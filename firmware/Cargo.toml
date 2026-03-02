@@ -1,0 +1,21 @@
+[package]
+name = "flux-purr-firmware"
+version = "0.1.0"
+edition = "2024"
+description = "Flux Purr firmware domain crate (no_std + async skeleton)"
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+esp32s3 = []
+esp32c3 = []
+
+[dependencies]
+embassy-futures = "0.1.2"
+heapless = "0.8.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"

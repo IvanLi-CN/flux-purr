@@ -1,0 +1,8 @@
+[target.xtensa-esp32s3-none-elf]
+rustflags = [
+  "-C",
+  "link-arg=-nostartfiles",
+]
+
+[env]
+ESP_TARGET = "esp32s3"
