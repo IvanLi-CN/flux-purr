@@ -1,0 +1,95 @@
+name: Release Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_level:
+        description: "major | minor | patch"
+        required: true
+        default: patch
+        type: choice
+        options: [major, minor, patch]
+      release_channel:
+        description: "stable | rc"
+        required: true
+        default: stable
+        type: choice
+        options: [stable, rc]
+
+permissions:
+  contents: write
+
+jobs:
+  release-intent:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.intent.outputs.release_enabled }}
+      level: ${{ steps.intent.outputs.release_level }}
+      channel: ${{ steps.intent.outputs.release_channel }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine release intent
+        id: intent
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_RELEASE_LEVEL: ${{ inputs.release_level }}
+          INPUT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
+        run: bash .github/scripts/release-intent.sh
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [release-intent]
+    if: needs.release-intent.outputs.enabled == 'true'
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install dependencies
+        run: bun install --cwd web --frozen-lockfile
+
+      - name: Build web
+        run: bun run --cwd web build
+
+      - name: Compute version
+        env:
+          RELEASE_LEVEL: ${{ needs.release-intent.outputs.level }}
+          RELEASE_CHANNEL: ${{ needs.release-intent.outputs.channel }}
+        run: bash .github/scripts/compute-version-web.sh
+
+      - name: Create and push tag
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/${WEB_TAG}" >/dev/null; then
+            echo "Tag ${WEB_TAG} already exists; skip"
+          else
+            git tag -a "${WEB_TAG}" -m "${WEB_TAG}"
+            git push origin "${WEB_TAG}"
+          fi
+
+      - name: Package web artifact
+        run: |
+          set -euo pipefail
+          tar -czf web-${WEB_EFFECTIVE_VERSION}.tar.gz -C web/dist .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.WEB_TAG }}
+          name: ${{ env.WEB_TAG }}
+          prerelease: ${{ needs.release-intent.outputs.channel == 'rc' }}
+          generate_release_notes: true
+          files: |
+            web-${{ env.WEB_EFFECTIVE_VERSION }}.tar.gz
