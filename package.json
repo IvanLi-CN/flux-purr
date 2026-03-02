@@ -1,0 +1,23 @@
+{
+  "name": "flux-purr",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Flux Purr mono-repo bootstrap",
+  "scripts": {
+    "prepare": "lefthook install",
+    "hooks:install": "lefthook install",
+    "check:firmware:fmt": "bash scripts/check-firmware-fmt.sh",
+    "check:firmware:clippy": "bash scripts/check-firmware-clippy.sh",
+    "check:firmware:build": "bash scripts/check-firmware-build.sh",
+    "check:web": "bash scripts/check-web-check.sh",
+    "check:web:build": "bash scripts/check-web-build.sh",
+    "check:storybook": "bash scripts/check-storybook-build.sh",
+    "check:e2e": "bash scripts/check-web-e2e.sh"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.4.2",
+    "@commitlint/config-conventional": "^20.4.2",
+    "commitlint-plugin-function-rules": "^4.3.2",
+    "lefthook": "^2.1.2"
+  }
+}

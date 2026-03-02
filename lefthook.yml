@@ -1,0 +1,43 @@
+pre-commit:
+  parallel: true
+  commands:
+    firmware_fmt:
+      glob: "firmware/**/*.rs"
+      run: bash scripts/check-firmware-fmt.sh
+    web_check:
+      glob: "web/**/*.{ts,tsx,js,jsx,json,css,mdx}"
+      run: bash scripts/check-web-check.sh
+
+commit-msg:
+  commands:
+    commitlint:
+      run: |
+        set -euo pipefail
+        if [ -x ./node_modules/.bin/commitlint ]; then
+          ./node_modules/.bin/commitlint --edit {1}
+          exit 0
+        fi
+        if command -v bunx >/dev/null 2>&1; then
+          bunx --no-install commitlint --edit {1}
+          exit 0
+        fi
+        if command -v npx >/dev/null 2>&1; then
+          npx --no-install commitlint --edit {1}
+          exit 0
+        fi
+        echo "commitlint is not installed. Install it or remove the commit-msg hook." >&2
+        exit 1
+
+pre-push:
+  parallel: false
+  commands:
+    firmware_clippy:
+      run: bash scripts/check-firmware-clippy.sh
+    firmware_build:
+      run: bash scripts/check-firmware-build.sh
+    web_build:
+      run: bash scripts/check-web-build.sh
+    storybook_build:
+      run: bash scripts/check-storybook-build.sh
+    web_e2e_optional:
+      run: bash scripts/check-web-e2e.sh

@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Node / Bun
+node_modules/
+web/node_modules/
+web/storybook-static/
+web/dist/
+web/playwright-report/
+web/test-results/
+*.log
+
+# Rust
+/target/
+firmware/target/
+Cargo.lock
+
+# IDE / tools
+.vscode/
+.idea/
+
+# Runtime artifacts
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.pyc
