@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（1/3）
+- Status: 部分完成（2/3）
 - Created: 2026-03-03
 - Last: 2026-03-03
 
@@ -149,7 +149,7 @@
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 规格与硬件口径文档落地并索引登记
-- [ ] M2: 固件 C3 board profile 与 CH224Q/CH442E/TCA6408A 适配层落地
+- [x] M2: 固件 C3 board profile 与 CH224Q/CH442E/TCA6408A 适配层落地
 - [ ] M3: HTTP/Web 字段同步并通过全量质量门禁
 
 ## 方案概述（Approach, high-level）
@@ -169,6 +169,7 @@
 
 - 2026-03-03: 创建规格并冻结 C3 二开的 GPIO、器件与接口同步范围。
 - 2026-03-03: 完成硬件口径文档与 specs 索引登记，里程碑更新为 1/3。
+- 2026-03-03: 完成 firmware 适配层与状态模型扩展，里程碑更新为 2/3。
 
 ## 参考（References）
 
