@@ -29,6 +29,10 @@
 - [S3] 侵权投诉与申诉规则（平台链接）
   URL: https://lceda.cn/page/appeal
   采集日期: 2026-03-03
+- [S4] EEWorld 转载页（交叉参考）
+  URL: https://www.eeworld.com.cn/RDesigns_detail/79318
+  采集日期: 2026-03-03
+  当前可达性: 访问受限（HTTP 403）
 
 ## 当前状态
 

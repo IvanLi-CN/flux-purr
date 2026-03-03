@@ -1,0 +1,35 @@
+# S1 Structured Evidence Extract
+
+- Source URL: https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai
+- Fetched at (UTC): 2026-03-03T07:37:21.814412+00:00
+- HTTP status: 200
+- Capture mode: structured extract (no full-page HTML stored)
+
+## Page Identity
+
+- Title: [PD协议 | 高颜值]mini加热台 - 立创开源硬件平台
+- Description: 超迷你的加热台，PD20V供电，加热面大小5.6*5.6cm，可以通过两个按键设置参数。
+- Open license: GPL 3.0
+- Created: 2022-09-12 19:49:10
+- Updated: 2023-07-27 09:58:31
+
+## Visible Design Facts
+
+- 协议芯片使用 IP2721，诱骗出 20V 电压。
+- 主控芯片为 STC8H3K32S。
+- 传感器使用 PT1000。
+- 程序烧录前需将 IRC 频率改为 35MHz。
+- 铝基板电阻约 6 欧姆，20V 供电时功率约 65W。
+- 设置内容记录到 EEPROM，断电不丢失。
+
+## Visible Attachments
+
+- mini加热台.zip (download count observed: 11881)
+- 演示.mp4 (download count observed: 6362)
+- HeatingPlate-PD-修复温度频繁跳变.hex (download count observed: 3354)
+
+## Comment Visibility
+
+- Login gate text present: 在登录后才可以进行评论操作
+- Comment count text visible: 全部评论（1）
+- Comment body list under current capture: not available without login

@@ -48,4 +48,4 @@ If hardware selection changes to ESP32-C3, keep API contracts stable and switch 
 ## Research baseline
 
 - PD mini hotplate derivative baseline:
-  - `docs/research/mini-hotplate/README.md`
+  - [docs/research/mini-hotplate/README.md](docs/research/mini-hotplate/README.md)

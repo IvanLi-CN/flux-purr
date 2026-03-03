@@ -155,6 +155,9 @@ None
 
 - 2026-03-03: 创建规格并完成 docs-only 基线交付。
 - 2026-03-03: 按 review 反馈补充不可变证据清单与索引直达入口。
+- 2026-03-03: 按 review 反馈补齐 artifact 快照路径与哈希，并修复螺丝规格 Markdown 误解析风险。
+- 2026-03-03: 按 review 反馈将 evidence artifact 收敛为结构化摘录（去除追踪参数 + token/账号标识/页面 ID 脱敏）并回写 manifest/README 哈希。
+- 2026-03-03: 按 review 反馈下调“评论区”相关结论为待验证假设，并将评论可见性统一为三态未检查（登录态受限）。
 
 ## 参考（References）
 

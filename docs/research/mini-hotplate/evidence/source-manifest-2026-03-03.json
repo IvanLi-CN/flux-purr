@@ -1,42 +1,58 @@
 {
-  "generated_at": "2026-03-03T07:15:36.566887+00:00",
-  "generator": "python urllib + sha256",
+  "generated_at": "2026-03-03T08:02:44.004129+00:00",
+  "generator": "python urllib + sha256 + structured evidence extraction",
   "entries": [
     {
       "source_id": "S1",
       "url": "https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai",
-      "fetched_at": "2026-03-03T07:15:36.567012+00:00",
+      "fetched_at": "2026-03-03T07:37:21.814412+00:00",
       "http_status": 200,
-      "content_sha256": "0f5d7ee3a33ba4f8d24205d30adc269f10ab344db8df3c92e20bd811b28d2d90",
+      "content_sha256": "88b3862917a3362ed64c5126226f789c8d8bd8add50c0f90a796c46c73882d31",
       "bytes": 520392,
-      "note": null
+      "artifact_path": "docs/research/mini-hotplate/evidence/artifacts/S1-oshwhub-original.html.txt",
+      "artifact_sha256": "25661bee946c6925575ac19fc5cfa619bcffaa9598f8d399d9db97dd91ee2580",
+      "artifact_sanitized": true,
+      "note": null,
+      "artifact_processing": "structured_extract + tracking_param_stripping + identifier_redaction"
     },
     {
       "source_id": "S2",
       "url": "https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai",
-      "fetched_at": "2026-03-03T07:15:38.277758+00:00",
+      "fetched_at": "2026-03-03T07:37:22.586898+00:00",
       "http_status": 200,
-      "content_sha256": "13896bcd1091c916558de9ed6a97bfa22eb15367cb7d065a00448abfe1ac7788",
+      "content_sha256": "1a06ac2c635fc662280692fd548b9c84bd146482fee7eaa0544b710c5dc000d0",
       "bytes": 499404,
-      "note": null
+      "artifact_path": "docs/research/mini-hotplate/evidence/artifacts/S2-oshwhub-kinglf.html.txt",
+      "artifact_sha256": "509e5c9650f2ac1bbde5570b25096faac63b8a19da0c594aed93cf39b65ffb9b",
+      "artifact_sanitized": true,
+      "note": null,
+      "artifact_processing": "structured_extract + tracking_param_stripping + identifier_redaction"
     },
     {
       "source_id": "S3",
       "url": "https://lceda.cn/page/appeal",
-      "fetched_at": "2026-03-03T07:15:38.855114+00:00",
+      "fetched_at": "2026-03-03T07:37:23.303948+00:00",
       "http_status": 200,
-      "content_sha256": "085c5e00d39658b8b1d48bd5f0aa672b58667d8ebbce4240176ba82fe3520676",
-      "bytes": 488333,
-      "note": null
+      "content_sha256": "457df145ebe1670785676da99c034e8a6ab687f7836de4f86c4f05f490b91ed1",
+      "bytes": 486829,
+      "artifact_path": "docs/research/mini-hotplate/evidence/artifacts/S3-lceda-appeal.html.txt",
+      "artifact_sha256": "32e347737efe8e1898f6e54c23c0ee914222f794136deaf241626ff804a737cd",
+      "artifact_sanitized": true,
+      "note": null,
+      "artifact_processing": "structured_extract + tracking_param_stripping + identifier_redaction"
     },
     {
       "source_id": "S4",
       "url": "https://www.eeworld.com.cn/RDesigns_detail/79318",
-      "fetched_at": "2026-03-03T07:15:39.676478+00:00",
-      "http_status": null,
-      "content_sha256": null,
-      "bytes": null,
-      "note": "FetchError: [Errno 54] Connection reset by peer"
+      "fetched_at": "2026-03-03T07:37:23.771559+00:00",
+      "http_status": 403,
+      "content_sha256": "323c42818fa3b7324113258a660ab63d069fce5cc6667b4adbcc5d5b4fe4e3ad",
+      "bytes": 1236,
+      "artifact_path": "docs/research/mini-hotplate/evidence/artifacts/S4-eeworld.html.txt",
+      "artifact_sha256": "76d78d857805a5d0f3d8649f867c13eedebe30446fc7e7d43a9f72e0e9b4c4ee",
+      "artifact_sanitized": true,
+      "note": "HTTPError: Forbidden",
+      "artifact_processing": "structured_extract + tracking_param_stripping + identifier_redaction"
     }
   ]
 }
