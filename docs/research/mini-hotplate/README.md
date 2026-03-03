@@ -20,14 +20,14 @@
 
 ## 来源索引
 
-- [S1] 原版项目（小O和小Q）  
-  URL: https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai  
+- [S1] 原版项目（小O和小Q）
+  URL: https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai
   采集日期: 2026-03-03
-- [S2] 铜柱二改项目（kinglf）  
-  URL: https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai  
+- [S2] 铜柱二改项目（kinglf）
+  URL: https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai
   采集日期: 2026-03-03
-- [S3] 侵权投诉与申诉规则（平台链接）  
-  URL: https://lceda.cn/page/appeal  
+- [S3] 侵权投诉与申诉规则（平台链接）
+  URL: https://lceda.cn/page/appeal
   采集日期: 2026-03-03
 
 ## 当前状态

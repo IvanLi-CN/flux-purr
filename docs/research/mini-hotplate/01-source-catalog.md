@@ -13,10 +13,10 @@
 
 | 来源 | URL | 当前状态 | 用途 |
 | --- | --- | --- | --- |
-| 侵权投诉与申诉规则 | https://lceda.cn/page/appeal | 存在 | 合规边界补充 |
-| EEWorld 转载页 | https://www.eeworld.com.cn/RDesigns_detail/79318 | 未检查 | 辅助确认附件命名 |
+| 侵权投诉与申诉规则（S3） | https://lceda.cn/page/appeal | 存在 | 合规边界补充 |
+| EEWorld 转载页（S4） | https://www.eeworld.com.cn/RDesigns_detail/79318 | 未检查 | 辅助确认附件命名 |
 
-依据：[S3]
+依据：[S3][S4]
 
 ## 附件与下载可用性（三态）
 
@@ -51,3 +51,4 @@
 - [S1] https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai
 - [S2] https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai
 - [S3] https://lceda.cn/page/appeal
+- [S4] https://www.eeworld.com.cn/RDesigns_detail/79318

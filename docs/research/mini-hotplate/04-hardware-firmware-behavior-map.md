@@ -38,4 +38,6 @@
 ## 引用
 
 - [S1] https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai
+  - 采集日期：2026-03-03
 - [S2] https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai
+  - 采集日期：2026-03-03
