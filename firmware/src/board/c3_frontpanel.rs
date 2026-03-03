@@ -56,8 +56,6 @@ pub fn gpio_budget_is_exactly_15() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn gpio_budget_is_exactly_15() {
         assert!(super::gpio_budget_is_exactly_15());

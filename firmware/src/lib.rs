@@ -59,7 +59,7 @@ pub fn snapshot() -> DeviceStatus {
     let request = adapters::ch224q::VoltageRequest::V28;
     let route = adapters::ch442e::Pins::default_mcu().route();
 
-    let fallback = tick % 17 == 0;
+    let fallback = tick.is_multiple_of(17);
     let pd_contract_mv = if fallback {
         adapters::ch224q::VoltageRequest::V5.millivolts()
     } else {
@@ -83,7 +83,7 @@ pub fn snapshot() -> DeviceStatus {
         usb_route: to_usb_route(route),
         fan_enabled: true,
         fan_pwm_permille: fan_pwm,
-        frontpanel_key: if tick % 10 == 0 {
+        frontpanel_key: if tick.is_multiple_of(10) {
             Some(FrontPanelKey::Center)
         } else {
             None
