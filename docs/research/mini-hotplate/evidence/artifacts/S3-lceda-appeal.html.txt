@@ -1,0 +1,21 @@
+# S3 Structured Evidence Extract
+
+- Source URL: https://lceda.cn/page/appeal
+- Fetched at (UTC): 2026-03-03T07:37:23.303948+00:00
+- HTTP status: 200
+- Capture mode: structured extract (no full-page HTML stored)
+
+## Page Identity
+
+- Title: 嘉立创旗下及关联平台侵权投诉与申诉规则
+- Page type: 平台规则说明页面
+
+## Compliance-Relevant Points
+
+- 页面用于说明侵权投诉与申诉流程边界。
+- 用于支持“平台规则存在且可访问”的事实，不单独构成法律意见。
+
+## Redaction Notes
+
+- CSRF token and other request-scoped values are not retained.
+- No user account identifiers are retained in this extract.

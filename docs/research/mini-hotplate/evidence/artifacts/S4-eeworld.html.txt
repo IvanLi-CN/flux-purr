@@ -1,0 +1,16 @@
+# S4 Structured Evidence Extract
+
+- Source URL: https://www.eeworld.com.cn/RDesigns_detail/79318
+- Fetched at (UTC): 2026-03-03T07:37:23.771559+00:00
+- HTTP status: 403
+- Capture mode: structured extract from error response
+
+## Error Summary
+
+- Error title: 电子工程世界防火墙 (EEWORLD WAF)
+- Key message: 非法爬虫，禁止访问
+- Stored note: HTTPError: Forbidden
+
+## Redaction Notes
+
+- Client IP and similar request fingerprints are redacted.

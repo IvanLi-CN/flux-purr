@@ -7,6 +7,7 @@ Flux Purr is a device mono-repo for an embedded firmware + React control console
 - `firmware/` - Rust `no_std` firmware domain crate (ESP32-S3 first)
 - `web/` - React + Vite + shadcn/ui + Storybook console
 - `docs/specs/` - executable specs and acceptance contracts
+- `docs/research/` - upstream research baselines for hardware/firmware derivative work
 - `.github/` - CI, label gate, and release workflows
 - `scripts/` - shared check scripts used by hooks and CI
 
@@ -43,3 +44,8 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 ```
 
 If hardware selection changes to ESP32-C3, keep API contracts stable and switch target in workflows.
+
+## Research baseline
+
+- PD mini hotplate derivative baseline:
+  - [docs/research/mini-hotplate/README.md](docs/research/mini-hotplate/README.md)

@@ -1,0 +1,32 @@
+# S2 Structured Evidence Extract
+
+- Source URL: https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai
+- Fetched at (UTC): 2026-03-03T07:37:22.586898+00:00
+- HTTP status: 200
+- Capture mode: structured extract (no full-page HTML stored)
+
+## Page Identity
+
+- Title: [PD协议 | 高颜值]mini加热台【铜柱板】 - 立创开源硬件平台
+- Description: 此工程源自于原版 mini 加热台，探针长时间导电容易烧短，整理为铜柱导电方案。
+- Open license: GPL 3.0
+- Created: 2023-12-26 13:22:01
+- Updated: 2024-02-23 13:50:19
+
+## Visible Variant Statements
+
+- 电路 BOM 与原版方案一致，不用更换 BOM 和固件。
+- PCB 需要全部重新打。
+- 探针替换为铜柱和铁氟龙管方案。
+- 附件表显示暂无数据（未见可下载文件条目）。
+
+## Comment Visibility
+
+- Login gate text present: 在登录后才可以进行评论操作
+- Comment count text visible: 全部评论（1）
+- Comment body list under current capture: not available without login
+
+## External Link Handling
+
+- Tracking query parameters removed during capture (e.g. _u, spm)
+- Example product hosts retained as host-level evidence only: detail.tmall.com
