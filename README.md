@@ -8,6 +8,7 @@ Flux Purr is a device mono-repo for an embedded firmware + React control console
 - `web/` - React + Vite + shadcn/ui + Storybook console
 - `docs/specs/` - executable specs and acceptance contracts
 - `docs/research/` - upstream research baselines for hardware/firmware derivative work
+- `docs/hardware/` - board-level pin map and power-chain baselines
 - `.github/` - CI, label gate, and release workflows
 - `scripts/` - shared check scripts used by hooks and CI
 
