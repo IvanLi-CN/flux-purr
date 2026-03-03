@@ -33,5 +33,6 @@
 ## 当前状态
 
 - 文档基线：存在
+- 不可变证据（hash manifest）：存在（`docs/research/mini-hotplate/evidence/`）
 - 附件文件实物解包：未检查
 - 登录后深层评论全量采集：未检查

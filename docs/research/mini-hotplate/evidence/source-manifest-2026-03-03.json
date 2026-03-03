@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-03-03T07:15:36.566887+00:00",
+  "generator": "python urllib + sha256",
+  "entries": [
+    {
+      "source_id": "S1",
+      "url": "https://oshwhub.com/littleoandlittleq/bian-xie-jia-re-tai",
+      "fetched_at": "2026-03-03T07:15:36.567012+00:00",
+      "http_status": 200,
+      "content_sha256": "0f5d7ee3a33ba4f8d24205d30adc269f10ab344db8df3c92e20bd811b28d2d90",
+      "bytes": 520392,
+      "note": null
+    },
+    {
+      "source_id": "S2",
+      "url": "https://oshwhub.com/kinglf/pd-xie-yi-gao-yan-zhi-mini-jia-re-tai",
+      "fetched_at": "2026-03-03T07:15:38.277758+00:00",
+      "http_status": 200,
+      "content_sha256": "13896bcd1091c916558de9ed6a97bfa22eb15367cb7d065a00448abfe1ac7788",
+      "bytes": 499404,
+      "note": null
+    },
+    {
+      "source_id": "S3",
+      "url": "https://lceda.cn/page/appeal",
+      "fetched_at": "2026-03-03T07:15:38.855114+00:00",
+      "http_status": 200,
+      "content_sha256": "085c5e00d39658b8b1d48bd5f0aa672b58667d8ebbce4240176ba82fe3520676",
+      "bytes": 488333,
+      "note": null
+    },
+    {
+      "source_id": "S4",
+      "url": "https://www.eeworld.com.cn/RDesigns_detail/79318",
+      "fetched_at": "2026-03-03T07:15:39.676478+00:00",
+      "http_status": null,
+      "content_sha256": null,
+      "bytes": null,
+      "note": "FetchError: [Errno 54] Connection reset by peer"
+    }
+  ]
+}

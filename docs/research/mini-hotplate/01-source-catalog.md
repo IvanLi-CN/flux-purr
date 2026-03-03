@@ -16,7 +16,7 @@
 | 侵权投诉与申诉规则（S3） | https://lceda.cn/page/appeal | 存在 | 合规边界补充 |
 | EEWorld 转载页（S4） | https://www.eeworld.com.cn/RDesigns_detail/79318 | 未检查 | 辅助确认附件命名 |
 
-依据：[S3][S4]
+依据：[S3]
 
 ## 附件与下载可用性（三态）
 
@@ -45,6 +45,15 @@
 - 登录后完整评论翻页：未检查。
 - 购物链接商品参数与现价：未检查。
 - 平台外转载内容（博客/论坛）：不作为主事实来源，除非后续逐条复核。
+
+## 不可变证据（Immutable Evidence）
+
+| 证据项 | 路径 | 状态 | 说明 |
+| --- | --- | --- | --- |
+| 采集清单与哈希 | `docs/research/mini-hotplate/evidence/source-manifest-2026-03-03.json` | 存在 | 记录 S1~S4 的抓取时间、HTTP 状态、内容 SHA256 |
+| 证据说明 | `docs/research/mini-hotplate/evidence/README.md` | 存在 | 可人工复核 403/未检查来源 |
+
+说明：S4 当前仅作为“待验证线索”，未纳入主结论依据。
 
 ## 引用
 

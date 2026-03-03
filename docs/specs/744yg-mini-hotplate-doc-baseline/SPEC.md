@@ -49,6 +49,7 @@
 - 必须使用附件状态三态：`存在 / 不存在 / 未检查`。
 - 必须覆盖两大主源（原版 + 铜柱版）。
 - 必须包含二开风险与机会章节。
+- 必须落地不可变证据清单（采集时间 + HTTP 状态 + 内容哈希）。
 
 ### SHOULD
 
@@ -90,6 +91,7 @@ None
 - Given 读取 `05-assembly-flash-troubleshooting.md`，When 检查排障章节，Then 必须覆盖烧录接口、电压、温度 000、PD 诱骗、绝缘短路风险。
 - Given 读取 `06-license-and-compliance-notes.md`，When 检查合规说明，Then 必须覆盖 GPL 3.0 与平台非商用/侵权投诉边界。
 - Given 仓库与规格索引，When 查看入口，Then `README.md` 与 `docs/specs/README.md` 均能跳转到资料目录。
+- Given 读取证据目录，When 检查 `docs/research/mini-hotplate/evidence/`，Then 必须存在可复核的 manifest 与哈希记录。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -120,6 +122,7 @@ None
 - `README.md`: 增加 mini 加热台资料目录入口。
 - `docs/specs/README.md`: 新增本规格索引记录。
 - `docs/research/mini-hotplate/*`: 新增基础资料文档。
+- `docs/research/mini-hotplate/evidence/*`: 新增采集证据与哈希清单。
 
 ## 计划资产（Plan assets）
 
@@ -151,6 +154,7 @@ None
 ## 变更记录（Change log）
 
 - 2026-03-03: 创建规格并完成 docs-only 基线交付。
+- 2026-03-03: 按 review 反馈补充不可变证据清单与索引直达入口。
 
 ## 参考（References）
 
