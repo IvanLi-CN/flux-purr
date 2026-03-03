@@ -1,7 +1,7 @@
 # Flux Purr HTTP + WS Contract
 
-Source of truth for this initialization scope:
-`docs/specs/n6csh-flux-purr-init/contracts/http-apis.md`
+Source of truth for this implementation scope:
+`docs/specs/233y7-c3-ch224q-ch442e-frontpanel/SPEC.md`
 
 Base URL: `http://<device-ip>`
 
@@ -11,26 +11,39 @@ Returns firmware identity and runtime mode.
 
 ```json
 {
-  "deviceId": "flux-purr-s3-001",
-  "fwVersion": "fw/v0.1.0-dev",
-  "board": "esp32-s3",
+  "deviceId": "flux-purr-c3-001",
+  "fwVersion": "fw/v0.2.0-dev",
+  "board": "esp32-c3",
   "mode": "sampling"
 }
 ```
 
 ## `GET /api/v1/device/status`
 
-Returns latest sampled electrical and thermal metrics.
+Returns latest sampled electrical, PD, route, and thermal metrics.
 
 ```json
 {
-  "voltageMv": 12080,
-  "currentMa": 830,
+  "voltageMv": 28010,
+  "currentMa": 840,
   "boardTempCenti": 3460,
+  "pdRequestMv": 28000,
+  "pdContractMv": 28000,
+  "pdState": "ready",
+  "usbRoute": "mcu",
+  "fanEnabled": true,
+  "fanPwmPermille": 720,
+  "frontpanelKey": "center",
   "wifiRssi": -58,
-  "lastSync": "2026-03-02T18:05:00+08:00"
+  "lastSync": "2026-03-03T20:05:00+08:00"
 }
 ```
+
+Field notes:
+
+- `pdState`: `negotiating | ready | fallback_5v | fault`
+- `usbRoute`: `mcu | sink | disabled`
+- `frontpanelKey`: `center | right | down | left | up | null`
 
 ## `PUT /api/v1/config/wifi`
 
@@ -55,8 +68,10 @@ WebSocket stream for incremental telemetry frames.
 
 ```json
 {
-  "ts": "18:05",
-  "voltage": 12.08,
-  "current": 0.83
+  "ts": "20:05",
+  "voltage": 28.01,
+  "current": 0.84,
+  "pdContractMv": 28000,
+  "usbRoute": "mcu"
 }
 ```
