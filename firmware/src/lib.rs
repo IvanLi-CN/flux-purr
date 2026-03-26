@@ -15,13 +15,6 @@ pub enum DeviceMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UsbRoute {
-    Mcu,
-    Sink,
-    Disabled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PdState {
     Negotiating,
     Ready,
@@ -38,7 +31,6 @@ pub struct DeviceStatus {
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdState,
-    pub usb_route: UsbRoute,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
     pub frontpanel_key: Option<FrontPanelKey>,
@@ -46,18 +38,9 @@ pub struct DeviceStatus {
 
 static SAMPLE_TICK: AtomicU32 = AtomicU32::new(0);
 
-fn to_usb_route(route: adapters::ch442e::Route) -> UsbRoute {
-    match route {
-        adapters::ch442e::Route::Mcu => UsbRoute::Mcu,
-        adapters::ch442e::Route::Sink => UsbRoute::Sink,
-        adapters::ch442e::Route::Disabled => UsbRoute::Disabled,
-    }
-}
-
 pub fn snapshot() -> DeviceStatus {
     let tick = SAMPLE_TICK.fetch_add(1, Ordering::Relaxed);
     let request = adapters::ch224q::VoltageRequest::V28;
-    let route = adapters::ch442e::Pins::default_mcu().route();
 
     let fallback = tick.is_multiple_of(17);
     let pd_contract_mv = if fallback {
@@ -80,7 +63,6 @@ pub fn snapshot() -> DeviceStatus {
         } else {
             PdState::Ready
         },
-        usb_route: to_usb_route(route),
         fan_enabled: true,
         fan_pwm_permille: fan_pwm,
         frontpanel_key: if tick.is_multiple_of(10) {
@@ -109,11 +91,10 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_includes_pd_and_routing_fields() {
+    fn snapshot_includes_pd_and_fan_fields() {
         let value = snapshot();
         assert_eq!(value.pd_request_mv, 28_000);
         assert!(value.pd_contract_mv == 28_000 || value.pd_contract_mv == 5_000);
-        assert_eq!(value.usb_route, UsbRoute::Mcu);
         assert!(value.fan_enabled);
         assert!(value.fan_pwm_permille >= 600);
     }

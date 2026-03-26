@@ -6,21 +6,18 @@ This document freezes the hardware integration baseline for the ESP32-C3 revisio
 
 - MCU: `ESP32-C3-FH4`
 - PD sink: `CH224Q` (I2C dynamic voltage request)
-- USB2.0 routing: `CH442E` (`IN + EN#` control)
 - 5 V rail: `TPS62933`
 - 3.3 V rail: `RT9013-33GB`
 - Fan regulator: `RT9043GB` (`PWM + EN` control)
 - Front panel expander: `TCA6408A @ 0x21`
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 
-## 2) Locked GPIO allocation (15/15)
+## 2) Active MCU GPIO allocation (13/15)
 
 | Function | GPIO | Notes |
 | --- | ---: | --- |
 | USB D- | 18 | Native USB pins |
 | USB D+ | 19 | Native USB pins |
-| CH442E IN | 8 | Route select |
-| CH442E EN# | 9 | Active low enable |
 | I2C SDA | 4 | Shared by CH224Q + TCA6408A |
 | I2C SCL | 5 | Shared by CH224Q + TCA6408A |
 | Front-panel INT# | 2 | From TCA6408A, active low/open-drain |
@@ -29,11 +26,16 @@ This document freezes the hardware integration baseline for the ESP32-C3 revisio
 | LCD DC | 7 | Data/command |
 | LCD BLK | 6 | Backlight (PWM allowed) |
 | FAN PWM | 3 | RT9043GB control injection path |
-| FAN EN | 1 | Fan rail enable |
+| VIN ADC | 1 | `ADC1_CH1`, main input voltage sense |
 | HEATER PWM | 10 | Main heating PWM |
 | TEMP ADC | 0 | Temperature sensing input |
 
-GPIO budget is intentionally full: `15/15`, no spare line.
+Reserved but intentionally unused MCU pins:
+
+- `GPIO8`
+- `GPIO9`
+
+These are kept uncommitted because ESP32-C3 treats them as strapping pins during reset.
 
 ## 3) Front-panel TCA6408A map
 
@@ -46,7 +48,7 @@ GPIO budget is intentionally full: `15/15`, no spare line.
 - `P4`: Up key
 - `P5`: LCD RES
 - `P6`: LCD CS
-- `P7`: Reserved
+- `P7`: FAN EN (default low / fan disabled)
 
 ## 4) CH224Q control baseline
 
@@ -54,14 +56,15 @@ GPIO budget is intentionally full: `15/15`, no spare line.
 - Support requests for `5/9/12/15/20/28 V`.
 - Keep PD state visible in firmware status model (`request` vs `contract` voltage).
 
-## 5) CH442E routing baseline
+## 5) VIN sense baseline
 
-- `EN#` is treated as active low.
-- Route behavior:
-  - `EN# = 1` => disabled/high-Z routing state
-  - `EN# = 0` and `IN = 0` => `MCU` path
-  - `EN# = 0` and `IN = 1` => `SINK` path
-- Boot strategy: enter safe state first, then initialize to default `MCU` route.
+- ADC pin: `GPIO1` / `ADC1_CH1`
+- Nominal divider:
+  - `R_HIGH = 56 kOhm` from `VIN` to `GPIO1`
+  - `R_LOW = 5.1 kOhm` from `GPIO1` to `GND`
+- Divider ratio: `Vadc = Vin * 5.1 / (56 + 5.1) ~= Vin / 11.98`
+- At `VIN = 28 V`, `GPIO1` sees about `2.34 V`, leaving margin for ESP32-C3 ADC operation with high attenuation enabled.
+- Recommendation: use `1%` resistors and add `100 nF` from `GPIO1` to `GND` near the MCU to stabilize the sampled node.
 
 ## 6) Power tree (frozen)
 
@@ -69,6 +72,7 @@ GPIO budget is intentionally full: `15/15`, no spare line.
 USB-C PD input
   -> CH224Q negotiates source
   -> main high-voltage bus (up to 28V request)
+  -> 56k / 5.1k divider to GPIO1 VIN sense
   -> TPS62933 buck to 5V
   -> RT9013-33GB LDO to 3V3
   -> RT9043GB adjustable fan rail (PWM + EN)
@@ -80,7 +84,7 @@ Use strapping pins with care during reset window:
 
 - `GPIO2`, `GPIO8`, `GPIO9` are strapping-related on ESP32-C3.
 - Ensure external pull network and peripheral defaults do not force unwanted boot mode.
-- Keep `CH442E` control network compatible with boot requirements before firmware config.
+- `GPIO8` and `GPIO9` stay reserved in this revision to avoid boot-mode coupling.
 
 Reference:
 
@@ -89,4 +93,5 @@ Reference:
 ## 8) Known trade-offs
 
 - `fan_tach` is intentionally not connected in this revision.
-- No spare GPIO remains for add-ons; any new peripheral requires reallocation or an extra expander.
+- Only `GPIO8/9` remain unassigned, and both are boot-strapping sensitive.
+- VIN sense accuracy depends on ADC calibration, divider tolerance, and input ripple.

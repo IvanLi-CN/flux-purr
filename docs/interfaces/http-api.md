@@ -20,7 +20,7 @@ Returns firmware identity and runtime mode.
 
 ## `GET /api/v1/device/status`
 
-Returns latest sampled electrical, PD, route, and thermal metrics.
+Returns latest sampled electrical, PD, and thermal metrics.
 
 ```json
 {
@@ -30,7 +30,6 @@ Returns latest sampled electrical, PD, route, and thermal metrics.
   "pdRequestMv": 28000,
   "pdContractMv": 28000,
   "pdState": "ready",
-  "usbRoute": "mcu",
   "fanEnabled": true,
   "fanPwmPermille": 720,
   "frontpanelKey": "center",
@@ -41,8 +40,8 @@ Returns latest sampled electrical, PD, route, and thermal metrics.
 
 Field notes:
 
+- `voltageMv`: reconstructed input voltage from the `GPIO1` divider (`56 kOhm / 5.1 kOhm` nominal)
 - `pdState`: `negotiating | ready | fallback_5v | fault`
-- `usbRoute`: `mcu | sink | disabled`
 - `frontpanelKey`: `center | right | down | left | up | null`
 
 ## `PUT /api/v1/config/wifi`
@@ -71,7 +70,6 @@ WebSocket stream for incremental telemetry frames.
   "ts": "20:05",
   "voltage": 28.01,
   "current": 0.84,
-  "pdContractMv": 28000,
-  "usbRoute": "mcu"
+  "pdContractMv": 28000
 }
 ```

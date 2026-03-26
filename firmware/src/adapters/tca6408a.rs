@@ -10,6 +10,7 @@ pub enum FrontPanelKey {
 pub const FRONT_PANEL_ADDRESS: u8 = 0x21;
 pub const LCD_RES_PIN: u8 = 5;
 pub const LCD_CS_PIN: u8 = 6;
+pub const FAN_EN_PIN: u8 = 7;
 
 const KEY_MASK: u8 = 0b0001_1111;
 

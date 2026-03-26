@@ -1,6 +1,5 @@
 export type DeviceMode = 'idle' | 'sampling' | 'fault'
 export type PdState = 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
-export type UsbRoute = 'mcu' | 'sink' | 'disabled'
 export type FrontPanelKey = 'center' | 'right' | 'down' | 'left' | 'up'
 
 export interface DeviceStatus {
@@ -11,7 +10,6 @@ export interface DeviceStatus {
   pdRequestMv: number
   pdContractMv: number
   pdState: PdState
-  usbRoute: UsbRoute
   fanEnabled: boolean
   fanPwmPermille: number
   frontpanelKey: FrontPanelKey | null

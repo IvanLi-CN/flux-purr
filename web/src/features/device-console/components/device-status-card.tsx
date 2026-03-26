@@ -31,7 +31,6 @@ export function DeviceStatusCard({ status }: DeviceStatusCardProps) {
           <Metric label="Wi-Fi RSSI" value={`${status.wifiRssi} dBm`} />
           <Metric label="PD Request" value={`${status.pdRequestMv} mV`} />
           <Metric label="PD Contract" value={`${status.pdContractMv} mV`} />
-          <Metric label="USB Route" value={status.usbRoute.toUpperCase()} />
           <Metric
             label="Fan"
             value={status.fanEnabled ? `${status.fanPwmPermille} ‰` : 'Disabled'}

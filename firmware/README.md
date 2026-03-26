@@ -14,6 +14,6 @@
 
 ## Hardware baseline notes
 
-- GPIO profile is locked to C3 front-panel baseline (`15/15` GPIO budget, no spare).
+- GPIO profile is locked to the C3 front-panel baseline (`13` active GPIO plus reserved `GPIO8/9` strapping pins).
 - CH224Q uses I2C dynamic request mode with `0x22` primary and `0x23` fallback address.
-- CH442E route control uses `IN + EN#`; firmware init drives default route to `MCU`.
+- Main input voltage sense uses `GPIO1` with a `56 kOhm / 5.1 kOhm` divider (`28 V -> ~2.34 V` at the ADC pin).

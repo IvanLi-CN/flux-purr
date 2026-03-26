@@ -8,7 +8,6 @@ export const mockStatus: DeviceStatus = {
   pdRequestMv: 28000,
   pdContractMv: 28000,
   pdState: 'ready',
-  usbRoute: 'mcu',
   fanEnabled: true,
   fanPwmPermille: 720,
   frontpanelKey: 'center',
