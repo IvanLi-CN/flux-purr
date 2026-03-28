@@ -9,14 +9,14 @@
 ## 背景 / 问题陈述
 
 - `flux-purr` 当前固件与接口仍是初始化骨架，硬件口径默认 `ESP32-S3`，与本次 C3 二开目标不一致。
-- 当前基线仍残留 `CH442E` 路由假设，但方案已改为不再引入该芯片，同时需要 MCU 直接采样 USB PD 主输入电压，并将 `FAN_EN` 回到 MCU 直连。
+- 当前基线仍残留 `CH442E` 路由假设，但方案已改为不再引入该芯片，同时需要 MCU 直接采样 USB PD 主输入电压，并满足“`FAN_EN` 直连 MCU”与“中键直连 `BOOT(GPIO9)`”两条硬约束。
 - 若不先冻结规格并同步实现，固件、Web 控制台、接口文档会持续分叉，导致联调成本上升。
 
 ## 目标 / 非目标
 
 ### Goals
 
-- 冻结并落地 C3 方案的新 GPIO 分配（`14` 路 active，保留 `GPIO9`）。
+- 冻结并落地 C3 方案的新 GPIO 分配（`14` 路 active，`GPIO8` 保留给 boot strap 兼容）。
 - 在 firmware 中实现可编译的适配层：CH224Q、TCA6408A 前面板映射，以及 VIN 采样板级常量。
 - 扩展设备状态模型并同步 HTTP 契约与 Web 控制台字段。
 - 按 `normal-flow` 收口至本地 PR-ready（不 push、不建 PR）。
@@ -46,11 +46,13 @@
 
 ### MUST
 
-- Active MCU GPIO 锁定为以下 14 路且无重复：`0,1,2,3,4,5,6,7,8,10,18,19,20,21`。
-- `GPIO8` 直连 `FAN_EN`，`GPIO9` 保留为 strapping-sensitive spare。
+- Active MCU GPIO 锁定为以下 14 路且无重复：`0,1,2,3,4,5,6,7,9,10,18,19,20,21`。
+- `GPIO8` 保留，不参与普通功能分配，用于保证 `GPIO9` BOOT 键路径的下载模式兼容性。
+- `GPIO9` 必须直连前面板中键，遵循 active-low BOOT-button 连接方式。
+- `GPIO6` 直连 `FAN_EN`。
 - CH224Q 适配层支持 `0x22` 与 `0x23` 地址识别，支持 `5/9/12/15/20/28V` 控制寄存器编码。
 - VIN sense 使用 `GPIO1 / ADC1_CH1`，分压标称值 `56 kOhm / 5.1 kOhm`，覆盖 `28V` 及以下输入。
-- TCA6408A 前面板支持 `P0~P4` 五向键解码，`P5/P6` 预留 LCD `RES/CS`，`P7` 保留。
+- TCA6408A 前面板支持 `P1~P4` 四向键解码，`P0` 保留，`P5/P6` 预留 LCD `RES/CS`，`P7` 用于 `LCD BLK`。
 - `DeviceStatus` 维护字段：`pd_request_mv`、`pd_contract_mv`、`fan_enabled`、`fan_pwm_permille`、`frontpanel_key`。
 - 保留枚举：`PdState`（`Negotiating|Ready|Fallback5V|Fault`）。
 - HTTP 与 Web 字段同步，最小展示包含 PD 档位、输入电压、风扇状态。
@@ -58,7 +60,8 @@
 ### SHOULD
 
 - VIN sense 节点使用 `1%` 电阻，板级预留 `100 nF` 小电容抑制采样抖动。
-- `FAN_EN` 所在 `GPIO8` 在复位窗口必须保持低电平，避免影响 boot strap；建议加弱下拉。
+- `GPIO9` 中键/BOOT 回路在复位窗口必须保持 released-high、pressed-low 的标准 BOOT 语义。
+- `FAN_EN` 建议加弱下拉，默认关闭风扇电源。
 - 对外状态字段与当前板级器件保持一致，不继续暴露已移除器件的占位字段。
 
 ### COULD
@@ -71,7 +74,7 @@
 
 - 固件启动时加载 C3 board profile，构建固定 GPIO 表并完成预算一致性校验。
 - CH224Q 通过 I2C 地址识别与寄存器编码生成可写入控制字。
-- 前面板扩展器输入寄存器被解码为单一方向键事件，歧义输入返回空。
+- 前面板扩展器输入寄存器被解码为四向键事件，歧义输入返回空；中键不经扩展器而由 MCU 直读。
 - 设备状态快照被 HTTP/Web 使用，展示新增 PD/输入电压/风扇字段。
 
 ### Edge cases / errors
@@ -98,7 +101,7 @@
 - Given C3 board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 active/reserved GPIO 总数为 `14 + 1` 且不重复。
 - Given CH224Q 适配层，When 对 `0x22/0x23` 进行解析并编码 `5/9/12/15/20/28V`，Then 地址解析与寄存器编码结果正确。
 - Given VIN sense 方案，When 按 `56 kOhm / 5.1 kOhm` 计算 `28V` 输入，Then ADC 引脚电压不高于 `2.337V`。
-- Given TCA6408A 前面板输入，When 解析 `P0~P4`，Then 五向键映射无歧义，多键返回空。
+- Given TCA6408A 前面板输入，When 解析 `P1~P4`，Then 四向键映射无歧义，`P0` 不参与解码，多键返回空。
 - Given 接口与 Web 已同步，When 检查 `docs/interfaces/http-api.md` 和 `web` 相关类型/mock/UI，Then 已移除 `usbRoute` 且输入电压字段仍可被展示或使用。
 - Given 本轮改动，When 运行仓库既有 checks，Then 结果明确且全部通过。
 
@@ -149,7 +152,7 @@
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 规格与硬件口径文档落地并索引登记
-- [x] M2: 固件 C3 board profile 与 CH224Q/TCA6408A/VIN sense/FAN_EN 基线落地
+- [x] M2: 固件 C3 board profile 与 CH224Q/TCA6408A/VIN sense/FAN_EN/BOOT-key 基线落地
 - [x] M3: HTTP/Web 字段同步并通过全量质量门禁
 
 ## 方案概述（Approach, high-level）
@@ -160,10 +163,13 @@
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：`GPIO8` 现在承担 `FAN_EN`，其默认电平必须严格受控，否则会引入 boot strap 或上电误使能风险。
+- 风险：为满足中键直连 `BOOT(GPIO9)`，`LCD BLK` 被迁到 `TCA6408A P7`，失去原生 MCU PWM 调光能力。
+- 风险：`GPIO8` 虽未分配功能，但必须保持 boot-strap 兼容高电平，不能被后续电路随意占用。
 - 风险：VIN sense 精度会受 ADC 校准、输入纹波与分压电阻误差影响。
 - 开放问题：实机联调时 CH224Q 是否稳定使用 `0x22`，需保留 `0x23` 兼容路径。
-- 假设：`FAN_EN` 直连 `GPIO8`，且板级通过弱下拉保证默认关闭。
+- 假设：`FAN_EN` 直连 `GPIO6`，且板级通过弱下拉保证默认关闭。
+- 假设：中键采用标准 BOOT 键连接，按下时直接将 `GPIO9` 拉低。
+- 假设：`GPIO8` 通过弱上拉或等效高兼容默认态辅助 `GPIO9` 进入下载模式。
 - 假设：LCD `CS/RES` 持续走 TCA6408A，不回退 MCU 直连。
 
 ## 变更记录（Change log）
@@ -173,7 +179,7 @@
 - 2026-03-03: 完成 firmware 适配层与状态模型扩展，里程碑更新为 2/3。
 - 2026-03-03: 完成 HTTP/Web 同步与全量检查，规格状态更新为已完成。
 - 2026-03-27: 移除 CH442E 基线，新增 GPIO1 VIN_ADC 与 `56 kOhm / 5.1 kOhm` 分压方案，清理 `usbRoute` 契约。
-- 2026-03-28: 将 `FAN_EN` 从 `TCA6408A P7` 调整为 MCU `GPIO8` 直连，并保留 `GPIO9` 作为唯一未分配 strapping pin。
+- 2026-03-28: 将 `FAN_EN` 改到 MCU `GPIO6`，把中键改为直连 `BOOT(GPIO9)`，并将 `LCD BLK` 迁移到 `TCA6408A P7`。
 
 ## 参考（References）
 

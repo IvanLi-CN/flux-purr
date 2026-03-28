@@ -10,14 +10,14 @@ pub enum FrontPanelKey {
 pub const FRONT_PANEL_ADDRESS: u8 = 0x21;
 pub const LCD_RES_PIN: u8 = 5;
 pub const LCD_CS_PIN: u8 = 6;
+pub const LCD_BLK_PIN: u8 = 7;
 
-const KEY_MASK: u8 = 0b0001_1111;
+const KEY_MASK: u8 = 0b0001_1110;
 
 pub fn decode_frontpanel_key(input_port: u8) -> Option<FrontPanelKey> {
     // TCA6408A inputs are active-low for this panel design.
     let pressed = (!input_port) & KEY_MASK;
     match pressed {
-        0b0000_0001 => Some(FrontPanelKey::Center),
         0b0000_0010 => Some(FrontPanelKey::Right),
         0b0000_0100 => Some(FrontPanelKey::Down),
         0b0000_1000 => Some(FrontPanelKey::Left),
@@ -31,11 +31,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decodes_each_five_way_key_without_ambiguity() {
-        assert_eq!(
-            decode_frontpanel_key(0b1111_1110),
-            Some(FrontPanelKey::Center)
-        );
+    fn decodes_each_four_way_key_without_ambiguity() {
         assert_eq!(
             decode_frontpanel_key(0b1111_1101),
             Some(FrontPanelKey::Right)
@@ -54,6 +50,7 @@ mod tests {
     #[test]
     fn returns_none_for_no_key_or_multi_key_press() {
         assert_eq!(decode_frontpanel_key(0b1111_1111), None);
-        assert_eq!(decode_frontpanel_key(0b1111_1100), None);
+        assert_eq!(decode_frontpanel_key(0b1111_1110), None);
+        assert_eq!(decode_frontpanel_key(0b1111_1001), None);
     }
 }

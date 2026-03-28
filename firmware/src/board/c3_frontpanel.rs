@@ -8,10 +8,10 @@ pub const PIN_FRONT_PANEL_INT_N: u8 = 2;
 pub const PIN_LCD_SCLK: u8 = 21;
 pub const PIN_LCD_MOSI: u8 = 20;
 pub const PIN_LCD_DC: u8 = 7;
-pub const PIN_LCD_BLK: u8 = 6;
 
 pub const PIN_FAN_PWM: u8 = 3;
-pub const PIN_FAN_EN: u8 = 8;
+pub const PIN_FAN_EN: u8 = 6;
+pub const PIN_CENTER_KEY_BOOT: u8 = 9;
 
 pub const PIN_HEATER_PWM: u8 = 10;
 pub const PIN_VIN_ADC: u8 = 1;
@@ -26,15 +26,15 @@ pub const ACTIVE_GPIO: [u8; 14] = [
     PIN_LCD_SCLK,
     PIN_LCD_MOSI,
     PIN_LCD_DC,
-    PIN_LCD_BLK,
     PIN_FAN_PWM,
     PIN_FAN_EN,
+    PIN_CENTER_KEY_BOOT,
     PIN_HEATER_PWM,
     PIN_VIN_ADC,
     PIN_TEMP_ADC,
 ];
 
-pub const RESERVED_STRAPPING_GPIO: [u8; 1] = [9];
+pub const RESERVED_STRAPPING_GPIO: [u8; 1] = [8];
 
 pub const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
 pub const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
@@ -72,7 +72,8 @@ mod tests {
     #[test]
     fn gpio_map_accounts_for_active_and_reserved_lines() {
         assert!(super::gpio_map_is_valid());
-        assert_eq!(super::PIN_FAN_EN, 8);
+        assert_eq!(super::PIN_FAN_EN, 6);
+        assert_eq!(super::PIN_CENTER_KEY_BOOT, 9);
         assert_eq!(super::VIN_DIVIDER_MAX_ADC_MV, 2_337);
     }
 }

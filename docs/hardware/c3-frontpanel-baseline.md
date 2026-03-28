@@ -24,31 +24,31 @@ This document freezes the hardware integration baseline for the ESP32-C3 revisio
 | LCD SCLK | 21 | SPI clock |
 | LCD MOSI | 20 | SPI MOSI |
 | LCD DC | 7 | Data/command |
-| LCD BLK | 6 | Backlight (PWM allowed) |
+| FAN EN | 6 | Direct MCU control |
 | FAN PWM | 3 | RT9043GB control injection path |
-| FAN EN | 8 | Direct MCU control, strap-sensitive pin |
 | VIN ADC | 1 | `ADC1_CH1`, main input voltage sense |
+| Center Key / BOOT | 9 | Direct MCU boot strap input, active low button to GND |
 | HEATER PWM | 10 | Main heating PWM |
 | TEMP ADC | 0 | Temperature sensing input |
 
 Reserved but intentionally unused MCU pins:
 
-- `GPIO9`
+- `GPIO8`
 
-`GPIO9` stays uncommitted because ESP32-C3 treats it as a strapping pin during reset.
+`GPIO8` stays reserved as a BOOT-assist strapping pin and should be held high-compatible during reset.
 
 ## 3) Front-panel TCA6408A map
 
 `TCA6408A @ 0x21` pins:
 
-- `P0`: Center key
+- `P0`: Reserved
 - `P1`: Right key
 - `P2`: Down key
 - `P3`: Left key
 - `P4`: Up key
 - `P5`: LCD RES
 - `P6`: LCD CS
-- `P7`: Reserved
+- `P7`: LCD BLK (on/off only)
 
 ## 4) CH224Q control baseline
 
@@ -66,13 +66,20 @@ Reserved but intentionally unused MCU pins:
 - At `VIN = 28 V`, `GPIO1` sees about `2.34 V`, leaving margin for ESP32-C3 ADC operation with high attenuation enabled.
 - Recommendation: use `1%` resistors and add `100 nF` from `GPIO1` to `GND` near the MCU to stabilize the sampled node.
 
-## 6) FAN enable baseline
+## 6) Center key / BOOT baseline
 
-- FAN regulator enable is directly driven by MCU `GPIO8`.
-- `GPIO8` is a strapping-related pin on ESP32-C3, so the external network must not force it high during reset.
+- Front-panel center key is directly wired to MCU `GPIO9`.
+- This key doubles as the ROM boot-mode key: hold the center key during reset to request download mode.
+- Hardware implementation should follow the usual active-low boot button pattern: released = pulled high, pressed = short to `GND`.
+- To keep download mode reachable, reserve `GPIO8` and add a weak pull-up so `GPIO9` low can be interpreted as a bootloader request.
+
+## 7) FAN enable baseline
+
+- FAN regulator enable is directly driven by MCU `GPIO6`.
+- `GPIO6` is no longer shared with LCD backlight, so `FAN_EN` can stay out of the ESP32-C3 boot-strap path.
 - Recommended default: add a weak pulldown such as `100 kOhm` on `FAN_EN`, keeping the fan rail disabled until firmware configures the pin.
 
-## 7) Power tree (frozen)
+## 8) Power tree (frozen)
 
 ```text
 USB-C PD input
@@ -81,25 +88,25 @@ USB-C PD input
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> TPS62933 buck to 5V
   -> RT9013-33GB LDO to 3V3
-  -> RT9043GB adjustable fan rail (GPIO3 PWM + GPIO8 EN)
+  -> RT9043GB adjustable fan rail (GPIO3 PWM + GPIO6 EN)
 ```
 
-## 8) ESP32-C3 strapping and bring-up constraints
+## 9) ESP32-C3 strapping and bring-up constraints
 
 Use strapping pins with care during reset window:
 
 - `GPIO2`, `GPIO8`, `GPIO9` are strapping-related on ESP32-C3.
 - Ensure external pull network and peripheral defaults do not force unwanted boot mode.
-- `GPIO8` is now used for `FAN_EN`, so keep it low by default and avoid any hard pull-up or active driver during reset.
-- `GPIO9` remains reserved to avoid boot-button/download-mode coupling.
+- `GPIO9` is now the dedicated center-key / BOOT input, so keep its released state high and route the key as an active-low switch to `GND`.
+- `GPIO8` stays reserved and should remain high-compatible during reset so the `GPIO9` BOOT key path can request download mode reliably.
 
 Reference:
 
 - ESP32-C3 datasheet: <https://documentation.espressif.com/esp32-c3_datasheet_en.html>
 
-## 9) Known trade-offs
+## 10) Known trade-offs
 
 - `fan_tach` is intentionally not connected in this revision.
-- `GPIO8` is reused for `FAN_EN`, which reduces spare GPIO and adds reset-state constraints to the fan enable net.
-- Only `GPIO9` remains unassigned, and it is boot-strapping sensitive.
+- `LCD BLK` moves to `TCA6408A P7`, so hardware backlight control is GPIO-expander based rather than native MCU PWM.
+- Only `GPIO8` remains unused, and it is reserved for boot-strap compatibility rather than general expansion.
 - VIN sense accuracy depends on ADC calibration, divider tolerance, and input ripple.
