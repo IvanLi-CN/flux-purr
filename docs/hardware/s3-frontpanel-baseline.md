@@ -20,24 +20,24 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | VIN ADC | 1 | `ADC1_CH0`, main input voltage sense |
 | TEMP ADC | 2 | `ADC1_CH1`, temperature sensing input |
 | HEATER PWM | 5 | Main heating PWM |
-| FAN PWM | 6 | RT9043GB control injection path |
-| FAN EN | 7 | Direct MCU enable, default low |
 | I2C SDA | 8 | CH224Q only |
 | I2C SCL | 9 | CH224Q only |
-| Right Key | 10 | Direct GPIO input |
+| LCD DC | 10 | Matches `mains-aegis` LCD control cluster |
 | LCD MOSI | 11 | SPI MOSI |
 | LCD SCLK | 12 | SPI clock |
-| LCD DC | 13 | Data/command |
+| LCD BLK | 13 | Direct MCU PWM, aligned with `mains-aegis` |
 | LCD RES | 14 | Direct reset output |
 | LCD CS | 15 | Direct chip-select output |
-| LCD BLK | 16 | Direct MCU PWM output |
+| Right Key | 16 | Direct GPIO input |
 | Down Key | 17 | Direct GPIO input |
 | Left Key | 18 | Direct GPIO input |
 | USB D- | 19 | Native USB pins |
 | USB D+ | 20 | Native USB pins |
 | Up Key | 21 | Direct GPIO input |
+| FAN EN | 35 | Direct MCU enable, matches `mains-aegis` fan block |
+| FAN PWM | 36 | RT9043GB control injection path |
 
-Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally avoids `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
+Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus `GPIO35/36` fan control pair while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
 
 ## 3) CH224Q control baseline
 
@@ -64,9 +64,11 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 
 ## 6) LCD and fan control baseline
 
-- `LCD BLK` is directly driven by MCU `GPIO16` and must support PWM dimming.
-- `FAN_EN` is directly driven by MCU `GPIO7`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
-- `FAN_PWM` is directly driven by MCU `GPIO6`.
+- `LCD DC/MOSI/SCLK/BLK` are placed on `GPIO10/11/12/13`, matching the frozen LCD cluster used by `mains-aegis`.
+- `LCD BLK` is directly driven by MCU `GPIO13` and must support PWM dimming.
+- `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
+- `FAN_PWM` is directly driven by MCU `GPIO36`.
+- `GPIO34` is intentionally left free so a future revision can add `FAN_TACH` without breaking the fan-control block convention used by `mains-aegis`.
 
 ## 7) Power tree (frozen)
 
@@ -77,7 +79,7 @@ USB-C PD input
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> TPS62933 buck to 5V
   -> RT9013-33GB LDO to 3V3
-  -> RT9043GB adjustable fan rail (GPIO6 PWM + GPIO7 EN)
+  -> RT9043GB adjustable fan rail (GPIO36 PWM + GPIO35 EN)
 ```
 
 ## 8) ESP32-S3FH4R2 bring-up constraints
@@ -95,6 +97,6 @@ Reference:
 
 ## 9) Known trade-offs
 
-- `fan_tach` is intentionally not connected in this revision.
+- `fan_tach` is intentionally not connected in this revision; `GPIO34` is left available if that signal is added later.
 - Front-panel keys are all direct GPIOs, so debounce and wake behavior are purely firmware responsibilities.
 - VIN sense accuracy depends on ADC calibration, divider tolerance, and input ripple.
