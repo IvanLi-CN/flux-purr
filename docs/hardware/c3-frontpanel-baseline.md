@@ -12,7 +12,7 @@ This document freezes the hardware integration baseline for the ESP32-C3 revisio
 - Front panel expander: `TCA6408A @ 0x21`
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 
-## 2) Active MCU GPIO allocation (13/15)
+## 2) Active MCU GPIO allocation (14/15)
 
 | Function | GPIO | Notes |
 | --- | ---: | --- |
@@ -26,16 +26,16 @@ This document freezes the hardware integration baseline for the ESP32-C3 revisio
 | LCD DC | 7 | Data/command |
 | LCD BLK | 6 | Backlight (PWM allowed) |
 | FAN PWM | 3 | RT9043GB control injection path |
+| FAN EN | 8 | Direct MCU control, strap-sensitive pin |
 | VIN ADC | 1 | `ADC1_CH1`, main input voltage sense |
 | HEATER PWM | 10 | Main heating PWM |
 | TEMP ADC | 0 | Temperature sensing input |
 
 Reserved but intentionally unused MCU pins:
 
-- `GPIO8`
 - `GPIO9`
 
-These are kept uncommitted because ESP32-C3 treats them as strapping pins during reset.
+`GPIO9` stays uncommitted because ESP32-C3 treats it as a strapping pin during reset.
 
 ## 3) Front-panel TCA6408A map
 
@@ -48,7 +48,7 @@ These are kept uncommitted because ESP32-C3 treats them as strapping pins during
 - `P4`: Up key
 - `P5`: LCD RES
 - `P6`: LCD CS
-- `P7`: FAN EN (default low / fan disabled)
+- `P7`: Reserved
 
 ## 4) CH224Q control baseline
 
@@ -66,7 +66,13 @@ These are kept uncommitted because ESP32-C3 treats them as strapping pins during
 - At `VIN = 28 V`, `GPIO1` sees about `2.34 V`, leaving margin for ESP32-C3 ADC operation with high attenuation enabled.
 - Recommendation: use `1%` resistors and add `100 nF` from `GPIO1` to `GND` near the MCU to stabilize the sampled node.
 
-## 6) Power tree (frozen)
+## 6) FAN enable baseline
+
+- FAN regulator enable is directly driven by MCU `GPIO8`.
+- `GPIO8` is a strapping-related pin on ESP32-C3, so the external network must not force it high during reset.
+- Recommended default: add a weak pulldown such as `100 kOhm` on `FAN_EN`, keeping the fan rail disabled until firmware configures the pin.
+
+## 7) Power tree (frozen)
 
 ```text
 USB-C PD input
@@ -75,23 +81,25 @@ USB-C PD input
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> TPS62933 buck to 5V
   -> RT9013-33GB LDO to 3V3
-  -> RT9043GB adjustable fan rail (PWM + EN)
+  -> RT9043GB adjustable fan rail (GPIO3 PWM + GPIO8 EN)
 ```
 
-## 7) ESP32-C3 strapping and bring-up constraints
+## 8) ESP32-C3 strapping and bring-up constraints
 
 Use strapping pins with care during reset window:
 
 - `GPIO2`, `GPIO8`, `GPIO9` are strapping-related on ESP32-C3.
 - Ensure external pull network and peripheral defaults do not force unwanted boot mode.
-- `GPIO8` and `GPIO9` stay reserved in this revision to avoid boot-mode coupling.
+- `GPIO8` is now used for `FAN_EN`, so keep it low by default and avoid any hard pull-up or active driver during reset.
+- `GPIO9` remains reserved to avoid boot-button/download-mode coupling.
 
 Reference:
 
 - ESP32-C3 datasheet: <https://documentation.espressif.com/esp32-c3_datasheet_en.html>
 
-## 8) Known trade-offs
+## 9) Known trade-offs
 
 - `fan_tach` is intentionally not connected in this revision.
-- Only `GPIO8/9` remain unassigned, and both are boot-strapping sensitive.
+- `GPIO8` is reused for `FAN_EN`, which reduces spare GPIO and adds reset-state constraints to the fan enable net.
+- Only `GPIO9` remains unassigned, and it is boot-strapping sensitive.
 - VIN sense accuracy depends on ADC calibration, divider tolerance, and input ripple.

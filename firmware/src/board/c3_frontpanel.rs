@@ -11,12 +11,13 @@ pub const PIN_LCD_DC: u8 = 7;
 pub const PIN_LCD_BLK: u8 = 6;
 
 pub const PIN_FAN_PWM: u8 = 3;
+pub const PIN_FAN_EN: u8 = 8;
 
 pub const PIN_HEATER_PWM: u8 = 10;
 pub const PIN_VIN_ADC: u8 = 1;
 pub const PIN_TEMP_ADC: u8 = 0;
 
-pub const ACTIVE_GPIO: [u8; 13] = [
+pub const ACTIVE_GPIO: [u8; 14] = [
     PIN_USB_D_MINUS,
     PIN_USB_D_PLUS,
     PIN_I2C_SDA,
@@ -27,12 +28,13 @@ pub const ACTIVE_GPIO: [u8; 13] = [
     PIN_LCD_DC,
     PIN_LCD_BLK,
     PIN_FAN_PWM,
+    PIN_FAN_EN,
     PIN_HEATER_PWM,
     PIN_VIN_ADC,
     PIN_TEMP_ADC,
 ];
 
-pub const RESERVED_STRAPPING_GPIO: [u8; 2] = [8, 9];
+pub const RESERVED_STRAPPING_GPIO: [u8; 1] = [9];
 
 pub const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
 pub const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
@@ -70,6 +72,7 @@ mod tests {
     #[test]
     fn gpio_map_accounts_for_active_and_reserved_lines() {
         assert!(super::gpio_map_is_valid());
+        assert_eq!(super::PIN_FAN_EN, 8);
         assert_eq!(super::VIN_DIVIDER_MAX_ADC_MV, 2_337);
     }
 }
