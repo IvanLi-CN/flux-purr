@@ -5,13 +5,20 @@ pub mod board;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-pub use adapters::tca6408a::FrontPanelKey;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
     Idle,
     Sampling,
     Fault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontPanelKey {
+    Center,
+    Right,
+    Down,
+    Left,
+    Up,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

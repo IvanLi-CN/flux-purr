@@ -1,1 +1,1 @@
-pub mod c3_frontpanel;
+pub mod s3_frontpanel;

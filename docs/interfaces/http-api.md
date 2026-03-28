@@ -11,9 +11,9 @@ Returns firmware identity and runtime mode.
 
 ```json
 {
-  "deviceId": "flux-purr-c3-001",
+  "deviceId": "flux-purr-s3-001",
   "fwVersion": "fw/v0.2.0-dev",
-  "board": "esp32-c3",
+  "board": "esp32-s3",
   "mode": "sampling"
 }
 ```

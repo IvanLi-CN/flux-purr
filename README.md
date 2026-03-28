@@ -44,7 +44,7 @@ Current default target direction is ESP32-S3. For Xtensa builds in CI/release:
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
 ```
 
-If hardware selection changes to ESP32-C3, keep API contracts stable and switch target in workflows.
+Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if the MCU selection changes again.
 
 ## Research baseline
 
