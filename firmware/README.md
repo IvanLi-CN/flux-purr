@@ -17,6 +17,7 @@
 - GPIO profile is locked to the S3 front-panel baseline (`20` active GPIO, no GPIO expander, center key on `GPIO0` BOOT).
 - CH224Q uses I2C dynamic request mode with `0x22` primary and `0x23` fallback address.
 - Main input voltage sense uses `GPIO1` with a `56 kOhm / 5.1 kOhm` divider (`28 V -> ~2.34 V` at the ADC pin).
+- `GPIO2` / `ADC1_CH1` is reserved for a `PT1000` RTD input using a `2.49 kOhm` precision bias resistor, `100 Ohm` series resistor, and `100 nF` ADC shunt capacitor.
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - FAN enable is directly controlled by MCU `GPIO35`; fan PWM uses `GPIO36`.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.

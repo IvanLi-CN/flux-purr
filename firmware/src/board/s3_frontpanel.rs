@@ -1,6 +1,7 @@
 pub const PIN_CENTER_KEY_BOOT: u8 = 0;
 pub const PIN_VIN_ADC: u8 = 1;
-pub const PIN_TEMP_ADC: u8 = 2;
+pub const PIN_RTD_ADC: u8 = 2;
+pub const PIN_TEMP_ADC: u8 = PIN_RTD_ADC;
 
 pub const PIN_HEATER_PWM: u8 = 5;
 
@@ -28,7 +29,7 @@ pub const PIN_FAN_PWM: u8 = 36;
 pub const ACTIVE_GPIO: [u8; 20] = [
     PIN_CENTER_KEY_BOOT,
     PIN_VIN_ADC,
-    PIN_TEMP_ADC,
+    PIN_RTD_ADC,
     PIN_HEATER_PWM,
     PIN_I2C_SDA,
     PIN_I2C_SCL,
@@ -77,6 +78,7 @@ mod tests {
     fn gpio_map_accounts_for_s3_direct_frontpanel() {
         assert!(super::gpio_map_is_valid());
         assert_eq!(super::PIN_CENTER_KEY_BOOT, 0);
+        assert_eq!(super::PIN_RTD_ADC, 2);
         assert_eq!(super::PIN_LCD_DC, 10);
         assert_eq!(super::PIN_LCD_BLK, 13);
         assert_eq!(super::PIN_FAN_EN, 35);
