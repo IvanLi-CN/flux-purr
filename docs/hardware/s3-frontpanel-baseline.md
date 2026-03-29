@@ -69,7 +69,8 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - about `1.18 V` at `100 C`
   - about `1.52 V` at `300 C`
   - about `1.70 V` at `450 C`
-- Firmware recommendation: use ADC calibration and prefer `ADC_ATTEN_DB_6` while the expected RTD range stays within about `0 ~ 500 C`.
+- Firmware recommendation: use ADC calibration and prefer `ADC_ATTEN_DB_6` when the expected RTD range stays within about `0 ~ 360 C` for this exact `2.49 kOhm + PT1000` network.
+- If the product requirement is really `0 ~ 500 C` while still trying to stay inside the better `ADC_ATTEN_DB_6` range, increase `R_REF` to about `3.0 kOhm` and re-freeze the divider math before layout.
 - If the actual probe turns out to be `PT100` instead of `PT1000`, do not keep this direct-divider topology. `PT100` should move to a dedicated RTD front-end (`MAX31865` class, or precision current source + amplifier), because lead resistance and ADC span both become too weak for a direct MCU ADC solution.
 - If the RTD is wired off-board, reserve an optional small capacitor footprint (`1 nF` max) directly across the probe for EMI cleanup.
 
