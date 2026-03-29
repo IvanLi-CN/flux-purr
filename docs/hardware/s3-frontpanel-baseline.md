@@ -6,9 +6,8 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 
 - MCU: `ESP32-S3FH4R2`
 - PD sink: `CH224Q` (I2C dynamic voltage request)
-- 5 V rail: `TPS62933`
-- 3.3 V rail: `RT9013-33GB`
-- Fan regulator: `RT9043GB` (`PWM + EN` control)
+- 3.3 V rail: `TPS62933DRLR` (fixed `3.3 V`)
+- Fan rail: `TPS62933DRLR` (adjustable `3.0 V ~ 5.0 V`)
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
 
@@ -34,8 +33,8 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | USB D- | 19 | Native USB pins |
 | USB D+ | 20 | Native USB pins |
 | Up Key | 21 | Direct GPIO input |
-| FAN EN | 35 | Direct MCU enable, matches `mains-aegis` fan block |
-| FAN PWM | 36 | RT9043 GB control injection path |
+| FAN EN | 35 | Direct MCU enable for the fan TPS62933 stage |
+| FAN PWM | 36 | PWM input for fan-voltage setpoint injection |
 
 Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus `GPIO35/36` fan control pair while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
 
@@ -86,7 +85,18 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - `LCD DC/MOSI/SCLK/BLK` are placed on `GPIO10/11/12/13`, matching the frozen LCD cluster used by `mains-aegis`.
 - `LCD BLK` is directly driven by MCU `GPIO13` and must support PWM dimming.
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
-- `FAN_PWM` is directly driven by MCU `GPIO36`.
+- `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
+- Fan rail baseline:
+  - use `TPS62933DRLR`
+  - `RT -> GND` (`1.2 MHz`)
+  - `L = 3.3 uH`
+  - fan output range `3.0 V ~ 5.0 V`
+  - `RFBB = 10 kOhm`
+  - `RFBT = 46.4 kOhm`
+  - `RINJ = 76.8 kOhm`
+  - `RPWM = 10 kOhm`
+  - `CPWM = 1 uF`
+  - `RPD = 100 kOhm`
 - `GPIO34` is intentionally left free so a future revision can add `FAN_TACH` without breaking the fan-control block convention used by `mains-aegis`.
 
 ## 8) Power tree (frozen)
@@ -97,10 +107,13 @@ USB-C PD input
   -> main high-voltage bus (up to 28V request)
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> PT1000 divider to GPIO2 RTD sense
-  -> TPS62933 buck to 5V
-  -> RT9013-33GB LDO to 3V3
-  -> RT9043GB adjustable fan rail (GPIO36 PWM + GPIO35 EN)
+  -> TPS62933 buck to fixed 3V3
+  -> TPS62933 buck to adjustable fan rail (GPIO36 PWM -> RC -> FB, GPIO35 EN)
 ```
+
+Power-stage details are frozen in:
+
+- `docs/hardware/tps62933-dual-rail-power-design.md`
 
 ## 9) ESP32-S3FH4R2 bring-up constraints
 
@@ -120,3 +133,4 @@ Reference:
 - `fan_tach` is intentionally not connected in this revision; `GPIO34` is left available if that signal is added later.
 - Front-panel keys are all direct GPIOs, so debounce and wake behavior are purely firmware responsibilities.
 - VIN sense and RTD sense accuracy both depend on ADC calibration, resistor tolerance, and board-level noise.
+- Fan-voltage control depends on a filtered PWM-to-FB injection path, so final startup behavior and low-speed acoustics still require bench validation.

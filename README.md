@@ -46,6 +46,10 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 
 Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if the MCU selection changes again.
 
+Power design notes for the current board revision are frozen in:
+
+- [docs/hardware/tps62933-dual-rail-power-design.md](docs/hardware/tps62933-dual-rail-power-design.md)
+
 ## Research baseline
 
 - PD mini hotplate derivative baseline:
