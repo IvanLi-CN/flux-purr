@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-03
-- Last: 2026-03-28
+- Last: 2026-03-30
 
 ## 背景 / 问题陈述
 
@@ -33,6 +33,7 @@
 
 - `docs/specs/233y7-c3-ch224q-ch442e-frontpanel/SPEC.md` 与索引更新。
 - 新增 `docs/hardware/s3-frontpanel-baseline.md`，删除旧的 C3 基线。
+- 新增 heater 与 power-tree 相关设计文档并与基线互相链接。
 - `firmware/` 内 board profile 更新为 `ESP32-S3FH4R2`，移除 `TCA6408A` 适配层。
 - `docs/interfaces/http-api.md`、`README.md`、`firmware/README.md` 口径同步。
 
@@ -52,6 +53,7 @@
 - `GPIO0` 必须直连前面板中键并承担 `BOOT` 键角色，采用 active-low 连接。
 - `GPIO10/11/12/13` 应尽量对齐 `mains-aegis` 的 LCD cluster，其中 `GPIO10=LCD_DC`、`GPIO11=LCD_MOSI`、`GPIO12=LCD_SCLK`、`GPIO13=LCD_BLK`。
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
+- `GPIO5` 必须保留为 heater PWM 输出。
 - `GPIO35` 必须直连 `FAN_EN`，`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
@@ -135,6 +137,8 @@
 - `docs/specs/README.md`
 - `docs/interfaces/http-api.md`
 - `docs/hardware/s3-frontpanel-baseline.md`
+- `docs/hardware/heater-power-switch-design.md`
+- `docs/hardware/tps62933-dual-rail-power-design.md`
 - `README.md`
 - `firmware/README.md`
 
@@ -147,6 +151,7 @@
 ## 方案概述（Approach, high-level）
 
 - 使用 `ESP32-S3FH4R2` 释放 GPIO 预算，直接满足 BOOT 键、LCD 背光 PWM、风扇控制与前面板按键直连。
+- Heater 功率开关保持为独立的低边 `NMOS` 方案，并通过单独硬件设计文档冻结外围与验证要求。
 - LCD 与风扇控制的 pin map 尽量向 `mains-aegis` 靠拢，降低后续跨项目复用与查线成本。
 - 温度探头沿用 mini-hotplate 参考资料里的 `PT1000` 假设，这样可以继续使用 MCU 直连 ADC，而不必额外加 RTD 专用芯片。
 - 避开 `ESP32-S3` 的 strapping pins 与 flash / PSRAM 占用区，保持板级余量和 bring-up 清晰度。
@@ -171,9 +176,12 @@
 - 2026-03-28: 切换为 `ESP32-S3FH4R2`，移除 `TCA6408A`，改为直连前面板与 LCD 控制。
 - 2026-03-28: 参考 `mains-aegis` 重新收敛 LCD 与风扇控制引脚，统一到 `GPIO10/11/12/13` 与 `GPIO35/36`。
 - 2026-03-28: 明确 `GPIO2` 作为 `PT1000` 直连 ADC 输入，并冻结 RTD 偏置/滤波外围值。
+- 2026-03-30: 补充双路 `TPS62933DRLR` 电源与 heater 低边 `NMOS` 的独立设计文档，并与主基线交叉链接。
 
 ## 参考（References）
 
 - [ESP32-S3 GPIO Guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32s3/api-reference/peripherals/gpio.html)
 - [ESP32-S3 Boot Mode Selection](https://docs.espressif.com/projects/esptool/en/latest/esp32s3/advanced-topics/boot-mode-selection.html)
 - [ESP32-S3 USB Device Guide](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32s3/api-reference/peripherals/usb_device.html)
+- [../../hardware/tps62933-dual-rail-power-design.md](../../hardware/tps62933-dual-rail-power-design.md)
+- [../../hardware/heater-power-switch-design.md](../../hardware/heater-power-switch-design.md)

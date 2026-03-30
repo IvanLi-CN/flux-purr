@@ -63,6 +63,6 @@
 
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
-| 233y7 | Flux Purr S3FH4R2 + CH224Q 直连前面板基线（移除 CH442E / TCA6408A） | 已完成 | `233y7-c3-ch224q-ch442e-frontpanel/SPEC.md` | 2026-03-28 | Baseline updated for S3FH4R2, direct panel wiring, and no TCA6408A |
+| 233y7 | Flux Purr S3FH4R2 + CH224Q 直连前面板基线（移除 CH442E / TCA6408A） | 已完成 | `233y7-c3-ch224q-ch442e-frontpanel/SPEC.md` | 2026-03-30 | Baseline updated for S3FH4R2, direct panel wiring, dual TPS62933 rails, and heater switch documentation |
 | n6csh | Flux Purr 初始化（Hooks + Storybook + shadcn + UI UX Pro Max） | 已完成 | `n6csh-flux-purr-init/SPEC.md` | 2026-03-02 | Local PR-ready（未 push / 未建 PR） |
 | 744yg | PD Mini加热台二开资料采集与基础文档 | 已完成 | `744yg-mini-hotplate-doc-baseline/SPEC.md` | 2026-03-03 | Research: [mini-hotplate](../research/mini-hotplate/README.md) |
