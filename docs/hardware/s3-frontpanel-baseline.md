@@ -11,7 +11,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
 
-## 2) Direct MCU GPIO allocation (20 active)
+## 2) Direct MCU GPIO allocation (21 active)
 
 | Function | GPIO | Notes |
 | --- | ---: | --- |
@@ -35,8 +35,9 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | Up Key | 21 | Direct GPIO input |
 | FAN EN | 35 | Direct MCU enable for the fan TPS62933 stage |
 | FAN PWM | 36 | PWM input for fan-voltage setpoint injection |
+| BUZZER PWM | 48 | Chip pin 36, buzzer tone / beep output |
 
-Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus `GPIO35/36` fan control pair while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
+Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus the nearby high-number control group on `GPIO35/36/47/48` while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
 
 ## 3) CH224Q control baseline
 
@@ -85,6 +86,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - `LCD DC/MOSI/SCLK/BLK` are placed on `GPIO10/11/12/13`, matching the frozen LCD cluster used by `mains-aegis`.
 - `LCD BLK` is directly driven by MCU `GPIO13` and must support PWM dimming.
 - `HEATER_PWM` is directly driven by MCU `GPIO47` (chip pin `37`) and controls a low-side heater MOSFET stage.
+- `BUZZER_PWM` is directly driven by MCU `GPIO48` (chip pin `36`) and is reserved for buzzer beeps or passive-buzzer tone output via PWM.
 - Heater switching baseline:
   - use low-side `NMOS`
   - current approved part: `BUK9Y14-40B,115`
@@ -93,6 +95,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - PWM start point `1 kHz ~ 2 kHz`
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
+- Keep the buzzer silent by default at boot. If the buzzer stage can sound when its input floats, add an external weak pulldown or use a driver topology whose default state is silent.
 - Fan rail baseline:
   - use `TPS62933DRLR`
   - `RT -> GND` (`1.2 MHz`)

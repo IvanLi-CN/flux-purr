@@ -25,8 +25,9 @@ pub const PIN_KEY_UP: u8 = 21;
 
 pub const PIN_FAN_EN: u8 = 35;
 pub const PIN_FAN_PWM: u8 = 36;
+pub const PIN_BUZZER_PWM: u8 = 48;
 
-pub const ACTIVE_GPIO: [u8; 20] = [
+pub const ACTIVE_GPIO: [u8; 21] = [
     PIN_CENTER_KEY_BOOT,
     PIN_VIN_ADC,
     PIN_RTD_ADC,
@@ -47,6 +48,7 @@ pub const ACTIVE_GPIO: [u8; 20] = [
     PIN_KEY_UP,
     PIN_FAN_EN,
     PIN_FAN_PWM,
+    PIN_BUZZER_PWM,
 ];
 
 pub const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
@@ -56,7 +58,7 @@ pub const VIN_DIVIDER_MAX_ADC_MV: u32 = (VIN_DIVIDER_MAX_INPUT_MV * VIN_DIVIDER_
     / (VIN_DIVIDER_R_HIGH_OHMS + VIN_DIVIDER_R_LOW_OHMS);
 
 pub fn gpio_map_is_valid() -> bool {
-    if ACTIVE_GPIO.len() != 20 {
+    if ACTIVE_GPIO.len() != 21 {
         return false;
     }
 
@@ -84,6 +86,7 @@ mod tests {
         assert_eq!(super::PIN_FAN_EN, 35);
         assert_eq!(super::PIN_FAN_PWM, 36);
         assert_eq!(super::PIN_HEATER_PWM, 47);
+        assert_eq!(super::PIN_BUZZER_PWM, 48);
         assert_eq!(super::VIN_DIVIDER_MAX_ADC_MV, 2_337);
     }
 }

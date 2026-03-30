@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-03
-- Last: 2026-03-30
+- Last: 2026-03-31
 
 ## 背景 / 问题陈述
 
@@ -49,11 +49,12 @@
 
 - MCU 切换为 `ESP32-S3FH4R2`。
 - 前面板不再使用 `TCA6408A`，所有按键与 LCD 控制脚改为 MCU 直连。
-- GPIO 分配固定为以下 20 路且无重复：`0,1,2,8,9,10,11,12,13,14,15,16,17,18,19,20,21,35,36,47`。
+- GPIO 分配固定为以下 21 路且无重复：`0,1,2,8,9,10,11,12,13,14,15,16,17,18,19,20,21,35,36,47,48`。
 - `GPIO0` 必须直连前面板中键并承担 `BOOT` 键角色，采用 active-low 连接。
 - `GPIO10/11/12/13` 应尽量对齐 `mains-aegis` 的 LCD cluster，其中 `GPIO10=LCD_DC`、`GPIO11=LCD_MOSI`、`GPIO12=LCD_SCLK`、`GPIO13=LCD_BLK`。
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
 - `GPIO47`（芯片 pin `37`）必须保留为 heater PWM 输出。
+- `GPIO48`（芯片 pin `36`）必须保留为 buzzer PWM / beep 输出。
 - `GPIO35` 必须直连 `FAN_EN`，`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
@@ -81,13 +82,14 @@
 - CH224Q 通过 `GPIO8/9` I2C 地址识别与寄存器编码生成控制字。
 - 前面板四向键与中键分别由 MCU 直接读取，不依赖 expander。
 - LCD `DC/MOSI/SCLK/BLK` 与 `mains-aegis` 对齐为 `GPIO10/11/12/13`，`RES/CS` 继续由 MCU 直连，其中 `BLK` 支持 PWM。
+- Buzzer 输出由 `GPIO48` 提供；固件可将其作为普通 beep GPIO 或 PWM/LEDC 音调输出使用。
 - `PT1000` 通过 `GPIO2` 进入 MCU ADC；固件按校准后的 ADC 电压换算温度，开路/短路应视为故障态而不是有效温度。
 - 设备状态快照继续输出 `frontpanel_key` 与 PD/风扇字段。
 
 ### Edge cases / errors
 
 - I2C 地址不在 `0x22/0x23` 时必须返回错误。
-- GPIO 表一旦重复或总数不是 `20`，单测必须失败。
+- GPIO 表一旦重复或总数不是 `21`，单测必须失败。
 - 直连键位模型保留 `center | right | down | left | up | null`，但不再假设任何 expander 输入位图。
 - 若热探头最终确认是 `PT100` 而不是 `PT1000`，则当前直连 ADC 方案失效，必须切换到专用 RTD 前端。
 
@@ -106,7 +108,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 20 且不重复。
+- Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 21 且不重复。
 - Given CH224Q 适配层，When 对 `0x22/0x23` 进行解析并编码 `5/9/12/15/20/28V`，Then 地址解析与寄存器编码结果正确。
 - Given VIN sense 方案，When 按 `56 kOhm / 5.1 kOhm` 计算 `28V` 输入，Then ADC 引脚电压不高于 `2.337V`。
 - Given firmware 不再依赖 `TCA6408A`，When 构建 `firmware` crate，Then 不再存在 `tca6408a` 模块引用。
@@ -152,6 +154,7 @@
 
 - 使用 `ESP32-S3FH4R2` 释放 GPIO 预算，直接满足 BOOT 键、LCD 背光 PWM、风扇控制与前面板按键直连。
 - Heater 功率开关保持为独立的低边 `NMOS` 方案，并通过单独硬件设计文档冻结外围与验证要求。
+- Buzzer 单独占用芯片 pin `36` / `GPIO48`，与 heater 的 pin `37` / `GPIO47` 形成相邻的高编号控制输出对，便于布线。
 - LCD 与风扇控制的 pin map 尽量向 `mains-aegis` 靠拢，降低后续跨项目复用与查线成本。
 - 温度探头沿用 mini-hotplate 参考资料里的 `PT1000` 假设，这样可以继续使用 MCU 直连 ADC，而不必额外加 RTD 专用芯片。
 - 避开 `ESP32-S3` 的 strapping pins 与 flash / PSRAM 占用区，保持板级余量和 bring-up 清晰度。
@@ -162,7 +165,7 @@
 - 风险：切到 `ESP32-S3FH4R2` 后，firmware 实际目标工具链应回到 `xtensa-esp32s3-none-elf`。
 - 风险：移除 expander 后，前面板按键去抖和唤醒行为都变成 MCU 侧职责。
 - 风险：实机上仍需验证 `GPIO0` 中键与 USB 下载流程是否满足期望的人机交互。
-- 风险：`GPIO35/36/47` 虽在 `ESP32-S3FH4R2` 可用集合内，但仍需结合最终 PCB 布局确认走线与 EMI 余量。
+- 风险：`GPIO35/36/47/48` 虽在 `ESP32-S3FH4R2` 可用集合内，但仍需结合最终 PCB 布局确认走线与 EMI 余量。
 - 风险：`PT1000` 直连 ADC 的方案偏向控制/保护用途，若主人后续要求高精度绝对温度，则仍应升级到专用 RTD 前端。
 - 假设：当前显示面板接受 `LCD_BLK` 的 MCU 直连 PWM 驱动。
 - 假设：`GPIO8/9` 专用于 CH224Q，不再复用其他 I2C 外设。
@@ -178,6 +181,7 @@
 - 2026-03-28: 明确 `GPIO2` 作为 `PT1000` 直连 ADC 输入，并冻结 RTD 偏置/滤波外围值。
 - 2026-03-30: 补充双路 `TPS62933DRLR` 电源与 heater 低边 `NMOS` 的独立设计文档，并与主基线交叉链接。
 - 2026-03-30: 因布线需求，将 `HEATER_PWM` 迁移到芯片 pin `37` / `GPIO47`。
+- 2026-03-31: 新增 buzzer 输出分配到芯片 pin `36` / `GPIO48`。
 
 ## 参考（References）
 
