@@ -49,7 +49,7 @@
 
 - MCU 切换为 `ESP32-S3FH4R2`。
 - 前面板不再使用 `TCA6408A`，所有按键与 LCD 控制脚改为 MCU 直连。
-- GPIO 分配固定为以下 21 路且无重复：`0,1,2,8,9,10,11,12,13,14,15,16,17,18,19,20,21,35,36,47,48`。
+- firmware-active GPIO 分配固定为以下 21 路且无重复：`0,1,2,8,9,10,11,12,13,14,15,16,17,18,19,20,21,35,36,47,48`。
 - `GPIO0` 必须直连前面板中键并承担 `BOOT` 键角色，采用 active-low 连接。
 - `GPIO10/11/12/13` 应尽量对齐 `mains-aegis` 的 LCD cluster，其中 `GPIO10=LCD_DC`、`GPIO11=LCD_MOSI`、`GPIO12=LCD_SCLK`、`GPIO13=LCD_BLK`。
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
@@ -58,9 +58,10 @@
 - `GPIO35` 必须直连 `FAN_EN`，`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
-- `PT1000` 直连 ADC 的基线外围固定为：`R_REF=2.49 kOhm (0.1%)`、`R_SERIES=100 Ohm`、`C_ADC=100 nF`。
-- `GPIO8/9` 仅用于 `CH224Q` I2C。
+- `PT1000` 直连 ADC 的基线外围固定为：`R_REF=2.49 kOhm (0.1%)`、`R_SERIES=2.2 kOhm`、`C_ADC=100 nF`，并在 MCU ADC 侧增加低漏电 ESD 钳位。
+- `GPIO8/9` 用作共享 I2C，总线上至少包含 `CH224Q` 与一颗 `M24C64` EEPROM。
 - `GPIO19/20` 用于原生 USB `D-/D+`。
+- `GPIO34` 可作为硬件接入的 `FAN_TACH` 输入存在，但它不计入当前 firmware-active 的 21 路 GPIO 集。
 - 保留 `DeviceStatus` 中的 `frontpanel_key`、`pd_request_mv`、`pd_contract_mv`、`fan_enabled`、`fan_pwm_permille` 字段。
 
 ### SHOULD
@@ -79,7 +80,8 @@
 ### Core flows
 
 - 固件启动时加载 `ESP32-S3FH4R2` board profile，并校验固定 GPIO 表无重复。
-- CH224Q 通过 `GPIO8/9` I2C 地址识别与寄存器编码生成控制字。
+- CH224Q 通过 `GPIO8/9` 共享 I2C 总线完成地址识别与寄存器编码控制字生成。
+- `M24C64` EEPROM 与 CH224Q 共用 `GPIO8/9` I2C，总线地址规划与固件仲裁必须兼容这一共享结构。
 - 前面板四向键与中键分别由 MCU 直接读取，不依赖 expander。
 - LCD `DC/MOSI/SCLK/BLK` 与 `mains-aegis` 对齐为 `GPIO10/11/12/13`，`RES/CS` 继续由 MCU 直连，其中 `BLK` 支持 PWM。
 - Buzzer 输出由 `GPIO48` 提供；固件可将其作为普通 beep GPIO 或 PWM/LEDC 音调输出使用。
@@ -168,9 +170,9 @@
 - 风险：`GPIO35/36/47/48` 虽在 `ESP32-S3FH4R2` 可用集合内，但仍需结合最终 PCB 布局确认走线与 EMI 余量。
 - 风险：`PT1000` 直连 ADC 的方案偏向控制/保护用途，若主人后续要求高精度绝对温度，则仍应升级到专用 RTD 前端。
 - 假设：当前显示面板接受 `LCD_BLK` 的 MCU 直连 PWM 驱动。
-- 假设：`GPIO8/9` 专用于 CH224Q，不再复用其他 I2C 外设。
+- 假设：`GPIO8/9` 的共享 I2C 总线由 CH224Q 与 M24C64 EEPROM 共同占用，后续若再挂载外设需要重新审视地址与时序预算。
 - 假设：温度探头最终确认为 `PT1000` 而不是 `PT100`。
-- 假设：保留 `GPIO34` 为空脚位有助于未来补入 `FAN_TACH`。
+- 假设：`GPIO34` 上的 `FAN_TACH` 在当前 revision 里只冻结为硬件输入，firmware 可后续再接入。
 
 ## 变更记录（Change log）
 

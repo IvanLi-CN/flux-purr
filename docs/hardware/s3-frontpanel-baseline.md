@@ -19,8 +19,8 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | VIN ADC | 1 | `ADC1_CH0`, main input voltage sense |
 | RTD ADC | 2 | `ADC1_CH1`, reserved for `PT1000` sensing |
 | HEATER PWM | 47 | Chip pin 37, main heating PWM |
-| I2C SDA | 8 | CH224Q only |
-| I2C SCL | 9 | CH224Q only |
+| I2C SDA | 8 | Shared by `CH224Q` and `M24C64` EEPROM |
+| I2C SCL | 9 | Shared by `CH224Q` and `M24C64` EEPROM |
 | LCD DC | 10 | Matches `mains-aegis` LCD control cluster |
 | LCD MOSI | 11 | SPI MOSI |
 | LCD SCLK | 12 | SPI clock |
@@ -33,17 +33,19 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | USB D- | 19 | Native USB pins |
 | USB D+ | 20 | Native USB pins |
 | Up Key | 21 | Direct GPIO input |
+| FAN TACH | 34 | Hardware-wired tach input, not yet consumed by the current firmware board profile |
 | FAN EN | 35 | Direct MCU enable for the fan TPS62933 stage |
 | FAN PWM | 36 | PWM input for fan-voltage setpoint injection |
 | BUZZER PWM | 48 | Chip pin 36, buzzer tone / beep output |
 
-Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus the nearby high-number control group on `GPIO35/36/47/48` while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
+Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus the nearby high-number control group on `GPIO34/35/36/47/48` while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
 
 ## 3) CH224Q control baseline
 
 - Use I2C dynamic mode with 7-bit address `0x22` (fallback compatible `0x23`).
 - Support requests for `5/9/12/15/20/28 V`.
 - Keep PD state visible in firmware status model (`request` vs `contract` voltage).
+- The same MCU I2C bus also carries one `M24C64` EEPROM with `E0/E1/E2` strapped low.
 
 ## 4) VIN sense baseline
 
@@ -59,12 +61,13 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 
 - Sensor type baseline: `PT1000`
 - ADC pin: `GPIO2` / `ADC1_CH1`
-- Recommended direct-to-ADC network for `ESP32-S3`:
+- Recommended protected direct-to-ADC network for `ESP32-S3`:
   - `3V3 -> R_REF = 2.49 kOhm (0.1%, <= 25 ppm/C) -> RTD_SENSE`
   - `PT1000 -> RTD_SENSE to GND`
-  - `RTD_SENSE -> 100 Ohm -> GPIO2`
+  - `RTD_SENSE -> 2.2 kOhm -> GPIO2`
   - `GPIO2 -> 100 nF -> GND` placed close to the MCU
-- This network keeps the ADC source impedance low, follows Espressif's common "ADC pin with external capacitor" practice, and gives a useful voltage span for `PT1000` hotplate temperatures:
+  - `GPIO2 -> low-leakage ESD clamp to GND`, for example one channel of `PESD3V3S2UT`
+- This network keeps the RTD divider simple while adding meaningful MCU-side protection for an off-board probe and still gives a useful voltage span for `PT1000` hotplate temperatures:
   - about `0.95 V` at `0 C`
   - about `1.18 V` at `100 C`
   - about `1.52 V` at `300 C`
@@ -95,6 +98,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - PWM start point `1 kHz ~ 2 kHz`
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
+- `FAN_TACH` is wired to `GPIO34` in hardware. The current firmware board profile still leaves this input outside the frozen 21-pin active set until tach support is implemented.
 - Keep the buzzer silent by default at boot. If the buzzer stage can sound when its input floats, add an external weak pulldown or use a driver topology whose default state is silent.
 - Fan rail baseline:
   - use `TPS62933DRLR`
@@ -108,7 +112,6 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - `CPWM = 1 uF`
   - no `VCTRL` pulldown
   - `EN` uses a weak pulldown such as `100 kOhm`
-- `GPIO34` is intentionally left free so a future revision can add `FAN_TACH` without breaking the fan-control block convention used by `mains-aegis`.
 
 ## 8) Power tree (frozen)
 
@@ -146,7 +149,7 @@ Reference:
 
 ## 10) Known trade-offs
 
-- `fan_tach` is intentionally not connected in this revision; `GPIO34` is left available if that signal is added later.
+- `fan_tach` is wired in hardware on `GPIO34`, but the current firmware board profile does not consume it yet.
 - Front-panel keys are all direct GPIOs, so debounce and wake behavior are purely firmware responsibilities.
 - VIN sense and RTD sense accuracy both depend on ADC calibration, resistor tolerance, and board-level noise.
 - Heater-power control depends on direct `3.3 V` MCU gate drive, so MOSFET temperature and drain overshoot still require bench validation.
