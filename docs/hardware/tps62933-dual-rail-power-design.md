@@ -149,6 +149,18 @@ This part should be treated as a cable/interface clamp, not as the main regulati
 - Keep the `VCTRL` RC filter away from the `SW` copper and the inductor fringe field
 - Route the fan connector return directly into power ground; do not force it through ADC or MCU quiet-ground paths
 
+Component placement priorities for the fan rail:
+
+- `BST` capacitor must sit very close to `BST` and `SW`
+- `CIN` MLCCs must sit close to `VIN` and `GND` of the `TPS62933DRLR`
+- the inductor should sit close to `SW`
+- the first output capacitor should sit close to the inductor output and power ground return
+- `RFBB`, `RFBT`, and the optional feed-forward capacitor should be grouped tightly around the `FB` pin
+- `RINJ` should sit with the `FB` divider cluster, not back near the MCU
+- `CPWM` should sit near `RINJ` and the `FB` cluster so `VCTRL` is a short local analog node
+- `RPWM` should also prefer the `VCTRL/FB` side, leaving the long trace on the digital PWM side rather than on the analog control side
+- the `EN` pulldown should sit close to the `EN` pin
+
 ## 10) Validation checklist before PCB freeze
 
 - Verify `FAN_VCC` still reaches the requested minimum under worst-case `28 V` input

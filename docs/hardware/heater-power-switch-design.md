@@ -129,6 +129,14 @@ Firmware should not treat the same PWM duty as equivalent power at every PD volt
 - keep the gate trace short and away from the hottest switching copper
 - place the MLCC stack and bulk capacitor close to the heater switch loop, not on the far side of the board
 
+Component placement priorities:
+
+- `R_GATE` must sit close to the MOSFET gate, not close to the MCU pin
+- `R_GPD` should also sit close to the MOSFET gate/source so the gate is held in a known state even if the upstream trace is noisy
+- the `100 nF / 1 uF / 10 uF` MLCC stack should sit close to the heater current loop entry, ideally near the heater feed and MOSFET drain return path
+- the bulk capacitor should sit close to the same heater power loop, not back near the PD connector alone
+- if an optional RC snubber footprint is reserved, place it close to the MOSFET drain/source switching loop
+
 ## 9) Optional tuning and protection footprints
 
 No freewheel diode is required for the heater branch because the load is treated as resistive, not as a motor or relay coil.
