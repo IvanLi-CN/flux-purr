@@ -96,8 +96,8 @@ The `3.3 V` rail should not depend on firmware-generated enables; it must be ava
 ### 7.2 Frozen control network
 
 - `RFBB = 10 kOhm` from `FB` to `GND`
-- `RFBT = 46.4 kOhm` from `FAN_VCC` to `FB`
-- `RINJ = 76.8 kOhm` from `VCTRL` to `FB`
+- `RFBT = 47 kOhm` from `FAN_VCC` to `FB`
+- `RINJ = 75 kOhm` from `VCTRL` to `FB`
 - `RPWM = 10 kOhm` from MCU PWM to `VCTRL`
 - `CPWM = 1 uF` from `VCTRL` to `GND`
 - `RPD = 100 kOhm` from `VCTRL` to `GND`
@@ -108,13 +108,15 @@ This is intentionally a single, slow RC stage. The design goal is to make `FB` s
 
 With the network above:
 
-- `Duty = 0%` gives approximately `5.0 V`
-- `Duty = 100%` gives approximately `3.0 V`
+- `Duty = 0%` gives approximately `5.06 V`
+- `Duty = 100%` gives approximately `2.99 V`
 - practical approximation:
-  - `VOUT ~= 5.0 - 1.99 * Duty`
+  - `VOUT ~= 5.06 - 2.07 * Duty`
   - where `Duty` is `0.0 ~ 1.0`
 
 Firmware should treat this as an inverse mapping: higher PWM duty means lower fan voltage.
+
+This E24 pair is intentional because it is easier to source than the earlier E96-style values. If firmware wants to cap the nominal top end close to exactly `5.0 V`, do not use a true `0%` floor. A practical floor near `3%` duty already lands very close to `5.0 V`.
 
 ### 7.4 PWM guidance
 

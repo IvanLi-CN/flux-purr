@@ -99,8 +99,8 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - `L = 3.3 uH`
   - fan output range `3.0 V ~ 5.0 V`
   - `RFBB = 10 kOhm`
-  - `RFBT = 46.4 kOhm`
-  - `RINJ = 76.8 kOhm`
+  - `RFBT = 47 kOhm`
+  - `RINJ = 75 kOhm`
   - `RPWM = 10 kOhm`
   - `CPWM = 1 uF`
   - `RPD = 100 kOhm`
