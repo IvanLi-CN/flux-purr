@@ -90,8 +90,9 @@ The `3.3 V` rail should not depend on firmware-generated enables; it must be ava
 ### 7.1 Target behavior
 
 - Fan supply range: `3.0 V ~ 5.0 V`
-- `GPIO35` hard-enables or disables the fan rail
+- `GPIO35` hard-enables or disables the fan rail through the `TPS62933DRLR EN` pin
 - `GPIO36` supplies PWM that is converted into a DC control voltage and injected into `FB`
+- `EN` must have its own weak pulldown so the fan rail stays off during reset and while the MCU pin is high-impedance
 
 ### 7.2 Frozen control network
 
@@ -100,20 +101,18 @@ The `3.3 V` rail should not depend on firmware-generated enables; it must be ava
 - `RINJ = 75 kOhm` from `VCTRL` to `FB`
 - `RPWM = 10 kOhm` from MCU PWM to `VCTRL`
 - `CPWM = 1 uF` from `VCTRL` to `GND`
-- `RPD = 1 MOhm` from `VCTRL` to `GND`
+- `REN_PD = 100 kOhm` from `EN` to `GND`
 
 This is intentionally a single, slow RC stage. The design goal is to make `FB` see a near-DC control value instead of a lightly filtered square wave.
-
-`RPD` is not mathematically required for modulation, but it is still recommended as a weak pulldown so `VCTRL` does not float during reset or while the MCU pin is high-impedance. The value should stay weak. A `100 kOhm` pulldown compresses the usable control range too much with `RPWM = 10 kOhm`, so the frozen baseline uses `1 MOhm` instead.
 
 ### 7.3 Control law
 
 With the network above:
 
 - `Duty = 0%` gives approximately `5.06 V`
-- `Duty = 100%` gives approximately `3.01 V`
+- `Duty = 100%` gives approximately `2.99 V`
 - practical approximation:
-  - `VOUT ~= 5.06 - 2.05 * Duty`
+  - `VOUT ~= 5.06 - 2.07 * Duty`
   - where `Duty` is `0.0 ~ 1.0`
 
 Firmware should treat this as an inverse mapping: higher PWM duty means lower fan voltage.
@@ -124,6 +123,7 @@ This E24 pair is intentional because it is easier to source than the earlier E96
 
 - Recommended PWM frequency from `ESP32-S3`: `20 kHz ~ 40 kHz`
 - Do not inject raw PWM directly into `FB`
+- Configure the PWM pin first, then assert `EN`
 - For startup reliability, drive the fan at `5 V` for `100 ms ~ 300 ms` before stepping down to the requested steady-state voltage
 
 ## 8) Fan connector protection

@@ -103,7 +103,8 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - `RINJ = 75 kOhm`
   - `RPWM = 10 kOhm`
   - `CPWM = 1 uF`
-  - `RPD = 1 MOhm`
+  - no `VCTRL` pulldown
+  - `EN` uses a weak pulldown such as `100 kOhm`
 - `GPIO34` is intentionally left free so a future revision can add `FAN_TACH` without breaking the fan-control block convention used by `mains-aegis`.
 
 ## 8) Power tree (frozen)
