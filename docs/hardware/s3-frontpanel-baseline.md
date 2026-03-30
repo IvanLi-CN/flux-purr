@@ -84,6 +84,13 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 
 - `LCD DC/MOSI/SCLK/BLK` are placed on `GPIO10/11/12/13`, matching the frozen LCD cluster used by `mains-aegis`.
 - `LCD BLK` is directly driven by MCU `GPIO13` and must support PWM dimming.
+- `HEATER_PWM` is directly driven by MCU `GPIO5` and controls a low-side heater MOSFET stage.
+- Heater switching baseline:
+  - use low-side `NMOS`
+  - current approved part: `BUK9Y14-40B,115`
+  - `R_GATE = 10 Ohm`
+  - `R_GPD = 100 kOhm`
+  - PWM start point `1 kHz ~ 2 kHz`
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
 - Fan rail baseline:
@@ -107,6 +114,7 @@ USB-C PD input
   -> main high-voltage bus (up to 28V request)
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> PT1000 divider to GPIO2 RTD sense
+  -> heater element switched by low-side NMOS from GPIO5 PWM
   -> TPS62933 buck to fixed 3V3
   -> TPS62933 buck to adjustable fan rail (GPIO36 PWM -> RC -> FB, GPIO35 EN)
 ```
@@ -114,6 +122,7 @@ USB-C PD input
 Power-stage details are frozen in:
 
 - `docs/hardware/tps62933-dual-rail-power-design.md`
+- `docs/hardware/heater-power-switch-design.md`
 
 ## 9) ESP32-S3FH4R2 bring-up constraints
 
@@ -133,4 +142,5 @@ Reference:
 - `fan_tach` is intentionally not connected in this revision; `GPIO34` is left available if that signal is added later.
 - Front-panel keys are all direct GPIOs, so debounce and wake behavior are purely firmware responsibilities.
 - VIN sense and RTD sense accuracy both depend on ADC calibration, resistor tolerance, and board-level noise.
+- Heater-power control depends on direct `3.3 V` MCU gate drive, so MOSFET temperature and drain overshoot still require bench validation.
 - Fan-voltage control depends on a filtered PWM-to-FB injection path, so final startup behavior and low-speed acoustics still require bench validation.

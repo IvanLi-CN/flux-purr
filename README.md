@@ -49,6 +49,7 @@ Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if 
 Power design notes for the current board revision are frozen in:
 
 - [docs/hardware/tps62933-dual-rail-power-design.md](docs/hardware/tps62933-dual-rail-power-design.md)
+- [docs/hardware/heater-power-switch-design.md](docs/hardware/heater-power-switch-design.md)
 
 ## Research baseline
 
