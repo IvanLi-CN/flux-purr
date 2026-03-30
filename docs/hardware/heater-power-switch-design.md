@@ -8,7 +8,7 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 - Lower PD voltages remain compatibility-only and are not required to deliver usable heating performance
 - Load type: resistive hotplate heater
 - Switch topology: low-side N-channel MOSFET
-- PWM source: `ESP32-S3 GPIO5`
+- PWM source: `ESP32-S3 GPIO47` (chip pin `37`)
 
 ## 2) Frozen topology
 
@@ -21,7 +21,7 @@ VBUS -> heater element -> HEATER_SW -> low-side NMOS -> power GND
 Control path:
 
 ```text
-ESP32-S3 GPIO5 -> gate resistor -> MOSFET gate
+ESP32-S3 GPIO47 -> gate resistor -> MOSFET gate
 gate -> pulldown -> source/GND
 ```
 
@@ -29,7 +29,7 @@ This topology is intentionally simple:
 
 - low-side `NMOS` keeps conduction loss lower than a comparable `PMOS`
 - the heater is a resistive load, so a simple switch stage is appropriate
-- the MCU already owns `GPIO5` as the heater-control output
+- the MCU already owns `GPIO47` (chip pin `37`) as the heater-control output
 
 Upstream protection baseline for the heater branch:
 
@@ -72,7 +72,7 @@ Recommended default:
 
 Connection:
 
-- `GPIO5 -> R_GATE -> gate`
+- `GPIO47 -> R_GATE -> gate`
 - `gate -> R_GPD -> source/GND`
 
 Do not leave the gate floating at reset or during boot.

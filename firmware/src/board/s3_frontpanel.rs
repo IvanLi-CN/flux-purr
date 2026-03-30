@@ -3,7 +3,7 @@ pub const PIN_VIN_ADC: u8 = 1;
 pub const PIN_RTD_ADC: u8 = 2;
 pub const PIN_TEMP_ADC: u8 = PIN_RTD_ADC;
 
-pub const PIN_HEATER_PWM: u8 = 5;
+pub const PIN_HEATER_PWM: u8 = 47;
 
 pub const PIN_I2C_SDA: u8 = 8;
 pub const PIN_I2C_SCL: u8 = 9;
@@ -83,6 +83,7 @@ mod tests {
         assert_eq!(super::PIN_LCD_BLK, 13);
         assert_eq!(super::PIN_FAN_EN, 35);
         assert_eq!(super::PIN_FAN_PWM, 36);
+        assert_eq!(super::PIN_HEATER_PWM, 47);
         assert_eq!(super::VIN_DIVIDER_MAX_ADC_MV, 2_337);
     }
 }

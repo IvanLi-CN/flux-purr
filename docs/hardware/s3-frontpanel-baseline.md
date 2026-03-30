@@ -18,7 +18,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | Center Key / BOOT | 0 | Active low button to `GND`, ROM boot strap |
 | VIN ADC | 1 | `ADC1_CH0`, main input voltage sense |
 | RTD ADC | 2 | `ADC1_CH1`, reserved for `PT1000` sensing |
-| HEATER PWM | 5 | Main heating PWM |
+| HEATER PWM | 47 | Chip pin 37, main heating PWM |
 | I2C SDA | 8 | CH224Q only |
 | I2C SCL | 9 | CH224Q only |
 | LCD DC | 10 | Matches `mains-aegis` LCD control cluster |
@@ -84,7 +84,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 
 - `LCD DC/MOSI/SCLK/BLK` are placed on `GPIO10/11/12/13`, matching the frozen LCD cluster used by `mains-aegis`.
 - `LCD BLK` is directly driven by MCU `GPIO13` and must support PWM dimming.
-- `HEATER_PWM` is directly driven by MCU `GPIO5` and controls a low-side heater MOSFET stage.
+- `HEATER_PWM` is directly driven by MCU `GPIO47` (chip pin `37`) and controls a low-side heater MOSFET stage.
 - Heater switching baseline:
   - use low-side `NMOS`
   - current approved part: `BUK9Y14-40B,115`
@@ -118,7 +118,7 @@ USB-C PD input
   -> main high-voltage board bus (up to 28V request)
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> PT1000 divider to GPIO2 RTD sense
-  -> heater element switched by low-side NMOS from GPIO5 PWM
+  -> heater element switched by low-side NMOS from GPIO47 PWM
   -> TPS62933 buck to fixed 3V3
   -> TPS62933 buck to adjustable fan rail (GPIO36 PWM -> RC -> FB, GPIO35 EN)
 ```
