@@ -100,18 +100,20 @@ The `3.3 V` rail should not depend on firmware-generated enables; it must be ava
 - `RINJ = 75 kOhm` from `VCTRL` to `FB`
 - `RPWM = 10 kOhm` from MCU PWM to `VCTRL`
 - `CPWM = 1 uF` from `VCTRL` to `GND`
-- `RPD = 100 kOhm` from `VCTRL` to `GND`
+- `RPD = 1 MOhm` from `VCTRL` to `GND`
 
 This is intentionally a single, slow RC stage. The design goal is to make `FB` see a near-DC control value instead of a lightly filtered square wave.
+
+`RPD` is not mathematically required for modulation, but it is still recommended as a weak pulldown so `VCTRL` does not float during reset or while the MCU pin is high-impedance. The value should stay weak. A `100 kOhm` pulldown compresses the usable control range too much with `RPWM = 10 kOhm`, so the frozen baseline uses `1 MOhm` instead.
 
 ### 7.3 Control law
 
 With the network above:
 
 - `Duty = 0%` gives approximately `5.06 V`
-- `Duty = 100%` gives approximately `2.99 V`
+- `Duty = 100%` gives approximately `3.01 V`
 - practical approximation:
-  - `VOUT ~= 5.06 - 2.07 * Duty`
+  - `VOUT ~= 5.06 - 2.05 * Duty`
   - where `Duty` is `0.0 ~ 1.0`
 
 Firmware should treat this as an inverse mapping: higher PWM duty means lower fan voltage.
