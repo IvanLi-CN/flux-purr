@@ -112,7 +112,10 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 ```text
 USB-C PD input
   -> CH224Q negotiates source
-  -> main high-voltage bus (up to 28V request)
+  -> USB connector raw power net `VBUS_RAW`
+  -> one-time SMD fuse to protected board bus `VBUS`
+  -> `TVS_VBUS` from `VBUS` to `GND`
+  -> main high-voltage board bus (up to 28V request)
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> PT1000 divider to GPIO2 RTD sense
   -> heater element switched by low-side NMOS from GPIO5 PWM

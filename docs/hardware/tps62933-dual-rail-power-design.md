@@ -4,13 +4,18 @@ This document freezes the current power-tree baseline for the `ESP32-S3FH4R2` re
 
 ## 1) Scope
 
-- Input bus: `VSYS`, expected operating range `5 V ~ 28 V`
+- Board input bus: `VBUS`, expected operating range `5 V ~ 28 V`
 - MCU rail: fixed `3.3 V`, nominal load up to `1 A`
 - Fan rail: adjustable `3.0 V ~ 5.0 V`, nominal fan load up to `0.5 A`
 - Both rails use `TPS62933DRLR`
 
 ## 2) Frozen architecture
 
+- USB-C connector raw power net: `VBUS_RAW`
+- Protected board power net after the fuse: `VBUS`
+- Input protection chain:
+  - `VBUS_RAW -> FUSE_VBUS -> VBUS`
+  - `TVS_VBUS` from `VBUS` to `GND`
 - `U_3V3`: `TPS62933DRLR`, fixed `3.3 V` rail for `ESP32-S3FH4R2` and low-voltage logic
 - `U_FAN`: `TPS62933DRLR`, adjustable fan rail
 - Both converters use the same switching-frequency and inductor baseline:
@@ -22,6 +27,13 @@ This document freezes the current power-tree baseline for the `ESP32-S3FH4R2` re
   - `GPIO36 -> FAN_VSET_PWM`
 
 This keeps both buck stages as similar as practical while leaving only the fan rail with the extra feedback-injection network.
+
+This fuse-plus-TVS structure is reasonable for the current fault model:
+
+- the fuse is the sacrificial element for downstream shorts, including accidental shorts involving exposed heater hardware
+- the TVS clamps the protected board-side bus rather than the raw connector pin
+
+Do not over-interpret the TVS. On a `28 V` PD-capable bus, TVS standoff and clamp margins are tight. It is useful for transient cleanup and fault-energy shunting, but it is not a substitute for a dedicated high-voltage surge or overvoltage management stage.
 
 ## 3) Why `1.2 MHz` for both rails
 

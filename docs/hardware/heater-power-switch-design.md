@@ -4,7 +4,8 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 
 ## 1) Scope
 
-- Input bus: `VSYS`, expected operating range `5 V ~ 28 V`
+- Heater supply bus: `VBUS`, expected operating range `20 V ~ 28 V` for the intended operating mode
+- Lower PD voltages remain compatibility-only and are not required to deliver usable heating performance
 - Load type: resistive hotplate heater
 - Switch topology: low-side N-channel MOSFET
 - PWM source: `ESP32-S3 GPIO5`
@@ -14,7 +15,7 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 The heater path is:
 
 ```text
-VSYS -> heater element -> HEATER_SW -> low-side NMOS -> power GND
+VBUS -> heater element -> HEATER_SW -> low-side NMOS -> power GND
 ```
 
 Control path:
@@ -29,6 +30,16 @@ This topology is intentionally simple:
 - low-side `NMOS` keeps conduction loss lower than a comparable `PMOS`
 - the heater is a resistive load, so a simple switch stage is appropriate
 - the MCU already owns `GPIO5` as the heater-control output
+
+Upstream protection baseline for the heater branch:
+
+```text
+USB-C VBUS pin -> VBUS_RAW -> FUSE_VBUS -> VBUS
+VBUS -> TVS_VBUS -> GND
+VBUS -> heater copper standoffs / heater branch
+```
+
+This means the heater and the rest of the board both run from the fused `VBUS` net rather than from the raw connector pin.
 
 ## 3) Approved MOSFET baseline
 
@@ -105,6 +116,13 @@ The bulk capacitor may be:
 
 Do not treat the bulk capacitor as a replacement for the local MLCC stack. Both are required.
 
+Fuse and TVS baseline:
+
+- add a one-time SMD fuse between `VBUS_RAW` and `VBUS`
+- place the fuse on the main board before the route reaches the exposed heater copper standoffs
+- add a TVS between `VBUS` and `GND`
+- the TVS should protect the board-side `VBUS` net, not sit out on the exposed heater hardware
+
 ## 7) Current and power constraints
 
 The PD source and the hotplate switch stage must be checked against the heater current when the MOSFET is fully on.
@@ -123,7 +141,7 @@ Firmware should not treat the same PWM duty as equivalent power at every PD volt
 
 ## 8) Layout baseline
 
-- keep the `VSYS -> heater -> MOSFET -> GND` high-current loop short and wide
+- keep the `VBUS -> heater -> MOSFET -> GND` high-current loop short and wide
 - route heater current return directly into the power-ground region
 - do not share the heater return path with ADC quiet-ground routing
 - keep the gate trace short and away from the hottest switching copper
@@ -131,6 +149,8 @@ Firmware should not treat the same PWM duty as equivalent power at every PD volt
 
 Component placement priorities:
 
+- `FUSE_VBUS` should sit close to the point where `VBUS_RAW` enters the board, before the route fans out to heater and regulators
+- `TVS_VBUS` should sit close to the protected `VBUS` entry region with a short, low-inductance return to ground
 - `R_GATE` must sit close to the MOSFET gate, not close to the MCU pin
 - `R_GPD` should also sit close to the MOSFET gate/source so the gate is held in a known state even if the upstream trace is noisy
 - the `100 nF / 1 uF / 10 uF` MLCC stack should sit close to the heater current loop entry, ideally near the heater feed and MOSFET drain return path
@@ -147,6 +167,8 @@ This footprint is optional and should not be populated by default without oscill
 
 ## 10) Validation checklist before PCB freeze
 
+- verify fuse rating against worst-case heater cold-start current
+- verify the chosen TVS does not nuisance-conduct at the highest intended PD voltage
 - verify MOSFET temperature at the highest intended heater power
 - verify drain overshoot at `5 / 9 / 12 / 15 / 20 / 28 V`
 - verify the gate waveform with the real `3.3 V` MCU drive
