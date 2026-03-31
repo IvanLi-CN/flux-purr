@@ -29,8 +29,22 @@ export function DeviceStatusCard({ status }: DeviceStatusCardProps) {
           <Metric label="Current" value={`${status.current.toFixed(2)} A`} />
           <Metric label="Board Temp" value={`${status.boardTempC.toFixed(1)} °C`} />
           <Metric label="Wi-Fi RSSI" value={`${status.wifiRssi} dBm`} />
+          <Metric label="PD Request" value={`${status.pdRequestMv} mV`} />
+          <Metric label="PD Contract" value={`${status.pdContractMv} mV`} />
+          <Metric
+            label="Fan"
+            value={status.fanEnabled ? `${status.fanPwmPermille} ‰` : 'Disabled'}
+          />
         </div>
         <Separator />
+        <div className="flex items-center justify-between text-muted-foreground">
+          <span>PD State</span>
+          <span className="font-medium text-foreground">{status.pdState}</span>
+        </div>
+        <div className="flex items-center justify-between text-muted-foreground">
+          <span>Front Panel</span>
+          <span>{status.frontpanelKey ?? 'none'}</span>
+        </div>
         <div className="flex items-center justify-between text-muted-foreground">
           <span>Firmware</span>
           <code className="rounded bg-muted px-2 py-0.5 text-xs">{status.fwVersion}</code>
