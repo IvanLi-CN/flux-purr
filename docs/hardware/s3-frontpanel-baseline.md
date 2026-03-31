@@ -10,6 +10,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - Fan rail: `TPS62933DRLR` (adjustable `3.0 V ~ 5.0 V`)
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
+- Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet`
 
 ## 2) Direct MCU GPIO allocation (21 active)
 
