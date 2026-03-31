@@ -55,7 +55,7 @@
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
 - `GPIO47`（芯片 pin `37`）必须保留为 heater PWM 输出。
 - `GPIO48`（芯片 pin `36`）必须保留为 buzzer PWM / beep 输出。
-- `GPIO35` 必须直连 `FAN_EN`，`GPIO36` 必须直连 `FAN_PWM`。
+- `GPIO35` 必须直接拥有风扇 `EN` 控制路径，允许在 MCU 侧原始控制网与实际 `FAN_EN` 之间插入保护/串联电阻；`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
 - `PT1000` 直连 ADC 的基线外围固定为：`R_REF=2.49 kOhm (0.1%)`、`R_SERIES=2.2 kOhm`、`C_ADC=100 nF`，并在 MCU ADC 侧增加低漏电 ESD 钳位。
@@ -63,6 +63,7 @@
 - `GPIO19/20` 用于原生 USB `D-/D+`。
 - `GPIO34` 可作为硬件接入的 `FAN_TACH` 输入存在，但它不计入当前 firmware-active 的 21 路 GPIO 集。
 - 保留 `DeviceStatus` 中的 `frontpanel_key`、`pd_request_mv`、`pd_contract_mv`、`fan_enabled`、`fan_pwm_permille` 字段。
+- 固定 `3.3 V` 电源应使用输入欠压锁定，目标行为为：约 `4.5 V` 以下关断、约 `5.0 V` 恢复。
 
 ### SHOULD
 
@@ -82,10 +83,12 @@
 - 固件启动时加载 `ESP32-S3FH4R2` board profile，并校验固定 GPIO 表无重复。
 - CH224Q 通过 `GPIO8/9` 共享 I2C 总线完成地址识别与寄存器编码控制字生成。
 - `M24C64` EEPROM 与 CH224Q 共用 `GPIO8/9` I2C，总线地址规划与固件仲裁必须兼容这一共享结构。
+- 共享 `GPIO8/9` I2C 总线保留 `4.7 kOhm` 到 `3V3` 的上拉。
 - 前面板四向键与中键分别由 MCU 直接读取，不依赖 expander。
 - LCD `DC/MOSI/SCLK/BLK` 与 `mains-aegis` 对齐为 `GPIO10/11/12/13`，`RES/CS` 继续由 MCU 直连，其中 `BLK` 支持 PWM。
 - Buzzer 输出由 `GPIO48` 提供；固件可将其作为普通 beep GPIO 或 PWM/LEDC 音调输出使用。
 - `PT1000` 通过 `GPIO2` 进入 MCU ADC；固件按校准后的 ADC 电压换算温度，开路/短路应视为故障态而不是有效温度。
+- `GPIO35` 的风扇使能控制在实现上可以表现为 `FAN_EN_RAW -> series resistor -> FAN_EN`，但 firmware 仍将其视为单一使能输出所有权。
 - 设备状态快照继续输出 `frontpanel_key` 与 PD/风扇字段。
 
 ### Edge cases / errors

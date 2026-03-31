@@ -23,7 +23,7 @@ This document freezes the current power-tree baseline for the `ESP32-S3FH4R2` re
   - `fSW = 1.2 MHz`
   - `L = 3.3 uH`
 - Fan control is still MCU-direct:
-  - `GPIO35 -> FAN_EN`
+  - `GPIO35 -> FAN_EN_RAW -> 2.2 kOhm -> FAN_EN`
   - `GPIO36 -> FAN_VSET_PWM`
 
 This keeps both buck stages as similar as practical while leaving only the fan rail with the extra feedback-injection network.
@@ -90,6 +90,7 @@ Recommended feedback network:
 
 - `RFBB = 10 kOhm`
 - `RFBT = 31.6 kOhm`
+- `CFF = 12 pF`
 
 This gives the normal `TPS62933` output relation:
 
@@ -97,14 +98,29 @@ This gives the normal `TPS62933` output relation:
 
 The `3.3 V` rail should not depend on firmware-generated enables; it must be available early enough for the MCU to boot.
 
+Implemented UVLO network:
+
+- `RUVLO_TOP = 220 kOhm` from `VBUS` to `VSYS_OK`
+- `RUVLO_BOT = 68 kOhm` from `VSYS_OK` to `GND`
+- `VSYS_OK -> EN`
+
+Using the `TPS62933` `EN` thresholds and bias currents, this implemented network gives approximately:
+
+- rising enable near `4.97 V`
+- falling disable near `4.49 V`
+
+This matches the board intent of treating anything below about `4.5 V` as undervoltage while only re-enabling once the source is back near `5 V`.
+
 ## 7) Adjustable fan rail
 
 ### 7.1 Target behavior
 
 - Fan supply range: `3.0 V ~ 5.0 V`
-- `GPIO35` hard-enables or disables the fan rail through the `TPS62933DRLR EN` pin
+- `GPIO35` hard-enables or disables the fan rail through the `TPS62933DRLR EN` path
 - `GPIO36` supplies PWM that is converted into a DC control voltage and injected into `FB`
 - `EN` must have its own weak pulldown so the fan rail stays off during reset and while the MCU pin is high-impedance
+- the implemented board inserts a `2.2 kOhm` series resistor between the MCU-side `FAN_EN_RAW` net and the actual `FAN_EN` node at the TPS pin
+- one channel of the shared `PESD3V3S2UT` is placed on `FAN_EN_RAW`; the second channel is used by `RTD_ADC`
 
 ### 7.2 Frozen control network
 
@@ -114,6 +130,7 @@ The `3.3 V` rail should not depend on firmware-generated enables; it must be ava
 - `RPWM = 10 kOhm` from MCU PWM to `VCTRL`
 - `CPWM = 1 uF` from `VCTRL` to `GND`
 - `REN_PD = 100 kOhm` from `EN` to `GND`
+- `RSER_EN = 2.2 kOhm` from `FAN_EN_RAW` to `FAN_EN`
 
 This is intentionally a single, slow RC stage. The design goal is to make `FB` see a near-DC control value instead of a lightly filtered square wave.
 
@@ -172,6 +189,7 @@ Component placement priorities for the fan rail:
 - `CPWM` should sit near `RINJ` and the `FB` cluster so `VCTRL` is a short local analog node
 - `RPWM` should also prefer the `VCTRL/FB` side, leaving the long trace on the digital PWM side rather than on the analog control side
 - the `EN` pulldown should sit close to the `EN` pin
+- if `RSER_EN` is populated, it should sit closer to the `EN` pin than to the MCU so the protected node stays local to the buck stage
 
 ## 10) Validation checklist before PCB freeze
 

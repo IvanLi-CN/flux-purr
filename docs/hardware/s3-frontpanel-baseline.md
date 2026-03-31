@@ -47,6 +47,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - Support requests for `5/9/12/15/20/28 V`.
 - Keep PD state visible in firmware status model (`request` vs `contract` voltage).
 - The same MCU I2C bus also carries one `M24C64` EEPROM with `E0/E1/E2` strapped low.
+- The shared `SDA/SCL` bus uses `4.7 kOhm` pullups to `3V3`.
 
 ## 4) VIN sense baseline
 
@@ -98,8 +99,10 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - `R_GPD = 100 kOhm`
   - PWM start point `1 kHz ~ 2 kHz`
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
+- In the implemented netlist, `GPIO35` first drives `FAN_EN_RAW`, then passes through a `2.2 kOhm` series resistor into the TPS62933 `EN` pin. The weak `100 kOhm` pulldown remains on the actual `FAN_EN` node.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
 - `FAN_TACH` is wired to `GPIO34` in hardware. The current firmware board profile still leaves this input outside the frozen 21-pin active set until tach support is implemented.
+- One channel of the dual `PESD3V3S2UT` clamp is populated on `FAN_EN_RAW`; the other channel protects `RTD_ADC`.
 - Keep the buzzer silent by default at boot. If the buzzer stage can sound when its input floats, add an external weak pulldown or use a driver topology whose default state is silent.
 - Fan rail baseline:
   - use `TPS62933DRLR`

@@ -103,9 +103,6 @@ Place a local capacitor group near the heater branch and MOSFET current loop:
 - `1 uF / 50 V / X7R`
 - `10 uF / 50 V / X7R`
 - `100 uF / 35 V` low-ESR bulk capacitor
-
-If the real heater current is high or the PWM frequency is pushed lower, upgrade the bulk capacitor to:
-
 - `220 uF / 35 V` low-ESR bulk capacitor
 
 The bulk capacitor may be:
@@ -114,7 +111,15 @@ The bulk capacitor may be:
 - solid aluminum
 - another clearly low-ESR bulk technology
 
-Do not treat the bulk capacitor as a replacement for the local MLCC stack. Both are required.
+The archived final controller-board netlist already populates this full stack on `VBUS` near the heater branch:
+
+- `100 nF`
+- `1 uF`
+- `10 uF`
+- `100 uF`
+- `220 uF`
+
+Do not treat the bulk capacitors as a replacement for the local MLCC stack. Both are required.
 
 Fuse and TVS baseline:
 
