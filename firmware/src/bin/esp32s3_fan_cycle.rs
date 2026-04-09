@@ -2,7 +2,9 @@
 #![cfg_attr(target_arch = "xtensa", no_main)]
 
 #[cfg(target_arch = "xtensa")]
-use core::panic::PanicInfo;
+use defmt::info;
+#[cfg(target_arch = "xtensa")]
+use esp_backtrace as _;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     clock::CpuClock,
@@ -17,9 +19,11 @@ use esp_hal::{
     time::{Duration, Instant, Rate},
 };
 #[cfg(target_arch = "xtensa")]
+use esp_println as _;
+#[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     FAN_PHASE_DURATION_SECS, FAN_PWM_FREQUENCY_HZ, FAN_STOP_SAFE_PWM_PERMILLE, FanCommand,
-    FanCycleController, board::s3_frontpanel, pwm_percent_from_permille,
+    FanCycleController, FanPhase, board::s3_frontpanel, pwm_percent_from_permille,
 };
 #[cfg(target_arch = "xtensa")]
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -31,13 +35,17 @@ const _: [(); s3_frontpanel::PIN_FAN_PWM as usize] = [(); 36];
 const _: [(); s3_frontpanel::PIN_FAN_TACH as usize] = [(); 34];
 
 #[cfg(target_arch = "xtensa")]
-#[panic_handler]
-fn panic(_: &PanicInfo<'_>) -> ! {
-    esp_hal::system::software_reset()
+fn phase_label(phase: FanPhase) -> &'static str {
+    match phase {
+        FanPhase::High => "high",
+        FanPhase::Low => "low",
+        FanPhase::Mid => "mid",
+        FanPhase::Stop => "stop",
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn configure_timer_with_fallback<T>(timer: &mut T) -> Result<(), timer::Error>
+fn configure_timer_with_fallback<T>(timer: &mut T) -> Result<u8, timer::Error>
 where
     T: TimerIFace<LowSpeed>,
 {
@@ -49,12 +57,14 @@ where
             clock_source: LSClockSource::APBClk,
             frequency: freq,
         })
+        .map(|_| 10)
         .or_else(|_| {
             timer.configure(timer::config::Config {
                 duty: Duty::Duty8Bit,
                 clock_source: LSClockSource::APBClk,
                 frequency: freq,
-            })
+            })?;
+            Ok(8)
         })
 }
 
@@ -81,6 +91,18 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+fn log_command(command: FanCommand, uptime_secs: u32) {
+    info!(
+        "fan phase={=str} enabled={=bool} pwm_permille={=u16} output_mv={=u16} uptime_s={=u32}",
+        phase_label(command.phase),
+        command.enabled,
+        command.pwm_permille,
+        command.approx_output_mv(),
+        uptime_secs,
+    );
+}
+
+#[cfg(target_arch = "xtensa")]
 #[main]
 fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -92,10 +114,8 @@ fn main() -> ! {
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
     let mut timer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    assert!(
-        configure_timer_with_fallback(&mut timer0).is_ok(),
-        "failed to configure LEDC timer for fan PWM"
-    );
+    let timer_bits = configure_timer_with_fallback(&mut timer0)
+        .expect("failed to configure LEDC timer for fan PWM");
 
     let mut fan_pwm = ledc.channel(channel::Number::Channel0, peripherals.GPIO36);
     let initial = FanCycleController::new().command_at(0);
@@ -112,7 +132,16 @@ fn main() -> ! {
 
     let mut controller = FanCycleController::new();
     let mut uptime_secs = 0_u32;
+    info!(
+        "boot fan_en_gpio={=u8} fan_pwm_gpio={=u8} fan_tach_gpio={=u8} pwm_hz={=u32} timer_bits={=u8}",
+        s3_frontpanel::PIN_FAN_EN,
+        s3_frontpanel::PIN_FAN_PWM,
+        s3_frontpanel::PIN_FAN_TACH,
+        FAN_PWM_FREQUENCY_HZ,
+        timer_bits,
+    );
     apply_command(&mut fan_enable, &fan_pwm, initial);
+    log_command(initial, uptime_secs);
 
     loop {
         let phase_started = Instant::now();
@@ -120,6 +149,7 @@ fn main() -> ! {
         uptime_secs = uptime_secs.saturating_add(FAN_PHASE_DURATION_SECS);
         let command = controller.command_at(uptime_secs);
         apply_command(&mut fan_enable, &fan_pwm, command);
+        log_command(command, uptime_secs);
     }
 }
 

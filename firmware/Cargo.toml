@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Flux Purr firmware domain crate (no_std + fan bring-up skeleton)"
 license = "MIT OR Apache-2.0"
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"
@@ -22,8 +23,11 @@ embassy-futures = "0.1.2"
 heapless = "0.8.0"
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
-esp-hal = { version = "1", default-features = false, features = ["esp32s3", "rt", "unstable"] }
-esp-bootloader-esp-idf = { version = "0.4.0", default-features = false, features = ["esp32s3"] }
+defmt = "1.0.1"
+esp-backtrace = { version = "0.18.1", features = ["esp32s3", "panic-handler", "defmt"] }
+esp-hal = { version = "1", default-features = false, features = ["esp32s3", "rt", "unstable", "defmt"] }
+esp-bootloader-esp-idf = { version = "0.4.0", default-features = false, features = ["esp32s3", "defmt"] }
+esp-println = { version = "0.16.1", features = ["esp32s3", "defmt-espflash"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
