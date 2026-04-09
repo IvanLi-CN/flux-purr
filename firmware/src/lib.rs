@@ -13,8 +13,47 @@ pub const FAN_HIGH_PWM_PERMILLE: u16 = 30;
 pub const FAN_MID_PWM_PERMILLE: u16 = 300;
 pub const FAN_LOW_PWM_PERMILLE: u16 = 500;
 pub const FAN_STOP_SAFE_PWM_PERMILLE: u16 = FAN_LOW_PWM_PERMILLE;
-pub const FAN_APPROX_MAX_OUTPUT_MV: u16 = 5_060;
-pub const FAN_APPROX_OUTPUT_SPAN_MV: u16 = 2_070;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanPcbVariant {
+    FiveVolt,
+    TwelveVolt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FanRailProfile {
+    pub variant: FanPcbVariant,
+    pub approx_max_output_mv: u16,
+    pub approx_output_span_mv: u16,
+    pub startup_boost_mv: u16,
+    pub startup_boost_ms: u16,
+}
+
+impl FanRailProfile {
+    pub const fn min_output_mv(self) -> u16 {
+        self.approx_max_output_mv - self.approx_output_span_mv
+    }
+}
+
+pub const FAN_RAIL_PROFILE_5V: FanRailProfile = FanRailProfile {
+    variant: FanPcbVariant::FiveVolt,
+    approx_max_output_mv: 5_061,
+    approx_output_span_mv: 2_068,
+    startup_boost_mv: 5_000,
+    startup_boost_ms: 200,
+};
+
+pub const FAN_RAIL_PROFILE_12V: FanRailProfile = FanRailProfile {
+    variant: FanPcbVariant::TwelveVolt,
+    approx_max_output_mv: 12_043,
+    approx_output_span_mv: 5_456,
+    startup_boost_mv: 12_000,
+    startup_boost_ms: 200,
+};
+
+pub const FAN_DEFAULT_RAIL_PROFILE: FanRailProfile = FAN_RAIL_PROFILE_5V;
+pub const FAN_APPROX_MAX_OUTPUT_MV: u16 = FAN_DEFAULT_RAIL_PROFILE.approx_max_output_mv;
+pub const FAN_APPROX_OUTPUT_SPAN_MV: u16 = FAN_DEFAULT_RAIL_PROFILE.approx_output_span_mv;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -107,8 +146,12 @@ impl FanCommand {
     }
 
     pub const fn approx_output_mv(self) -> u16 {
+        self.approx_output_mv_for_profile(FAN_DEFAULT_RAIL_PROFILE)
+    }
+
+    pub const fn approx_output_mv_for_profile(self, profile: FanRailProfile) -> u16 {
         if self.enabled {
-            fan_output_voltage_mv_from_pwm_permille(self.pwm_permille)
+            fan_output_voltage_mv_from_pwm_permille_for_profile(profile, self.pwm_permille)
         } else {
             0
         }
@@ -151,14 +194,21 @@ impl FanCycleController {
     }
 }
 
-pub const fn fan_output_voltage_mv_from_pwm_permille(pwm_permille: u16) -> u16 {
+pub const fn fan_output_voltage_mv_from_pwm_permille_for_profile(
+    profile: FanRailProfile,
+    pwm_permille: u16,
+) -> u16 {
     let duty = if pwm_permille > 1_000 {
         1_000
     } else {
         pwm_permille as u32
     };
-    let drop_mv = ((FAN_APPROX_OUTPUT_SPAN_MV as u32 * duty) + 500) / 1_000;
-    (FAN_APPROX_MAX_OUTPUT_MV as u32 - drop_mv) as u16
+    let drop_mv = ((profile.approx_output_span_mv as u32 * duty) + 500) / 1_000;
+    (profile.approx_max_output_mv as u32 - drop_mv) as u16
+}
+
+pub const fn fan_output_voltage_mv_from_pwm_permille(pwm_permille: u16) -> u16 {
+    fan_output_voltage_mv_from_pwm_permille_for_profile(FAN_DEFAULT_RAIL_PROFILE, pwm_permille)
 }
 
 pub const fn pwm_percent_from_permille(pwm_permille: u16) -> u8 {
@@ -342,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn pwm_mapping_matches_bringup_points() {
+    fn pwm_mapping_matches_5v_bringup_points() {
         assert_within(
             fan_output_voltage_mv_from_pwm_permille(FAN_HIGH_PWM_PERMILLE),
             5_000,
@@ -358,6 +408,47 @@ mod tests {
             4_000,
             80,
         );
+        assert_eq!(fan_output_voltage_mv_from_pwm_permille(1_000), 2_993);
+    }
+
+    #[test]
+    fn pwm_mapping_matches_12v_variant_points() {
+        assert_eq!(
+            fan_output_voltage_mv_from_pwm_permille_for_profile(
+                FAN_RAIL_PROFILE_12V,
+                FAN_HIGH_PWM_PERMILLE,
+            ),
+            11_879,
+        );
+        assert_eq!(
+            fan_output_voltage_mv_from_pwm_permille_for_profile(
+                FAN_RAIL_PROFILE_12V,
+                FAN_MID_PWM_PERMILLE,
+            ),
+            10_406,
+        );
+        assert_eq!(
+            fan_output_voltage_mv_from_pwm_permille_for_profile(
+                FAN_RAIL_PROFILE_12V,
+                FAN_LOW_PWM_PERMILLE,
+            ),
+            9_315,
+        );
+        assert_eq!(
+            fan_output_voltage_mv_from_pwm_permille_for_profile(FAN_RAIL_PROFILE_12V, 1_000),
+            6_587,
+        );
+    }
+
+    #[test]
+    fn rail_profiles_freeze_variant_startup_requirements() {
+        assert_eq!(FAN_DEFAULT_RAIL_PROFILE, FAN_RAIL_PROFILE_5V);
+        assert_eq!(FAN_RAIL_PROFILE_5V.startup_boost_mv, 5_000);
+        assert_eq!(FAN_RAIL_PROFILE_5V.startup_boost_ms, 200);
+        assert_eq!(FAN_RAIL_PROFILE_5V.min_output_mv(), 2_993);
+        assert_eq!(FAN_RAIL_PROFILE_12V.startup_boost_mv, 12_000);
+        assert_eq!(FAN_RAIL_PROFILE_12V.startup_boost_ms, 200);
+        assert_eq!(FAN_RAIL_PROFILE_12V.min_output_mv(), 6_587);
     }
 
     #[test]
@@ -368,10 +459,20 @@ mod tests {
         assert!(!stop.enabled);
         assert_eq!(stop.phase, FanPhase::Stop);
         assert_eq!(stop.approx_output_mv(), 0);
+        assert_eq!(stop.approx_output_mv_for_profile(FAN_RAIL_PROFILE_12V), 0);
         assert!(low.enabled);
         assert_eq!(low.phase, FanPhase::Low);
         assert_eq!(stop.pwm_permille, FAN_STOP_SAFE_PWM_PERMILLE);
         assert_eq!(low.pwm_permille, FAN_LOW_PWM_PERMILLE);
+    }
+
+    #[test]
+    fn fan_command_reports_variant_specific_output_estimates() {
+        let high = FanCommand::from_phase(FanPhase::High);
+
+        assert_eq!(high.approx_output_mv(), 4_999);
+        assert_eq!(high.approx_output_mv_for_profile(FAN_RAIL_PROFILE_12V), 11_879);
+        assert!(high.approx_output_mv_for_profile(FAN_RAIL_PROFILE_12V) > high.approx_output_mv());
     }
 
     #[test]
