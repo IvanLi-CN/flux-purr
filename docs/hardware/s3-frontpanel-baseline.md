@@ -7,10 +7,13 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - MCU: `ESP32-S3FH4R2`
 - PD sink: `CH224Q` (I2C dynamic voltage request)
 - 3.3 V rail: `TPS62933DRLR` (fixed `3.3 V`)
-- Fan rail: `TPS62933DRLR` (adjustable `3.0 V ~ 5.0 V`)
+- Fan rail: `TPS62933DRLR` adjustable sibling variants
+  - `fan-5v`: `3.0 V ~ 5.0 V`
+  - `fan-12v`: `6.6 V ~ 12.0 V`
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
-- Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet`
+- Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet` (`fan-5v` baseline)
+- Variant overlay reference: `docs/hardware/fan-pcb-variants.md`
 
 ## 2) Direct MCU GPIO allocation (21 active)
 
@@ -108,14 +111,26 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - use `TPS62933DRLR`
   - `RT -> GND` (`1.2 MHz`)
   - `L = 3.3 uH`
-  - fan output range `3.0 V ~ 5.0 V`
-  - `RFBB = 10 kOhm`
-  - `RFBT = 47 kOhm`
-  - `RINJ = 75 kOhm`
-  - `RPWM = 10 kOhm`
-  - `CPWM = 1 uF`
-  - no `VCTRL` pulldown
-  - `EN` uses a weak pulldown such as `100 kOhm`
+  - shared contract remains `GPIO35/36/34` plus `fan_enabled` / `fan_pwm_permille`
+  - archived `fan-5v` baseline:
+    - output range `3.0 V ~ 5.0 V`
+    - `RFBB = 10 kOhm`
+    - `RFBT = 47 kOhm`
+    - `RINJ = 75 kOhm`
+    - `RPWM = 10 kOhm`
+    - `CPWM = 1 uF`
+    - no `VCTRL` pulldown
+    - `EN` uses a weak pulldown such as `100 kOhm`
+    - connector silkscreen must read `5V FAN ONLY`
+  - `fan-12v` overlay:
+    - output range `6.6 V ~ 12.0 V`
+    - keep the same network except `RFBT = 124 kOhm 1%`
+    - every capacitor directly on `FAN_VCC` must be `>=25 V`
+    - the two main output capacitors must use `1206` or larger footprints
+    - add local `100 nF` decoupling near the fan connector in live CAD
+    - startup rule: drive near `12 V` for `200 ms` before stepping down
+    - connector silkscreen must read `12V FAN ONLY`
+- See `docs/hardware/fan-pcb-variants.md` for the machine-readable variant manifests and fabrication-output naming freeze.
 
 ## 8) Power tree (frozen)
 
@@ -130,7 +145,7 @@ USB-C PD input
   -> PT1000 divider to GPIO2 RTD sense
   -> heater element switched by low-side NMOS from GPIO47 PWM
   -> TPS62933 buck to fixed 3V3
-  -> TPS62933 buck to adjustable fan rail (GPIO36 PWM -> RC -> FB, GPIO35 EN)
+  -> TPS62933 buck to adjustable fan rail (`fan-5v` archived base or `fan-12v` sibling variant)
 ```
 
 Power-stage details are frozen in:
@@ -157,4 +172,4 @@ Reference:
 - Front-panel keys are all direct GPIOs, so debounce and wake behavior are purely firmware responsibilities.
 - VIN sense and RTD sense accuracy both depend on ADC calibration, resistor tolerance, and board-level noise.
 - Heater-power control depends on direct `3.3 V` MCU gate drive, so MOSFET temperature and drain overshoot still require bench validation.
-- Fan-voltage control depends on a filtered PWM-to-FB injection path, so final startup behavior and low-speed acoustics still require bench validation.
+- Fan-voltage control depends on a filtered PWM-to-FB injection path, so final startup behavior, output-cap selection, and low-speed acoustics still require bench validation.
