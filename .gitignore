@@ -23,6 +23,7 @@ Cargo.lock
 .env
 .env.*
 !.env.example
+.mcu-agentd/
 
 # Python cache
 __pycache__/

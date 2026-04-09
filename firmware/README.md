@@ -49,7 +49,6 @@
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight PWM is directly driven by MCU `GPIO13`.
-
 ## MCU agentd flow
 
 - Repo-local config: `/Users/ivan/.codex/worktrees/80d2/flux-purr/mcu-agentd.toml`
