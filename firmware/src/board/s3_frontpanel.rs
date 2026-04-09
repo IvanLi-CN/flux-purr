@@ -23,6 +23,7 @@ pub const PIN_USB_D_MINUS: u8 = 19;
 pub const PIN_USB_D_PLUS: u8 = 20;
 pub const PIN_KEY_UP: u8 = 21;
 
+pub const PIN_FAN_TACH: u8 = 34;
 pub const PIN_FAN_EN: u8 = 35;
 pub const PIN_FAN_PWM: u8 = 36;
 pub const PIN_BUZZER_PWM: u8 = 48;
@@ -71,22 +72,25 @@ pub fn gpio_map_is_valid() -> bool {
         seen[idx] = true;
     }
 
-    true
+    PIN_FAN_TACH == 34 && PIN_FAN_EN == 35 && PIN_FAN_PWM == 36
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn gpio_map_accounts_for_s3_direct_frontpanel() {
-        assert!(super::gpio_map_is_valid());
-        assert_eq!(super::PIN_CENTER_KEY_BOOT, 0);
-        assert_eq!(super::PIN_RTD_ADC, 2);
-        assert_eq!(super::PIN_LCD_DC, 10);
-        assert_eq!(super::PIN_LCD_BLK, 13);
-        assert_eq!(super::PIN_FAN_EN, 35);
-        assert_eq!(super::PIN_FAN_PWM, 36);
-        assert_eq!(super::PIN_HEATER_PWM, 47);
-        assert_eq!(super::PIN_BUZZER_PWM, 48);
-        assert_eq!(super::VIN_DIVIDER_MAX_ADC_MV, 2_337);
+        assert!(gpio_map_is_valid());
+        assert_eq!(PIN_CENTER_KEY_BOOT, 0);
+        assert_eq!(PIN_RTD_ADC, 2);
+        assert_eq!(PIN_LCD_DC, 10);
+        assert_eq!(PIN_LCD_BLK, 13);
+        assert_eq!(PIN_FAN_TACH, 34);
+        assert_eq!(PIN_FAN_EN, 35);
+        assert_eq!(PIN_FAN_PWM, 36);
+        assert_eq!(PIN_HEATER_PWM, 47);
+        assert_eq!(PIN_BUZZER_PWM, 48);
+        assert_eq!(VIN_DIVIDER_MAX_ADC_MV, 2_337);
     }
 }

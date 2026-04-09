@@ -2,11 +2,15 @@
 name = "flux-purr-firmware"
 version = "0.1.0"
 edition = "2024"
-description = "Flux Purr firmware domain crate (no_std + async skeleton)"
+description = "Flux Purr firmware domain crate (no_std + fan bring-up skeleton)"
 license = "MIT OR Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
+
+[[bin]]
+name = "esp32s3-fan-cycle"
+path = "src/bin/esp32s3_fan_cycle.rs"
 
 [features]
 default = ["esp32s3"]
@@ -16,6 +20,9 @@ esp32c3 = []
 [dependencies]
 embassy-futures = "0.1.2"
 heapless = "0.8.0"
+
+[target.'cfg(target_arch = "xtensa")'.dependencies]
+esp-hal = { version = "1", default-features = false, features = ["esp32s3", "rt", "unstable"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

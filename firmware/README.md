@@ -3,14 +3,36 @@
 ## Target profile
 
 - Default architecture intent: `ESP32-S3FH4R2`
-- Runtime style: `no_std` + async polling primitives (`embassy-futures`)
+- Current bring-up board profile: `S3 frontpanel fan baseline`
+- Runtime style:
+  - host checks: `no_std` library + host stub binary
+  - device bring-up: `esp-hal` LEDC runtime for `xtensa-esp32s3-none-elf`
+
+## Fan bring-up baseline
+
+- `FAN_EN`: `GPIO35`
+- `FAN_PWM`: `GPIO36`
+- `FAN_TACH`: `GPIO34` (reserved only in this round)
+- PWM frequency target: `25 kHz`
+- Cycle order: `10s high -> 10s low -> 10s mid -> 10s stop -> repeat`
+- Frozen duty points:
+  - `high = 30‰` (about `5.0 V`)
+  - `mid = 300‰` (about `4.4 V`)
+  - `low = 500‰` (about `4.0 V`)
+  - `stop = EN low`
+- Control law note: fan control is **inverse PWM-to-voltage** through the `TPS62933` feedback path; higher duty means lower target fan voltage.
 
 ## Build commands
 
+- Before any Xtensa build in a fresh terminal:
+  - `source /Users/ivan/export-esp.sh`
+
 - Local host sanity build:
   - `cargo build --manifest-path firmware/Cargo.toml`
-- ESP32-S3 build:
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release`
+- Local host tests:
+  - `cargo test --manifest-path firmware/Cargo.toml`
+- ESP32-S3 fan bring-up build (with Xtensa toolchain installed):
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release`
 
 ## Hardware baseline notes
 
@@ -27,3 +49,25 @@
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight PWM is directly driven by MCU `GPIO13`.
+
+## MCU agentd flow
+
+- Repo-local config: `/Users/ivan/.codex/worktrees/80d2/flux-purr/mcu-agentd.toml`
+- MCU id: `esp32s3_frontpanel`
+- The configured ELF artifact is:
+  - `firmware/target/xtensa-esp32s3-none-elf/release/esp32s3-fan-cycle`
+- Typical first-use sequence:
+  - `source /Users/ivan/export-esp.sh`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release`
+  - `mcu-agentd config check`
+  - `mcu-agentd selector list esp32s3_frontpanel`
+  - `mcu-agentd selector set esp32s3_frontpanel <serial-port>`
+  - `mcu-agentd flash esp32s3_frontpanel`
+  - `mcu-agentd monitor esp32s3_frontpanel --reset`
+
+## Notes
+
+- The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
+- The `firmware/build.rs` linker hook adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` is pinned to `espflash` + `defmt` decoding.
+- Host `clippy/build` keeps using the stub binary path so repository checks can run without Xtensa-specific dependencies.
+- The current round does not implement tach feedback, stall recovery, heater power, RTD sensing, or LCD/output drivers.
