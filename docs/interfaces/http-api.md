@@ -45,7 +45,7 @@ Field notes:
 - `voltageMv`: reconstructed input voltage from the `GPIO1` divider (`56 kOhm / 5.1 kOhm` nominal)
 - `pdState`: `negotiating | ready | fallback_5v | fault`
 - `frontpanelKey`: `center | right | down | left | up | null`
-- `fanPwmPermille`: normalized fan setpoint owned by firmware; the actual `FAN_VCC` curve remains PCB-variant specific (`fan-5v` vs `fan-12v`) and must not be interpreted as one globally fixed millivolt value without the board-variant context
+- `fanPwmPermille`: normalized fan actuator setpoint owned by firmware; firmware intentionally does not expose or infer the real `FAN_VCC`, so clients must not convert this field into millivolts or infer the PCB voltage variant from it
 
 ## `PUT /api/v1/config/wifi`
 

@@ -12,6 +12,10 @@ Both variants keep the same firmware-facing contract:
 - status fields stay unchanged:
   - `fan_enabled`
   - `fan_pwm_permille`
+- the shared firmware / API contract is intentionally voltage-agnostic:
+  - `fan_pwm_permille` is only a normalized actuator request
+  - firmware must not infer `fan-5v` vs `fan-12v`
+  - firmware must not promise a `permille -> mV` conversion
 
 The control topology also remains shared:
 
@@ -47,7 +51,7 @@ This repository does not currently carry the live PCB CAD source. Therefore, the
   - `CPWM = 1 uF`
   - `REN_PD = 100 kΩ`
   - `RSER_EN = 2.2 kΩ`
-- Approximate control law:
+- Approximate hardware control law:
   - `VOUT ~= 5.06 - 2.07 * Duty`
 - Variant manifest: `docs/hardware/variants/fan-5v/variant-manifest.json`
 - Fan-rail BOM overlay: `docs/hardware/variants/fan-5v/fan-rail-bom.csv`
@@ -63,10 +67,8 @@ This repository does not currently carry the live PCB CAD source. Therefore, the
   - each cap must be `>=25 V`
   - footprint must be `1206` or larger
   - add `100 nF` local decoupling close to the fan connector in the live CAD source
-- Approximate control law:
+- Approximate hardware control law:
   - `VOUT ~= 12.04 - 5.46 * Duty`
-- Startup requirement:
-  - drive near `12 V` for `200 ms` before stepping down to the requested steady-state target
 - Variant manifest: `docs/hardware/variants/fan-12v/variant-manifest.json`
 - Fan-rail BOM overlay: `docs/hardware/variants/fan-12v/fan-rail-bom.csv`
 
@@ -92,6 +94,7 @@ Recommended names:
 
 ## 6) Implementation notes
 
-- `fan_pwm_permille` is normalized across both variants; it is not a promise that both boards produce the same output voltage.
-- `fan-12v` intentionally does not chase reliable startup below about `6.6 V`; startup reliability is delegated to the `200 ms` high-voltage pulse.
+- `fan_pwm_permille` is normalized across both variants; firmware and HTTP payloads must not infer or expose actual fan voltage from it.
+- Future closed-loop fan control is expected to operate on temperature error and normalized actuator commands, not on a fixed fan-voltage target.
+- `fan-12v` intentionally does not chase reliable startup below about `6.6 V` in the open-loop rail design; if a specific board later needs startup tuning, keep that tuning outside the shared firmware contract.
 - Because the live CAD source is not checked into this repository, the `100 nF` local decoupling requirement for `fan-12v` is frozen as a manifest / layout action rather than a checked-in designator.

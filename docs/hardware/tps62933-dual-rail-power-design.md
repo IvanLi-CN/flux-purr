@@ -172,20 +172,17 @@ This is intentionally a single, slow RC stage. The design goal is to make `FB` s
 - the two main output capacitors must each be `22 uF` and use `1206` or larger footprints
 - add `100 nF` local decoupling close to the fan connector in the live CAD source
 - silkscreen requirement: `12V FAN ONLY`
-- startup rule: assert `EN`, hold the rail near `12 V` for `200 ms`, then step down to the requested steady-state target
 
-The `fan-12v` minimum steady-state point is intentionally about `6.6 V`. Reliable startup below that point is out of scope for this rail profile.
+The `fan-12v` minimum steady-state point is intentionally about `6.6 V`. Reliable startup below that point is out of scope for this rail profile. This voltage curve remains a hardware characterization only; shared firmware and API stay voltage-agnostic.
 
 ### 7.5 PWM guidance
 
 - Recommended PWM frequency from `ESP32-S3`: `20 kHz ~ 40 kHz`
 - Do not inject raw PWM directly into `FB`
 - Configure the PWM pin first, then assert `EN`
-- For startup reliability:
-  - `fan-5v`: drive the fan near `5 V` for `100 ms ~ 300 ms` before stepping down to the requested steady-state voltage
-  - `fan-12v`: drive the fan near `12 V` for `200 ms` before stepping down to the requested steady-state voltage
-
-Firmware should treat both variants as inverse mappings: higher PWM duty means lower fan voltage.
+- At the hardware level, higher duty still drives the analog FB injection path toward a lower rail voltage on both variants
+- Shared firmware / API contract should only carry `fan_enabled` and `fan_pwm_permille`; it must not estimate millivolts or distinguish `fan-5v` vs `fan-12v`
+- If a specific board later needs startup boost or low-speed tuning, keep that tuning in board-specific bring-up / thermal-control policy rather than the shared firmware contract
 
 ## 8) Fan connector protection
 

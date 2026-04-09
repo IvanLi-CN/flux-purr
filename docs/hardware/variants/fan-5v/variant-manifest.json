@@ -12,7 +12,9 @@
     "status_fields": [
       "fan_enabled",
       "fan_pwm_permille"
-    ]
+    ],
+    "firmware_voltage_awareness": false,
+    "fan_pwm_permille_semantics": "normalized actuator command"
   },
   "fan_rail": {
     "controller": "TPS62933DRLR",
@@ -54,10 +56,6 @@
           "archived_footprint": "0603"
         }
       ]
-    },
-    "startup_boost": {
-      "target_mv": 5000,
-      "duration_ms": 200
     }
   },
   "fabrication_outputs": {

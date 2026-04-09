@@ -128,8 +128,8 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
     - every capacitor directly on `FAN_VCC` must be `>=25 V`
     - the two main output capacitors must use `1206` or larger footprints
     - add local `100 nF` decoupling near the fan connector in live CAD
-    - startup rule: drive near `12 V` for `200 ms` before stepping down
     - connector silkscreen must read `12V FAN ONLY`
+  - shared firmware contract remains voltage-agnostic; any board-specific startup tuning stays outside `fan_enabled` / `fan_pwm_permille` semantics
 - See `docs/hardware/fan-pcb-variants.md` for the machine-readable variant manifests and fabrication-output naming freeze.
 
 ## 8) Power tree (frozen)
