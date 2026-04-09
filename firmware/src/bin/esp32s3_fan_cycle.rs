@@ -1,9 +1,9 @@
-#![cfg_attr(all(feature = "esp32s3", target_arch = "xtensa"), no_std)]
-#![cfg_attr(all(feature = "esp32s3", target_arch = "xtensa"), no_main)]
+#![cfg_attr(target_arch = "xtensa", no_std)]
+#![cfg_attr(target_arch = "xtensa", no_main)]
 
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 use core::panic::PanicInfo;
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 use esp_hal::{
     clock::CpuClock,
     gpio::{DriveMode, Level, Output, OutputConfig},
@@ -16,25 +16,25 @@ use esp_hal::{
     main,
     time::{Duration, Instant, Rate},
 };
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     FAN_PHASE_DURATION_SECS, FAN_PWM_FREQUENCY_HZ, FAN_STOP_SAFE_PWM_PERMILLE, FanCommand,
     FanCycleController, board::s3_frontpanel, pwm_percent_from_permille,
 };
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_FAN_EN as usize] = [(); 35];
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_FAN_PWM as usize] = [(); 36];
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_FAN_TACH as usize] = [(); 34];
 
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 #[panic_handler]
 fn panic(_: &PanicInfo<'_>) -> ! {
     esp_hal::system::software_reset()
 }
 
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 fn configure_timer_with_fallback<T>(timer: &mut T) -> Result<(), timer::Error>
 where
     T: TimerIFace<LowSpeed>,
@@ -56,7 +56,7 @@ where
         })
 }
 
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 fn apply_command<'a, C>(fan_enable: &mut Output<'_>, channel: &C, command: FanCommand)
 where
     C: ChannelIFace<'a, LowSpeed>,
@@ -78,7 +78,7 @@ where
     }
 }
 
-#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+#[cfg(target_arch = "xtensa")]
 #[main]
 fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -121,7 +121,7 @@ fn main() -> ! {
     }
 }
 
-#[cfg(not(all(feature = "esp32s3", target_arch = "xtensa")))]
+#[cfg(not(target_arch = "xtensa"))]
 fn main() {
     println!(
         "esp32s3-fan-cycle is a host stub; build with --target xtensa-esp32s3-none-elf --features esp32s3"

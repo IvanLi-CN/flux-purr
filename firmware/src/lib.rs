@@ -382,15 +382,27 @@ mod tests {
         assert_eq!(pwm_percent_from_permille(1_500), 100);
     }
 
+    #[cfg(not(target_os = "none"))]
     #[test]
     fn host_mock_elapsed_accumulates_fractional_seconds_between_polls() {
-        let (uptime_secs, remainder) = accumulate_host_elapsed(
-            core::time::Duration::from_millis(400),
-            core::time::Duration::from_millis(700),
-            9,
-        );
+        use core::time::Duration;
 
+        let (uptime_secs, fractional_elapsed) =
+            accumulate_host_elapsed(Duration::ZERO, Duration::from_millis(1_500), 0);
+        assert_eq!(uptime_secs, 1);
+        assert_eq!(fractional_elapsed, Duration::from_millis(500));
+
+        let (uptime_secs, fractional_elapsed) = accumulate_host_elapsed(
+            fractional_elapsed,
+            Duration::from_millis(1_500),
+            uptime_secs,
+        );
+        assert_eq!(uptime_secs, 3);
+        assert_eq!(fractional_elapsed, Duration::ZERO);
+
+        let (uptime_secs, remainder) =
+            accumulate_host_elapsed(Duration::from_millis(400), Duration::from_millis(700), 9);
         assert_eq!(uptime_secs, 10);
-        assert_eq!(remainder, core::time::Duration::from_millis(100));
+        assert_eq!(remainder, Duration::from_millis(100));
     }
 }
