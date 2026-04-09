@@ -67,4 +67,4 @@
 | n6csh | Flux Purr 初始化（Hooks + Storybook + shadcn + UI UX Pro Max） | 已完成 | `n6csh-flux-purr-init/SPEC.md` | 2026-03-02 | Local PR-ready（未 push / 未建 PR） |
 | 744yg | PD Mini加热台二开资料采集与基础文档 | 已完成 | `744yg-mini-hotplate-doc-baseline/SPEC.md` | 2026-03-03 | Research: [mini-hotplate](../research/mini-hotplate/README.md) |
 | 8tesd | Flux Purr S3 风扇循环调速 bring-up | 已完成 | `8tesd-s3-fan-cycle-bringup/SPEC.md` | 2026-04-09 | PR #4 |
-| v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #5 |
+| v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
