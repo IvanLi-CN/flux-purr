@@ -23,6 +23,7 @@ heapless = "0.8.0"
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 esp-hal = { version = "1", default-features = false, features = ["esp32s3", "rt", "unstable"] }
+esp-bootloader-esp-idf = { version = "0.4.0", default-features = false, features = ["esp32s3"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

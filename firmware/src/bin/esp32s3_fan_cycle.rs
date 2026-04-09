@@ -22,6 +22,8 @@ use flux_purr_firmware::{
     FanCycleController, board::s3_frontpanel, pwm_percent_from_permille,
 };
 #[cfg(target_arch = "xtensa")]
+esp_bootloader_esp_idf::esp_app_desc!();
+#[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_FAN_EN as usize] = [(); 35];
 #[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_FAN_PWM as usize] = [(); 36];
