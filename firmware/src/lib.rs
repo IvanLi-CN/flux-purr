@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn snapshot_starts_in_sampling_mode() {
-        let value = snapshot_at(0, 0);
+        let value = snapshot_at(10, 0);
         assert_eq!(value.mode, DeviceMode::Sampling);
         assert!(value.voltage_mv >= 12_000);
         assert!(value.current_ma >= 800);
