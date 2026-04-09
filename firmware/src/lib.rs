@@ -471,7 +471,10 @@ mod tests {
         let high = FanCommand::from_phase(FanPhase::High);
 
         assert_eq!(high.approx_output_mv(), 4_999);
-        assert_eq!(high.approx_output_mv_for_profile(FAN_RAIL_PROFILE_12V), 11_879);
+        assert_eq!(
+            high.approx_output_mv_for_profile(FAN_RAIL_PROFILE_12V),
+            11_879,
+        );
         assert!(high.approx_output_mv_for_profile(FAN_RAIL_PROFILE_12V) > high.approx_output_mv());
     }
 
