@@ -1,0 +1,12 @@
+designator,function,variant_value,footprint_requirement,voltage_rating_requirement,notes
+R91,RFBB,10kOhm 1%,shared with archived base,not applicable,Shared lower feedback resistor
+R10,RFBT,124kOhm 1%,shared resistor footprint,not applicable,Only resistor value change relative to archived fan-5v
+R11,RINJ,75kOhm 1%,shared with archived base,not applicable,FB injection resistor stays unchanged
+R12,RPWM,10kOhm 1%,shared with archived base,not applicable,PWM to VCTRL resistor stays unchanged
+logical:REN_PD,FAN EN pulldown,100kOhm 1%,shared with archived base,not applicable,Weak pulldown on the real FAN_EN node
+logical:RSER_EN,FAN EN series resistor,2.2kOhm 1%,shared with archived base,not applicable,Series resistor between FAN_EN_RAW and FAN_EN
+C2,CPWM,1uF X7R,shared with archived base,>=10V,VCTRL filter capacitor stays unchanged
+C19,CFF,12pF C0G,shared with archived base,not applicable,Optional feed-forward capacitor stays unchanged
+C138,FAN_VCC output cap,22uF X7R,1206 or larger,>=25V,Replace archived 6.3V output capacitor
+C139,FAN_VCC output cap,22uF X7R,1206 or larger,>=25V,Replace archived 10V output capacitor
+TBD_FAN_LOCAL,FAN_VCC local decoupling,100nF X7R,place near fan connector,>=25V,Assign a real designator in live CAD and keep it local to the connector
