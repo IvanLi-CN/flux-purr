@@ -21,6 +21,12 @@ use flux_purr_firmware::{
     FAN_PHASE_DURATION_SECS, FAN_PWM_FREQUENCY_HZ, FAN_STOP_SAFE_PWM_PERMILLE, FanCommand,
     FanCycleController, board::s3_frontpanel, pwm_percent_from_permille,
 };
+#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+const _: [(); s3_frontpanel::PIN_FAN_EN as usize] = [(); 35];
+#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+const _: [(); s3_frontpanel::PIN_FAN_PWM as usize] = [(); 36];
+#[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
+const _: [(); s3_frontpanel::PIN_FAN_TACH as usize] = [(); 34];
 
 #[cfg(all(feature = "esp32s3", target_arch = "xtensa"))]
 #[panic_handler]
@@ -79,10 +85,6 @@ fn main() -> ! {
     let peripherals = esp_hal::init(config);
 
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
-
-    debug_assert_eq!(s3_frontpanel::PIN_FAN_EN, 35);
-    debug_assert_eq!(s3_frontpanel::PIN_FAN_PWM, 36);
-    debug_assert_eq!(s3_frontpanel::PIN_FAN_TACH, 34);
 
     let mut ledc = Ledc::new(peripherals.LEDC);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
