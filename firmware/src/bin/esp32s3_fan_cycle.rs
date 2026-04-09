@@ -58,11 +58,17 @@ where
     let safe_percent = pwm_percent_from_permille(FAN_STOP_SAFE_PWM_PERMILLE);
     if command.enabled {
         let duty_percent = pwm_percent_from_permille(command.pwm_permille);
-        let _ = channel.set_duty(duty_percent);
+        assert!(
+            channel.set_duty(duty_percent).is_ok(),
+            "failed to update LEDC duty while enabling fan"
+        );
         fan_enable.set_high();
     } else {
         fan_enable.set_low();
-        let _ = channel.set_duty(safe_percent);
+        assert!(
+            channel.set_duty(safe_percent).is_ok(),
+            "failed to update LEDC duty while stopping fan"
+        );
     }
 }
 
@@ -82,15 +88,23 @@ fn main() -> ! {
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
     let mut timer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    let _ = configure_timer_with_fallback(&mut timer0);
+    assert!(
+        configure_timer_with_fallback(&mut timer0).is_ok(),
+        "failed to configure LEDC timer for fan PWM"
+    );
 
     let mut fan_pwm = ledc.channel(channel::Number::Channel0, peripherals.GPIO36);
     let initial = FanCycleController::new().command_at(0);
-    let _ = fan_pwm.configure(ChannelConfig {
-        timer: &timer0,
-        duty_pct: pwm_percent_from_permille(initial.pwm_permille),
-        drive_mode: DriveMode::PushPull,
-    });
+    assert!(
+        fan_pwm
+            .configure(ChannelConfig {
+                timer: &timer0,
+                duty_pct: pwm_percent_from_permille(initial.pwm_permille),
+                drive_mode: DriveMode::PushPull,
+            })
+            .is_ok(),
+        "failed to configure LEDC fan PWM channel"
+    );
 
     let mut controller = FanCycleController::new();
     let mut uptime_secs = 0_u32;

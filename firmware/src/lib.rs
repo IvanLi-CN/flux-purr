@@ -180,7 +180,6 @@ fn snapshot_at(tick: u32, uptime_secs: u32) -> DeviceStatus {
     } else {
         request.millivolts()
     };
-
     let mut fan = FanCycleController::new();
     let fan_command = fan.command_at(uptime_secs);
 
