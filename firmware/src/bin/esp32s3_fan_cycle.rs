@@ -93,11 +93,10 @@ where
 #[cfg(target_arch = "xtensa")]
 fn log_command(command: FanCommand, uptime_secs: u32) {
     info!(
-        "fan phase={=str} enabled={=bool} pwm_permille={=u16} output_mv={=u16} uptime_s={=u32}",
+        "fan phase={=str} enabled={=bool} pwm_permille={=u16} uptime_s={=u32}",
         phase_label(command.phase),
         command.enabled,
         command.pwm_permille,
-        command.approx_output_mv(),
         uptime_secs,
     );
 }
