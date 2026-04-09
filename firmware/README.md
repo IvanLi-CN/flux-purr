@@ -8,19 +8,43 @@
   - host checks: `no_std` library + host stub binary
   - device bring-up: `esp-hal` LEDC runtime for `xtensa-esp32s3-none-elf`
 
+## Fan PCB variants
+
+- Shared GPIO contract:
+  - `FAN_EN = GPIO35`
+  - `FAN_PWM = GPIO36`
+  - `FAN_TACH = GPIO34` (reserved only in this round)
+- Shared PWM frequency target: `25 kHz`
+- Shared control-law direction: the fan rail is **inverse PWM-to-voltage** through the `TPS62933` feedback path, so higher duty means lower target fan voltage.
+- Current frozen PCB variants:
+
+| Variant | Rail range | Approximate control law | Startup boost | Silkscreen |
+| --- | --- | --- | --- | --- |
+| `fan-5v` | `3.0 V ~ 5.06 V` | `VOUT ~= 5.06 - 2.07 * Duty` | `5.0 V` for `200 ms` | `5V FAN ONLY` |
+| `fan-12v` | `6.6 V ~ 12.0 V` | `VOUT ~= 12.04 - 5.46 * Duty` | near `12 V` for `200 ms` | `12V FAN ONLY` |
+
+- The repository default board profile remains `fan-5v` unless a future board selector overrides it.
+- `fan_pwm_permille` remains a normalized setpoint. It does **not** mean the same millivolt target across all board variants.
+
 ## Fan bring-up baseline
 
-- `FAN_EN`: `GPIO35`
-- `FAN_PWM`: `GPIO36`
-- `FAN_TACH`: `GPIO34` (reserved only in this round)
-- PWM frequency target: `25 kHz`
 - Cycle order: `10s high -> 10s low -> 10s mid -> 10s stop -> repeat`
 - Frozen duty points:
-  - `high = 30‰` (about `5.0 V`)
-  - `mid = 300‰` (about `4.4 V`)
-  - `low = 500‰` (about `4.0 V`)
+  - `high = 30‰`
+  - `mid = 300‰`
+  - `low = 500‰`
   - `stop = EN low`
-- Control law note: fan control is **inverse PWM-to-voltage** through the `TPS62933` feedback path; higher duty means lower target fan voltage.
+- Approximate output points with the default `fan-5v` profile:
+  - `high = 30‰` -> about `5.0 V`
+  - `mid = 300‰` -> about `4.4 V`
+  - `low = 500‰` -> about `4.0 V`
+  - `stop = EN low`
+- Approximate output points with the `fan-12v` profile:
+  - `high = 30‰` -> about `11.9 V`
+  - `mid = 300‰` -> about `10.4 V`
+  - `low = 500‰` -> about `9.3 V`
+  - `1000‰` -> about `6.6 V`
+- `fan-12v` does not promise reliable startup below the `~6.6 V` steady-state floor; startup reliability depends on the `200 ms` high-voltage pulse before stepping down.
 
 ## Build commands
 
@@ -43,12 +67,13 @@
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - `GPIO47` (chip pin `37`) is the heater-control PWM output for a low-side `BUK9Y14-40B,115` MOSFET stage.
 - `GPIO48` (chip pin `36`) is reserved as the buzzer PWM / tone output.
-- The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail.
+- The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one variant-specific adjustable fan rail.
 - The fixed `3.3 V` rail uses an external UVLO divider on `VSYS_OK` (`220 kOhm` to `VBUS`, `68 kOhm` to `GND`) and enables at about `4.97 V` rising / `4.49 V` falling.
 - FAN enable is owned by MCU `GPIO35`, but the implemented board routes it as `FAN_EN_RAW -> 2.2 kOhm -> FAN_EN` with the weak pulldown on the actual `EN` node; `GPIO36` provides the fan-voltage setpoint PWM that is filtered and injected into the fan rail `FB` node.
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight PWM is directly driven by MCU `GPIO13`.
+
 ## MCU agentd flow
 
 - Repo-local config: `/Users/ivan/.codex/worktrees/80d2/flux-purr/mcu-agentd.toml`
