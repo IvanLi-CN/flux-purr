@@ -1,0 +1,95 @@
+{
+  "variant": "fan-12v",
+  "status": "frozen",
+  "base_archived_netlist": "docs/hardware/netlists/main-controller-board.enet",
+  "silkscreen_required_text": "12V FAN ONLY",
+  "shared_contract": {
+    "gpio": {
+      "fan_enable": "GPIO35",
+      "fan_vset_pwm": "GPIO36",
+      "fan_tach": "GPIO34"
+    },
+    "status_fields": [
+      "fan_enabled",
+      "fan_pwm_permille"
+    ],
+    "firmware_voltage_awareness": false,
+    "fan_pwm_permille_semantics": "normalized actuator command"
+  },
+  "fan_rail": {
+    "controller": "TPS62933DRLR",
+    "archived_netlist_role": "overlay-on-fan-5v-base",
+    "topology": {
+      "fan_enable_path": "GPIO35 -> FAN_EN_RAW -> 2.2k -> FAN_EN",
+      "fan_control_path": "GPIO36 -> RPWM -> VCTRL -> RINJ -> FB"
+    },
+    "output_range_mv": {
+      "min": 6587,
+      "max": 12043
+    },
+    "control_law": {
+      "approximation": "VOUT ~= 12.04 - 5.46 * Duty",
+      "duty_domain": "0.0..1.0"
+    },
+    "resistors_ohms": {
+      "rfbb": 10000,
+      "rfbt": 124000,
+      "rinj": 75000,
+      "rpwm": 10000,
+      "ren_pd": 100000,
+      "rser_en": 2200
+    },
+    "capacitors": {
+      "cpwm_uf": 1.0,
+      "cff_pf": 12,
+      "fan_vcc_output_caps": [
+        {
+          "designator": "C138",
+          "minimum_capacitance": "22uF",
+          "minimum_voltage_v": 25,
+          "footprint_min": "1206"
+        },
+        {
+          "designator": "C139",
+          "minimum_capacitance": "22uF",
+          "minimum_voltage_v": 25,
+          "footprint_min": "1206"
+        }
+      ],
+      "local_decoupling": {
+        "designator": "TBD_FAN_LOCAL",
+        "minimum_capacitance": "100nF",
+        "minimum_voltage_v": 25,
+        "placement": "close to the fan connector"
+      }
+    },
+    "designator_overrides": [
+      {
+        "designator": "R10",
+        "from": "47kOhm",
+        "to": "124kOhm 1%"
+      },
+      {
+        "designator": "C138",
+        "from": "22uF 6.3V 0603",
+        "to": "22uF >=25V 1206+"
+      },
+      {
+        "designator": "C139",
+        "from": "22uF 10V 0603",
+        "to": "22uF >=25V 1206+"
+      }
+    ],
+    "layout_actions": [
+      "Add and place a 100nF local FAN_VCC decoupling capacitor close to the fan connector in the live CAD source.",
+      "Apply the 12V silkscreen warning text at the fan connector and on the board body."
+    ]
+  },
+  "fabrication_outputs": {
+    "bom_csv": "flux-purr-main-controller-fan-12v.bom.csv",
+    "pos_csv": "flux-purr-main-controller-fan-12v.pos.csv",
+    "pnp_csv": "flux-purr-main-controller-fan-12v.pnp.csv",
+    "gerbers_zip": "flux-purr-main-controller-fan-12v.gerbers.zip"
+  },
+  "generated_outputs_checked_in": false
+}

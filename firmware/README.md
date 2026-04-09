@@ -8,19 +8,30 @@
   - host checks: `no_std` library + host stub binary
   - device bring-up: `esp-hal` LEDC runtime for `xtensa-esp32s3-none-elf`
 
+## Fan control contract
+
+- Shared GPIO contract:
+  - `FAN_EN = GPIO35`
+  - `FAN_PWM = GPIO36`
+  - `FAN_TACH = GPIO34` (reserved only in this round)
+- Shared PWM frequency target: `25 kHz`
+- `fan_pwm_permille` is a normalized actuator command owned by firmware.
+- The shared firmware contract is intentionally voltage-agnostic:
+  - firmware does not model the real `FAN_VCC`
+  - firmware does not distinguish `fan-5v` vs `fan-12v`
+  - firmware does not infer millivolts from `fan_pwm_permille`
+- Actual rail range, silkscreen limits, capacitor rules, and board-specific tuning remain in hardware docs.
+- Future fan control is expected to close the loop on temperature / thermal error, not on inferred fan voltage.
+
 ## Fan bring-up baseline
 
-- `FAN_EN`: `GPIO35`
-- `FAN_PWM`: `GPIO36`
-- `FAN_TACH`: `GPIO34` (reserved only in this round)
-- PWM frequency target: `25 kHz`
 - Cycle order: `10s high -> 10s low -> 10s mid -> 10s stop -> repeat`
-- Frozen duty points:
-  - `high = 30‰` (about `5.0 V`)
-  - `mid = 300‰` (about `4.4 V`)
-  - `low = 500‰` (about `4.0 V`)
+- Frozen duty points for smoke tests and bench bring-up:
+  - `high = 30‰`
+  - `mid = 300‰`
+  - `low = 500‰`
   - `stop = EN low`
-- Control law note: fan control is **inverse PWM-to-voltage** through the `TPS62933` feedback path; higher duty means lower target fan voltage.
+- These points are normalized actuator setpoints only. They are not promises about the actual fan voltage on any PCB variant.
 
 ## Build commands
 
@@ -43,12 +54,13 @@
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - `GPIO47` (chip pin `37`) is the heater-control PWM output for a low-side `BUK9Y14-40B,115` MOSFET stage.
 - `GPIO48` (chip pin `36`) is reserved as the buzzer PWM / tone output.
-- The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail.
+- The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - The fixed `3.3 V` rail uses an external UVLO divider on `VSYS_OK` (`220 kOhm` to `VBUS`, `68 kOhm` to `GND`) and enables at about `4.97 V` rising / `4.49 V` falling.
-- FAN enable is owned by MCU `GPIO35`, but the implemented board routes it as `FAN_EN_RAW -> 2.2 kOhm -> FAN_EN` with the weak pulldown on the actual `EN` node; `GPIO36` provides the fan-voltage setpoint PWM that is filtered and injected into the fan rail `FB` node.
+- FAN enable is owned by MCU `GPIO35`, but the implemented board routes it as `FAN_EN_RAW -> 2.2 kOhm -> FAN_EN` with the weak pulldown on the actual `EN` node; `GPIO36` provides the normalized fan-actuator PWM that is filtered and injected into the fan rail `FB` node.
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight PWM is directly driven by MCU `GPIO13`.
+
 ## MCU agentd flow
 
 - Repo-local config: `/Users/ivan/.codex/worktrees/80d2/flux-purr/mcu-agentd.toml`

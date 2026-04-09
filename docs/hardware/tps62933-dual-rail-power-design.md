@@ -2,11 +2,15 @@
 
 This document freezes the current power-tree baseline for the `ESP32-S3FH4R2` revision.
 
+The archived controller-board netlist in this repository remains the `fan-5v` reference implementation. The sibling `fan-12v` PCB is frozen through `docs/hardware/fan-pcb-variants.md` and its variant manifests.
+
 ## 1) Scope
 
 - Board input bus: `VBUS`, expected operating range `5 V ~ 28 V`
 - MCU rail: fixed `3.3 V`, nominal load up to `1 A`
-- Fan rail: adjustable `3.0 V ~ 5.0 V`, nominal fan load up to `0.5 A`
+- Fan rail: adjustable sibling PCB variants built on the same `TPS62933DRLR` topology
+  - `fan-5v`: `3.0 V ~ 5.0 V`
+  - `fan-12v`: `6.6 V ~ 12.0 V`
 - Both rails use `TPS62933DRLR`
 
 ## 2) Frozen architecture
@@ -45,9 +49,10 @@ Using `fSW = 1.2 MHz`:
 
 - `3.0 V` fan-min output gives `VIN_MAX ~= 35.7 V`
 - `3.3 V` MCU output gives `VIN_MAX ~= 39.3 V`
-- `5.0 V` fan-max output gives `VIN_MAX ~= 59.5 V`
+- `5.0 V` fan-5v max output gives `VIN_MAX ~= 59.5 V`
+- `12.0 V` fan-12v max output gives `VIN_MAX ~= 142.9 V`
 
-With a real input ceiling of `28 V`, both rails stay clear of the minimum-on-time foldback boundary while still using a smaller inductor than the `500 kHz` option.
+With a real input ceiling of `28 V`, both fan variants and the fixed MCU rail stay clear of the minimum-on-time foldback boundary while still using a smaller inductor than the `500 kHz` option.
 
 ## 4) Shared passive baseline
 
@@ -62,6 +67,13 @@ Unless bench validation proves otherwise, both rails should start from the same 
   - start with `10 pF ~ 12 pF`
   - keep it close to the FB divider
   - final value is bench-tuning territory, not a paper-only guarantee
+
+Variant-specific capacitor rules:
+
+- archived `fan-5v` base netlist keeps its current lower-voltage output-cap footprint set
+- `fan-12v` must upgrade every capacitor directly tied to `FAN_VCC` to `>=25 V`
+- the two main `fan-12v` output caps must use `1206` or larger footprints
+- `fan-12v` must add a local `100 nF` decoupling capacitor close to the fan connector in the live CAD source
 
 ## 5) Common inductor selection
 
@@ -79,7 +91,8 @@ The currently approved compact part is:
 
 This part fits the current design assumptions for:
 
-- fan rail: up to `5 V / 0.5 A`
+- fan rail: up to `5 V / 0.5 A` on `fan-5v`
+- fan rail: planned `12 V` class operation on `fan-12v`, still pending bench confirmation for thermal and startup margin
 - MCU rail: up to `3.3 V / 1 A`
 
 If the real fan startup current or the 3.3 V load budget grows materially, re-check the inductor margin before layout freeze.
@@ -111,49 +124,65 @@ Using the `TPS62933` `EN` thresholds and bias currents, this implemented network
 
 This matches the board intent of treating anything below about `4.5 V` as undervoltage while only re-enabling once the source is back near `5 V`.
 
-## 7) Adjustable fan rail
+## 7) Adjustable fan rail variants
 
-### 7.1 Target behavior
+### 7.1 Shared behavior
 
-- Fan supply range: `3.0 V ~ 5.0 V`
 - `GPIO35` hard-enables or disables the fan rail through the `TPS62933DRLR EN` path
 - `GPIO36` supplies PWM that is converted into a DC control voltage and injected into `FB`
 - `EN` must have its own weak pulldown so the fan rail stays off during reset and while the MCU pin is high-impedance
 - the implemented board inserts a `2.2 kOhm` series resistor between the MCU-side `FAN_EN_RAW` net and the actual `FAN_EN` node at the TPS pin
 - one channel of the shared `PESD3V3S2UT` is placed on `FAN_EN_RAW`; the second channel is used by `RTD_ADC`
+- the archived base netlist at `docs/hardware/netlists/main-controller-board.enet` is the `fan-5v` baseline
+- all PCB-variant overlays are frozen under `docs/hardware/variants/`
 
-### 7.2 Frozen control network
+### 7.2 Shared control network
+
+Both PCB variants keep the same control topology:
 
 - `RFBB = 10 kOhm` from `FB` to `GND`
-- `RFBT = 47 kOhm` from `FAN_VCC` to `FB`
 - `RINJ = 75 kOhm` from `VCTRL` to `FB`
 - `RPWM = 10 kOhm` from MCU PWM to `VCTRL`
 - `CPWM = 1 uF` from `VCTRL` to `GND`
 - `REN_PD = 100 kOhm` from `EN` to `GND`
 - `RSER_EN = 2.2 kOhm` from `FAN_EN_RAW` to `FAN_EN`
+- optional `CFF = 12 pF` across the upper FB resistor
 
 This is intentionally a single, slow RC stage. The design goal is to make `FB` see a near-DC control value instead of a lightly filtered square wave.
 
-### 7.3 Control law
+### 7.3 `fan-5v` frozen variant
 
-With the network above:
-
+- `RFBT = 47 kOhm`
 - `Duty = 0%` gives approximately `5.06 V`
 - `Duty = 100%` gives approximately `2.99 V`
 - practical approximation:
   - `VOUT ~= 5.06 - 2.07 * Duty`
   - where `Duty` is `0.0 ~ 1.0`
+- silkscreen requirement: `5V FAN ONLY`
 
-Firmware should treat this as an inverse mapping: higher PWM duty means lower fan voltage.
+### 7.4 `fan-12v` frozen variant
 
-This E24 pair is intentional because it is easier to source than the earlier E96-style values. If firmware wants to cap the nominal top end close to exactly `5.0 V`, do not use a true `0%` floor. A practical floor near `3%` duty already lands very close to `5.0 V`.
+- `RFBT = 124 kOhm 1%`
+- `Duty = 0%` gives approximately `12.04 V`
+- `Duty = 100%` gives approximately `6.59 V`
+- practical approximation:
+  - `VOUT ~= 12.04 - 5.46 * Duty`
+  - where `Duty` is `0.0 ~ 1.0`
+- all capacitors directly tied to `FAN_VCC` must be `>=25 V`
+- the two main output capacitors must each be `22 uF` and use `1206` or larger footprints
+- add `100 nF` local decoupling close to the fan connector in the live CAD source
+- silkscreen requirement: `12V FAN ONLY`
 
-### 7.4 PWM guidance
+The `fan-12v` minimum steady-state point is intentionally about `6.6 V`. Reliable startup below that point is out of scope for this rail profile. This voltage curve remains a hardware characterization only; shared firmware and API stay voltage-agnostic.
+
+### 7.5 PWM guidance
 
 - Recommended PWM frequency from `ESP32-S3`: `20 kHz ~ 40 kHz`
 - Do not inject raw PWM directly into `FB`
 - Configure the PWM pin first, then assert `EN`
-- For startup reliability, drive the fan at `5 V` for `100 ms ~ 300 ms` before stepping down to the requested steady-state voltage
+- At the hardware level, higher duty still drives the analog FB injection path toward a lower rail voltage on both variants
+- Shared firmware / API contract should only carry `fan_enabled` and `fan_pwm_permille`; it must not estimate millivolts or distinguish `fan-5v` vs `fan-12v`
+- If a specific board later needs startup boost or low-speed tuning, keep that tuning in board-specific bring-up / thermal-control policy rather than the shared firmware contract
 
 ## 8) Fan connector protection
 
@@ -168,7 +197,7 @@ Connection:
 - cathode -> `FAN+`
 - anode -> `FAN-`
 
-This part should be treated as a cable/interface clamp, not as the main regulation or compensation element.
+This part should be treated as a cable/interface clamp, not as the main regulation or compensation element. The same `DSK34` class remains acceptable for `fan-12v` because it already exceeds the required `>=40 V` Schottky class.
 
 ## 9) Layout notes
 
@@ -190,6 +219,7 @@ Component placement priorities for the fan rail:
 - `RPWM` should also prefer the `VCTRL/FB` side, leaving the long trace on the digital PWM side rather than on the analog control side
 - the `EN` pulldown should sit close to the `EN` pin
 - if `RSER_EN` is populated, it should sit closer to the `EN` pin than to the MCU so the protected node stays local to the buck stage
+- `fan-12v` should reserve the local `100 nF` connector-side decoupling capacitor as a distinct placement task in the live CAD source
 
 ## 10) Validation checklist before PCB freeze
 
@@ -198,8 +228,10 @@ Component placement priorities for the fan rail:
 - Check audible noise at low fan speeds because `TPS62933DRLR` can enter light-load `PFM`
 - Measure inductor temperature on both rails
 - Confirm the real MLCC effective capacitance at operating DC bias
+- For `fan-12v`, explicitly validate output-cap voltage rating, package size, and startup current margin before production release
 
 ## References
 
 - [TI TPS62933 datasheet](https://www.ti.com/lit/ds/symlink/tps62933.pdf)
 - [TI TPS62933 product page](https://www.ti.com/product/TPS62933)
+- [Fan PCB variants](./fan-pcb-variants.md)

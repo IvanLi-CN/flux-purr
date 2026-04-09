@@ -1,0 +1,11 @@
+designator,function,variant_value,footprint_requirement,voltage_rating_requirement,notes
+R91,RFBB,10kOhm 1%,archived baseline,not applicable,Shared lower feedback resistor
+R10,RFBT,47kOhm 1%,archived baseline,not applicable,Upper feedback resistor for fan-5v
+R11,RINJ,75kOhm 1%,archived baseline,not applicable,FB injection resistor
+R12,RPWM,10kOhm 1%,archived baseline,not applicable,PWM to VCTRL resistor
+logical:REN_PD,FAN EN pulldown,100kOhm 1%,archived baseline,not applicable,Weak pulldown on the real FAN_EN node
+logical:RSER_EN,FAN EN series resistor,2.2kOhm 1%,archived baseline,not applicable,Series resistor between FAN_EN_RAW and FAN_EN
+C2,CPWM,1uF X7R,archived baseline,>=10V,VCTRL filter capacitor
+C19,CFF,12pF C0G,archived baseline,not applicable,Optional feed-forward capacitor
+C138,FAN_VCC output cap,22uF X7R,archived baseline 0603,>=6.3V,Archived main fan-rail output capacitor
+C139,FAN_VCC output cap,22uF X7R,archived baseline 0603,>=10V,Archived secondary fan-rail output capacitor
