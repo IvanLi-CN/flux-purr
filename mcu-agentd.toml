@@ -11,5 +11,6 @@ chip = "esp32s3"
 artifact_elf = "firmware/target/xtensa-esp32s3-none-elf/release/esp32s3-fan-cycle"
 
 [mcu.esp32s3_frontpanel.espflash]
+log_format = "serial"
 after_flash = "no-reset"
 skip_update_check = true
