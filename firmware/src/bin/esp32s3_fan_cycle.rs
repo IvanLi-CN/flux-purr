@@ -120,6 +120,7 @@ async fn main(_spawner: Spawner) {
         s3_frontpanel::PIN_LCD_RES,
         s3_frontpanel::PIN_LCD_CS,
     );
+    info!("display firmware keeps fan gpio35/gpio36 idle in this test build");
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
@@ -201,8 +202,14 @@ async fn main(_spawner: Spawner) {
         }
     }
 
+    let mut heartbeat_seconds: u32 = 0;
     loop {
-        EmbassyTimer::after_millis(1_000).await;
+        EmbassyTimer::after_millis(2_000).await;
+        heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
+        info!(
+            "heartbeat startup-screen uptime_s={=u32}",
+            heartbeat_seconds
+        );
     }
 }
 
