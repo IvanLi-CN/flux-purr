@@ -10,6 +10,8 @@ use embassy_time::Timer as EmbassyTimer;
 #[cfg(target_arch = "xtensa")]
 use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
+use embedded_hal::pwm::SetDutyCycle;
+#[cfg(target_arch = "xtensa")]
 use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
 use esp_backtrace as _;
@@ -17,6 +19,7 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     gpio::{Level, Output, OutputConfig},
+    mcpwm::{McPwm, PeripheralClockConfig, operator::PwmPinConfig, timer::PwmWorkingMode},
     spi::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
@@ -28,11 +31,13 @@ use esp_hal::{
 use esp_println as _;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
+    FAN_PWM_FREQUENCY_HZ, FanCommand, FanCycleController, FanPhase,
     board::s3_frontpanel,
     display::{
         DEMO_SEQUENCE, DEVICE_BOOT_FLOW, DISPLAY_PANEL_CONFIG, DeviceBootFlow, DisplayCanvas,
         SceneId, render_scene,
     },
+    pwm_percent_from_permille,
 };
 #[cfg(target_arch = "xtensa")]
 use gc9d01::{GC9D01, Timer as Gc9d01Timer};
@@ -61,6 +66,67 @@ struct DisplayTimer;
 impl Gc9d01Timer for DisplayTimer {
     async fn after_millis(milliseconds: u64) {
         EmbassyTimer::after_millis(milliseconds).await;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn fan_phase_label(phase: FanPhase) -> &'static str {
+    match phase {
+        FanPhase::High => "high",
+        FanPhase::Low => "low",
+        FanPhase::Mid => "mid",
+        FanPhase::Stop => "stop",
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn apply_fan_command<PWM>(fan_enable: &mut Output<'_>, fan_pwm: &mut PWM, command: FanCommand)
+where
+    PWM: SetDutyCycle<Error = core::convert::Infallible>,
+{
+    let duty_percent = pwm_percent_from_permille(command.pwm_permille);
+    let _ = fan_pwm.set_duty_cycle_percent(duty_percent);
+
+    if command.enabled {
+        fan_enable.set_high();
+    } else {
+        fan_enable.set_low();
+    }
+
+    info!(
+        "fan phase={=str} enabled={=bool} pwm_permille={=u16} pwm_percent={=u8} approx_mv={=u16}",
+        fan_phase_label(command.phase),
+        command.enabled,
+        command.pwm_permille,
+        duty_percent,
+        command.approx_output_mv(),
+    );
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn wait_with_fan<PWM>(
+    duration_ms: u64,
+    elapsed_ms: &mut u64,
+    fan_controller: &mut FanCycleController,
+    active_command: &mut Option<FanCommand>,
+    fan_enable: &mut Output<'_>,
+    fan_pwm: &mut PWM,
+) where
+    PWM: SetDutyCycle<Error = core::convert::Infallible>,
+{
+    let mut remaining_ms = duration_ms;
+    while remaining_ms > 0 {
+        let step_ms = remaining_ms.min(200);
+        EmbassyTimer::after_millis(step_ms).await;
+        *elapsed_ms = elapsed_ms.saturating_add(step_ms);
+        remaining_ms -= step_ms;
+
+        let uptime_secs = ((*elapsed_ms) / 1_000).min(u32::MAX as u64) as u32;
+        let next = fan_controller.command_at(uptime_secs);
+        if active_command.is_none_or(|current| current != next) {
+            apply_fan_command(fan_enable, fan_pwm, next);
+            *active_command = Some(next);
+        }
     }
 }
 
@@ -120,10 +186,38 @@ async fn main(_spawner: Spawner) {
         s3_frontpanel::PIN_LCD_RES,
         s3_frontpanel::PIN_LCD_CS,
     );
-    info!("display firmware keeps fan gpio35/gpio36 idle in this test build");
+    info!(
+        "boot fan_tach={=u8} fan_en={=u8} fan_pwm={=u8} pwm_hz={=u32}",
+        s3_frontpanel::PIN_FAN_TACH,
+        s3_frontpanel::PIN_FAN_EN,
+        s3_frontpanel::PIN_FAN_PWM,
+        FAN_PWM_FREQUENCY_HZ,
+    );
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
+
+    let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
+    let fan_clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40))
+        .expect("failed to derive MCPWM peripheral clock");
+    let mut fan_mcpwm = McPwm::new(peripherals.MCPWM0, fan_clock_cfg);
+    fan_mcpwm.operator0.set_timer(&fan_mcpwm.timer0);
+    let mut fan_pwm = fan_mcpwm
+        .operator0
+        .with_pin_a(peripherals.GPIO36, PwmPinConfig::UP_ACTIVE_HIGH);
+    let fan_timer_cfg = fan_clock_cfg
+        .timer_clock_with_frequency(
+            99,
+            PwmWorkingMode::Increase,
+            Rate::from_hz(FAN_PWM_FREQUENCY_HZ),
+        )
+        .expect("failed to derive fan PWM timer clock");
+    fan_mcpwm.timer0.start(fan_timer_cfg);
+    let mut fan_controller = FanCycleController::new();
+    let mut elapsed_ms: u64 = 0;
+    let initial_fan_command = fan_controller.command_at(0);
+    apply_fan_command(&mut fan_enable, &mut fan_pwm, initial_fan_command);
+    let mut fan_active_command = Some(initial_fan_command);
 
     let spi = Spi::new(
         peripherals.SPI2,
@@ -187,13 +281,29 @@ async fn main(_spawner: Spawner) {
         }
         DeviceBootFlow::CalibrationThenDemoThenHold => {
             info!("device boot flow: calibration -> demo -> hold");
-            EmbassyTimer::after_millis(1200).await;
+            wait_with_fan(
+                1_200,
+                &mut elapsed_ms,
+                &mut fan_controller,
+                &mut fan_active_command,
+                &mut fan_enable,
+                &mut fan_pwm,
+            )
+            .await;
             for scene in DEMO_SEQUENCE {
                 flush_scene(&mut display, canvas, scene)
                     .await
                     .expect("failed to draw demo scene");
                 info!("scene={=str}", scene.label());
-                EmbassyTimer::after_millis(scene.dwell_millis()).await;
+                wait_with_fan(
+                    scene.dwell_millis(),
+                    &mut elapsed_ms,
+                    &mut fan_controller,
+                    &mut fan_active_command,
+                    &mut fan_enable,
+                    &mut fan_pwm,
+                )
+                .await;
             }
             flush_scene(&mut display, canvas, SceneId::StartupCalibration)
                 .await
@@ -204,7 +314,15 @@ async fn main(_spawner: Spawner) {
 
     let mut heartbeat_seconds: u32 = 0;
     loop {
-        EmbassyTimer::after_millis(2_000).await;
+        wait_with_fan(
+            2_000,
+            &mut elapsed_ms,
+            &mut fan_controller,
+            &mut fan_active_command,
+            &mut fan_enable,
+            &mut fan_pwm,
+        )
+        .await;
         heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
         info!(
             "heartbeat startup-screen uptime_s={=u32}",
