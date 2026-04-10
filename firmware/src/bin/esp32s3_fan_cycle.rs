@@ -55,6 +55,9 @@ const _: [(); s3_frontpanel::PIN_LCD_RES as usize] = [(); 14];
 const _: [(); s3_frontpanel::PIN_LCD_CS as usize] = [(); 15];
 
 #[cfg(target_arch = "xtensa")]
+const GPIO13_TOGGLE_DIAGNOSTIC_ONLY: bool = true;
+
+#[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
 
 #[cfg(target_arch = "xtensa")]
@@ -123,6 +126,24 @@ async fn main(_spawner: Spawner) {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
+
+    let gpio13_toggle_diagnostic_only = GPIO13_TOGGLE_DIAGNOSTIC_ONLY;
+    if gpio13_toggle_diagnostic_only {
+        let mut gpio13 = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
+        let mut drive_low = false;
+        info!("diag mode: toggle gpio13 every 1000 ms");
+        loop {
+            if drive_low {
+                gpio13.set_low();
+                info!("diag gpio13=low");
+            } else {
+                gpio13.set_high();
+                info!("diag gpio13=high");
+            }
+            drive_low = !drive_low;
+            EmbassyTimer::after_millis(1_000).await;
+        }
+    }
 
     let spi = Spi::new(
         peripherals.SPI2,
