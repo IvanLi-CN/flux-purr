@@ -1,5 +1,5 @@
 [project]
-id = "flux-purr-80d2"
+id = "flux-purr"
 
 [agentd]
 auto_start_daemon = true
