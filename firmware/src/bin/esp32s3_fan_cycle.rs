@@ -138,8 +138,9 @@ async fn main(_spawner: Spawner) {
     let cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
     let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-    let mut backlight = Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default());
-    backlight.set_high();
+    let mut backlight = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
+    backlight.set_low();
+    info!("backlight active-low: gpio13 low -> on");
 
     let spi_device = ExclusiveDevice::new_no_delay(spi, cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
