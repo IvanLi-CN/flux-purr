@@ -27,6 +27,10 @@
   - `BLK = GPIO13`
   - `RES = GPIO14`
   - `CS = GPIO15`
+- Front-panel board backlight polarity:
+  - `BLK` is active-low on the panel board
+  - `Q5` (`BSS84AKW`) switches `3V3 -> LEDA` on the high side
+  - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
 - Current bring-up flow:
   - boot -> startup calibration screen
   - play demo sequence once
