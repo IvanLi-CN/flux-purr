@@ -55,7 +55,7 @@ const _: [(); s3_frontpanel::PIN_LCD_RES as usize] = [(); 14];
 const _: [(); s3_frontpanel::PIN_LCD_CS as usize] = [(); 15];
 
 #[cfg(target_arch = "xtensa")]
-const GPIO13_TOGGLE_DIAGNOSTIC_ONLY: bool = true;
+const GPIO_CLUSTER_WALK_DIAGNOSTIC_ONLY: bool = true;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -127,21 +127,45 @@ async fn main(_spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
-    let gpio13_toggle_diagnostic_only = GPIO13_TOGGLE_DIAGNOSTIC_ONLY;
-    if gpio13_toggle_diagnostic_only {
-        let mut gpio13 = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
-        let mut drive_low = false;
-        info!("diag mode: toggle gpio13 every 1000 ms");
+    let gpio_cluster_walk_diagnostic_only = GPIO_CLUSTER_WALK_DIAGNOSTIC_ONLY;
+    if gpio_cluster_walk_diagnostic_only {
+        let mut gpio10_dc = Output::new(peripherals.GPIO10, Level::High, OutputConfig::default());
+        let mut gpio11_mosi = Output::new(peripherals.GPIO11, Level::High, OutputConfig::default());
+        let mut gpio12_sclk = Output::new(peripherals.GPIO12, Level::High, OutputConfig::default());
+        let mut gpio13_blk = Output::new(peripherals.GPIO13, Level::High, OutputConfig::default());
+        let mut gpio14_res = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
+        let mut gpio15_cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
+        info!("diag mode: walk low across gpio10..15, 2000 ms each");
         loop {
-            if drive_low {
-                gpio13.set_low();
-                info!("diag gpio13=low");
-            } else {
-                gpio13.set_high();
-                info!("diag gpio13=high");
-            }
-            drive_low = !drive_low;
-            EmbassyTimer::after_millis(1_000).await;
+            gpio10_dc.set_low();
+            info!("diag gpio10(dc)=low others=high");
+            EmbassyTimer::after_millis(2_000).await;
+            gpio10_dc.set_high();
+
+            gpio11_mosi.set_low();
+            info!("diag gpio11(mosi)=low others=high");
+            EmbassyTimer::after_millis(2_000).await;
+            gpio11_mosi.set_high();
+
+            gpio12_sclk.set_low();
+            info!("diag gpio12(sclk)=low others=high");
+            EmbassyTimer::after_millis(2_000).await;
+            gpio12_sclk.set_high();
+
+            gpio13_blk.set_low();
+            info!("diag gpio13(blk)=low others=high");
+            EmbassyTimer::after_millis(2_000).await;
+            gpio13_blk.set_high();
+
+            gpio14_res.set_low();
+            info!("diag gpio14(res)=low others=high");
+            EmbassyTimer::after_millis(2_000).await;
+            gpio14_res.set_high();
+
+            gpio15_cs.set_low();
+            info!("diag gpio15(cs)=low others=high");
+            EmbassyTimer::after_millis(2_000).await;
+            gpio15_cs.set_high();
         }
     }
 
