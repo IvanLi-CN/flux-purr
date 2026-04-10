@@ -4,158 +4,210 @@
 #[cfg(target_arch = "xtensa")]
 use defmt::info;
 #[cfg(target_arch = "xtensa")]
+use embassy_executor::Spawner;
+#[cfg(target_arch = "xtensa")]
+use embassy_time::Timer as EmbassyTimer;
+#[cfg(target_arch = "xtensa")]
+use embedded_graphics::prelude::RgbColor;
+#[cfg(target_arch = "xtensa")]
+use embedded_hal_bus::spi::ExclusiveDevice;
+#[cfg(target_arch = "xtensa")]
 use esp_backtrace as _;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     clock::CpuClock,
-    gpio::{DriveMode, Level, Output, OutputConfig},
-    ledc::{
-        LSGlobalClkSource, Ledc, LowSpeed, channel,
-        channel::{ChannelIFace, config::Config as ChannelConfig},
-        timer,
-        timer::{LSClockSource, TimerIFace, config::Duty},
+    gpio::{Level, Output, OutputConfig},
+    spi::{
+        Mode as SpiMode,
+        master::{Config as SpiConfig, Spi},
     },
-    main,
-    time::{Duration, Instant, Rate},
+    time::Rate,
+    timer::timg::TimerGroup,
 };
 #[cfg(target_arch = "xtensa")]
 use esp_println as _;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    FAN_PHASE_DURATION_SECS, FAN_PWM_FREQUENCY_HZ, FAN_STOP_SAFE_PWM_PERMILLE, FanCommand,
-    FanCycleController, FanPhase, board::s3_frontpanel, pwm_percent_from_permille,
+    board::s3_frontpanel,
+    display::{
+        DEMO_SEQUENCE, DEVICE_BOOT_FLOW, DISPLAY_PANEL_CONFIG, DeviceBootFlow, DisplayCanvas,
+        SceneId, render_scene,
+    },
 };
+#[cfg(target_arch = "xtensa")]
+use gc9d01::{GC9D01, Timer as Gc9d01Timer};
+#[cfg(target_arch = "xtensa")]
+use static_cell::StaticCell;
+
 #[cfg(target_arch = "xtensa")]
 esp_bootloader_esp_idf::esp_app_desc!();
 #[cfg(target_arch = "xtensa")]
-const _: [(); s3_frontpanel::PIN_FAN_EN as usize] = [(); 35];
+const _: [(); s3_frontpanel::PIN_LCD_DC as usize] = [(); 10];
 #[cfg(target_arch = "xtensa")]
-const _: [(); s3_frontpanel::PIN_FAN_PWM as usize] = [(); 36];
+const _: [(); s3_frontpanel::PIN_LCD_MOSI as usize] = [(); 11];
 #[cfg(target_arch = "xtensa")]
-const _: [(); s3_frontpanel::PIN_FAN_TACH as usize] = [(); 34];
+const _: [(); s3_frontpanel::PIN_LCD_SCLK as usize] = [(); 12];
+#[cfg(target_arch = "xtensa")]
+const _: [(); s3_frontpanel::PIN_LCD_BLK as usize] = [(); 13];
+#[cfg(target_arch = "xtensa")]
+const _: [(); s3_frontpanel::PIN_LCD_RES as usize] = [(); 14];
+#[cfg(target_arch = "xtensa")]
+const _: [(); s3_frontpanel::PIN_LCD_CS as usize] = [(); 15];
 
 #[cfg(target_arch = "xtensa")]
-fn phase_label(phase: FanPhase) -> &'static str {
-    match phase {
-        FanPhase::High => "high",
-        FanPhase::Low => "low",
-        FanPhase::Mid => "mid",
-        FanPhase::Stop => "stop",
+struct DisplayTimer;
+
+#[cfg(target_arch = "xtensa")]
+impl Gc9d01Timer for DisplayTimer {
+    async fn after_millis(milliseconds: u64) {
+        EmbassyTimer::after_millis(milliseconds).await;
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn configure_timer_with_fallback<T>(timer: &mut T) -> Result<u8, timer::Error>
+fn present_scene<'a, BUS, DC, RST>(
+    display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
+    canvas: &mut DisplayCanvas,
+    scene: SceneId,
+) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
-    T: TimerIFace<LowSpeed>,
+    BUS: embedded_hal_async::spi::SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
+    BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
+    DC::Error: core::fmt::Debug,
 {
-    let freq = Rate::from_hz(FAN_PWM_FREQUENCY_HZ);
-
-    timer
-        .configure(timer::config::Config {
-            duty: Duty::Duty10Bit,
-            clock_source: LSClockSource::APBClk,
-            frequency: freq,
-        })
-        .map(|_| 10)
-        .or_else(|_| {
-            timer.configure(timer::config::Config {
-                duty: Duty::Duty8Bit,
-                clock_source: LSClockSource::APBClk,
-                frequency: freq,
-            })?;
-            Ok(8)
-        })
-}
-
-#[cfg(target_arch = "xtensa")]
-fn apply_command<'a, C>(fan_enable: &mut Output<'_>, channel: &C, command: FanCommand)
-where
-    C: ChannelIFace<'a, LowSpeed>,
-{
-    let safe_percent = pwm_percent_from_permille(FAN_STOP_SAFE_PWM_PERMILLE);
-    if command.enabled {
-        let duty_percent = pwm_percent_from_permille(command.pwm_permille);
-        assert!(
-            channel.set_duty(duty_percent).is_ok(),
-            "failed to update LEDC duty while enabling fan"
-        );
-        fan_enable.set_high();
-    } else {
-        fan_enable.set_low();
-        assert!(
-            channel.set_duty(safe_percent).is_ok(),
-            "failed to update LEDC duty while stopping fan"
-        );
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-fn log_command(command: FanCommand, uptime_secs: u32) {
-    info!(
-        "fan phase={=str} enabled={=bool} pwm_permille={=u16} output_mv={=u16} uptime_s={=u32}",
-        phase_label(command.phase),
-        command.enabled,
-        command.pwm_permille,
-        command.approx_output_mv(),
-        uptime_secs,
+    render_scene(scene, canvas);
+    display.write_area(
+        0,
+        0,
+        DISPLAY_PANEL_CONFIG.width,
+        DISPLAY_PANEL_CONFIG.height,
+        canvas.pixels(),
     );
+    Ok(())
 }
 
 #[cfg(target_arch = "xtensa")]
-#[main]
-fn main() -> ! {
+async fn flush_scene<'a, BUS, DC, RST>(
+    display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
+    canvas: &mut DisplayCanvas,
+    scene: SceneId,
+) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
+where
+    BUS: embedded_hal_async::spi::SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
+    BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
+    DC::Error: core::fmt::Debug,
+{
+    present_scene(display, canvas, scene)?;
+    display.flush().await
+}
+
+#[cfg(target_arch = "xtensa")]
+#[esp_hal_embassy::main]
+async fn main(_spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
-    let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
-
-    let mut ledc = Ledc::new(peripherals.LEDC);
-    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
-
-    let mut timer0 = ledc.timer::<LowSpeed>(timer::Number::Timer0);
-    let timer_bits = configure_timer_with_fallback(&mut timer0)
-        .expect("failed to configure LEDC timer for fan PWM");
-
-    let mut fan_pwm = ledc.channel(channel::Number::Channel0, peripherals.GPIO36);
-    let initial = FanCycleController::new().command_at(0);
-    assert!(
-        fan_pwm
-            .configure(ChannelConfig {
-                timer: &timer0,
-                duty_pct: pwm_percent_from_permille(initial.pwm_permille),
-                drive_mode: DriveMode::PushPull,
-            })
-            .is_ok(),
-        "failed to configure LEDC fan PWM channel"
-    );
-
-    let mut controller = FanCycleController::new();
-    let mut uptime_secs = 0_u32;
     info!(
-        "boot fan_en_gpio={=u8} fan_pwm_gpio={=u8} fan_tach_gpio={=u8} pwm_hz={=u32} timer_bits={=u8}",
-        s3_frontpanel::PIN_FAN_EN,
-        s3_frontpanel::PIN_FAN_PWM,
-        s3_frontpanel::PIN_FAN_TACH,
-        FAN_PWM_FREQUENCY_HZ,
-        timer_bits,
+        "boot display_dc={=u8} mosi={=u8} sclk={=u8} blk={=u8} res={=u8} cs={=u8}",
+        s3_frontpanel::PIN_LCD_DC,
+        s3_frontpanel::PIN_LCD_MOSI,
+        s3_frontpanel::PIN_LCD_SCLK,
+        s3_frontpanel::PIN_LCD_BLK,
+        s3_frontpanel::PIN_LCD_RES,
+        s3_frontpanel::PIN_LCD_CS,
     );
-    apply_command(&mut fan_enable, &fan_pwm, initial);
-    log_command(initial, uptime_secs);
+
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_hal_embassy::init(timg0.timer0);
+
+    let spi = Spi::new(
+        peripherals.SPI2,
+        SpiConfig::default()
+            .with_frequency(Rate::from_hz(10_000_000))
+            .with_mode(SpiMode::_0),
+    )
+    .expect("failed to create SPI2")
+    .with_sck(peripherals.GPIO12)
+    .with_mosi(peripherals.GPIO11)
+    .into_async();
+
+    let cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
+    let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
+    let rst = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
+    let mut backlight = Output::new(peripherals.GPIO13, Level::Low, OutputConfig::default());
+    backlight.set_high();
+
+    let spi_device = ExclusiveDevice::new_no_delay(spi, cs)
+        .expect("failed to wrap async SPI bus as ExclusiveDevice");
+
+    static DRIVER_FB: StaticCell<
+        [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
+    > = StaticCell::new();
+    static CANVAS: StaticCell<DisplayCanvas> = StaticCell::new();
+
+    let driver_framebuffer = DRIVER_FB.init(
+        [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS],
+    );
+    let canvas = CANVAS.init(DisplayCanvas::new());
+
+    let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
+        DISPLAY_PANEL_CONFIG,
+        spi_device,
+        dc,
+        rst,
+        driver_framebuffer,
+    );
+
+    info!(
+        "init panel width={=u16} height={=u16} dx={=u16} dy={=u16}",
+        DISPLAY_PANEL_CONFIG.width,
+        DISPLAY_PANEL_CONFIG.height,
+        DISPLAY_PANEL_CONFIG.dx,
+        DISPLAY_PANEL_CONFIG.dy,
+    );
+    display
+        .init()
+        .await
+        .expect("failed to initialize GC9D01 display");
+
+    flush_scene(&mut display, canvas, SceneId::StartupCalibration)
+        .await
+        .expect("failed to draw startup calibration screen");
+    info!("scene={=str}", SceneId::StartupCalibration.label());
+
+    match DEVICE_BOOT_FLOW {
+        DeviceBootFlow::CalibrationOnly => {
+            info!("device boot flow: calibration-only");
+        }
+        DeviceBootFlow::CalibrationThenDemoThenHold => {
+            info!("device boot flow: calibration -> demo -> hold");
+            EmbassyTimer::after_millis(1200).await;
+            for scene in DEMO_SEQUENCE {
+                flush_scene(&mut display, canvas, scene)
+                    .await
+                    .expect("failed to draw demo scene");
+                info!("scene={=str}", scene.label());
+                EmbassyTimer::after_millis(scene.dwell_millis()).await;
+            }
+            flush_scene(&mut display, canvas, SceneId::StartupCalibration)
+                .await
+                .expect("failed to restore startup calibration screen");
+            info!("scene={=str}", SceneId::StartupCalibration.label());
+        }
+    }
 
     loop {
-        let phase_started = Instant::now();
-        while phase_started.elapsed() < Duration::from_secs(FAN_PHASE_DURATION_SECS as u64) {}
-        uptime_secs = uptime_secs.saturating_add(FAN_PHASE_DURATION_SECS);
-        let command = controller.command_at(uptime_secs);
-        apply_command(&mut fan_enable, &fan_pwm, command);
-        log_command(command, uptime_secs);
+        EmbassyTimer::after_millis(1_000).await;
     }
 }
 
 #[cfg(not(target_arch = "xtensa"))]
 fn main() {
     println!(
-        "esp32s3-fan-cycle is a host stub; build with --target xtensa-esp32s3-none-elf --features esp32s3"
+        "esp32s3-fan-cycle is now the GC9D01 async display bring-up binary; build with --target xtensa-esp32s3-none-elf --features esp32s3"
     );
 }
