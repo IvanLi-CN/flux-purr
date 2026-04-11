@@ -194,8 +194,10 @@ const fn panel_transform_coordinates(orientation: Orientation, x: u16, y: u16) -
             DISPLAY_PHYSICAL_HEIGHT - 1 - x,
         ),
         Orientation::Landscape => (y, DISPLAY_PHYSICAL_HEIGHT - 1 - x),
-        Orientation::PortraitSwapped => (DISPLAY_PHYSICAL_WIDTH - 1 - y, x),
-        Orientation::LandscapeSwapped => (y, x),
+        // Mirror the current gc9d01-rs panel_160x50 driver behavior exactly so the
+        // host-side panel companion matches the on-device frame buffer layout byte-for-byte.
+        Orientation::PortraitSwapped => (x, y),
+        Orientation::LandscapeSwapped => (y, DISPLAY_PHYSICAL_HEIGHT - 1 - x),
     }
 }
 
@@ -566,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_transform_coordinates_cover_all_orientations_without_overflow() {
+    fn panel_transform_coordinates_fit_the_driver_framebuffer_indexing_contract() {
         let orientations = [
             Orientation::Portrait,
             Orientation::Landscape,
@@ -575,37 +577,27 @@ mod tests {
         ];
 
         for orientation in orientations {
-            let (tlx, tly) = panel_transform_coordinates(orientation, 0, 0);
-            let (brx, bry) =
-                panel_transform_coordinates(orientation, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
-            assert!(
-                tlx < DISPLAY_PHYSICAL_WIDTH,
-                "top-left x out of bounds for {:?}",
-                orientation as u8
-            );
-            assert!(
-                tly < DISPLAY_PHYSICAL_HEIGHT,
-                "top-left y out of bounds for {:?}",
-                orientation as u8
-            );
-            assert!(
-                brx < DISPLAY_PHYSICAL_WIDTH,
-                "bottom-right x out of bounds for {:?}",
-                orientation as u8
-            );
-            assert!(
-                bry < DISPLAY_PHYSICAL_HEIGHT,
-                "bottom-right y out of bounds for {:?}",
-                orientation as u8
-            );
+            for y in 0..DISPLAY_HEIGHT {
+                for x in 0..DISPLAY_WIDTH {
+                    let (px, py) = panel_transform_coordinates(orientation, x, y);
+                    let physical_index = py as usize * DISPLAY_PHYSICAL_WIDTH_USIZE + px as usize;
+                    assert!(
+                        physical_index < DISPLAY_PIXELS,
+                        "framebuffer index out of range for orientation={} x={} y={}",
+                        orientation as u8,
+                        x,
+                        y
+                    );
+                }
+            }
         }
     }
 
     #[test]
-    fn swapped_panel_orientations_match_expected_axis_mapping() {
+    fn swapped_panel_orientations_match_gc9d01_driver_mapping() {
         assert_eq!(
             panel_transform_coordinates(Orientation::PortraitSwapped, 0, 0),
-            (DISPLAY_PHYSICAL_WIDTH - 1, 0)
+            (0, 0)
         );
         assert_eq!(
             panel_transform_coordinates(
@@ -613,11 +605,11 @@ mod tests {
                 DISPLAY_WIDTH - 1,
                 DISPLAY_HEIGHT - 1
             ),
-            (0, DISPLAY_WIDTH - 1)
+            (DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1)
         );
         assert_eq!(
             panel_transform_coordinates(Orientation::LandscapeSwapped, 0, 0),
-            (0, 0)
+            (0, DISPLAY_PHYSICAL_HEIGHT - 1)
         );
         assert_eq!(
             panel_transform_coordinates(
@@ -625,7 +617,7 @@ mod tests {
                 DISPLAY_WIDTH - 1,
                 DISPLAY_HEIGHT - 1
             ),
-            (DISPLAY_HEIGHT - 1, DISPLAY_WIDTH - 1)
+            (DISPLAY_HEIGHT - 1, 0)
         );
     }
 

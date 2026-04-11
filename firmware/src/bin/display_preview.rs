@@ -23,8 +23,21 @@ fn default_output_path(scene: SceneId) -> PathBuf {
     ))
 }
 
-fn panel_output_path(logical_output_path: &Path, scene: SceneId) -> PathBuf {
-    logical_output_path.with_file_name(format!("{}.panel.framebuffer.bin", scene.slug()))
+fn panel_output_path(logical_output_path: &Path) -> PathBuf {
+    let file_name = logical_output_path
+        .file_name()
+        .expect("logical framebuffer output path should include a file name")
+        .to_string_lossy();
+
+    let companion_name = if let Some(prefix) = file_name.strip_suffix(".framebuffer.bin") {
+        format!("{prefix}.panel.framebuffer.bin")
+    } else if let Some((stem, ext)) = file_name.rsplit_once('.') {
+        format!("{stem}.panel.{ext}")
+    } else {
+        format!("{file_name}.panel")
+    };
+
+    logical_output_path.with_file_name(companion_name)
 }
 
 fn main() -> ExitCode {
@@ -43,7 +56,7 @@ fn main() -> ExitCode {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| default_output_path(scene));
-    let panel_output_path = panel_output_path(&output_path, scene);
+    let panel_output_path = panel_output_path(&output_path);
 
     let mut canvas = DisplayCanvas::new();
     render_scene(scene, &mut canvas);
@@ -88,4 +101,25 @@ fn main() -> ExitCode {
         DISPLAY_PANEL_CONFIG.dy,
     );
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_output_path_tracks_the_requested_filename() {
+        assert_eq!(
+            panel_output_path(Path::new("/tmp/startup.framebuffer.bin")),
+            PathBuf::from("/tmp/startup.panel.framebuffer.bin")
+        );
+        assert_eq!(
+            panel_output_path(Path::new("/tmp/custom.bin")),
+            PathBuf::from("/tmp/custom.panel.bin")
+        );
+        assert_eq!(
+            panel_output_path(Path::new("/tmp/custom")),
+            PathBuf::from("/tmp/custom.panel")
+        );
+    }
 }
