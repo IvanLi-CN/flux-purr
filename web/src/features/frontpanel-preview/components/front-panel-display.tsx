@@ -131,32 +131,6 @@ function fillRect(
   ctx.fillRect(x, y, width, height)
 }
 
-function drawBorder(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  color: string
-) {
-  fillRect(ctx, x, y, width, 1, color)
-  fillRect(ctx, x, y + height - 1, width, 1, color)
-  fillRect(ctx, x, y, 1, height, color)
-  fillRect(ctx, x + width - 1, y, 1, height, color)
-}
-
-function drawPanel(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  fill: string
-) {
-  fillRect(ctx, x, y, width, height, fill)
-  drawBorder(ctx, x, y, width, height, palette.border)
-}
-
 function splitTemperature(tempC: number) {
   const fixed = tempC.toFixed(1)
   const [integerPart, decimalPart] = fixed.split('.')
@@ -312,7 +286,7 @@ function drawHomeScreen(
 
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
 
-  drawPanel(ctx, 4, 4, 72, 36, palette.panelStrong)
+  fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
   drawSevenSegmentNumber(ctx, currentTemperature.integerPart, 8, 8, currentTempColor)
   drawBitmapText(ctx, currentTemperature.decimalPart, 65, 8, {
     color: palette.text,
@@ -321,7 +295,7 @@ function drawHomeScreen(
   })
   drawTempUnitIcon(ctx, 66, 21, palette.text, 1)
 
-  drawPanel(ctx, 78, 4, 78, 36, palette.panel)
+  fillRect(ctx, 78, 4, 78, 36, palette.panel)
   drawRightInfoLine(ctx, 7, palette.warning, 'SET', formatTargetTemperature(screen.targetTempC))
   drawRightInfoLine(
     ctx,
@@ -332,7 +306,7 @@ function drawHomeScreen(
   )
   drawRightInfoLine(ctx, 29, fan.color, 'FAN', fan.text)
 
-  drawPanel(ctx, 4, 42, 152, 5, palette.panel)
+  fillRect(ctx, 4, 42, 152, 5, palette.panel)
   fillRect(ctx, 6, 43, pwmWidth, 3, palette.accent)
 }
 
@@ -350,7 +324,7 @@ function drawMenuScreen(
 
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
 
-  drawPanel(ctx, 4, 4, 152, 24, palette.panelStrong)
+  fillRect(ctx, 4, 4, 152, 24, palette.panelStrong)
   screen.items.forEach((item, index) => {
     const x = 6 + index * 38
     const active = item.id === screen.selectedItem
@@ -359,7 +333,7 @@ function drawMenuScreen(
     drawMenuIcon(ctx, item.id, x + 9, 8, active ? palette.bg : palette.text)
   })
 
-  drawPanel(ctx, 4, 30, 152, 16, palette.panel)
+  fillRect(ctx, 4, 30, 152, 16, palette.panel)
   drawMenuIcon(ctx, selectedItem.id, 8, 30, palette.warning)
   drawBitmapText(ctx, selectedMeta.title, Math.round((160 - titleWidth) / 2), 34, {
     color: palette.text,
