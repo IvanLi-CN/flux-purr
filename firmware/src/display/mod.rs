@@ -176,7 +176,7 @@ impl DisplayCanvas {
         for (index, pixel) in self.pixels.iter().copied().enumerate() {
             let x = (index % DISPLAY_WIDTH_USIZE) as u16;
             let y = (index / DISPLAY_WIDTH_USIZE) as u16;
-            let (px, py) = panel_transform_coordinates(x, y);
+            let (px, py) = panel_transform_coordinates(DISPLAY_PANEL_CONFIG.orientation, x, y);
             let physical_index = py as usize * DISPLAY_PHYSICAL_WIDTH_USIZE + px as usize;
             let raw: RawU16 = pixel.into();
             let bytes = raw.into_inner().to_be_bytes();
@@ -187,15 +187,15 @@ impl DisplayCanvas {
     }
 }
 
-const fn panel_transform_coordinates(x: u16, y: u16) -> (u16, u16) {
-    match DISPLAY_PANEL_CONFIG.orientation {
+const fn panel_transform_coordinates(orientation: Orientation, x: u16, y: u16) -> (u16, u16) {
+    match orientation {
         Orientation::Portrait => (
             DISPLAY_PHYSICAL_WIDTH - 1 - y,
             DISPLAY_PHYSICAL_HEIGHT - 1 - x,
         ),
         Orientation::Landscape => (y, DISPLAY_PHYSICAL_HEIGHT - 1 - x),
-        Orientation::PortraitSwapped => (x, y),
-        Orientation::LandscapeSwapped => (y, DISPLAY_PHYSICAL_HEIGHT - 1 - x),
+        Orientation::PortraitSwapped => (DISPLAY_PHYSICAL_WIDTH - 1 - y, x),
+        Orientation::LandscapeSwapped => (y, x),
     }
 }
 
@@ -562,6 +562,70 @@ mod tests {
         assert_eq!(
             &bytes[base..base + 2],
             &RawU16::from(Rgb565::RED).into_inner().to_be_bytes()
+        );
+    }
+
+    #[test]
+    fn panel_transform_coordinates_cover_all_orientations_without_overflow() {
+        let orientations = [
+            Orientation::Portrait,
+            Orientation::Landscape,
+            Orientation::PortraitSwapped,
+            Orientation::LandscapeSwapped,
+        ];
+
+        for orientation in orientations {
+            let (tlx, tly) = panel_transform_coordinates(orientation, 0, 0);
+            let (brx, bry) =
+                panel_transform_coordinates(orientation, DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1);
+            assert!(
+                tlx < DISPLAY_PHYSICAL_WIDTH,
+                "top-left x out of bounds for {:?}",
+                orientation as u8
+            );
+            assert!(
+                tly < DISPLAY_PHYSICAL_HEIGHT,
+                "top-left y out of bounds for {:?}",
+                orientation as u8
+            );
+            assert!(
+                brx < DISPLAY_PHYSICAL_WIDTH,
+                "bottom-right x out of bounds for {:?}",
+                orientation as u8
+            );
+            assert!(
+                bry < DISPLAY_PHYSICAL_HEIGHT,
+                "bottom-right y out of bounds for {:?}",
+                orientation as u8
+            );
+        }
+    }
+
+    #[test]
+    fn swapped_panel_orientations_match_expected_axis_mapping() {
+        assert_eq!(
+            panel_transform_coordinates(Orientation::PortraitSwapped, 0, 0),
+            (DISPLAY_PHYSICAL_WIDTH - 1, 0)
+        );
+        assert_eq!(
+            panel_transform_coordinates(
+                Orientation::PortraitSwapped,
+                DISPLAY_WIDTH - 1,
+                DISPLAY_HEIGHT - 1
+            ),
+            (0, DISPLAY_WIDTH - 1)
+        );
+        assert_eq!(
+            panel_transform_coordinates(Orientation::LandscapeSwapped, 0, 0),
+            (0, 0)
+        );
+        assert_eq!(
+            panel_transform_coordinates(
+                Orientation::LandscapeSwapped,
+                DISPLAY_WIDTH - 1,
+                DISPLAY_HEIGHT - 1
+            ),
+            (DISPLAY_HEIGHT - 1, DISPLAY_WIDTH - 1)
         );
     }
 
