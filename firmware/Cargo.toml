@@ -13,10 +13,16 @@ path = "src/lib.rs"
 name = "esp32s3-fan-cycle"
 path = "src/bin/esp32s3_fan_cycle.rs"
 
+[[bin]]
+name = "display_preview"
+path = "src/bin/display_preview.rs"
+required-features = ["host-preview"]
+
 [features]
 default = ["esp32s3"]
 esp32s3 = []
 esp32c3 = []
+host-preview = []
 
 [dependencies]
 embassy-futures = "0.1.2"

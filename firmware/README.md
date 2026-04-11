@@ -91,10 +91,12 @@
 ## Host preview workflow
 
 - Render the startup scene framebuffer:
-  - `cargo run --manifest-path firmware/Cargo.toml --bin display_preview -- startup docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.framebuffer.bin`
-- The exported framebuffer is the GC9D01 panel-order dump (`RGB565 BE`, `50x160`) after applying the same orientation transform used on-device.
-- Convert the panel-order framebuffer to PNG:
-  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian be --width 50 --height 160 --in docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.framebuffer.bin --out docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.preview.png`
+  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.framebuffer.bin`
+- The preview tool writes two framebuffer artifacts:
+  - logical preview framebuffer: `startup.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
+  - panel-order companion: `startup.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
+- Convert the logical preview framebuffer to PNG:
+  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.framebuffer.bin --out docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.preview.png`
 - Preview assets land under:
   - `docs/specs/vmekj-s3-gc9d01-display-bringup/assets/`
 
