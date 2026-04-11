@@ -92,14 +92,18 @@ where
     } else {
         fan_enable.set_low();
     }
+}
 
+#[cfg(target_arch = "xtensa")]
+fn log_fan_command(command: FanCommand, uptime_secs: u32) {
+    let duty_percent = pwm_percent_from_permille(command.pwm_permille);
     info!(
-        "fan phase={=str} enabled={=bool} pwm_permille={=u16} pwm_percent={=u8} approx_mv={=u16}",
+        "fan phase={=str} enabled={=bool} pwm_permille={=u16} pwm_percent={=u8} uptime_s={=u32}",
         fan_phase_label(command.phase),
         command.enabled,
         command.pwm_permille,
         duty_percent,
-        command.approx_output_mv(),
+        uptime_secs,
     );
 }
 
@@ -125,6 +129,7 @@ async fn wait_with_fan<PWM>(
         let next = fan_controller.command_at(uptime_secs);
         if active_command.is_none_or(|current| current != next) {
             apply_fan_command(fan_enable, fan_pwm, next);
+            log_fan_command(next, uptime_secs);
             *active_command = Some(next);
         }
     }
@@ -217,6 +222,7 @@ async fn main(_spawner: Spawner) {
     let mut elapsed_ms: u64 = 0;
     let initial_fan_command = fan_controller.command_at(0);
     apply_fan_command(&mut fan_enable, &mut fan_pwm, initial_fan_command);
+    log_fan_command(initial_fan_command, 0);
     let mut fan_active_command = Some(initial_fan_command);
 
     let spi = Spi::new(

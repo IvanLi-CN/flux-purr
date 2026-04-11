@@ -14,8 +14,6 @@ pub const FAN_HIGH_PWM_PERMILLE: u16 = 30;
 pub const FAN_MID_PWM_PERMILLE: u16 = 300;
 pub const FAN_LOW_PWM_PERMILLE: u16 = 500;
 pub const FAN_STOP_SAFE_PWM_PERMILLE: u16 = FAN_LOW_PWM_PERMILLE;
-pub const FAN_APPROX_MAX_OUTPUT_MV: u16 = 5_060;
-pub const FAN_APPROX_OUTPUT_SPAN_MV: u16 = 2_070;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -106,14 +104,6 @@ impl FanCommand {
             },
         }
     }
-
-    pub const fn approx_output_mv(self) -> u16 {
-        if self.enabled {
-            fan_output_voltage_mv_from_pwm_permille(self.pwm_permille)
-        } else {
-            0
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,16 +140,6 @@ impl FanCycleController {
 
         FanCommand::from_phase(self.phase)
     }
-}
-
-pub const fn fan_output_voltage_mv_from_pwm_permille(pwm_permille: u16) -> u16 {
-    let duty = if pwm_permille > 1_000 {
-        1_000
-    } else {
-        pwm_permille as u32
-    };
-    let drop_mv = ((FAN_APPROX_OUTPUT_SPAN_MV as u32 * duty) + 500) / 1_000;
-    (FAN_APPROX_MAX_OUTPUT_MV as u32 - drop_mv) as u16
 }
 
 pub const fn pwm_percent_from_permille(pwm_permille: u16) -> u8 {
@@ -277,14 +257,6 @@ pub async fn poll_once() -> DeviceStatus {
 mod tests {
     use super::*;
 
-    fn assert_within(actual: u16, expected: u16, tolerance: u16) {
-        let delta = actual.abs_diff(expected);
-        assert!(
-            delta <= tolerance,
-            "expected {actual} to be within {tolerance} of {expected}, delta={delta}"
-        );
-    }
-
     #[test]
     fn snapshot_starts_in_sampling_mode() {
         let value = snapshot_at(10, 0);
@@ -343,36 +315,20 @@ mod tests {
     }
 
     #[test]
-    fn pwm_mapping_matches_bringup_points() {
-        assert_within(
-            fan_output_voltage_mv_from_pwm_permille(FAN_HIGH_PWM_PERMILLE),
-            5_000,
-            80,
-        );
-        assert_within(
-            fan_output_voltage_mv_from_pwm_permille(FAN_MID_PWM_PERMILLE),
-            4_400,
-            80,
-        );
-        assert_within(
-            fan_output_voltage_mv_from_pwm_permille(FAN_LOW_PWM_PERMILLE),
-            4_000,
-            80,
-        );
-    }
-
-    #[test]
-    fn stop_command_disables_output_without_relabeling_it_as_low_speed() {
-        let stop = FanCommand::from_phase(FanPhase::Stop);
+    fn fan_commands_only_expose_normalized_setpoints() {
+        let high = FanCommand::from_phase(FanPhase::High);
+        let mid = FanCommand::from_phase(FanPhase::Mid);
         let low = FanCommand::from_phase(FanPhase::Low);
+        let stop = FanCommand::from_phase(FanPhase::Stop);
 
-        assert!(!stop.enabled);
-        assert_eq!(stop.phase, FanPhase::Stop);
-        assert_eq!(stop.approx_output_mv(), 0);
+        assert!(high.enabled);
+        assert!(mid.enabled);
         assert!(low.enabled);
-        assert_eq!(low.phase, FanPhase::Low);
-        assert_eq!(stop.pwm_permille, FAN_STOP_SAFE_PWM_PERMILLE);
+        assert!(!stop.enabled);
+        assert_eq!(high.pwm_permille, FAN_HIGH_PWM_PERMILLE);
+        assert_eq!(mid.pwm_permille, FAN_MID_PWM_PERMILLE);
         assert_eq!(low.pwm_permille, FAN_LOW_PWM_PERMILLE);
+        assert_eq!(stop.pwm_permille, FAN_STOP_SAFE_PWM_PERMILLE);
     }
 
     #[test]

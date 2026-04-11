@@ -1,0 +1,68 @@
+{
+  "variant": "fan-5v",
+  "status": "frozen",
+  "base_archived_netlist": "docs/hardware/netlists/main-controller-board.enet",
+  "silkscreen_required_text": "5V FAN ONLY",
+  "shared_contract": {
+    "gpio": {
+      "fan_enable": "GPIO35",
+      "fan_vset_pwm": "GPIO36",
+      "fan_tach": "GPIO34"
+    },
+    "status_fields": [
+      "fan_enabled",
+      "fan_pwm_permille"
+    ],
+    "firmware_voltage_awareness": false,
+    "fan_pwm_permille_semantics": "normalized actuator command"
+  },
+  "fan_rail": {
+    "controller": "TPS62933DRLR",
+    "archived_netlist_role": "direct-baseline",
+    "topology": {
+      "fan_enable_path": "GPIO35 -> FAN_EN_RAW -> 2.2k -> FAN_EN",
+      "fan_control_path": "GPIO36 -> RPWM -> VCTRL -> RINJ -> FB"
+    },
+    "output_range_mv": {
+      "min": 2993,
+      "max": 5061
+    },
+    "control_law": {
+      "approximation": "VOUT ~= 5.06 - 2.07 * Duty",
+      "duty_domain": "0.0..1.0"
+    },
+    "resistors_ohms": {
+      "rfbb": 10000,
+      "rfbt": 47000,
+      "rinj": 75000,
+      "rpwm": 10000,
+      "ren_pd": 100000,
+      "rser_en": 2200
+    },
+    "capacitors": {
+      "cpwm_uf": 1.0,
+      "cff_pf": 12,
+      "fan_vcc_output_caps": [
+        {
+          "designator": "C138",
+          "minimum_capacitance": "22uF",
+          "minimum_voltage_v": 6.3,
+          "archived_footprint": "0603"
+        },
+        {
+          "designator": "C139",
+          "minimum_capacitance": "22uF",
+          "minimum_voltage_v": 10.0,
+          "archived_footprint": "0603"
+        }
+      ]
+    }
+  },
+  "fabrication_outputs": {
+    "bom_csv": "flux-purr-main-controller-fan-5v.bom.csv",
+    "pos_csv": "flux-purr-main-controller-fan-5v.pos.csv",
+    "pnp_csv": "flux-purr-main-controller-fan-5v.pnp.csv",
+    "gerbers_zip": "flux-purr-main-controller-fan-5v.gerbers.zip"
+  },
+  "generated_outputs_checked_in": false
+}
