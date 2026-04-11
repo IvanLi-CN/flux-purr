@@ -31,12 +31,9 @@
   - `BLK` is active-low on the panel board
   - `Q5` (`BSS84AKW`) switches `3V3 -> LEDA` on the high side
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
-- Current bring-up flow:
+- Current startup behavior:
   - boot -> startup calibration screen
-  - play demo sequence once
-  - return to startup calibration screen and hold
-- Final post-verification goal:
-  - switch to startup screen only and keep it resident until a later firmware replaces it
+  - keep the startup screen resident until a later firmware replaces it
 
 ## Shared scene rendering
 
@@ -97,7 +94,7 @@
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
 - `GPIO47` remains the heater-control PWM output.
 - `GPIO48` remains reserved as the buzzer PWM / tone output.
-- `GPIO35/36/34` stay wired for the existing fan stage, but this firmware round does not drive the fan path.
+- `GPIO35/36/34` stay wired for the existing fan stage, and the display test firmware continues to run the frozen fan-cycle behavior alongside the static startup screen.
 
 ## Notes
 

@@ -29,7 +29,7 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
     dy: 0,
 };
 
-pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenDemoThenHold;
+pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationOnly;
 pub const STARTUP_SCENE_SLUG: &str = "startup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

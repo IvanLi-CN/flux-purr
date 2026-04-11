@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-04-10
-- Last: 2026-04-10
+- Last: 2026-04-11
 
 ## 背景 / 问题陈述
 
@@ -19,13 +19,13 @@
 
 - 复用 `esp32s3-fan-cycle` binary 名称与 `mcu-agentd` artifact 路径，改造成 `ESP32-S3` 的 GC9D01 显示 bring-up 入口。
 - 接入 `gc9d01-rs` async driver，使用 `Embassy + esp-hal-embassy + SPI2.into_async()` 完成面板初始化与刷屏。
-- 新增一套共享显示场景：静态校准屏 + 单次 demo 序列，并支持最终收口为静态启动屏常驻。
+- 新增一套共享显示场景：静态校准屏 + 单次 demo 序列，并完成最终收口为静态启动屏常驻。
 - 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin` 与 `preview.png`。
 - 保持 host 侧质量门和 Xtensa 构建口径可运行，并通过 `mcu-agentd` 完成烧录/监看流程。
 
 ### Non-goals
 
-- 不保留原来的风扇循环逻辑并行运行。
+- 不扩展风扇策略范围；只保持已冻结的 `fan-cycle` 行为继续运行，不在本规格内新增 tach 闭环或新的风扇控制算法。
 - 不接入触摸、按键切屏、动画菜单、业务状态页或量产 UI。
 - 不修改 Web 控制台、HTTP API、CH224Q / heater / RTD 等其它硬件驱动。
 - 不在本轮实现自动持久化“校准已完成”状态；最终静态屏切换仍由固件常量/代码收口。
@@ -57,8 +57,9 @@
 - 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
-- 设备测试流程必须支持：`静态校准屏 -> demo 单次轮播 -> 回到静态校准屏`。
-- 最终收口版本必须支持切为“上电后一直停留在静态启动屏”。
+- bring-up 阶段必须支持：`静态校准屏 -> demo 单次轮播 -> 回到静态校准屏`。
+- 最终收口版本必须默认采用“上电后一直停留在静态启动屏”。
+- 最终收口版本不得破坏已冻结的风扇循环逻辑；显示测试固件运行时仍需继续驱动 `GPIO35/36` 对应的 fan-cycle。
 - host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
 - 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 
@@ -77,10 +78,11 @@
 ### Core flows
 
 - 设备上电后初始化 Embassy 定时器、异步 SPI、GC9D01 driver 与背光控制。
-- 固件先绘制静态校准屏并显示，随后按固定顺序播放一次 demo 场景集合。
-- demo 播放结束后，固件回到静态校准屏并保持常驻，等待下一次刷写或代码切换。
+- bring-up 阶段固件先绘制静态校准屏并显示，随后按固定顺序播放一次 demo 场景集合。
+- 最终收口固件上电后直接显示静态校准屏并保持常驻，等待下一次刷写或代码切换。
 - host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
 - 硬件调试阶段，主人拍摄静态校准屏和 demo 画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
+- 风扇控制与显示流程并行存在：显示维持静态启动屏时，`fan-cycle` 继续按原冻结方案切换 `High -> Low -> Mid -> Stop`。
 
 ### Edge cases / errors
 
@@ -107,9 +109,10 @@ None
 - Given host preview harness，When 生成启动屏 framebuffer 与 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
 - Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功。
 - Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
-- Given 面板已烧录，When 固件启动，Then 先显示静态校准屏，再单次播放 demo，最后回到静态校准屏常驻。
+- Given bring-up 验证版固件，When 固件启动，Then 能先显示静态校准屏，再单次播放 demo，最后回到静态校准屏常驻。
 - Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
 - Given 最终收口版本，When 设备再次上电，Then 在后续未替换固件前默认停留于静态启动屏。
+- Given 最终收口版本，When 设备保持运行，Then 风扇继续按冻结的 `fan-cycle` 节奏工作，不因显示收口而退化为闲置。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -144,7 +147,7 @@ None
 - [x] M1: 新建显示 bring-up spec 与索引
 - [x] M2: 落地 async SPI + GC9D01 设备端入口
 - [x] M3: 落地共享显示场景与 host preview harness
-- [ ] M4: 完成 host/Xtensa 验证、视觉证据与硬件烧录口径
+- [x] M4: 完成 host/Xtensa 验证、视觉证据与硬件烧录口径
 
 ## 方案概述（Approach, high-level）
 
@@ -174,6 +177,7 @@ None
 
 - 2026-04-10: 创建显示 bring-up 规格，冻结 async SPI、`panel_160x50`、host preview 与静态启动屏收口口径。
 - 2026-04-10: 落地共享显示场景、host preview harness 与 Xtensa 异步 SPI 显示入口，并生成首版启动屏视觉证据。
+- 2026-04-11: 根据实拍确认方向、偏移与颜色口径正确，最终固件收口为静态启动屏常驻，同时保留冻结的 fan-cycle 行为。
 
 ## 参考（References）
 

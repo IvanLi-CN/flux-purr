@@ -67,4 +67,4 @@
 | n6csh | Flux Purr 初始化（Hooks + Storybook + shadcn + UI UX Pro Max） | 已完成 | `n6csh-flux-purr-init/SPEC.md` | 2026-03-02 | Local PR-ready（未 push / 未建 PR） |
 | 744yg | PD Mini加热台二开资料采集与基础文档 | 已完成 | `744yg-mini-hotplate-doc-baseline/SPEC.md` | 2026-03-03 | Research: [mini-hotplate](../research/mini-hotplate/README.md) |
 | 8tesd | Flux Purr S3 风扇循环调速 bring-up | 已完成 | `8tesd-s3-fan-cycle-bringup/SPEC.md` | 2026-04-09 | PR #4 |
-| vmekj | Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与静态启动屏 | 部分完成（3/4） | `vmekj-s3-gc9d01-display-bringup/SPEC.md` | 2026-04-10 | Host preview + Xtensa build ready; hardware photo pending |
+| vmekj | Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与静态启动屏 | 已完成 | `vmekj-s3-gc9d01-display-bringup/SPEC.md` | 2026-04-11 | Orientation/colors confirmed on hardware photo; final firmware keeps the static startup screen resident while preserving fan-cycle behavior |
