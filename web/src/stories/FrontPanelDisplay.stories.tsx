@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { FrontPanelDesignBoard } from '@/features/frontpanel-preview/components/front-panel-design-board'
 import { FrontPanelDisplay } from '@/features/frontpanel-preview/components/front-panel-display'
 import { FrontPanelGallery } from '@/features/frontpanel-preview/components/front-panel-gallery'
 import {
@@ -53,6 +54,11 @@ export const DocsGallery: Story = {
   ),
 }
 
+export const DesignSpec: Story = {
+  name: 'Design Spec',
+  render: () => <FrontPanelDesignBoard />,
+}
+
 export const Home: Story = {
   args: {
     screen: frontPanelStoryStates.home,
@@ -104,6 +110,12 @@ export const PreferencesDeviceInfo: Story = {
 export const PresetTemp: Story = {
   args: {
     screen: frontPanelStoryStates.presetTemp,
+  },
+}
+
+export const PresetTempDisabled: Story = {
+  args: {
+    screen: frontPanelStoryStates.presetTempDisabled,
   },
 }
 

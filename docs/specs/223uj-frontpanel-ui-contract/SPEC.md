@@ -20,6 +20,7 @@
 - 为 `Home`、`Menu L1`、`Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
 - 在 `web/` 中提供可截图的 1:1 预览实现，作为当前最稳定的 render truth source。
+- 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
 
 ### Non-goals
 
@@ -50,6 +51,10 @@
 - 逻辑分辨率固定为 `160×50`。
 - 主界面必须把温度作为第一视觉焦点，且在 1× 逻辑尺寸下仍能一眼识别。
 - 主界面必须同时显示：当前温度、设定温度、PWM/能量条、电压、风扇状态、连接/PD 状态。
+- `Preset Temp` 页面顶部必须显示 `M1 ~ M9` 预设槽位。
+- 预设槽位状态必须固定为：当前项=主题色、已启用=正常文本色、未启用=置灰。
+- `Preset Temp` 必须支持 `---℃` 表示预设未启用。
+- `Preset Temp` 的实际温度显示必须复用 Dashboard 温度字体与温度分段颜色。
 - 一级菜单必须一次显示 `Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 四项。
 - 五向键映射必须冻结为：`上/下移动`、`中/右进入`、`左返回`。
 - 二级页面必须维持“单主任务”结构，不得塞入多个同级编辑面板。
@@ -67,6 +72,38 @@
 
 ## 功能与行为规格（Functional/Behavior Spec）
 
+## 设计令牌（Design Tokens）
+
+### Palette
+
+| Token | Value | Usage |
+| --- | --- | --- |
+| `bg` | `#08111F` | 全局屏幕背景 |
+| `panel` | `#122036` | 次级信息面 |
+| `panelStrong` | `#1B2A43` | 主信息面 / 顶部图标栏 |
+| `border` | `#2A3D5D` | 内部分隔线 |
+| `text` | `#F7FBFF` | 启用文字 / 常规图标 |
+| `muted` | `#8EA3C6` | 次级说明文字 |
+| `disabled` | `#5B6C88` | 未启用状态 |
+| `accent` | `#FF9A3C` | 当前选中项 / 主题强调 |
+| `success` | `#40D9A1` | 风扇启用 / 正常状态 |
+| `warning` | `#FFD166` | 设定温度 / 警示信息 |
+| `cyan` | `#63D8FF` | 协议 / 联网 / 信息状态 |
+
+### Typography
+
+| Role | Spec | Usage |
+| --- | --- | --- |
+| Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Home / Preset 温度主值 |
+| UI Labels | 3×5 bitmap glyphs, scale `1` 或 `2` | 菜单标题、状态标签、`M1~M9` |
+| Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
+
+### Temperature states
+
+- 默认 5 段颜色：`#63D8FF` → `#52E3C2` → `#9ADF61` → `#FFD166` → `#FF9A3C`
+- 默认 6 阈值变量：`[0, 80, 150, 220, 300, 420]`
+- 阈值后续允许在设置界面调整，但颜色映射顺序固定不变。
+
 ### Core flows
 
 - `Home`
@@ -77,7 +114,10 @@
   - 底部显示当前选中项的标题与一行说明文字。
   - 当前选中项以橙色高亮底和反白图标突出。
 - `Preset Temp`
-  - 以居中大数字显示目标温度，辅助显示步进值与按键提示。
+  - 顶部一行显示 `M1 ~ M9` 预设槽位。
+  - 当前选中槽位使用主题色；启用槽位用正常文本色；未启用槽位用灰色。
+  - 中央主值必须使用与 Dashboard 相同的 7-segment 温度字体。
+  - 未启用预设显示 `---℃`；启用预设显示实际温度值并复用 Dashboard 温度分段颜色。
 - `Active Cooling`
   - 用明确的 `ON/OFF` 和模式标签表达主动降温状态。
 - `WiFi Info`
@@ -182,6 +222,10 @@ None
 
 ![Front panel preset temp](./assets/frontpanel-preset-temp.png)
 
+#### Preset Temp Disabled
+
+![Front panel preset temp disabled](./assets/frontpanel-preset-temp-disabled.png)
+
 #### Active Cooling
 
 ![Front panel active cooling](./assets/frontpanel-active-cooling.png)
@@ -193,6 +237,10 @@ None
 #### Device Info
 
 ![Front panel device info](./assets/frontpanel-device-info.png)
+
+### Design spec board
+
+![Front panel design spec](./assets/frontpanel-design-spec.png)
 
 ## 变更记录（Change log）
 

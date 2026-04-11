@@ -1,3 +1,4 @@
+import { frontPanelDefaultThresholdsC } from './design-tokens'
 import type { FrontPanelScreen, MenuItemId } from './types'
 
 const menuItems: ReadonlyArray<{ id: MenuItemId; label: string }> = [
@@ -19,7 +20,7 @@ export const frontPanelStoryStates = {
     protocol: 'PPS',
     fanState: 'on',
     pdState: 'ready',
-    temperatureThresholdsC: [0, 80, 150, 220, 300, 420],
+    temperatureThresholdsC: frontPanelDefaultThresholdsC,
   } satisfies FrontPanelScreen,
   menu: {
     kind: 'menu',
@@ -31,9 +32,18 @@ export const frontPanelStoryStates = {
   presetTemp: {
     kind: 'preset-temp',
     title: 'Preset Temp',
-    subtitle: 'Level-2 target temperature editing',
-    presetTempC: 380,
-    stepC: 5,
+    subtitle: 'Preset temperature slots',
+    selectedPresetIndex: 3,
+    presetsC: [320, 340, null, 380, 400, null, 420, 450, null],
+    temperatureThresholdsC: frontPanelDefaultThresholdsC,
+  } satisfies FrontPanelScreen,
+  presetTempDisabled: {
+    kind: 'preset-temp',
+    title: 'Preset Temp Disabled',
+    subtitle: 'Disabled preset slot preview',
+    selectedPresetIndex: 5,
+    presetsC: [320, 340, null, 380, 400, null, 420, 450, null],
+    temperatureThresholdsC: frontPanelDefaultThresholdsC,
   } satisfies FrontPanelScreen,
   activeCooling: {
     kind: 'active-cooling',

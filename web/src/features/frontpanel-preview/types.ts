@@ -32,8 +32,9 @@ export interface FrontPanelMenuScreen extends FrontPanelBaseScreen {
 
 export interface FrontPanelPresetTempScreen extends FrontPanelBaseScreen {
   kind: 'preset-temp'
-  presetTempC: number
-  stepC: number
+  selectedPresetIndex: number
+  presetsC: ReadonlyArray<number | null>
+  temperatureThresholdsC: readonly [number, number, number, number, number, number]
 }
 
 export interface FrontPanelCoolingScreen extends FrontPanelBaseScreen {

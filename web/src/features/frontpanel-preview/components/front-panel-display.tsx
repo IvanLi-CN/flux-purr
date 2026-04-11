@@ -1,26 +1,14 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { drawBitmapText, measureBitmapText } from '../bitmap-font'
+import { frontPanelPalette, frontPanelTemperatureColors } from '../design-tokens'
 import type { FanState, FrontPanelScreen, PowerProtocol } from '../types'
 
 const LOGICAL_WIDTH = 160
 const LOGICAL_HEIGHT = 50
 
-const palette = {
-  bg: '#08111f',
-  panel: '#122036',
-  panelStrong: '#1b2a43',
-  border: '#2a3d5d',
-  text: '#f7fbff',
-  muted: '#8ea3c6',
-  accent: '#ff9a3c',
-  accentSoft: '#4e2e18',
-  success: '#40d9a1',
-  warning: '#ffd166',
-  cyan: '#63d8ff',
-} as const
-
-const temperatureColors = ['#63d8ff', '#52e3c2', '#9adf61', '#ffd166', '#ff9a3c'] as const
+const palette = frontPanelPalette
+const temperatureColors = frontPanelTemperatureColors
 type MenuIconId = Extract<FrontPanelScreen, { kind: 'menu' }>['items'][number]['id']
 
 const menuMeta: Record<MenuIconId, { title: string }> = {
@@ -169,7 +157,25 @@ function drawTempUnitIcon(
   })
 }
 
+function measureLargeCelsiusIcon() {
+  return 14
+}
+
+function drawLargeCelsiusIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
+  drawBitmapText(ctx, '°', x + 1, y, {
+    color,
+    scale: 2,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, 'C', x + 6, y + 4, {
+    color,
+    scale: 2,
+    letterSpacing: 1,
+  })
+}
+
 const sevenSegmentMap: Record<string, Array<'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g'>> = {
+  '-': ['g'],
   '0': ['a', 'b', 'c', 'd', 'e', 'f'],
   '1': ['b', 'c'],
   '2': ['a', 'b', 'g', 'e', 'd'],
@@ -226,6 +232,11 @@ function drawSevenSegmentNumber(
   }
 }
 
+function measureSevenSegmentNumber(text: string) {
+  if (!text.length) return 0
+  return text.length * 17 - 2
+}
+
 function temperatureColor(
   currentTempC: number,
   thresholds: readonly [number, number, number, number, number, number]
@@ -273,6 +284,29 @@ function drawMenuIcon(
       fillRect(ctx, x + columnIndex, y + rowIndex, 1, 1, color)
     }
   }
+}
+
+const presetMarkerGlyph = ['10001', '11011', '10101', '10001', '10001'] as const
+
+function drawPresetSlotLabel(
+  ctx: CanvasRenderingContext2D,
+  index: number,
+  x: number,
+  y: number,
+  color: string
+) {
+  presetMarkerGlyph.forEach((row, rowIndex) => {
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      if (row[columnIndex] !== '1') continue
+      fillRect(ctx, x + columnIndex, y + rowIndex, 1, 1, color)
+    }
+  })
+
+  drawBitmapText(ctx, String(index + 1), x + 6, y, {
+    color,
+    scale: 1,
+    letterSpacing: 1,
+  })
 }
 
 function drawHomeScreen(
@@ -348,23 +382,35 @@ function drawPresetTempScreen(
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
 
-  drawBitmapText(ctx, 'SET TEMP', 8, 6, {
-    color: palette.text,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `STEP ${screen.stepC}C`, 152, 6, {
-    color: palette.muted,
-    scale: 2,
-    align: 'right',
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `${screen.presetTempC}C`, LOGICAL_WIDTH / 2, 19, {
-    color: palette.warning,
-    scale: 5,
-    align: 'center',
-    letterSpacing: 1,
-  })
+  const selectedPreset = screen.presetsC[screen.selectedPresetIndex] ?? null
+  const displayText = selectedPreset == null ? '---' : String(Math.round(selectedPreset))
+  const valueColor =
+    selectedPreset == null
+      ? palette.disabled
+      : temperatureColor(selectedPreset, screen.temperatureThresholdsC)
+  const unitColor = selectedPreset == null ? palette.disabled : palette.text
+  const totalSlots = Math.min(screen.presetsC.length, 9)
+
+  for (let index = 0; index < totalSlots; index += 1) {
+    const isSelected = index === screen.selectedPresetIndex
+    const isEnabled = screen.presetsC[index] != null
+    const color = isSelected ? palette.accent : isEnabled ? palette.text : palette.disabled
+    drawPresetSlotLabel(ctx, index, 4 + index * 17, 5, color)
+  }
+
+  const digitsWidth = measureSevenSegmentNumber(displayText)
+  const digitsY = 18
+  const digitHeight = 26
+  const unitGap = 3
+  const unitWidth = measureLargeCelsiusIcon()
+  const unitHeight = 14
+  const blockWidth = digitsWidth + unitGap + unitWidth
+  const digitsX = Math.round((LOGICAL_WIDTH - blockWidth) / 2)
+  const unitX = digitsX + digitsWidth + unitGap
+  const unitY = digitsY + digitHeight - unitHeight
+
+  drawSevenSegmentNumber(ctx, displayText, digitsX, digitsY, valueColor)
+  drawLargeCelsiusIcon(ctx, unitX, unitY, unitColor)
 }
 
 function drawActiveCoolingScreen(
@@ -478,8 +524,12 @@ function ariaLabel(screen: FrontPanelScreen) {
       return `front panel home screen ${screen.currentTempC} degrees`
     case 'menu':
       return `front panel preferences menu`
-    case 'preset-temp':
-      return `front panel preset temperature ${screen.presetTempC} degrees`
+    case 'preset-temp': {
+      const preset = screen.presetsC[screen.selectedPresetIndex]
+      return preset == null
+        ? `front panel preset ${screen.selectedPresetIndex + 1} disabled`
+        : `front panel preset ${screen.selectedPresetIndex + 1} ${preset} degrees`
+    }
     case 'active-cooling':
       return `front panel active cooling ${screen.enabled ? 'enabled' : 'disabled'}`
     case 'wifi-info':
@@ -494,6 +544,8 @@ export interface FrontPanelDisplayProps {
   scale?: number
   className?: string
   frameClassName?: string
+  showFrame?: boolean
+  showMeta?: boolean
 }
 
 export function FrontPanelDisplay({
@@ -501,6 +553,8 @@ export function FrontPanelDisplay({
   scale = 6,
   className,
   frameClassName,
+  showFrame = true,
+  showMeta = true,
 }: FrontPanelDisplayProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const label = useMemo(() => ariaLabel(screen), [screen])
@@ -521,7 +575,9 @@ export function FrontPanelDisplay({
     <div data-testid="front-panel-display" className={cn('inline-flex flex-col gap-3', className)}>
       <div
         className={cn(
-          'rounded-[28px] border border-slate-700/80 bg-slate-950 p-4 shadow-[0_30px_80px_rgba(2,6,23,0.55)]',
+          showFrame
+            ? 'rounded-[28px] border border-slate-700/80 bg-slate-950 p-4 shadow-[0_30px_80px_rgba(2,6,23,0.55)]'
+            : 'p-0',
           frameClassName
         )}
       >
@@ -540,10 +596,12 @@ export function FrontPanelDisplay({
           }}
         />
       </div>
-      <div className="space-y-1 text-center">
-        <p className="text-sm font-semibold text-slate-100">{screen.title}</p>
-        {screen.subtitle ? <p className="text-xs text-slate-400">{screen.subtitle}</p> : null}
-      </div>
+      {showMeta ? (
+        <div className="space-y-1 text-center">
+          <p className="text-sm font-semibold text-slate-100">{screen.title}</p>
+          {screen.subtitle ? <p className="text-xs text-slate-400">{screen.subtitle}</p> : null}
+        </div>
+      ) : null}
     </div>
   )
 }
