@@ -6,10 +6,13 @@ use flux_purr_firmware::display::{
 };
 
 fn default_output_path(scene: SceneId) -> PathBuf {
-    PathBuf::from(format!(
-        "docs/specs/vmekj-s3-gc9d01-display-bringup/assets/{}.framebuffer.bin",
-        scene.slug()
-    ))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("firmware crate should live under the repo root")
+        .join(format!(
+            "docs/specs/vmekj-s3-gc9d01-display-bringup/assets/{}.framebuffer.bin",
+            scene.slug()
+        ))
 }
 
 fn main() -> ExitCode {
