@@ -1,8 +1,8 @@
 use std::{env, fs, path::PathBuf, process::ExitCode};
 
 use flux_purr_firmware::display::{
-    DISPLAY_FRAMEBUFFER_BYTES, DISPLAY_HEIGHT, DISPLAY_PANEL_CONFIG, DISPLAY_WIDTH, DisplayCanvas,
-    STARTUP_SCENE_SLUG, SceneId, render_scene,
+    DISPLAY_FRAMEBUFFER_BYTES, DISPLAY_PANEL_CONFIG, DISPLAY_PHYSICAL_HEIGHT,
+    DISPLAY_PHYSICAL_WIDTH, DisplayCanvas, STARTUP_SCENE_SLUG, SceneId, render_scene,
 };
 
 fn default_output_path(scene: SceneId) -> PathBuf {
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     render_scene(scene, &mut canvas);
 
     let mut bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
-    canvas.write_rgb565_le_bytes(&mut bytes);
+    canvas.write_panel_rgb565_be_bytes(&mut bytes);
 
     if let Some(parent) = output_path.parent()
         && let Err(error) = fs::create_dir_all(parent)
@@ -51,11 +51,11 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "wrote {} scene={} width={} height={} orientation=Landscape dx={} dy={} rgb565_endian=le",
+        "wrote {} scene={} width={} height={} orientation=Landscape dx={} dy={} rgb565_endian=be layout=gc9d01-panel-order",
         output_path.display(),
         scene.slug(),
-        DISPLAY_WIDTH,
-        DISPLAY_HEIGHT,
+        DISPLAY_PHYSICAL_WIDTH,
+        DISPLAY_PHYSICAL_HEIGHT,
         DISPLAY_PANEL_CONFIG.dx,
         DISPLAY_PANEL_CONFIG.dy,
     );

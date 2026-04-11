@@ -18,6 +18,10 @@ pub const DISPLAY_WIDTH_USIZE: usize = DISPLAY_WIDTH as usize;
 pub const DISPLAY_HEIGHT_USIZE: usize = DISPLAY_HEIGHT as usize;
 pub const DISPLAY_PIXELS: usize = DISPLAY_WIDTH_USIZE * DISPLAY_HEIGHT_USIZE;
 pub const DISPLAY_FRAMEBUFFER_BYTES: usize = DISPLAY_PIXELS * 2;
+pub const DISPLAY_PHYSICAL_WIDTH: u16 = 50;
+pub const DISPLAY_PHYSICAL_HEIGHT: u16 = 160;
+pub const DISPLAY_PHYSICAL_WIDTH_USIZE: usize = DISPLAY_PHYSICAL_WIDTH as usize;
+pub const DISPLAY_PHYSICAL_HEIGHT_USIZE: usize = DISPLAY_PHYSICAL_HEIGHT as usize;
 
 pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
     width: DISPLAY_WIDTH,
@@ -164,6 +168,34 @@ impl DisplayCanvas {
             out[base] = bytes[0];
             out[base + 1] = bytes[1];
         }
+    }
+
+    pub fn write_panel_rgb565_be_bytes(&self, out: &mut [u8; DISPLAY_FRAMEBUFFER_BYTES]) {
+        out.fill(0);
+
+        for (index, pixel) in self.pixels.iter().copied().enumerate() {
+            let x = (index % DISPLAY_WIDTH_USIZE) as u16;
+            let y = (index / DISPLAY_WIDTH_USIZE) as u16;
+            let (px, py) = panel_transform_coordinates(x, y);
+            let physical_index = py as usize * DISPLAY_PHYSICAL_WIDTH_USIZE + px as usize;
+            let raw: RawU16 = pixel.into();
+            let bytes = raw.into_inner().to_be_bytes();
+            let base = physical_index * 2;
+            out[base] = bytes[0];
+            out[base + 1] = bytes[1];
+        }
+    }
+}
+
+const fn panel_transform_coordinates(x: u16, y: u16) -> (u16, u16) {
+    match DISPLAY_PANEL_CONFIG.orientation {
+        Orientation::Portrait => (
+            DISPLAY_PHYSICAL_WIDTH - 1 - y,
+            DISPLAY_PHYSICAL_HEIGHT - 1 - x,
+        ),
+        Orientation::Landscape => (y, DISPLAY_PHYSICAL_HEIGHT - 1 - x),
+        Orientation::PortraitSwapped => (x, y),
+        Orientation::LandscapeSwapped => (y, DISPLAY_PHYSICAL_HEIGHT - 1 - x),
     }
 }
 
@@ -512,6 +544,25 @@ mod tests {
         canvas.write_rgb565_le_bytes(&mut bytes);
         assert_eq!(bytes.len(), DISPLAY_FRAMEBUFFER_BYTES);
         assert!(bytes.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn startup_scene_can_be_serialized_as_panel_rgb565_be() {
+        let mut canvas = DisplayCanvas::new();
+        canvas.clear(Rgb565::BLACK).ok();
+        canvas
+            .draw_iter([Pixel(Point::new(0, 0), Rgb565::RED)])
+            .expect("failed to draw test pixel");
+        let mut bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
+        canvas.write_panel_rgb565_be_bytes(&mut bytes);
+        assert_eq!(bytes.len(), DISPLAY_FRAMEBUFFER_BYTES);
+        assert!(bytes.iter().any(|byte| *byte != 0));
+
+        let base = ((DISPLAY_PHYSICAL_HEIGHT_USIZE - 1) * DISPLAY_PHYSICAL_WIDTH_USIZE) * 2;
+        assert_eq!(
+            &bytes[base..base + 2],
+            &RawU16::from(Rgb565::RED).into_inner().to_be_bytes()
+        );
     }
 
     #[test]

@@ -153,21 +153,21 @@ None
 
 - 场景渲染采用独立的逻辑 framebuffer/canvas，让 host preview 与 device binary 共享同一套绘制代码。
 - 设备端只负责初始化 `gc9d01-rs` driver，并把共享 canvas 内容拷入驱动 framebuffer 再 flush 到屏幕。
-- host preview 通过导出逻辑 framebuffer 原始 `RGB565 LE` 数据，再转换为 PNG，避免另写一套 UI 逻辑。
+- host preview 通过导出与 GC9D01 设备端一致的 panel-order framebuffer（已应用 orientation 变换，`RGB565 BE`），再转换为 PNG，避免另写一套 UI 逻辑。
 - 通过单一常量控制“测试流程（静态 -> demo -> 静态）”与“最终静态常驻”两种模式的切换。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：上游 `gc9d01-rs` 的 `Orientation::Landscape` 与当前板子的实际装配方向可能不一致，仍需实拍确认。
 - 风险：`panel_160x50` 的 `dx=15` 与实际模组可视区若存在偏差，需要在同一轮实现里微调。
-- 风险：host preview 反映的是逻辑场景，不等于实机面板玻璃、背光、色温与拍照白平衡的真实观感。
+- 风险：host preview 反映的是与设备端一致的 panel-order 数据，不等于实机面板玻璃、背光、色温与拍照白平衡的真实观感。
 - 风险：若 `mcu-agentd` selector 未设置或串口被占用，会阻断上板验证。
 - 假设：当前前面板模组确实与 `gc9d01-rs` 的 `panel_160x50` 配置兼容。
 - 假设：最终静态启动屏无需在 EEPROM/NVS 中持久化状态，只需固件代码冻结默认行为。
 
 ## Visual Evidence
 
-- Host startup preview（逻辑渲染，`RGB565 LE`，`160x50`，`Orientation::Landscape`，`dx=15`，`dy=0`）
+- Host startup preview（GC9D01 panel-order dump，`RGB565 BE`，`50x160`，`Orientation::Landscape`，`dx=15`，`dy=0`）
 - Raw framebuffer: `./assets/startup.framebuffer.bin`
 - PNG preview: `./assets/startup.preview.png`
 
