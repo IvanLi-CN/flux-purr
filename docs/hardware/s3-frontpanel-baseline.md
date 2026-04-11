@@ -14,6 +14,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
 - Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet` (`fan-5v` baseline)
 - Variant overlay reference: `docs/hardware/fan-pcb-variants.md`
+- Archived front-panel-board netlist: `docs/hardware/netlists/front-panel-board.enet`
 
 ## 2) Direct MCU GPIO allocation (21 active)
 
@@ -28,7 +29,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | LCD DC | 10 | Matches `mains-aegis` LCD control cluster |
 | LCD MOSI | 11 | SPI MOSI |
 | LCD SCLK | 12 | SPI clock |
-| LCD BLK | 13 | Direct MCU PWM, aligned with `mains-aegis` |
+| LCD BLK | 13 | Active-low BLK gate to the front-panel backlight switch |
 | LCD RES | 14 | Direct reset output |
 | LCD CS | 15 | Direct chip-select output |
 | Right Key | 16 | Direct GPIO input |
@@ -92,7 +93,14 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 ## 7) LCD and fan control baseline
 
 - `LCD DC/MOSI/SCLK/BLK` are placed on `GPIO10/11/12/13`, matching the frozen LCD cluster used by `mains-aegis`.
-- `LCD BLK` is directly driven by MCU `GPIO13` and must support PWM dimming.
+- Controller board `GPIO13` reaches the front-panel board as net `BLK` through the panel FPC.
+- Front-panel board netlist evidence:
+  - `FPC1 pin 7 = BLK`
+  - `R55 = 100 kOhm` pulls `BLK` up to `3V3`
+  - `Q5 = BSS84AKW,115` (`P-MOS`) uses `G=BLK`, `S=3V3`, `D=U44.LEDA`
+  - `U44.LEDK` is tied directly to `GND`
+- Therefore `LCD BLK` is **active-low** at the system level: driving `GPIO13` low turns the backlight on, while driving it high or leaving it floating turns the backlight off.
+- Backlight PWM dimming must follow this active-low polarity.
 - `HEATER_PWM` is directly driven by MCU `GPIO47` (chip pin `37`) and controls a low-side heater MOSFET stage.
 - `BUZZER_PWM` is directly driven by MCU `GPIO48` (chip pin `36`) and is reserved for buzzer beeps or passive-buzzer tone output via PWM.
 - Heater switching baseline:

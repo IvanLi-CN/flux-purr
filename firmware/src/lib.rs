@@ -2,6 +2,7 @@
 
 pub mod adapters;
 pub mod board;
+pub mod display;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_os = "none"))]
