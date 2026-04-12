@@ -164,7 +164,18 @@ export const DocsGallery: Story = {
 
 export const DesignSpec: Story = {
   name: 'Design Spec',
-  render: () => <FrontPanelDesignBoard />,
+  render: () => (
+    <div
+      style={{
+        minHeight: '100vh',
+        background:
+          'radial-gradient(circle at top, rgba(23,37,84,0.92) 0%, rgba(8,17,31,1) 34%, rgba(2,6,23,1) 100%)',
+        padding: '36px',
+      }}
+    >
+      <FrontPanelDesignBoard />
+    </div>
+  ),
 }
 
 export const Home: Story = {
