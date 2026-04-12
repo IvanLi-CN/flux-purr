@@ -33,7 +33,8 @@
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
 - Current startup behavior:
   - boot -> startup calibration screen
-  - keep the startup screen resident until a later firmware replaces it
+  - after a short settle, enter the looping demo slideshow
+  - keep cycling through the demo scenes while the firmware stays alive
 
 ## Shared scene rendering
 
@@ -128,7 +129,7 @@
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight is owned by MCU `GPIO13`, but at the system level it is active-low because the front-panel board routes `BLK` into a high-side PMOS gate.
-- `GPIO35/36/34` stay wired for the existing fan stage, and the display test firmware continues to run the frozen fan-cycle behavior alongside the static startup screen.
+- `GPIO35/36/34` stay wired for the existing fan stage, and the display test firmware continues to run the frozen fan-cycle behavior while the demo slideshow loops on the LCD.
 
 ## Notes
 

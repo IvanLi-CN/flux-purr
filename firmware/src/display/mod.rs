@@ -33,13 +33,14 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
     dy: 0,
 };
 
-pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationOnly;
+pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenDemoLoop;
 pub const STARTUP_SCENE_SLUG: &str = "startup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBootFlow {
     CalibrationOnly,
     CalibrationThenDemoThenHold,
+    CalibrationThenDemoLoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

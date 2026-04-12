@@ -177,6 +177,40 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn play_demo_sequence_once<'a, BUS, DC, RST, PWM>(
+    display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
+    canvas: &mut DisplayCanvas,
+    elapsed_ms: &mut u64,
+    fan_controller: &mut FanCycleController,
+    active_command: &mut Option<FanCommand>,
+    fan_enable: &mut Output<'_>,
+    fan_pwm: &mut PWM,
+) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
+where
+    BUS: embedded_hal_async::spi::SpiDevice,
+    DC: embedded_hal::digital::OutputPin,
+    RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
+    BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
+    DC::Error: core::fmt::Debug,
+    PWM: SetDutyCycle<Error = core::convert::Infallible>,
+{
+    for scene in DEMO_SEQUENCE {
+        flush_scene(display, canvas, scene).await?;
+        info!("scene={=str}", scene.label());
+        wait_with_fan(
+            scene.dwell_millis(),
+            elapsed_ms,
+            fan_controller,
+            active_command,
+            fan_enable,
+            fan_pwm,
+        )
+        .await;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
 #[esp_hal_embassy::main]
 async fn main(_spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -284,6 +318,24 @@ async fn main(_spawner: Spawner) {
     match DEVICE_BOOT_FLOW {
         DeviceBootFlow::CalibrationOnly => {
             info!("device boot flow: calibration-only");
+
+            let mut heartbeat_seconds: u32 = 0;
+            loop {
+                wait_with_fan(
+                    2_000,
+                    &mut elapsed_ms,
+                    &mut fan_controller,
+                    &mut fan_active_command,
+                    &mut fan_enable,
+                    &mut fan_pwm,
+                )
+                .await;
+                heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
+                info!(
+                    "heartbeat startup-screen uptime_s={=u32}",
+                    heartbeat_seconds
+                );
+            }
         }
         DeviceBootFlow::CalibrationThenDemoThenHold => {
             info!("device boot flow: calibration -> demo -> hold");
@@ -296,13 +348,26 @@ async fn main(_spawner: Spawner) {
                 &mut fan_pwm,
             )
             .await;
-            for scene in DEMO_SEQUENCE {
-                flush_scene(&mut display, canvas, scene)
-                    .await
-                    .expect("failed to draw demo scene");
-                info!("scene={=str}", scene.label());
+            play_demo_sequence_once(
+                &mut display,
+                canvas,
+                &mut elapsed_ms,
+                &mut fan_controller,
+                &mut fan_active_command,
+                &mut fan_enable,
+                &mut fan_pwm,
+            )
+            .await
+            .expect("failed to play demo sequence");
+            flush_scene(&mut display, canvas, SceneId::StartupCalibration)
+                .await
+                .expect("failed to restore startup calibration screen");
+            info!("scene={=str}", SceneId::StartupCalibration.label());
+
+            let mut heartbeat_seconds: u32 = 0;
+            loop {
                 wait_with_fan(
-                    scene.dwell_millis(),
+                    2_000,
                     &mut elapsed_ms,
                     &mut fan_controller,
                     &mut fan_active_command,
@@ -310,30 +375,41 @@ async fn main(_spawner: Spawner) {
                     &mut fan_pwm,
                 )
                 .await;
+                heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
+                info!(
+                    "heartbeat startup-screen uptime_s={=u32}",
+                    heartbeat_seconds
+                );
             }
-            flush_scene(&mut display, canvas, SceneId::StartupCalibration)
-                .await
-                .expect("failed to restore startup calibration screen");
-            info!("scene={=str}", SceneId::StartupCalibration.label());
         }
-    }
-
-    let mut heartbeat_seconds: u32 = 0;
-    loop {
-        wait_with_fan(
-            2_000,
-            &mut elapsed_ms,
-            &mut fan_controller,
-            &mut fan_active_command,
-            &mut fan_enable,
-            &mut fan_pwm,
-        )
-        .await;
-        heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
-        info!(
-            "heartbeat startup-screen uptime_s={=u32}",
-            heartbeat_seconds
-        );
+        DeviceBootFlow::CalibrationThenDemoLoop => {
+            info!("device boot flow: calibration -> demo loop");
+            wait_with_fan(
+                1_200,
+                &mut elapsed_ms,
+                &mut fan_controller,
+                &mut fan_active_command,
+                &mut fan_enable,
+                &mut fan_pwm,
+            )
+            .await;
+            let mut cycle_count: u32 = 0;
+            loop {
+                play_demo_sequence_once(
+                    &mut display,
+                    canvas,
+                    &mut elapsed_ms,
+                    &mut fan_controller,
+                    &mut fan_active_command,
+                    &mut fan_enable,
+                    &mut fan_pwm,
+                )
+                .await
+                .expect("failed to play looping demo sequence");
+                cycle_count = cycle_count.wrapping_add(1);
+                info!("demo cycle complete count={=u32}", cycle_count);
+            }
+        }
     }
 }
 
