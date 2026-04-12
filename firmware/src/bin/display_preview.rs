@@ -48,7 +48,7 @@ fn main() -> ExitCode {
     let Some(scene) = SceneId::from_slug(&scene_slug) else {
         eprintln!("unknown scene '{scene_slug}'");
         eprintln!(
-            "known scenes: startup, solid-red, solid-green, solid-blue, checker-wide, checker-fine, shapes, lines, text, triangles, grid"
+            "known scenes: startup, solid-red, solid-green, solid-blue, checker-wide, checker-fine, shapes, lines, text, triangles, grid, frontpanel-home, frontpanel-preferences-preset-temp, frontpanel-preferences-active-cooling, frontpanel-preferences-wifi-info, frontpanel-preferences-device-info, frontpanel-preset-temp, frontpanel-preset-temp-disabled, frontpanel-active-cooling, frontpanel-wifi-info, frontpanel-device-info"
         );
         return ExitCode::FAILURE;
     };

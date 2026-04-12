@@ -35,7 +35,7 @@ use flux_purr_firmware::{
     board::s3_frontpanel,
     display::{
         DEMO_SEQUENCE, DEVICE_BOOT_FLOW, DISPLAY_PANEL_CONFIG, DeviceBootFlow, DisplayCanvas,
-        SceneId, render_scene,
+        FRONTPANEL_CAROUSEL_SEQUENCE, SceneId, render_scene,
     },
     pwm_percent_from_permille,
 };
@@ -177,9 +177,10 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn play_demo_sequence_once<'a, BUS, DC, RST, PWM>(
+async fn play_scene_sequence_once<'a, BUS, DC, RST, PWM>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
+    sequence: &[SceneId],
     elapsed_ms: &mut u64,
     fan_controller: &mut FanCycleController,
     active_command: &mut Option<FanCommand>,
@@ -194,7 +195,7 @@ where
     DC::Error: core::fmt::Debug,
     PWM: SetDutyCycle<Error = core::convert::Infallible>,
 {
-    for scene in DEMO_SEQUENCE {
+    for &scene in sequence {
         flush_scene(display, canvas, scene).await?;
         info!("scene={=str}", scene.label());
         wait_with_fan(
@@ -348,9 +349,10 @@ async fn main(_spawner: Spawner) {
                 &mut fan_pwm,
             )
             .await;
-            play_demo_sequence_once(
+            play_scene_sequence_once(
                 &mut display,
                 canvas,
+                &DEMO_SEQUENCE,
                 &mut elapsed_ms,
                 &mut fan_controller,
                 &mut fan_active_command,
@@ -395,9 +397,10 @@ async fn main(_spawner: Spawner) {
             .await;
             let mut cycle_count: u32 = 0;
             loop {
-                play_demo_sequence_once(
+                play_scene_sequence_once(
                     &mut display,
                     canvas,
+                    &DEMO_SEQUENCE,
                     &mut elapsed_ms,
                     &mut fan_controller,
                     &mut fan_active_command,
@@ -408,6 +411,35 @@ async fn main(_spawner: Spawner) {
                 .expect("failed to play looping demo sequence");
                 cycle_count = cycle_count.wrapping_add(1);
                 info!("demo cycle complete count={=u32}", cycle_count);
+            }
+        }
+        DeviceBootFlow::CalibrationThenFrontPanelLoop => {
+            info!("device boot flow: calibration -> frontpanel carousel");
+            wait_with_fan(
+                1_200,
+                &mut elapsed_ms,
+                &mut fan_controller,
+                &mut fan_active_command,
+                &mut fan_enable,
+                &mut fan_pwm,
+            )
+            .await;
+            let mut cycle_count: u32 = 0;
+            loop {
+                play_scene_sequence_once(
+                    &mut display,
+                    canvas,
+                    &FRONTPANEL_CAROUSEL_SEQUENCE,
+                    &mut elapsed_ms,
+                    &mut fan_controller,
+                    &mut fan_active_command,
+                    &mut fan_enable,
+                    &mut fan_pwm,
+                )
+                .await
+                .expect("failed to play frontpanel carousel");
+                cycle_count = cycle_count.wrapping_add(1);
+                info!("frontpanel cycle complete count={=u32}", cycle_count);
             }
         }
     }
