@@ -107,6 +107,18 @@ function fanLabel(fanState: FanState) {
   return { text: 'ON', color: palette.success }
 }
 
+function pdStatusLabel(pdState: Extract<FrontPanelScreen, { kind: 'home' }>['pdState']) {
+  if (pdState === 'negotiating') return { text: 'NG', color: palette.warning }
+  if (pdState === 'fault') return { text: 'ER', color: palette.warning }
+  return { text: 'OK', color: palette.success }
+}
+
+function homeFanValue(fanState: FanState) {
+  if (fanState === 'auto') return 'AU'
+  if (fanState === 'off') return 'OF'
+  return 'ON'
+}
+
 function fillRect(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -269,6 +281,25 @@ function drawRightInfoLine(
   })
 }
 
+function fitBitmapText(
+  text: string,
+  maxWidth: number,
+  scale = 1,
+  letterSpacing = 1,
+  trailing = '...'
+) {
+  if (measureBitmapText(text, scale, letterSpacing) <= maxWidth) return text
+
+  let truncated = text
+  while (truncated.length > 0) {
+    const next = `${truncated.slice(0, -1)}${trailing}`
+    if (measureBitmapText(next, scale, letterSpacing) <= maxWidth) return next
+    truncated = truncated.slice(0, -1)
+  }
+
+  return trailing
+}
+
 function drawMenuIcon(
   ctx: CanvasRenderingContext2D,
   itemId: MenuIconId,
@@ -314,7 +345,9 @@ function drawHomeScreen(
   screen: Extract<FrontPanelScreen, { kind: 'home' }>
 ) {
   const fan = fanLabel(screen.fanState)
-  const pwmWidth = Math.max(18, Math.round((screen.pwmPercent / 100) * 148))
+  const pd = pdStatusLabel(screen.pdState)
+  const pwmWidth =
+    screen.pwmPercent > 0 ? Math.max(18, Math.round((screen.pwmPercent / 100) * 148)) : 0
   const currentTempColor = temperatureColor(screen.currentTempC, screen.temperatureThresholdsC)
   const currentTemperature = splitTemperature(screen.currentTempC)
 
@@ -338,10 +371,32 @@ function drawHomeScreen(
     screen.protocol,
     formatVoltageValue(screen.protocol, screen.voltage)
   )
-  drawRightInfoLine(ctx, 29, fan.color, 'FAN', fan.text)
+  const compactFanText = homeFanValue(screen.fanState)
+  drawBitmapText(ctx, 'FAN', 80, 29, {
+    color: fan.color,
+    scale: 2,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, compactFanText, 124, 29, {
+    color: fan.color,
+    scale: 2,
+    letterSpacing: 1,
+    align: 'right',
+  })
+  drawBitmapText(ctx, 'PD', 128, 29, {
+    color: pd.color,
+    scale: 2,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, pd.text, 154, 29, {
+    color: pd.color,
+    scale: 2,
+    letterSpacing: 1,
+    align: 'right',
+  })
 
   fillRect(ctx, 4, 42, 152, 5, palette.panel)
-  fillRect(ctx, 6, 43, pwmWidth, 3, palette.accent)
+  if (pwmWidth > 0) fillRect(ctx, 6, 43, pwmWidth, 3, palette.accent)
 }
 
 function drawMenuScreen(
@@ -452,7 +507,7 @@ function drawWifiInfoScreen(
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
 
-  drawBitmapText(ctx, `SSID ${screen.ssid}`, 8, 6, {
+  drawBitmapText(ctx, fitBitmapText(`SSID ${screen.ssid}`, 144, 2, 1), 8, 6, {
     color: palette.text,
     scale: 2,
     letterSpacing: 1,
