@@ -9,28 +9,89 @@ export function FrontPanelGallery({ screens }: FrontPanelGalleryProps) {
   return (
     <div
       data-testid="front-panel-gallery"
-      className="grid gap-6 xl:grid-cols-3 md:grid-cols-2"
       style={{
         display: 'grid',
         gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-        gap: '24px',
+        gap: '36px 32px',
         alignItems: 'start',
       }}
     >
-      {screens.map((screen) => (
-        <section
-          key={screen.kind}
-          className="rounded-[32px] border border-slate-800 bg-slate-950/90 p-5 shadow-[0_20px_60px_rgba(2,6,23,0.45)]"
-          style={{
-            borderRadius: '32px',
-            border: '1px solid #1e293b',
-            background: 'rgba(2, 6, 23, 0.92)',
-            padding: '20px',
-            color: '#e2e8f0',
-            boxShadow: '0 20px 60px rgba(2, 6, 23, 0.45)',
-          }}
-        >
-          <FrontPanelDisplay screen={screen} scale={4} frameClassName="p-3" />
+      {screens.map((screen, index) => (
+        <section key={screen.kind} style={{ display: 'grid', gap: '12px' }}>
+          <div
+            style={{
+              display: 'grid',
+              gap: '8px',
+              paddingTop: '14px',
+              borderTop: index < 2 ? 'none' : '1px solid rgba(148, 163, 184, 0.18)',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'baseline',
+                gap: '16px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
+                <span
+                  style={{
+                    color: '#ff9a3c',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    letterSpacing: '0.22em',
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {String(index + 1).padStart(2, '0')}
+                </span>
+                <h3
+                  style={{
+                    margin: 0,
+                    color: '#f8fafc',
+                    fontSize: '22px',
+                    lineHeight: 1.1,
+                    fontWeight: 700,
+                  }}
+                >
+                  {screen.title}
+                </h3>
+              </div>
+              <span
+                style={{
+                  color: '#8ea3c6',
+                  fontSize: '12px',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.18em',
+                  whiteSpace: 'nowrap',
+                }}
+              >
+                {screen.kind}
+              </span>
+            </div>
+            {screen.subtitle ? (
+              <p
+                style={{
+                  margin: 0,
+                  color: '#94a3b8',
+                  fontSize: '14px',
+                  lineHeight: 1.5,
+                }}
+              >
+                {screen.subtitle}
+              </p>
+            ) : null}
+          </div>
+
+          <FrontPanelDisplay
+            screen={screen}
+            scale={4}
+            showFrame={false}
+            showMeta={false}
+            className="w-full"
+            frameClassName="p-0"
+          />
         </section>
       ))}
     </div>
