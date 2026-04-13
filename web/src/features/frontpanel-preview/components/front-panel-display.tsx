@@ -119,6 +119,24 @@ function fillRect(
   ctx.fillRect(x, y, width, height)
 }
 
+function fillPixelRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  color: string
+) {
+  if (width < 3 || height < 3) {
+    fillRect(ctx, x, y, width, height, color)
+    return
+  }
+
+  fillRect(ctx, x + 1, y, width - 2, 1, color)
+  fillRect(ctx, x, y + 1, width, height - 2, color)
+  fillRect(ctx, x + 1, y + height - 1, width - 2, 1, color)
+}
+
 function splitTemperature(tempC: number) {
   const fixed = tempC.toFixed(1)
   const [integerPart, decimalPart] = fixed.split('.')
@@ -138,44 +156,45 @@ function formatVoltageValue(protocol: PowerProtocol, voltage: number) {
   return `${voltage.toFixed(1)}V`
 }
 
-function drawTempUnitIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
-  const bitmap = [
-    '011000000000',
-    '100100111111',
-    '100101110000',
-    '011011000000',
-    '000011000000',
-    '000011000000',
-    '000011000000',
-    '000011000000',
-    '000011000000',
-    '000001111000',
-    '000000111111',
-  ] as const
+const celsiusUnitBitmap = [
+  '011000000000',
+  '100100111111',
+  '100101110000',
+  '011011000000',
+  '000011000000',
+  '000011000000',
+  '000011000000',
+  '000011000000',
+  '000011000000',
+  '000001111000',
+  '000000111111',
+] as const
 
-  bitmap.forEach((row, rowIndex) => {
+function drawCelsiusUnitBitmap(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  scale = 1
+) {
+  celsiusUnitBitmap.forEach((row, rowIndex) => {
     for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
       if (row[columnIndex] !== '1') continue
-      fillRect(ctx, x + columnIndex, y + rowIndex, 1, 1, color)
+      fillRect(ctx, x + columnIndex * scale, y + rowIndex * scale, scale, scale, color)
     }
   })
 }
 
+function drawTempUnitIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
+  drawCelsiusUnitBitmap(ctx, x, y, color, 1)
+}
+
 function measureLargeCelsiusIcon() {
-  return 14
+  return celsiusUnitBitmap[0].length
 }
 
 function drawLargeCelsiusIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
-  drawBitmapText(ctx, '°', x + 1, y, {
-    color,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, 'C', x + 6, y + 4, {
-    color,
-    scale: 2,
-    letterSpacing: 1,
-  })
+  drawCelsiusUnitBitmap(ctx, x, y, color, 1)
 }
 
 const sevenSegmentMap: Record<string, Array<'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g'>> = {
@@ -388,7 +407,7 @@ function drawMenuScreen(
     const x = 6 + index * 38
     const active = item.id === screen.selectedItem
     if (index > 0) fillRect(ctx, x - 2, 8, 1, 16, palette.border)
-    if (active) fillRect(ctx, x + 4, 8, 26, 16, palette.accent)
+    if (active) fillPixelRoundedRect(ctx, x + 4, 6, 26, 20, palette.accent)
     drawMenuIcon(ctx, item.id, x + 9, 8, active ? palette.bg : palette.text)
   })
 
