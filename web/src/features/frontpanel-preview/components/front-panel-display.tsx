@@ -107,18 +107,6 @@ function fanLabel(fanState: FanState) {
   return { text: 'ON', color: palette.success }
 }
 
-function pdStatusLabel(pdState: Extract<FrontPanelScreen, { kind: 'home' }>['pdState']) {
-  if (pdState === 'negotiating') return { text: 'NG', color: palette.warning }
-  if (pdState === 'fault') return { text: 'ER', color: palette.warning }
-  return { text: 'OK', color: palette.success }
-}
-
-function homeFanValue(fanState: FanState) {
-  if (fanState === 'auto') return 'AU'
-  if (fanState === 'off') return 'OF'
-  return 'ON'
-}
-
 function fillRect(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -150,22 +138,26 @@ function formatVoltageValue(protocol: PowerProtocol, voltage: number) {
   return `${voltage.toFixed(1)}V`
 }
 
-function drawTempUnitIcon(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  color: string,
-  scale = 1
-) {
-  drawBitmapText(ctx, '°', x + scale, y, {
-    color,
-    scale,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, 'C', x, y + 5 * scale, {
-    color,
-    scale,
-    letterSpacing: 1,
+function drawTempUnitIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
+  const bitmap = [
+    '011000000000',
+    '100100111111',
+    '100101110000',
+    '011011000000',
+    '000011000000',
+    '000011000000',
+    '000011000000',
+    '000011000000',
+    '000011000000',
+    '000001111000',
+    '000000111111',
+  ] as const
+
+  bitmap.forEach((row, rowIndex) => {
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      if (row[columnIndex] !== '1') continue
+      fillRect(ctx, x + columnIndex, y + rowIndex, 1, 1, color)
+    }
   })
 }
 
@@ -345,9 +337,7 @@ function drawHomeScreen(
   screen: Extract<FrontPanelScreen, { kind: 'home' }>
 ) {
   const fan = fanLabel(screen.fanState)
-  const pd = pdStatusLabel(screen.pdState)
-  const pwmWidth =
-    screen.pwmPercent > 0 ? Math.max(18, Math.round((screen.pwmPercent / 100) * 148)) : 0
+  const pwmWidth = Math.max(18, Math.round((screen.pwmPercent / 100) * 148))
   const currentTempColor = temperatureColor(screen.currentTempC, screen.temperatureThresholdsC)
   const currentTemperature = splitTemperature(screen.currentTempC)
 
@@ -355,12 +345,14 @@ function drawHomeScreen(
 
   fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
   drawSevenSegmentNumber(ctx, currentTemperature.integerPart, 8, 8, currentTempColor)
-  drawBitmapText(ctx, currentTemperature.decimalPart, 65, 8, {
+  fillRect(ctx, 60, 16, 2, 2, palette.text)
+  drawBitmapText(ctx, currentTemperature.decimalPart, 72, 8, {
     color: palette.text,
     scale: 2,
     letterSpacing: 1,
+    align: 'right',
   })
-  drawTempUnitIcon(ctx, 66, 21, palette.text, 1)
+  drawTempUnitIcon(ctx, 60, 24, palette.text)
 
   fillRect(ctx, 78, 4, 78, 36, palette.panel)
   drawRightInfoLine(ctx, 7, palette.warning, 'SET', formatTargetTemperature(screen.targetTempC))
@@ -371,32 +363,10 @@ function drawHomeScreen(
     screen.protocol,
     formatVoltageValue(screen.protocol, screen.voltage)
   )
-  const compactFanText = homeFanValue(screen.fanState)
-  drawBitmapText(ctx, 'FAN', 80, 29, {
-    color: fan.color,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, compactFanText, 124, 29, {
-    color: fan.color,
-    scale: 2,
-    letterSpacing: 1,
-    align: 'right',
-  })
-  drawBitmapText(ctx, 'PD', 128, 29, {
-    color: pd.color,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, pd.text, 154, 29, {
-    color: pd.color,
-    scale: 2,
-    letterSpacing: 1,
-    align: 'right',
-  })
+  drawRightInfoLine(ctx, 29, fan.color, 'FAN', fan.text)
 
   fillRect(ctx, 4, 42, 152, 5, palette.panel)
-  if (pwmWidth > 0) fillRect(ctx, 6, 43, pwmWidth, 3, palette.accent)
+  fillRect(ctx, 6, 43, pwmWidth, 3, palette.accent)
 }
 
 function drawMenuScreen(
