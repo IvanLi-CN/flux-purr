@@ -33,13 +33,15 @@ pub const DISPLAY_PANEL_CONFIG: PanelConfig = PanelConfig {
     dy: 0,
 };
 
-pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationOnly;
+pub const DEVICE_BOOT_FLOW: DeviceBootFlow = DeviceBootFlow::CalibrationThenFrontPanelLoop;
 pub const STARTUP_SCENE_SLUG: &str = "startup";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceBootFlow {
     CalibrationOnly,
     CalibrationThenDemoThenHold,
+    CalibrationThenDemoLoop,
+    CalibrationThenFrontPanelLoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,6 +57,16 @@ pub enum SceneId {
     DemoText,
     DemoTriangles,
     DemoGrid,
+    FrontPanelHome,
+    FrontPanelPreferencesPresetTemp,
+    FrontPanelPreferencesActiveCooling,
+    FrontPanelPreferencesWifiInfo,
+    FrontPanelPreferencesDeviceInfo,
+    FrontPanelPresetTemp,
+    FrontPanelPresetTempDisabled,
+    FrontPanelActiveCooling,
+    FrontPanelWifiInfo,
+    FrontPanelDeviceInfo,
 }
 
 impl SceneId {
@@ -71,6 +83,16 @@ impl SceneId {
             Self::DemoText => "demo-text",
             Self::DemoTriangles => "demo-triangles",
             Self::DemoGrid => "demo-grid",
+            Self::FrontPanelHome => "frontpanel-home",
+            Self::FrontPanelPreferencesPresetTemp => "frontpanel-preferences-preset-temp",
+            Self::FrontPanelPreferencesActiveCooling => "frontpanel-preferences-active-cooling",
+            Self::FrontPanelPreferencesWifiInfo => "frontpanel-preferences-wifi-info",
+            Self::FrontPanelPreferencesDeviceInfo => "frontpanel-preferences-device-info",
+            Self::FrontPanelPresetTemp => "frontpanel-preset-temp",
+            Self::FrontPanelPresetTempDisabled => "frontpanel-preset-temp-disabled",
+            Self::FrontPanelActiveCooling => "frontpanel-active-cooling",
+            Self::FrontPanelWifiInfo => "frontpanel-wifi-info",
+            Self::FrontPanelDeviceInfo => "frontpanel-device-info",
         }
     }
 
@@ -87,6 +109,16 @@ impl SceneId {
             Self::DemoText => "text",
             Self::DemoTriangles => "triangles",
             Self::DemoGrid => "grid",
+            Self::FrontPanelHome => "home",
+            Self::FrontPanelPreferencesPresetTemp => "preferences temp set",
+            Self::FrontPanelPreferencesActiveCooling => "preferences active cool",
+            Self::FrontPanelPreferencesWifiInfo => "preferences wifi",
+            Self::FrontPanelPreferencesDeviceInfo => "preferences device",
+            Self::FrontPanelPresetTemp => "preset temp",
+            Self::FrontPanelPresetTempDisabled => "preset temp disabled",
+            Self::FrontPanelActiveCooling => "active cooling",
+            Self::FrontPanelWifiInfo => "wifi info",
+            Self::FrontPanelDeviceInfo => "device info",
         }
     }
 
@@ -100,6 +132,16 @@ impl SceneId {
             | Self::DemoText
             | Self::DemoTriangles
             | Self::DemoGrid => 700,
+            Self::FrontPanelHome
+            | Self::FrontPanelPreferencesPresetTemp
+            | Self::FrontPanelPreferencesActiveCooling
+            | Self::FrontPanelPreferencesWifiInfo
+            | Self::FrontPanelPreferencesDeviceInfo
+            | Self::FrontPanelPresetTemp
+            | Self::FrontPanelPresetTempDisabled
+            | Self::FrontPanelActiveCooling
+            | Self::FrontPanelWifiInfo
+            | Self::FrontPanelDeviceInfo => 1_500,
         }
     }
 
@@ -116,6 +158,26 @@ impl SceneId {
             "demo-text" | "text" => Some(Self::DemoText),
             "demo-triangles" | "triangles" => Some(Self::DemoTriangles),
             "demo-grid" | "grid" => Some(Self::DemoGrid),
+            "frontpanel-home" | "home" => Some(Self::FrontPanelHome),
+            "frontpanel-preferences-preset-temp" | "preferences-preset-temp" => {
+                Some(Self::FrontPanelPreferencesPresetTemp)
+            }
+            "frontpanel-preferences-active-cooling" | "preferences-active-cooling" => {
+                Some(Self::FrontPanelPreferencesActiveCooling)
+            }
+            "frontpanel-preferences-wifi-info" | "preferences-wifi-info" => {
+                Some(Self::FrontPanelPreferencesWifiInfo)
+            }
+            "frontpanel-preferences-device-info" | "preferences-device-info" => {
+                Some(Self::FrontPanelPreferencesDeviceInfo)
+            }
+            "frontpanel-preset-temp" | "preset-temp" => Some(Self::FrontPanelPresetTemp),
+            "frontpanel-preset-temp-disabled" | "preset-temp-disabled" => {
+                Some(Self::FrontPanelPresetTempDisabled)
+            }
+            "frontpanel-active-cooling" | "active-cooling" => Some(Self::FrontPanelActiveCooling),
+            "frontpanel-wifi-info" | "wifi-info" => Some(Self::FrontPanelWifiInfo),
+            "frontpanel-device-info" | "device-info" => Some(Self::FrontPanelDeviceInfo),
             _ => None,
         }
     }
@@ -132,6 +194,19 @@ pub const DEMO_SEQUENCE: [SceneId; 10] = [
     SceneId::DemoText,
     SceneId::DemoTriangles,
     SceneId::DemoGrid,
+];
+
+pub const FRONTPANEL_CAROUSEL_SEQUENCE: [SceneId; 10] = [
+    SceneId::FrontPanelHome,
+    SceneId::FrontPanelPreferencesPresetTemp,
+    SceneId::FrontPanelPreferencesActiveCooling,
+    SceneId::FrontPanelPreferencesWifiInfo,
+    SceneId::FrontPanelPreferencesDeviceInfo,
+    SceneId::FrontPanelPresetTemp,
+    SceneId::FrontPanelPresetTempDisabled,
+    SceneId::FrontPanelActiveCooling,
+    SceneId::FrontPanelWifiInfo,
+    SceneId::FrontPanelDeviceInfo,
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +331,84 @@ pub fn render_scene(scene: SceneId, canvas: &mut DisplayCanvas) {
         SceneId::DemoText => render_text(canvas),
         SceneId::DemoTriangles => render_triangles(canvas),
         SceneId::DemoGrid => render_grid(canvas),
+        SceneId::FrontPanelHome => render_frontpanel_asset(canvas, FRONTPANEL_HOME_FRAME),
+        SceneId::FrontPanelPreferencesPresetTemp => {
+            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_PRESET_TEMP_FRAME)
+        }
+        SceneId::FrontPanelPreferencesActiveCooling => {
+            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_ACTIVE_COOLING_FRAME)
+        }
+        SceneId::FrontPanelPreferencesWifiInfo => {
+            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_WIFI_INFO_FRAME)
+        }
+        SceneId::FrontPanelPreferencesDeviceInfo => {
+            render_frontpanel_asset(canvas, FRONTPANEL_PREFERENCES_DEVICE_INFO_FRAME)
+        }
+        SceneId::FrontPanelPresetTemp => {
+            render_frontpanel_asset(canvas, FRONTPANEL_PRESET_TEMP_FRAME)
+        }
+        SceneId::FrontPanelPresetTempDisabled => {
+            render_frontpanel_asset(canvas, FRONTPANEL_PRESET_TEMP_DISABLED_FRAME)
+        }
+        SceneId::FrontPanelActiveCooling => {
+            render_frontpanel_asset(canvas, FRONTPANEL_ACTIVE_COOLING_FRAME)
+        }
+        SceneId::FrontPanelWifiInfo => render_frontpanel_asset(canvas, FRONTPANEL_WIFI_INFO_FRAME),
+        SceneId::FrontPanelDeviceInfo => {
+            render_frontpanel_asset(canvas, FRONTPANEL_DEVICE_INFO_FRAME)
+        }
+    }
+}
+
+const FRONTPANEL_HOME_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/frontpanel-carousel/home.rgb565le.bin"
+));
+const FRONTPANEL_PREFERENCES_PRESET_TEMP_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/frontpanel-carousel/preferences-preset-temp.rgb565le.bin"
+    ));
+const FRONTPANEL_PREFERENCES_ACTIVE_COOLING_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/frontpanel-carousel/preferences-active-cooling.rgb565le.bin"
+    ));
+const FRONTPANEL_PREFERENCES_WIFI_INFO_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/frontpanel-carousel/preferences-wifi-info.rgb565le.bin"
+    ));
+const FRONTPANEL_PREFERENCES_DEVICE_INFO_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/frontpanel-carousel/preferences-device-info.rgb565le.bin"
+    ));
+const FRONTPANEL_PRESET_TEMP_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/frontpanel-carousel/preset-temp.rgb565le.bin"
+));
+const FRONTPANEL_PRESET_TEMP_DISABLED_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
+    include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/frontpanel-carousel/preset-temp-disabled.rgb565le.bin"
+    ));
+const FRONTPANEL_ACTIVE_COOLING_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/frontpanel-carousel/active-cooling.rgb565le.bin"
+));
+const FRONTPANEL_WIFI_INFO_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/frontpanel-carousel/wifi-info.rgb565le.bin"
+));
+const FRONTPANEL_DEVICE_INFO_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/frontpanel-carousel/device-info.rgb565le.bin"
+));
+
+fn render_frontpanel_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
+    for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.chunks_exact(2)) {
+        *pixel = RawU16::new(u16::from_le_bytes([bytes[0], bytes[1]])).into();
     }
 }
 
