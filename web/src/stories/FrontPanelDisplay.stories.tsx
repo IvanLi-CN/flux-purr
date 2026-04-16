@@ -256,18 +256,18 @@ export const KeyTestInteractions: Story = {
 
     await step('short press keeps success color semantics', async () => {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
-      await expect(debug).toHaveTextContent('keyTest: RAW UP / UP / SHORT')
+      await expect(debug).toHaveTextContent('keyTest: U / U / SHORT')
       await expect(debug).toHaveTextContent('route: key-test')
     })
 
     await step('double press reports accent gesture', async () => {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-right-double'))
-      await expect(debug).toHaveTextContent('keyTest: RAW RIGHT / RIGHT / DOUBLE')
+      await expect(debug).toHaveTextContent('keyTest: R / R / DOUBLE')
     })
 
     await step('long press reports info-cyan gesture', async () => {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-left-long'))
-      await expect(debug).toHaveTextContent('keyTest: RAW LEFT / LEFT / LONG')
+      await expect(debug).toHaveTextContent('keyTest: D / L / LONG')
     })
   },
 }
@@ -283,6 +283,11 @@ export const AppInteractionFlow: Story = {
       await expect(debug).toHaveTextContent('route: dashboard')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
       await expect(debug).toHaveTextContent('targetTempC: 381')
+      for (let index = 0; index < 19; index += 1) {
+        await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      }
+      await expect(debug).toHaveTextContent('targetTempC: 400')
+      await expect(debug).toHaveTextContent('selectedPresetIndex: 4')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('heaterEnabled: true')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-double'))
@@ -309,7 +314,7 @@ export const AppInteractionFlow: Story = {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: preset-temp')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
-      await expect(debug).toHaveTextContent('targetTempC: 381')
+      await expect(debug).toHaveTextContent('targetTempC: 401')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: menu')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))

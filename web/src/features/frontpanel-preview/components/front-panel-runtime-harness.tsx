@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   applyFrontPanelInteraction,
   buildRuntimeScreenSnapshot,
@@ -32,9 +32,16 @@ export function FrontPanelRuntimeHarness({
   mode = 'app',
   scale = 5,
 }: FrontPanelRuntimeHarnessProps) {
-  const [state, setState] = useState<FrontPanelRuntimeState>(
-    initialState ?? buildRuntimeScreenSnapshot(mode)
+  const seedState = useMemo(
+    () => initialState ?? buildRuntimeScreenSnapshot(mode),
+    [initialState, mode]
   )
+  const [state, setState] = useState<FrontPanelRuntimeState>(seedState)
+
+  useEffect(() => {
+    setState(seedState)
+  }, [seedState])
+
   const screen = useMemo(() => frontPanelRuntimeToScreen(state), [state])
 
   return (

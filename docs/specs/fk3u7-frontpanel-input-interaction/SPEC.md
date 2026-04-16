@@ -245,6 +245,10 @@ None
 
 ### Firmware preview renders
 
+#### Key Test
+
+![Front panel firmware key test](./assets/key-test-long.zoom.png)
+
 #### Dashboard
 
 ![Front panel firmware dashboard](./assets/dashboard.zoom.png)

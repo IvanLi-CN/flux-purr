@@ -2,7 +2,7 @@ use heapless::Vec;
 
 pub mod render;
 
-pub const FRONTPANEL_DEBOUNCE_MS: u64 = 25;
+pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
 pub const FRONTPANEL_LONG_PRESS_MS: u64 = 500;
 pub const FRONTPANEL_DOUBLE_CLICK_MS: u64 = 250;
 pub const FRONTPANEL_PRESET_COUNT: usize = 9;
@@ -261,6 +261,26 @@ impl FrontPanelInputController {
             if pressed != tracker.raw_pressed {
                 tracker.raw_pressed = pressed;
                 tracker.last_raw_change_ms = now_ms;
+
+                if pressed {
+                    tracker.press_started_ms = Some(now_ms);
+                    tracker.long_fired = false;
+                } else if !tracker.stable_pressed {
+                    tracker.press_started_ms = None;
+                    tracker.long_fired = false;
+                }
+            }
+
+            if tracker.pending_short_release_ms.is_some_and(|released| {
+                now_ms.saturating_sub(released) > self.timings.double_click_ms
+            }) {
+                tracker.pending_short_release_ms = None;
+                let _ = result.events.push(KeyEvent {
+                    raw_key,
+                    key: logical_key,
+                    gesture: KeyGesture::ShortPress,
+                    at_ms: now_ms,
+                });
             }
 
             if tracker.raw_pressed != tracker.stable_pressed
@@ -268,7 +288,6 @@ impl FrontPanelInputController {
             {
                 tracker.stable_pressed = tracker.raw_pressed;
                 if tracker.stable_pressed {
-                    tracker.press_started_ms = Some(now_ms);
                     tracker.long_fired = false;
                 } else if tracker.press_started_ms.take().is_some() && !tracker.long_fired {
                     if let Some(previous_release_ms) = tracker.pending_short_release_ms {
@@ -303,20 +322,6 @@ impl FrontPanelInputController {
                     raw_key,
                     key: logical_key,
                     gesture: KeyGesture::LongPress,
-                    at_ms: now_ms,
-                });
-            }
-
-            if !tracker.stable_pressed
-                && tracker.pending_short_release_ms.is_some_and(|released| {
-                    now_ms.saturating_sub(released) > self.timings.double_click_ms
-                })
-            {
-                tracker.pending_short_release_ms = None;
-                let _ = result.events.push(KeyEvent {
-                    raw_key,
-                    key: logical_key,
-                    gesture: KeyGesture::ShortPress,
                     at_ms: now_ms,
                 });
             }
@@ -481,7 +486,9 @@ impl FrontPanelUiState {
 
     pub fn set_raw_state(&mut self, raw_state: FrontPanelRawState) {
         self.key_test.raw_state = raw_state;
-        self.key_test.last_raw_key = raw_state.first_pressed();
+        if let Some(raw_key) = raw_state.first_pressed() {
+            self.key_test.last_raw_key = Some(raw_key);
+        }
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
@@ -500,6 +507,10 @@ impl FrontPanelUiState {
     }
 
     pub fn matching_preset_slot(&self) -> Option<usize> {
+        if self.selected_preset() == Some(self.target_temp_c) {
+            return Some(self.selected_preset_slot);
+        }
+
         self.presets_c
             .iter()
             .position(|preset| preset.is_some_and(|value| value == self.target_temp_c))
@@ -785,6 +796,26 @@ mod tests {
     }
 
     #[test]
+    fn exact_twenty_ms_press_survives_debounce() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (5, raw_state(&[RawFrontPanelKey::Up])),
+                (25, raw_state(&[RawFrontPanelKey::Up])),
+                (35, raw_state(&[])),
+                (55, raw_state(&[])),
+                (320, raw_state(&[])),
+            ],
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, FrontPanelKey::Up);
+        assert_eq!(events[0].gesture, KeyGesture::ShortPress);
+    }
+
+    #[test]
     fn double_press_emits_single_double_event() {
         let mut controller = FrontPanelInputController::default();
         let events = collect_events(
@@ -829,6 +860,26 @@ mod tests {
     }
 
     #[test]
+    fn long_press_uses_the_raw_press_edge() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Right])),
+                (30, raw_state(&[RawFrontPanelKey::Right])),
+                (509, raw_state(&[RawFrontPanelKey::Right])),
+                (510, raw_state(&[RawFrontPanelKey::Right])),
+            ],
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, FrontPanelKey::Right);
+        assert_eq!(events[0].gesture, KeyGesture::LongPress);
+        assert_eq!(events[0].at_ms, 510);
+    }
+
+    #[test]
     fn different_keys_do_not_cross_contaminate_pending_clicks() {
         let mut controller = FrontPanelInputController::default();
         let events = collect_events(
@@ -849,6 +900,32 @@ mod tests {
 
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].key, FrontPanelKey::Down);
+        assert_eq!(events[0].gesture, KeyGesture::ShortPress);
+        assert_eq!(events[1].key, FrontPanelKey::Up);
+        assert_eq!(events[1].gesture, KeyGesture::ShortPress);
+    }
+
+    #[test]
+    fn slow_second_press_preserves_the_first_short_press() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Up])),
+                (40, raw_state(&[RawFrontPanelKey::Up])),
+                (50, raw_state(&[])),
+                (80, raw_state(&[])),
+                (300, raw_state(&[RawFrontPanelKey::Up])),
+                (325, raw_state(&[RawFrontPanelKey::Up])),
+                (335, raw_state(&[])),
+                (360, raw_state(&[])),
+                (620, raw_state(&[])),
+            ],
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].key, FrontPanelKey::Up);
         assert_eq!(events[0].gesture, KeyGesture::ShortPress);
         assert_eq!(events[1].key, FrontPanelKey::Up);
         assert_eq!(events[1].gesture, KeyGesture::ShortPress);
@@ -969,6 +1046,40 @@ mod tests {
         }));
         assert_eq!(state.presets_c[2], None);
         assert_eq!(state.target_temp_c, 0);
+    }
+
+    #[test]
+    fn matching_preset_slot_prefers_the_current_duplicate_slot() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.selected_preset_slot = 4;
+        state.presets_c[2] = Some(400);
+        state.target_temp_c = 399;
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Up,
+            key: FrontPanelKey::Up,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.target_temp_c, 400);
+        assert_eq!(state.selected_preset_slot, 4);
+    }
+
+    #[test]
+    fn key_test_release_keeps_the_last_raw_label() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
+        state.set_raw_state(raw_state(&[RawFrontPanelKey::Down]));
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Down,
+            key: FrontPanelKey::Left,
+            gesture: KeyGesture::LongPress,
+            at_ms: 0,
+        }));
+
+        state.set_raw_state(raw_state(&[]));
+        assert_eq!(state.key_test.last_raw_key, Some(RawFrontPanelKey::Down));
+        assert_eq!(state.key_test.last_key, Some(FrontPanelKey::Left));
+        assert_eq!(state.key_test.last_gesture, Some(KeyGesture::LongPress));
     }
 
     #[test]

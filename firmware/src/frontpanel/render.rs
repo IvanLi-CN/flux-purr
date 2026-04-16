@@ -19,6 +19,16 @@ const COLOR_ACCENT: Rgb565 = Rgb565::new(31, 38, 7);
 const COLOR_SUCCESS: Rgb565 = Rgb565::new(8, 54, 20);
 const COLOR_WARNING: Rgb565 = Rgb565::new(31, 52, 11);
 const COLOR_CYAN: Rgb565 = Rgb565::new(12, 54, 31);
+const COLOR_TEMP_MINT: Rgb565 = Rgb565::new(10, 56, 24);
+const COLOR_TEMP_LIME: Rgb565 = Rgb565::new(19, 55, 12);
+const TEMPERATURE_THRESHOLDS_C: [i16; 6] = [0, 80, 150, 220, 300, 420];
+const TEMPERATURE_COLORS: [Rgb565; 5] = [
+    COLOR_CYAN,
+    COLOR_TEMP_MINT,
+    COLOR_TEMP_LIME,
+    COLOR_WARNING,
+    COLOR_ACCENT,
+];
 
 pub fn render_frontpanel_ui(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     canvas.clear(COLOR_BG).ok();
@@ -110,6 +120,16 @@ fn measure_bitmap_text(text: &str, scale: u32, letter_spacing: u32) -> i32 {
     let scale = scale as i32;
     let spacing = letter_spacing as i32;
     (count * BITMAP_FONT_WIDTH + (count - 1) * spacing) * scale
+}
+
+fn temperature_color(value_c: i16) -> Rgb565 {
+    for index in 0..(TEMPERATURE_THRESHOLDS_C.len() - 1) {
+        if value_c < TEMPERATURE_THRESHOLDS_C[index + 1] {
+            return TEMPERATURE_COLORS[index];
+        }
+    }
+
+    TEMPERATURE_COLORS[TEMPERATURE_COLORS.len() - 1]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -487,9 +507,10 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 
 fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     let display_text = i16_to_text(state.target_temp_c);
+    let value_color = temperature_color(state.target_temp_c);
 
     fill_rect(canvas, 4, 4, 72, 36, COLOR_PANEL_STRONG);
-    draw_seven_segment_text(canvas, &display_text, 8, 8, COLOR_ACCENT);
+    draw_seven_segment_text(canvas, &display_text, 8, 8, value_color);
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
@@ -589,11 +610,10 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 
     let value = state.selected_preset().map(i16_to_text);
     let display = value.as_deref().unwrap_or("---");
-    let digit_color = if state.selected_preset().is_some() {
-        COLOR_ACCENT
-    } else {
-        COLOR_DISABLED
-    };
+    let digit_color = state
+        .selected_preset()
+        .map(temperature_color)
+        .unwrap_or(COLOR_DISABLED);
     let unit_color = if state.selected_preset().is_some() {
         COLOR_TEXT
     } else {
@@ -671,4 +691,23 @@ fn draw_device_info(canvas: &mut DisplayCanvas) {
     draw_text_mid(canvas, "BOARD FP-S3", 8, 6, COLOR_TEXT);
     draw_text_mid(canvas, "FW V0.3.0", 8, 19, COLOR_WARNING);
     draw_text_mid(canvas, "ID S3-001", 8, 32, COLOR_CYAN);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temperature_color_follows_threshold_bands() {
+        assert_eq!(temperature_color(-5), COLOR_CYAN);
+        assert_eq!(temperature_color(79), COLOR_CYAN);
+        assert_eq!(temperature_color(80), COLOR_TEMP_MINT);
+        assert_eq!(temperature_color(149), COLOR_TEMP_MINT);
+        assert_eq!(temperature_color(150), COLOR_TEMP_LIME);
+        assert_eq!(temperature_color(219), COLOR_TEMP_LIME);
+        assert_eq!(temperature_color(220), COLOR_WARNING);
+        assert_eq!(temperature_color(299), COLOR_WARNING);
+        assert_eq!(temperature_color(300), COLOR_ACCENT);
+        assert_eq!(temperature_color(450), COLOR_ACCENT);
+    }
 }

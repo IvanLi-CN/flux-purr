@@ -10,9 +10,9 @@ use flux_purr_firmware::{
         DISPLAY_PHYSICAL_WIDTH, DisplayCanvas,
     },
     frontpanel::{
-        ActiveCoolingMode, FrontPanelMenuItem, FrontPanelRawState, FrontPanelRoute,
-        FrontPanelRuntimeMode, FrontPanelUiState, KeyEvent, KeyGesture, RawFrontPanelKey,
-        render::render_frontpanel_ui,
+        ActiveCoolingMode, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState,
+        FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState, KeyEvent, KeyGesture,
+        RawFrontPanelKey, render::render_frontpanel_ui,
     },
 };
 
@@ -29,6 +29,22 @@ enum PreviewPreset {
     ActiveCooling,
     WifiInfo,
     DeviceInfo,
+}
+
+fn build_key_test_state(raw_key: RawFrontPanelKey, gesture: KeyGesture) -> FrontPanelUiState {
+    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
+    let mut raw_state = FrontPanelRawState::default();
+    raw_state.set_pressed(raw_key, true);
+    state.set_raw_state(raw_state);
+
+    let _ = state.handle_event(KeyEvent {
+        raw_key,
+        key: FrontPanelKeyMap::default().logical_from_raw(raw_key),
+        gesture,
+        at_ms: 0,
+    });
+
+    state
 }
 
 impl PreviewPreset {
@@ -69,37 +85,13 @@ impl PreviewPreset {
         match self {
             Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),
             Self::KeyTestShort => {
-                let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
-                let mut raw_state = FrontPanelRawState::default();
-                raw_state.set_pressed(RawFrontPanelKey::Up, true);
-                state.set_raw_state(raw_state);
-                let _ = state.handle_event(KeyEvent {
-                    raw_key: RawFrontPanelKey::Up,
-                    key: flux_purr_firmware::frontpanel::FrontPanelKey::Up,
-                    gesture: KeyGesture::ShortPress,
-                    at_ms: 0,
-                });
-                state
+                build_key_test_state(RawFrontPanelKey::Up, KeyGesture::ShortPress)
             }
             Self::KeyTestDouble => {
-                let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
-                let _ = state.handle_event(KeyEvent {
-                    raw_key: RawFrontPanelKey::CenterBoot,
-                    key: flux_purr_firmware::frontpanel::FrontPanelKey::Center,
-                    gesture: KeyGesture::DoublePress,
-                    at_ms: 0,
-                });
-                state
+                build_key_test_state(RawFrontPanelKey::CenterBoot, KeyGesture::DoublePress)
             }
             Self::KeyTestLong => {
-                let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
-                let _ = state.handle_event(KeyEvent {
-                    raw_key: RawFrontPanelKey::Left,
-                    key: flux_purr_firmware::frontpanel::FrontPanelKey::Left,
-                    gesture: KeyGesture::LongPress,
-                    at_ms: 0,
-                });
-                state
+                build_key_test_state(RawFrontPanelKey::Down, KeyGesture::LongPress)
             }
             Self::Dashboard => FrontPanelUiState::new(FrontPanelRuntimeMode::App),
             Self::DashboardManual => {

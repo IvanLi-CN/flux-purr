@@ -23,6 +23,7 @@ export type FrontPanelRuntimeMode = 'key-test' | 'app'
 export interface FrontPanelRuntimeInteraction {
   key: FrontPanelKeyId
   gesture: KeyGestureId
+  rawKey?: FrontPanelKeyId
 }
 
 export interface FrontPanelRuntimeState {
@@ -61,20 +62,32 @@ const keyMaskMap: Record<FrontPanelKeyId, string> = {
   up: 'MASK 10',
 }
 
+const rawToLogicalKeyMap: Record<FrontPanelKeyId, FrontPanelKeyId> = {
+  center: 'center',
+  right: 'right',
+  down: 'left',
+  left: 'down',
+  up: 'up',
+}
+
+const logicalToRawKeyMap = Object.fromEntries(
+  Object.entries(rawToLogicalKeyMap).map(([rawKey, logicalKey]) => [logicalKey, rawKey])
+) as Record<FrontPanelKeyId, FrontPanelKeyId>
+
 const rawLabelMap: Record<FrontPanelKeyId, string> = {
-  center: 'RAW CENTER',
-  right: 'RAW RIGHT',
-  down: 'RAW DOWN',
-  left: 'RAW LEFT',
-  up: 'RAW UP',
+  center: 'CTR',
+  right: 'R',
+  down: 'D',
+  left: 'L',
+  up: 'U',
 }
 
 const logicalLabelMap: Record<FrontPanelKeyId, string> = {
-  center: 'CENTER',
-  right: 'RIGHT',
-  down: 'DOWN',
-  left: 'LEFT',
-  up: 'UP',
+  center: 'CTR',
+  right: 'R',
+  down: 'D',
+  left: 'L',
+  up: 'U',
 }
 
 export function createFrontPanelRuntimeState(
@@ -94,12 +107,21 @@ export function createFrontPanelRuntimeState(
     keyTest: {
       activeKey: null,
       activeGesture: null,
-      rawKeyLabel: 'RAW ---',
-      logicalKeyLabel: 'LOG ---',
+      rawKeyLabel: '---',
+      logicalKeyLabel: '---',
       gestureLabel: 'IDLE',
       rawMaskLabel: 'MASK 00',
     },
   }
+}
+
+function matchingPresetIndex(state: FrontPanelRuntimeState, targetTempC: number) {
+  if (state.presetsC[state.selectedPresetIndex] === targetTempC) {
+    return state.selectedPresetIndex
+  }
+
+  const index = state.presetsC.indexOf(targetTempC)
+  return index >= 0 ? index : null
 }
 
 function sortedActivePresetEntries(state: FrontPanelRuntimeState) {
@@ -107,6 +129,16 @@ function sortedActivePresetEntries(state: FrontPanelRuntimeState) {
     .map((tempC, index) => ({ index, tempC }))
     .filter((entry): entry is { index: number; tempC: number } => entry.tempC != null)
     .sort((left, right) => left.tempC - right.tempC || left.index - right.index)
+}
+
+const FRONT_PANEL_TARGET_TEMP_MIN = -(2 ** 15)
+const FRONT_PANEL_TARGET_TEMP_MAX = 2 ** 15 - 1
+
+function saturatingAdjustTargetTemp(targetTempC: number, delta: number) {
+  return Math.min(
+    FRONT_PANEL_TARGET_TEMP_MAX,
+    Math.max(FRONT_PANEL_TARGET_TEMP_MIN, targetTempC + delta)
+  )
 }
 
 function findNeighborPreset(state: FrontPanelRuntimeState, ascending: boolean) {
@@ -127,15 +159,18 @@ function updateKeyTest(
   state: FrontPanelRuntimeState,
   interaction: FrontPanelRuntimeInteraction
 ): FrontPanelRuntimeState {
+  const logicalKey = interaction.key
+  const rawKey = interaction.rawKey ?? logicalToRawKeyMap[logicalKey]
+
   return {
     ...state,
     keyTest: {
-      activeKey: interaction.key,
+      activeKey: logicalKey,
       activeGesture: interaction.gesture,
-      rawKeyLabel: rawLabelMap[interaction.key],
-      logicalKeyLabel: logicalLabelMap[interaction.key],
+      rawKeyLabel: rawLabelMap[rawKey],
+      logicalKeyLabel: logicalLabelMap[logicalKey],
       gestureLabel: interaction.gesture.toUpperCase(),
-      rawMaskLabel: keyMaskMap[interaction.key],
+      rawMaskLabel: keyMaskMap[rawKey],
     },
   }
 }
@@ -149,10 +184,22 @@ export function applyFrontPanelInteraction(
 
   if (state.route === 'dashboard') {
     if (interaction.key === 'up' && interaction.gesture === 'short') {
-      return { ...state, targetTempC: state.targetTempC + 1 }
+      const nextTargetTempC = saturatingAdjustTargetTemp(state.targetTempC, 1)
+      return {
+        ...state,
+        targetTempC: nextTargetTempC,
+        selectedPresetIndex:
+          matchingPresetIndex(state, nextTargetTempC) ?? state.selectedPresetIndex,
+      }
     }
     if (interaction.key === 'down' && interaction.gesture === 'short') {
-      return { ...state, targetTempC: state.targetTempC - 1 }
+      const nextTargetTempC = saturatingAdjustTargetTemp(state.targetTempC, -1)
+      return {
+        ...state,
+        targetTempC: nextTargetTempC,
+        selectedPresetIndex:
+          matchingPresetIndex(state, nextTargetTempC) ?? state.selectedPresetIndex,
+      }
     }
     if (interaction.key === 'left' && interaction.gesture === 'short') {
       const neighbor = findNeighborPreset(state, false)
