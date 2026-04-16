@@ -72,9 +72,10 @@ export function FrontPanelDesignBoard() {
             160×50 UI design spec
           </h1>
           <p style={{ margin: 0, fontSize: '15px', lineHeight: 1.7, color: '#cbd5e1' }}>
-            Use the Dashboard as the canonical reference interface: large live temperature on the
-            left, compact status stack on the right, and a full-width heat bar at the bottom.
-            Secondary pages inherit the same palette, typography, and spacing rules.
+            Use the Dashboard as the canonical reference interface: large set temperature on the
+            left, heater and fan mock status on the right, and a compact status bar at the bottom.
+            Key Test, menu, and child pages inherit the same palette, bitmap typography, and spacing
+            rules.
           </p>
         </div>
 
@@ -177,7 +178,7 @@ export function FrontPanelDesignBoard() {
                   Reference render
                 </p>
                 <FrontPanelDisplay
-                  screen={frontPanelStoryStates.home}
+                  screen={frontPanelStoryStates.dashboard}
                   scale={5}
                   showFrame={false}
                   showMeta={false}
@@ -192,9 +193,9 @@ export function FrontPanelDesignBoard() {
                 }}
               >
                 {[
-                  ['Live temp', 'Left-dominant 7-segment value'],
-                  ['Status stack', 'Setpoint, protocol and fan on the right'],
-                  ['Heat bar', 'Single full-width energy bar at the bottom'],
+                  ['Set temp', 'Left-dominant 7-segment setpoint value'],
+                  ['Mock toggles', 'Heater and fan state stay on the right stack'],
+                  ['Bottom cue', 'Thin bar reinforces dashboard runtime state'],
                 ].map(([label, note]) => (
                   <div
                     key={label}
@@ -236,10 +237,11 @@ export function FrontPanelDesignBoard() {
             </p>
             <div style={{ display: 'grid', gap: '12px', marginTop: '16px' }}>
               {[
-                'Dashboard is the baseline: left = current temperature, right = compact status stack, bottom = full-width heat bar.',
+                'Dashboard is the baseline: left = set temperature, right = compact heater/fan stack, bottom = thin runtime cue bar.',
                 'Default safe area is 4 px inside any panel group; avoid adding decorative outer borders on the screen edge.',
-                'Preset page uses M1~M9: current slot = accent, enabled slot = primary text, disabled slot = muted gray.',
-                'Disabled preset renders ---℃. Enabled preset renders the actual value with the same numerals and color thresholds as Dashboard.',
+                'Key Test keeps the five-way diagram white at rest; short = Success, double = Accent, long = Info Cyan.',
+                'Preset page uses M1~M9: selected slot = accent, enabled slot = primary text, disabled slot = muted gray.',
+                'All mock pages keep short center exit and long center fallback exit unless the dashboard binds center long to the menu.',
               ].map((rule) => (
                 <div
                   key={rule}

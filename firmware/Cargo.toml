@@ -18,11 +18,17 @@ name = "display_preview"
 path = "src/bin/display_preview.rs"
 required-features = ["host-preview"]
 
+[[bin]]
+name = "frontpanel_preview"
+path = "src/bin/frontpanel_preview.rs"
+required-features = ["host-preview"]
+
 [features]
 default = ["esp32s3"]
 esp32s3 = []
 esp32c3 = []
 host-preview = []
+frontpanel-key-test = []
 
 [dependencies]
 embassy-futures = "0.1.2"

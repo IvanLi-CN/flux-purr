@@ -18,7 +18,7 @@ use esp_backtrace as _;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     clock::CpuClock,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     mcpwm::{McPwm, PeripheralClockConfig, operator::PwmPinConfig, timer::PwmWorkingMode},
     spi::{
         Mode as SpiMode,
@@ -31,13 +31,14 @@ use esp_hal::{
 use esp_println as _;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    FAN_PWM_FREQUENCY_HZ, FanCommand, FanCycleController, FanPhase,
+    FAN_PWM_FREQUENCY_HZ,
     board::s3_frontpanel,
-    display::{
-        DEMO_SEQUENCE, DEVICE_BOOT_FLOW, DISPLAY_PANEL_CONFIG, DeviceBootFlow, DisplayCanvas,
-        FRONTPANEL_CAROUSEL_SEQUENCE, SceneId, render_scene,
+    display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
+    frontpanel::{
+        FrontPanelInputController, FrontPanelInputTimings, FrontPanelKeyMap, FrontPanelRawState,
+        FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState, RawFrontPanelKey,
+        render::render_frontpanel_ui,
     },
-    pwm_percent_from_permille,
 };
 #[cfg(target_arch = "xtensa")]
 use gc9d01::{GC9D01, Timer as Gc9d01Timer};
@@ -70,76 +71,64 @@ impl Gc9d01Timer for DisplayTimer {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn fan_phase_label(phase: FanPhase) -> &'static str {
-    match phase {
-        FanPhase::High => "high",
-        FanPhase::Low => "low",
-        FanPhase::Mid => "mid",
-        FanPhase::Stop => "stop",
+struct FrontPanelInputs<'d> {
+    center: Input<'d>,
+    right: Input<'d>,
+    down: Input<'d>,
+    left: Input<'d>,
+    up: Input<'d>,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl<'d> FrontPanelInputs<'d> {
+    fn sample(&self) -> FrontPanelRawState {
+        let mut state = FrontPanelRawState::default();
+        state.set_pressed(RawFrontPanelKey::CenterBoot, self.center.is_low());
+        state.set_pressed(RawFrontPanelKey::Right, self.right.is_low());
+        state.set_pressed(RawFrontPanelKey::Down, self.down.is_low());
+        state.set_pressed(RawFrontPanelKey::Left, self.left.is_low());
+        state.set_pressed(RawFrontPanelKey::Up, self.up.is_low());
+        state
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn apply_fan_command<PWM>(fan_enable: &mut Output<'_>, fan_pwm: &mut PWM, command: FanCommand)
-where
-    PWM: SetDutyCycle<Error = core::convert::Infallible>,
-{
-    let duty_percent = pwm_percent_from_permille(command.pwm_permille);
-    let _ = fan_pwm.set_duty_cycle_percent(duty_percent);
-
-    if command.enabled {
-        fan_enable.set_high();
-    } else {
-        fan_enable.set_low();
+fn runtime_mode_label(mode: FrontPanelRuntimeMode) -> &'static str {
+    match mode {
+        FrontPanelRuntimeMode::KeyTest => "key-test",
+        FrontPanelRuntimeMode::App => "app",
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-fn log_fan_command(command: FanCommand, uptime_secs: u32) {
-    let duty_percent = pwm_percent_from_permille(command.pwm_permille);
+fn route_label(route: FrontPanelRoute) -> &'static str {
+    match route {
+        FrontPanelRoute::KeyTest => "key-test",
+        FrontPanelRoute::Dashboard => "dashboard",
+        FrontPanelRoute::Menu => "menu",
+        FrontPanelRoute::PresetTemp => "preset-temp",
+        FrontPanelRoute::ActiveCooling => "active-cooling",
+        FrontPanelRoute::WifiInfo => "wifi-info",
+        FrontPanelRoute::DeviceInfo => "device-info",
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn log_ui_state(state: &FrontPanelUiState) {
     info!(
-        "fan phase={=str} enabled={=bool} pwm_permille={=u16} pwm_percent={=u8} uptime_s={=u32}",
-        fan_phase_label(command.phase),
-        command.enabled,
-        command.pwm_permille,
-        duty_percent,
-        uptime_secs,
+        "ui route={=str} target_c={=i16} heater={=bool} fan={=bool}",
+        route_label(state.route),
+        state.target_temp_c,
+        state.heater_enabled,
+        state.fan_enabled,
     );
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn wait_with_fan<PWM>(
-    duration_ms: u64,
-    elapsed_ms: &mut u64,
-    fan_controller: &mut FanCycleController,
-    active_command: &mut Option<FanCommand>,
-    fan_enable: &mut Output<'_>,
-    fan_pwm: &mut PWM,
-) where
-    PWM: SetDutyCycle<Error = core::convert::Infallible>,
-{
-    let mut remaining_ms = duration_ms;
-    while remaining_ms > 0 {
-        let step_ms = remaining_ms.min(200);
-        EmbassyTimer::after_millis(step_ms).await;
-        *elapsed_ms = elapsed_ms.saturating_add(step_ms);
-        remaining_ms -= step_ms;
-
-        let uptime_secs = ((*elapsed_ms) / 1_000).min(u32::MAX as u64) as u32;
-        let next = fan_controller.command_at(uptime_secs);
-        if active_command.is_none_or(|current| current != next) {
-            apply_fan_command(fan_enable, fan_pwm, next);
-            log_fan_command(next, uptime_secs);
-            *active_command = Some(next);
-        }
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-fn present_scene<'a, BUS, DC, RST>(
+fn present_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
-    scene: SceneId,
+    state: &FrontPanelUiState,
 ) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -148,7 +137,7 @@ where
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
 {
-    render_scene(scene, canvas);
+    render_frontpanel_ui(canvas, state);
     display.write_area(
         0,
         0,
@@ -160,10 +149,10 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn flush_scene<'a, BUS, DC, RST>(
+async fn flush_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
-    scene: SceneId,
+    state: &FrontPanelUiState,
 ) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -172,43 +161,8 @@ where
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
 {
-    present_scene(display, canvas, scene)?;
+    present_ui(display, canvas, state)?;
     display.flush().await
-}
-
-#[cfg(target_arch = "xtensa")]
-async fn play_scene_sequence_once<'a, BUS, DC, RST, PWM>(
-    display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
-    canvas: &mut DisplayCanvas,
-    sequence: &[SceneId],
-    elapsed_ms: &mut u64,
-    fan_controller: &mut FanCycleController,
-    active_command: &mut Option<FanCommand>,
-    fan_enable: &mut Output<'_>,
-    fan_pwm: &mut PWM,
-) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
-where
-    BUS: embedded_hal_async::spi::SpiDevice,
-    DC: embedded_hal::digital::OutputPin,
-    RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
-    BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
-    DC::Error: core::fmt::Debug,
-    PWM: SetDutyCycle<Error = core::convert::Infallible>,
-{
-    for &scene in sequence {
-        flush_scene(display, canvas, scene).await?;
-        info!("scene={=str}", scene.label());
-        wait_with_fan(
-            scene.dwell_millis(),
-            elapsed_ms,
-            fan_controller,
-            active_command,
-            fan_enable,
-            fan_pwm,
-        )
-        .await;
-    }
-    Ok(())
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -227,17 +181,22 @@ async fn main(_spawner: Spawner) {
         s3_frontpanel::PIN_LCD_CS,
     );
     info!(
-        "boot fan_tach={=u8} fan_en={=u8} fan_pwm={=u8} pwm_hz={=u32}",
-        s3_frontpanel::PIN_FAN_TACH,
-        s3_frontpanel::PIN_FAN_EN,
-        s3_frontpanel::PIN_FAN_PWM,
-        FAN_PWM_FREQUENCY_HZ,
+        "boot keys center={=u8} right={=u8} down={=u8} left={=u8} up={=u8}",
+        s3_frontpanel::PIN_CENTER_KEY_BOOT,
+        s3_frontpanel::PIN_KEY_RIGHT,
+        s3_frontpanel::PIN_KEY_DOWN,
+        s3_frontpanel::PIN_KEY_LEFT,
+        s3_frontpanel::PIN_KEY_UP,
     );
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
+    let mut heater_pwm = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
+    heater_pwm.set_low();
+
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
+    fan_enable.set_low();
     let fan_clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40))
         .expect("failed to derive MCPWM peripheral clock");
     let mut fan_mcpwm = McPwm::new(peripherals.MCPWM0, fan_clock_cfg);
@@ -253,12 +212,17 @@ async fn main(_spawner: Spawner) {
         )
         .expect("failed to derive fan PWM timer clock");
     fan_mcpwm.timer0.start(fan_timer_cfg);
-    let mut fan_controller = FanCycleController::new();
-    let mut elapsed_ms: u64 = 0;
-    let initial_fan_command = fan_controller.command_at(0);
-    apply_fan_command(&mut fan_enable, &mut fan_pwm, initial_fan_command);
-    log_fan_command(initial_fan_command, 0);
-    let mut fan_active_command = Some(initial_fan_command);
+    let _ = fan_pwm.set_duty_cycle_percent(0);
+    info!("fan/heater outputs forced safe-off for mock-only runtime");
+
+    let input_cfg = InputConfig::default().with_pull(Pull::Up);
+    let inputs = FrontPanelInputs {
+        center: Input::new(peripherals.GPIO0, input_cfg),
+        right: Input::new(peripherals.GPIO16, input_cfg),
+        down: Input::new(peripherals.GPIO17, input_cfg),
+        left: Input::new(peripherals.GPIO18, input_cfg),
+        up: Input::new(peripherals.GPIO21, input_cfg),
+    };
 
     let spi = Spi::new(
         peripherals.SPI2,
@@ -311,136 +275,75 @@ async fn main(_spawner: Spawner) {
         .await
         .expect("failed to initialize GC9D01 display");
 
-    flush_scene(&mut display, canvas, SceneId::StartupCalibration)
+    render_scene(SceneId::StartupCalibration, canvas);
+    display.write_area(
+        0,
+        0,
+        DISPLAY_PANEL_CONFIG.width,
+        DISPLAY_PANEL_CONFIG.height,
+        canvas.pixels(),
+    );
+    display
+        .flush()
         .await
         .expect("failed to draw startup calibration screen");
     info!("scene={=str}", SceneId::StartupCalibration.label());
+    EmbassyTimer::after_millis(900).await;
 
-    match DEVICE_BOOT_FLOW {
-        DeviceBootFlow::CalibrationOnly => {
-            info!("device boot flow: calibration-only");
+    let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
+    info!(
+        "frontpanel runtime mode={=str}",
+        runtime_mode_label(runtime_mode)
+    );
 
-            let mut heartbeat_seconds: u32 = 0;
-            loop {
-                wait_with_fan(
-                    2_000,
-                    &mut elapsed_ms,
-                    &mut fan_controller,
-                    &mut fan_active_command,
-                    &mut fan_enable,
-                    &mut fan_pwm,
-                )
-                .await;
-                heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
-                info!(
-                    "heartbeat startup-screen uptime_s={=u32}",
-                    heartbeat_seconds
-                );
+    let mut controller = FrontPanelInputController::new(
+        FrontPanelKeyMap::default(),
+        FrontPanelInputTimings::default(),
+    );
+    let mut ui_state = FrontPanelUiState::new(runtime_mode);
+    let mut last_raw_state = FrontPanelRawState::default();
+    ui_state.set_raw_state(last_raw_state);
+    flush_ui(&mut display, canvas, &ui_state)
+        .await
+        .expect("failed to draw initial frontpanel UI");
+    log_ui_state(&ui_state);
+
+    let mut elapsed_ms: u64 = 0;
+    loop {
+        EmbassyTimer::after_millis(20).await;
+        elapsed_ms = elapsed_ms.saturating_add(20);
+
+        let raw_state = inputs.sample();
+        let sample = controller.sample(elapsed_ms, raw_state);
+        let mut needs_redraw = false;
+
+        if sample.raw_state != last_raw_state {
+            ui_state.set_raw_state(sample.raw_state);
+            last_raw_state = sample.raw_state;
+            info!("raw mask={=u8}", sample.raw_state.pressed_mask());
+            if runtime_mode == FrontPanelRuntimeMode::KeyTest {
+                needs_redraw = true;
             }
         }
-        DeviceBootFlow::CalibrationThenDemoThenHold => {
-            info!("device boot flow: calibration -> demo -> hold");
-            wait_with_fan(
-                1_200,
-                &mut elapsed_ms,
-                &mut fan_controller,
-                &mut fan_active_command,
-                &mut fan_enable,
-                &mut fan_pwm,
-            )
-            .await;
-            play_scene_sequence_once(
-                &mut display,
-                canvas,
-                &DEMO_SEQUENCE,
-                &mut elapsed_ms,
-                &mut fan_controller,
-                &mut fan_active_command,
-                &mut fan_enable,
-                &mut fan_pwm,
-            )
-            .await
-            .expect("failed to play demo sequence");
-            flush_scene(&mut display, canvas, SceneId::StartupCalibration)
-                .await
-                .expect("failed to restore startup calibration screen");
-            info!("scene={=str}", SceneId::StartupCalibration.label());
 
-            let mut heartbeat_seconds: u32 = 0;
-            loop {
-                wait_with_fan(
-                    2_000,
-                    &mut elapsed_ms,
-                    &mut fan_controller,
-                    &mut fan_active_command,
-                    &mut fan_enable,
-                    &mut fan_pwm,
-                )
-                .await;
-                heartbeat_seconds = heartbeat_seconds.wrapping_add(2);
-                info!(
-                    "heartbeat startup-screen uptime_s={=u32}",
-                    heartbeat_seconds
-                );
+        for event in sample.events {
+            info!(
+                "key raw={=str} logical={=str} gesture={=str} at_ms={=u64}",
+                event.raw_key.label(),
+                event.key.label(),
+                event.gesture.label(),
+                event.at_ms,
+            );
+            if ui_state.handle_event(event) {
+                needs_redraw = true;
             }
         }
-        DeviceBootFlow::CalibrationThenDemoLoop => {
-            info!("device boot flow: calibration -> demo loop");
-            wait_with_fan(
-                1_200,
-                &mut elapsed_ms,
-                &mut fan_controller,
-                &mut fan_active_command,
-                &mut fan_enable,
-                &mut fan_pwm,
-            )
-            .await;
-            let mut cycle_count: u32 = 0;
-            loop {
-                play_scene_sequence_once(
-                    &mut display,
-                    canvas,
-                    &DEMO_SEQUENCE,
-                    &mut elapsed_ms,
-                    &mut fan_controller,
-                    &mut fan_active_command,
-                    &mut fan_enable,
-                    &mut fan_pwm,
-                )
+
+        if needs_redraw {
+            flush_ui(&mut display, canvas, &ui_state)
                 .await
-                .expect("failed to play looping demo sequence");
-                cycle_count = cycle_count.wrapping_add(1);
-                info!("demo cycle complete count={=u32}", cycle_count);
-            }
-        }
-        DeviceBootFlow::CalibrationThenFrontPanelLoop => {
-            info!("device boot flow: calibration -> frontpanel carousel");
-            wait_with_fan(
-                1_200,
-                &mut elapsed_ms,
-                &mut fan_controller,
-                &mut fan_active_command,
-                &mut fan_enable,
-                &mut fan_pwm,
-            )
-            .await;
-            let mut cycle_count: u32 = 0;
-            loop {
-                play_scene_sequence_once(
-                    &mut display,
-                    canvas,
-                    &FRONTPANEL_CAROUSEL_SEQUENCE,
-                    &mut elapsed_ms,
-                    &mut fan_controller,
-                    &mut fan_active_command,
-                    &mut fan_enable,
-                    &mut fan_pwm,
-                )
-                .await
-                .expect("failed to play frontpanel carousel");
-                cycle_count = cycle_count.wrapping_add(1);
-                info!("frontpanel cycle complete count={=u32}", cycle_count);
-            }
+                .expect("failed to refresh frontpanel UI");
+            log_ui_state(&ui_state);
         }
     }
 }
@@ -448,6 +351,6 @@ async fn main(_spawner: Spawner) {
 #[cfg(not(target_arch = "xtensa"))]
 fn main() {
     println!(
-        "esp32s3-fan-cycle is now the GC9D01 async display bring-up binary; build with --target xtensa-esp32s3-none-elf --features esp32s3"
+        "esp32s3-fan-cycle now runs the interactive frontpanel mock runtime; build with --target xtensa-esp32s3-none-elf --features esp32s3[,frontpanel-key-test]"
     );
 }

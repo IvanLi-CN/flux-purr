@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef } from 'react'
 import { cn } from '@/lib/utils'
 import { drawBitmapText, measureBitmapText } from '../bitmap-font'
 import { frontPanelPalette, frontPanelTemperatureColors } from '../design-tokens'
-import type { FanState, FrontPanelScreen, PowerProtocol } from '../types'
+import type { FrontPanelKeyId, FrontPanelScreen, KeyGestureId } from '../types'
 
 const LOGICAL_WIDTH = 160
 const LOGICAL_HEIGHT = 50
 
 const palette = frontPanelPalette
 const temperatureColors = frontPanelTemperatureColors
+
 type MenuIconId = Extract<FrontPanelScreen, { kind: 'menu' }>['items'][number]['id']
 
 const menuMeta: Record<MenuIconId, { title: string }> = {
@@ -101,12 +102,6 @@ const menuIconBitmaps: Record<MenuIconId, readonly string[]> = {
   ],
 }
 
-function fanLabel(fanState: FanState) {
-  if (fanState === 'auto') return { text: 'AUTO', color: palette.cyan }
-  if (fanState === 'off') return { text: 'OFF', color: palette.warning }
-  return { text: 'ON', color: palette.success }
-}
-
 function fillRect(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -137,23 +132,16 @@ function fillPixelRoundedRect(
   fillRect(ctx, x + 1, y + height - 1, width - 2, 1, color)
 }
 
-function splitTemperature(tempC: number) {
-  const fixed = tempC.toFixed(1)
-  const [integerPart, decimalPart] = fixed.split('.')
-  return {
-    integerPart,
-    decimalPart: decimalPart ?? '0',
+function temperatureColor(
+  value: number,
+  thresholds: readonly [number, number, number, number, number, number]
+) {
+  for (let index = 0; index < thresholds.length - 1; index += 1) {
+    if (value < thresholds[index + 1]) {
+      return temperatureColors[Math.min(index, temperatureColors.length - 1)]
+    }
   }
-}
-
-function formatTargetTemperature(tempC: number) {
-  return Number.isInteger(tempC) ? String(tempC) : tempC.toFixed(1)
-}
-
-function formatVoltageValue(protocol: PowerProtocol, voltage: number) {
-  if (protocol === 'PPS') return `${voltage.toFixed(2)}V`
-  if (Number.isInteger(voltage)) return `${Math.round(voltage)}V`
-  return `${voltage.toFixed(1)}V`
+  return temperatureColors[temperatureColors.length - 1]
 }
 
 const celsiusUnitBitmap = [
@@ -186,14 +174,6 @@ function drawCelsiusUnitBitmap(
 }
 
 function drawTempUnitIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
-  drawCelsiusUnitBitmap(ctx, x, y, color, 1)
-}
-
-function measureLargeCelsiusIcon() {
-  return celsiusUnitBitmap[0].length
-}
-
-function drawLargeCelsiusIcon(ctx: CanvasRenderingContext2D, x: number, y: number, color: string) {
   drawCelsiusUnitBitmap(ctx, x, y, color, 1)
 }
 
@@ -260,19 +240,126 @@ function measureSevenSegmentNumber(text: string) {
   return text.length * 17 - 2
 }
 
-function temperatureColor(
-  currentTempC: number,
-  thresholds: readonly [number, number, number, number, number, number]
-) {
-  for (let index = 0; index < thresholds.length - 1; index += 1) {
-    if (currentTempC < thresholds[index + 1]) {
-      return temperatureColors[Math.min(index, temperatureColors.length - 1)]
-    }
-  }
-  return temperatureColors[temperatureColors.length - 1]
+const keyMaskColors: Record<KeyGestureId, string> = {
+  short: palette.success,
+  double: palette.accent,
+  long: palette.cyan,
 }
 
-function drawRightInfoLine(
+function activeKeyColor(
+  activeKey: FrontPanelKeyId | null,
+  target: FrontPanelKeyId,
+  gesture: KeyGestureId | null
+) {
+  if (activeKey !== target || !gesture) return palette.text
+  return keyMaskColors[gesture]
+}
+
+function drawKeyShape(ctx: CanvasRenderingContext2D, key: FrontPanelKeyId, color: string) {
+  ctx.fillStyle = color
+  ctx.beginPath()
+
+  if (key === 'up') {
+    ctx.moveTo(40, 7)
+    ctx.lineTo(30, 19)
+    ctx.lineTo(50, 19)
+  } else if (key === 'down') {
+    ctx.moveTo(40, 41)
+    ctx.lineTo(30, 29)
+    ctx.lineTo(50, 29)
+  } else if (key === 'left') {
+    ctx.moveTo(11, 24)
+    ctx.lineTo(23, 14)
+    ctx.lineTo(23, 34)
+  } else if (key === 'right') {
+    ctx.moveTo(69, 24)
+    ctx.lineTo(57, 14)
+    ctx.lineTo(57, 34)
+  } else {
+    ctx.arc(40, 24, 10, 0, Math.PI * 2)
+  }
+
+  ctx.closePath()
+  ctx.fill()
+}
+
+function drawKeyTestScreen(
+  ctx: CanvasRenderingContext2D,
+  screen: Extract<FrontPanelScreen, { kind: 'key-test' }>
+) {
+  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
+  fillRect(ctx, 4, 4, 152, 42, palette.panelStrong)
+  drawBitmapText(ctx, 'KEY TEST', 8, 7, {
+    color: palette.text,
+    scale: 2,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, 'SHORT=SUCCESS', 84, 8, {
+    color: palette.success,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, 'DOUBLE=ACCENT', 84, 15, {
+    color: palette.accent,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, 'LONG=INFO', 84, 22, {
+    color: palette.cyan,
+    scale: 1,
+    letterSpacing: 1,
+  })
+
+  ;(['up', 'left', 'center', 'right', 'down'] as const).forEach((key) => {
+    drawKeyShape(ctx, key, activeKeyColor(screen.activeKey, key, screen.activeGesture))
+  })
+
+  drawBitmapText(ctx, 'U', 39, 15, { color: palette.bg, scale: 1, letterSpacing: 1 })
+  drawBitmapText(ctx, 'D', 39, 34, { color: palette.bg, scale: 1, letterSpacing: 1 })
+  drawBitmapText(ctx, 'L', 17, 24, { color: palette.bg, scale: 1, letterSpacing: 1 })
+  drawBitmapText(ctx, 'R', 61, 24, { color: palette.bg, scale: 1, letterSpacing: 1 })
+  drawBitmapText(ctx, 'OK', 34, 24, { color: palette.bg, scale: 1, letterSpacing: 1 })
+
+  drawBitmapText(ctx, screen.rawKeyLabel.replace('RAW ', ''), 84, 32, {
+    color: palette.warning,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, screen.logicalKeyLabel.replace('LOGICAL ', '').replace('LOG ', ''), 112, 32, {
+    color: palette.text,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, screen.gestureLabel, 134, 32, {
+    color: screen.activeGesture ? keyMaskColors[screen.activeGesture] : palette.text,
+    scale: 1,
+    letterSpacing: 1,
+  })
+  drawBitmapText(ctx, screen.rawMaskLabel, 84, 41, {
+    color: palette.muted,
+    scale: 1,
+    letterSpacing: 1,
+  })
+}
+
+function drawMenuIcon(
+  ctx: CanvasRenderingContext2D,
+  itemId: MenuIconId,
+  x: number,
+  y: number,
+  color: string
+) {
+  const bitmap = menuIconBitmaps[itemId]
+  for (let rowIndex = 0; rowIndex < bitmap.length; rowIndex += 1) {
+    const row = bitmap[rowIndex]
+    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+      if (row[columnIndex] !== '1') continue
+      fillRect(ctx, x + columnIndex, y + rowIndex, 1, 1, color)
+    }
+  }
+}
+
+function drawStatusLine(
   ctx: CanvasRenderingContext2D,
   y: number,
   color: string,
@@ -292,40 +379,73 @@ function drawRightInfoLine(
   })
 }
 
-function fitBitmapText(
-  text: string,
-  maxWidth: number,
-  scale = 1,
-  letterSpacing = 1,
-  trailing = '...'
+function drawDashboardScreen(
+  ctx: CanvasRenderingContext2D,
+  screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
 ) {
-  if (measureBitmapText(text, scale, letterSpacing) <= maxWidth) return text
+  const valueColor = temperatureColor(screen.targetTempC, screen.temperatureThresholdsC)
+  const valueText = String(Math.round(screen.targetTempC))
 
-  let truncated = text
-  while (truncated.length > 0) {
-    const next = `${truncated.slice(0, -1)}${trailing}`
-    if (measureBitmapText(next, scale, letterSpacing) <= maxWidth) return next
-    truncated = truncated.slice(0, -1)
-  }
+  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
+  fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
+  drawSevenSegmentNumber(ctx, valueText, 8, 8, valueColor)
+  drawTempUnitIcon(ctx, 60, 24, palette.text)
 
-  return trailing
+  fillRect(ctx, 78, 4, 78, 36, palette.panel)
+  drawStatusLine(
+    ctx,
+    7,
+    screen.heaterEnabled ? palette.success : palette.warning,
+    'HEAT',
+    screen.heaterEnabled ? 'ON' : 'OFF'
+  )
+  drawStatusLine(
+    ctx,
+    18,
+    screen.fanEnabled ? palette.success : palette.disabled,
+    'FAN',
+    screen.fanEnabled ? 'RUN' : 'STOP'
+  )
+  drawStatusLine(ctx, 29, palette.cyan, 'MODE', 'APP')
+
+  fillRect(ctx, 4, 42, 152, 5, palette.panel)
+  fillRect(
+    ctx,
+    6,
+    43,
+    screen.heaterEnabled ? 116 : 42,
+    3,
+    screen.heaterEnabled ? palette.accent : palette.disabled
+  )
 }
 
-function drawMenuIcon(
+function drawMenuScreen(
   ctx: CanvasRenderingContext2D,
-  itemId: MenuIconId,
-  x: number,
-  y: number,
-  color: string
+  screen: Extract<FrontPanelScreen, { kind: 'menu' }>
 ) {
-  const bitmap = menuIconBitmaps[itemId]
-  for (let rowIndex = 0; rowIndex < bitmap.length; rowIndex += 1) {
-    const row = bitmap[rowIndex]
-    for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
-      if (row[columnIndex] !== '1') continue
-      fillRect(ctx, x + columnIndex, y + rowIndex, 1, 1, color)
-    }
-  }
+  const selectedItem =
+    screen.items.find((item) => item.id === screen.selectedItem) ?? screen.items[0]
+  const selectedMeta = menuMeta[selectedItem.id]
+  const titleWidth = measureBitmapText(selectedMeta.title, 2, 1)
+
+  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
+  fillRect(ctx, 4, 4, 152, 24, palette.panelStrong)
+  screen.items.forEach((item, index) => {
+    const x = 6 + index * 38
+    const active = item.id === screen.selectedItem
+
+    if (index > 0) fillRect(ctx, x - 2, 8, 1, 16, palette.border)
+    if (active) fillPixelRoundedRect(ctx, x + 4, 6, 26, 20, palette.accent)
+    drawMenuIcon(ctx, item.id, x + 9, 8, active ? palette.bg : palette.text)
+  })
+
+  fillRect(ctx, 4, 30, 152, 16, palette.panel)
+  drawMenuIcon(ctx, selectedItem.id, 8, 30, palette.warning)
+  drawBitmapText(ctx, selectedMeta.title, Math.round((160 - titleWidth) / 2), 34, {
+    color: palette.text,
+    scale: 2,
+    letterSpacing: 1,
+  })
 }
 
 const presetMarkerGlyph = ['10001', '11011', '10101', '10001', '10001'] as const
@@ -351,75 +471,6 @@ function drawPresetSlotLabel(
   })
 }
 
-function drawHomeScreen(
-  ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'home' }>
-) {
-  const fan = fanLabel(screen.fanState)
-  const pwmWidth = Math.max(18, Math.round((screen.pwmPercent / 100) * 148))
-  const currentTempColor = temperatureColor(screen.currentTempC, screen.temperatureThresholdsC)
-  const currentTemperature = splitTemperature(screen.currentTempC)
-
-  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-
-  fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
-  drawSevenSegmentNumber(ctx, currentTemperature.integerPart, 8, 8, currentTempColor)
-  fillRect(ctx, 60, 16, 2, 2, palette.text)
-  drawBitmapText(ctx, currentTemperature.decimalPart, 72, 8, {
-    color: palette.text,
-    scale: 2,
-    letterSpacing: 1,
-    align: 'right',
-  })
-  drawTempUnitIcon(ctx, 60, 24, palette.text)
-
-  fillRect(ctx, 78, 4, 78, 36, palette.panel)
-  drawRightInfoLine(ctx, 7, palette.warning, 'SET', formatTargetTemperature(screen.targetTempC))
-  drawRightInfoLine(
-    ctx,
-    18,
-    palette.cyan,
-    screen.protocol,
-    formatVoltageValue(screen.protocol, screen.voltage)
-  )
-  drawRightInfoLine(ctx, 29, fan.color, 'FAN', fan.text)
-
-  fillRect(ctx, 4, 42, 152, 5, palette.panel)
-  fillRect(ctx, 6, 43, pwmWidth, 3, palette.accent)
-}
-
-function drawMenuScreen(
-  ctx: CanvasRenderingContext2D,
-  screen: Extract<FrontPanelScreen, { kind: 'menu' }>
-) {
-  const selectedIndex = Math.max(
-    0,
-    screen.items.findIndex((item) => item.id === screen.selectedItem)
-  )
-  const selectedItem = screen.items[selectedIndex] ?? screen.items[0]
-  const selectedMeta = menuMeta[selectedItem.id]
-  const titleWidth = measureBitmapText(selectedMeta.title, 2, 1)
-
-  fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-
-  fillRect(ctx, 4, 4, 152, 24, palette.panelStrong)
-  screen.items.forEach((item, index) => {
-    const x = 6 + index * 38
-    const active = item.id === screen.selectedItem
-    if (index > 0) fillRect(ctx, x - 2, 8, 1, 16, palette.border)
-    if (active) fillPixelRoundedRect(ctx, x + 4, 6, 26, 20, palette.accent)
-    drawMenuIcon(ctx, item.id, x + 9, 8, active ? palette.bg : palette.text)
-  })
-
-  fillRect(ctx, 4, 30, 152, 16, palette.panel)
-  drawMenuIcon(ctx, selectedItem.id, 8, 30, palette.warning)
-  drawBitmapText(ctx, selectedMeta.title, Math.round((160 - titleWidth) / 2), 34, {
-    color: palette.text,
-    scale: 2,
-    letterSpacing: 1,
-  })
-}
-
 function drawPresetTempScreen(
   ctx: CanvasRenderingContext2D,
   screen: Extract<FrontPanelScreen, { kind: 'preset-temp' }>
@@ -433,47 +484,46 @@ function drawPresetTempScreen(
       ? palette.disabled
       : temperatureColor(selectedPreset, screen.temperatureThresholdsC)
   const unitColor = selectedPreset == null ? palette.disabled : palette.text
-  const totalSlots = Math.min(screen.presetsC.length, 9)
 
-  for (let index = 0; index < totalSlots; index += 1) {
+  for (let index = 0; index < Math.min(screen.presetsC.length, 9); index += 1) {
     const isSelected = index === screen.selectedPresetIndex
     const isEnabled = screen.presetsC[index] != null
     const color = isSelected ? palette.accent : isEnabled ? palette.text : palette.disabled
-    drawPresetSlotLabel(ctx, index, 4 + index * 17, 5, color)
+    drawPresetSlotLabel(ctx, index, 4 + index * 17, 1, color)
   }
 
   const digitsWidth = measureSevenSegmentNumber(displayText)
   const digitsY = 18
   const digitHeight = 26
   const unitGap = 3
-  const unitWidth = measureLargeCelsiusIcon()
-  const unitHeight = 14
+  const unitWidth = celsiusUnitBitmap[0].length
+  const unitHeight = 11
   const blockWidth = digitsWidth + unitGap + unitWidth
   const digitsX = Math.round((LOGICAL_WIDTH - blockWidth) / 2)
   const unitX = digitsX + digitsWidth + unitGap
   const unitY = digitsY + digitHeight - unitHeight
 
   drawSevenSegmentNumber(ctx, displayText, digitsX, digitsY, valueColor)
-  drawLargeCelsiusIcon(ctx, unitX, unitY, unitColor)
+  drawCelsiusUnitBitmap(ctx, unitX, unitY, unitColor, 1)
 }
 
 function drawActiveCoolingScreen(
   ctx: CanvasRenderingContext2D,
   screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>
 ) {
-  const fan = fanLabel(screen.fanState)
-  const stateText = screen.enabled ? 'ON' : 'OFF'
-  const stateColor = screen.enabled ? palette.success : palette.warning
+  const fanText =
+    !screen.enabled || screen.mode === 'off' ? 'OFF' : screen.mode === 'smart' ? 'AUTO' : 'ON'
+  const fanColor =
+    fanText === 'AUTO' ? palette.cyan : fanText === 'ON' ? palette.success : palette.warning
 
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-
   drawBitmapText(ctx, 'A-COOL', 8, 6, {
     color: palette.text,
     scale: 2,
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, stateText, 152, 6, {
-    color: stateColor,
+  drawBitmapText(ctx, screen.enabled ? 'ON' : 'OFF', 152, 6, {
+    color: screen.enabled ? palette.success : palette.warning,
     scale: 2,
     align: 'right',
     letterSpacing: 1,
@@ -483,11 +533,30 @@ function drawActiveCoolingScreen(
     scale: 2,
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, `FAN ${fan.text}`, 8, 33, {
-    color: fan.color,
+  drawBitmapText(ctx, `FAN ${fanText}`, 8, 33, {
+    color: fanColor,
     scale: 2,
     letterSpacing: 1,
   })
+}
+
+function fitBitmapText(
+  text: string,
+  maxWidth: number,
+  scale = 1,
+  letterSpacing = 1,
+  trailing = '...'
+) {
+  if (measureBitmapText(text, scale, letterSpacing) <= maxWidth) return text
+
+  let truncated = text
+  while (truncated.length > 0) {
+    const next = `${truncated.slice(0, -1)}${trailing}`
+    if (measureBitmapText(next, scale, letterSpacing) <= maxWidth) return next
+    truncated = truncated.slice(0, -1)
+  }
+
+  return trailing
 }
 
 function drawWifiInfoScreen(
@@ -495,7 +564,6 @@ function drawWifiInfoScreen(
   screen: Extract<FrontPanelScreen, { kind: 'wifi-info' }>
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-
   drawBitmapText(ctx, fitBitmapText(`SSID ${screen.ssid}`, 144, 2, 1), 8, 6, {
     color: palette.text,
     scale: 2,
@@ -518,7 +586,6 @@ function drawDeviceInfoScreen(
   screen: Extract<FrontPanelScreen, { kind: 'device-info' }>
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-
   drawBitmapText(ctx, `BOARD ${screen.board}`, 8, 6, {
     color: palette.text,
     scale: 2,
@@ -541,8 +608,11 @@ function drawFrontPanel(ctx: CanvasRenderingContext2D, screen: FrontPanelScreen)
   ctx.imageSmoothingEnabled = false
 
   switch (screen.kind) {
-    case 'home':
-      drawHomeScreen(ctx, screen)
+    case 'key-test':
+      drawKeyTestScreen(ctx, screen)
+      return
+    case 'dashboard':
+      drawDashboardScreen(ctx, screen)
       return
     case 'menu':
       drawMenuScreen(ctx, screen)
@@ -564,10 +634,12 @@ function drawFrontPanel(ctx: CanvasRenderingContext2D, screen: FrontPanelScreen)
 
 function ariaLabel(screen: FrontPanelScreen) {
   switch (screen.kind) {
-    case 'home':
-      return `front panel home screen ${screen.currentTempC} degrees`
+    case 'key-test':
+      return `front panel key test ${screen.gestureLabel}`
+    case 'dashboard':
+      return `front panel dashboard ${screen.targetTempC} degrees`
     case 'menu':
-      return `front panel preferences menu`
+      return 'front panel menu'
     case 'preset-temp': {
       const preset = screen.presetsC[screen.selectedPresetIndex]
       return preset == null

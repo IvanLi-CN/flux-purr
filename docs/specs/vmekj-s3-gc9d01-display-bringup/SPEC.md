@@ -4,31 +4,37 @@
 
 - Status: 已完成
 - Created: 2026-04-10
-- Last: 2026-04-11
+- Last: 2026-04-13
 
 ## 背景 / 问题陈述
 
 - 当前仓库的 `ESP32-S3` 固件入口只覆盖风扇 bring-up，LCD 相关引脚虽已冻结，但没有可烧录的显示驱动实现。
 - 主人已经明确要求使用 `gc9d01-rs` 作为显示驱动，并且硬约束必须走 **异步 SPI**，不能用 blocking SPI 兜底。
 - 若没有统一的显示测试界面、host 侧可控预览图，以及上板后用于拍照校验方向/颜色的流程，就无法可靠完成面板方向、偏移和颜色口径的闭环。
-- 本轮测试通过后，设备需要在启动校准结束后持续轮播一组已冻结的前面板界面，用于主人直接在硬件上检查最终 UI 观感。
+- 本 spec 完成时曾以“启动校准后进入界面轮播”作为 bring-up 验收；当前分支的运行态行为已迁移到 `#fk3u7`。
 
 ## 目标 / 非目标
+
+## 继承 / supersession 说明
+
+- 本 spec 继续保留 `GC9D01 async SPI + panel_160x50 + host preview` 的显示 bring-up 基线。
+- 启动后轮播、五向输入、Key Test 与 mock-only safe-off runtime 行为，现已由 `#fk3u7` 接管。
+- 若本 spec 与 `#fk3u7` 在运行态行为上冲突，以 `#fk3u7` 为准。
 
 ### Goals
 
 - 复用 `esp32s3-fan-cycle` binary 名称与 `mcu-agentd` artifact 路径，改造成 `ESP32-S3` 的 GC9D01 显示 bring-up 入口。
 - 接入 `gc9d01-rs` async driver，使用 `Embassy + esp-hal-embassy + SPI2.into_async()` 完成面板初始化与刷屏。
-- 新增一套共享显示场景：静态校准屏 + 启动后的前面板界面轮播，并完成最终收口为界面轮播常驻。
+- 新增一套共享显示场景与 host/device 共用渲染基线，支撑后续前面板 runtime 的 host preview 与硬件验证。
 - 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin` 与 `preview.png`。
 - 保持 host 侧质量门和 Xtensa 构建口径可运行，并通过 `mcu-agentd` 完成烧录/监看流程。
 
 ### Non-goals
 
-- 不扩展风扇策略范围；只保持已冻结的 `fan-cycle` 行为继续运行，不在本规格内新增 tach 闭环或新的风扇控制算法。
+- 不定义后续前面板输入状态机、Key Test 或 mock-only safe-off 输出行为；这些运行态约束由 `#fk3u7` 负责。
 - 不接入触摸、按键驱动的真实菜单状态机、动画切换或实时业务状态绑定。
 - 不修改 Web 控制台、HTTP API、CH224Q / heater / RTD 等其它硬件驱动。
-- 不在本轮实现自动持久化“校准已完成”状态；最终启动后轮播行为仍由固件常量/代码收口。
+- 不在本轮实现自动持久化“校准已完成”状态。
 
 ## 范围（Scope）
 
@@ -57,9 +63,8 @@
 - 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
-- bring-up 阶段必须支持：`静态校准屏 -> 界面轮播`。
-- 最终收口版本必须默认采用“上电后进入前面板界面轮播”。
-- 最终收口版本不得破坏已冻结的风扇循环逻辑；显示轮播固件运行时仍需继续驱动 `GPIO35/36` 对应的 fan-cycle。
+- bring-up 阶段必须支持：`静态校准屏 -> 前面板显示基线`。
+- 当前 display baseline 只负责证明驱动、方向、偏移、host preview 与 on-device 渲染一致；后续运行态是否轮播、是否 safe-off，由 `#fk3u7` 冻结。
 - host preview 必须复用同一套场景渲染代码，并产出 `framebuffer.bin` 与 `preview.png`。
 - 上板方向/颜色验收必须以主人的实拍照片为最终真相源；若有偏差，只允许在同一实现范围内微调 orientation / offset / 颜色口径。
 
@@ -78,11 +83,9 @@
 ### Core flows
 
 - 设备上电后初始化 Embassy 定时器、异步 SPI、GC9D01 driver 与背光控制。
-- bring-up 阶段固件先绘制静态校准屏并显示，随后按固定顺序轮播前面板最终界面集合。
-- 最终收口固件上电后先显示静态校准屏，再进入界面轮播并持续循环，等待下一次刷写或代码切换。
+- bring-up 阶段固件先绘制静态校准屏并显示，再进入前面板显示基线画面，用于确认驱动与方向口径。
 - host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
-- 硬件调试阶段，主人拍摄静态校准屏和界面轮播画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
-- 风扇控制与显示流程并行存在：显示轮播运行时，`fan-cycle` 继续按原冻结方案切换 `High -> Low -> Mid -> Stop`。
+- 硬件调试阶段，主人拍摄静态校准屏和前面板运行画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
 
 ### Edge cases / errors
 
@@ -109,10 +112,9 @@ None
 - Given host preview harness，When 生成启动屏 framebuffer 与 PNG，Then 预览图能显示方向标识、RGB 色块、灰阶块和文字标签。
 - Given device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release` 成功。
 - Given host 质量门，When 运行 `cargo test`、`cargo clippy --all-targets --all-features -D warnings`、`cargo build --release`，Then 全部通过。
-- Given bring-up 验证版固件，When 固件启动，Then 能先显示静态校准屏，再循环播放前面板最终界面。
+- Given bring-up 验证版固件，When 固件启动，Then 能先显示静态校准屏，再进入前面板显示基线画面。
 - Given 主人提供实拍照片，When 对比 host preview 与实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
-- Given 最终收口版本，When 设备再次上电，Then 在后续未替换固件前默认进入前面板界面轮播。
-- Given 最终收口版本，When 设备保持运行，Then 风扇继续按冻结的 `fan-cycle` 节奏工作，不因显示收口而退化为闲置。
+- Given 后续运行态规格需要交互或 safe-off 约束，When 查询本仓库 spec，Then 以 `#fk3u7` 为真相源，而不是回退到本 spec 的历史轮播描述。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -163,7 +165,6 @@ None
 - 风险：host preview 反映的是逻辑场景与 panel-order companion 的组合证据，不等于实机面板玻璃、背光、色温与拍照白平衡的真实观感。
 - 风险：若 `mcu-agentd` selector 未设置或串口被占用，会阻断上板验证。
 - 假设：当前前面板模组确实与 `gc9d01-rs` 的 `panel_160x50` 配置兼容。
-- 假设：最终启动后界面轮播无需在 EEPROM/NVS 中持久化状态，只需固件代码冻结默认行为。
 
 ## Visual Evidence
 
@@ -180,6 +181,7 @@ None
 - 2026-04-10: 落地共享显示场景、host preview harness 与 Xtensa 异步 SPI 显示入口，并生成首版启动屏视觉证据。
 - 2026-04-11: 根据实拍确认方向、偏移与颜色口径正确，最终固件先收口为静态启动屏常驻，同时保留冻结的 fan-cycle 行为。
 - 2026-04-12: 启动后显示流程改为前面板最终界面轮播，移除测试场景常驻路径，并在硬件日志中确认实际轮播的是 Home / Preferences / Preset / Cooling / WiFi / Device 界面。
+- 2026-04-13: 将运行态行为合同显式让位给 `#fk3u7`，本 spec 仅保留显示驱动、方向与 host preview 基线。
 
 ## 参考（References）
 

@@ -1,0 +1,108 @@
+import { useMemo, useState } from 'react'
+import {
+  applyFrontPanelInteraction,
+  buildRuntimeScreenSnapshot,
+  type FrontPanelRuntimeInteraction,
+  type FrontPanelRuntimeMode,
+  type FrontPanelRuntimeState,
+  frontPanelRuntimeToScreen,
+} from '../runtime'
+import type { FrontPanelKeyId, KeyGestureId } from '../types'
+import { FrontPanelDisplay } from './front-panel-display'
+
+interface FrontPanelRuntimeHarnessProps {
+  initialState?: FrontPanelRuntimeState
+  mode?: FrontPanelRuntimeMode
+  scale?: number
+}
+
+const keyOrder: ReadonlyArray<FrontPanelKeyId> = ['up', 'down', 'left', 'right', 'center']
+const gestureOrder: ReadonlyArray<KeyGestureId> = ['short', 'double', 'long']
+
+const shortcuts: ReadonlyArray<FrontPanelRuntimeInteraction> = keyOrder.flatMap((key) =>
+  gestureOrder.map((gesture) => ({ key, gesture }))
+)
+
+function interactionLabel(key: FrontPanelKeyId, gesture: KeyGestureId) {
+  return `${key} ${gesture}`
+}
+
+export function FrontPanelRuntimeHarness({
+  initialState,
+  mode = 'app',
+  scale = 5,
+}: FrontPanelRuntimeHarnessProps) {
+  const [state, setState] = useState<FrontPanelRuntimeState>(
+    initialState ?? buildRuntimeScreenSnapshot(mode)
+  )
+  const screen = useMemo(() => frontPanelRuntimeToScreen(state), [state])
+
+  return (
+    <div
+      className="grid gap-6 lg:grid-cols-[auto_minmax(320px,1fr)]"
+      data-testid="frontpanel-runtime-harness"
+    >
+      <FrontPanelDisplay screen={screen} scale={scale} />
+
+      <div className="grid gap-4 rounded-3xl border border-slate-700/70 bg-slate-950/90 p-5 text-slate-100 shadow-[0_20px_60px_rgba(2,6,23,0.35)]">
+        <div className="grid gap-2">
+          <h3 className="text-lg font-semibold">Interaction driver</h3>
+          <p className="text-sm text-slate-400">
+            Deterministic mock controls for Storybook play coverage and local review.
+          </p>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-3">
+          {shortcuts.map((interaction) => {
+            const label = interactionLabel(interaction.key, interaction.gesture)
+            return (
+              <button
+                key={label}
+                type="button"
+                className="rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-left text-sm font-medium text-slate-100 transition hover:border-cyan-400/70 hover:text-cyan-200"
+                data-testid={`frontpanel-action-${interaction.key}-${interaction.gesture}`}
+                onClick={() =>
+                  setState((current) => applyFrontPanelInteraction(current, interaction))
+                }
+              >
+                {label}
+              </button>
+            )
+          })}
+        </div>
+
+        <div
+          className="grid gap-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-4 text-sm"
+          data-testid="frontpanel-runtime-debug"
+        >
+          <div>
+            <span className="text-slate-400">route:</span> {state.route}
+          </div>
+          <div>
+            <span className="text-slate-400">targetTempC:</span> {state.targetTempC}
+          </div>
+          <div>
+            <span className="text-slate-400">heaterEnabled:</span> {String(state.heaterEnabled)}
+          </div>
+          <div>
+            <span className="text-slate-400">fanEnabled:</span> {String(state.fanEnabled)}
+          </div>
+          <div>
+            <span className="text-slate-400">selectedMenuItem:</span> {state.selectedMenuItem}
+          </div>
+          <div>
+            <span className="text-slate-400">selectedPresetIndex:</span> {state.selectedPresetIndex}
+          </div>
+          <div>
+            <span className="text-slate-400">activeCooling:</span>{' '}
+            {String(state.activeCoolingEnabled)} / {state.activeCoolingMode}
+          </div>
+          <div>
+            <span className="text-slate-400">keyTest:</span> {state.keyTest.rawKeyLabel} /{' '}
+            {state.keyTest.logicalKeyLabel} / {state.keyTest.gestureLabel}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

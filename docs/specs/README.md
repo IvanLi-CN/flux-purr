@@ -67,7 +67,8 @@
 | n6csh | Flux Purr 初始化（Hooks + Storybook + shadcn + UI UX Pro Max） | 已完成 | `n6csh-flux-purr-init/SPEC.md` | 2026-03-02 | Local PR-ready（未 push / 未建 PR） |
 | 744yg | PD Mini加热台二开资料采集与基础文档 | 已完成 | `744yg-mini-hotplate-doc-baseline/SPEC.md` | 2026-03-03 | Research: [mini-hotplate](../research/mini-hotplate/README.md) |
 | 8tesd | Flux Purr S3 风扇循环调速 bring-up | 已完成 | `8tesd-s3-fan-cycle-bringup/SPEC.md` | 2026-04-09 | PR #4 |
-| 223uj | Flux Purr 160×50 前面板 UI 契约 | 已完成 | `223uj-frontpanel-ui-contract/SPEC.md` | 2026-04-10 | Tiny front-panel preview + Storybook visual contract |
-| vmekj | Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与启动后界面轮播 | 已完成 | `vmekj-s3-gc9d01-display-bringup/SPEC.md` | 2026-04-12 | Orientation/colors confirmed on hardware photo; final firmware enters the front-panel UI carousel after startup calibration while preserving fan-cycle behavior |
+| 223uj | Flux Purr 160×50 前面板 UI 契约 | 已完成 | `223uj-frontpanel-ui-contract/SPEC.md` | 2026-04-16 | Visual baseline retained; Dashboard no longer shows preset label and `Preset Temp` keeps editable `---` slots per #fk3u7 |
+| vmekj | Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与启动后界面轮播 | 已完成 | `vmekj-s3-gc9d01-display-bringup/SPEC.md` | 2026-04-13 | Orientation/colors confirmed; runtime behavior later superseded by #fk3u7 while display bring-up baseline stays canonical |
+| fk3u7 | Flux Purr 前面板五向输入与交互导航 | 已完成 | `fk3u7-frontpanel-input-interaction/SPEC.md` | 2026-04-16 | Key Test mapping + mock-only app runtime verified on hardware; Storybook/firmware evidence refreshed |
 | jb85u | Release 失败 Telegram 告警接入 | 待实现 | `jb85u-release-failure-telegram-alerts/SPEC.md` | 2026-04-12 | Add a repo-local notifier for Release Web / Release Firmware and keep a manual Telegram smoke test path |
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
