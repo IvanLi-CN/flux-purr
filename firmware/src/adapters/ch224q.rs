@@ -67,6 +67,10 @@ impl VoltageRequest {
 pub const STATUS_REGISTER: u8 = 0x09;
 pub const VOLTAGE_CONTROL_REGISTER: u8 = 0x0A;
 
+pub const fn voltage_request_payload(request: VoltageRequest) -> [u8; 2] {
+    [VOLTAGE_CONTROL_REGISTER, request.control_register_value()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -100,5 +104,10 @@ mod tests {
     #[test]
     fn reports_requested_voltage_in_millivolts() {
         assert_eq!(VoltageRequest::V28.millivolts(), 28_000);
+    }
+
+    #[test]
+    fn encodes_voltage_request_payload() {
+        assert_eq!(voltage_request_payload(VoltageRequest::V12), [0x0A, 2]);
     }
 }

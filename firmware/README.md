@@ -58,9 +58,15 @@
   - `FAN_EN = GPIO35`
   - `FAN_PWM = GPIO36`
   - `FAN_TACH = GPIO34` (reserved only in this round)
-- Shared PWM frequency target remains `25 kHz`, but the current front-panel runtime keeps heater and fan outputs in `safe-off` while UI actions stay mock-only.
-- The Web and firmware reducers may toggle `heaterEnabled` / `fanEnabled` state for display, but those flags do not drive the physical output stage in this phase.
+- The current front-panel runtime keeps the fan path in `safe-off`, but drives `HEATER_PWM` with a bring-up test waveform at `1 kHz / 50% duty`.
+- The Web and firmware reducers may toggle `heaterEnabled` / `fanEnabled` state for display, but those flags do not yet close the real control loop for heater / fan behavior.
 - Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `esp32s3-fan-cycle` artifact on this branch.
+
+## CH224Q PD request bring-up
+
+- `GPIO8/9` host the shared I2C bus for `CH224Q` and `M24C64`.
+- The current bring-up runtime programs `CH224Q` register `0x0A` on boot and requests `12 V`.
+- Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the heater test continues.
 
 ## Build commands
 
@@ -126,4 +132,4 @@
 - The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
 - Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
-- This round does not implement touch input, heater power, RTD sensing, tach feedback, or production UI logic.
+- This round does not implement touch input, closed-loop heater control, RTD sensing, tach feedback, or production UI logic.

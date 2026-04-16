@@ -19,6 +19,7 @@ use esp_backtrace as _;
 use esp_hal::{
     clock::CpuClock,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
+    i2c::master::{Config as I2cConfig, I2c},
     mcpwm::{McPwm, PeripheralClockConfig, operator::PwmPinConfig, timer::PwmWorkingMode},
     spi::{
         Mode as SpiMode,
@@ -31,7 +32,8 @@ use esp_hal::{
 use esp_println as _;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    FAN_PWM_FREQUENCY_HZ,
+    DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ,
+    adapters::ch224q::{self, Address},
     board::s3_frontpanel,
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
@@ -63,6 +65,14 @@ const _: [(); s3_frontpanel::PIN_LCD_CS as usize] = [(); 15];
 const HEATER_TEST_PWM_FREQUENCY_HZ: u32 = 1_000;
 #[cfg(target_arch = "xtensa")]
 const HEATER_TEST_PWM_DUTY_PERCENT: u8 = 50;
+#[cfg(target_arch = "xtensa")]
+const CH224Q_I2C_FREQUENCY_HZ: u32 = 100_000;
+#[cfg(target_arch = "xtensa")]
+const CH224Q_RETRY_ATTEMPTS: u8 = 3;
+#[cfg(target_arch = "xtensa")]
+const CH224Q_RETRY_DELAY_MS: u64 = 50;
+#[cfg(target_arch = "xtensa")]
+const CH224Q_PD_SETTLE_MS: u64 = 150;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -170,6 +180,39 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn request_ch224q_voltage(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    request: ch224q::VoltageRequest,
+) -> Address {
+    let payload = ch224q::voltage_request_payload(request);
+
+    for attempt in 1..=CH224Q_RETRY_ATTEMPTS {
+        for address in [Address::Primary, Address::Secondary] {
+            if i2c.write(address.as_u8(), &payload).is_ok() {
+                info!(
+                    "ch224q request ok addr=0x{=u8:02x} reg=0x{=u8:02x} code={=u8} mv={=u16}",
+                    address.as_u8(),
+                    ch224q::VOLTAGE_CONTROL_REGISTER,
+                    request.control_register_value(),
+                    request.millivolts(),
+                );
+                return address;
+            }
+        }
+
+        info!(
+            "ch224q request retry={=u8}/{=u8} mv={=u16}",
+            attempt,
+            CH224Q_RETRY_ATTEMPTS,
+            request.millivolts(),
+        );
+        EmbassyTimer::after_millis(CH224Q_RETRY_DELAY_MS).await;
+    }
+
+    panic!("failed to program CH224Q voltage request");
+}
+
+#[cfg(target_arch = "xtensa")]
 #[esp_hal_embassy::main]
 async fn main(_spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
@@ -195,6 +238,22 @@ async fn main(_spawner: Spawner) {
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
+
+    let mut pd_i2c = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_hz(CH224Q_I2C_FREQUENCY_HZ)),
+    )
+    .expect("failed to create I2C0")
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9);
+    let ch224q_address = request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await;
+    info!(
+        "pd request locked addr=0x{=u8:02x} target_mv={=u16} settle_ms={=u64}",
+        ch224q_address.as_u8(),
+        DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+        CH224Q_PD_SETTLE_MS,
+    );
+    EmbassyTimer::after_millis(CH224Q_PD_SETTLE_MS).await;
 
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
     fan_enable.set_low();
