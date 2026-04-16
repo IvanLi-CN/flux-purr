@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod board;
 pub mod display;
+pub mod frontpanel;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_os = "none"))]
@@ -20,15 +21,6 @@ pub enum DeviceMode {
     Idle,
     Sampling,
     Fault,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrontPanelKey {
-    Center,
-    Right,
-    Down,
-    Left,
-    Up,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +42,7 @@ pub struct DeviceStatus {
     pub pd_state: PdState,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
-    pub frontpanel_key: Option<FrontPanelKey>,
+    pub frontpanel_key: Option<frontpanel::FrontPanelKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,7 +171,7 @@ fn snapshot_at(tick: u32, uptime_secs: u32) -> DeviceStatus {
         fan_enabled: fan_command.enabled,
         fan_pwm_permille: fan_command.pwm_permille,
         frontpanel_key: if tick.is_multiple_of(10) {
-            Some(FrontPanelKey::Center)
+            Some(frontpanel::FrontPanelKey::Center)
         } else {
             None
         },
@@ -266,7 +258,10 @@ mod tests {
         assert_eq!(value.pd_request_mv, 28_000);
         assert_eq!(value.pd_contract_mv, 28_000);
         assert_eq!(value.pd_state, PdState::Ready);
-        assert_eq!(value.frontpanel_key, Some(FrontPanelKey::Center));
+        assert_eq!(
+            value.frontpanel_key,
+            Some(frontpanel::FrontPanelKey::Center)
+        );
         assert!(value.fan_enabled);
         assert_eq!(value.fan_pwm_permille, FAN_HIGH_PWM_PERMILLE);
     }

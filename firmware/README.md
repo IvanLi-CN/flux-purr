@@ -6,7 +6,7 @@
 - Current bring-up board profile: `S3 frontpanel GC9D01 display baseline`
 - Runtime style:
   - host preview: shared scene renderer + framebuffer dump + PNG conversion
-  - device bring-up: `Embassy + esp-hal-embassy + SPI2.into_async() + MCPWM fan control`
+  - device runtime: `Embassy + esp-hal-embassy + SPI2.into_async() + five-way input mock runtime`
 
 ## GC9D01 display bring-up baseline
 
@@ -33,8 +33,9 @@
   - `R55 100 kOhm` pulls `BLK` up to `3V3`, so firmware must drive low or use inverted PWM for visible light
 - Current startup behavior:
   - boot -> startup calibration screen
-  - after a short settle, enter the looping front-panel UI carousel
-  - keep cycling through the finalized UI renders while the firmware stays alive
+  - after a short settle, enter the interactive front-panel runtime
+  - default build (`esp32s3`) enters the mock-only app dashboard/menu flow
+  - diagnostic build (`esp32s3,frontpanel-key-test`) enters `Key Test` for GPIO mapping calibration
 
 ## Shared scene rendering
 
@@ -45,38 +46,21 @@
   - RGB bar
   - grayscale bar
   - bottom panel label text
-- Front-panel carousel includes:
-  - dashboard / home
-  - preferences selector (all four focused entries)
-  - preset temperature enabled / disabled
-  - active cooling
-  - WiFi info
-  - device info
+- Front-panel runtime preview includes:
+  - key-test idle / short / double / long
+  - dashboard / dashboard manual
+  - menu / preset temp / active cooling / WiFi info / device info
 
-## Fan control contract
+## Fan / heater output contract
 
 - Shared GPIO contract:
+  - `HEATER_PWM = GPIO47`
   - `FAN_EN = GPIO35`
   - `FAN_PWM = GPIO36`
   - `FAN_TACH = GPIO34` (reserved only in this round)
-- Shared PWM frequency target: `25 kHz`
-- `fan_pwm_permille` is a normalized actuator command owned by firmware.
-- The shared firmware contract is intentionally voltage-agnostic:
-  - firmware does not model the real `FAN_VCC`
-  - firmware does not distinguish `fan-5v` vs `fan-12v`
-  - firmware does not infer millivolts from `fan_pwm_permille`
-- Actual rail range, silkscreen limits, capacitor rules, and board-specific tuning remain in hardware docs.
-- Future fan control is expected to close the loop on temperature / thermal error, not on inferred fan voltage.
-
-## Fan bring-up baseline
-
-- Cycle order: `10s high -> 10s low -> 10s mid -> 10s stop -> repeat`
-- Frozen duty points for smoke tests and bench bring-up:
-  - `high = 30‰`
-  - `mid = 300‰`
-  - `low = 500‰`
-  - `stop = EN low`
-- These points are normalized actuator setpoints only. They are not promises about the actual fan voltage on any PCB variant.
+- Shared PWM frequency target remains `25 kHz`, but the current front-panel runtime keeps heater and fan outputs in `safe-off` while UI actions stay mock-only.
+- The Web and firmware reducers may toggle `heaterEnabled` / `fanEnabled` state for display, but those flags do not drive the physical output stage in this phase.
+- Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `esp32s3-fan-cycle` artifact on this branch.
 
 ## Build commands
 
@@ -89,20 +73,22 @@
   - `cargo clippy --manifest-path firmware/Cargo.toml --all-targets --all-features -- -D warnings`
 - Host release build:
   - `cargo build --manifest-path firmware/Cargo.toml --release`
-- Xtensa display bring-up build:
+- Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release`
+- Xtensa key-test calibration build:
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,frontpanel-key-test --bin esp32s3-fan-cycle --release`
 
 ## Host preview workflow
 
-- Render the startup scene framebuffer:
-  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin display_preview -- startup docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.framebuffer.bin`
+- Render a front-panel runtime framebuffer:
+  - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/fk3u7-frontpanel-input-interaction/assets/dashboard.framebuffer.bin`
 - The preview tool writes two framebuffer artifacts:
-  - logical preview framebuffer: `startup.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
-  - panel-order companion: `startup.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
+  - logical preview framebuffer: `<preset>.framebuffer.bin` (`RGB565 LE`, `160x50`) for owner-facing PNG generation
+  - panel-order companion: `<preset>.panel.framebuffer.bin` (`RGB565 BE`, `50x160`) after applying the same GC9D01 orientation transform used on-device
 - Convert the logical preview framebuffer to PNG:
-  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.framebuffer.bin --out docs/specs/vmekj-s3-gc9d01-display-bringup/assets/startup.preview.png`
+  - `python3 /Users/ivan/.codex/skills/firmware-display-preview/scripts/fb_to_png.py --format rgb565 --endian le --width 160 --height 50 --in docs/specs/fk3u7-frontpanel-input-interaction/assets/dashboard.framebuffer.bin --out docs/specs/fk3u7-frontpanel-input-interaction/assets/dashboard.png`
 - Preview assets land under:
-  - `docs/specs/vmekj-s3-gc9d01-display-bringup/assets/`
+  - `docs/specs/fk3u7-frontpanel-input-interaction/assets/`
 
 ## MCU agentd flow
 
@@ -112,12 +98,13 @@
   - `firmware/target/xtensa-esp32s3-none-elf/release/esp32s3-fan-cycle`
 - Typical flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,frontpanel-key-test --bin esp32s3-fan-cycle --release`
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`
   - after the intended selector is confirmed, `mcu-agentd --non-interactive flash esp32s3_frontpanel`
   - `mcu-agentd --non-interactive monitor esp32s3_frontpanel --reset`
+  - 校准完成后，重新构建默认 `esp32s3` 版本并重复 flash/monitor 验证 App mock runtime
 
 ## Hardware baseline notes
 
@@ -132,7 +119,7 @@
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight is owned by MCU `GPIO13`, but at the system level it is active-low because the front-panel board routes `BLK` into a high-side PMOS gate.
-- `GPIO35/36/34` stay wired for the existing fan stage, and the display firmware continues to run the frozen fan-cycle behavior while the UI carousel loops on the LCD.
+- `GPIO35/36/34` 仍保留现有风扇硬件连线，但当前前面板 runtime 在本阶段保持 safe-off，不把 mock UI 状态接到真实风扇执行链路。
 
 ## Notes
 

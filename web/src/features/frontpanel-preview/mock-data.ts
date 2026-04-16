@@ -1,78 +1,61 @@
-import { frontPanelDefaultThresholdsC } from './design-tokens'
-import type { FrontPanelScreen, MenuItemId } from './types'
+import {
+  buildRuntimeScreenSnapshot,
+  type FrontPanelRuntimeInteraction,
+  frontPanelRuntimeToScreen,
+} from './runtime'
+import type { FrontPanelScreen } from './types'
 
-const menuItems: ReadonlyArray<{ id: MenuItemId; label: string }> = [
-  { id: 'preset-temp', label: 'Preset Temp' },
-  { id: 'active-cooling', label: 'Active Cooling' },
-  { id: 'wifi-info', label: 'WiFi Info' },
-  { id: 'device-info', label: 'Device Info' },
-]
+function repeatInteraction(
+  count: number,
+  key: FrontPanelRuntimeInteraction['key'],
+  gesture: FrontPanelRuntimeInteraction['gesture']
+): FrontPanelRuntimeInteraction[] {
+  return Array.from({ length: count }, () => ({ key, gesture }))
+}
+
+function screenFor(
+  mode: 'key-test' | 'app',
+  interactions: ReadonlyArray<FrontPanelRuntimeInteraction> = []
+): FrontPanelScreen {
+  return frontPanelRuntimeToScreen(buildRuntimeScreenSnapshot(mode, interactions))
+}
 
 export const frontPanelStoryStates = {
-  home: {
-    kind: 'home',
-    title: 'Home',
-    subtitle: 'Primary runtime screen',
-    currentTempC: 365.4,
-    targetTempC: 380.0,
-    pwmPercent: 72,
-    voltage: 20.08,
-    protocol: 'PPS',
-    fanState: 'on',
-    pdState: 'ready',
-    temperatureThresholdsC: frontPanelDefaultThresholdsC,
-  } satisfies FrontPanelScreen,
-  menu: {
-    kind: 'menu',
-    title: 'Preferences',
-    subtitle: 'Horizontal icon selector',
-    selectedItem: 'active-cooling',
-    items: menuItems,
-  } satisfies FrontPanelScreen,
-  presetTemp: {
-    kind: 'preset-temp',
-    title: 'Preset Temp',
-    subtitle: 'Preset temperature slots',
-    selectedPresetIndex: 3,
-    presetsC: [320, 340, null, 380, 400, null, 420, 450, null],
-    temperatureThresholdsC: frontPanelDefaultThresholdsC,
-  } satisfies FrontPanelScreen,
-  presetTempDisabled: {
-    kind: 'preset-temp',
-    title: 'Preset Temp Disabled',
-    subtitle: 'Disabled preset slot preview',
-    selectedPresetIndex: 5,
-    presetsC: [320, 340, null, 380, 400, null, 420, 450, null],
-    temperatureThresholdsC: frontPanelDefaultThresholdsC,
-  } satisfies FrontPanelScreen,
-  activeCooling: {
-    kind: 'active-cooling',
-    title: 'Active Cooling',
-    subtitle: 'Single-task cooling state page',
-    enabled: true,
-    mode: 'smart',
-    fanState: 'auto',
-  } satisfies FrontPanelScreen,
-  wifiInfo: {
-    kind: 'wifi-info',
-    title: 'WiFi Info',
-    subtitle: 'Compact connection summary',
-    ssid: 'FluxLab',
-    rssiDbm: -58,
-    ipAddress: '192.168.4.1',
-  } satisfies FrontPanelScreen,
-  deviceInfo: {
-    kind: 'device-info',
-    title: 'Device Info',
-    subtitle: 'Board and firmware identity',
-    board: 'FP-S3',
-    firmwareVersion: 'v0.2.0',
-    serial: 'S3-001',
-  } satisfies FrontPanelScreen,
+  keyTestIdle: screenFor('key-test'),
+  keyTestShort: screenFor('key-test', [{ key: 'up', gesture: 'short' }]),
+  keyTestDouble: screenFor('key-test', [{ key: 'center', gesture: 'double' }]),
+  keyTestLong: screenFor('key-test', [{ key: 'left', gesture: 'long' }]),
+  dashboard: screenFor('app'),
+  dashboardManual: screenFor('app', [
+    ...repeatInteraction(9, 'up', 'short'),
+    { key: 'center', gesture: 'short' },
+  ]),
+  menu: screenFor('app', [{ key: 'center', gesture: 'long' }]),
+  presetTemp: screenFor('app', [
+    { key: 'center', gesture: 'long' },
+    { key: 'left', gesture: 'short' },
+    { key: 'center', gesture: 'short' },
+  ]),
+  activeCooling: screenFor('app', [
+    { key: 'center', gesture: 'long' },
+    { key: 'center', gesture: 'short' },
+  ]),
+  wifiInfo: screenFor('app', [
+    { key: 'center', gesture: 'long' },
+    { key: 'right', gesture: 'short' },
+    { key: 'center', gesture: 'short' },
+  ]),
+  deviceInfo: screenFor('app', [
+    { key: 'center', gesture: 'long' },
+    { key: 'right', gesture: 'short' },
+    { key: 'right', gesture: 'short' },
+    { key: 'center', gesture: 'short' },
+  ]),
 } as const
 
 export const frontPanelGalleryOrder: FrontPanelScreen[] = [
-  frontPanelStoryStates.home,
+  frontPanelStoryStates.keyTestIdle,
+  frontPanelStoryStates.dashboard,
   frontPanelStoryStates.menu,
   frontPanelStoryStates.presetTemp,
   frontPanelStoryStates.activeCooling,

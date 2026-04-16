@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-10
-- Last: 2026-04-10
+- Last: 2026-04-16
 
 ## 背景 / 问题陈述
 
@@ -14,10 +14,16 @@
 
 ## 目标 / 非目标
 
+## 交互继承说明
+
+- 本 spec 继续作为 `160×50` 前面板的视觉 token、布局和渲染基线。
+- 五向输入、手势阈值、菜单路由和 Key Test 诊断行为，统一迁移到 `#fk3u7`。
+- 若 `#223uj` 与 `#fk3u7` 在导航或交互描述上冲突，以 `#fk3u7` 为准。
+
 ### Goals
 
 - 冻结 `160×50` 前面板主界面与两级设置菜单的视觉和导航契约。
-- 为 `Home`、`Menu L1`、`Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 提供确定性渲染源。
+- 为 `Dashboard`、`Key Test`、`Menu L1`、`Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 提供确定性渲染源。
 - 约束屏幕网格、字体预算、颜色 token、状态文案和五向键导航映射。
 - 在 `web/` 中提供可截图的 1:1 预览实现，作为当前最稳定的 render truth source。
 - 输出一张界面设计规范图，明确配色、字体、温度分段与小屏布局规则。
@@ -50,13 +56,15 @@
 
 - 逻辑分辨率固定为 `160×50`。
 - 主界面必须把温度作为第一视觉焦点，且在 1× 逻辑尺寸下仍能一眼识别。
-- 主界面必须同时显示：当前温度、设定温度、PWM/能量条、电压、风扇状态、连接/PD 状态。
+- 主界面必须同时显示：目标温度、heater mock 与 fan mock。
+- 主界面暂不显示当前命中的 preset 标识，保持既有视觉基线不变。
 - `Preset Temp` 页面顶部必须显示 `M1 ~ M9` 预设槽位。
 - 预设槽位状态必须固定为：当前项=主题色、已启用=正常文本色、未启用=置灰。
 - `Preset Temp` 必须支持 `---℃` 表示预设未启用。
+- `Preset Temp` 中灰色 `---` 槽位仍可进入与编辑；灰色仅表示当前值不可用。
 - `Preset Temp` 的实际温度显示必须复用 Dashboard 温度字体与温度分段颜色。
 - 一级菜单必须一次显示 `Preset Temp`、`Active Cooling`、`WiFi Info`、`Device Info` 四项。
-- 五向键映射必须冻结为：`上/下移动`、`中/右进入`、`左返回`。
+- 五向键的手势与路由行为不再由本 spec 冻结；输入与导航合同以 `#fk3u7` 为准。
 - 二级页面必须维持“单主任务”结构，不得塞入多个同级编辑面板。
 - 预览实现必须支持确定性截图，不依赖真实固件或真实设备。
 
@@ -94,7 +102,7 @@
 
 | Role | Spec | Usage |
 | --- | --- | --- |
-| Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Home / Preset 温度主值 |
+| Dashboard Numerals | 7-segment digits, `15×26` logical px per glyph | Dashboard / Preset 温度主值 |
 | UI Labels | 3×5 bitmap glyphs, scale `1` 或 `2` | 菜单标题、状态标签、`M1~M9` |
 | Temp Unit | stacked bitmap `℃` icon | 所有温度主值单位 |
 
@@ -106,15 +114,17 @@
 
 ### Core flows
 
-- `Home`
-  - 左侧为大温度区，显示当前温度和设定温度。
-  - 右侧为紧凑状态栈，依次承载 PWM、VIN、Fan、PD/Link。
+- `Dashboard`
+  - 左侧为大温度区，显示当前目标温度。
+  - 右侧为紧凑状态栈，依次承载 heater、fan 与 mock runtime 状态。
+  - 不显示当前命中的 `MAN / Mx` 或其他 preset 标签。
 - `Menu L1`
   - 采用横向图标菜单，四个入口按一行切换。
   - 底部显示当前选中项的标题与一行说明文字。
   - 当前选中项以橙色高亮底和反白图标突出。
 - `Preset Temp`
   - 顶部一行显示 `M1 ~ M9` 预设槽位。
+  - `M1 ~ M9` 标签靠近屏幕上边缘，与主值区拉开足够层级。
   - 当前选中槽位使用主题色；启用槽位用正常文本色；未启用槽位用灰色。
   - 中央主值必须使用与 Dashboard 相同的 7-segment 温度字体。
   - 未启用预设显示 `---℃`；启用预设显示实际温度值并复用 Dashboard 温度分段颜色。
@@ -139,7 +149,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `FrontPanelScreen` | TypeScript type | internal | New | None | web | Storybook / future firmware port | 前面板单屏渲染联合类型 |
 | `FrontPanelDisplay` | React component | internal | New | None | web | Storybook / preview pages | 160×50 逻辑屏预览组件 |
-| `frontPanelStoryStates` | Mock data | internal | New | None | web | Storybook | 冻结 6 个主要画面状态 |
+| `frontPanelStoryStates` | Mock data | internal | Updated | None | web | Storybook | 冻结 Key Test + Dashboard/Menu/subpage 主要画面状态 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -147,13 +157,14 @@ None
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `Home` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 当前温度仍是最显著元素，且 `PWM`、`VIN`、`Fan`、`PD` 均可读。
+- Given `Dashboard` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 目标温度仍是最显著元素，且 heater / fan 状态均可读。
 - Given `Menu L1`，When 在同屏展示 4 个菜单项，Then 所有菜单项完整可见且选中项不与其他行混淆。
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
+- Given `Preset Temp` 页面，When 某个槽位显示为灰色 `---`，Then 该槽位仍可被选中与重新调整为有效值。
 - Given `Active Cooling` 页面，When 观察屏幕，Then 开关状态和模式标签清晰分层，不依赖外部图例理解。
 - Given `WiFi Info` 页面，When 观察屏幕，Then `SSID/RSSI/IP` 均可读，且没有超过屏宽的断行。
 - Given `Device Info` 页面，When 观察屏幕，Then `Board/FW/Serial` 结构清楚且信息密度不显拥挤。
-- Given Storybook docs/gallery，When 打开前面板故事集，Then 至少存在 6 个可独立访问的主状态画面与 1 个总览画面。
+- Given Storybook docs/gallery，When 打开前面板故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页与 1 个总览画面。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -183,7 +194,7 @@ None
 
 - [x] M1: 冻结前面板小屏 UI spec、网格与导航契约
 - [x] M2: 落地前面板 160×50 预览组件与 mock 状态模型
-- [x] M3: 补齐 Storybook docs/gallery 与至少 6 个状态故事
+- [x] M3: 补齐 Storybook docs/gallery 与主要交互状态故事
 - [x] M4: 回填视觉证据并通过 web + Storybook 质量门
 
 ## 方案概述（Approach, high-level）
@@ -202,15 +213,11 @@ None
 ## Visual Evidence
 
 - 证据来源：Storybook `canvas` + docs gallery（`160×50` 逻辑像素，nearest-neighbor 放大展示）
-- 绑定说明：以下图片均来自 `web/src/stories/FrontPanelDisplay.stories.tsx`
-
-### Gallery overview
-
-![Front panel docs gallery](./assets/frontpanel-docs-gallery.png)
+- 绑定说明：以下图片来自 `web/src/stories/FrontPanelDisplay.stories.tsx`；真机校准与最新 runtime 联动验证由 `#fk3u7` 持续承接。
 
 ### Screen renders
 
-#### Home
+#### Dashboard
 
 ![Front panel home](./assets/frontpanel-home.png)
 
@@ -221,10 +228,6 @@ None
 #### Preset Temp
 
 ![Front panel preset temp](./assets/frontpanel-preset-temp.png)
-
-#### Preset Temp Disabled
-
-![Front panel preset temp disabled](./assets/frontpanel-preset-temp-disabled.png)
 
 #### Active Cooling
 
@@ -246,9 +249,10 @@ None
 
 - 2026-04-10: 创建前面板 UI 契约规格，冻结 `160×50` 小屏、主界面结构、两级菜单和视觉验证口径。
 - 2026-04-10: 完成 `FrontPanelDisplay` 预览组件、Storybook 状态画廊与 6 张前面板渲染图落盘。
+- 2026-04-16: 同步 `#fk3u7` 的最终口径，Dashboard 不再显示 preset 标签，`Preset Temp` 的灰色 `---` 槽位保持可进入可编辑。
 
 ## 参考（References）
 
-- `/Users/ivan/.codex/worktrees/5698/flux-purr/docs/hardware/s3-frontpanel-baseline.md`
-- `/Users/ivan/.codex/worktrees/5698/flux-purr/docs/interfaces/http-api.md`
+- `/Users/ivan/Projects/Ivan/flux-purr/docs/hardware/s3-frontpanel-baseline.md`
+- `/Users/ivan/Projects/Ivan/flux-purr/docs/interfaces/http-api.md`
 - `repo://IvanLi-CN/iso-usb-hub/sha/51a1a0e9bb0cd0857ff18fdcae34969442c80a35/contents/docs/dashboard_spec.md`

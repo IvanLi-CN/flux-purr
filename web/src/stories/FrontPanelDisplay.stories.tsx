@@ -1,7 +1,9 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import { FrontPanelDesignBoard } from '@/features/frontpanel-preview/components/front-panel-design-board'
 import { FrontPanelDisplay } from '@/features/frontpanel-preview/components/front-panel-display'
 import { FrontPanelGallery } from '@/features/frontpanel-preview/components/front-panel-gallery'
+import { FrontPanelRuntimeHarness } from '@/features/frontpanel-preview/components/front-panel-runtime-harness'
 import {
   frontPanelGalleryOrder,
   frontPanelStoryStates,
@@ -16,12 +18,12 @@ const meta = {
     docs: {
       description: {
         component:
-          '160×50 front-panel preview contract for the Flux Purr hotplate. The preview keeps temperature dominant and squeezes PWM, VIN, fan, and connection state into a compact right stack.',
+          '160×50 front-panel interaction contract for the Flux Purr hotplate. Storybook is the visual source for the two-stage rollout: key-test calibration first, then dashboard/menu mock navigation.',
       },
     },
   },
   args: {
-    screen: frontPanelStoryStates.home,
+    screen: frontPanelStoryStates.dashboard,
     scale: 6,
   },
 } satisfies Meta<typeof FrontPanelDisplay>
@@ -91,7 +93,7 @@ export const DocsGallery: Story = {
                   lineHeight: 1.04,
                 }}
               >
-                160×50 front-panel state gallery
+                160×50 front-panel interaction gallery
               </h1>
               <p
                 style={{
@@ -102,9 +104,9 @@ export const DocsGallery: Story = {
                   lineHeight: 1.7,
                 }}
               >
-                Dark-theme overview for the complete front-panel UI set. Dashboard stays dominant,
-                preferences use horizontal icon switching, and every secondary page inherits the
-                same palette, bitmap typography, and tiny-screen spacing rules.
+                Stage one verifies the five-way key mapping with short, double, and long gestures.
+                Stage two keeps dashboard, menu, and child-page behavior fully mock-driven so the UI
+                can be validated before any real heater or fan wiring lands.
               </p>
             </div>
 
@@ -112,12 +114,13 @@ export const DocsGallery: Story = {
               style={{
                 display: 'grid',
                 gap: '12px',
-                minWidth: '220px',
+                minWidth: '240px',
               }}
             >
               {[
                 ['Theme', 'Dark embedded UI'],
-                ['Screen set', '10 states'],
+                ['Screen set', '7 core screens'],
+                ['Gestures', 'Short / Double / Long'],
               ].map(([label, value]) => (
                 <div
                   key={label}
@@ -178,63 +181,51 @@ export const DesignSpec: Story = {
   ),
 }
 
-export const Home: Story = {
+export const KeyTestIdle: Story = {
   args: {
-    screen: frontPanelStoryStates.home,
+    screen: frontPanelStoryStates.keyTestIdle,
   },
 }
 
-export const MenuLevel1: Story = {
+export const KeyTestShort: Story = {
+  args: {
+    screen: frontPanelStoryStates.keyTestShort,
+  },
+}
+
+export const KeyTestDouble: Story = {
+  args: {
+    screen: frontPanelStoryStates.keyTestDouble,
+  },
+}
+
+export const KeyTestLong: Story = {
+  args: {
+    screen: frontPanelStoryStates.keyTestLong,
+  },
+}
+
+export const Dashboard: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboard,
+  },
+}
+
+export const DashboardManual: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardManual,
+  },
+}
+
+export const Menu: Story = {
   args: {
     screen: frontPanelStoryStates.menu,
-  },
-}
-
-export const PreferencesPresetTemp: Story = {
-  args: {
-    screen: {
-      ...frontPanelStoryStates.menu,
-      selectedItem: 'preset-temp',
-    },
-  },
-}
-
-export const PreferencesActiveCooling: Story = {
-  args: {
-    screen: {
-      ...frontPanelStoryStates.menu,
-      selectedItem: 'active-cooling',
-    },
-  },
-}
-
-export const PreferencesWifiInfo: Story = {
-  args: {
-    screen: {
-      ...frontPanelStoryStates.menu,
-      selectedItem: 'wifi-info',
-    },
-  },
-}
-
-export const PreferencesDeviceInfo: Story = {
-  args: {
-    screen: {
-      ...frontPanelStoryStates.menu,
-      selectedItem: 'device-info',
-    },
   },
 }
 
 export const PresetTemp: Story = {
   args: {
     screen: frontPanelStoryStates.presetTemp,
-  },
-}
-
-export const PresetTempDisabled: Story = {
-  args: {
-    screen: frontPanelStoryStates.presetTempDisabled,
   },
 }
 
@@ -253,5 +244,81 @@ export const WifiInfo: Story = {
 export const DeviceInfo: Story = {
   args: {
     screen: frontPanelStoryStates.deviceInfo,
+  },
+}
+
+export const KeyTestInteractions: Story = {
+  name: 'Interaction / Key Test',
+  render: () => <FrontPanelRuntimeHarness mode="key-test" scale={6} />,
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+
+    await step('short press keeps success color semantics', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await expect(debug).toHaveTextContent('keyTest: U / U / SHORT')
+      await expect(debug).toHaveTextContent('route: key-test')
+    })
+
+    await step('double press reports accent gesture', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-right-double'))
+      await expect(debug).toHaveTextContent('keyTest: R / R / DOUBLE')
+    })
+
+    await step('long press reports info-cyan gesture', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-left-long'))
+      await expect(debug).toHaveTextContent('keyTest: D / L / LONG')
+    })
+  },
+}
+
+export const AppInteractionFlow: Story = {
+  name: 'Interaction / App Flow',
+  render: () => <FrontPanelRuntimeHarness mode="app" scale={6} />,
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+
+    await step('dashboard short and double presses stay on dashboard', async () => {
+      await expect(debug).toHaveTextContent('route: dashboard')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await expect(debug).toHaveTextContent('targetTempC: 381')
+      for (let index = 0; index < 19; index += 1) {
+        await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      }
+      await expect(debug).toHaveTextContent('targetTempC: 400')
+      await expect(debug).toHaveTextContent('selectedPresetIndex: 4')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await expect(debug).toHaveTextContent('heaterEnabled: true')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-double'))
+      await expect(debug).toHaveTextContent('fanEnabled: true')
+    })
+
+    await step('center long enters menu and active cooling mock page', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
+      await expect(debug).toHaveTextContent('route: menu')
+      await expect(debug).toHaveTextContent('selectedMenuItem: active-cooling')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await expect(debug).toHaveTextContent('route: active-cooling')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-right-short'))
+      await expect(debug).toHaveTextContent('activeCooling: true / boost')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await expect(debug).toHaveTextContent('activeCooling: false / boost')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
+      await expect(debug).toHaveTextContent('route: menu')
+    })
+
+    await step('left moves to preset temp and exit fallback returns dashboard', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-left-short'))
+      await expect(debug).toHaveTextContent('selectedMenuItem: preset-temp')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await expect(debug).toHaveTextContent('route: preset-temp')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await expect(debug).toHaveTextContent('targetTempC: 401')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await expect(debug).toHaveTextContent('route: menu')
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
+      await expect(debug).toHaveTextContent('route: dashboard')
+    })
   },
 }
