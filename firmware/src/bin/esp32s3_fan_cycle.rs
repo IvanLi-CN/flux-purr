@@ -59,6 +59,10 @@ const _: [(); s3_frontpanel::PIN_LCD_BLK as usize] = [(); 13];
 const _: [(); s3_frontpanel::PIN_LCD_RES as usize] = [(); 14];
 #[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_LCD_CS as usize] = [(); 15];
+#[cfg(target_arch = "xtensa")]
+const HEATER_TEST_PWM_FREQUENCY_HZ: u32 = 1_000;
+#[cfg(target_arch = "xtensa")]
+const HEATER_TEST_PWM_DUTY_PERCENT: u8 = 50;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -192,28 +196,43 @@ async fn main(_spawner: Spawner) {
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
 
-    let mut heater_pwm = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
-    heater_pwm.set_low();
-
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
     fan_enable.set_low();
-    let fan_clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40))
+    let pwm_clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40))
         .expect("failed to derive MCPWM peripheral clock");
-    let mut fan_mcpwm = McPwm::new(peripherals.MCPWM0, fan_clock_cfg);
-    fan_mcpwm.operator0.set_timer(&fan_mcpwm.timer0);
-    let mut fan_pwm = fan_mcpwm
+    let mut mcpwm = McPwm::new(peripherals.MCPWM0, pwm_clock_cfg);
+
+    mcpwm.operator0.set_timer(&mcpwm.timer0);
+    let mut fan_pwm = mcpwm
         .operator0
         .with_pin_a(peripherals.GPIO36, PwmPinConfig::UP_ACTIVE_HIGH);
-    let fan_timer_cfg = fan_clock_cfg
+    let fan_timer_cfg = pwm_clock_cfg
         .timer_clock_with_frequency(
             99,
             PwmWorkingMode::Increase,
             Rate::from_hz(FAN_PWM_FREQUENCY_HZ),
         )
         .expect("failed to derive fan PWM timer clock");
-    fan_mcpwm.timer0.start(fan_timer_cfg);
+    mcpwm.timer0.start(fan_timer_cfg);
     let _ = fan_pwm.set_duty_cycle_percent(0);
-    info!("fan/heater outputs forced safe-off for mock-only runtime");
+
+    mcpwm.operator1.set_timer(&mcpwm.timer1);
+    let mut heater_pwm = mcpwm
+        .operator1
+        .with_pin_a(peripherals.GPIO47, PwmPinConfig::UP_ACTIVE_HIGH);
+    let heater_timer_cfg = pwm_clock_cfg
+        .timer_clock_with_frequency(
+            99,
+            PwmWorkingMode::Increase,
+            Rate::from_hz(HEATER_TEST_PWM_FREQUENCY_HZ),
+        )
+        .expect("failed to derive heater PWM timer clock");
+    mcpwm.timer1.start(heater_timer_cfg);
+    let _ = heater_pwm.set_duty_cycle_percent(HEATER_TEST_PWM_DUTY_PERCENT);
+    info!(
+        "heater PWM test active: gpio47 duty={=u8}% freq={=u32}Hz; fan remains safe-off",
+        HEATER_TEST_PWM_DUTY_PERCENT, HEATER_TEST_PWM_FREQUENCY_HZ,
+    );
 
     let input_cfg = InputConfig::default().with_pull(Pull::Up);
     let inputs = FrontPanelInputs {
