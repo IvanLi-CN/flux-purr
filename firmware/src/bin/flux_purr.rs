@@ -75,15 +75,15 @@ const HEATER_HARD_CUTOFF_TEMP_C: i16 = 420;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_CONTROL_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KP: f32 = 1.6;
+const HEATER_PID_KP: f32 = 2.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KI: f32 = 0.04;
+const HEATER_PID_KI: f32 = 0.08;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KD: f32 = 4.0;
+const HEATER_PID_KD: f32 = 1.8;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MIN: f32 = -800.0;
+const HEATER_PID_INTEGRAL_MIN: f32 = -1_200.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MAX: f32 = 800.0;
+const HEATER_PID_INTEGRAL_MAX: f32 = 1_200.0;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
@@ -1155,13 +1155,13 @@ async fn main(_spawner: Spawner) {
             );
 
             info!(
-                "heater pid temp_c={=f32} target_c={=i16} error_c={=f32} integral={=f32} deriv_cps={=f32} duty={=u8}% arm={=bool} fault={=str}",
-                latest_temp_c,
+                "heater loop set_c={=i16} temp_c={=f32} duty={=u8}% error_c={=f32} integral={=f32} deriv_cps={=f32} arm={=bool} fault={=str}",
                 ui_state.target_temp_c,
+                latest_temp_c,
+                pid_snapshot.duty_percent,
                 pid_snapshot.error_c,
                 pid_snapshot.integral,
                 pid_snapshot.derivative_c_per_s,
-                pid_snapshot.duty_percent,
                 ui_state.heater_enabled,
                 heater_controller
                     .fault_latched()
