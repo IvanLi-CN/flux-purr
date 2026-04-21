@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-04-21
 - Last: 2026-04-21
 
@@ -162,7 +162,7 @@ None
 - [x] M1: 落地正式 `HeaterController`、heater fault-latch 与 overtemp fan runtime
 - [x] M2: 落地 Dashboard 真实运行态字段、输入语义修正与渲染更新
 - [x] M3: 补齐单测、构建与 frontpanel preview 证据
-- [ ] M4: 完成板级 flash/monitor 验证并收敛到 merge-ready PR
+- [x] M4: 完成板级 flash/monitor 验证并收敛到 merge-ready PR
 
 ## 方案概述（Approach, high-level）
 
@@ -180,6 +180,7 @@ None
 ## 变更记录（Change log）
 
 - 2026-04-21: 创建正式 heater PID 闭环与前面板运行态同步 spec，冻结控制包线、fault-latch、fan hysteresis 与 PD 观测语义。
+- 2026-04-21: 收敛到 merge-ready PR #11，并补齐 preview / board proof 路径。
 
 ## 参考（References）
 
