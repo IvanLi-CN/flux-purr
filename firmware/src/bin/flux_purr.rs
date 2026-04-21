@@ -75,15 +75,15 @@ const HEATER_HARD_CUTOFF_TEMP_C: i16 = 420;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_CONTROL_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KP: f32 = 2.0;
+const HEATER_PID_KP: f32 = 1.9;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KI: f32 = 0.08;
+const HEATER_PID_KI: f32 = 0.02;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KD: f32 = 1.8;
+const HEATER_PID_KD: f32 = 0.8;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MIN: f32 = -1_200.0;
+const HEATER_PID_INTEGRAL_MIN: f32 = -500.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MAX: f32 = 1_200.0;
+const HEATER_PID_INTEGRAL_MAX: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
@@ -293,14 +293,19 @@ impl HeaterController {
 
         let error_c = f32::from(target_temp_c) - measured_temp_c;
         let dt_s = HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0;
-        self.integral = (self.integral + error_c * dt_s)
-            .clamp(HEATER_PID_INTEGRAL_MIN, HEATER_PID_INTEGRAL_MAX);
         let derivative_c_per_s = previous_temp
             .map(|previous| (measured_temp_c - previous) / dt_s)
             .unwrap_or(0.0);
-        let duty = (HEATER_PID_KP * error_c + HEATER_PID_KI * self.integral
-            - HEATER_PID_KD * derivative_c_per_s)
-            .clamp(0.0, 100.0);
+        let proportional_derivative = HEATER_PID_KP * error_c - HEATER_PID_KD * derivative_c_per_s;
+        let integral_candidate = (self.integral + error_c * dt_s)
+            .clamp(HEATER_PID_INTEGRAL_MIN, HEATER_PID_INTEGRAL_MAX);
+        let unsaturated_output = proportional_derivative + HEATER_PID_KI * self.integral;
+        let saturating_high = unsaturated_output >= 100.0 && error_c > 0.0;
+        let saturating_low = unsaturated_output <= 0.0 && error_c < 0.0;
+        if !(saturating_high || saturating_low) {
+            self.integral = integral_candidate;
+        }
+        let duty = (proportional_derivative + HEATER_PID_KI * self.integral).clamp(0.0, 100.0);
 
         self.last_measured_temp_c = Some(measured_temp_c);
         self.duty_percent = (duty + 0.5) as u8;
@@ -1209,6 +1214,25 @@ mod tests {
 
         assert!(cold.duty_percent > warm.duty_percent);
         assert!(warm.duty_percent >= near_setpoint.duty_percent);
+    }
+
+    #[test]
+    fn heater_pid_unwinds_after_sustained_saturation() {
+        let mut controller = HeaterController::new();
+
+        let mut snapshot = controller.update(380, 25.0, true);
+        assert_eq!(snapshot.duty_percent, 100);
+
+        for measured in [50.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0] {
+            snapshot = controller.update(380, measured, true);
+        }
+        assert!(snapshot.duty_percent < 100);
+
+        let near_setpoint = controller.update(380, 370.0, true);
+        assert!(near_setpoint.duty_percent < 20);
+
+        let at_target = controller.update(380, 380.0, true);
+        assert_eq!(at_target.duty_percent, 0);
     }
 
     #[test]
