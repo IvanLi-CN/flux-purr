@@ -112,7 +112,7 @@ impl PreviewPreset {
             Self::PresetTemp => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.route = FrontPanelRoute::PresetTemp;
-                state.selected_preset_slot = 3;
+                state.selected_preset_slot = 4;
                 state
             }
             Self::ActiveCooling => {

@@ -314,7 +314,7 @@ export const AppInteractionFlow: Story = {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: preset-temp')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
-      await expect(debug).toHaveTextContent('targetTempC: 401')
+      await expect(debug).toHaveTextContent('targetTempC: 181')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: menu')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))

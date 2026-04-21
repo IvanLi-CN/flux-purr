@@ -581,10 +581,9 @@ fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    const SLOT_LABELS: [&str; 9] = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9"];
+    const SLOT_LABELS: [&str; 10] = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"];
 
     for (index, label) in SLOT_LABELS.iter().enumerate().take(state.presets_c.len()) {
-        let x = 4 + index as i32 * 17;
         let color = if index == state.selected_preset_slot {
             COLOR_ACCENT
         } else if state.presets_c[index].is_some() {
@@ -592,7 +591,8 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         } else {
             COLOR_DISABLED
         };
-        draw_text_mid(canvas, label, x, 2, color);
+        let x = 2 + index as i32 * 16;
+        draw_text_small(canvas, label, x, 2, color);
     }
 
     let value = state.selected_preset().map(i16_to_text);

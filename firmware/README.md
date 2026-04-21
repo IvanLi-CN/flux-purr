@@ -61,6 +61,7 @@
 - Runtime truth source:
   - `current_temp_c` is the live PT1000-derived temperature sample from `GPIO2 / ADC1`
   - `target_temp_c` is clamped to `0..=400°C`
+  - `Preset Temp` defaults are `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`
   - `heater_enabled` is the user arm state toggled by center short-press
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle

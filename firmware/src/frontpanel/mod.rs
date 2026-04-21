@@ -5,7 +5,7 @@ pub mod render;
 pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
 pub const FRONTPANEL_LONG_PRESS_MS: u64 = 500;
 pub const FRONTPANEL_DOUBLE_CLICK_MS: u64 = 250;
-pub const FRONTPANEL_PRESET_COUNT: usize = 9;
+pub const FRONTPANEL_PRESET_COUNT: usize = 10;
 pub const FRONTPANEL_TARGET_TEMP_MIN_C: i16 = 0;
 pub const FRONTPANEL_TARGET_TEMP_MAX_C: i16 = 400;
 
@@ -472,17 +472,18 @@ impl FrontPanelUiState {
             heater_output_percent: 0,
             fan_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
-            selected_preset_slot: 3,
+            selected_preset_slot: 4,
             presets_c: [
-                Some(320),
-                Some(340),
-                None,
-                Some(380),
-                Some(400),
-                None,
-                None,
-                None,
-                None,
+                Some(50),
+                Some(100),
+                Some(120),
+                Some(150),
+                Some(180),
+                Some(200),
+                Some(210),
+                Some(220),
+                Some(250),
+                Some(300),
             ],
             active_cooling_enabled: true,
             active_cooling_mode: ActiveCoolingMode::Smart,
@@ -932,9 +933,30 @@ mod tests {
     }
 
     #[test]
+    fn default_presets_match_the_calibrated_temperature_ladder() {
+        let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        assert_eq!(
+            state.presets_c,
+            [
+                Some(50),
+                Some(100),
+                Some(120),
+                Some(150),
+                Some(180),
+                Some(200),
+                Some(210),
+                Some(220),
+                Some(250),
+                Some(300),
+            ]
+        );
+        assert_eq!(state.selected_preset_slot, 4);
+    }
+
+    #[test]
     fn dashboard_navigation_uses_sorted_preset_temperatures() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
-        state.target_temp_c = 389;
+        state.target_temp_c = 189;
 
         assert!(state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::Left,
@@ -942,7 +964,7 @@ mod tests {
             gesture: KeyGesture::ShortPress,
             at_ms: 0,
         }));
-        assert_eq!(state.target_temp_c, 380);
+        assert_eq!(state.target_temp_c, 180);
 
         assert!(state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::Right,
@@ -950,7 +972,7 @@ mod tests {
             gesture: KeyGesture::ShortPress,
             at_ms: 0,
         }));
-        assert_eq!(state.target_temp_c, 400);
+        assert_eq!(state.target_temp_c, 200);
     }
 
     #[test]
@@ -1011,6 +1033,7 @@ mod tests {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         state.route = FrontPanelRoute::PresetTemp;
         state.selected_preset_slot = 1;
+        state.presets_c[2] = None;
 
         assert!(state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::Right,
@@ -1052,8 +1075,9 @@ mod tests {
     fn matching_preset_slot_prefers_the_current_duplicate_slot() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         state.selected_preset_slot = 4;
-        state.presets_c[2] = Some(400);
-        state.target_temp_c = 399;
+        state.presets_c[2] = Some(200);
+        state.presets_c[4] = Some(200);
+        state.target_temp_c = 199;
 
         assert!(state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::Up,
@@ -1061,7 +1085,7 @@ mod tests {
             gesture: KeyGesture::ShortPress,
             at_ms: 0,
         }));
-        assert_eq!(state.target_temp_c, 400);
+        assert_eq!(state.target_temp_c, 200);
         assert_eq!(state.selected_preset_slot, 4);
     }
 

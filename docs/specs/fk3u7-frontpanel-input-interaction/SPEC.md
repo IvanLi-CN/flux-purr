@@ -63,7 +63,8 @@
 - `Dashboard` 中键短按只切 heater arm；中键双击保留为无副作用事件；中键长按只进菜单。
 - 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
-- `Preset Temp` 页必须允许进入全部 `M1-M9` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
+- `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
+- `Preset Temp` 默认预设温度必须固定为 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`，并按 `M1-M10` 顺序展示。
 - `Preset Temp` 页中，当槽位值降到 `0°C` 以下时必须进入 `---` 状态并置灰；再次上调时必须能从 `---` 回到 `0°C`。
 - `Dashboard` 仅在左右切换记忆温度时忽略灰色 / `---` 槽位，不得把无效预设当作可命中的目标值。
 - `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；只保留返回/退出导航，不再承载可写 fan mock。
@@ -123,7 +124,7 @@
 ### 子页默认行为
 
 - `Preset Temp`
-  - `Right short`：按槽位顺序循环到下一个 `M1-M9`
+  - `Right short`：按槽位顺序循环到下一个 `M1-M10`
   - `Up short`：对当前槽位做 `+1°C`；若当前为 `---`，则恢复到 `0°C`
   - `Down short`：对当前槽位做 `-1°C`；若值降到 `0°C` 以下，则变成 `---`
   - `Left short / Center short / Center long`：返回 `Menu`
@@ -260,7 +261,7 @@ None
 
 - `esp32s3_frontpanel` 已完成 `Key Test` 真机校准，`left/down` 映射对调后确认无误。
 - 真机 `App` runtime 已验证 `Dashboard / Menu / Preset Temp / Active Cooling` 的输入与导航联动路径；heater/fan 真相源与运行态保护由 `#q2aw6` 承接。
-- `Preset Temp` 页面已在真机确认：`M1-M9` 顶部标签整体上移，灰色 `---` 槽位仍可进入并重新调回有效值。
+- `Preset Temp` 页面已在真机确认：`M1-M10` 默认预设值为 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`；任一槽位即使被降到灰色 `---`，仍可重新调回有效值。
 
 ## 变更记录（Change log）
 
