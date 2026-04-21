@@ -10,7 +10,7 @@
 
 - `#223uj` 已冻结 `160×50` 前面板的视觉基线，但当前固件仍停留在启动后静态轮播，无法验证五向键的实际 GPIO 映射、手势判定和页面联动。
 - 五向开关的中心键与 `GPIO0 / BOOT` 复用，若把诊断入口绑到上电长按，会把调试入口和启动约束耦死，给真机校准带来不必要风险。
-- 若不先做“可校准的 Key Test + mock-only UI 联动”，后续把真实 heater / fan / preset 逻辑接进来时，很难分辨是输入映射错、手势阈值错，还是界面状态机错。
+- 若不先做“可校准的 Key Test + 可重放的页面联动”，后续把真实 heater / fan / preset 逻辑接进来时，很难分辨是输入映射错、手势阈值错，还是界面状态机错。
 
 ## 目标 / 非目标
 
@@ -20,11 +20,11 @@
 - 在固件中新增真实五向输入域：`raw GPIO -> logical key -> short / double / long gesture`。
 - 提供 build-time `FrontPanelRuntimeMode`：`KeyTest` 用于真机校准，`App` 用于 Dashboard/Menu/subpage mock 联动。
 - 在 Web Storybook 中补齐 `Key Test`、`Dashboard`、`Menu` 与子页的确定性故事、docs/gallery 与 `play` 交互覆盖。
-- 让固件显示从静态轮播切换为 reducer 驱动的动态渲染，但第二阶段所有 heater / fan / temp / preset 变化都保持 mock-only。
+- 让固件显示从静态轮播切换为 reducer 驱动的动态渲染，并冻结五向键对 Dashboard / Menu / 子页的导航语义。
 
 ### Non-goals
 
-- 不接真实 heater 功率控制、真实 fan 执行链路、RTD/tach 闭环、Wi‑Fi 写回或预设持久化。
+- 不在本 spec 内冻结真实 heater 功率控制、真实 fan 执行链路、RTD/tach 闭环、Wi‑Fi 写回或预设持久化；这些运行态真相源以后续 spec 为准。
 - 不扩展超过 `Preset Temp / Active Cooling / WiFi Info / Device Info` 的正式菜单结构。
 - 不用桌面全屏截图或临时手工截图作为验收主证据源。
 
@@ -33,7 +33,7 @@
 ### In scope
 
 - `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/frontpanel/**`
-- `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/bin/esp32s3_fan_cycle.rs`
+- `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/bin/flux_purr.rs`
 - `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/bin/frontpanel_preview.rs`
 - `/Users/ivan/Projects/Ivan/flux-purr/web/src/features/frontpanel-preview/**`
 - `/Users/ivan/Projects/Ivan/flux-purr/web/src/stories/FrontPanelDisplay.stories.tsx`
@@ -60,15 +60,15 @@
 - `Dashboard` 上/下必须以 `1°C` 步进调整当前目标温度。
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
 - `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
-- `Dashboard` 中键短按只切 heater mock；中键双击只切 fan mock；中键长按只进菜单。
+- `Dashboard` 中键短按只切 heater arm；中键双击保留为无副作用事件；中键长按只进菜单。
 - 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M9` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
 - `Preset Temp` 页中，当槽位值降到 `0°C` 以下时必须进入 `---` 状态并置灰；再次上调时必须能从 `---` 回到 `0°C`。
 - `Dashboard` 仅在左右切换记忆温度时忽略灰色 / `---` 槽位，不得把无效预设当作可命中的目标值。
-- `Active Cooling` 页必须支持左右切模式、上下切启停。
+- `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；只保留返回/退出导航，不再承载可写 fan mock。
 - `WiFi Info / Device Info` 必须保持只读页，仅处理返回/退出。
-- 固件运行态必须保持 heater / fan 输出为 safe-off，避免 mock UI 误触真实执行。
+- 真实 heater / fan 执行链路、保护与运行态真相源由后续 runtime spec 冻结，本 spec 只冻结输入与导航语义。
 - Storybook 必须提供 docs/gallery 与交互故事，作为 Web 侧视觉主证据源。
 - 视觉证据必须同时包含 Storybook render 与 firmware preview render，并绑定到本 spec 的 `assets/`。
 
@@ -110,9 +110,9 @@
 - `Left short`：跳到严格小于当前温度、且最接近的已启用预设值
 - `Right short`：跳到严格大于当前温度、且最接近的已启用预设值
 - `Center short`：切换 `heaterEnabled`
-- `Center double`：切换 `fanEnabled`
+- `Center double`：保留，无运行态副作用
 - `Center long`：进入 `Menu`
-- 所有变化仅更新 UI mock state，不触发真实控制输出
+- 目标温度、路由与 heater arm 变化进入统一 UI/runtime state；真实 heater / fan 控制语义以后续 runtime spec 为准
 
 ### Menu（一级菜单）
 
@@ -128,8 +128,7 @@
   - `Down short`：对当前槽位做 `-1°C`；若值降到 `0°C` 以下，则变成 `---`
   - `Left short / Center short / Center long`：返回 `Menu`
 - `Active Cooling`
-  - `Right short`：模式轮换 `smart -> boost -> off -> smart`
-  - `Up short / Down short`：切换启停
+  - 只读显示当前安全策略（overtemp-only 风扇包线说明）
   - `Left short / Center short / Center long`：返回 `Menu`
 - `WiFi Info / Device Info`
   - 只读显示
@@ -165,7 +164,7 @@ None
 - Given `Dashboard`，When 主人按上/下，Then 目标温度每次严格 `±1°C`。
 - Given `Dashboard`，When 主人按左/右，Then 跳转基于已启用预设的实际温度值排序，而不是按槽位编号。
 - Given `Dashboard`，When 当前温度命中某个预设值或刚从预设值调离，Then 界面仍不显示当前预设槽位标签。
-- Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater mock、fan mock、进入菜单，不发生混用。
+- Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、保留无副作用、进入菜单，不发生混用。
 - Given 一级菜单，When 主人左右移动并中键进入，Then 始终只在四个固定项之间切换。
 - Given 任意子页，When 主人中键短按或长按，Then 都能回到上一级菜单；When 主人按左键，Then 也能返回菜单。
 - Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并重新调回有效温度。
@@ -185,7 +184,7 @@ None
 
 - `cargo test --manifest-path /Users/ivan/Projects/Ivan/flux-purr/firmware/Cargo.toml`
 - `cargo build --manifest-path /Users/ivan/Projects/Ivan/flux-purr/firmware/Cargo.toml --release`
-- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path /Users/ivan/Projects/Ivan/flux-purr/firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin esp32s3-fan-cycle --release`
+- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path /Users/ivan/Projects/Ivan/flux-purr/firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
 - `bun run --cwd /Users/ivan/Projects/Ivan/flux-purr/web check`
 - `bun run --cwd /Users/ivan/Projects/Ivan/flux-purr/web build`
 - `bun run --cwd /Users/ivan/Projects/Ivan/flux-purr/web test:storybook`
@@ -260,17 +259,17 @@ None
 ### Hardware verification
 
 - `esp32s3_frontpanel` 已完成 `Key Test` 真机校准，`left/down` 映射对调后确认无误。
-- 真机 `App` runtime 已验证 `Dashboard / Menu / Preset Temp / Active Cooling` 的 mock-only 联动路径。
+- 真机 `App` runtime 已验证 `Dashboard / Menu / Preset Temp / Active Cooling` 的输入与导航联动路径；heater/fan 真相源与运行态保护由 `#q2aw6` 承接。
 - `Preset Temp` 页面已在真机确认：`M1-M9` 顶部标签整体上移，灰色 `---` 槽位仍可进入并重新调回有效值。
 
 ## 变更记录（Change log）
 
-- 2026-04-13: 创建前面板五向输入与交互导航规格，冻结两阶段范围、手势阈值、Key Test 和 mock-only 联动口径。
+- 2026-04-13: 创建前面板五向输入与交互导航规格，冻结两阶段范围、手势阈值、Key Test 与导航口径。
 - 2026-04-16: 完成真机 Key Test 校准、App runtime mock 导航验证与视觉证据回填；同步 Dashboard 与 Preset Temp 的最终验收口径。
 
 ## 参考（References）
 
 - `/Users/ivan/Projects/Ivan/flux-purr/docs/specs/223uj-frontpanel-ui-contract/SPEC.md`
 - `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/board/s3_frontpanel.rs`
-- `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/bin/esp32s3_fan_cycle.rs`
+- `/Users/ivan/Projects/Ivan/flux-purr/firmware/src/bin/flux_purr.rs`
 - `/Users/ivan/Projects/Ivan/flux-purr/web/src/stories/FrontPanelDisplay.stories.tsx`

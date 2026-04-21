@@ -506,25 +506,16 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    let display_text = i16_to_text(state.target_temp_c);
-    let value_color = temperature_color(state.target_temp_c);
+    let display_text = i16_to_text(state.current_temp_c);
+    let value_color = temperature_color(state.current_temp_c);
+    let set_text = i16_to_text(state.target_temp_c);
 
     fill_rect(canvas, 4, 4, 72, 36, COLOR_PANEL_STRONG);
     draw_seven_segment_text(canvas, &display_text, 8, 8, value_color);
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
-    draw_status_line(
-        canvas,
-        7,
-        "HEAT",
-        if state.heater_enabled { "ON" } else { "OFF" },
-        if state.heater_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_WARNING
-        },
-    );
+    draw_status_line(canvas, 7, "SET", &set_text, COLOR_ACCENT);
     draw_status_line(
         canvas,
         18,
@@ -539,18 +530,14 @@ fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     draw_status_line(canvas, 29, "MODE", "APP", COLOR_CYAN);
 
     fill_rect(canvas, 4, 42, 152, 5, COLOR_PANEL);
-    fill_rect(
-        canvas,
-        6,
-        43,
-        if state.heater_enabled { 116 } else { 42 },
-        3,
-        if state.heater_enabled {
-            COLOR_ACCENT
-        } else {
-            COLOR_DISABLED
-        },
-    );
+    let heater_fill_width = heater_bar_fill_width(state.heater_output_percent);
+    if heater_fill_width > 0 {
+        fill_rect(canvas, 6, 43, heater_fill_width, 3, COLOR_ACCENT);
+    }
+}
+
+fn heater_bar_fill_width(output_percent: u8) -> u32 {
+    (u32::from(output_percent.min(100)) * 148) / 100
 }
 
 fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
@@ -635,50 +622,11 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+fn draw_active_cooling(canvas: &mut DisplayCanvas, _state: &FrontPanelUiState) {
     draw_text_mid(canvas, "A-COOL", 8, 6, COLOR_TEXT);
-    draw_text_mid_right(
-        canvas,
-        if state.active_cooling_enabled {
-            "ON"
-        } else {
-            "OFF"
-        },
-        152,
-        6,
-        if state.active_cooling_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_WARNING
-        },
-    );
-    draw_text_mid(
-        canvas,
-        match state.active_cooling_mode {
-            super::ActiveCoolingMode::Smart => "MODE SMART",
-            super::ActiveCoolingMode::Boost => "MODE BOOST",
-            super::ActiveCoolingMode::Off => "MODE OFF",
-        },
-        8,
-        20,
-        COLOR_CYAN,
-    );
-    draw_text_mid(
-        canvas,
-        match (state.active_cooling_enabled, state.active_cooling_mode) {
-            (false, _) => "FAN OFF",
-            (true, super::ActiveCoolingMode::Smart) => "FAN AUTO",
-            (true, super::ActiveCoolingMode::Boost) => "FAN ON",
-            (true, super::ActiveCoolingMode::Off) => "FAN OFF",
-        },
-        8,
-        33,
-        match (state.active_cooling_enabled, state.active_cooling_mode) {
-            (true, super::ActiveCoolingMode::Smart) => COLOR_CYAN,
-            (true, super::ActiveCoolingMode::Boost) => COLOR_SUCCESS,
-            _ => COLOR_WARNING,
-        },
-    );
+    draw_text_mid_right(canvas, "SAFE", 152, 6, COLOR_WARNING);
+    draw_text_mid(canvas, "POLICY O/TEMP", 8, 20, COLOR_CYAN);
+    draw_text_mid(canvas, "ON360 OFF340", 8, 33, COLOR_WARNING);
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas) {
@@ -709,5 +657,14 @@ mod tests {
         assert_eq!(temperature_color(299), COLOR_WARNING);
         assert_eq!(temperature_color(300), COLOR_ACCENT);
         assert_eq!(temperature_color(450), COLOR_ACCENT);
+    }
+
+    #[test]
+    fn heater_bar_fill_width_tracks_output_percent() {
+        assert_eq!(heater_bar_fill_width(0), 0);
+        assert_eq!(heater_bar_fill_width(25), 37);
+        assert_eq!(heater_bar_fill_width(50), 74);
+        assert_eq!(heater_bar_fill_width(100), 148);
+        assert_eq!(heater_bar_fill_width(255), 148);
     }
 }

@@ -96,8 +96,11 @@ impl PreviewPreset {
             Self::Dashboard => FrontPanelUiState::new(FrontPanelRuntimeMode::App),
             Self::DashboardManual => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                state.current_temp_c = 300;
                 state.target_temp_c = 389;
                 state.heater_enabled = true;
+                state.heater_output_percent = 64;
+                state.fan_enabled = false;
                 state
             }
             Self::Menu => {
@@ -142,7 +145,7 @@ fn repo_root() -> PathBuf {
 
 fn default_output_path(preset: PreviewPreset) -> PathBuf {
     repo_root().join(format!(
-        "docs/specs/fk3u7-frontpanel-input-interaction/assets/{}.framebuffer.bin",
+        "docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/{}.framebuffer.bin",
         preset.slug()
     ))
 }

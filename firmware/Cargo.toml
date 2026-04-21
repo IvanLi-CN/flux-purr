@@ -10,8 +10,8 @@ build = "build.rs"
 path = "src/lib.rs"
 
 [[bin]]
-name = "esp32s3-fan-cycle"
-path = "src/bin/esp32s3_fan_cycle.rs"
+name = "flux-purr"
+path = "src/bin/flux_purr.rs"
 
 [[bin]]
 name = "display_preview"
@@ -35,6 +35,7 @@ embassy-futures = "0.1.2"
 embedded-graphics = "0.8.1"
 gc9d01 = { git = "https://github.com/IvanLi-CN/gc9d01-rs", rev = "6b75d9dc818be04e57932b750a7d209aaed3bd57", features = ["async", "defmt", "panel_160x50"] }
 heapless = "0.8.0"
+nb = "1.1.0"
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 defmt = "1.0.1"

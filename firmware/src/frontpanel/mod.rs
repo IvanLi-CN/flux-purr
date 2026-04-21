@@ -6,6 +6,8 @@ pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
 pub const FRONTPANEL_LONG_PRESS_MS: u64 = 500;
 pub const FRONTPANEL_DOUBLE_CLICK_MS: u64 = 250;
 pub const FRONTPANEL_PRESET_COUNT: usize = 9;
+pub const FRONTPANEL_TARGET_TEMP_MIN_C: i16 = 0;
+pub const FRONTPANEL_TARGET_TEMP_MAX_C: i16 = 400;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -441,8 +443,10 @@ pub struct KeyTestState {
 pub struct FrontPanelUiState {
     pub runtime_mode: FrontPanelRuntimeMode,
     pub route: FrontPanelRoute,
+    pub current_temp_c: i16,
     pub target_temp_c: i16,
     pub heater_enabled: bool,
+    pub heater_output_percent: u8,
     pub fan_enabled: bool,
     pub selected_menu_item: FrontPanelMenuItem,
     pub selected_preset_slot: usize,
@@ -462,8 +466,10 @@ impl FrontPanelUiState {
         Self {
             runtime_mode,
             route,
+            current_temp_c: 300,
             target_temp_c: 380,
             heater_enabled: false,
+            heater_output_percent: 0,
             fan_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
             selected_preset_slot: 3,
@@ -474,8 +480,8 @@ impl FrontPanelUiState {
                 Some(380),
                 Some(400),
                 None,
-                Some(420),
-                Some(450),
+                None,
+                None,
                 None,
             ],
             active_cooling_enabled: true,
@@ -522,6 +528,13 @@ impl FrontPanelUiState {
         }
     }
 
+    pub fn set_target_temp_c(&mut self, target_temp_c: i16) {
+        self.target_temp_c = clamp_target_temp_c(target_temp_c);
+        self.selected_preset_slot = self
+            .matching_preset_slot()
+            .unwrap_or(self.selected_preset_slot);
+    }
+
     fn apply_app_event(&mut self, event: KeyEvent) -> bool {
         match self.route {
             FrontPanelRoute::KeyTest => {
@@ -541,23 +554,17 @@ impl FrontPanelUiState {
     fn apply_dashboard_event(&mut self, event: KeyEvent) -> bool {
         match (event.key, event.gesture) {
             (FrontPanelKey::Up, KeyGesture::ShortPress) => {
-                self.target_temp_c = self.target_temp_c.saturating_add(1);
-                self.selected_preset_slot = self
-                    .matching_preset_slot()
-                    .unwrap_or(self.selected_preset_slot);
+                self.set_target_temp_c(self.target_temp_c.saturating_add(1));
                 true
             }
             (FrontPanelKey::Down, KeyGesture::ShortPress) => {
-                self.target_temp_c = self.target_temp_c.saturating_sub(1);
-                self.selected_preset_slot = self
-                    .matching_preset_slot()
-                    .unwrap_or(self.selected_preset_slot);
+                self.set_target_temp_c(self.target_temp_c.saturating_sub(1));
                 true
             }
             (FrontPanelKey::Left, KeyGesture::ShortPress) => {
                 if let Some((slot, temp)) = self.find_neighbor_preset(false) {
                     self.selected_preset_slot = slot;
-                    self.target_temp_c = temp;
+                    self.set_target_temp_c(temp);
                     true
                 } else {
                     false
@@ -566,7 +573,7 @@ impl FrontPanelUiState {
             (FrontPanelKey::Right, KeyGesture::ShortPress) => {
                 if let Some((slot, temp)) = self.find_neighbor_preset(true) {
                     self.selected_preset_slot = slot;
-                    self.target_temp_c = temp;
+                    self.set_target_temp_c(temp);
                     true
                 } else {
                     false
@@ -576,10 +583,7 @@ impl FrontPanelUiState {
                 self.heater_enabled = !self.heater_enabled;
                 true
             }
-            (FrontPanelKey::Center, KeyGesture::DoublePress) => {
-                self.fan_enabled = !self.fan_enabled;
-                true
-            }
+            (FrontPanelKey::Center, KeyGesture::DoublePress) => false,
             (FrontPanelKey::Center, KeyGesture::LongPress) => {
                 self.route = FrontPanelRoute::Menu;
                 true
@@ -633,18 +637,19 @@ impl FrontPanelUiState {
                 self.ensure_selected_preset_slot();
                 let next_temp = self.presets_c[self.selected_preset_slot]
                     .map(|temp| temp.saturating_add(1))
-                    .unwrap_or(0);
+                    .unwrap_or(FRONTPANEL_TARGET_TEMP_MIN_C);
+                let next_temp = clamp_target_temp_c(next_temp);
                 self.presets_c[self.selected_preset_slot] = Some(next_temp);
-                self.target_temp_c = next_temp;
+                self.set_target_temp_c(next_temp);
                 true
             }
             (FrontPanelKey::Down, KeyGesture::ShortPress) => {
                 self.ensure_selected_preset_slot();
                 match self.presets_c[self.selected_preset_slot] {
-                    Some(temp) if temp > 0 => {
-                        let next_temp = temp.saturating_sub(1);
+                    Some(temp) if temp > FRONTPANEL_TARGET_TEMP_MIN_C => {
+                        let next_temp = clamp_target_temp_c(temp.saturating_sub(1));
                         self.presets_c[self.selected_preset_slot] = Some(next_temp);
-                        self.target_temp_c = next_temp;
+                        self.set_target_temp_c(next_temp);
                     }
                     Some(_) | None => {
                         self.presets_c[self.selected_preset_slot] = None;
@@ -664,15 +669,6 @@ impl FrontPanelUiState {
 
     fn apply_active_cooling_event(&mut self, event: KeyEvent) -> bool {
         match (event.key, event.gesture) {
-            (FrontPanelKey::Right, KeyGesture::ShortPress) => {
-                self.active_cooling_mode = self.active_cooling_mode.next();
-                true
-            }
-            (FrontPanelKey::Up, KeyGesture::ShortPress)
-            | (FrontPanelKey::Down, KeyGesture::ShortPress) => {
-                self.active_cooling_enabled = !self.active_cooling_enabled;
-                true
-            }
             (FrontPanelKey::Left, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::LongPress) => {
@@ -725,6 +721,10 @@ impl FrontPanelUiState {
     fn advance_preset_slot(&self) -> usize {
         (self.selected_preset_slot + 1) % FRONTPANEL_PRESET_COUNT
     }
+}
+
+fn clamp_target_temp_c(target_temp_c: i16) -> i16 {
+    target_temp_c.clamp(FRONTPANEL_TARGET_TEMP_MIN_C, FRONTPANEL_TARGET_TEMP_MAX_C)
 }
 
 #[cfg(test)]
@@ -954,7 +954,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_center_gestures_only_toggle_mock_flags_or_menu() {
+    fn dashboard_center_short_toggles_heater_double_press_is_reserved() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
 
         assert!(state.handle_event(KeyEvent {
@@ -966,13 +966,13 @@ mod tests {
         assert!(state.heater_enabled);
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
 
-        assert!(state.handle_event(KeyEvent {
+        assert!(!state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::CenterBoot,
             key: FrontPanelKey::Center,
             gesture: KeyGesture::DoublePress,
             at_ms: 0,
         }));
-        assert!(state.fan_enabled);
+        assert!(!state.fan_enabled);
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
 
         assert!(state.handle_event(KeyEvent {
@@ -1063,6 +1063,33 @@ mod tests {
         }));
         assert_eq!(state.target_temp_c, 400);
         assert_eq!(state.selected_preset_slot, 4);
+    }
+
+    #[test]
+    fn dashboard_target_temp_clamps_to_working_range() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.set_target_temp_c(-10);
+        assert_eq!(state.target_temp_c, FRONTPANEL_TARGET_TEMP_MIN_C);
+
+        state.set_target_temp_c(450);
+        assert_eq!(state.target_temp_c, FRONTPANEL_TARGET_TEMP_MAX_C);
+    }
+
+    #[test]
+    fn preset_temp_editing_clamps_to_working_range() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.route = FrontPanelRoute::PresetTemp;
+        state.selected_preset_slot = 3;
+        state.presets_c[3] = Some(FRONTPANEL_TARGET_TEMP_MAX_C);
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Up,
+            key: FrontPanelKey::Up,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.presets_c[3], Some(FRONTPANEL_TARGET_TEMP_MAX_C));
+        assert_eq!(state.target_temp_c, FRONTPANEL_TARGET_TEMP_MAX_C);
     }
 
     #[test]
