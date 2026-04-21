@@ -75,15 +75,21 @@ const HEATER_HARD_CUTOFF_TEMP_C: i16 = 420;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_CONTROL_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KP: f32 = 1.9;
+const HEATER_FULL_POWER_ERROR_C: f32 = 30.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KI: f32 = 0.02;
+const HEATER_CUTBACK_START_ERROR_C: f32 = 0.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KD: f32 = 0.8;
+const HEATER_CUTBACK_MIN_DUTY_PERCENT: f32 = 36.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MIN: f32 = -500.0;
+const HEATER_PID_KP: f32 = 1.35;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MAX: f32 = 500.0;
+const HEATER_PID_KI: f32 = 0.08;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PID_KD: f32 = 0.0;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PID_INTEGRAL_MIN: f32 = 0.0;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PID_INTEGRAL_MAX: f32 = 100.0;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
@@ -296,16 +302,34 @@ impl HeaterController {
         let derivative_c_per_s = previous_temp
             .map(|previous| (measured_temp_c - previous) / dt_s)
             .unwrap_or(0.0);
+
+        if error_c >= HEATER_FULL_POWER_ERROR_C {
+            self.integral = 0.0;
+            self.last_measured_temp_c = Some(measured_temp_c);
+            self.duty_percent = 100;
+            return HeaterPidSnapshot {
+                duty_percent: 100,
+                error_c,
+                integral: 0.0,
+                derivative_c_per_s,
+            };
+        }
+
+        let cutback_span = (HEATER_FULL_POWER_ERROR_C - HEATER_CUTBACK_START_ERROR_C).max(1.0);
+        let cutback_ratio =
+            ((error_c - HEATER_CUTBACK_START_ERROR_C) / cutback_span).clamp(0.0, 1.0);
+        let duty_ceiling = HEATER_CUTBACK_MIN_DUTY_PERCENT
+            + (100.0 - HEATER_CUTBACK_MIN_DUTY_PERCENT) * cutback_ratio;
+
         let proportional_derivative = HEATER_PID_KP * error_c - HEATER_PID_KD * derivative_c_per_s;
-        let integral_candidate = (self.integral + error_c * dt_s)
+        let integral_candidate = (self.integral + HEATER_PID_KI * error_c * dt_s)
             .clamp(HEATER_PID_INTEGRAL_MIN, HEATER_PID_INTEGRAL_MAX);
-        let unsaturated_output = proportional_derivative + HEATER_PID_KI * self.integral;
-        let saturating_high = unsaturated_output >= 100.0 && error_c > 0.0;
-        let saturating_low = unsaturated_output <= 0.0 && error_c < 0.0;
-        if !(saturating_high || saturating_low) {
+        let unsaturated_output = proportional_derivative + self.integral;
+        let saturating_high = unsaturated_output >= duty_ceiling && error_c > 0.0;
+        if !saturating_high {
             self.integral = integral_candidate;
         }
-        let duty = (proportional_derivative + HEATER_PID_KI * self.integral).clamp(0.0, 100.0);
+        let duty = (proportional_derivative + self.integral).clamp(0.0, duty_ceiling);
 
         self.last_measured_temp_c = Some(measured_temp_c);
         self.duty_percent = (duty + 0.5) as u8;
@@ -951,8 +975,13 @@ async fn main(_spawner: Spawner) {
         read_ch224q_status(&mut pd_i2c, ch224q_address)
     };
     info!(
-        "heater pid params kp={=f32} ki={=f32} kd={=f32} interval_ms={=u64}",
-        HEATER_PID_KP, HEATER_PID_KI, HEATER_PID_KD, HEATER_CONTROL_INTERVAL_MS,
+        "heater control policy kp={=f32} ki={=f32} kd={=f32} interval_ms={=u64} full_power>= {=f32}C cutback_floor={=f32}%",
+        HEATER_PID_KP,
+        HEATER_PID_KI,
+        HEATER_PID_KD,
+        HEATER_CONTROL_INTERVAL_MS,
+        HEATER_FULL_POWER_ERROR_C,
+        HEATER_CUTBACK_MIN_DUTY_PERCENT,
     );
 
     let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin);
@@ -1209,7 +1238,7 @@ mod tests {
     fn heater_pid_reduces_output_as_temperature_rises() {
         let mut controller = HeaterController::new();
         let cold = controller.update(380, 25.0, true);
-        let warm = controller.update(380, 300.0, true);
+        let warm = controller.update(380, 360.0, true);
         let near_setpoint = controller.update(380, 378.0, true);
 
         assert!(cold.duty_percent > warm.duty_percent);
@@ -1223,16 +1252,16 @@ mod tests {
         let mut snapshot = controller.update(380, 25.0, true);
         assert_eq!(snapshot.duty_percent, 100);
 
-        for measured in [50.0, 80.0, 120.0, 160.0, 200.0, 240.0, 280.0, 320.0] {
+        for measured in [80.0, 160.0, 240.0, 320.0, 340.0, 350.0, 360.0] {
             snapshot = controller.update(380, measured, true);
         }
         assert!(snapshot.duty_percent < 100);
 
         let near_setpoint = controller.update(380, 370.0, true);
-        assert!(near_setpoint.duty_percent < 20);
+        assert!(near_setpoint.duty_percent <= 60);
 
-        let at_target = controller.update(380, 380.0, true);
-        assert_eq!(at_target.duty_percent, 0);
+        let overshoot = controller.update(380, 390.0, true);
+        assert!(overshoot.duty_percent < near_setpoint.duty_percent);
     }
 
     #[test]
@@ -1267,6 +1296,21 @@ mod tests {
         let rearmed = controller.update(380, 200.0, true);
         assert!(rearmed.duty_percent > 0);
         assert_eq!(controller.fault_latched(), None);
+    }
+
+    #[test]
+    fn heater_pid_holds_some_output_near_setpoint_after_cutback() {
+        let mut controller = HeaterController::new();
+
+        for measured in [
+            25.0, 80.0, 160.0, 240.0, 320.0, 340.0, 350.0, 360.0, 370.0, 375.0,
+        ] {
+            let _ = controller.update(380, measured, true);
+        }
+
+        let near_target = controller.update(380, 379.0, true);
+        assert!(near_target.duty_percent > 0);
+        assert!(near_target.duty_percent <= HEATER_CUTBACK_MIN_DUTY_PERCENT as u8 + 2);
     }
 
     #[test]
