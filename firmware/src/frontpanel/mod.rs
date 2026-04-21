@@ -467,12 +467,12 @@ impl FrontPanelUiState {
             runtime_mode,
             route,
             current_temp_c: 300,
-            target_temp_c: 380,
+            target_temp_c: 100,
             heater_enabled: false,
             heater_output_percent: 0,
             fan_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
-            selected_preset_slot: 4,
+            selected_preset_slot: 1,
             presets_c: [
                 Some(50),
                 Some(100),
@@ -950,7 +950,7 @@ mod tests {
                 Some(300),
             ]
         );
-        assert_eq!(state.selected_preset_slot, 4);
+        assert_eq!(state.selected_preset_slot, 1);
     }
 
     #[test]
