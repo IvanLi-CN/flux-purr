@@ -252,6 +252,11 @@ fn draw_seven_segment_text(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i3
     }
 }
 
+fn measure_seven_segment_text(text: &str) -> i32 {
+    let digits = text.chars().count() as i32;
+    if digits == 0 { 0 } else { digits * 17 - 2 }
+}
+
 fn draw_status_line(canvas: &mut DisplayCanvas, y: i32, label: &str, value: &str, color: Rgb565) {
     draw_text_mid(canvas, label, 80, y, color);
     draw_text_mid_right(canvas, value, 154, y, color);
@@ -280,6 +285,46 @@ fn i16_to_text(value: i16) -> heapless::String<8> {
 
     let mut out = heapless::String::<8>::new();
     let _ = write!(&mut out, "{}", value);
+    out
+}
+
+fn deci_c_to_parts(value_deci_c: i16) -> (heapless::String<8>, char) {
+    use core::fmt::Write;
+
+    let mut integer = heapless::String::<8>::new();
+    let sign = if value_deci_c < 0 { "-" } else { "" };
+    let magnitude = i32::from(value_deci_c).abs();
+    let whole = magnitude / 10;
+    let tenth = magnitude % 10;
+    let _ = write!(&mut integer, "{}{}", sign, whole);
+    let fractional = char::from(b'0' + u8::try_from(tenth).unwrap_or(0));
+    (integer, fractional)
+}
+
+fn digit_char_text(ch: char) -> &'static str {
+    match ch {
+        '0' => "0",
+        '1' => "1",
+        '2' => "2",
+        '3' => "3",
+        '4' => "4",
+        '5' => "5",
+        '6' => "6",
+        '7' => "7",
+        '8' => "8",
+        '9' => "9",
+        _ => "?",
+    }
+}
+
+fn pd_voltage_content_text(contract_mv: u16) -> heapless::String<8> {
+    use core::fmt::Write;
+
+    let whole = contract_mv / 1000;
+    let fractional = (contract_mv % 1000) / 10;
+
+    let mut out = heapless::String::<8>::new();
+    let _ = write!(&mut out, "{}.{:02}", whole, fractional);
     out
 }
 
@@ -506,51 +551,51 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    let display_text = i16_to_text(state.target_temp_c);
-    let value_color = temperature_color(state.target_temp_c);
+    let (display_text, fractional_digit) = deci_c_to_parts(state.current_temp_deci_c);
+    let value_color = temperature_color(state.current_temp_c);
+    let set_text = i16_to_text(state.target_temp_c);
+    let digits_width = measure_seven_segment_text(&display_text);
+    let digits_right_edge = 57;
+    let digits_x = digits_right_edge - digits_width;
 
     fill_rect(canvas, 4, 4, 72, 36, COLOR_PANEL_STRONG);
-    draw_seven_segment_text(canvas, &display_text, 8, 8, value_color);
+    draw_seven_segment_text(canvas, &display_text, digits_x, 8, value_color);
+    draw_text_mid(canvas, digit_char_text(fractional_digit), 66, 8, COLOR_TEXT);
+    fill_rect(canvas, 60, 16, 2, 2, COLOR_TEXT);
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
+    draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
+    draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
+    let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
+    draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
+    draw_text_mid_right(canvas, "V", 154, 18, COLOR_CYAN);
     draw_status_line(
         canvas,
-        7,
-        "HEAT",
-        if state.heater_enabled { "ON" } else { "OFF" },
-        if state.heater_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_WARNING
-        },
-    );
-    draw_status_line(
-        canvas,
-        18,
+        29,
         "FAN",
-        if state.fan_enabled { "RUN" } else { "STOP" },
+        if state.fan_enabled { "ON" } else { "OFF" },
         if state.fan_enabled {
             COLOR_SUCCESS
         } else {
             COLOR_DISABLED
         },
     );
-    draw_status_line(canvas, 29, "MODE", "APP", COLOR_CYAN);
 
     fill_rect(canvas, 4, 42, 152, 5, COLOR_PANEL);
-    fill_rect(
-        canvas,
-        6,
-        43,
-        if state.heater_enabled { 116 } else { 42 },
-        3,
-        if state.heater_enabled {
-            COLOR_ACCENT
-        } else {
-            COLOR_DISABLED
-        },
-    );
+    let heater_fill_width = heater_bar_fill_width(state.heater_output_percent);
+    if heater_fill_width > 0 {
+        fill_rect(canvas, 6, 43, heater_fill_width, 3, COLOR_ACCENT);
+    }
+}
+
+fn heater_bar_fill_width(output_percent: u8) -> u32 {
+    let output_percent = u32::from(output_percent.min(100));
+    if output_percent == 0 {
+        return 0;
+    }
+
+    (13 + ((output_percent * 148) / 100)).min(148)
 }
 
 fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
@@ -594,10 +639,9 @@ fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    const SLOT_LABELS: [&str; 9] = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9"];
+    const SLOT_LABELS: [&str; 10] = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"];
 
     for (index, label) in SLOT_LABELS.iter().enumerate().take(state.presets_c.len()) {
-        let x = 4 + index as i32 * 17;
         let color = if index == state.selected_preset_slot {
             COLOR_ACCENT
         } else if state.presets_c[index].is_some() {
@@ -605,7 +649,8 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         } else {
             COLOR_DISABLED
         };
-        draw_text_mid(canvas, label, x, 2, color);
+        let x = 2 + index as i32 * 16;
+        draw_text_small(canvas, label, x, 2, color);
     }
 
     let value = state.selected_preset().map(i16_to_text);
@@ -635,50 +680,11 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+fn draw_active_cooling(canvas: &mut DisplayCanvas, _state: &FrontPanelUiState) {
     draw_text_mid(canvas, "A-COOL", 8, 6, COLOR_TEXT);
-    draw_text_mid_right(
-        canvas,
-        if state.active_cooling_enabled {
-            "ON"
-        } else {
-            "OFF"
-        },
-        152,
-        6,
-        if state.active_cooling_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_WARNING
-        },
-    );
-    draw_text_mid(
-        canvas,
-        match state.active_cooling_mode {
-            super::ActiveCoolingMode::Smart => "MODE SMART",
-            super::ActiveCoolingMode::Boost => "MODE BOOST",
-            super::ActiveCoolingMode::Off => "MODE OFF",
-        },
-        8,
-        20,
-        COLOR_CYAN,
-    );
-    draw_text_mid(
-        canvas,
-        match (state.active_cooling_enabled, state.active_cooling_mode) {
-            (false, _) => "FAN OFF",
-            (true, super::ActiveCoolingMode::Smart) => "FAN AUTO",
-            (true, super::ActiveCoolingMode::Boost) => "FAN ON",
-            (true, super::ActiveCoolingMode::Off) => "FAN OFF",
-        },
-        8,
-        33,
-        match (state.active_cooling_enabled, state.active_cooling_mode) {
-            (true, super::ActiveCoolingMode::Smart) => COLOR_CYAN,
-            (true, super::ActiveCoolingMode::Boost) => COLOR_SUCCESS,
-            _ => COLOR_WARNING,
-        },
-    );
+    draw_text_mid_right(canvas, "SAFE", 152, 6, COLOR_WARNING);
+    draw_text_mid(canvas, "POLICY O/TEMP", 8, 20, COLOR_CYAN);
+    draw_text_mid(canvas, "ON360 OFF340", 8, 33, COLOR_WARNING);
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas) {
@@ -709,5 +715,37 @@ mod tests {
         assert_eq!(temperature_color(299), COLOR_WARNING);
         assert_eq!(temperature_color(300), COLOR_ACCENT);
         assert_eq!(temperature_color(450), COLOR_ACCENT);
+    }
+
+    #[test]
+    fn heater_bar_fill_width_tracks_output_percent() {
+        assert_eq!(heater_bar_fill_width(0), 0);
+        assert_eq!(heater_bar_fill_width(25), 50);
+        assert_eq!(heater_bar_fill_width(50), 87);
+        assert_eq!(heater_bar_fill_width(64), 107);
+        assert_eq!(heater_bar_fill_width(100), 148);
+        assert_eq!(heater_bar_fill_width(255), 148);
+    }
+
+    #[test]
+    fn deci_temperature_parts_keep_one_decimal() {
+        assert_eq!(deci_c_to_parts(263), ("26".try_into().unwrap(), '3'));
+        assert_eq!(deci_c_to_parts(3000), ("300".try_into().unwrap(), '0'));
+        assert_eq!(deci_c_to_parts(-52), ("-5".try_into().unwrap(), '2'));
+    }
+
+    #[test]
+    fn seven_segment_measurement_matches_glyph_advance() {
+        assert_eq!(measure_seven_segment_text(""), 0);
+        assert_eq!(measure_seven_segment_text("8"), 15);
+        assert_eq!(measure_seven_segment_text("26"), 32);
+        assert_eq!(measure_seven_segment_text("300"), 49);
+    }
+
+    #[test]
+    fn pd_voltage_content_text_omits_unit_for_split_layout() {
+        assert_eq!(pd_voltage_content_text(12_000), "12.00");
+        assert_eq!(pd_voltage_content_text(20_000), "20.00");
+        assert_eq!(pd_voltage_content_text(20_080), "20.08");
     }
 }

@@ -32,7 +32,7 @@ export const frontPanelTypography = [
   {
     name: 'UI Labels',
     spec: '3×5 bitmap glyphs · scale 1 / scale 2',
-    usage: 'M1~M9, protocol, fan status, menu titles',
+    usage: 'M1~M10, protocol, fan status, menu titles',
   },
   {
     name: 'Temp Unit',

@@ -96,12 +96,12 @@ export function createFrontPanelRuntimeState(
   return {
     mode,
     route: mode === 'key-test' ? 'key-test' : 'dashboard',
-    targetTempC: 380,
+    targetTempC: 100,
     heaterEnabled: false,
     fanEnabled: false,
     selectedMenuItem: 'active-cooling',
-    selectedPresetIndex: 3,
-    presetsC: [320, 340, null, 380, 400, null, 420, 450, null],
+    selectedPresetIndex: 1,
+    presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
     activeCoolingEnabled: true,
     activeCoolingMode: 'smart',
     keyTest: {

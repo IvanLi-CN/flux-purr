@@ -485,11 +485,11 @@ function drawPresetTempScreen(
       : temperatureColor(selectedPreset, screen.temperatureThresholdsC)
   const unitColor = selectedPreset == null ? palette.disabled : palette.text
 
-  for (let index = 0; index < Math.min(screen.presetsC.length, 9); index += 1) {
+  for (let index = 0; index < Math.min(screen.presetsC.length, 10); index += 1) {
     const isSelected = index === screen.selectedPresetIndex
     const isEnabled = screen.presetsC[index] != null
     const color = isSelected ? palette.accent : isEnabled ? palette.text : palette.disabled
-    drawPresetSlotLabel(ctx, index, 4 + index * 17, 1, color)
+    drawPresetSlotLabel(ctx, index, 2 + index * 16, 1, color)
   }
 
   const digitsWidth = measureSevenSegmentNumber(displayText)

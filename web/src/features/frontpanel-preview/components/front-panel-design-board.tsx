@@ -240,7 +240,7 @@ export function FrontPanelDesignBoard() {
                 'Dashboard is the baseline: left = set temperature, right = compact heater/fan stack, bottom = thin runtime cue bar.',
                 'Default safe area is 4 px inside any panel group; avoid adding decorative outer borders on the screen edge.',
                 'Key Test keeps the five-way diagram white at rest; short = Success, double = Accent, long = Info Cyan.',
-                'Preset page uses M1~M9: selected slot = accent, enabled slot = primary text, disabled slot = muted gray.',
+                'Preset page uses M1~M10: selected slot = accent, enabled slot = primary text, disabled slot = muted gray.',
                 'All mock pages keep short center exit and long center fallback exit unless the dashboard binds center long to the menu.',
               ].map((rule) => (
                 <div

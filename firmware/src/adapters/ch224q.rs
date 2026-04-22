@@ -66,6 +66,40 @@ impl VoltageRequest {
 
 pub const STATUS_REGISTER: u8 = 0x09;
 pub const VOLTAGE_CONTROL_REGISTER: u8 = 0x0A;
+pub const CURRENT_DATA_REGISTER: u8 = 0x50;
+
+pub const fn voltage_request_payload(request: VoltageRequest) -> [u8; 2] {
+    [VOLTAGE_CONTROL_REGISTER, request.control_register_value()]
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Status {
+    pub bc_active: bool,
+    pub qc2_active: bool,
+    pub qc3_active: bool,
+    pub pd_active: bool,
+    pub epr_active: bool,
+    pub epr_exist: bool,
+    pub avs_exist: bool,
+}
+
+impl Status {
+    pub const fn from_register(value: u8) -> Self {
+        Self {
+            bc_active: (value & (1 << 0)) != 0,
+            qc2_active: (value & (1 << 1)) != 0,
+            qc3_active: (value & (1 << 2)) != 0,
+            pd_active: (value & (1 << 3)) != 0,
+            epr_active: (value & (1 << 4)) != 0,
+            epr_exist: (value & (1 << 5)) != 0,
+            avs_exist: (value & (1 << 6)) != 0,
+        }
+    }
+}
+
+pub const fn current_ma_from_register(value: u8) -> u16 {
+    (value as u16) * 50
+}
 
 #[cfg(test)]
 mod tests {
@@ -100,5 +134,29 @@ mod tests {
     #[test]
     fn reports_requested_voltage_in_millivolts() {
         assert_eq!(VoltageRequest::V28.millivolts(), 28_000);
+    }
+
+    #[test]
+    fn encodes_voltage_request_payload() {
+        assert_eq!(voltage_request_payload(VoltageRequest::V12), [0x0A, 2]);
+    }
+
+    #[test]
+    fn decodes_status_register_bits() {
+        let status = Status::from_register(0b0011_1001);
+        assert!(status.bc_active);
+        assert!(!status.qc2_active);
+        assert!(!status.qc3_active);
+        assert!(status.pd_active);
+        assert!(status.epr_active);
+        assert!(status.epr_exist);
+        assert!(!status.avs_exist);
+    }
+
+    #[test]
+    fn converts_current_register_to_ma() {
+        assert_eq!(current_ma_from_register(0), 0);
+        assert_eq!(current_ma_from_register(10), 500);
+        assert_eq!(current_ma_from_register(65), 3_250);
     }
 }
