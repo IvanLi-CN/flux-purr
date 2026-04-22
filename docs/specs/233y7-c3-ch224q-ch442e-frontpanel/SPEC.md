@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-03
-- Last: 2026-03-31
+- Last: 2026-04-22
 
 ## 背景 / 问题陈述
 
@@ -19,6 +19,7 @@
 - 冻结 `ESP32-S3FH4R2 + CH224Q` 的直连前面板 GPIO 分配。
 - 从 baseline 与 firmware 中移除 `TCA6408A` 相关假设与适配层。
 - 保持 CH224Q 控制、输入电压采样、风扇控制、前面板按键、LCD 控制的契约一致。
+- 为 RGB 状态灯冻结三路独立 PWM GPIO 分配，并与硬件文档/firmware board profile 对齐。
 - 按 `normal-flow` 收口至本地 PR-ready（不 push、不建 PR）。
 
 ### Non-goals
@@ -49,19 +50,21 @@
 
 - MCU 切换为 `ESP32-S3FH4R2`。
 - 前面板不再使用 `TCA6408A`，所有按键与 LCD 控制脚改为 MCU 直连。
-- firmware-active GPIO 分配固定为以下 21 路且无重复：`0,1,2,8,9,10,11,12,13,14,15,16,17,18,19,20,21,35,36,47,48`。
+- firmware-active GPIO 分配固定为以下 24 路且无重复：`0,1,2,8,9,10,11,12,13,14,15,16,17,18,19,20,21,35,36,37,38,39,47,48`。
 - `GPIO0` 必须直连前面板中键并承担 `BOOT` 键角色，采用 active-low 连接。
 - `GPIO10/11/12/13` 应尽量对齐 `mains-aegis` 的 LCD cluster，其中 `GPIO10=LCD_DC`、`GPIO11=LCD_MOSI`、`GPIO12=LCD_SCLK`、`GPIO13=LCD_BLK`。
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
 - `GPIO47`（芯片 pin `37`）必须保留为 heater PWM 输出。
 - `GPIO48`（芯片 pin `36`）必须保留为 buzzer PWM / beep 输出。
 - `GPIO35` 必须直接拥有风扇 `EN` 控制路径，允许在 MCU 侧原始控制网与实际 `FAN_EN` 之间插入保护/串联电阻；`GPIO36` 必须直连 `FAN_PWM`。
+- `GPIO37/38/39` 必须分别冻结为 `RGB_B_PWM`、`RGB_G_PWM`、`RGB_R_PWM` 三路独立状态灯 PWM 输出。
+- 当前 populated baseline 只允许装配 1 颗 RGB 状态灯；若主板网表保留第二颗并联 RGB footprint，则它必须标记为 `DNI`，除非后续给第二颗补齐独立限流电阻。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
 - `PT1000` 直连 ADC 的基线外围固定为：`R_REF=2.49 kOhm (0.1%)`、`R_SERIES=2.2 kOhm`、`C_ADC=100 nF`，并在 MCU ADC 侧增加低漏电 ESD 钳位。
 - `GPIO8/9` 用作共享 I2C，总线上至少包含 `CH224Q` 与一颗 `M24C64` EEPROM。
 - `GPIO19/20` 用于原生 USB `D-/D+`。
-- `GPIO34` 可作为硬件接入的 `FAN_TACH` 输入存在，但它不计入当前 firmware-active 的 21 路 GPIO 集。
+- `GPIO34` 保留为 `FAN_TACH` 预留输入位，但 2026-04-22 的主板网表当前未把它接出；它不计入当前 firmware-active 的 24 路 GPIO 集。
 - 保留 `DeviceStatus` 中的 `frontpanel_key`、`pd_request_mv`、`pd_contract_mv`、`fan_enabled`、`fan_pwm_permille` 字段。
 - 固定 `3.3 V` 电源应使用输入欠压锁定，目标行为为：约 `4.5 V` 以下关断、约 `5.0 V` 恢复。
 
@@ -69,6 +72,7 @@
 
 - 避开 `ESP32-S3` 的 strapping pins `GPIO3`、`GPIO45`、`GPIO46`。
 - 避开 `GPIO26 ~ GPIO32` 的 flash / PSRAM 占用区。
+- 若继续沿用默认 USB Serial/JTAG 路径，则允许把 `GPIO39`（封装信号 `MTCK`）复用为普通 PWM 输出；若未来改为外部 GPIO JTAG，则必须重新审视 RGB_R 分配。
 - `FAN_EN` 默认通过弱下拉保持关闭。
 - `BOOT(GPIO0)` 采用 released-high / pressed-low 的标准电路。
 
@@ -87,6 +91,7 @@
 - 前面板四向键与中键分别由 MCU 直接读取，不依赖 expander。
 - LCD `DC/MOSI/SCLK/BLK` 与 `mains-aegis` 对齐为 `GPIO10/11/12/13`，`RES/CS` 继续由 MCU 直连，其中 `BLK` 支持 PWM。
 - Buzzer 输出由 `GPIO48` 提供；固件可将其作为普通 beep GPIO 或 PWM/LEDC 音调输出使用。
+- RGB 状态灯由 `GPIO39/38/37` 提供 `R/G/B` 三路 PWM；固件可按状态机需要输出静态颜色或亮度调制。
 - `PT1000` 通过 `GPIO2` 进入 MCU ADC；固件按校准后的 ADC 电压换算温度，开路/短路应视为故障态而不是有效温度。
 - `GPIO35` 的风扇使能控制在实现上可以表现为 `FAN_EN_RAW -> series resistor -> FAN_EN`，但 firmware 仍将其视为单一使能输出所有权。
 - 设备状态快照继续输出 `frontpanel_key` 与 PD/风扇字段。
@@ -113,7 +118,8 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 21 且不重复。
+- Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 24 且不重复。
+- Given RGB 状态灯 GPIO 分配已冻结，When 检查 board profile 常量，Then `RGB_B/G/R` 分别固定为 `GPIO37/38/39`。
 - Given CH224Q 适配层，When 对 `0x22/0x23` 进行解析并编码 `5/9/12/15/20/28V`，Then 地址解析与寄存器编码结果正确。
 - Given VIN sense 方案，When 按 `56 kOhm / 5.1 kOhm` 计算 `28V` 输入，Then ADC 引脚电压不高于 `2.337V`。
 - Given firmware 不再依赖 `TCA6408A`，When 构建 `firmware` crate，Then 不再存在 `tca6408a` 模块引用。
@@ -161,6 +167,7 @@
 - Heater 功率开关保持为独立的低边 `NMOS` 方案，并通过单独硬件设计文档冻结外围与验证要求。
 - Buzzer 单独占用芯片 pin `36` / `GPIO48`，与 heater 的 pin `37` / `GPIO47` 形成相邻的高编号控制输出对，便于布线。
 - LCD 与风扇控制的 pin map 尽量向 `mains-aegis` 靠拢，降低后续跨项目复用与查线成本。
+- RGB 状态灯使用相邻的 `GPIO37/38/39` 组成三路 PWM 输出，便于布线并减少与既有锁定功能的交叉。
 - 温度探头沿用 mini-hotplate 参考资料里的 `PT1000` 假设，这样可以继续使用 MCU 直连 ADC，而不必额外加 RTD 专用芯片。
 - 避开 `ESP32-S3` 的 strapping pins 与 flash / PSRAM 占用区，保持板级余量和 bring-up 清晰度。
 - 保持对外 API 语义稳定，仅更新板级来源说明。
@@ -170,12 +177,14 @@
 - 风险：切到 `ESP32-S3FH4R2` 后，firmware 实际目标工具链应回到 `xtensa-esp32s3-none-elf`。
 - 风险：移除 expander 后，前面板按键去抖和唤醒行为都变成 MCU 侧职责。
 - 风险：实机上仍需验证 `GPIO0` 中键与 USB 下载流程是否满足期望的人机交互。
-- 风险：`GPIO35/36/47/48` 虽在 `ESP32-S3FH4R2` 可用集合内，但仍需结合最终 PCB 布局确认走线与 EMI 余量。
+- 风险：`GPIO35/36/37/38/39/47/48` 虽在 `ESP32-S3FH4R2` 可用集合内，但仍需结合最终 PCB 布局确认走线与 EMI 余量。
+- 风险：若后续要同时装配两颗 RGB LED，则必须给第二颗补独立限流；当前归档主板网表只接受 `LED2` 作为 `DNI` 备选位。
 - 风险：`PT1000` 直连 ADC 的方案偏向控制/保护用途，若主人后续要求高精度绝对温度，则仍应升级到专用 RTD 前端。
 - 假设：当前显示面板接受 `LCD_BLK` 的 MCU 直连 PWM 驱动。
 - 假设：`GPIO8/9` 的共享 I2C 总线由 CH224Q 与 M24C64 EEPROM 共同占用，后续若再挂载外设需要重新审视地址与时序预算。
 - 假设：温度探头最终确认为 `PT1000` 而不是 `PT100`。
-- 假设：`GPIO34` 上的 `FAN_TACH` 在当前 revision 里只冻结为硬件输入，firmware 可后续再接入。
+- 假设：`GPIO34` 在当前 revision 里只冻结为 `FAN_TACH` 预留位，后续若重新接出则 firmware 可再接入。
+- 假设：项目继续使用默认 USB Serial/JTAG 调试路径，不把 JTAG eFuse 切到 `GPIO39~42`。
 
 ## 变更记录（Change log）
 
@@ -187,6 +196,9 @@
 - 2026-03-30: 补充双路 `TPS62933DRLR` 电源与 heater 低边 `NMOS` 的独立设计文档，并与主基线交叉链接。
 - 2026-03-30: 因布线需求，将 `HEATER_PWM` 迁移到芯片 pin `37` / `GPIO47`。
 - 2026-03-31: 新增 buzzer 输出分配到芯片 pin `36` / `GPIO48`。
+- 2026-04-22: 按主人确认的原理图片段新增 RGB 状态灯分配：`GPIO39/38/37 -> RGB_R/G/B_PWM`。
+- 2026-04-22: 用最新主板网表替换归档 `.enet`，并确认当前版本未把 `GPIO34` 接到 `FAN_TACH`。
+- 2026-04-22: 将并联的 `LED2` 标记为 `DNI`，保持单颗 RGB 状态灯 + 单路独立限流的装配基线。
 
 ## 参考（References）
 

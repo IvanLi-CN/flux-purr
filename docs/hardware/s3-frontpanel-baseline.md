@@ -16,7 +16,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - Variant overlay reference: `docs/hardware/fan-pcb-variants.md`
 - Archived front-panel-board netlist: `docs/hardware/netlists/front-panel-board.enet`
 
-## 2) Direct MCU GPIO allocation (21 active)
+## 2) Direct MCU GPIO allocation (24 active)
 
 | Function | GPIO | Notes |
 | --- | ---: | --- |
@@ -38,12 +38,15 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | USB D- | 19 | Native USB pins |
 | USB D+ | 20 | Native USB pins |
 | Up Key | 21 | Direct GPIO input |
-| FAN TACH | 34 | Hardware-wired tach input, not yet consumed by the current firmware board profile |
+| FAN TACH | 34 | Reserved tach input GPIO; the 2026-04-22 main-board netlist currently leaves it unconnected |
 | FAN EN | 35 | Direct MCU enable for the fan TPS62933 stage |
 | FAN PWM | 36 | PWM input for fan-voltage setpoint injection |
+| RGB B PWM | 37 | Discrete blue-channel PWM for the RGB status LED |
+| RGB G PWM | 38 | Discrete green-channel PWM for the RGB status LED |
+| RGB R PWM | 39 | Discrete red-channel PWM for the RGB status LED (`MTCK` package signal) |
 | BUZZER PWM | 48 | Chip pin 36, buzzer tone / beep output |
 
-Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster plus the nearby high-number control group on `GPIO34/35/36/47/48` while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
+Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster, keeps the fan rail on `GPIO34/35/36`, and uses `GPIO37/38/39` as a contiguous RGB status-LED PWM group while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
 
 ## 3) CH224Q control baseline
 
@@ -103,6 +106,8 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - Backlight PWM dimming must follow this active-low polarity.
 - `HEATER_PWM` is directly driven by MCU `GPIO47` (chip pin `37`) and controls a low-side heater MOSFET stage.
 - `BUZZER_PWM` is directly driven by MCU `GPIO48` (chip pin `36`) and is reserved for buzzer beeps or passive-buzzer tone output via PWM.
+- The RGB status LED is directly driven by MCU `GPIO39/38/37` for `R/G/B` respectively, each as an independent PWM-capable output.
+- The archived 2026-04-22 main-board netlist keeps a second RGB LED footprint (`LED2`) on the same `LED_R/G/B` rails, but that footprint is marked DNI; the populated baseline still assumes exactly one RGB status LED and one ballast resistor per color.
 - Heater switching baseline:
   - use low-side `NMOS`
   - current approved part: `BUK9Y14-40B,115`
@@ -112,7 +117,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - In the implemented netlist, `GPIO35` first drives `FAN_EN_RAW`, then passes through a `2.2 kOhm` series resistor into the TPS62933 `EN` pin. The weak `100 kOhm` pulldown remains on the actual `FAN_EN` node.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
-- `FAN_TACH` is wired to `GPIO34` in hardware. The current firmware board profile still leaves this input outside the frozen 21-pin active set until tach support is implemented.
+- `GPIO34` remains reserved for a future `FAN_TACH` input, but the 2026-04-22 main-board netlist currently leaves this signal unconnected. The firmware board profile still keeps the GPIO reserved outside the frozen active set until tach support is implemented.
 - One channel of the dual `PESD3V3S2UT` clamp is populated on `FAN_EN_RAW`; the other channel protects `RTD_ADC`.
 - Keep the buzzer silent by default at boot. If the buzzer stage can sound when its input floats, add an external weak pulldown or use a driver topology whose default state is silent.
 - Fan rail baseline:
@@ -166,6 +171,7 @@ Power-stage details are frozen in:
 - Native USB uses `GPIO19` (`D-`) and `GPIO20` (`D+`).
 - Strapping pins on ESP32-S3 are `GPIO0`, `GPIO3`, `GPIO45`, and `GPIO46`.
 - Avoid using `GPIO3`, `GPIO45`, and `GPIO46` for front-panel or power-control signals.
+- `GPIO39` is reused here for `RGB_R_PWM`; this is acceptable as long as the design keeps the default built-in USB Serial/JTAG path and does not burn eFuses to move JTAG onto `GPIO39~42`.
 - `GPIO26 ~ GPIO32` are generally occupied by SPI flash / PSRAM and are intentionally avoided in this baseline.
 
 Reference:
