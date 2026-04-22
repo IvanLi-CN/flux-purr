@@ -107,6 +107,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - `HEATER_PWM` is directly driven by MCU `GPIO47` (chip pin `37`) and controls a low-side heater MOSFET stage.
 - `BUZZER_PWM` is directly driven by MCU `GPIO48` (chip pin `36`) and is reserved for buzzer beeps or passive-buzzer tone output via PWM.
 - The RGB status LED is directly driven by MCU `GPIO39/38/37` for `R/G/B` respectively, each as an independent PWM-capable output.
+- The archived 2026-04-22 main-board netlist keeps a second RGB LED footprint (`LED2`) on the same `LED_R/G/B` rails, but that footprint is marked DNI; the populated baseline still assumes exactly one RGB status LED and one ballast resistor per color.
 - Heater switching baseline:
   - use low-side `NMOS`
   - current approved part: `BUK9Y14-40B,115`

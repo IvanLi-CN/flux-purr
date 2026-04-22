@@ -5822,7 +5822,7 @@
         },
         "gge623_1": {
             "props": {
-                "Add into BOM": "yes",
+                "Add into BOM": "no",
                 "Convert to PCB": "yes",
                 "Symbol": "7e9be03099529888",
                 "Designator": "LED2",

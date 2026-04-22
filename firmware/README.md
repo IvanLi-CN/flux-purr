@@ -144,6 +144,7 @@
 - `GPIO48` (chip pin `36`) is reserved as the buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
+- The archived 2026-04-22 main-board netlist keeps a second RGB footprint (`LED2`) only as DNI; the populated baseline still uses one RGB status LED with one ballast resistor per color.
 - The fixed `3.3 V` rail uses an external UVLO divider on `VSYS_OK` (`220 kOhm` to `VBUS`, `68 kOhm` to `GND`) and enables at about `4.97 V` rising / `4.49 V` falling.
 - FAN enable is owned by MCU `GPIO35`, but the implemented board routes it as `FAN_EN_RAW -> 2.2 kOhm -> FAN_EN` with the weak pulldown on the actual `EN` node; `GPIO36` provides the normalized fan-actuator PWM that is filtered and injected into the fan rail `FB` node.
 - `GPIO34` remains reserved for `FAN_TACH`, but the 2026-04-22 main-board netlist currently leaves it unconnected, so it is not yet part of the current firmware board-profile active GPIO set.
