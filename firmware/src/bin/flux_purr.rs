@@ -1078,6 +1078,7 @@ async fn main(_spawner: Spawner) {
         FrontPanelInputTimings::default(),
     );
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
+    ui_state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
     let mut heater_controller = HeaterController::new();
     let mut current_rtd_fault: Option<HeaterFaultReason> = None;
     let mut latest_temp_c = 0.0_f32;
@@ -1261,6 +1262,11 @@ async fn main(_spawner: Spawner) {
                     None => info!("pd status update read=failed"),
                 }
                 last_pd_observation = current_pd_observation;
+            }
+            let next_pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+            if ui_state.pd_contract_mv != next_pd_contract_mv {
+                ui_state.pd_contract_mv = next_pd_contract_mv;
+                needs_redraw = true;
             }
 
             let next_fan_runtime_enabled = next_fan_runtime_enabled(

@@ -8,7 +8,7 @@
 
 ## 背景 / 问题陈述
 
-- 当前 `flux-purr` 已经完成前面板输入、RTD 读取、CH224Q 12V 请求与 heater/fan bring-up，但 heater 仍是固定占空比测试波形，无法按设定温度稳定工作。
+- 当前 `flux-purr` 已经完成前面板输入、RTD 读取、CH224Q 20V 请求与 heater/fan bring-up，但 heater 仍是固定占空比测试波形，无法按设定温度稳定工作。
 - `#223uj` 与 `#fk3u7` 已冻结前面板视觉和五向输入基线，但 Dashboard 的 heater/fan 语义仍残留 mock 时代口径，和现在的真实运行态不一致。
 - 若不把温控、故障保护、风扇联动和 UI 真相源一次收口，后续板级调试会持续混淆“显示状态”“控制状态”“保护状态”三套口径。
 
@@ -57,7 +57,7 @@
 - PID 必须固定使用内置常量参数，并包含积分限幅、设定变化重置积分、导数对测量值求差。
 - RTD 开路、短路、ADC 读失败、`temp >= 420°C` 时，heater 必须立即关断并进入 fault-latch。
 - fault-latch 期间 heater 不得自动恢复；故障解除后必须由用户再次短按中键重臂。
-- CH224Q 仍在启动时请求 `12V`；PD 状态变化只允许进入日志/状态观测，不得触发 heater 锁死或自动关断。
+- CH224Q 仍在启动时请求 `20V`；PD 状态变化只允许进入日志/状态观测，不得触发 heater 锁死或自动关断。
 - 风扇默认关闭；`temp >= 360°C` 强制开启，降到 `<340°C` 才允许关闭。
 - Dashboard 中键短按只切 heater arm；中键双击不得再影响风扇运行态。
 - Dashboard 左侧必须显示实时温度；右上必须显示 `SET` 与设定温度；`FAN` 必须显示实际运行态；底部条形必须绑定实际 heater 输出 duty。
@@ -77,7 +77,7 @@
 
 ### Core flows
 
-- 启动后仍先请求 `12V`，随后初始化 RTD、heater PWM、fan 运行态和前面板 UI。
+- 启动后仍先请求 `20V`，随后初始化 RTD、heater PWM、fan 运行态和前面板 UI。
 - 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则 PID 开始按 `target_temp_c - current_temp_c` 驱动 duty。
 - 当实时温度靠近设定温度时，heater duty 应明显下降；超过设定温度时 duty 应继续收敛到低值或 0。
 - 风扇不跟随 heater arm 自动开启；只有温度达到阈值时才进入全速运行。

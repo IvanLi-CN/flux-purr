@@ -77,14 +77,14 @@
   - the `Active Cooling` page is informational in the formal runtime; it documents the safety policy instead of exposing a writable fan override
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
 - PD policy:
-  - boot still requests `12 V` from `CH224Q`
+  - boot still requests `20 V` from `CH224Q`
   - later PD status changes are observed and logged only; they do not latch or gate heater output
 - Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
 ## CH224Q PD request bring-up
 
 - `GPIO8/9` host the shared I2C bus for `CH224Q` and `M24C64`.
-- The app runtime programs `CH224Q` register `0x0A` on boot and requests `12 V`.
+- The app runtime programs `CH224Q` register `0x0A` on boot and requests `20 V`.
 - Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the app runtime continues.
 - After boot request/settle, the runtime polls CH224Q status for observation and defmt logging only.
 
