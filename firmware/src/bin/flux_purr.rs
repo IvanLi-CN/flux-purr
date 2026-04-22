@@ -73,23 +73,32 @@ const HEATER_FAN_OFF_TEMP_C: i16 = 340;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HARD_CUTOFF_TEMP_C: i16 = 420;
 #[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 const HEATER_CONTROL_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_FULL_POWER_ERROR_C: f32 = 30.0;
+const HEATER_WARMUP_EXIT_ERROR_C: f32 = 2.2;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_CUTBACK_START_ERROR_C: f32 = 0.0;
+const HEATER_WARMUP_REENTER_ERROR_C: f32 = 4.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_CUTBACK_MIN_DUTY_PERCENT: f32 = 36.0;
+const HEATER_HOLD_ENTRY_ERROR_C: f32 = 0.9;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KP: f32 = 1.35;
+const HEATER_HOLD_EXIT_ERROR_C: f32 = 2.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KI: f32 = 0.08;
+const HEATER_APPROACH_DUTY_PERCENT: u8 = 32;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_KD: f32 = 0.0;
+const HEATER_APPROACH_MAX_TICKS: u8 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MIN: f32 = 0.0;
+const HEATER_HOLD_DUTY_PERCENT: u8 = 32;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PID_INTEGRAL_MAX: f32 = 100.0;
+const HEATER_HOLD_ON_ERROR_C: f32 = 0.3;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_OFF_ERROR_C: f32 = 0.05;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_OVERSHOOT_CUTOFF_C: f32 = 0.25;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_TEMP_FILTER_ALPHA: f32 = 0.45;
+#[cfg(target_arch = "xtensa")]
+const HEATER_SELFTEST_AUTO_ARM_ON_BOOT: bool = true;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
@@ -216,11 +225,32 @@ impl HeaterFaultReason {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
+enum HeaterControlPhase {
+    Warmup,
+    Approach,
+    Hold,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+impl HeaterControlPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Warmup => "warmup",
+            Self::Approach => "approach",
+            Self::Hold => "hold",
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct HeaterPidSnapshot {
     duty_percent: u8,
     error_c: f32,
-    integral: f32,
-    derivative_c_per_s: f32,
+    control_error_c: f32,
+    filtered_temp_c: f32,
+    phase: HeaterControlPhase,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -228,8 +258,9 @@ struct HeaterPidSnapshot {
 struct HeaterController {
     fault_latched: Option<HeaterFaultReason>,
     last_target_temp_c: i16,
-    last_measured_temp_c: Option<f32>,
-    integral: f32,
+    filtered_temp_c: Option<f32>,
+    phase: HeaterControlPhase,
+    phase_ticks: u8,
     duty_percent: u8,
 }
 
@@ -239,8 +270,9 @@ impl HeaterController {
         Self {
             fault_latched: None,
             last_target_temp_c: 0,
-            last_measured_temp_c: None,
-            integral: 0.0,
+            filtered_temp_c: None,
+            phase: HeaterControlPhase::Warmup,
+            phase_ticks: 0,
             duty_percent: 0,
         }
     }
@@ -251,16 +283,18 @@ impl HeaterController {
 
     fn clear_fault_latch(&mut self) {
         self.fault_latched = None;
-        self.integral = 0.0;
-        self.last_measured_temp_c = None;
+        self.filtered_temp_c = None;
+        self.phase = HeaterControlPhase::Warmup;
+        self.phase_ticks = 0;
         self.duty_percent = 0;
     }
 
     fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
         let changed = self.fault_latched != Some(reason);
         self.fault_latched = Some(reason);
-        self.integral = 0.0;
-        self.last_measured_temp_c = None;
+        self.filtered_temp_c = None;
+        self.phase = HeaterControlPhase::Warmup;
+        self.phase_ticks = 0;
         self.duty_percent = 0;
         changed
     }
@@ -272,7 +306,6 @@ impl HeaterController {
         heater_enabled: bool,
     ) -> HeaterPidSnapshot {
         let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
-        let previous_temp = self.last_measured_temp_c;
         let last_target_temp_c = self.last_target_temp_c;
         self.last_target_temp_c = target_temp_c;
 
@@ -281,64 +314,104 @@ impl HeaterController {
         }
 
         if !heater_enabled || self.fault_latched.is_some() {
-            self.integral = 0.0;
-            self.last_measured_temp_c = Some(measured_temp_c);
+            self.filtered_temp_c = Some(measured_temp_c);
+            self.phase = HeaterControlPhase::Warmup;
+            self.phase_ticks = 0;
             self.duty_percent = 0;
             return HeaterPidSnapshot {
                 duty_percent: 0,
                 error_c: f32::from(target_temp_c) - measured_temp_c,
-                integral: 0.0,
-                derivative_c_per_s: 0.0,
+                control_error_c: f32::from(target_temp_c) - measured_temp_c,
+                filtered_temp_c: measured_temp_c,
+                phase: self.phase,
             };
         }
 
         if target_temp_c != last_target_temp_c {
-            self.integral = 0.0;
-            self.last_measured_temp_c = previous_temp.map(|_| measured_temp_c);
+            self.filtered_temp_c = Some(measured_temp_c);
+            self.phase = HeaterControlPhase::Warmup;
+            self.phase_ticks = 0;
+            self.duty_percent = 0;
         }
 
         let error_c = f32::from(target_temp_c) - measured_temp_c;
-        let dt_s = HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0;
-        let derivative_c_per_s = previous_temp
-            .map(|previous| (measured_temp_c - previous) / dt_s)
-            .unwrap_or(0.0);
+        let filtered_temp_c = if let Some(previous_filtered_temp_c) = self.filtered_temp_c {
+            previous_filtered_temp_c
+                + HEATER_TEMP_FILTER_ALPHA * (measured_temp_c - previous_filtered_temp_c)
+        } else {
+            measured_temp_c
+        };
+        self.filtered_temp_c = Some(filtered_temp_c);
+        let control_error_c = f32::from(target_temp_c) - filtered_temp_c;
 
-        if error_c >= HEATER_FULL_POWER_ERROR_C {
-            self.integral = 0.0;
-            self.last_measured_temp_c = Some(measured_temp_c);
-            self.duty_percent = 100;
-            return HeaterPidSnapshot {
-                duty_percent: 100,
-                error_c,
-                integral: 0.0,
-                derivative_c_per_s,
+        let mut next_phase = self.phase;
+        let previous_phase = self.phase;
+        match self.phase {
+            HeaterControlPhase::Warmup => {
+                if control_error_c <= HEATER_WARMUP_EXIT_ERROR_C {
+                    next_phase = HeaterControlPhase::Approach;
+                }
+            }
+            HeaterControlPhase::Approach => {
+                if control_error_c >= HEATER_WARMUP_REENTER_ERROR_C {
+                    next_phase = HeaterControlPhase::Warmup;
+                } else if control_error_c <= HEATER_HOLD_ENTRY_ERROR_C
+                    || self.phase_ticks >= HEATER_APPROACH_MAX_TICKS
+                {
+                    next_phase = HeaterControlPhase::Hold;
+                }
+            }
+            HeaterControlPhase::Hold => {
+                if control_error_c >= HEATER_HOLD_EXIT_ERROR_C {
+                    next_phase = HeaterControlPhase::Approach;
+                }
+            }
+        }
+
+        if next_phase != self.phase {
+            self.phase = next_phase;
+            self.phase_ticks = 0;
+        } else {
+            self.phase_ticks = self.phase_ticks.saturating_add(1);
+        }
+
+        let previous_duty_percent =
+            if previous_phase != self.phase && self.phase == HeaterControlPhase::Hold {
+                0
+            } else {
+                self.duty_percent
             };
-        }
+        let duty_percent =
+            if measured_temp_c >= f32::from(target_temp_c) + HEATER_OVERSHOOT_CUTOFF_C {
+                0
+            } else {
+                match self.phase {
+                    HeaterControlPhase::Warmup => 100,
+                    HeaterControlPhase::Approach => HEATER_APPROACH_DUTY_PERCENT,
+                    HeaterControlPhase::Hold => {
+                        if previous_duty_percent >= HEATER_HOLD_DUTY_PERCENT {
+                            if control_error_c > HEATER_HOLD_OFF_ERROR_C {
+                                HEATER_HOLD_DUTY_PERCENT
+                            } else {
+                                0
+                            }
+                        } else if control_error_c >= HEATER_HOLD_ON_ERROR_C {
+                            HEATER_HOLD_DUTY_PERCENT
+                        } else {
+                            0
+                        }
+                    }
+                }
+            };
 
-        let cutback_span = (HEATER_FULL_POWER_ERROR_C - HEATER_CUTBACK_START_ERROR_C).max(1.0);
-        let cutback_ratio =
-            ((error_c - HEATER_CUTBACK_START_ERROR_C) / cutback_span).clamp(0.0, 1.0);
-        let duty_ceiling = HEATER_CUTBACK_MIN_DUTY_PERCENT
-            + (100.0 - HEATER_CUTBACK_MIN_DUTY_PERCENT) * cutback_ratio;
-
-        let proportional_derivative = HEATER_PID_KP * error_c - HEATER_PID_KD * derivative_c_per_s;
-        let integral_candidate = (self.integral + HEATER_PID_KI * error_c * dt_s)
-            .clamp(HEATER_PID_INTEGRAL_MIN, HEATER_PID_INTEGRAL_MAX);
-        let unsaturated_output = proportional_derivative + self.integral;
-        let saturating_high = unsaturated_output >= duty_ceiling && error_c > 0.0;
-        if !saturating_high {
-            self.integral = integral_candidate;
-        }
-        let duty = (proportional_derivative + self.integral).clamp(0.0, duty_ceiling);
-
-        self.last_measured_temp_c = Some(measured_temp_c);
-        self.duty_percent = (duty + 0.5) as u8;
+        self.duty_percent = duty_percent;
 
         HeaterPidSnapshot {
-            duty_percent: self.duty_percent,
+            duty_percent,
             error_c,
-            integral: self.integral,
-            derivative_c_per_s,
+            control_error_c,
+            filtered_temp_c,
+            phase: self.phase,
         }
     }
 }
@@ -367,6 +440,17 @@ fn is_overtemp_sample(temp_c: f32) -> bool {
 fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16) {
     *latest_temp_c = 0.0;
     *latest_temp_i16 = 0;
+}
+
+#[cfg(target_arch = "xtensa")]
+fn temp_c_to_deci_c(temp_c: f32) -> i16 {
+    let scaled = temp_c * 10.0;
+    let rounded = if scaled >= 0.0 {
+        scaled + 0.5
+    } else {
+        scaled - 0.5
+    };
+    rounded.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -975,13 +1059,17 @@ async fn main(_spawner: Spawner) {
         read_ch224q_status(&mut pd_i2c, ch224q_address)
     };
     info!(
-        "heater control policy kp={=f32} ki={=f32} kd={=f32} interval_ms={=u64} full_power>= {=f32}C cutback_floor={=f32}%",
-        HEATER_PID_KP,
-        HEATER_PID_KI,
-        HEATER_PID_KD,
+        "heater control policy mode=staged interval_ms={=u64} warmup_exit={=f32}C warmup_reenter={=f32}C hold_entry={=f32}C hold_exit={=f32}C approach_hi={=u8}% approach_lo={=u8}% approach_max_s={=u8} hold_hi={=u8}% hold_lo={=u8}%",
         HEATER_CONTROL_INTERVAL_MS,
-        HEATER_FULL_POWER_ERROR_C,
-        HEATER_CUTBACK_MIN_DUTY_PERCENT,
+        HEATER_WARMUP_EXIT_ERROR_C,
+        HEATER_WARMUP_REENTER_ERROR_C,
+        HEATER_HOLD_ENTRY_ERROR_C,
+        HEATER_HOLD_EXIT_ERROR_C,
+        HEATER_APPROACH_DUTY_PERCENT,
+        HEATER_APPROACH_DUTY_PERCENT,
+        HEATER_APPROACH_MAX_TICKS,
+        HEATER_HOLD_DUTY_PERCENT,
+        0_u8,
     );
 
     let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin);
@@ -1007,6 +1095,7 @@ async fn main(_spawner: Spawner) {
                 );
             }
             ui_state.current_temp_c = measurement.current_temp_c;
+            ui_state.current_temp_deci_c = temp_c_to_deci_c(measurement.temp_c);
             info!(
                 "rtd initial adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32}",
                 measurement.adc_mv,
@@ -1019,6 +1108,7 @@ async fn main(_spawner: Spawner) {
             current_rtd_fault = Some(reason);
             let _ = heater_controller.latch_fault(reason);
             ui_state.current_temp_c = 0;
+            ui_state.current_temp_deci_c = 0;
             info!(
                 "rtd initial fault adc_mv={=u16} reason={=str}",
                 adc_mv.unwrap_or(0),
@@ -1030,6 +1120,13 @@ async fn main(_spawner: Spawner) {
     let mut fan_runtime_enabled = should_run_fan(latest_temp_i16, false);
     let mut fan_output_applied = false;
     ui_state.fan_enabled = fan_runtime_enabled;
+    if HEATER_SELFTEST_AUTO_ARM_ON_BOOT
+        && current_rtd_fault.is_none()
+        && heater_controller.fault_latched().is_none()
+    {
+        ui_state.heater_enabled = true;
+        info!("heater selftest auto-arm -> on");
+    }
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
     apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
@@ -1110,6 +1207,11 @@ async fn main(_spawner: Spawner) {
                         ui_state.current_temp_c = measurement.current_temp_c;
                         needs_redraw = true;
                     }
+                    let current_temp_deci_c = temp_c_to_deci_c(measurement.temp_c);
+                    if ui_state.current_temp_deci_c != current_temp_deci_c {
+                        ui_state.current_temp_deci_c = current_temp_deci_c;
+                        needs_redraw = true;
+                    }
                     info!(
                         "rtd sample adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32} heater_arm={=bool}",
                         measurement.adc_mv,
@@ -1122,6 +1224,11 @@ async fn main(_spawner: Spawner) {
                 RtdSample::Fault { adc_mv, reason } => {
                     current_rtd_fault = Some(reason);
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
+                    if ui_state.current_temp_c != 0 || ui_state.current_temp_deci_c != 0 {
+                        ui_state.current_temp_c = 0;
+                        ui_state.current_temp_deci_c = 0;
+                        needs_redraw = true;
+                    }
                     info!(
                         "rtd fault adc_mv={=u16} reason={=str} heater_arm={=bool}",
                         adc_mv.unwrap_or(0),
@@ -1189,13 +1296,14 @@ async fn main(_spawner: Spawner) {
             );
 
             info!(
-                "heater loop set_c={=i16} temp_c={=f32} duty={=u8}% error_c={=f32} integral={=f32} deriv_cps={=f32} arm={=bool} fault={=str}",
+                "heater loop set_c={=i16} temp_c={=f32} duty={=u8}% error_c={=f32} control_error_c={=f32} temp_avg_c={=f32} phase={=str} arm={=bool} fault={=str}",
                 ui_state.target_temp_c,
                 latest_temp_c,
                 pid_snapshot.duty_percent,
                 pid_snapshot.error_c,
-                pid_snapshot.integral,
-                pid_snapshot.derivative_c_per_s,
+                pid_snapshot.control_error_c,
+                pid_snapshot.filtered_temp_c,
+                pid_snapshot.phase.label(),
                 ui_state.heater_enabled,
                 heater_controller
                     .fault_latched()
@@ -1225,54 +1333,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heater_pid_saturates_when_far_below_target() {
+    fn heater_control_saturates_when_far_below_target() {
         let mut controller = HeaterController::new();
         let snapshot = controller.update(380, 25.0, true);
 
         assert_eq!(snapshot.duty_percent, 100);
         assert!(snapshot.error_c > 300.0);
+        assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
         assert_eq!(controller.fault_latched(), None);
     }
 
     #[test]
-    fn heater_pid_reduces_output_as_temperature_rises() {
+    fn heater_control_reduces_output_as_temperature_rises() {
         let mut controller = HeaterController::new();
-        let cold = controller.update(380, 25.0, true);
-        let warm = controller.update(380, 360.0, true);
-        let near_setpoint = controller.update(380, 378.0, true);
-
-        assert!(cold.duty_percent > warm.duty_percent);
-        assert!(warm.duty_percent >= near_setpoint.duty_percent);
-    }
-
-    #[test]
-    fn heater_pid_unwinds_after_sustained_saturation() {
-        let mut controller = HeaterController::new();
-
-        let mut snapshot = controller.update(380, 25.0, true);
-        assert_eq!(snapshot.duty_percent, 100);
-
-        for measured in [80.0, 160.0, 240.0, 320.0, 340.0, 350.0, 360.0] {
-            snapshot = controller.update(380, measured, true);
+        let mut snapshots = Vec::new();
+        for measured in [25.0, 60.0, 80.0, 92.0, 96.0, 99.2] {
+            snapshots.push(controller.update(100, measured, true));
         }
-        assert!(snapshot.duty_percent < 100);
 
-        let near_setpoint = controller.update(380, 370.0, true);
-        assert!(near_setpoint.duty_percent <= 60);
-
-        let overshoot = controller.update(380, 390.0, true);
-        assert!(overshoot.duty_percent < near_setpoint.duty_percent);
+        assert_eq!(snapshots[0].duty_percent, 100);
+        assert!(snapshots[3].duty_percent >= snapshots[4].duty_percent);
+        assert!(snapshots[4].duty_percent >= snapshots[5].duty_percent);
     }
 
     #[test]
-    fn heater_pid_resets_when_disabled() {
+    fn heater_control_stays_aggressive_through_approach_band() {
+        let mut controller = HeaterController::new();
+        let mut snapshot = controller.update(100, 25.0, true);
+        for measured in [40.0, 60.0, 80.0, 92.0, 96.0, 96.0, 96.0] {
+            snapshot = controller.update(100, measured, true);
+        }
+
+        assert!(snapshot.duty_percent >= HEATER_APPROACH_DUTY_PERCENT);
+    }
+
+    #[test]
+    fn heater_control_resets_when_disabled() {
         let mut controller = HeaterController::new();
         let enabled = controller.update(380, 25.0, true);
         let disabled = controller.update(380, 40.0, false);
 
         assert!(enabled.duty_percent > 0);
         assert_eq!(disabled.duty_percent, 0);
-        assert_eq!(disabled.integral, 0.0);
+        assert_eq!(disabled.filtered_temp_c, 40.0);
+        assert_eq!(disabled.phase, HeaterControlPhase::Warmup);
     }
 
     #[test]
@@ -1299,18 +1403,32 @@ mod tests {
     }
 
     #[test]
-    fn heater_pid_holds_some_output_near_setpoint_after_cutback() {
+    fn heater_control_reapplies_power_when_temperature_falls_below_target() {
         let mut controller = HeaterController::new();
 
-        for measured in [
-            25.0, 80.0, 160.0, 240.0, 320.0, 340.0, 350.0, 360.0, 370.0, 375.0,
-        ] {
-            let _ = controller.update(380, measured, true);
+        for measured in [25.0, 40.0, 55.0, 70.0, 82.0, 90.0, 96.0, 99.2, 100.4] {
+            let _ = controller.update(100, measured, true);
         }
 
-        let near_target = controller.update(380, 379.0, true);
-        assert!(near_target.duty_percent > 0);
-        assert!(near_target.duty_percent <= HEATER_CUTBACK_MIN_DUTY_PERCENT as u8 + 2);
+        let _ = controller.update(100, 99.6, true);
+        let _ = controller.update(100, 98.4, true);
+        let cooling = controller.update(100, 98.8, true);
+        assert!(cooling.duty_percent > 0);
+        assert!(matches!(
+            cooling.phase,
+            HeaterControlPhase::Approach | HeaterControlPhase::Hold
+        ));
+    }
+
+    #[test]
+    fn heater_control_cuts_power_on_overshoot() {
+        let mut controller = HeaterController::new();
+        for measured in [25.0, 60.0, 80.0, 92.0, 96.0, 99.2, 99.8] {
+            let _ = controller.update(100, measured, true);
+        }
+
+        let overshoot = controller.update(100, 100.3, true);
+        assert_eq!(overshoot.duty_percent, 0);
     }
 
     #[test]

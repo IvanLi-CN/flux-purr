@@ -97,6 +97,7 @@ impl PreviewPreset {
             Self::DashboardManual => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.current_temp_c = 300;
+                state.current_temp_deci_c = 3000;
                 state.target_temp_c = 389;
                 state.heater_enabled = true;
                 state.heater_output_percent = 64;

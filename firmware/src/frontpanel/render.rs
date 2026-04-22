@@ -252,6 +252,11 @@ fn draw_seven_segment_text(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i3
     }
 }
 
+fn measure_seven_segment_text(text: &str) -> i32 {
+    let digits = text.chars().count() as i32;
+    if digits == 0 { 0 } else { digits * 17 - 2 }
+}
+
 fn draw_status_line(canvas: &mut DisplayCanvas, y: i32, label: &str, value: &str, color: Rgb565) {
     draw_text_mid(canvas, label, 80, y, color);
     draw_text_mid_right(canvas, value, 154, y, color);
@@ -281,6 +286,20 @@ fn i16_to_text(value: i16) -> heapless::String<8> {
     let mut out = heapless::String::<8>::new();
     let _ = write!(&mut out, "{}", value);
     out
+}
+
+fn deci_c_to_parts(value_deci_c: i16) -> (heapless::String<8>, heapless::String<4>) {
+    use core::fmt::Write;
+
+    let mut integer = heapless::String::<8>::new();
+    let mut fractional = heapless::String::<4>::new();
+    let sign = if value_deci_c < 0 { "-" } else { "" };
+    let magnitude = i32::from(value_deci_c).abs();
+    let whole = magnitude / 10;
+    let tenth = magnitude % 10;
+    let _ = write!(&mut integer, "{}{}", sign, whole);
+    let _ = write!(&mut fractional, ".{}", tenth);
+    (integer, fractional)
 }
 
 fn gesture_color(gesture: Option<KeyGesture>) -> Rgb565 {
@@ -506,13 +525,17 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    let display_text = i16_to_text(state.current_temp_c);
+    let (display_text, fractional_text) = deci_c_to_parts(state.current_temp_deci_c);
     let value_color = temperature_color(state.current_temp_c);
     let set_text = i16_to_text(state.target_temp_c);
+    let digits_width = measure_seven_segment_text(&display_text);
+    let digits_right_edge = 54;
+    let digits_x = digits_right_edge - digits_width;
 
     fill_rect(canvas, 4, 4, 72, 36, COLOR_PANEL_STRONG);
-    draw_seven_segment_text(canvas, &display_text, 8, 8, value_color);
-    draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
+    draw_seven_segment_text(canvas, &display_text, digits_x, 8, value_color);
+    draw_text_small(canvas, &fractional_text, 51, 29, value_color);
+    draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 61, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
     draw_status_line(canvas, 7, "SET", &set_text, COLOR_ACCENT);
@@ -666,5 +689,29 @@ mod tests {
         assert_eq!(heater_bar_fill_width(50), 74);
         assert_eq!(heater_bar_fill_width(100), 148);
         assert_eq!(heater_bar_fill_width(255), 148);
+    }
+
+    #[test]
+    fn deci_temperature_parts_keep_one_decimal() {
+        assert_eq!(
+            deci_c_to_parts(263),
+            ("26".try_into().unwrap(), ".3".try_into().unwrap())
+        );
+        assert_eq!(
+            deci_c_to_parts(3000),
+            ("300".try_into().unwrap(), ".0".try_into().unwrap())
+        );
+        assert_eq!(
+            deci_c_to_parts(-52),
+            ("-5".try_into().unwrap(), ".2".try_into().unwrap())
+        );
+    }
+
+    #[test]
+    fn seven_segment_measurement_matches_glyph_advance() {
+        assert_eq!(measure_seven_segment_text(""), 0);
+        assert_eq!(measure_seven_segment_text("8"), 15);
+        assert_eq!(measure_seven_segment_text("26"), 32);
+        assert_eq!(measure_seven_segment_text("300"), 49);
     }
 }
