@@ -3544,7 +3544,7 @@
                 "42": {
                     "name": "GPIO37",
                     "number": "42",
-                    "net": "",
+                    "net": "RGB_B_PWM",
                     "props": {
                         "Pin Number": "42"
                     }
@@ -3552,7 +3552,7 @@
                 "43": {
                     "name": "GPIO38",
                     "number": "43",
-                    "net": "",
+                    "net": "RGB_G_PWM",
                     "props": {
                         "Pin Number": "43"
                     }
@@ -3560,7 +3560,7 @@
                 "44": {
                     "name": "MTCK",
                     "number": "44",
-                    "net": "",
+                    "net": "RGB_R_PWM",
                     "props": {
                         "Pin Number": "44"
                     }

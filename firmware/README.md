@@ -57,6 +57,9 @@
   - `HEATER_PWM = GPIO47`
   - `FAN_EN = GPIO35`
   - `FAN_PWM = GPIO36`
+  - `RGB_B_PWM = GPIO37`
+  - `RGB_G_PWM = GPIO38`
+  - `RGB_R_PWM = GPIO39`
   - `FAN_TACH = GPIO34` (reserved only in this round)
 - Shared PWM frequency target remains `25 kHz`, but the current front-panel runtime keeps heater and fan outputs in `safe-off` while UI actions stay mock-only.
 - The Web and firmware reducers may toggle `heaterEnabled` / `fanEnabled` state for display, but those flags do not drive the physical output stage in this phase.
@@ -108,12 +111,13 @@
 
 ## Hardware baseline notes
 
-- GPIO profile is locked to the S3 front-panel baseline (`21` firmware-active GPIO, center key on `GPIO0`).
+- GPIO profile is locked to the S3 front-panel baseline (`24` firmware-active GPIO, center key on `GPIO0`).
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
 - `GPIO47` (chip pin `37`) is the heater-control PWM output for a low-side `BUK9Y14-40B,115` MOSFET stage.
 - `GPIO48` (chip pin `36`) is reserved as the buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
+- `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
 - The fixed `3.3 V` rail uses an external UVLO divider on `VSYS_OK` (`220 kOhm` to `VBUS`, `68 kOhm` to `GND`) and enables at about `4.97 V` rising / `4.49 V` falling.
 - FAN enable is owned by MCU `GPIO35`, but the implemented board routes it as `FAN_EN_RAW -> 2.2 kOhm -> FAN_EN` with the weak pulldown on the actual `EN` node; `GPIO36` provides the normalized fan-actuator PWM that is filtered and injected into the fan rail `FB` node.
 - `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
