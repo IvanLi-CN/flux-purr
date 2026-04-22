@@ -85,11 +85,13 @@ jobs:
           fi
 
       - name: Package firmware artifact
+        env:
+          FW_RELEASE_DIR: firmware/target/xtensa-esp32s3-none-elf/release
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cp target/xtensa-esp32s3-none-elf/release/*.a artifacts/ 2>/dev/null || true
-          tar -czf artifacts/firmware-${FW_EFFECTIVE_VERSION}.tar.gz -C target/xtensa-esp32s3-none-elf/release .
+          cp "${FW_RELEASE_DIR}"/*.a artifacts/ 2>/dev/null || true
+          tar -czf artifacts/firmware-${FW_EFFECTIVE_VERSION}.tar.gz -C "${FW_RELEASE_DIR}" .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
