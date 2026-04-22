@@ -282,12 +282,12 @@ export const AppInteractionFlow: Story = {
     await step('dashboard short and double presses stay on dashboard', async () => {
       await expect(debug).toHaveTextContent('route: dashboard')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
-      await expect(debug).toHaveTextContent('targetTempC: 381')
+      await expect(debug).toHaveTextContent('targetTempC: 101')
       for (let index = 0; index < 19; index += 1) {
         await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
       }
-      await expect(debug).toHaveTextContent('targetTempC: 400')
-      await expect(debug).toHaveTextContent('selectedPresetIndex: 4')
+      await expect(debug).toHaveTextContent('targetTempC: 120')
+      await expect(debug).toHaveTextContent('selectedPresetIndex: 2')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('heaterEnabled: true')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-double'))
@@ -314,7 +314,7 @@ export const AppInteractionFlow: Story = {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: preset-temp')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
-      await expect(debug).toHaveTextContent('targetTempC: 401')
+      await expect(debug).toHaveTextContent('targetTempC: 121')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: menu')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
