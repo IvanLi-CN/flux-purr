@@ -63,7 +63,7 @@
 - `PT1000` 直连 ADC 的基线外围固定为：`R_REF=2.49 kOhm (0.1%)`、`R_SERIES=2.2 kOhm`、`C_ADC=100 nF`，并在 MCU ADC 侧增加低漏电 ESD 钳位。
 - `GPIO8/9` 用作共享 I2C，总线上至少包含 `CH224Q` 与一颗 `M24C64` EEPROM。
 - `GPIO19/20` 用于原生 USB `D-/D+`。
-- `GPIO34` 可作为硬件接入的 `FAN_TACH` 输入存在，但它不计入当前 firmware-active 的 24 路 GPIO 集。
+- `GPIO34` 保留为 `FAN_TACH` 预留输入位，但 2026-04-22 的主板网表当前未把它接出；它不计入当前 firmware-active 的 24 路 GPIO 集。
 - 保留 `DeviceStatus` 中的 `frontpanel_key`、`pd_request_mv`、`pd_contract_mv`、`fan_enabled`、`fan_pwm_permille` 字段。
 - 固定 `3.3 V` 电源应使用输入欠压锁定，目标行为为：约 `4.5 V` 以下关断、约 `5.0 V` 恢复。
 
@@ -181,7 +181,7 @@
 - 假设：当前显示面板接受 `LCD_BLK` 的 MCU 直连 PWM 驱动。
 - 假设：`GPIO8/9` 的共享 I2C 总线由 CH224Q 与 M24C64 EEPROM 共同占用，后续若再挂载外设需要重新审视地址与时序预算。
 - 假设：温度探头最终确认为 `PT1000` 而不是 `PT100`。
-- 假设：`GPIO34` 上的 `FAN_TACH` 在当前 revision 里只冻结为硬件输入，firmware 可后续再接入。
+- 假设：`GPIO34` 在当前 revision 里只冻结为 `FAN_TACH` 预留位，后续若重新接出则 firmware 可再接入。
 - 假设：项目继续使用默认 USB Serial/JTAG 调试路径，不把 JTAG eFuse 切到 `GPIO39~42`。
 
 ## 变更记录（Change log）
@@ -195,6 +195,7 @@
 - 2026-03-30: 因布线需求，将 `HEATER_PWM` 迁移到芯片 pin `37` / `GPIO47`。
 - 2026-03-31: 新增 buzzer 输出分配到芯片 pin `36` / `GPIO48`。
 - 2026-04-22: 按主人确认的原理图片段新增 RGB 状态灯分配：`GPIO39/38/37 -> RGB_R/G/B_PWM`。
+- 2026-04-22: 用最新主板网表替换归档 `.enet`，并确认当前版本未把 `GPIO34` 接到 `FAN_TACH`。
 
 ## 参考（References）
 

@@ -38,7 +38,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | USB D- | 19 | Native USB pins |
 | USB D+ | 20 | Native USB pins |
 | Up Key | 21 | Direct GPIO input |
-| FAN TACH | 34 | Hardware-wired tach input, not yet consumed by the current firmware board profile |
+| FAN TACH | 34 | Reserved tach input GPIO; the 2026-04-22 main-board netlist currently leaves it unconnected |
 | FAN EN | 35 | Direct MCU enable for the fan TPS62933 stage |
 | FAN PWM | 36 | PWM input for fan-voltage setpoint injection |
 | RGB B PWM | 37 | Discrete blue-channel PWM for the RGB status LED |
@@ -116,7 +116,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - In the implemented netlist, `GPIO35` first drives `FAN_EN_RAW`, then passes through a `2.2 kOhm` series resistor into the TPS62933 `EN` pin. The weak `100 kOhm` pulldown remains on the actual `FAN_EN` node.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
-- `FAN_TACH` is wired to `GPIO34` in hardware. The current firmware board profile still leaves this input outside the frozen 21-pin active set until tach support is implemented.
+- `GPIO34` remains reserved for a future `FAN_TACH` input, but the 2026-04-22 main-board netlist currently leaves this signal unconnected. The firmware board profile still keeps the GPIO reserved outside the frozen active set until tach support is implemented.
 - One channel of the dual `PESD3V3S2UT` clamp is populated on `FAN_EN_RAW`; the other channel protects `RTD_ADC`.
 - Keep the buzzer silent by default at boot. If the buzzer stage can sound when its input floats, add an external weak pulldown or use a driver topology whose default state is silent.
 - Fan rail baseline:

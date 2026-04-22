@@ -146,7 +146,7 @@
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
 - The fixed `3.3 V` rail uses an external UVLO divider on `VSYS_OK` (`220 kOhm` to `VBUS`, `68 kOhm` to `GND`) and enables at about `4.97 V` rising / `4.49 V` falling.
 - FAN enable is owned by MCU `GPIO35`, but the implemented board routes it as `FAN_EN_RAW -> 2.2 kOhm -> FAN_EN` with the weak pulldown on the actual `EN` node; `GPIO36` provides the normalized fan-actuator PWM that is filtered and injected into the fan rail `FB` node.
-- `GPIO34` is wired to `FAN_TACH` in hardware, but it is not yet part of the current firmware board-profile active GPIO set.
+- `GPIO34` remains reserved for `FAN_TACH`, but the 2026-04-22 main-board netlist currently leaves it unconnected, so it is not yet part of the current firmware board-profile active GPIO set.
 - Front-panel center key is directly wired to `GPIO0`, using the standard active-low BOOT-button pattern.
 - LCD backlight is owned by MCU `GPIO13`, but at the system level it is active-low because the front-panel board routes `BLK` into a high-side PMOS gate.
 - `GPIO35/36/34` 保持当前风扇硬件连线；默认运行态只在 overtemp 条件下驱动真实风扇，不再接受 mock UI 直接切换。
