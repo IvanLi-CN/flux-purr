@@ -92,7 +92,14 @@ export function FrontPanelRuntimeHarness({
             <span className="text-slate-400">heaterEnabled:</span> {String(state.heaterEnabled)}
           </div>
           <div>
-            <span className="text-slate-400">fanEnabled:</span> {String(state.fanEnabled)}
+            <span className="text-slate-400">heaterOutputPercent:</span> {state.heaterOutputPercent}
+          </div>
+          <div>
+            <span className="text-slate-400">fanRuntimeEnabled:</span>{' '}
+            {String(state.fanRuntimeEnabled)}
+          </div>
+          <div>
+            <span className="text-slate-400">fanDisplayState:</span> {state.fanDisplayState}
           </div>
           <div>
             <span className="text-slate-400">selectedMenuItem:</span> {state.selectedMenuItem}
@@ -101,8 +108,19 @@ export function FrontPanelRuntimeHarness({
             <span className="text-slate-400">selectedPresetIndex:</span> {state.selectedPresetIndex}
           </div>
           <div>
-            <span className="text-slate-400">activeCooling:</span>{' '}
-            {String(state.activeCoolingEnabled)} / {state.activeCoolingMode}
+            <span className="text-slate-400">activeCoolingEnabled:</span>{' '}
+            {String(state.activeCoolingEnabled)}
+          </div>
+          <div>
+            <span className="text-slate-400">heaterLockReason:</span>{' '}
+            {state.heaterLockReason ?? 'none'}
+          </div>
+          <div>
+            <span className="text-slate-400">warningVisible:</span>{' '}
+            {String(state.dashboardWarningVisible)}
+          </div>
+          <div>
+            <span className="text-slate-400">pdContractMv:</span> {state.pdContractMv}
           </div>
           <div>
             <span className="text-slate-400">keyTest:</span> {state.keyTest.rawKeyLabel} /{' '}

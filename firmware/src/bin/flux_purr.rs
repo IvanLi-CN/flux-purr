@@ -31,9 +31,14 @@ use esp_hal::{
 };
 #[cfg(target_arch = "xtensa")]
 use esp_println as _;
+#[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::frontpanel::{FanDisplayState, HeaterLockReason};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ,
+    DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ, pwm_percent_from_permille,
+};
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::{
     adapters::ch224q::{self, Address, Status},
     board::s3_frontpanel,
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
@@ -67,14 +72,33 @@ const HEATER_PID_TARGET_MIN_C: i16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PID_TARGET_MAX_C: i16 = 400;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_FAN_ON_TEMP_C: i16 = 360;
+const AUTO_COOLING_FAN_STOP_TEMP_C: i16 = 35;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_FAN_OFF_TEMP_C: i16 = 340;
+const AUTO_COOLING_FAN_START_TEMP_C: i16 = 40;
+#[cfg(any(target_arch = "xtensa", test))]
+const AUTO_COOLING_FAN_FULL_TEMP_C: i16 = 50;
+#[cfg(any(target_arch = "xtensa", test))]
+const COOLING_DISABLED_PULSE_START_TEMP_C: i16 = 100;
+#[cfg(any(target_arch = "xtensa", test))]
+const COOLING_DISABLED_HEATER_LOCK_TEMP_C: i16 = 350;
+#[cfg(any(target_arch = "xtensa", test))]
+const COOLING_DISABLED_FAN_FULL_TEMP_C: i16 = 360;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HARD_CUTOFF_TEMP_C: i16 = 420;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 const HEATER_CONTROL_INTERVAL_MS: u64 = 1_000;
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS: u64 = 500;
+#[cfg(any(target_arch = "xtensa", test))]
+const FAN_PULSE_PERIOD_MS: u64 = 10_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
+#[cfg(any(target_arch = "xtensa", test))]
+const FAN_HALF_SPEED_PWM_PERMILLE: u16 = 250;
+#[cfg(any(target_arch = "xtensa", test))]
+const FAN_MINIMUM_VOLTAGE_PWM_PERMILLE: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_WARMUP_EXIT_ERROR_C: f32 = 2.2;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -101,8 +125,6 @@ const HEATER_TEMP_FILTER_ALPHA: f32 = 0.45;
 const HEATER_SELFTEST_AUTO_ARM_ON_BOOT: bool = true;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
-#[cfg(target_arch = "xtensa")]
-const FAN_TEST_DUTY_PERCENT: u8 = 0;
 #[cfg(target_arch = "xtensa")]
 const FAN_PWM_PERIOD_TICKS: u16 = 99;
 #[cfg(target_arch = "xtensa")]
@@ -416,19 +438,219 @@ impl HeaterController {
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
-fn should_run_fan(current_temp_c: i16, was_running: bool) -> bool {
-    current_temp_c >= HEATER_FAN_ON_TEMP_C
-        || (was_running && current_temp_c >= HEATER_FAN_OFF_TEMP_C)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FanVoltageProfile {
+    Minimum,
+    SafeHalf,
+    Full,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn next_fan_runtime_enabled(current_temp_c: i16, was_running: bool, has_rtd_fault: bool) -> bool {
-    if has_rtd_fault {
-        was_running
-    } else {
-        should_run_fan(current_temp_c, was_running)
+impl FanVoltageProfile {
+    const fn pwm_permille(self) -> u16 {
+        match self {
+            Self::Minimum => FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+            Self::SafeHalf => FAN_HALF_SPEED_PWM_PERMILLE,
+            Self::Full => FAN_FULL_SPEED_PWM_PERMILLE,
+        }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FanHardwareCommand {
+    enabled: bool,
+    pwm_permille: u16,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl FanHardwareCommand {
+    const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            pwm_permille: FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+        }
+    }
+
+    const fn from_profile(profile: FanVoltageProfile) -> Self {
+        Self {
+            enabled: true,
+            pwm_permille: profile.pwm_permille(),
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FanPolicyDecision {
+    command: FanHardwareCommand,
+    display_state: FanDisplayState,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
+    matches!(
+        reason,
+        Some(
+            HeaterFaultReason::SensorShort
+                | HeaterFaultReason::SensorOpen
+                | HeaterFaultReason::AdcReadFailed
+        )
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn auto_cooling_command(
+    current_temp_c: i16,
+    previous_command: FanHardwareCommand,
+) -> FanHardwareCommand {
+    if current_temp_c > AUTO_COOLING_FAN_FULL_TEMP_C {
+        FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+    } else if current_temp_c > AUTO_COOLING_FAN_START_TEMP_C {
+        FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+    } else if current_temp_c < AUTO_COOLING_FAN_STOP_TEMP_C {
+        FanHardwareCommand::disabled()
+    } else if previous_command.enabled {
+        FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+    } else {
+        FanHardwareCommand::disabled()
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn cooling_disabled_pulse_duty_percent(current_temp_c: i16) -> u8 {
+    if current_temp_c <= COOLING_DISABLED_PULSE_START_TEMP_C {
+        return 0;
+    }
+
+    (((current_temp_c - COOLING_DISABLED_PULSE_START_TEMP_C) / 10) as u8).min(25)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn cooling_disabled_command(current_temp_c: i16, elapsed_ms: u64) -> (FanHardwareCommand, bool) {
+    if current_temp_c > COOLING_DISABLED_FAN_FULL_TEMP_C {
+        return (
+            FanHardwareCommand::from_profile(FanVoltageProfile::Full),
+            true,
+        );
+    }
+    if current_temp_c > COOLING_DISABLED_HEATER_LOCK_TEMP_C {
+        return (
+            FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
+            true,
+        );
+    }
+    if current_temp_c <= COOLING_DISABLED_PULSE_START_TEMP_C {
+        return (FanHardwareCommand::disabled(), false);
+    }
+
+    let duty_percent = cooling_disabled_pulse_duty_percent(current_temp_c);
+    if duty_percent == 0 {
+        return (FanHardwareCommand::disabled(), false);
+    }
+
+    let elapsed_in_period_ms = elapsed_ms % FAN_PULSE_PERIOD_MS;
+    let on_window_ms = FAN_PULSE_PERIOD_MS.saturating_mul(u64::from(duty_percent)) / 100;
+    let enabled = elapsed_in_period_ms < on_window_ms;
+    (
+        FanHardwareCommand {
+            enabled,
+            pwm_permille: FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+        },
+        false,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fan_policy_decision(
+    current_temp_c: i16,
+    elapsed_ms: u64,
+    active_cooling_enabled: bool,
+    previous_command: FanHardwareCommand,
+    hold_previous_output: bool,
+) -> FanPolicyDecision {
+    if hold_previous_output {
+        return FanPolicyDecision {
+            command: previous_command,
+            display_state: if active_cooling_enabled {
+                if previous_command.enabled {
+                    FanDisplayState::Run
+                } else {
+                    FanDisplayState::Auto
+                }
+            } else {
+                FanDisplayState::Off
+            },
+        };
+    }
+
+    if active_cooling_enabled {
+        let command = auto_cooling_command(current_temp_c, previous_command);
+        return FanPolicyDecision {
+            command,
+            display_state: if command.enabled {
+                FanDisplayState::Run
+            } else {
+                FanDisplayState::Auto
+            },
+        };
+    }
+
+    let (command, _) = cooling_disabled_command(current_temp_c, elapsed_ms);
+    FanPolicyDecision {
+        command,
+        display_state: FanDisplayState::Off,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn next_heater_lock_reason(
+    heater_fault: Option<HeaterFaultReason>,
+    cooling_disabled_lock_latched: bool,
+) -> Option<HeaterLockReason> {
+    if heater_fault == Some(HeaterFaultReason::OverTemp) {
+        Some(HeaterLockReason::HardOvertemp)
+    } else if cooling_disabled_lock_latched {
+        Some(HeaterLockReason::CoolingDisabledOvertemp)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn next_dashboard_warning_visible(
+    elapsed_ms: u64,
+    heater_lock_reason: Option<HeaterLockReason>,
+) -> bool {
+    heater_lock_reason.is_some()
+        && (elapsed_ms / DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS).is_multiple_of(2)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn reconcile_cooling_disabled_lock(
+    active_cooling_enabled: bool,
+    current_temp_c: i16,
+    has_sensor_fault: bool,
+    latched: bool,
+    armed: bool,
+) -> (bool, bool, bool) {
+    if active_cooling_enabled {
+        return (false, true, latched);
+    }
+    if has_sensor_fault {
+        return (latched, armed, false);
+    }
+    if current_temp_c <= COOLING_DISABLED_HEATER_LOCK_TEMP_C {
+        return (latched, true, false);
+    }
+    if armed {
+        return (true, false, !latched);
+    }
+
+    (latched, armed, false)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -484,13 +706,20 @@ struct PdStatusObservation {
 #[cfg(target_arch = "xtensa")]
 fn log_ui_state(state: &FrontPanelUiState) {
     info!(
-        "ui route={=str} temp_c={=i16} target_c={=i16} heater_arm={=bool} heater_out={=u8}% fan={=bool}",
+        "ui route={=str} temp_c={=i16} target_c={=i16} heater_arm={=bool} heater_out={=u8}% fan_runtime={=bool} fan_display={=str} cooling_policy={=bool} heater_lock={=str} warn_visible={=bool}",
         route_label(state.route),
         state.current_temp_c,
         state.target_temp_c,
         state.heater_enabled,
         state.heater_output_percent,
         state.fan_enabled,
+        state.fan_display_state.label(),
+        state.active_cooling_enabled,
+        state
+            .heater_lock_reason
+            .map(|reason| reason.label())
+            .unwrap_or("none"),
+        state.dashboard_warning_visible,
     );
 }
 
@@ -635,29 +864,62 @@ where
 fn apply_fan_output<PWM>(
     fan_enable: &mut Output<'_>,
     fan_pwm: &mut PWM,
-    fan_running: bool,
-    last_fan_running: &mut bool,
+    command: FanHardwareCommand,
+    last_command: &mut Option<FanHardwareCommand>,
 ) where
     PWM: SetDutyCycle,
 {
-    if fan_running == *last_fan_running {
+    if last_command.is_some_and(|last| last == command) {
         return;
     }
 
-    let _ = fan_pwm.set_duty_cycle_percent(FAN_TEST_DUTY_PERCENT);
-    if fan_running {
+    let duty_percent = pwm_percent_from_permille(command.pwm_permille);
+    let _ = fan_pwm.set_duty_cycle_percent(duty_percent);
+    if command.enabled {
         fan_enable.set_high();
     } else {
         fan_enable.set_low();
     }
     info!(
-        "fan runtime -> {=str} gpio35={=str} gpio36 duty={=u8}% freq={=u32}Hz",
-        if fan_running { "run" } else { "off" },
-        if fan_running { "on" } else { "off" },
-        FAN_TEST_DUTY_PERCENT,
+        "fan runtime -> {=str} gpio35={=str} gpio36 duty={=u8}% pwm_permille={=u16} freq={=u32}Hz",
+        if command.enabled { "run" } else { "off" },
+        if command.enabled { "on" } else { "off" },
+        duty_percent,
+        command.pwm_permille,
         FAN_PWM_FREQUENCY_HZ,
     );
-    *last_fan_running = fan_running;
+    *last_command = Some(command);
+}
+
+#[cfg(target_arch = "xtensa")]
+fn sync_frontpanel_runtime_state(
+    ui_state: &mut FrontPanelUiState,
+    fan_decision: FanPolicyDecision,
+    heater_lock_reason: Option<HeaterLockReason>,
+    elapsed_ms: u64,
+) -> bool {
+    let mut changed = false;
+
+    if ui_state.fan_enabled != fan_decision.command.enabled {
+        ui_state.fan_enabled = fan_decision.command.enabled;
+        changed = true;
+    }
+    if ui_state.fan_display_state != fan_decision.display_state {
+        ui_state.fan_display_state = fan_decision.display_state;
+        changed = true;
+    }
+    if ui_state.heater_lock_reason != heater_lock_reason {
+        ui_state.heater_lock_reason = heater_lock_reason;
+        changed = true;
+    }
+
+    let dashboard_warning_visible = next_dashboard_warning_visible(elapsed_ms, heater_lock_reason);
+    if ui_state.dashboard_warning_visible != dashboard_warning_visible {
+        ui_state.dashboard_warning_visible = dashboard_warning_visible;
+        changed = true;
+    }
+
+    changed
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1009,10 +1271,20 @@ async fn main(_spawner: Spawner) {
         )
         .expect("failed to derive fan PWM timer clock");
     mcpwm.timer0.start(fan_timer_cfg);
-    let _ = fan_pwm.set_duty_cycle_percent(FAN_TEST_DUTY_PERCENT);
+    let _ =
+        fan_pwm.set_duty_cycle_percent(pwm_percent_from_permille(FAN_MINIMUM_VOLTAGE_PWM_PERMILLE));
     info!(
-        "fan runtime armed: gpio35 default=off gpio36 duty={=u8}% freq={=u32}Hz on>= {=i16}C off< {=i16}C",
-        FAN_TEST_DUTY_PERCENT, FAN_PWM_FREQUENCY_HZ, HEATER_FAN_ON_TEMP_C, HEATER_FAN_OFF_TEMP_C,
+        "fan runtime armed: gpio35 default=off gpio36 min={=u16}permille half={=u16}permille full={=u16}permille freq={=u32}Hz auto_off<{=i16}C auto_min>{=i16}C auto_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
+        FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+        FAN_HALF_SPEED_PWM_PERMILLE,
+        FAN_FULL_SPEED_PWM_PERMILLE,
+        FAN_PWM_FREQUENCY_HZ,
+        AUTO_COOLING_FAN_STOP_TEMP_C,
+        AUTO_COOLING_FAN_START_TEMP_C,
+        AUTO_COOLING_FAN_FULL_TEMP_C,
+        COOLING_DISABLED_PULSE_START_TEMP_C,
+        COOLING_DISABLED_HEATER_LOCK_TEMP_C,
+        COOLING_DISABLED_FAN_FULL_TEMP_C,
     );
 
     mcpwm.operator1.set_timer(&mcpwm.timer1);
@@ -1032,11 +1304,11 @@ async fn main(_spawner: Spawner) {
         await_ch224q_pd_ready(&mut pd_i2c, ch224q_address).await
     {
         info!(
-            "heater runtime ready: gpio47 freq={=u32}Hz target={=i16}~{=i16}C fan_on={=i16}C cutoff={=i16}C pd_status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
+            "heater runtime ready: gpio47 freq={=u32}Hz target={=i16}~{=i16}C cooling_lock>{=i16}C hard_cutoff={=i16}C pd_status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
             HEATER_PWM_FREQUENCY_HZ,
             HEATER_PID_TARGET_MIN_C,
             HEATER_PID_TARGET_MAX_C,
-            HEATER_FAN_ON_TEMP_C,
+            COOLING_DISABLED_HEATER_LOCK_TEMP_C,
             HEATER_HARD_CUTOFF_TEMP_C,
             status_raw,
             status.pd_active,
@@ -1118,9 +1390,10 @@ async fn main(_spawner: Spawner) {
         }
     }
     let mut last_heater_duty = 0_u8;
-    let mut fan_runtime_enabled = should_run_fan(latest_temp_i16, false);
-    let mut fan_output_applied = false;
-    ui_state.fan_enabled = fan_runtime_enabled;
+    let mut cooling_disabled_lock_latched = false;
+    let mut cooling_disabled_lock_armed = true;
+    let mut fan_command = FanHardwareCommand::disabled();
+    let mut last_fan_command: Option<FanHardwareCommand> = None;
     if HEATER_SELFTEST_AUTO_ARM_ON_BOOT
         && current_rtd_fault.is_none()
         && heater_controller.fault_latched().is_none()
@@ -1130,12 +1403,29 @@ async fn main(_spawner: Spawner) {
     }
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
+    let initial_fan_decision = fan_policy_decision(
+        latest_temp_i16,
+        0,
+        ui_state.active_cooling_enabled,
+        fan_command,
+        is_sensor_fault(current_rtd_fault),
+    );
+    fan_command = initial_fan_decision.command;
+    let _ = sync_frontpanel_runtime_state(
+        &mut ui_state,
+        initial_fan_decision,
+        next_heater_lock_reason(
+            heater_controller.fault_latched(),
+            cooling_disabled_lock_latched,
+        ),
+        0,
+    );
     apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
     apply_fan_output(
         &mut fan_enable,
         &mut fan_pwm,
-        fan_runtime_enabled,
-        &mut fan_output_applied,
+        fan_command,
+        &mut last_fan_command,
     );
     flush_ui(&mut display, canvas, &ui_state)
         .await
@@ -1163,6 +1453,7 @@ async fn main(_spawner: Spawner) {
 
         for event in sample.events {
             let heater_enabled_before = ui_state.heater_enabled;
+            let active_cooling_enabled_before = ui_state.active_cooling_enabled;
             info!(
                 "key raw={=str} logical={=str} gesture={=str} at_ms={=u64}",
                 event.raw_key.label(),
@@ -1173,8 +1464,27 @@ async fn main(_spawner: Spawner) {
             if ui_state.handle_event(event) {
                 needs_redraw = true;
             }
+            if ui_state.active_cooling_enabled != active_cooling_enabled_before {
+                info!(
+                    "active cooling policy -> {=str}",
+                    if ui_state.active_cooling_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    }
+                );
+                if ui_state.active_cooling_enabled {
+                    cooling_disabled_lock_latched = false;
+                    cooling_disabled_lock_armed = true;
+                }
+            }
             if ui_state.heater_enabled != heater_enabled_before {
                 if ui_state.heater_enabled {
+                    if cooling_disabled_lock_latched {
+                        cooling_disabled_lock_latched = false;
+                        cooling_disabled_lock_armed = false;
+                        info!("heater re-arm -> cleared cooling-disabled lock");
+                    }
                     if heater_controller.fault_latched().is_some() {
                         if let Some(reason) = current_rtd_fault {
                             ui_state.heater_enabled = false;
@@ -1269,23 +1579,6 @@ async fn main(_spawner: Spawner) {
                 needs_redraw = true;
             }
 
-            let next_fan_runtime_enabled = next_fan_runtime_enabled(
-                latest_temp_i16,
-                fan_runtime_enabled,
-                current_rtd_fault.is_some(),
-            );
-            if ui_state.fan_enabled != next_fan_runtime_enabled {
-                ui_state.fan_enabled = next_fan_runtime_enabled;
-                needs_redraw = true;
-            }
-            fan_runtime_enabled = next_fan_runtime_enabled;
-            apply_fan_output(
-                &mut fan_enable,
-                &mut fan_pwm,
-                fan_runtime_enabled,
-                &mut fan_output_applied,
-            );
-
             let pid_snapshot = heater_controller.update(
                 ui_state.target_temp_c,
                 latest_temp_c,
@@ -1316,6 +1609,69 @@ async fn main(_spawner: Spawner) {
                     .map(|reason| reason.label())
                     .unwrap_or("none"),
             );
+        }
+
+        let (
+            next_cooling_disabled_lock_latched,
+            next_cooling_disabled_lock_armed,
+            lock_just_latched,
+        ) = reconcile_cooling_disabled_lock(
+            ui_state.active_cooling_enabled,
+            latest_temp_i16,
+            is_sensor_fault(current_rtd_fault),
+            cooling_disabled_lock_latched,
+            cooling_disabled_lock_armed,
+        );
+        if cooling_disabled_lock_latched != next_cooling_disabled_lock_latched
+            || cooling_disabled_lock_armed != next_cooling_disabled_lock_armed
+        {
+            cooling_disabled_lock_latched = next_cooling_disabled_lock_latched;
+            cooling_disabled_lock_armed = next_cooling_disabled_lock_armed;
+            needs_redraw = true;
+        }
+        if lock_just_latched {
+            if ui_state.heater_enabled {
+                ui_state.heater_enabled = false;
+            }
+            info!(
+                "cooling-disabled safety lock latched temp_c={=i16}",
+                latest_temp_i16
+            );
+        }
+
+        if !ui_state.heater_enabled
+            && (last_heater_duty != 0 || ui_state.heater_output_percent != 0)
+        {
+            ui_state.heater_output_percent = 0;
+            apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
+            needs_redraw = true;
+        }
+
+        let fan_decision = fan_policy_decision(
+            latest_temp_i16,
+            elapsed_ms,
+            ui_state.active_cooling_enabled,
+            fan_command,
+            is_sensor_fault(current_rtd_fault),
+        );
+        fan_command = fan_decision.command;
+        apply_fan_output(
+            &mut fan_enable,
+            &mut fan_pwm,
+            fan_command,
+            &mut last_fan_command,
+        );
+
+        if sync_frontpanel_runtime_state(
+            &mut ui_state,
+            fan_decision,
+            next_heater_lock_reason(
+                heater_controller.fault_latched(),
+                cooling_disabled_lock_latched,
+            ),
+            elapsed_ms,
+        ) {
+            needs_redraw = true;
         }
 
         if needs_redraw {
@@ -1438,11 +1794,35 @@ mod tests {
     }
 
     #[test]
-    fn fan_runtime_uses_overtemp_hysteresis() {
-        assert!(!should_run_fan(359, false));
-        assert!(should_run_fan(360, false));
-        assert!(should_run_fan(350, true));
-        assert!(!should_run_fan(339, true));
+    fn auto_cooling_policy_uses_requested_hysteresis_and_speed_steps() {
+        let stopped = fan_policy_decision(34, 0, true, FanHardwareCommand::disabled(), false);
+        assert_eq!(stopped.command, FanHardwareCommand::disabled());
+        assert_eq!(stopped.display_state, FanDisplayState::Auto);
+
+        let minimum = fan_policy_decision(41, 0, true, FanHardwareCommand::disabled(), false);
+        assert_eq!(
+            minimum.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+        );
+        assert_eq!(minimum.display_state, FanDisplayState::Run);
+
+        let hysteresis = fan_policy_decision(
+            37,
+            0,
+            true,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Minimum),
+            false,
+        );
+        assert_eq!(
+            hysteresis.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+        );
+
+        let full = fan_policy_decision(51, 0, true, FanHardwareCommand::disabled(), false);
+        assert_eq!(
+            full.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+        );
     }
 
     #[test]
@@ -1452,10 +1832,84 @@ mod tests {
     }
 
     #[test]
-    fn rtd_fault_keeps_existing_fan_cooling_state() {
-        assert!(next_fan_runtime_enabled(0, true, true));
-        assert!(!next_fan_runtime_enabled(0, false, true));
-        assert!(next_fan_runtime_enabled(360, false, false));
+    fn cooling_disabled_policy_uses_pulse_window_and_safety_steps() {
+        assert_eq!(cooling_disabled_pulse_duty_percent(100), 0);
+        assert_eq!(cooling_disabled_pulse_duty_percent(110), 1);
+        assert_eq!(cooling_disabled_pulse_duty_percent(350), 25);
+
+        let pulse_on = fan_policy_decision(110, 0, false, FanHardwareCommand::disabled(), false);
+        assert!(pulse_on.command.enabled);
+        assert_eq!(pulse_on.display_state, FanDisplayState::Off);
+        assert_eq!(
+            pulse_on.command.pwm_permille,
+            FAN_MINIMUM_VOLTAGE_PWM_PERMILLE
+        );
+
+        let pulse_off = fan_policy_decision(110, 200, false, FanHardwareCommand::disabled(), false);
+        assert!(!pulse_off.command.enabled);
+
+        let half = fan_policy_decision(351, 0, false, FanHardwareCommand::disabled(), false);
+        assert_eq!(
+            half.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
+        );
+
+        let full = fan_policy_decision(361, 0, false, FanHardwareCommand::disabled(), false);
+        assert_eq!(
+            full.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+        );
+    }
+
+    #[test]
+    fn rtd_sensor_fault_keeps_existing_fan_output() {
+        let previous = FanHardwareCommand::from_profile(FanVoltageProfile::Minimum);
+
+        let auto = fan_policy_decision(0, 0, true, previous, true);
+        assert_eq!(auto.command, previous);
+        assert_eq!(auto.display_state, FanDisplayState::Run);
+
+        let disabled = fan_policy_decision(0, 0, false, previous, true);
+        assert_eq!(disabled.command, previous);
+        assert_eq!(disabled.display_state, FanDisplayState::Off);
+    }
+
+    #[test]
+    fn cooling_disabled_lock_requires_cooldown_after_manual_rearm() {
+        let (latched, armed, just_latched) =
+            reconcile_cooling_disabled_lock(false, 351, false, false, true);
+        assert_eq!((latched, armed, just_latched), (true, false, true));
+
+        let (manual_override_latched, manual_override_armed, manual_override_just_latched) =
+            reconcile_cooling_disabled_lock(false, 351, false, false, false);
+        assert_eq!(
+            (
+                manual_override_latched,
+                manual_override_armed,
+                manual_override_just_latched
+            ),
+            (false, false, false)
+        );
+
+        let (rearmed_latched, rearmed_armed, rearmed_just_latched) =
+            reconcile_cooling_disabled_lock(
+                false,
+                350,
+                false,
+                manual_override_latched,
+                manual_override_armed,
+            );
+        assert_eq!(
+            (rearmed_latched, rearmed_armed, rearmed_just_latched),
+            (false, true, false)
+        );
+
+        let (latched_again, armed_again, just_latched_again) =
+            reconcile_cooling_disabled_lock(false, 351, false, rearmed_latched, rearmed_armed);
+        assert_eq!(
+            (latched_again, armed_again, just_latched_again),
+            (true, false, true)
+        );
     }
 
     #[test]

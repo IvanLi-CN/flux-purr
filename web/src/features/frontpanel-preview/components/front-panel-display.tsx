@@ -383,8 +383,14 @@ function drawDashboardScreen(
   ctx: CanvasRenderingContext2D,
   screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
 ) {
-  const valueColor = temperatureColor(screen.targetTempC, screen.temperatureThresholdsC)
-  const valueText = String(Math.round(screen.targetTempC))
+  const valueColor = temperatureColor(screen.currentTempC, screen.temperatureThresholdsC)
+  const valueText = String(Math.round(screen.currentTempC))
+  const fanColor =
+    screen.fanDisplayState === 'run'
+      ? palette.success
+      : screen.fanDisplayState === 'auto'
+        ? palette.cyan
+        : palette.disabled
 
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
@@ -392,31 +398,29 @@ function drawDashboardScreen(
   drawTempUnitIcon(ctx, 60, 24, palette.text)
 
   fillRect(ctx, 78, 4, 78, 36, palette.panel)
-  drawStatusLine(
-    ctx,
-    7,
-    screen.heaterEnabled ? palette.success : palette.warning,
-    'HEAT',
-    screen.heaterEnabled ? 'ON' : 'OFF'
-  )
-  drawStatusLine(
-    ctx,
-    18,
-    screen.fanEnabled ? palette.success : palette.disabled,
-    'FAN',
-    screen.fanEnabled ? 'RUN' : 'STOP'
-  )
-  drawStatusLine(ctx, 29, palette.cyan, 'MODE', 'APP')
+  if (screen.heaterLockReason && screen.dashboardWarningVisible) {
+    drawStatusLine(ctx, 7, palette.warning, 'WARN', 'OTEMP')
+  } else {
+    drawStatusLine(ctx, 7, palette.text, 'SET', `${screen.targetTempC}`)
+  }
+  drawStatusLine(ctx, 18, palette.cyan, 'PPS', `${Math.round(screen.pdContractMv / 1000)}V`)
+  drawStatusLine(ctx, 29, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
 
   fillRect(ctx, 4, 42, 152, 5, palette.panel)
-  fillRect(
-    ctx,
-    6,
-    43,
-    screen.heaterEnabled ? 116 : 42,
-    3,
-    screen.heaterEnabled ? palette.accent : palette.disabled
+  const heaterBarWidth = Math.max(
+    0,
+    Math.min(148, Math.round((148 * screen.heaterOutputPercent) / 100))
   )
+  if (heaterBarWidth > 0) {
+    fillRect(
+      ctx,
+      6,
+      43,
+      heaterBarWidth,
+      3,
+      screen.heaterEnabled ? palette.accent : palette.disabled
+    )
+  }
 }
 
 function drawMenuScreen(
@@ -511,11 +515,6 @@ function drawActiveCoolingScreen(
   ctx: CanvasRenderingContext2D,
   screen: Extract<FrontPanelScreen, { kind: 'active-cooling' }>
 ) {
-  const fanText =
-    !screen.enabled || screen.mode === 'off' ? 'OFF' : screen.mode === 'smart' ? 'AUTO' : 'ON'
-  const fanColor =
-    fanText === 'AUTO' ? palette.cyan : fanText === 'ON' ? palette.success : palette.warning
-
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   drawBitmapText(ctx, 'A-COOL', 8, 6, {
     color: palette.text,
@@ -528,16 +527,28 @@ function drawActiveCoolingScreen(
     align: 'right',
     letterSpacing: 1,
   })
-  drawBitmapText(ctx, `MODE ${screen.mode.toUpperCase()}`, 8, 20, {
-    color: palette.cyan,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `FAN ${fanText}`, 8, 33, {
-    color: fanColor,
-    scale: 2,
-    letterSpacing: 1,
-  })
+  drawBitmapText(
+    ctx,
+    `PD ${Math.round(screen.pdContractMv / 1000)}V | AUTO <${screen.autoStopTempC} OFF >${screen.autoStartTempC} MIN`,
+    8,
+    20,
+    {
+      color: palette.cyan,
+      scale: 1,
+      letterSpacing: 1,
+    }
+  )
+  drawBitmapText(
+    ctx,
+    `SAFE >${screen.pulseStartTempC} PLS >${screen.lockTempC} 50% >${screen.fullTempC} MAX`,
+    8,
+    33,
+    {
+      color: palette.warning,
+      scale: 1,
+      letterSpacing: 1,
+    }
+  )
 }
 
 function fitBitmapText(

@@ -1,10 +1,11 @@
 import { frontPanelDefaultThresholdsC } from './design-tokens'
 import type {
-  CoolingMode,
+  FanDisplayState,
   FrontPanelDashboardScreen,
   FrontPanelKeyId,
   FrontPanelKeyTestScreen,
   FrontPanelScreen,
+  HeaterLockReason,
   KeyGestureId,
   MenuItemId,
 } from './types'
@@ -29,14 +30,20 @@ export interface FrontPanelRuntimeInteraction {
 export interface FrontPanelRuntimeState {
   mode: FrontPanelRuntimeMode
   route: FrontPanelRoute
+  currentTempC: number
+  currentTempDeciC: number
   targetTempC: number
   heaterEnabled: boolean
-  fanEnabled: boolean
+  heaterOutputPercent: number
+  fanRuntimeEnabled: boolean
+  fanDisplayState: FanDisplayState
   selectedMenuItem: MenuItemId
   selectedPresetIndex: number
   presetsC: ReadonlyArray<number | null>
   activeCoolingEnabled: boolean
-  activeCoolingMode: CoolingMode
+  pdContractMv: number
+  heaterLockReason: HeaterLockReason | null
+  dashboardWarningVisible: boolean
   keyTest: {
     activeKey: FrontPanelKeyId | null
     activeGesture: KeyGestureId | null
@@ -46,6 +53,16 @@ export interface FrontPanelRuntimeState {
     rawMaskLabel: string
   }
 }
+
+const AUTO_COOLING_STOP_TEMP_C = 35
+const AUTO_COOLING_START_TEMP_C = 40
+const AUTO_COOLING_FULL_TEMP_C = 50
+const COOLING_DISABLED_PULSE_START_TEMP_C = 100
+const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
+const COOLING_DISABLED_FAN_FULL_TEMP_C = 360
+const HARD_OVERTEMP_TEMP_C = 420
+const DEFAULT_PD_CONTRACT_MV = 12_000
+const DEFAULT_HEATER_OUTPUT_PERCENT = 18
 
 const menuItems: ReadonlyArray<{ id: MenuItemId; label: string }> = [
   { id: 'preset-temp', label: 'Preset Temp' },
@@ -90,29 +107,8 @@ const logicalLabelMap: Record<FrontPanelKeyId, string> = {
   up: 'U',
 }
 
-export function createFrontPanelRuntimeState(
-  mode: FrontPanelRuntimeMode = 'app'
-): FrontPanelRuntimeState {
-  return {
-    mode,
-    route: mode === 'key-test' ? 'key-test' : 'dashboard',
-    targetTempC: 100,
-    heaterEnabled: false,
-    fanEnabled: false,
-    selectedMenuItem: 'active-cooling',
-    selectedPresetIndex: 1,
-    presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
-    activeCoolingEnabled: true,
-    activeCoolingMode: 'smart',
-    keyTest: {
-      activeKey: null,
-      activeGesture: null,
-      rawKeyLabel: '---',
-      logicalKeyLabel: '---',
-      gestureLabel: 'IDLE',
-      rawMaskLabel: 'MASK 00',
-    },
-  }
+function clampTargetTemp(targetTempC: number) {
+  return Math.min(400, Math.max(0, targetTempC))
 }
 
 function matchingPresetIndex(state: FrontPanelRuntimeState, targetTempC: number) {
@@ -131,16 +127,6 @@ function sortedActivePresetEntries(state: FrontPanelRuntimeState) {
     .sort((left, right) => left.tempC - right.tempC || left.index - right.index)
 }
 
-const FRONT_PANEL_TARGET_TEMP_MIN = -(2 ** 15)
-const FRONT_PANEL_TARGET_TEMP_MAX = 2 ** 15 - 1
-
-function saturatingAdjustTargetTemp(targetTempC: number, delta: number) {
-  return Math.min(
-    FRONT_PANEL_TARGET_TEMP_MAX,
-    Math.max(FRONT_PANEL_TARGET_TEMP_MIN, targetTempC + delta)
-  )
-}
-
 function findNeighborPreset(state: FrontPanelRuntimeState, ascending: boolean) {
   const entries = sortedActivePresetEntries(state)
   if (ascending) {
@@ -149,7 +135,7 @@ function findNeighborPreset(state: FrontPanelRuntimeState, ascending: boolean) {
   return [...entries].reverse().find((entry) => entry.tempC < state.targetTempC) ?? null
 }
 
-function nextSortedPreset(state: FrontPanelRuntimeState) {
+function nextPresetSlot(state: FrontPanelRuntimeState) {
   if (!state.presetsC.length) return null
   const nextIndex = (state.selectedPresetIndex + 1) % state.presetsC.length
   return { index: nextIndex, tempC: state.presetsC[nextIndex] }
@@ -175,6 +161,84 @@ function updateKeyTest(
   }
 }
 
+function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntimeState {
+  const hardOvertemp = state.currentTempC >= HARD_OVERTEMP_TEMP_C
+  let heaterLockReason: HeaterLockReason | null = hardOvertemp ? 'hard-overtemp' : null
+  let fanRuntimeEnabled = state.fanRuntimeEnabled
+  let fanDisplayState: FanDisplayState = state.activeCoolingEnabled ? 'auto' : 'off'
+  let heaterEnabled = state.heaterEnabled
+
+  if (state.activeCoolingEnabled) {
+    if (state.currentTempC > AUTO_COOLING_FULL_TEMP_C) {
+      fanRuntimeEnabled = true
+    } else if (state.currentTempC > AUTO_COOLING_START_TEMP_C) {
+      fanRuntimeEnabled = true
+    } else if (state.currentTempC < AUTO_COOLING_STOP_TEMP_C) {
+      fanRuntimeEnabled = false
+    }
+    fanDisplayState = fanRuntimeEnabled ? 'run' : 'auto'
+  } else {
+    if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
+      fanRuntimeEnabled = true
+    } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
+      fanRuntimeEnabled = true
+    } else if (state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C) {
+      fanRuntimeEnabled = false
+    } else {
+      fanRuntimeEnabled = false
+    }
+    fanDisplayState = 'off'
+    if (!hardOvertemp && state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
+      heaterLockReason = 'cooling-disabled-overtemp'
+    }
+  }
+
+  if (heaterLockReason) {
+    heaterEnabled = false
+  }
+
+  return {
+    ...state,
+    heaterEnabled,
+    heaterOutputPercent: heaterEnabled ? state.heaterOutputPercent : 0,
+    fanRuntimeEnabled,
+    fanDisplayState,
+    heaterLockReason,
+    dashboardWarningVisible: heaterLockReason != null,
+  }
+}
+
+export function createFrontPanelRuntimeState(
+  mode: FrontPanelRuntimeMode = 'app'
+): FrontPanelRuntimeState {
+  return reconcileCoolingState({
+    mode,
+    route: mode === 'key-test' ? 'key-test' : 'dashboard',
+    currentTempC: 32,
+    currentTempDeciC: 321,
+    targetTempC: 100,
+    heaterEnabled: false,
+    heaterOutputPercent: 0,
+    fanRuntimeEnabled: false,
+    fanDisplayState: 'auto',
+    selectedMenuItem: 'active-cooling',
+    selectedPresetIndex: 1,
+    presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
+    activeCoolingEnabled: true,
+    pdContractMv: DEFAULT_PD_CONTRACT_MV,
+    heaterLockReason: null,
+    dashboardWarningVisible: false,
+    keyTest: {
+      activeKey: null,
+      activeGesture: null,
+      rawKeyLabel: '---',
+      logicalKeyLabel: '---',
+      gestureLabel: 'IDLE',
+      rawMaskLabel: 'MASK 00',
+    },
+  })
+}
+
 export function applyFrontPanelInteraction(
   current: FrontPanelRuntimeState,
   interaction: FrontPanelRuntimeInteraction
@@ -184,40 +248,54 @@ export function applyFrontPanelInteraction(
 
   if (state.route === 'dashboard') {
     if (interaction.key === 'up' && interaction.gesture === 'short') {
-      const nextTargetTempC = saturatingAdjustTargetTemp(state.targetTempC, 1)
-      return {
+      const targetTempC = clampTargetTemp(state.targetTempC + 1)
+      return reconcileCoolingState({
         ...state,
-        targetTempC: nextTargetTempC,
-        selectedPresetIndex:
-          matchingPresetIndex(state, nextTargetTempC) ?? state.selectedPresetIndex,
-      }
+        targetTempC,
+        selectedPresetIndex: matchingPresetIndex(state, targetTempC) ?? state.selectedPresetIndex,
+      })
     }
     if (interaction.key === 'down' && interaction.gesture === 'short') {
-      const nextTargetTempC = saturatingAdjustTargetTemp(state.targetTempC, -1)
-      return {
+      const targetTempC = clampTargetTemp(state.targetTempC - 1)
+      return reconcileCoolingState({
         ...state,
-        targetTempC: nextTargetTempC,
-        selectedPresetIndex:
-          matchingPresetIndex(state, nextTargetTempC) ?? state.selectedPresetIndex,
-      }
+        targetTempC,
+        selectedPresetIndex: matchingPresetIndex(state, targetTempC) ?? state.selectedPresetIndex,
+      })
     }
     if (interaction.key === 'left' && interaction.gesture === 'short') {
       const neighbor = findNeighborPreset(state, false)
       return neighbor
-        ? { ...state, targetTempC: neighbor.tempC, selectedPresetIndex: neighbor.index }
+        ? reconcileCoolingState({
+            ...state,
+            targetTempC: neighbor.tempC,
+            selectedPresetIndex: neighbor.index,
+          })
         : state
     }
     if (interaction.key === 'right' && interaction.gesture === 'short') {
       const neighbor = findNeighborPreset(state, true)
       return neighbor
-        ? { ...state, targetTempC: neighbor.tempC, selectedPresetIndex: neighbor.index }
+        ? reconcileCoolingState({
+            ...state,
+            targetTempC: neighbor.tempC,
+            selectedPresetIndex: neighbor.index,
+          })
         : state
     }
     if (interaction.key === 'center' && interaction.gesture === 'short') {
-      return { ...state, heaterEnabled: !state.heaterEnabled }
+      const heaterEnabled = !state.heaterEnabled
+      return reconcileCoolingState({
+        ...state,
+        heaterEnabled,
+        heaterOutputPercent: heaterEnabled ? DEFAULT_HEATER_OUTPUT_PERCENT : 0,
+      })
     }
     if (interaction.key === 'center' && interaction.gesture === 'double') {
-      return { ...state, fanEnabled: !state.fanEnabled }
+      return reconcileCoolingState({
+        ...state,
+        activeCoolingEnabled: !state.activeCoolingEnabled,
+      })
     }
     if (interaction.key === 'center' && interaction.gesture === 'long') {
       return { ...state, route: 'menu' }
@@ -251,15 +329,15 @@ export function applyFrontPanelInteraction(
 
   if (state.route === 'preset-temp') {
     if (interaction.key === 'right' && interaction.gesture === 'short') {
-      const entry = nextSortedPreset(state)
+      const entry = nextPresetSlot(state)
       return entry ? { ...state, selectedPresetIndex: entry.index } : state
     }
     if (interaction.key === 'up' && interaction.gesture === 'short') {
       const nextPresets = [...state.presetsC]
       const currentValue = nextPresets[state.selectedPresetIndex]
-      const nextValue = currentValue == null ? 0 : currentValue + 1
+      const nextValue = clampTargetTemp(currentValue == null ? 0 : currentValue + 1)
       nextPresets[state.selectedPresetIndex] = nextValue
-      return { ...state, presetsC: nextPresets, targetTempC: nextValue }
+      return reconcileCoolingState({ ...state, presetsC: nextPresets, targetTempC: nextValue })
     }
     if (interaction.key === 'down' && interaction.gesture === 'short') {
       const nextPresets = [...state.presetsC]
@@ -268,9 +346,9 @@ export function applyFrontPanelInteraction(
         nextPresets[state.selectedPresetIndex] = null
         return { ...state, presetsC: nextPresets }
       }
-      const nextValue = currentValue - 1
+      const nextValue = clampTargetTemp(currentValue - 1)
       nextPresets[state.selectedPresetIndex] = nextValue
-      return { ...state, presetsC: nextPresets, targetTempC: nextValue }
+      return reconcileCoolingState({ ...state, presetsC: nextPresets, targetTempC: nextValue })
     }
     if (
       (interaction.key === 'left' && interaction.gesture === 'short') ||
@@ -283,20 +361,6 @@ export function applyFrontPanelInteraction(
   }
 
   if (state.route === 'active-cooling') {
-    if (interaction.key === 'right' && interaction.gesture === 'short') {
-      const nextMode: Record<CoolingMode, CoolingMode> = {
-        smart: 'boost',
-        boost: 'off',
-        off: 'smart',
-      }
-      return { ...state, activeCoolingMode: nextMode[state.activeCoolingMode] }
-    }
-    if (
-      (interaction.key === 'up' && interaction.gesture === 'short') ||
-      (interaction.key === 'down' && interaction.gesture === 'short')
-    ) {
-      return { ...state, activeCoolingEnabled: !state.activeCoolingEnabled }
-    }
     if (
       (interaction.key === 'left' && interaction.gesture === 'short') ||
       (interaction.key === 'center' &&
@@ -337,10 +401,17 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
     return {
       kind: 'dashboard',
       title: 'Dashboard',
-      subtitle: 'Up/down ±1°C · center short heat · center double fan · center long menu',
+      subtitle: 'Up/down ±1°C · center short heat · center double cooling · center long menu',
+      currentTempC: state.currentTempC,
+      currentTempDeciC: state.currentTempDeciC,
       targetTempC: state.targetTempC,
       heaterEnabled: state.heaterEnabled,
-      fanEnabled: state.fanEnabled,
+      heaterOutputPercent: state.heaterOutputPercent,
+      fanRuntimeEnabled: state.fanRuntimeEnabled,
+      fanDisplayState: state.fanDisplayState,
+      pdContractMv: state.pdContractMv,
+      heaterLockReason: state.heaterLockReason,
+      dashboardWarningVisible: state.dashboardWarningVisible,
       temperatureThresholdsC: frontPanelDefaultThresholdsC,
     } satisfies FrontPanelDashboardScreen
   }
@@ -370,9 +441,15 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
     return {
       kind: 'active-cooling',
       title: 'Active Cooling',
-      subtitle: 'Up/down toggle · right mode · center/left back',
+      subtitle: 'Readonly policy summary · center/left back',
       enabled: state.activeCoolingEnabled,
-      mode: state.activeCoolingMode,
+      pdContractMv: state.pdContractMv,
+      autoStopTempC: AUTO_COOLING_STOP_TEMP_C,
+      autoStartTempC: AUTO_COOLING_START_TEMP_C,
+      autoFullTempC: AUTO_COOLING_FULL_TEMP_C,
+      pulseStartTempC: COOLING_DISABLED_PULSE_START_TEMP_C,
+      lockTempC: COOLING_DISABLED_HEATER_LOCK_TEMP_C,
+      fullTempC: COOLING_DISABLED_FAN_FULL_TEMP_C,
     }
   }
 

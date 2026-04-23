@@ -1,17 +1,11 @@
 import {
   buildRuntimeScreenSnapshot,
+  createFrontPanelRuntimeState,
   type FrontPanelRuntimeInteraction,
+  type FrontPanelRuntimeState,
   frontPanelRuntimeToScreen,
 } from './runtime'
 import type { FrontPanelScreen } from './types'
-
-function repeatInteraction(
-  count: number,
-  key: FrontPanelRuntimeInteraction['key'],
-  gesture: FrontPanelRuntimeInteraction['gesture']
-): FrontPanelRuntimeInteraction[] {
-  return Array.from({ length: count }, () => ({ key, gesture }))
-}
 
 function screenFor(
   mode: 'key-test' | 'app',
@@ -20,16 +14,75 @@ function screenFor(
   return frontPanelRuntimeToScreen(buildRuntimeScreenSnapshot(mode, interactions))
 }
 
+function screenFromState(overrides: Partial<FrontPanelRuntimeState>): FrontPanelScreen {
+  return frontPanelRuntimeToScreen({
+    ...createFrontPanelRuntimeState('app'),
+    ...overrides,
+  })
+}
+
 export const frontPanelStoryStates = {
   keyTestIdle: screenFor('key-test'),
   keyTestShort: screenFor('key-test', [{ key: 'up', gesture: 'short' }]),
   keyTestDouble: screenFor('key-test', [{ key: 'center', gesture: 'double' }]),
   keyTestLong: screenFor('key-test', [{ key: 'left', gesture: 'long' }]),
   dashboard: screenFor('app'),
-  dashboardManual: screenFor('app', [
-    ...repeatInteraction(9, 'up', 'short'),
-    { key: 'center', gesture: 'short' },
-  ]),
+  dashboardManual: screenFromState({
+    currentTempC: 365,
+    currentTempDeciC: 3654,
+    targetTempC: 380,
+    heaterEnabled: true,
+    heaterOutputPercent: 64,
+    fanRuntimeEnabled: true,
+    fanDisplayState: 'run',
+  }),
+  dashboardFanOff: screenFromState({
+    currentTempC: 96,
+    currentTempDeciC: 962,
+    heaterEnabled: false,
+    heaterOutputPercent: 0,
+    activeCoolingEnabled: false,
+    fanRuntimeEnabled: false,
+    fanDisplayState: 'off',
+  }),
+  dashboardFanAuto: screenFromState({
+    currentTempC: 34,
+    currentTempDeciC: 341,
+    heaterEnabled: true,
+    heaterOutputPercent: 18,
+    fanRuntimeEnabled: false,
+    fanDisplayState: 'auto',
+  }),
+  dashboardFanRun: screenFromState({
+    currentTempC: 58,
+    currentTempDeciC: 583,
+    heaterEnabled: true,
+    heaterOutputPercent: 72,
+    fanRuntimeEnabled: true,
+    fanDisplayState: 'run',
+  }),
+  dashboardOvertempA: screenFromState({
+    currentTempC: 351,
+    currentTempDeciC: 3512,
+    heaterEnabled: false,
+    heaterOutputPercent: 0,
+    activeCoolingEnabled: false,
+    fanRuntimeEnabled: true,
+    fanDisplayState: 'off',
+    heaterLockReason: 'cooling-disabled-overtemp',
+    dashboardWarningVisible: true,
+  }),
+  dashboardOvertempB: screenFromState({
+    currentTempC: 351,
+    currentTempDeciC: 3512,
+    heaterEnabled: false,
+    heaterOutputPercent: 0,
+    activeCoolingEnabled: false,
+    fanRuntimeEnabled: true,
+    fanDisplayState: 'off',
+    heaterLockReason: 'cooling-disabled-overtemp',
+    dashboardWarningVisible: false,
+  }),
   menu: screenFor('app', [{ key: 'center', gesture: 'long' }]),
   presetTemp: screenFor('app', [
     { key: 'center', gesture: 'long' },
@@ -56,6 +109,11 @@ export const frontPanelStoryStates = {
 export const frontPanelGalleryOrder: FrontPanelScreen[] = [
   frontPanelStoryStates.keyTestIdle,
   frontPanelStoryStates.dashboard,
+  frontPanelStoryStates.dashboardFanOff,
+  frontPanelStoryStates.dashboardFanAuto,
+  frontPanelStoryStates.dashboardFanRun,
+  frontPanelStoryStates.dashboardOvertempA,
+  frontPanelStoryStates.dashboardOvertempB,
   frontPanelStoryStates.menu,
   frontPanelStoryStates.presetTemp,
   frontPanelStoryStates.activeCooling,

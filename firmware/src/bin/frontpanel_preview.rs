@@ -5,13 +5,14 @@ use std::{
 };
 
 use flux_purr_firmware::{
+    DEFAULT_PD_VOLTAGE_REQUEST,
     display::{
         DISPLAY_FRAMEBUFFER_BYTES, DISPLAY_PANEL_CONFIG, DISPLAY_PHYSICAL_HEIGHT,
         DISPLAY_PHYSICAL_WIDTH, DisplayCanvas,
     },
     frontpanel::{
-        ActiveCoolingMode, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState,
-        FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState, KeyEvent, KeyGesture,
+        FanDisplayState, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState, FrontPanelRoute,
+        FrontPanelRuntimeMode, FrontPanelUiState, HeaterLockReason, KeyEvent, KeyGesture,
         RawFrontPanelKey, render::render_frontpanel_ui,
     },
 };
@@ -24,6 +25,11 @@ enum PreviewPreset {
     KeyTestLong,
     Dashboard,
     DashboardManual,
+    DashboardFanOff,
+    DashboardFanAuto,
+    DashboardFanRun,
+    DashboardOvertempA,
+    DashboardOvertempB,
     Menu,
     PresetTemp,
     ActiveCooling,
@@ -47,6 +53,17 @@ fn build_key_test_state(raw_key: RawFrontPanelKey, gesture: KeyGesture) -> Front
     state
 }
 
+fn base_dashboard_state() -> FrontPanelUiState {
+    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+    state.target_temp_c = 180;
+    state.current_temp_c = 32;
+    state.current_temp_deci_c = 321;
+    state.heater_enabled = true;
+    state.heater_output_percent = 18;
+    state
+}
+
 impl PreviewPreset {
     const fn slug(self) -> &'static str {
         match self {
@@ -56,6 +73,11 @@ impl PreviewPreset {
             Self::KeyTestLong => "key-test-long",
             Self::Dashboard => "dashboard",
             Self::DashboardManual => "dashboard-manual",
+            Self::DashboardFanOff => "dashboard-fan-off",
+            Self::DashboardFanAuto => "dashboard-fan-auto",
+            Self::DashboardFanRun => "dashboard-fan-run",
+            Self::DashboardOvertempA => "dashboard-overtemp-a",
+            Self::DashboardOvertempB => "dashboard-overtemp-b",
             Self::Menu => "menu",
             Self::PresetTemp => "preset-temp",
             Self::ActiveCooling => "active-cooling",
@@ -72,6 +94,11 @@ impl PreviewPreset {
             "key-test-long" | "keytest-long" => Some(Self::KeyTestLong),
             "dashboard" => Some(Self::Dashboard),
             "dashboard-manual" => Some(Self::DashboardManual),
+            "dashboard-fan-off" => Some(Self::DashboardFanOff),
+            "dashboard-fan-auto" => Some(Self::DashboardFanAuto),
+            "dashboard-fan-run" => Some(Self::DashboardFanRun),
+            "dashboard-overtemp-a" => Some(Self::DashboardOvertempA),
+            "dashboard-overtemp-b" => Some(Self::DashboardOvertempB),
             "menu" => Some(Self::Menu),
             "preset-temp" => Some(Self::PresetTemp),
             "active-cooling" => Some(Self::ActiveCooling),
@@ -95,14 +122,59 @@ impl PreviewPreset {
             }
             Self::Dashboard => FrontPanelUiState::new(FrontPanelRuntimeMode::App),
             Self::DashboardManual => {
-                let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                let mut state = base_dashboard_state();
                 state.current_temp_c = 365;
                 state.current_temp_deci_c = 3654;
-                state.pd_contract_mv = 20_000;
                 state.target_temp_c = 380;
-                state.heater_enabled = true;
                 state.heater_output_percent = 64;
                 state.fan_enabled = true;
+                state.fan_display_state = FanDisplayState::Run;
+                state
+            }
+            Self::DashboardFanOff => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 96;
+                state.current_temp_deci_c = 962;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
+                state.active_cooling_enabled = false;
+                state.fan_enabled = false;
+                state.fan_display_state = FanDisplayState::Off;
+                state
+            }
+            Self::DashboardFanAuto => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 34;
+                state.current_temp_deci_c = 341;
+                state.fan_enabled = false;
+                state.fan_display_state = FanDisplayState::Auto;
+                state
+            }
+            Self::DashboardFanRun => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 58;
+                state.current_temp_deci_c = 583;
+                state.heater_output_percent = 72;
+                state.fan_enabled = true;
+                state.fan_display_state = FanDisplayState::Run;
+                state
+            }
+            Self::DashboardOvertempA => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 351;
+                state.current_temp_deci_c = 3512;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
+                state.active_cooling_enabled = false;
+                state.fan_enabled = true;
+                state.fan_display_state = FanDisplayState::Off;
+                state.heater_lock_reason = Some(HeaterLockReason::CoolingDisabledOvertemp);
+                state.dashboard_warning_visible = true;
+                state
+            }
+            Self::DashboardOvertempB => {
+                let mut state = Self::DashboardOvertempA.build_state();
+                state.dashboard_warning_visible = false;
                 state
             }
             Self::Menu => {
@@ -120,8 +192,8 @@ impl PreviewPreset {
             Self::ActiveCooling => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.route = FrontPanelRoute::ActiveCooling;
-                state.active_cooling_mode = ActiveCoolingMode::Boost;
                 state.active_cooling_enabled = true;
+                state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
                 state
             }
             Self::WifiInfo => {
@@ -174,7 +246,7 @@ fn main() -> ExitCode {
     let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
     let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
         eprintln!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, menu, preset-temp, active-cooling, wifi-info, device-info)",
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, menu, preset-temp, active-cooling, wifi-info, device-info)",
             preset_slug
         );
         return ExitCode::FAILURE;

@@ -58,7 +58,7 @@
 
 - 逻辑分辨率固定为 `160×50`。
 - 主界面必须把温度作为第一视觉焦点，且在 1× 逻辑尺寸下仍能一眼识别。
-- 主界面必须同时显示：实时温度、设定温度与实际风扇运行状态。
+- 主界面必须同时显示：实时温度、设定温度、`PPS 12V` 与 `OFF/AUTO/RUN` 三态风扇显示。
 - 主界面暂不显示当前命中的 preset 标识，保持既有视觉基线不变。
 - `Preset Temp` 页面顶部必须显示 `M1 ~ M9` 预设槽位。
 - 预设槽位状态必须固定为：当前项=主题色、已启用=正常文本色、未启用=置灰。
@@ -118,7 +118,8 @@
 
 - `Dashboard`
   - 左侧为大温度区，显示当前实时温度。
-  - 右侧为紧凑状态栈，至少承载 `SET` 设定温度与 `FAN` 实际运行状态。
+  - 右侧为紧凑状态栈，至少承载 `SET` / `PPS` / `FAN` 三行。
+  - 过温告警激活时，`SET` 行切换为 `WARN / OTEMP` 并闪烁；`FAN` 行仍保持 `OFF/AUTO/RUN` 三态显示。
   - 底部细条用于表达 heater 实际输出强度。
   - 不显示当前命中的 `MAN / Mx` 或其他 preset 标签。
 - `Menu L1`
@@ -132,7 +133,9 @@
   - 中央主值必须使用与 Dashboard 相同的 7-segment 温度字体。
   - 未启用预设显示 `---℃`；启用预设显示实际温度值并复用 Dashboard 温度分段颜色。
 - `Active Cooling`
-  - 用明确的 `ON/OFF` 和模式标签表达主动降温状态。
+  - 用明确的 `ON/OFF` 和两行只读策略说明表达主动降温状态。
+  - 第一行固定概括 `PD 12V | AUTO <35 OFF >40 MIN`。
+  - 第二行固定概括 `SAFE >100 PLS >350 50% >360 MAX`。
 - `WiFi Info`
   - 只显示最关键的三行：`SSID`、`RSSI`、`IP`。
 - `Device Info`
@@ -142,7 +145,7 @@
 
 - 若连接状态异常，允许把右侧最底行切换为 `FAULT` / `NEGOT.` / `OFFLINE`，但不得挤压温度主视觉区。
 - 若字符串超出预算，必须使用缩写或截断，不允许自动缩小主字号来硬塞内容。
-- 若风扇关闭，状态必须明确显示 `OFF`，不得仍显示占空比数值造成歧义。
+- 若风扇策略开启但当前无需工作，状态必须明确显示 `AUTO`；若策略关闭，则必须显示 `OFF`，不得仍显示占空比数值造成歧义。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -164,7 +167,7 @@ None
 - Given `Menu L1`，When 在同屏展示 4 个菜单项，Then 所有菜单项完整可见且选中项不与其他行混淆。
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
 - Given `Preset Temp` 页面，When 某个槽位显示为灰色 `---`，Then 该槽位仍可被选中与重新调整为有效值。
-- Given `Active Cooling` 页面，When 观察屏幕，Then 开关状态和模式标签清晰分层，不依赖外部图例理解。
+- Given `Active Cooling` 页面，When 观察屏幕，Then 开关状态与两行安全策略摘要清晰分层，不依赖外部图例理解。
 - Given `WiFi Info` 页面，When 观察屏幕，Then `SSID/RSSI/IP` 均可读，且没有超过屏宽的断行。
 - Given `Device Info` 页面，When 观察屏幕，Then `Board/FW/Serial` 结构清楚且信息密度不显拥挤。
 - Given Storybook docs/gallery，When 打开前面板故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页与 1 个总览画面。

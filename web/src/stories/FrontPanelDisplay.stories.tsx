@@ -18,7 +18,7 @@ const meta = {
     docs: {
       description: {
         component:
-          '160×50 front-panel interaction contract for the Flux Purr hotplate. Storybook is the visual source for the two-stage rollout: key-test calibration first, then dashboard/menu mock navigation.',
+          '160×50 front-panel interaction contract for the Flux Purr hotplate. Storybook is the stable visual source for dashboard tri-state fan states, overtemp warning keyframes, and readonly policy pages.',
       },
     },
   },
@@ -105,8 +105,9 @@ export const DocsGallery: Story = {
                 }}
               >
                 Stage one verifies the five-way key mapping with short, double, and long gestures.
-                Stage two keeps dashboard, menu, and child-page behavior fully mock-driven so the UI
-                can be validated before any real heater or fan wiring lands.
+                Stage two locks the dashboard fan policy contract: center double toggles cooling
+                policy, FAN shows OFF/AUTO/RUN, and overtemp warnings flash on the SET row without
+                occupying the fan state slot.
               </p>
             </div>
 
@@ -119,7 +120,7 @@ export const DocsGallery: Story = {
             >
               {[
                 ['Theme', 'Dark embedded UI'],
-                ['Screen set', '7 core screens'],
+                ['Screen set', '12 preview states'],
                 ['Gestures', 'Short / Double / Long'],
               ].map(([label, value]) => (
                 <div
@@ -217,6 +218,36 @@ export const DashboardManual: Story = {
   },
 }
 
+export const DashboardFanOff: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardFanOff,
+  },
+}
+
+export const DashboardFanAuto: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardFanAuto,
+  },
+}
+
+export const DashboardFanRun: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardFanRun,
+  },
+}
+
+export const DashboardOvertempA: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardOvertempA,
+  },
+}
+
+export const DashboardOvertempB: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardOvertempB,
+  },
+}
+
 export const Menu: Story = {
   args: {
     screen: frontPanelStoryStates.menu,
@@ -291,19 +322,23 @@ export const AppInteractionFlow: Story = {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('heaterEnabled: true')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-double'))
-      await expect(debug).toHaveTextContent('fanEnabled: true')
+      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('fanDisplayState: off')
+      await expect(debug).toHaveTextContent('fanRuntimeEnabled: false')
     })
 
-    await step('center long enters menu and active cooling mock page', async () => {
+    await step('center long enters menu and active cooling page stays readonly', async () => {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
       await expect(debug).toHaveTextContent('route: menu')
       await expect(debug).toHaveTextContent('selectedMenuItem: active-cooling')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: active-cooling')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-right-short'))
-      await expect(debug).toHaveTextContent('activeCooling: true / boost')
+      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('route: active-cooling')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
-      await expect(debug).toHaveTextContent('activeCooling: false / boost')
+      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('route: active-cooling')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
       await expect(debug).toHaveTextContent('route: menu')
     })

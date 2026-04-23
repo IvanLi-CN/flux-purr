@@ -405,28 +405,33 @@ impl FrontPanelMenuItem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActiveCoolingMode {
-    Smart,
-    Boost,
+pub enum FanDisplayState {
     Off,
+    Auto,
+    Run,
 }
 
-impl ActiveCoolingMode {
-    pub const ALL: [Self; 3] = [Self::Smart, Self::Boost, Self::Off];
-
+impl FanDisplayState {
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Smart => "SMART",
-            Self::Boost => "BOOST",
             Self::Off => "OFF",
+            Self::Auto => "AUTO",
+            Self::Run => "RUN",
         }
     }
+}
 
-    pub const fn next(self) -> Self {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaterLockReason {
+    CoolingDisabledOvertemp,
+    HardOvertemp,
+}
+
+impl HeaterLockReason {
+    pub const fn label(self) -> &'static str {
         match self {
-            Self::Smart => Self::Boost,
-            Self::Boost => Self::Off,
-            Self::Off => Self::Smart,
+            Self::CoolingDisabledOvertemp => "cooling-disabled-overtemp",
+            Self::HardOvertemp => "hard-overtemp",
         }
     }
 }
@@ -450,11 +455,13 @@ pub struct FrontPanelUiState {
     pub heater_enabled: bool,
     pub heater_output_percent: u8,
     pub fan_enabled: bool,
+    pub fan_display_state: FanDisplayState,
+    pub heater_lock_reason: Option<HeaterLockReason>,
+    pub dashboard_warning_visible: bool,
     pub selected_menu_item: FrontPanelMenuItem,
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub active_cooling_enabled: bool,
-    pub active_cooling_mode: ActiveCoolingMode,
     pub key_test: KeyTestState,
 }
 
@@ -470,11 +477,14 @@ impl FrontPanelUiState {
             route,
             current_temp_c: 300,
             current_temp_deci_c: 3000,
-            pd_contract_mv: 20_000,
+            pd_contract_mv: crate::DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
             target_temp_c: 100,
             heater_enabled: false,
             heater_output_percent: 0,
             fan_enabled: false,
+            fan_display_state: FanDisplayState::Auto,
+            heater_lock_reason: None,
+            dashboard_warning_visible: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
             selected_preset_slot: 1,
             presets_c: [
@@ -490,7 +500,6 @@ impl FrontPanelUiState {
                 Some(300),
             ],
             active_cooling_enabled: true,
-            active_cooling_mode: ActiveCoolingMode::Smart,
             key_test: KeyTestState::default(),
         }
     }
@@ -588,7 +597,10 @@ impl FrontPanelUiState {
                 self.heater_enabled = !self.heater_enabled;
                 true
             }
-            (FrontPanelKey::Center, KeyGesture::DoublePress) => false,
+            (FrontPanelKey::Center, KeyGesture::DoublePress) => {
+                self.active_cooling_enabled = !self.active_cooling_enabled;
+                true
+            }
             (FrontPanelKey::Center, KeyGesture::LongPress) => {
                 self.route = FrontPanelRoute::Menu;
                 true
@@ -955,6 +967,12 @@ mod tests {
             ]
         );
         assert_eq!(state.selected_preset_slot, 1);
+        assert_eq!(
+            state.pd_contract_mv,
+            crate::DEFAULT_PD_VOLTAGE_REQUEST.millivolts()
+        );
+        assert_eq!(state.fan_display_state, FanDisplayState::Auto);
+        assert_eq!(state.heater_lock_reason, None);
     }
 
     #[test]
@@ -980,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_center_short_toggles_heater_double_press_is_reserved() {
+    fn dashboard_center_short_toggles_heater_and_double_press_toggles_cooling_policy() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
 
         assert!(state.handle_event(KeyEvent {
@@ -992,13 +1010,15 @@ mod tests {
         assert!(state.heater_enabled);
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
 
-        assert!(!state.handle_event(KeyEvent {
+        assert!(state.handle_event(KeyEvent {
             raw_key: RawFrontPanelKey::CenterBoot,
             key: FrontPanelKey::Center,
             gesture: KeyGesture::DoublePress,
             at_ms: 0,
         }));
         assert!(!state.fan_enabled);
+        assert!(!state.active_cooling_enabled);
+        assert_eq!(state.fan_display_state, FanDisplayState::Auto);
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
 
         assert!(state.handle_event(KeyEvent {

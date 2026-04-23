@@ -565,7 +565,11 @@ fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
-    draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
+    if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
+        draw_status_line(canvas, 7, "WARN", "OTEMP", COLOR_WARNING);
+    } else {
+        draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
+    }
     draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
     let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
     draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
@@ -574,11 +578,11 @@ fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         canvas,
         29,
         "FAN",
-        if state.fan_enabled { "ON" } else { "OFF" },
-        if state.fan_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_DISABLED
+        state.fan_display_state.label(),
+        match state.fan_display_state {
+            super::FanDisplayState::Off => COLOR_DISABLED,
+            super::FanDisplayState::Auto => COLOR_CYAN,
+            super::FanDisplayState::Run => COLOR_SUCCESS,
         },
     );
 
@@ -680,11 +684,31 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_active_cooling(canvas: &mut DisplayCanvas, _state: &FrontPanelUiState) {
+fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     draw_text_mid(canvas, "A-COOL", 8, 6, COLOR_TEXT);
-    draw_text_mid_right(canvas, "SAFE", 152, 6, COLOR_WARNING);
-    draw_text_mid(canvas, "POLICY O/TEMP", 8, 20, COLOR_CYAN);
-    draw_text_mid(canvas, "ON360 OFF340", 8, 33, COLOR_WARNING);
+    draw_text_mid_right(
+        canvas,
+        if state.active_cooling_enabled {
+            "ON"
+        } else {
+            "OFF"
+        },
+        152,
+        6,
+        if state.active_cooling_enabled {
+            COLOR_SUCCESS
+        } else {
+            COLOR_WARNING
+        },
+    );
+    draw_text_small(canvas, "PD 12V | AUTO <35 OFF >40 MIN", 8, 22, COLOR_CYAN);
+    draw_text_small(
+        canvas,
+        "SAFE >100 PLS >350 50% >360 MAX",
+        8,
+        34,
+        COLOR_WARNING,
+    );
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas) {

@@ -16,7 +16,7 @@ pub const FAN_MID_PWM_PERMILLE: u16 = 300;
 pub const FAN_LOW_PWM_PERMILLE: u16 = 500;
 pub const FAN_STOP_SAFE_PWM_PERMILLE: u16 = FAN_LOW_PWM_PERMILLE;
 pub const DEFAULT_PD_VOLTAGE_REQUEST: adapters::ch224q::VoltageRequest =
-    adapters::ch224q::VoltageRequest::V20;
+    adapters::ch224q::VoltageRequest::V12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -255,10 +255,10 @@ mod tests {
     fn snapshot_starts_in_sampling_mode() {
         let value = snapshot_at(10, 0);
         assert_eq!(value.mode, DeviceMode::Sampling);
-        assert!(value.voltage_mv >= 20_000);
+        assert!(value.voltage_mv >= 12_000);
         assert!(value.current_ma >= 800);
-        assert_eq!(value.pd_request_mv, 20_000);
-        assert_eq!(value.pd_contract_mv, 20_000);
+        assert_eq!(value.pd_request_mv, 12_000);
+        assert_eq!(value.pd_contract_mv, 12_000);
         assert_eq!(value.pd_state, PdState::Ready);
         assert_eq!(
             value.frontpanel_key,
@@ -273,7 +273,7 @@ mod tests {
         let value = snapshot_at(123, 20);
         assert!(value.fan_enabled);
         assert_eq!(value.fan_pwm_permille, FAN_MID_PWM_PERMILLE);
-        assert_eq!(value.pd_contract_mv, 20_000);
+        assert_eq!(value.pd_contract_mv, 12_000);
 
         let stopped = snapshot_at(999, 30);
         assert!(!stopped.fan_enabled);
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn snapshot_preserves_pd_fallback_and_frontpanel_key_logic() {
         let fallback = snapshot_at(17, 0);
-        assert_eq!(fallback.pd_request_mv, 20_000);
+        assert_eq!(fallback.pd_request_mv, 12_000);
         assert_eq!(fallback.pd_contract_mv, 5_000);
         assert_eq!(fallback.pd_state, PdState::Fallback5V);
         assert_eq!(fallback.frontpanel_key, None);

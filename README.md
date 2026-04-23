@@ -46,6 +46,12 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 
 Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if the MCU selection changes again.
 
+Current firmware runtime baseline also assumes:
+
+- CH224Q default PD request is `12 V`
+- Dashboard center double toggles the active-cooling policy
+- Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
+
 Power design notes for the current board revision are frozen in:
 
 - [docs/hardware/tps62933-dual-rail-power-design.md](docs/hardware/tps62933-dual-rail-power-design.md)
