@@ -8,6 +8,7 @@ import {
   frontPanelGalleryOrder,
   frontPanelStoryStates,
 } from '@/features/frontpanel-preview/mock-data'
+import { createFrontPanelRuntimeState } from '@/features/frontpanel-preview/runtime'
 
 const meta = {
   title: 'Embedded/FrontPanelDisplay',
@@ -30,6 +31,19 @@ const meta = {
 
 export default meta
 type Story = StoryObj<typeof meta>
+
+const coolingDisabledManualOverrideSeed = {
+  ...createFrontPanelRuntimeState('app'),
+  currentTempC: 351,
+  currentTempDeciC: 3512,
+  activeCoolingEnabled: false,
+  fanRuntimeEnabled: true,
+  fanDisplayState: 'off' as const,
+  coolingDisabledLockLatched: true,
+  coolingDisabledLockArmed: false,
+  heaterLockReason: 'cooling-disabled-overtemp' as const,
+  dashboardWarningVisible: true,
+}
 
 export const DocsGallery: Story = {
   name: 'Docs / Gallery',
@@ -354,6 +368,31 @@ export const AppInteractionFlow: Story = {
       await expect(debug).toHaveTextContent('route: menu')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
       await expect(debug).toHaveTextContent('route: dashboard')
+    })
+  },
+}
+
+export const CoolingDisabledManualRearm: Story = {
+  name: 'Interaction / Cooling Disabled Manual Re-arm',
+  render: () => (
+    <FrontPanelRuntimeHarness initialState={coolingDisabledManualOverrideSeed} scale={6} />
+  ),
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+
+    await step('locked cooling-disabled state starts with heater off', async () => {
+      await expect(debug).toHaveTextContent('route: dashboard')
+      await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
+      await expect(debug).toHaveTextContent('heaterEnabled: false')
+      await expect(debug).toHaveTextContent('heaterLockReason: cooling-disabled-overtemp')
+    })
+
+    await step('center short clears the cooling-disabled lock and re-arms heater', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await expect(debug).toHaveTextContent('heaterEnabled: true')
+      await expect(debug).toHaveTextContent('heaterLockReason: none')
+      await expect(debug).toHaveTextContent('fanDisplayState: off')
     })
   },
 }

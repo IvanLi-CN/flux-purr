@@ -42,6 +42,8 @@ export interface FrontPanelRuntimeState {
   presetsC: ReadonlyArray<number | null>
   activeCoolingEnabled: boolean
   pdContractMv: number
+  coolingDisabledLockLatched: boolean
+  coolingDisabledLockArmed: boolean
   heaterLockReason: HeaterLockReason | null
   dashboardWarningVisible: boolean
   keyTest: {
@@ -161,9 +163,42 @@ function updateKeyTest(
   }
 }
 
+function reconcileCoolingDisabledLock(state: FrontPanelRuntimeState) {
+  if (state.activeCoolingEnabled) {
+    return {
+      coolingDisabledLockLatched: false,
+      coolingDisabledLockArmed: true,
+    }
+  }
+
+  if (state.currentTempC <= COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
+    return {
+      coolingDisabledLockLatched: false,
+      coolingDisabledLockArmed: true,
+    }
+  }
+
+  if (state.coolingDisabledLockArmed) {
+    return {
+      coolingDisabledLockLatched: true,
+      coolingDisabledLockArmed: false,
+    }
+  }
+
+  return {
+    coolingDisabledLockLatched: state.coolingDisabledLockLatched,
+    coolingDisabledLockArmed: state.coolingDisabledLockArmed,
+  }
+}
+
 function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntimeState {
+  const coolingDisabledLock = reconcileCoolingDisabledLock(state)
   const hardOvertemp = state.currentTempC >= HARD_OVERTEMP_TEMP_C
-  let heaterLockReason: HeaterLockReason | null = hardOvertemp ? 'hard-overtemp' : null
+  const heaterLockReason: HeaterLockReason | null = hardOvertemp
+    ? 'hard-overtemp'
+    : coolingDisabledLock.coolingDisabledLockLatched
+      ? 'cooling-disabled-overtemp'
+      : null
   let fanRuntimeEnabled = state.fanRuntimeEnabled
   let fanDisplayState: FanDisplayState = state.activeCoolingEnabled ? 'auto' : 'off'
   let heaterEnabled = state.heaterEnabled
@@ -188,9 +223,6 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
       fanRuntimeEnabled = false
     }
     fanDisplayState = 'off'
-    if (!hardOvertemp && state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
-      heaterLockReason = 'cooling-disabled-overtemp'
-    }
   }
 
   if (heaterLockReason) {
@@ -203,6 +235,8 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     heaterOutputPercent: heaterEnabled ? state.heaterOutputPercent : 0,
     fanRuntimeEnabled,
     fanDisplayState,
+    coolingDisabledLockLatched: coolingDisabledLock.coolingDisabledLockLatched,
+    coolingDisabledLockArmed: coolingDisabledLock.coolingDisabledLockArmed,
     heaterLockReason,
     dashboardWarningVisible: heaterLockReason != null,
   }
@@ -226,6 +260,8 @@ export function createFrontPanelRuntimeState(
     presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
     activeCoolingEnabled: true,
     pdContractMv: DEFAULT_PD_CONTRACT_MV,
+    coolingDisabledLockLatched: false,
+    coolingDisabledLockArmed: true,
     heaterLockReason: null,
     dashboardWarningVisible: false,
     keyTest: {
@@ -285,8 +321,16 @@ export function applyFrontPanelInteraction(
     }
     if (interaction.key === 'center' && interaction.gesture === 'short') {
       const heaterEnabled = !state.heaterEnabled
+      const lockOverrideState =
+        heaterEnabled && state.heaterLockReason === 'cooling-disabled-overtemp'
+          ? {
+              coolingDisabledLockLatched: false,
+              coolingDisabledLockArmed: false,
+            }
+          : {}
       return reconcileCoolingState({
         ...state,
+        ...lockOverrideState,
         heaterEnabled,
         heaterOutputPercent: heaterEnabled ? DEFAULT_HEATER_OUTPUT_PERCENT : 0,
       })
