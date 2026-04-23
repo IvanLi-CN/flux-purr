@@ -30,6 +30,7 @@ export interface FrontPanelRuntimeInteraction {
 export interface FrontPanelRuntimeState {
   mode: FrontPanelRuntimeMode
   route: FrontPanelRoute
+  elapsedMs: number
   currentTempC: number
   currentTempDeciC: number
   targetTempC: number
@@ -63,6 +64,8 @@ const COOLING_DISABLED_PULSE_START_TEMP_C = 100
 const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 const COOLING_DISABLED_FAN_FULL_TEMP_C = 360
 const HARD_OVERTEMP_TEMP_C = 420
+const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS = 500
+const FAN_PULSE_PERIOD_MS = 10_000
 const DEFAULT_PD_CONTRACT_MV = 12_000
 const DEFAULT_HEATER_OUTPUT_PERCENT = 18
 
@@ -173,7 +176,7 @@ function reconcileCoolingDisabledLock(state: FrontPanelRuntimeState) {
 
   if (state.currentTempC <= COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
     return {
-      coolingDisabledLockLatched: false,
+      coolingDisabledLockLatched: state.coolingDisabledLockLatched,
       coolingDisabledLockArmed: true,
     }
   }
@@ -189,6 +192,25 @@ function reconcileCoolingDisabledLock(state: FrontPanelRuntimeState) {
     coolingDisabledLockLatched: state.coolingDisabledLockLatched,
     coolingDisabledLockArmed: state.coolingDisabledLockArmed,
   }
+}
+
+function coolingDisabledPulseDutyPercent(currentTempC: number) {
+  if (currentTempC <= COOLING_DISABLED_PULSE_START_TEMP_C) {
+    return 0
+  }
+
+  return Math.min(25, Math.floor((currentTempC - COOLING_DISABLED_PULSE_START_TEMP_C) / 10))
+}
+
+function coolingDisabledPulseEnabled(state: FrontPanelRuntimeState) {
+  const dutyPercent = coolingDisabledPulseDutyPercent(state.currentTempC)
+  if (dutyPercent <= 0) {
+    return false
+  }
+
+  const elapsedInPeriodMs = state.elapsedMs % FAN_PULSE_PERIOD_MS
+  const onWindowMs = Math.floor((FAN_PULSE_PERIOD_MS * dutyPercent) / 100)
+  return elapsedInPeriodMs < onWindowMs
 }
 
 function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntimeState {
@@ -218,7 +240,7 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
       fanRuntimeEnabled = true
     } else if (state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C) {
-      fanRuntimeEnabled = false
+      fanRuntimeEnabled = coolingDisabledPulseEnabled(state)
     } else {
       fanRuntimeEnabled = false
     }
@@ -238,7 +260,9 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     coolingDisabledLockLatched: coolingDisabledLock.coolingDisabledLockLatched,
     coolingDisabledLockArmed: coolingDisabledLock.coolingDisabledLockArmed,
     heaterLockReason,
-    dashboardWarningVisible: heaterLockReason != null,
+    dashboardWarningVisible:
+      heaterLockReason != null &&
+      Math.floor(state.elapsedMs / DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS) % 2 === 0,
   }
 }
 
@@ -248,6 +272,7 @@ export function createFrontPanelRuntimeState(
   return reconcileCoolingState({
     mode,
     route: mode === 'key-test' ? 'key-test' : 'dashboard',
+    elapsedMs: 0,
     currentTempC: 32,
     currentTempDeciC: 321,
     targetTempC: 100,
@@ -272,6 +297,16 @@ export function createFrontPanelRuntimeState(
       gestureLabel: 'IDLE',
       rawMaskLabel: 'MASK 00',
     },
+  })
+}
+
+export function tickFrontPanelRuntime(
+  current: FrontPanelRuntimeState,
+  elapsedMsDelta: number
+): FrontPanelRuntimeState {
+  return reconcileCoolingState({
+    ...current,
+    elapsedMs: current.elapsedMs + Math.max(0, elapsedMsDelta),
   })
 }
 

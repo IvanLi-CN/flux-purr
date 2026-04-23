@@ -6,6 +6,7 @@ import {
   type FrontPanelRuntimeMode,
   type FrontPanelRuntimeState,
   frontPanelRuntimeToScreen,
+  tickFrontPanelRuntime,
 } from '../runtime'
 import type { FrontPanelKeyId, KeyGestureId } from '../types'
 import { FrontPanelDisplay } from './front-panel-display'
@@ -18,6 +19,9 @@ interface FrontPanelRuntimeHarnessProps {
 
 const keyOrder: ReadonlyArray<FrontPanelKeyId> = ['up', 'down', 'left', 'right', 'center']
 const gestureOrder: ReadonlyArray<KeyGestureId> = ['short', 'double', 'long']
+const RUNTIME_TICK_MS = 100
+const COOLING_DISABLED_PULSE_START_TEMP_C = 100
+const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 
 const shortcuts: ReadonlyArray<FrontPanelRuntimeInteraction> = keyOrder.flatMap((key) =>
   gestureOrder.map((gesture) => ({ key, gesture }))
@@ -41,6 +45,24 @@ export function FrontPanelRuntimeHarness({
   useEffect(() => {
     setState(seedState)
   }, [seedState])
+
+  useEffect(() => {
+    const needsTick =
+      state.heaterLockReason != null ||
+      (!state.activeCoolingEnabled &&
+        state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C &&
+        state.currentTempC <= COOLING_DISABLED_HEATER_LOCK_TEMP_C)
+
+    if (!needsTick) {
+      return undefined
+    }
+
+    const intervalId = window.setInterval(() => {
+      setState((current) => tickFrontPanelRuntime(current, RUNTIME_TICK_MS))
+    }, RUNTIME_TICK_MS)
+
+    return () => window.clearInterval(intervalId)
+  }, [state.activeCoolingEnabled, state.currentTempC, state.heaterLockReason])
 
   const screen = useMemo(() => frontPanelRuntimeToScreen(state), [state])
 
