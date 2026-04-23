@@ -438,6 +438,7 @@ impl HeaterController {
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FanVoltageProfile {
     Minimum,
