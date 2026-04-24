@@ -908,16 +908,34 @@ mod tests {
     #[test]
     fn temperature_color_follows_threshold_bands() {
         let palette = temperature_palette(TemperaturePaletteId::Current);
-        assert_eq!(temperature_color_with_palette(-5, palette), COLOR_TEMP_WHITE);
-        assert_eq!(temperature_color_with_palette(39, palette), COLOR_TEMP_WHITE);
+        assert_eq!(
+            temperature_color_with_palette(-5, palette),
+            COLOR_TEMP_WHITE
+        );
+        assert_eq!(
+            temperature_color_with_palette(39, palette),
+            COLOR_TEMP_WHITE
+        );
         assert_eq!(temperature_color_with_palette(40, palette), COLOR_TEMP_BLUE);
         assert_eq!(temperature_color_with_palette(59, palette), COLOR_TEMP_BLUE);
         assert_eq!(temperature_color_with_palette(60, palette), COLOR_TEMP_CYAN);
         assert_eq!(temperature_color_with_palette(99, palette), COLOR_TEMP_CYAN);
-        assert_eq!(temperature_color_with_palette(100, palette), COLOR_TEMP_GREEN);
-        assert_eq!(temperature_color_with_palette(149, palette), COLOR_TEMP_GREEN);
-        assert_eq!(temperature_color_with_palette(150, palette), COLOR_TEMP_LIME);
-        assert_eq!(temperature_color_with_palette(199, palette), COLOR_TEMP_LIME);
+        assert_eq!(
+            temperature_color_with_palette(100, palette),
+            COLOR_TEMP_GREEN
+        );
+        assert_eq!(
+            temperature_color_with_palette(149, palette),
+            COLOR_TEMP_GREEN
+        );
+        assert_eq!(
+            temperature_color_with_palette(150, palette),
+            COLOR_TEMP_LIME
+        );
+        assert_eq!(
+            temperature_color_with_palette(199, palette),
+            COLOR_TEMP_LIME
+        );
         assert_eq!(
             temperature_color_with_palette(200, palette),
             COLOR_TEMP_ORANGE
