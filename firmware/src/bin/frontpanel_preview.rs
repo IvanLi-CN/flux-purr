@@ -13,7 +13,8 @@ use flux_purr_firmware::{
     frontpanel::{
         FanDisplayState, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState, FrontPanelRoute,
         FrontPanelRuntimeMode, FrontPanelUiState, HeaterLockReason, KeyEvent, KeyGesture,
-        RawFrontPanelKey, render::render_frontpanel_ui,
+        RawFrontPanelKey,
+        render::{TemperaturePaletteId, render_frontpanel_ui_with_palette, temperature_palette},
     },
 };
 
@@ -30,6 +31,7 @@ enum PreviewPreset {
     DashboardFanRun,
     DashboardOvertempA,
     DashboardOvertempB,
+    DashboardTemp,
     Menu,
     PresetTemp,
     ActiveCooling,
@@ -64,6 +66,23 @@ fn base_dashboard_state() -> FrontPanelUiState {
     state
 }
 
+fn build_dashboard_temp_state(temp_c: i16) -> FrontPanelUiState {
+    let mut state = base_dashboard_state();
+    state.current_temp_c = temp_c;
+    state.current_temp_deci_c = temp_c * 10;
+    state.heater_enabled = false;
+    state.heater_output_percent = 0;
+    state.active_cooling_enabled = true;
+    if temp_c > 40 {
+        state.fan_enabled = true;
+        state.fan_display_state = FanDisplayState::Run;
+    } else {
+        state.fan_enabled = false;
+        state.fan_display_state = FanDisplayState::Auto;
+    }
+    state
+}
+
 impl PreviewPreset {
     const fn slug(self) -> &'static str {
         match self {
@@ -78,6 +97,7 @@ impl PreviewPreset {
             Self::DashboardFanRun => "dashboard-fan-run",
             Self::DashboardOvertempA => "dashboard-overtemp-a",
             Self::DashboardOvertempB => "dashboard-overtemp-b",
+            Self::DashboardTemp => "dashboard-temp",
             Self::Menu => "menu",
             Self::PresetTemp => "preset-temp",
             Self::ActiveCooling => "active-cooling",
@@ -99,6 +119,7 @@ impl PreviewPreset {
             "dashboard-fan-run" => Some(Self::DashboardFanRun),
             "dashboard-overtemp-a" => Some(Self::DashboardOvertempA),
             "dashboard-overtemp-b" => Some(Self::DashboardOvertempB),
+            "dashboard-temp" => Some(Self::DashboardTemp),
             "menu" => Some(Self::Menu),
             "preset-temp" => Some(Self::PresetTemp),
             "active-cooling" => Some(Self::ActiveCooling),
@@ -108,7 +129,7 @@ impl PreviewPreset {
         }
     }
 
-    fn build_state(self) -> FrontPanelUiState {
+    fn build_state(self, dashboard_temp_c: Option<i16>) -> FrontPanelUiState {
         match self {
             Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),
             Self::KeyTestShort => {
@@ -176,10 +197,11 @@ impl PreviewPreset {
                 state
             }
             Self::DashboardOvertempB => {
-                let mut state = Self::DashboardOvertempA.build_state();
+                let mut state = Self::DashboardOvertempA.build_state(None);
                 state.dashboard_warning_visible = false;
                 state
             }
+            Self::DashboardTemp => build_dashboard_temp_state(dashboard_temp_c.unwrap_or(25)),
             Self::Menu => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.route = FrontPanelRoute::Menu;
@@ -249,7 +271,7 @@ fn main() -> ExitCode {
     let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
     let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
         eprintln!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, menu, preset-temp, active-cooling, wifi-info, device-info)",
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info)",
             preset_slug
         );
         return ExitCode::FAILURE;
@@ -258,11 +280,46 @@ fn main() -> ExitCode {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| default_output_path(preset));
+    let mut dashboard_temp_c = None;
+    let mut palette_id = TemperaturePaletteId::Current;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--temp" => {
+                let Some(value) = args.next() else {
+                    eprintln!("missing value for --temp");
+                    return ExitCode::FAILURE;
+                };
+                let Ok(parsed) = value.parse::<i16>() else {
+                    eprintln!("invalid --temp value '{}'", value);
+                    return ExitCode::FAILURE;
+                };
+                dashboard_temp_c = Some(parsed);
+            }
+            "--palette" => {
+                let Some(value) = args.next() else {
+                    eprintln!("missing value for --palette");
+                    return ExitCode::FAILURE;
+                };
+                let Some(parsed) = TemperaturePaletteId::from_slug(&value) else {
+                    eprintln!(
+                        "unknown --palette '{}' (known: current, balanced-white-low|a, glacier-white-low|b, aurora-white-low|c, marine-white-low|d, industrial-white-low|e, ember-white-low|f)",
+                        value
+                    );
+                    return ExitCode::FAILURE;
+                };
+                palette_id = parsed;
+            }
+            other => {
+                eprintln!("unknown argument '{}'", other);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let panel_path = panel_output_path(&output_path);
 
     let mut canvas = DisplayCanvas::new();
-    let state = preset.build_state();
-    render_frontpanel_ui(&mut canvas, &state);
+    let state = preset.build_state(dashboard_temp_c);
+    render_frontpanel_ui_with_palette(&mut canvas, &state, temperature_palette(palette_id));
 
     let mut logical_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
     canvas.write_rgb565_le_bytes(&mut logical_bytes);
