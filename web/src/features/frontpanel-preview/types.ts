@@ -31,7 +31,7 @@ export interface FrontPanelDashboardScreen extends FrontPanelBaseScreen {
   pdContractMv: number
   heaterLockReason: HeaterLockReason | null
   dashboardWarningVisible: boolean
-  temperatureThresholdsC: readonly [number, number, number, number, number, number]
+  temperatureThresholdsC: readonly number[]
 }
 
 export interface FrontPanelMenuScreen extends FrontPanelBaseScreen {
@@ -47,7 +47,7 @@ export interface FrontPanelPresetTempScreen extends FrontPanelBaseScreen {
   kind: 'preset-temp'
   selectedPresetIndex: number
   presetsC: ReadonlyArray<number | null>
-  temperatureThresholdsC: readonly [number, number, number, number, number, number]
+  temperatureThresholdsC: readonly number[]
 }
 
 export interface FrontPanelCoolingScreen extends FrontPanelBaseScreen {

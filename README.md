@@ -48,9 +48,23 @@ Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if 
 
 Current firmware runtime baseline also assumes:
 
-- CH224Q default PD request is `12 V`
+- CH224Q default PD request is `20 V`
+- optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
 - Dashboard center double toggles the active-cooling policy
 - Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
+
+PD request build variants:
+
+```bash
+# default runtime image (20 V)
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
+
+# 12 V variant
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-12v --bin flux-purr --release
+
+# 28 V variant
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-28v --bin flux-purr --release
+```
 
 Power design notes for the current board revision are frozen in:
 

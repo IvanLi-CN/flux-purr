@@ -19,15 +19,21 @@ const COLOR_ACCENT: Rgb565 = Rgb565::new(31, 38, 7);
 const COLOR_SUCCESS: Rgb565 = Rgb565::new(8, 54, 20);
 const COLOR_WARNING: Rgb565 = Rgb565::new(31, 52, 11);
 const COLOR_CYAN: Rgb565 = Rgb565::new(12, 54, 31);
+const COLOR_TEMP_DEEP_BLUE: Rgb565 = Rgb565::new(4, 11, 18);
+const COLOR_TEMP_BLUE: Rgb565 = Rgb565::new(8, 24, 28);
 const COLOR_TEMP_MINT: Rgb565 = Rgb565::new(10, 56, 24);
 const COLOR_TEMP_LIME: Rgb565 = Rgb565::new(19, 55, 12);
-const TEMPERATURE_THRESHOLDS_C: [i16; 6] = [0, 80, 150, 220, 300, 420];
-const TEMPERATURE_COLORS: [Rgb565; 5] = [
+const COLOR_TEMP_HOT: Rgb565 = Rgb565::new(31, 24, 7);
+const TEMPERATURE_THRESHOLDS_C: [i16; 8] = [0, 40, 60, 100, 150, 200, 250, 300];
+const TEMPERATURE_COLORS: [Rgb565; 8] = [
+    COLOR_TEMP_DEEP_BLUE,
+    COLOR_TEMP_BLUE,
     COLOR_CYAN,
     COLOR_TEMP_MINT,
     COLOR_TEMP_LIME,
     COLOR_WARNING,
     COLOR_ACCENT,
+    COLOR_TEMP_HOT,
 ];
 
 pub fn render_frontpanel_ui(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
@@ -685,6 +691,8 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+    use core::fmt::Write;
+
     draw_text_mid(canvas, "A-COOL", 8, 6, COLOR_TEXT);
     draw_text_mid_right(
         canvas,
@@ -701,7 +709,13 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
             COLOR_WARNING
         },
     );
-    draw_text_small(canvas, "PD 12V | AUTO <35 OFF >40 MIN", 8, 22, COLOR_CYAN);
+    let mut cooling_summary = heapless::String::<40>::new();
+    let _ = write!(
+        &mut cooling_summary,
+        "PD {}V | <35 OFF >40 50% >60 MAX",
+        state.pd_contract_mv / 1000
+    );
+    draw_text_small(canvas, &cooling_summary, 8, 22, COLOR_CYAN);
     draw_text_small(
         canvas,
         "SAFE >100 PLS >350 50% >360 MAX",
@@ -729,16 +743,22 @@ mod tests {
 
     #[test]
     fn temperature_color_follows_threshold_bands() {
-        assert_eq!(temperature_color(-5), COLOR_CYAN);
-        assert_eq!(temperature_color(79), COLOR_CYAN);
-        assert_eq!(temperature_color(80), COLOR_TEMP_MINT);
+        assert_eq!(temperature_color(-5), COLOR_TEMP_DEEP_BLUE);
+        assert_eq!(temperature_color(39), COLOR_TEMP_DEEP_BLUE);
+        assert_eq!(temperature_color(40), COLOR_TEMP_BLUE);
+        assert_eq!(temperature_color(59), COLOR_TEMP_BLUE);
+        assert_eq!(temperature_color(60), COLOR_CYAN);
+        assert_eq!(temperature_color(99), COLOR_CYAN);
+        assert_eq!(temperature_color(100), COLOR_TEMP_MINT);
         assert_eq!(temperature_color(149), COLOR_TEMP_MINT);
         assert_eq!(temperature_color(150), COLOR_TEMP_LIME);
-        assert_eq!(temperature_color(219), COLOR_TEMP_LIME);
-        assert_eq!(temperature_color(220), COLOR_WARNING);
-        assert_eq!(temperature_color(299), COLOR_WARNING);
-        assert_eq!(temperature_color(300), COLOR_ACCENT);
-        assert_eq!(temperature_color(450), COLOR_ACCENT);
+        assert_eq!(temperature_color(199), COLOR_TEMP_LIME);
+        assert_eq!(temperature_color(200), COLOR_WARNING);
+        assert_eq!(temperature_color(249), COLOR_WARNING);
+        assert_eq!(temperature_color(250), COLOR_ACCENT);
+        assert_eq!(temperature_color(299), COLOR_ACCENT);
+        assert_eq!(temperature_color(300), COLOR_TEMP_HOT);
+        assert_eq!(temperature_color(450), COLOR_TEMP_HOT);
     }
 
     #[test]

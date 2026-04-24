@@ -75,20 +75,22 @@
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
 - Fan control:
-  - active cooling enabled: `<35°C` stop, `>40°C` minimum-voltage run, `>50°C` full speed, `35~40°C` keeps the previous enable state for hysteresis
+  - heater disabled + active cooling enabled: `<35°C` stop, `>40°C` `50%` run, `>60°C` full speed, `35~40°C` keeps the previous enable state for hysteresis
+  - heater enabled: `<=100°C` keeps the fan off; `>100°C` hands control to the safety path
   - active cooling disabled: `>100°C` minimum-voltage `0.1Hz` enable pulse, `>350°C` heater lock + `50%` fan, `>360°C` full speed
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
   - the `Active Cooling` page is informational in the formal runtime; it documents the safety policy instead of exposing a writable fan override
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
 - PD policy:
-  - boot now requests `12 V` from `CH224Q`
+  - default build requests `20 V` from `CH224Q`
+  - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
   - later PD status changes are observed and logged only; they do not latch or gate heater output
 - Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
 ## CH224Q PD request bring-up
 
 - `GPIO8/9` host the shared I2C bus for `CH224Q` and `M24C64`.
-- The app runtime programs `CH224Q` register `0x0A` on boot and requests `12 V`.
+- The app runtime programs `CH224Q` register `0x0A` on boot and requests the feature-selected voltage (`20 V` by default, optional `12 V` / `28 V` build variants).
 - Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the app runtime continues.
 - After boot request/settle, the runtime polls CH224Q status for observation and defmt logging only.
 
@@ -100,11 +102,15 @@
 - Host tests:
   - `cargo test --manifest-path firmware/Cargo.toml`
 - Host lint:
-  - `cargo clippy --manifest-path firmware/Cargo.toml --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-firmware-clippy.sh`
 - Host release build:
   - `cargo build --manifest-path firmware/Cargo.toml --release`
 - Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+- Xtensa app runtime build (`12 V` variant):
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-12v --bin flux-purr --release`
+- Xtensa app runtime build (`28 V` variant):
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-28v --bin flux-purr --release`
 - Xtensa key-test calibration build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,frontpanel-key-test --bin flux-purr --release`
 
@@ -128,7 +134,8 @@
   - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
 - Typical flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` (default `20 V`)
+  - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,pd-request-12v` or `--no-default-features --features esp32s3,pd-request-28v`
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`

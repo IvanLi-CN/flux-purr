@@ -2,11 +2,11 @@ import type { DeviceStatus, TelemetryPoint, WifiConfig } from './types'
 
 export const mockStatus: DeviceStatus = {
   mode: 'sampling',
-  voltage: 12.01,
+  voltage: 20.01,
   current: 0.84,
   boardTempC: 34.6,
-  pdRequestMv: 12000,
-  pdContractMv: 12000,
+  pdRequestMv: 20000,
+  pdContractMv: 20000,
   pdState: 'ready',
   fanEnabled: true,
   fanPwmPermille: 500,
@@ -24,9 +24,9 @@ export const mockWifiConfig: WifiConfig = {
 }
 
 export const mockTelemetrySeries: TelemetryPoint[] = [
-  { ts: '20:01', voltage: 11.92, current: 0.73 },
-  { ts: '20:02', voltage: 11.96, current: 0.77 },
-  { ts: '20:03', voltage: 11.98, current: 0.8 },
-  { ts: '20:04', voltage: 12.0, current: 0.82 },
-  { ts: '20:05', voltage: 12.01, current: 0.84 },
+  { ts: '20:01', voltage: 19.92, current: 0.73 },
+  { ts: '20:02', voltage: 19.96, current: 0.77 },
+  { ts: '20:03', voltage: 19.98, current: 0.8 },
+  { ts: '20:04', voltage: 20.0, current: 0.82 },
+  { ts: '20:05', voltage: 20.01, current: 0.84 },
 ]

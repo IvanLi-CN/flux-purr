@@ -76,7 +76,7 @@ const AUTO_COOLING_FAN_STOP_TEMP_C: i16 = 35;
 #[cfg(any(target_arch = "xtensa", test))]
 const AUTO_COOLING_FAN_START_TEMP_C: i16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
-const AUTO_COOLING_FAN_FULL_TEMP_C: i16 = 50;
+const AUTO_COOLING_FAN_FULL_TEMP_C: i16 = 60;
 #[cfg(any(target_arch = "xtensa", test))]
 const COOLING_DISABLED_PULSE_START_TEMP_C: i16 = 100;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -568,12 +568,12 @@ fn fan_display_state_for_command(
     active_cooling_enabled: bool,
     command: FanHardwareCommand,
 ) -> FanDisplayState {
-    if command.enabled {
-        FanDisplayState::Run
-    } else if active_cooling_enabled {
-        FanDisplayState::Auto
-    } else {
+    if !active_cooling_enabled {
         FanDisplayState::Off
+    } else if command.enabled {
+        FanDisplayState::Run
+    } else {
+        FanDisplayState::Auto
     }
 }
 
@@ -1826,7 +1826,14 @@ mod tests {
             FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
         );
 
-        let full = fan_policy_decision(51, 0, false, true, FanHardwareCommand::disabled(), false);
+        let still_minimum =
+            fan_policy_decision(60, 0, false, true, FanHardwareCommand::disabled(), false);
+        assert_eq!(
+            still_minimum.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+        );
+
+        let full = fan_policy_decision(61, 0, false, true, FanHardwareCommand::disabled(), false);
         assert_eq!(
             full.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Full)
@@ -1873,7 +1880,7 @@ mod tests {
         let pulse_on =
             fan_policy_decision(110, 0, false, false, FanHardwareCommand::disabled(), false);
         assert!(pulse_on.command.enabled);
-        assert_eq!(pulse_on.display_state, FanDisplayState::Run);
+        assert_eq!(pulse_on.display_state, FanDisplayState::Off);
         assert_eq!(
             pulse_on.command.pwm_permille,
             FAN_MINIMUM_VOLTAGE_PWM_PERMILLE
@@ -1894,14 +1901,14 @@ mod tests {
             half.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
         );
-        assert_eq!(half.display_state, FanDisplayState::Run);
+        assert_eq!(half.display_state, FanDisplayState::Off);
 
         let full = fan_policy_decision(361, 0, false, false, FanHardwareCommand::disabled(), false);
         assert_eq!(
             full.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Full)
         );
-        assert_eq!(full.display_state, FanDisplayState::Run);
+        assert_eq!(full.display_state, FanDisplayState::Off);
     }
 
     #[test]
@@ -1914,7 +1921,7 @@ mod tests {
 
         let disabled = fan_policy_decision(0, 0, false, false, previous, true);
         assert_eq!(disabled.command, previous);
-        assert_eq!(disabled.display_state, FanDisplayState::Run);
+        assert_eq!(disabled.display_state, FanDisplayState::Off);
     }
 
     #[test]

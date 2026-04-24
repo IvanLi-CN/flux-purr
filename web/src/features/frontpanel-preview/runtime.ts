@@ -59,14 +59,14 @@ export interface FrontPanelRuntimeState {
 
 const AUTO_COOLING_STOP_TEMP_C = 35
 const AUTO_COOLING_START_TEMP_C = 40
-const AUTO_COOLING_FULL_TEMP_C = 50
+const AUTO_COOLING_FULL_TEMP_C = 60
 const COOLING_DISABLED_PULSE_START_TEMP_C = 100
 const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 const COOLING_DISABLED_FAN_FULL_TEMP_C = 360
 const HARD_OVERTEMP_TEMP_C = 420
 const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS = 500
 const FAN_PULSE_PERIOD_MS = 10_000
-const DEFAULT_PD_CONTRACT_MV = 12_000
+const DEFAULT_PD_CONTRACT_MV = 20_000
 const DEFAULT_HEATER_OUTPUT_PERCENT = 18
 
 const menuItems: ReadonlyArray<{ id: MenuItemId; label: string }> = [
@@ -225,7 +225,18 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
   let fanDisplayState: FanDisplayState = state.activeCoolingEnabled ? 'auto' : 'off'
   let heaterEnabled = state.heaterEnabled
 
-  if (state.activeCoolingEnabled) {
+  if (heaterEnabled) {
+    if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
+      fanRuntimeEnabled = true
+    } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
+      fanRuntimeEnabled = true
+    } else if (state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C) {
+      fanRuntimeEnabled = coolingDisabledPulseEnabled(state)
+    } else {
+      fanRuntimeEnabled = false
+    }
+    fanDisplayState = state.activeCoolingEnabled ? (fanRuntimeEnabled ? 'run' : 'auto') : 'off'
+  } else if (state.activeCoolingEnabled) {
     if (state.currentTempC > AUTO_COOLING_FULL_TEMP_C) {
       fanRuntimeEnabled = true
     } else if (state.currentTempC > AUTO_COOLING_START_TEMP_C) {

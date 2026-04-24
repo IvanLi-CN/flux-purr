@@ -14,14 +14,17 @@ export const frontPanelPalette = {
 } as const
 
 export const frontPanelTemperatureColors = [
+  '#193b72',
+  '#2f6cff',
   '#63d8ff',
   '#52e3c2',
   '#9adf61',
   '#ffd166',
   '#ff9a3c',
+  '#ff6b57',
 ] as const
 
-export const frontPanelDefaultThresholdsC = [0, 80, 150, 220, 300, 420] as const
+export const frontPanelDefaultThresholdsC = [0, 40, 60, 100, 150, 200, 250, 300] as const
 
 export const frontPanelTypography = [
   {

@@ -132,10 +132,7 @@ function fillPixelRoundedRect(
   fillRect(ctx, x + 1, y + height - 1, width - 2, 1, color)
 }
 
-function temperatureColor(
-  value: number,
-  thresholds: readonly [number, number, number, number, number, number]
-) {
+function temperatureColor(value: number, thresholds: readonly number[]) {
   for (let index = 0; index < thresholds.length - 1; index += 1) {
     if (value < thresholds[index + 1]) {
       return temperatureColors[Math.min(index, temperatureColors.length - 1)]
@@ -529,7 +526,7 @@ function drawActiveCoolingScreen(
   })
   drawBitmapText(
     ctx,
-    `PD ${Math.round(screen.pdContractMv / 1000)}V | AUTO <${screen.autoStopTempC} OFF >${screen.autoStartTempC} MIN`,
+    `PD ${Math.round(screen.pdContractMv / 1000)}V | <${screen.autoStopTempC} OFF >${screen.autoStartTempC} 50% >${screen.autoFullTempC} MAX`,
     8,
     20,
     {

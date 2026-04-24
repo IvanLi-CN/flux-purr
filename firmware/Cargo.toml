@@ -24,11 +24,14 @@ path = "src/bin/frontpanel_preview.rs"
 required-features = ["host-preview"]
 
 [features]
-default = ["esp32s3"]
+default = ["esp32s3", "pd-request-20v"]
 esp32s3 = []
 esp32c3 = []
 host-preview = []
 frontpanel-key-test = []
+pd-request-12v = []
+pd-request-20v = []
+pd-request-28v = []
 
 [dependencies]
 embassy-futures = "0.1.2"

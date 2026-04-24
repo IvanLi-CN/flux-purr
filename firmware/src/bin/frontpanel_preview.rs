@@ -146,6 +146,8 @@ impl PreviewPreset {
                 let mut state = base_dashboard_state();
                 state.current_temp_c = 34;
                 state.current_temp_deci_c = 341;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
                 state.fan_enabled = false;
                 state.fan_display_state = FanDisplayState::Auto;
                 state
@@ -154,7 +156,8 @@ impl PreviewPreset {
                 let mut state = base_dashboard_state();
                 state.current_temp_c = 58;
                 state.current_temp_deci_c = 583;
-                state.heater_output_percent = 72;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
                 state.fan_enabled = true;
                 state.fan_display_state = FanDisplayState::Run;
                 state

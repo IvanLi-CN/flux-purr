@@ -9,14 +9,49 @@ use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_os = "none"))]
 extern crate std;
 
+#[cfg(all(feature = "pd-request-12v", feature = "pd-request-20v"))]
+compile_error!("pd-request-12v and pd-request-20v cannot be enabled together");
+#[cfg(all(feature = "pd-request-12v", feature = "pd-request-28v"))]
+compile_error!("pd-request-12v and pd-request-28v cannot be enabled together");
+#[cfg(all(feature = "pd-request-20v", feature = "pd-request-28v"))]
+compile_error!("pd-request-20v and pd-request-28v cannot be enabled together");
+#[cfg(not(any(
+    feature = "pd-request-12v",
+    feature = "pd-request-20v",
+    feature = "pd-request-28v"
+)))]
+compile_error!(
+    "one PD request feature must be enabled: pd-request-12v | pd-request-20v | pd-request-28v"
+);
+
 pub const FAN_PHASE_DURATION_SECS: u32 = 10;
 pub const FAN_PWM_FREQUENCY_HZ: u32 = 25_000;
 pub const FAN_HIGH_PWM_PERMILLE: u16 = 30;
 pub const FAN_MID_PWM_PERMILLE: u16 = 300;
 pub const FAN_LOW_PWM_PERMILLE: u16 = 500;
 pub const FAN_STOP_SAFE_PWM_PERMILLE: u16 = FAN_LOW_PWM_PERMILLE;
+
 pub const DEFAULT_PD_VOLTAGE_REQUEST: adapters::ch224q::VoltageRequest =
-    adapters::ch224q::VoltageRequest::V12;
+    default_pd_voltage_request();
+
+#[cfg(feature = "pd-request-12v")]
+const fn default_pd_voltage_request() -> adapters::ch224q::VoltageRequest {
+    adapters::ch224q::VoltageRequest::V12
+}
+
+#[cfg(all(not(feature = "pd-request-12v"), feature = "pd-request-28v"))]
+const fn default_pd_voltage_request() -> adapters::ch224q::VoltageRequest {
+    adapters::ch224q::VoltageRequest::V28
+}
+
+#[cfg(all(
+    not(feature = "pd-request-12v"),
+    not(feature = "pd-request-28v"),
+    feature = "pd-request-20v"
+))]
+const fn default_pd_voltage_request() -> adapters::ch224q::VoltageRequest {
+    adapters::ch224q::VoltageRequest::V20
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceMode {
@@ -254,11 +289,12 @@ mod tests {
     #[test]
     fn snapshot_starts_in_sampling_mode() {
         let value = snapshot_at(10, 0);
+        let default_pd_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
         assert_eq!(value.mode, DeviceMode::Sampling);
-        assert!(value.voltage_mv >= 12_000);
+        assert!(value.voltage_mv >= u32::from(default_pd_mv));
         assert!(value.current_ma >= 800);
-        assert_eq!(value.pd_request_mv, 12_000);
-        assert_eq!(value.pd_contract_mv, 12_000);
+        assert_eq!(value.pd_request_mv, default_pd_mv);
+        assert_eq!(value.pd_contract_mv, default_pd_mv);
         assert_eq!(value.pd_state, PdState::Ready);
         assert_eq!(
             value.frontpanel_key,
@@ -273,7 +309,10 @@ mod tests {
         let value = snapshot_at(123, 20);
         assert!(value.fan_enabled);
         assert_eq!(value.fan_pwm_permille, FAN_MID_PWM_PERMILLE);
-        assert_eq!(value.pd_contract_mv, 12_000);
+        assert_eq!(
+            value.pd_contract_mv,
+            DEFAULT_PD_VOLTAGE_REQUEST.millivolts()
+        );
 
         let stopped = snapshot_at(999, 30);
         assert!(!stopped.fan_enabled);
@@ -283,10 +322,34 @@ mod tests {
     #[test]
     fn snapshot_preserves_pd_fallback_and_frontpanel_key_logic() {
         let fallback = snapshot_at(17, 0);
-        assert_eq!(fallback.pd_request_mv, 12_000);
+        assert_eq!(
+            fallback.pd_request_mv,
+            DEFAULT_PD_VOLTAGE_REQUEST.millivolts()
+        );
         assert_eq!(fallback.pd_contract_mv, 5_000);
         assert_eq!(fallback.pd_state, PdState::Fallback5V);
         assert_eq!(fallback.frontpanel_key, None);
+    }
+
+    #[test]
+    fn default_pd_request_matches_selected_feature() {
+        #[cfg(feature = "pd-request-12v")]
+        assert_eq!(
+            DEFAULT_PD_VOLTAGE_REQUEST,
+            adapters::ch224q::VoltageRequest::V12
+        );
+
+        #[cfg(feature = "pd-request-20v")]
+        assert_eq!(
+            DEFAULT_PD_VOLTAGE_REQUEST,
+            adapters::ch224q::VoltageRequest::V20
+        );
+
+        #[cfg(feature = "pd-request-28v")]
+        assert_eq!(
+            DEFAULT_PD_VOLTAGE_REQUEST,
+            adapters::ch224q::VoltageRequest::V28
+        );
     }
 
     #[test]

@@ -26,11 +26,11 @@ Returns latest sampled electrical, PD, and thermal metrics.
 
 ```json
 {
-  "voltageMv": 12010,
+  "voltageMv": 20010,
   "currentMa": 840,
   "boardTempCenti": 3460,
-  "pdRequestMv": 12000,
-  "pdContractMv": 12000,
+  "pdRequestMv": 20000,
+  "pdContractMv": 20000,
   "pdState": "ready",
   "fanEnabled": true,
   "fanPwmPermille": 500,
@@ -71,8 +71,8 @@ WebSocket stream for incremental telemetry frames.
 ```json
 {
   "ts": "20:05",
-  "voltage": 12.01,
+  "voltage": 20.01,
   "current": 0.84,
-  "pdContractMv": 12000
+  "pdContractMv": 20000
 }
 ```
