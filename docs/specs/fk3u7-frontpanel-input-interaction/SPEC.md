@@ -60,7 +60,7 @@
 - `Dashboard` 上/下必须以 `1°C` 步进调整当前目标温度。
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
 - `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
-- `Dashboard` 中键短按只切 heater arm；中键双击保留为无副作用事件；中键长按只进菜单。
+- `Dashboard` 中键短按只切 heater arm；中键双击切换 `active_cooling_enabled`；中键长按只进菜单。
 - 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
@@ -111,9 +111,9 @@
 - `Left short`：跳到严格小于当前温度、且最接近的已启用预设值
 - `Right short`：跳到严格大于当前温度、且最接近的已启用预设值
 - `Center short`：切换 `heaterEnabled`
-- `Center double`：保留，无运行态副作用
+- `Center double`：切换 `active_cooling_enabled`
 - `Center long`：进入 `Menu`
-- 目标温度、路由与 heater arm 变化进入统一 UI/runtime state；真实 heater / fan 控制语义以后续 runtime spec 为准
+- 目标温度、路由、heater arm 与 active cooling 策略位进入统一 UI/runtime state；真实 fan runtime 由 `#q2aw6` 约束，不由双击直接切换
 
 ### Menu（一级菜单）
 
@@ -165,7 +165,7 @@ None
 - Given `Dashboard`，When 主人按上/下，Then 目标温度每次严格 `±1°C`。
 - Given `Dashboard`，When 主人按左/右，Then 跳转基于已启用预设的实际温度值排序，而不是按槽位编号。
 - Given `Dashboard`，When 当前温度命中某个预设值或刚从预设值调离，Then 界面仍不显示当前预设槽位标签。
-- Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、保留无副作用、进入菜单，不发生混用。
+- Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、切换 `active_cooling_enabled`、进入菜单，不发生混用。
 - Given 一级菜单，When 主人左右移动并中键进入，Then 始终只在四个固定项之间切换。
 - Given 任意子页，When 主人中键短按或长按，Then 都能回到上一级菜单；When 主人按左键，Then 也能返回菜单。
 - Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并重新调回有效温度。

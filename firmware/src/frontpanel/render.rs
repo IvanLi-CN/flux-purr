@@ -19,25 +19,187 @@ const COLOR_ACCENT: Rgb565 = Rgb565::new(31, 38, 7);
 const COLOR_SUCCESS: Rgb565 = Rgb565::new(8, 54, 20);
 const COLOR_WARNING: Rgb565 = Rgb565::new(31, 52, 11);
 const COLOR_CYAN: Rgb565 = Rgb565::new(12, 54, 31);
-const COLOR_TEMP_MINT: Rgb565 = Rgb565::new(10, 56, 24);
-const COLOR_TEMP_LIME: Rgb565 = Rgb565::new(19, 55, 12);
-const TEMPERATURE_THRESHOLDS_C: [i16; 6] = [0, 80, 150, 220, 300, 420];
-const TEMPERATURE_COLORS: [Rgb565; 5] = [
-    COLOR_CYAN,
-    COLOR_TEMP_MINT,
+const COLOR_TEMP_WHITE: Rgb565 = COLOR_TEXT;
+const COLOR_TEMP_BLUE: Rgb565 = Rgb565::new(8, 31, 31);
+const COLOR_TEMP_CYAN: Rgb565 = Rgb565::new(7, 59, 30);
+const COLOR_TEMP_GREEN: Rgb565 = Rgb565::new(10, 60, 13);
+const COLOR_TEMP_LIME: Rgb565 = Rgb565::new(24, 59, 9);
+const COLOR_TEMP_ORANGE: Rgb565 = Rgb565::new(31, 44, 7);
+const COLOR_TEMP_RED: Rgb565 = Rgb565::new(31, 21, 8);
+const COLOR_TEMP_OVERTEMP: Rgb565 = Rgb565::new(31, 19, 20);
+const TEMPERATURE_THRESHOLDS_C: [i16; 8] = [0, 40, 60, 100, 150, 200, 250, 300];
+const TEMPERATURE_COLORS: [Rgb565; 8] = [
+    COLOR_TEMP_WHITE,
+    COLOR_TEMP_BLUE,
+    COLOR_TEMP_CYAN,
+    COLOR_TEMP_GREEN,
     COLOR_TEMP_LIME,
-    COLOR_WARNING,
-    COLOR_ACCENT,
+    COLOR_TEMP_ORANGE,
+    COLOR_TEMP_RED,
+    COLOR_TEMP_OVERTEMP,
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TemperaturePaletteId {
+    Current,
+    BalancedWhiteLow,
+    GlacierWhiteLow,
+    AuroraWhiteLow,
+    MarineWhiteLow,
+    IndustrialWhiteLow,
+    EmberWhiteLow,
+}
+
+impl TemperaturePaletteId {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::BalancedWhiteLow => "balanced-white-low",
+            Self::GlacierWhiteLow => "glacier-white-low",
+            Self::AuroraWhiteLow => "aurora-white-low",
+            Self::MarineWhiteLow => "marine-white-low",
+            Self::IndustrialWhiteLow => "industrial-white-low",
+            Self::EmberWhiteLow => "ember-white-low",
+        }
+    }
+
+    pub fn from_slug(value: &str) -> Option<Self> {
+        match value {
+            "current" => Some(Self::Current),
+            "balanced-white-low" | "a" => Some(Self::BalancedWhiteLow),
+            "glacier-white-low" | "b" => Some(Self::GlacierWhiteLow),
+            "aurora-white-low" | "c" => Some(Self::AuroraWhiteLow),
+            "marine-white-low" | "d" => Some(Self::MarineWhiteLow),
+            "industrial-white-low" | "e" => Some(Self::IndustrialWhiteLow),
+            "ember-white-low" | "f" => Some(Self::EmberWhiteLow),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TemperaturePalette {
+    pub id: TemperaturePaletteId,
+    pub colors: [Rgb565; TEMPERATURE_THRESHOLDS_C.len()],
+}
+
+pub const DEFAULT_TEMPERATURE_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::Current,
+    colors: TEMPERATURE_COLORS,
+};
+
+const WHITE_LOW_BALANCED_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::BalancedWhiteLow,
+    colors: [
+        COLOR_TEXT,
+        Rgb565::new(9, 35, 31),
+        Rgb565::new(10, 54, 31),
+        Rgb565::new(9, 55, 20),
+        Rgb565::new(25, 58, 10),
+        Rgb565::new(31, 45, 9),
+        Rgb565::new(31, 23, 9),
+        Rgb565::new(31, 20, 23),
+    ],
+};
+
+const WHITE_LOW_GLACIER_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::GlacierWhiteLow,
+    colors: [
+        COLOR_TEXT,
+        Rgb565::new(9, 33, 28),
+        Rgb565::new(13, 55, 31),
+        Rgb565::new(11, 56, 22),
+        Rgb565::new(27, 55, 11),
+        Rgb565::new(30, 44, 9),
+        Rgb565::new(28, 22, 9),
+        Rgb565::new(27, 23, 23),
+    ],
+};
+
+const WHITE_LOW_AURORA_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::AuroraWhiteLow,
+    colors: [
+        COLOR_TEXT,
+        Rgb565::new(8, 31, 31),
+        Rgb565::new(7, 59, 30),
+        Rgb565::new(10, 60, 13),
+        Rgb565::new(24, 59, 9),
+        Rgb565::new(31, 44, 7),
+        Rgb565::new(31, 21, 8),
+        Rgb565::new(31, 19, 20),
+    ],
+};
+
+const WHITE_LOW_MARINE_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::MarineWhiteLow,
+    colors: [
+        COLOR_TEXT,
+        Rgb565::new(7, 35, 31),
+        Rgb565::new(9, 52, 29),
+        Rgb565::new(7, 53, 20),
+        Rgb565::new(23, 56, 10),
+        Rgb565::new(30, 40, 7),
+        Rgb565::new(28, 19, 8),
+        Rgb565::new(26, 19, 21),
+    ],
+};
+
+const WHITE_LOW_INDUSTRIAL_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::IndustrialWhiteLow,
+    colors: [
+        COLOR_TEXT,
+        Rgb565::new(9, 31, 27),
+        Rgb565::new(12, 50, 24),
+        Rgb565::new(13, 46, 17),
+        Rgb565::new(26, 51, 10),
+        Rgb565::new(26, 36, 8),
+        Rgb565::new(25, 20, 8),
+        Rgb565::new(22, 22, 19),
+    ],
+};
+
+const WHITE_LOW_EMBER_PALETTE: TemperaturePalette = TemperaturePalette {
+    id: TemperaturePaletteId::EmberWhiteLow,
+    colors: [
+        COLOR_TEXT,
+        Rgb565::new(9, 35, 31),
+        Rgb565::new(10, 52, 31),
+        Rgb565::new(12, 59, 11),
+        Rgb565::new(31, 52, 9),
+        Rgb565::new(31, 38, 6),
+        Rgb565::new(31, 19, 6),
+        Rgb565::new(31, 16, 18),
+    ],
+};
+
+pub const fn temperature_palette(id: TemperaturePaletteId) -> &'static TemperaturePalette {
+    match id {
+        TemperaturePaletteId::Current => &DEFAULT_TEMPERATURE_PALETTE,
+        TemperaturePaletteId::BalancedWhiteLow => &WHITE_LOW_BALANCED_PALETTE,
+        TemperaturePaletteId::GlacierWhiteLow => &WHITE_LOW_GLACIER_PALETTE,
+        TemperaturePaletteId::AuroraWhiteLow => &WHITE_LOW_AURORA_PALETTE,
+        TemperaturePaletteId::MarineWhiteLow => &WHITE_LOW_MARINE_PALETTE,
+        TemperaturePaletteId::IndustrialWhiteLow => &WHITE_LOW_INDUSTRIAL_PALETTE,
+        TemperaturePaletteId::EmberWhiteLow => &WHITE_LOW_EMBER_PALETTE,
+    }
+}
+
 pub fn render_frontpanel_ui(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+    render_frontpanel_ui_with_palette(canvas, state, &DEFAULT_TEMPERATURE_PALETTE);
+}
+
+pub fn render_frontpanel_ui_with_palette(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    palette: &TemperaturePalette,
+) {
     canvas.clear(COLOR_BG).ok();
 
     match state.route {
         FrontPanelRoute::KeyTest => draw_key_test(canvas, state),
-        FrontPanelRoute::Dashboard => draw_dashboard(canvas, state),
+        FrontPanelRoute::Dashboard => draw_dashboard(canvas, state, palette),
         FrontPanelRoute::Menu => draw_menu(canvas, state),
-        FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state),
+        FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, palette),
         FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state),
         FrontPanelRoute::WifiInfo => draw_wifi_info(canvas),
         FrontPanelRoute::DeviceInfo => draw_device_info(canvas),
@@ -122,14 +284,14 @@ fn measure_bitmap_text(text: &str, scale: u32, letter_spacing: u32) -> i32 {
     (count * BITMAP_FONT_WIDTH + (count - 1) * spacing) * scale
 }
 
-fn temperature_color(value_c: i16) -> Rgb565 {
+fn temperature_color_with_palette(value_c: i16, palette: &TemperaturePalette) -> Rgb565 {
     for index in 0..(TEMPERATURE_THRESHOLDS_C.len() - 1) {
         if value_c < TEMPERATURE_THRESHOLDS_C[index + 1] {
-            return TEMPERATURE_COLORS[index];
+            return palette.colors[index];
         }
     }
 
-    TEMPERATURE_COLORS[TEMPERATURE_COLORS.len() - 1]
+    palette.colors[palette.colors.len() - 1]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -550,9 +712,13 @@ fn draw_key_test(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+fn draw_dashboard(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    palette: &TemperaturePalette,
+) {
     let (display_text, fractional_digit) = deci_c_to_parts(state.current_temp_deci_c);
-    let value_color = temperature_color(state.current_temp_c);
+    let value_color = temperature_color_with_palette(state.current_temp_c, palette);
     let set_text = i16_to_text(state.target_temp_c);
     let digits_width = measure_seven_segment_text(&display_text);
     let digits_right_edge = 57;
@@ -565,7 +731,11 @@ fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     draw_bitmap_rows(canvas, &CELSIUS_UNIT_BITMAP, 60, 24, COLOR_TEXT);
 
     fill_rect(canvas, 78, 4, 78, 36, COLOR_PANEL);
-    draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
+    if state.heater_lock_reason.is_some() && state.dashboard_warning_visible {
+        draw_status_line(canvas, 7, "WARN", "OTEMP", COLOR_WARNING);
+    } else {
+        draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
+    }
     draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
     let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
     draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
@@ -574,11 +744,11 @@ fn draw_dashboard(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
         canvas,
         29,
         "FAN",
-        if state.fan_enabled { "ON" } else { "OFF" },
-        if state.fan_enabled {
-            COLOR_SUCCESS
-        } else {
-            COLOR_DISABLED
+        state.fan_display_state.label(),
+        match state.fan_display_state {
+            super::FanDisplayState::Off => COLOR_DISABLED,
+            super::FanDisplayState::Auto => COLOR_CYAN,
+            super::FanDisplayState::Run => COLOR_SUCCESS,
         },
     );
 
@@ -638,7 +808,11 @@ fn draw_menu(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+fn draw_preset_temp(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    palette: &TemperaturePalette,
+) {
     const SLOT_LABELS: [&str; 10] = ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"];
 
     for (index, label) in SLOT_LABELS.iter().enumerate().take(state.presets_c.len()) {
@@ -657,7 +831,7 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     let display = value.as_deref().unwrap_or("---");
     let digit_color = state
         .selected_preset()
-        .map(temperature_color)
+        .map(|value| temperature_color_with_palette(value, palette))
         .unwrap_or(COLOR_DISABLED);
     let unit_color = if state.selected_preset().is_some() {
         COLOR_TEXT
@@ -680,11 +854,39 @@ fn draw_preset_temp(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_active_cooling(canvas: &mut DisplayCanvas, _state: &FrontPanelUiState) {
+fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
+    use core::fmt::Write;
+
     draw_text_mid(canvas, "A-COOL", 8, 6, COLOR_TEXT);
-    draw_text_mid_right(canvas, "SAFE", 152, 6, COLOR_WARNING);
-    draw_text_mid(canvas, "POLICY O/TEMP", 8, 20, COLOR_CYAN);
-    draw_text_mid(canvas, "ON360 OFF340", 8, 33, COLOR_WARNING);
+    draw_text_mid_right(
+        canvas,
+        if state.active_cooling_enabled {
+            "ON"
+        } else {
+            "OFF"
+        },
+        152,
+        6,
+        if state.active_cooling_enabled {
+            COLOR_SUCCESS
+        } else {
+            COLOR_WARNING
+        },
+    );
+    let mut cooling_summary = heapless::String::<40>::new();
+    let _ = write!(
+        &mut cooling_summary,
+        "PD {}V | <35 OFF >40 50% >60 MAX",
+        state.pd_contract_mv / 1000
+    );
+    draw_text_small(canvas, &cooling_summary, 8, 22, COLOR_CYAN);
+    draw_text_small(
+        canvas,
+        "SAFE >100 PLS >350 50% >360 MAX",
+        8,
+        34,
+        COLOR_WARNING,
+    );
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas) {
@@ -705,16 +907,63 @@ mod tests {
 
     #[test]
     fn temperature_color_follows_threshold_bands() {
-        assert_eq!(temperature_color(-5), COLOR_CYAN);
-        assert_eq!(temperature_color(79), COLOR_CYAN);
-        assert_eq!(temperature_color(80), COLOR_TEMP_MINT);
-        assert_eq!(temperature_color(149), COLOR_TEMP_MINT);
-        assert_eq!(temperature_color(150), COLOR_TEMP_LIME);
-        assert_eq!(temperature_color(219), COLOR_TEMP_LIME);
-        assert_eq!(temperature_color(220), COLOR_WARNING);
-        assert_eq!(temperature_color(299), COLOR_WARNING);
-        assert_eq!(temperature_color(300), COLOR_ACCENT);
-        assert_eq!(temperature_color(450), COLOR_ACCENT);
+        let palette = temperature_palette(TemperaturePaletteId::Current);
+        assert_eq!(
+            temperature_color_with_palette(-5, palette),
+            COLOR_TEMP_WHITE
+        );
+        assert_eq!(
+            temperature_color_with_palette(39, palette),
+            COLOR_TEMP_WHITE
+        );
+        assert_eq!(temperature_color_with_palette(40, palette), COLOR_TEMP_BLUE);
+        assert_eq!(temperature_color_with_palette(59, palette), COLOR_TEMP_BLUE);
+        assert_eq!(temperature_color_with_palette(60, palette), COLOR_TEMP_CYAN);
+        assert_eq!(temperature_color_with_palette(99, palette), COLOR_TEMP_CYAN);
+        assert_eq!(
+            temperature_color_with_palette(100, palette),
+            COLOR_TEMP_GREEN
+        );
+        assert_eq!(
+            temperature_color_with_palette(149, palette),
+            COLOR_TEMP_GREEN
+        );
+        assert_eq!(
+            temperature_color_with_palette(150, palette),
+            COLOR_TEMP_LIME
+        );
+        assert_eq!(
+            temperature_color_with_palette(199, palette),
+            COLOR_TEMP_LIME
+        );
+        assert_eq!(
+            temperature_color_with_palette(200, palette),
+            COLOR_TEMP_ORANGE
+        );
+        assert_eq!(
+            temperature_color_with_palette(249, palette),
+            COLOR_TEMP_ORANGE
+        );
+        assert_eq!(temperature_color_with_palette(250, palette), COLOR_TEMP_RED);
+        assert_eq!(temperature_color_with_palette(299, palette), COLOR_TEMP_RED);
+        assert_eq!(
+            temperature_color_with_palette(300, palette),
+            COLOR_TEMP_OVERTEMP
+        );
+        assert_eq!(
+            temperature_color_with_palette(450, palette),
+            COLOR_TEMP_OVERTEMP
+        );
+    }
+
+    #[test]
+    fn white_low_preview_palette_promotes_cold_band_to_white() {
+        let palette = temperature_palette(TemperaturePaletteId::MarineWhiteLow);
+        assert_eq!(temperature_color_with_palette(25, palette), COLOR_TEXT);
+        assert_eq!(
+            temperature_color_with_palette(50, palette),
+            WHITE_LOW_MARINE_PALETTE.colors[1]
+        );
     }
 
     #[test]

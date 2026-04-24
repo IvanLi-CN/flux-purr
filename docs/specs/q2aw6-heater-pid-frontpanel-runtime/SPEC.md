@@ -4,29 +4,34 @@
 
 - Status: 已完成
 - Created: 2026-04-21
-- Last: 2026-04-21
+- Last: 2026-04-24
 
 ## 背景 / 问题陈述
 
-- 当前 `flux-purr` 已经完成前面板输入、RTD 读取、CH224Q 20V 请求与 heater/fan bring-up，但 heater 仍是固定占空比测试波形，无法按设定温度稳定工作。
-- `#223uj` 与 `#fk3u7` 已冻结前面板视觉和五向输入基线，但 Dashboard 的 heater/fan 语义仍残留 mock 时代口径，和现在的真实运行态不一致。
-- 若不把温控、故障保护、风扇联动和 UI 真相源一次收口，后续板级调试会持续混淆“显示状态”“控制状态”“保护状态”三套口径。
+- 当前 `flux-purr` 已完成前面板输入、RTD 读取、CH224Q 默认电压请求与 heater/fan bring-up，但 Dashboard 的风扇语义仍残留旧的单布尔开关口径。
+- `#223uj` 与 `#fk3u7` 已冻结前面板视觉和五向输入基线，但 Dashboard 的 fan line、Active Cooling 页面和过温告警仍缺少统一真相源。
+- 若不把风扇策略、过温停热、feature-selected PD 默认请求与前面板显示一次收口，后续板级调试会持续混淆“策略开关”“实际输出”“保护联动”三套状态。
 
 ## 目标 / 非目标
 
 ### Goals
 
 - 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式 PID PWM 闭环。
-- 让前面板稳定显示实时温度、设定温度、实际风扇状态与实际 heater 输出强度。
-- 冻结正式温控包线：`target 0~400°C`、`fan on >=360°C`、`fan off <340°C`、`hard cutoff >=420°C`。
-- 冻结故障策略：RTD 开路/短路、ADC 读失败、硬超温进入 heater fault-latch；PD 状态仅记录，不参与 heater 锁死或闭锁。
+- 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN` 三态风扇显示与实际 heater 输出强度。
+- 冻结正式风扇/保护包线：
+  - heater `OFF` 且 active cooling `ON`：`<35°C` 停止、`>40°C` 以 `50%` 档启动、`>60°C` 全速，`35~40°C` 保持回差。
+  - heater `ON`：`<=100°C` 不主动散热，超过 `100°C` 后由安全链路接管。
+  - active cooling `OFF`：`>100°C` 进入最低电压 `0.1Hz` 使能脉冲，脉冲占空比按 `floor((temp-100)/10)%` 递增并封顶 `25%`。
+  - active cooling `OFF` 且 `>350°C`：锁住停热并保持风扇 `50%`；`>360°C` 改为全速。
+  - `temp >= 420°C`：保持 heater hard cutoff fault-latch。
+- 默认启动时把 CH224Q 请求固定为 `20V`，并通过 build features 提供 `12V / 28V` 变体，同时保持外部 `fan_enabled + fan_pwm_permille` 归一化契约不变。
 - 产出 merge-ready 所需的 spec、视觉证据、板级验证与 review 收敛材料。
 
 ### Non-goals
 
 - 不提供运行时 PID 参数调节入口。
-- 不实现按 VIN / PD 档位的动态 duty 补偿。
-- 不修改外部 HTTP / RPC / 持久化契约。
+- 不实现 fan tach 闭环、4 线 PWM、持久化风扇档位或按 VIN 自动切换 PD 请求。
+- 不修改外部 HTTP / RPC / 持久化字段结构。
 - 不扩展新的前面板菜单层级或联网业务逻辑。
 
 ## 范围（Scope）
@@ -36,15 +41,17 @@
 - `firmware/src/bin/flux_purr.rs`
 - `firmware/src/frontpanel/**`
 - `firmware/src/bin/frontpanel_preview.rs`
+- `web/src/features/frontpanel-preview/**`
+- `web/src/stories/FrontPanelDisplay.stories.tsx`
 - `firmware/README.md`
+- `docs/interfaces/http-api.md`
 - `docs/specs/q2aw6-heater-pid-frontpanel-runtime/**`
 - `docs/specs/fk3u7-frontpanel-input-interaction/SPEC.md`
 - `docs/specs/223uj-frontpanel-ui-contract/SPEC.md`
-- `docs/specs/README.md`
 
 ### Out of scope
 
-- Web 控制台、HTTP API、Wi‑Fi 配置写回
+- Web 控制台、HTTP API、Wi‑Fi 配置写回字段扩展
 - 多电压 / 多功率档位与自动 PD 策略切换
 - RTD 额外校准界面或外部校准协议
 
@@ -54,20 +61,20 @@
 
 - heater PWM 频率固定为 `2 kHz`，控制周期固定为 `1 Hz`。
 - 目标温度与 preset 写入都必须 clamp 到 `0~400°C`。
-- PID 必须固定使用内置常量参数，并包含积分限幅、设定变化重置积分、导数对测量值求差。
 - RTD 开路、短路、ADC 读失败、`temp >= 420°C` 时，heater 必须立即关断并进入 fault-latch。
 - fault-latch 期间 heater 不得自动恢复；故障解除后必须由用户再次短按中键重臂。
-- CH224Q 仍在启动时请求 `20V`；PD 状态变化只允许进入日志/状态观测，不得触发 heater 锁死或自动关断。
-- 风扇默认关闭；`temp >= 360°C` 强制开启，降到 `<340°C` 才允许关闭。
-- Dashboard 中键短按只切 heater arm；中键双击不得再影响风扇运行态。
-- Dashboard 左侧必须显示实时温度；右上必须显示 `SET` 与设定温度；`FAN` 必须显示实际运行态；底部条形必须绑定实际 heater 输出 duty。
-- defmt 日志必须覆盖 RTD 读数、PID 输入/输出、fault 原因、fan hysteresis 状态与 PD 状态变化。
+- CH224Q 在启动时默认请求 `20V`；`pd-request-12v` / `pd-request-28v` 仅改变默认请求值。PD 状态变化只允许进入日志/状态观测，不得触发 heater 锁死或自动关断。
+- `active_cooling_enabled=true` 时，Dashboard fan line 必须只显示 `AUTO` 或 `RUN`；`active_cooling_enabled=false` 时必须显示 `OFF`，即使保护链路正在临时驱动真实风扇。
+- Dashboard 中键短按只切 heater arm；中键双击切换 `active_cooling_enabled`；中键长按只进菜单。
+- 过温保护不得占用 Dashboard 的风扇元素；SET 行必须在告警激活时以 `1Hz` 闪烁 `WARN / OTEMP` 两关键帧。
+- `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页，必须同步默认 `20V`（及 `12V / 28V` build variants）、`<35 / >40 / >60 / >100 / >350 / >360°C` 新包线。
+- defmt 日志必须覆盖 RTD 读数、PID 输入/输出、fault 原因、fan policy 输出与 PD 状态变化。
 
 ### SHOULD
 
-- fault-latch 的原因标签应保持稳定，便于 monitor 与后续 review 收敛。
+- cooling-disabled lock 的标签与恢复路径保持稳定，便于 monitor 与后续 review 收敛。
 - 初始 UI 应在第一次有效 RTD 样本后就显示实际温度，而不是长时间保留 bring-up 默认值。
-- preview 与板级运行态的 Dashboard 布局、文案与颜色层级应保持一致。
+- firmware preview 与 Storybook 的 Dashboard/Active Cooling 文案和颜色层级保持一致。
 
 ### COULD
 
@@ -77,10 +84,14 @@
 
 ### Core flows
 
-- 启动后仍先请求 `20V`，随后初始化 RTD、heater PWM、fan 运行态和前面板 UI。
+- 启动后先请求 feature-selected PD 电压（默认 `20V`），随后初始化 RTD、heater PWM、fan 运行态和前面板 UI。
 - 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则 PID 开始按 `target_temp_c - current_temp_c` 驱动 duty。
-- 当实时温度靠近设定温度时，heater duty 应明显下降；超过设定温度时 duty 应继续收敛到低值或 0。
-- 风扇不跟随 heater arm 自动开启；只有温度达到阈值时才进入全速运行。
+- Dashboard fan line 只反映“策略开关 + 当前是否实际运行”：
+  - `OFF`：风扇策略关闭
+  - `AUTO`：风扇策略开启但当前无需工作
+  - `RUN`：风扇策略开启且当前已使能输出
+- 当 `active_cooling_enabled=false` 且 `temp > 350°C` 时，heater 必须被强制关断并锁住；用户重新开启风扇策略或手动重新使能 heater 后才允许退出该锁态。
+- 当 `active_cooling_enabled=false` 且 `temp > 360°C` 时，真实风扇输出升级为全速，但 Dashboard fan line 仍保持 `OFF`。
 - PD 状态只做观测：即使 PD 丢失或降档，也不自动清空 `heater_enabled`，只在日志中体现。
 
 ### Edge cases / errors
@@ -89,8 +100,8 @@
 - fault-latch 期间若用户再次短按中键：
   - 当前 fault 仍存在时，必须拒绝重臂并保持 `heater_enabled=false`
   - 当前 fault 已消失时，允许清除 latch 并重新进入 arm
-- overtemp fault 后，若温度仍高于风扇回差阈值，风扇必须继续运行直到安全回落。
-- 双击中键在 v1 中保留为无副作用事件，不得污染 heater/fan 真相源。
+- cooling-disabled lock 清除后，若温度仍高于 `350°C`，必须等待温度回到 `<=350°C` 再次越线后才允许重新触发锁定。
+- 双击中键不再直接改真实 fan runtime；它只切换风扇策略位。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -98,9 +109,10 @@
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `FrontPanelUiState.heater_output_percent` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard 底部输出条真相源 |
-| `FrontPanelUiState.fan_enabled` | Rust state model | internal | Modify | None | firmware | runtime / preview / render tests | 由 mock flag 改为实际 fan runtime state |
-| `HeaterController` | Rust runtime helper | internal | New | None | firmware | main runtime / unit tests | PID + fault-latch 状态机 |
+| `FrontPanelUiState.fan_display_state` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard 风扇三态真相源 |
+| `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `cooling-disabled-overtemp` / `hard-overtemp` |
+| `FrontPanelUiState.dashboard_warning_visible` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | SET 行告警闪烁相位 |
+| `FrontPanelRuntimeState` / `FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | 对齐 firmware 三态 fan 与告警关键帧 |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -108,13 +120,14 @@ None
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 固件刚启动，When RTD 已有有效样本，Then Dashboard 左侧显示实时温度，右上显示 `SET <target>`，`FAN` 显示实际 fan runtime state，heater 默认 `arm=false`。
-- Given Dashboard，When 用户短按中键，Then 只切换 heater arm，不再改变 fan state；When 双击中键，Then 不产生 heater/fan 副作用；When 长按中键，Then 仍进入菜单。
-- Given heater 已 arm 且无 fault，When 实时温度低于设定温度，Then heater duty 上升；When 接近设定温度，Then heater duty 收敛下降，而不是固定 `50%`。
-- Given RTD 开路、短路、ADC 读失败或 `temp >= 420°C`，When 故障出现，Then heater duty 立即归零、`heater_enabled=false`，并进入 fault-latch。
-- Given fault-latch 已存在，When 故障已消失且用户再次短按中键，Then 才允许重臂；When 故障未消失，Then 重臂必须被拒绝。
-- Given 温度 `>=360°C`，When 控制循环更新，Then fan 必须自动开启；Given fan 已开启，When 温度降到 `<340°C`，Then fan 才允许关闭。
-- Given PD 状态发生变化，When monitor 日志输出，Then 可以看到 PD 状态更新，但 heater 不会因此被锁死或自动清臂。
+- Given 固件刚启动，When RTD 已有有效样本，Then Dashboard 左侧显示实时温度，右侧显示 `SET/PPS/FAN`，其中 `FAN` 只会显示 `OFF/AUTO/RUN`。
+- Given Dashboard，When 用户短按中键，Then 只切换 heater arm；When 双击中键，Then 只切换 `active_cooling_enabled`；When 长按中键，Then 仍进入菜单。
+- Given heater 关闭且 active cooling 开启，When 温度 `<35°C / >40°C / >60°C`，Then fan 必须分别进入停止 / `50%` / 全速，并在 `35~40°C` 维持回差。
+- Given heater 开启，When 温度 `<=100°C`，Then fan 不得因为 idle cooling 阈值而提前启动。
+- Given active cooling 关闭，When 温度 `100 / 110 / 350 / 351 / 361°C`，Then fan 必须分别满足无脉冲 / `1%` 脉冲 / `25%` 脉冲 / `50%` / 全速。
+- Given active cooling 关闭且温度 `>350°C`，When 控制循环更新，Then heater 必须被锁住停热；When 用户重新开启风扇策略或手动重新 arm heater，Then 才允许离开锁态。
+- Given `temp >= 420°C`，When 故障出现，Then heater 立即归零并进入 `hard-overtemp` fault-latch。
+- Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -128,59 +141,72 @@ None
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
-- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-manual docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-manual.framebuffer.bin`
+- `bun run --cwd web check`
+- `bun run --cwd web typecheck`
+- `bun run --cwd web build-storybook`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-off docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-fan-off.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-auto docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-fan-auto.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-fan-run docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-fan-run.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-a docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-overtemp-a.framebuffer.bin`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard-overtemp-b docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-overtemp-b.framebuffer.bin`
 
 ### UI / Firmware Preview
 
-- owner-facing 预览必须来自 `frontpanel_preview` 的确定性输出。
+- owner-facing 预览必须来自 `frontpanel_preview` 或 Storybook 的确定性输出。
 - 视觉证据必须落在本 spec 的 `./assets/` 下，并和聊天回图保持同源。
 
 ## 文档更新（Docs to Update）
 
-- `docs/specs/README.md`
 - `docs/specs/fk3u7-frontpanel-input-interaction/SPEC.md`
 - `docs/specs/223uj-frontpanel-ui-contract/SPEC.md`
 - `firmware/README.md`
+- `docs/interfaces/http-api.md`
 
 ## Visual Evidence
 
-- Dashboard manual firmware preview（实时温度 / `SET` / 实际风扇状态 / 实际 heater 输出条）：
+- Dashboard fan `OFF`：
 
-![Dashboard manual runtime preview](./assets/dashboard-manual.png)
+![Dashboard fan off](./assets/dashboard-fan-off.png)
 
-- Active Cooling policy preview（正式 runtime 中改为只读安全策略说明页）：
+- Dashboard fan `AUTO`：
 
-![Active Cooling policy preview](./assets/active-cooling.png)
+![Dashboard fan auto](./assets/dashboard-fan-auto.png)
 
-- 板级启动日志证据：
-  - flash session: `/Users/ivan/Projects/Ivan/flux-purr/.mcu-agentd/sessions/esp32s3_frontpanel/20260421_105455.session.ndjson`
-  - monitor: `/Users/ivan/Projects/Ivan/flux-purr/.mcu-agentd/monitor/esp32s3_frontpanel/20260421_105459_702.mon.ndjson`
-  - 已确认默认启动 `heater_arm=false`、`heater_out=0%`、`fan=false`，并持续输出 PID/RTD defmt 日志。
+- Dashboard fan `RUN`：
+
+![Dashboard fan run](./assets/dashboard-fan-run.png)
+
+- Dashboard overtemp warning frame A：
+
+![Dashboard overtemp A](./assets/dashboard-overtemp-a.png)
+
+- Dashboard overtemp warning frame B：
+
+![Dashboard overtemp B](./assets/dashboard-overtemp-b.png)
+
+- Current default temperature palette（Aurora / C）：
+
+![Temperature palette current](./assets/temperature-palette-current.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
-- [x] M1: 落地正式 `HeaterController`、heater fault-latch 与 overtemp fan runtime
-- [x] M2: 落地 Dashboard 真实运行态字段、输入语义修正与渲染更新
-- [x] M3: 补齐单测、构建与 frontpanel preview 证据
-- [x] M4: 完成板级 flash/monitor 验证并收敛到 merge-ready PR
+- [x] M1: 落地正式 `HeaterController`、heater fault-latch 与风扇策略状态机
+- [x] M2: 落地 Dashboard 三态风扇显示、SET 行告警闪烁与 Active Cooling 只读说明页
+- [x] M3: 补齐单测、host preview、Storybook 故事与视觉证据
+- [x] M4: 完成 xtensa build / review 收敛并准备 merge-ready PR
 
 ## 方案概述（Approach, high-level）
 
-- 用单一 `HeaterController` 管理 PID、fault-latch 与 re-arm 语义，避免把控制逻辑散落在 UI reducer 和 GPIO 分支里。
-- 用 Dashboard 的 `heater_output_percent` 与 `fan_enabled` 作为真实运行态展示层，不再复用 mock-only flag 表达真实执行输出。
-- 继续把 CH224Q 作为电源准备层而不是 heater interlock，避免把“功率不足”误处理成“安全故障”。
+- 用单一 `HeaterController` 管理 PID 与 hard fault-latch，再把 cooling-disabled lock 作为独立安全层挂在 fan policy 旁边。
+- 用 `fan_display_state + heater_lock_reason + dashboard_warning_visible` 作为 Dashboard 真相源，不再复用单布尔 fan 标记表达全部运行态。
+- 继续把 CH224Q 作为电源准备层而不是 heater interlock，只把 feature-selected 默认请求（默认 `20V`）和观测日志纳入当前合同。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：当前 PID 默认参数仍需依赖实板热惯性验证，首次实现只能先选保守固定值。
 - 风险：RTD 经验标定仍是经验值，不是外部标准校准；高温绝对精度仍可能需要后续单独处理。
-- 风险：如果热板本体散热过强，风扇仅超温开启的策略可能让回落速度偏慢，但不影响当前安全目标。
+- 风险：`0.1Hz` 风扇脉冲与半速 / 全速切换基于当前板级风扇 rail 映射，后续若硬件变更需重新验证。
 - 假设：当前 heater 与 fan 硬件极性已经按现有 bring-up 经验验证为正确。
-
-## 变更记录（Change log）
-
-- 2026-04-21: 创建正式 heater PID 闭环与前面板运行态同步 spec，冻结控制包线、fault-latch、fan hysteresis 与 PD 观测语义。
-- 2026-04-21: 收敛到 merge-ready PR #11，并补齐 preview / board proof 路径。
 
 ## 参考（References）
 

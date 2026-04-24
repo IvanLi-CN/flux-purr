@@ -6,6 +6,7 @@ import {
   type FrontPanelRuntimeMode,
   type FrontPanelRuntimeState,
   frontPanelRuntimeToScreen,
+  tickFrontPanelRuntime,
 } from '../runtime'
 import type { FrontPanelKeyId, KeyGestureId } from '../types'
 import { FrontPanelDisplay } from './front-panel-display'
@@ -18,6 +19,9 @@ interface FrontPanelRuntimeHarnessProps {
 
 const keyOrder: ReadonlyArray<FrontPanelKeyId> = ['up', 'down', 'left', 'right', 'center']
 const gestureOrder: ReadonlyArray<KeyGestureId> = ['short', 'double', 'long']
+const RUNTIME_TICK_MS = 100
+const COOLING_DISABLED_PULSE_START_TEMP_C = 100
+const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 
 const shortcuts: ReadonlyArray<FrontPanelRuntimeInteraction> = keyOrder.flatMap((key) =>
   gestureOrder.map((gesture) => ({ key, gesture }))
@@ -41,6 +45,24 @@ export function FrontPanelRuntimeHarness({
   useEffect(() => {
     setState(seedState)
   }, [seedState])
+
+  useEffect(() => {
+    const needsPulseTick =
+      state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C &&
+      state.currentTempC <= COOLING_DISABLED_HEATER_LOCK_TEMP_C &&
+      (state.heaterEnabled || !state.activeCoolingEnabled)
+    const needsTick = state.heaterLockReason != null || needsPulseTick
+
+    if (!needsTick) {
+      return undefined
+    }
+
+    const intervalId = window.setInterval(() => {
+      setState((current) => tickFrontPanelRuntime(current, RUNTIME_TICK_MS))
+    }, RUNTIME_TICK_MS)
+
+    return () => window.clearInterval(intervalId)
+  }, [state.activeCoolingEnabled, state.currentTempC, state.heaterEnabled, state.heaterLockReason])
 
   const screen = useMemo(() => frontPanelRuntimeToScreen(state), [state])
 
@@ -92,7 +114,14 @@ export function FrontPanelRuntimeHarness({
             <span className="text-slate-400">heaterEnabled:</span> {String(state.heaterEnabled)}
           </div>
           <div>
-            <span className="text-slate-400">fanEnabled:</span> {String(state.fanEnabled)}
+            <span className="text-slate-400">heaterOutputPercent:</span> {state.heaterOutputPercent}
+          </div>
+          <div>
+            <span className="text-slate-400">fanRuntimeEnabled:</span>{' '}
+            {String(state.fanRuntimeEnabled)}
+          </div>
+          <div>
+            <span className="text-slate-400">fanDisplayState:</span> {state.fanDisplayState}
           </div>
           <div>
             <span className="text-slate-400">selectedMenuItem:</span> {state.selectedMenuItem}
@@ -101,8 +130,19 @@ export function FrontPanelRuntimeHarness({
             <span className="text-slate-400">selectedPresetIndex:</span> {state.selectedPresetIndex}
           </div>
           <div>
-            <span className="text-slate-400">activeCooling:</span>{' '}
-            {String(state.activeCoolingEnabled)} / {state.activeCoolingMode}
+            <span className="text-slate-400">activeCoolingEnabled:</span>{' '}
+            {String(state.activeCoolingEnabled)}
+          </div>
+          <div>
+            <span className="text-slate-400">heaterLockReason:</span>{' '}
+            {state.heaterLockReason ?? 'none'}
+          </div>
+          <div>
+            <span className="text-slate-400">warningVisible:</span>{' '}
+            {String(state.dashboardWarningVisible)}
+          </div>
+          <div>
+            <span className="text-slate-400">pdContractMv:</span> {state.pdContractMv}
           </div>
           <div>
             <span className="text-slate-400">keyTest:</span> {state.keyTest.rawKeyLabel} /{' '}

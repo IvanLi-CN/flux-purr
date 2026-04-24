@@ -5,14 +5,16 @@ use std::{
 };
 
 use flux_purr_firmware::{
+    DEFAULT_PD_VOLTAGE_REQUEST,
     display::{
         DISPLAY_FRAMEBUFFER_BYTES, DISPLAY_PANEL_CONFIG, DISPLAY_PHYSICAL_HEIGHT,
         DISPLAY_PHYSICAL_WIDTH, DisplayCanvas,
     },
     frontpanel::{
-        ActiveCoolingMode, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState,
-        FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState, KeyEvent, KeyGesture,
-        RawFrontPanelKey, render::render_frontpanel_ui,
+        FanDisplayState, FrontPanelKeyMap, FrontPanelMenuItem, FrontPanelRawState, FrontPanelRoute,
+        FrontPanelRuntimeMode, FrontPanelUiState, HeaterLockReason, KeyEvent, KeyGesture,
+        RawFrontPanelKey,
+        render::{TemperaturePaletteId, render_frontpanel_ui_with_palette, temperature_palette},
     },
 };
 
@@ -24,6 +26,12 @@ enum PreviewPreset {
     KeyTestLong,
     Dashboard,
     DashboardManual,
+    DashboardFanOff,
+    DashboardFanAuto,
+    DashboardFanRun,
+    DashboardOvertempA,
+    DashboardOvertempB,
+    DashboardTemp,
     Menu,
     PresetTemp,
     ActiveCooling,
@@ -47,6 +55,34 @@ fn build_key_test_state(raw_key: RawFrontPanelKey, gesture: KeyGesture) -> Front
     state
 }
 
+fn base_dashboard_state() -> FrontPanelUiState {
+    let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+    state.target_temp_c = 180;
+    state.current_temp_c = 32;
+    state.current_temp_deci_c = 321;
+    state.heater_enabled = false;
+    state.heater_output_percent = 0;
+    state
+}
+
+fn build_dashboard_temp_state(temp_c: i16) -> FrontPanelUiState {
+    let mut state = base_dashboard_state();
+    state.current_temp_c = temp_c;
+    state.current_temp_deci_c = temp_c * 10;
+    state.heater_enabled = false;
+    state.heater_output_percent = 0;
+    state.active_cooling_enabled = true;
+    if temp_c > 40 {
+        state.fan_enabled = true;
+        state.fan_display_state = FanDisplayState::Run;
+    } else {
+        state.fan_enabled = false;
+        state.fan_display_state = FanDisplayState::Auto;
+    }
+    state
+}
+
 impl PreviewPreset {
     const fn slug(self) -> &'static str {
         match self {
@@ -56,6 +92,12 @@ impl PreviewPreset {
             Self::KeyTestLong => "key-test-long",
             Self::Dashboard => "dashboard",
             Self::DashboardManual => "dashboard-manual",
+            Self::DashboardFanOff => "dashboard-fan-off",
+            Self::DashboardFanAuto => "dashboard-fan-auto",
+            Self::DashboardFanRun => "dashboard-fan-run",
+            Self::DashboardOvertempA => "dashboard-overtemp-a",
+            Self::DashboardOvertempB => "dashboard-overtemp-b",
+            Self::DashboardTemp => "dashboard-temp",
             Self::Menu => "menu",
             Self::PresetTemp => "preset-temp",
             Self::ActiveCooling => "active-cooling",
@@ -72,6 +114,12 @@ impl PreviewPreset {
             "key-test-long" | "keytest-long" => Some(Self::KeyTestLong),
             "dashboard" => Some(Self::Dashboard),
             "dashboard-manual" => Some(Self::DashboardManual),
+            "dashboard-fan-off" => Some(Self::DashboardFanOff),
+            "dashboard-fan-auto" => Some(Self::DashboardFanAuto),
+            "dashboard-fan-run" => Some(Self::DashboardFanRun),
+            "dashboard-overtemp-a" => Some(Self::DashboardOvertempA),
+            "dashboard-overtemp-b" => Some(Self::DashboardOvertempB),
+            "dashboard-temp" => Some(Self::DashboardTemp),
             "menu" => Some(Self::Menu),
             "preset-temp" => Some(Self::PresetTemp),
             "active-cooling" => Some(Self::ActiveCooling),
@@ -81,7 +129,7 @@ impl PreviewPreset {
         }
     }
 
-    fn build_state(self) -> FrontPanelUiState {
+    fn build_state(self, dashboard_temp_c: Option<i16>) -> FrontPanelUiState {
         match self {
             Self::KeyTestIdle => FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest),
             Self::KeyTestShort => {
@@ -93,18 +141,68 @@ impl PreviewPreset {
             Self::KeyTestLong => {
                 build_key_test_state(RawFrontPanelKey::Down, KeyGesture::LongPress)
             }
-            Self::Dashboard => FrontPanelUiState::new(FrontPanelRuntimeMode::App),
+            Self::Dashboard => base_dashboard_state(),
             Self::DashboardManual => {
-                let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+                let mut state = base_dashboard_state();
                 state.current_temp_c = 365;
                 state.current_temp_deci_c = 3654;
-                state.pd_contract_mv = 20_000;
                 state.target_temp_c = 380;
                 state.heater_enabled = true;
                 state.heater_output_percent = 64;
                 state.fan_enabled = true;
+                state.fan_display_state = FanDisplayState::Run;
                 state
             }
+            Self::DashboardFanOff => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 96;
+                state.current_temp_deci_c = 962;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
+                state.active_cooling_enabled = false;
+                state.fan_enabled = false;
+                state.fan_display_state = FanDisplayState::Off;
+                state
+            }
+            Self::DashboardFanAuto => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 34;
+                state.current_temp_deci_c = 341;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
+                state.fan_enabled = false;
+                state.fan_display_state = FanDisplayState::Auto;
+                state
+            }
+            Self::DashboardFanRun => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 58;
+                state.current_temp_deci_c = 583;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
+                state.fan_enabled = true;
+                state.fan_display_state = FanDisplayState::Run;
+                state
+            }
+            Self::DashboardOvertempA => {
+                let mut state = base_dashboard_state();
+                state.current_temp_c = 351;
+                state.current_temp_deci_c = 3512;
+                state.heater_enabled = false;
+                state.heater_output_percent = 0;
+                state.active_cooling_enabled = false;
+                state.fan_enabled = true;
+                state.fan_display_state = FanDisplayState::Off;
+                state.heater_lock_reason = Some(HeaterLockReason::CoolingDisabledOvertemp);
+                state.dashboard_warning_visible = true;
+                state
+            }
+            Self::DashboardOvertempB => {
+                let mut state = Self::DashboardOvertempA.build_state(None);
+                state.dashboard_warning_visible = false;
+                state
+            }
+            Self::DashboardTemp => build_dashboard_temp_state(dashboard_temp_c.unwrap_or(25)),
             Self::Menu => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.route = FrontPanelRoute::Menu;
@@ -120,8 +218,8 @@ impl PreviewPreset {
             Self::ActiveCooling => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
                 state.route = FrontPanelRoute::ActiveCooling;
-                state.active_cooling_mode = ActiveCoolingMode::Boost;
                 state.active_cooling_enabled = true;
+                state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
                 state
             }
             Self::WifiInfo => {
@@ -152,6 +250,73 @@ fn default_output_path(preset: PreviewPreset) -> PathBuf {
     ))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedCliArgs {
+    preset: PreviewPreset,
+    output_path: PathBuf,
+    dashboard_temp_c: Option<i16>,
+    palette_id: TemperaturePaletteId,
+}
+
+fn parse_cli_args<I>(args: I) -> Result<ParsedCliArgs, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
+    let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
+        return Err(format!(
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info)",
+            preset_slug
+        ));
+    };
+
+    let mut output_path = None;
+    let mut dashboard_temp_c = None;
+    let mut palette_id = TemperaturePaletteId::Current;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--temp" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("missing value for --temp"));
+                };
+                let Ok(parsed) = value.parse::<i16>() else {
+                    return Err(format!("invalid --temp value '{}'", value));
+                };
+                dashboard_temp_c = Some(parsed);
+            }
+            "--palette" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("missing value for --palette"));
+                };
+                let Some(parsed) = TemperaturePaletteId::from_slug(&value) else {
+                    return Err(format!(
+                        "unknown --palette '{}' (known: current, balanced-white-low|a, glacier-white-low|b, aurora-white-low|c, marine-white-low|d, industrial-white-low|e, ember-white-low|f)",
+                        value
+                    ));
+                };
+                palette_id = parsed;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown argument '{}'", other));
+            }
+            other => {
+                if output_path.is_some() {
+                    return Err(format!("unknown argument '{}'", other));
+                }
+                output_path = Some(PathBuf::from(other));
+            }
+        }
+    }
+
+    Ok(ParsedCliArgs {
+        preset,
+        output_path: output_path.unwrap_or_else(|| default_output_path(preset)),
+        dashboard_temp_c,
+        palette_id,
+    })
+}
+
 fn panel_output_path(logical_output_path: &Path) -> PathBuf {
     let file_name = logical_output_path
         .file_name()
@@ -170,24 +335,23 @@ fn panel_output_path(logical_output_path: &Path) -> PathBuf {
 }
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
-    let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
-        eprintln!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, menu, preset-temp, active-cooling, wifi-info, device-info)",
-            preset_slug
-        );
-        return ExitCode::FAILURE;
+    let ParsedCliArgs {
+        preset,
+        output_path,
+        dashboard_temp_c,
+        palette_id,
+    } = match parse_cli_args(env::args().skip(1)) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
     };
-    let output_path = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_output_path(preset));
     let panel_path = panel_output_path(&output_path);
 
     let mut canvas = DisplayCanvas::new();
-    let state = preset.build_state();
-    render_frontpanel_ui(&mut canvas, &state);
+    let state = preset.build_state(dashboard_temp_c);
+    render_frontpanel_ui_with_palette(&mut canvas, &state, temperature_palette(palette_id));
 
     let mut logical_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
     canvas.write_rgb565_le_bytes(&mut logical_bytes);
@@ -235,6 +399,49 @@ mod tests {
         assert_eq!(
             panel_output_path(Path::new("/tmp/dashboard.framebuffer.bin")),
             PathBuf::from("/tmp/dashboard.panel.framebuffer.bin")
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_allows_option_only_dashboard_temp_invocation() {
+        let parsed = parse_cli_args([
+            String::from("dashboard-temp"),
+            String::from("--temp"),
+            String::from("25"),
+        ])
+        .expect("option-only invocation should parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCliArgs {
+                preset: PreviewPreset::DashboardTemp,
+                output_path: default_output_path(PreviewPreset::DashboardTemp),
+                dashboard_temp_c: Some(25),
+                palette_id: TemperaturePaletteId::Current,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_output_path_after_flags() {
+        let parsed = parse_cli_args([
+            String::from("dashboard-temp"),
+            String::from("--temp"),
+            String::from("80"),
+            String::from("--palette"),
+            String::from("c"),
+            String::from("/tmp/custom.framebuffer.bin"),
+        ])
+        .expect("flags before output path should parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCliArgs {
+                preset: PreviewPreset::DashboardTemp,
+                output_path: PathBuf::from("/tmp/custom.framebuffer.bin"),
+                dashboard_temp_c: Some(80),
+                palette_id: TemperaturePaletteId::AuroraWhiteLow,
+            }
         );
     }
 }
