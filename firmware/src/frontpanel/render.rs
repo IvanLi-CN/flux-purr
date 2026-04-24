@@ -876,15 +876,16 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     let mut cooling_summary = heapless::String::<40>::new();
     let _ = write!(
         &mut cooling_summary,
-        "PD {}V | <35 OFF >40 50% >60 MAX",
+        "PD {}V | >=40 MIN >60 MAX",
         state.pd_contract_mv / 1000
     );
     draw_text_small(canvas, &cooling_summary, 8, 22, COLOR_CYAN);
+    draw_text_small(canvas, "<40 LOW 30S THEN OFF", 8, 34, COLOR_SUCCESS);
     draw_text_small(
         canvas,
         "SAFE >100 PLS >350 50% >360 MAX",
         8,
-        34,
+        42,
         COLOR_WARNING,
     );
 }

@@ -21,7 +21,11 @@ use esp_hal::{
     clock::CpuClock,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
-    mcpwm::{McPwm, PeripheralClockConfig, operator::PwmPinConfig, timer::PwmWorkingMode},
+    mcpwm::{
+        McPwm, PeripheralClockConfig,
+        operator::PwmPinConfig,
+        timer::{CounterDirection, PwmWorkingMode},
+    },
     spi::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
@@ -31,6 +35,10 @@ use esp_hal::{
 };
 #[cfg(target_arch = "xtensa")]
 use esp_println as _;
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::buzzer::BuzzerOutput;
+#[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{FanDisplayState, HeaterLockReason};
 #[cfg(target_arch = "xtensa")]
@@ -72,11 +80,11 @@ const HEATER_PID_TARGET_MIN_C: i16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PID_TARGET_MAX_C: i16 = 400;
 #[cfg(any(target_arch = "xtensa", test))]
-const AUTO_COOLING_FAN_STOP_TEMP_C: i16 = 35;
-#[cfg(any(target_arch = "xtensa", test))]
-const AUTO_COOLING_FAN_START_TEMP_C: i16 = 40;
+const AUTO_COOLING_FAN_MIN_TEMP_C: i16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
 const AUTO_COOLING_FAN_FULL_TEMP_C: i16 = 60;
+#[cfg(any(target_arch = "xtensa", test))]
+const AUTO_COOLING_FAN_COOLDOWN_MS: u64 = 30_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const COOLING_DISABLED_PULSE_START_TEMP_C: i16 = 100;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -129,6 +137,12 @@ const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 const FAN_PWM_PERIOD_TICKS: u16 = 99;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_PERIOD_TICKS: u16 = 99;
+#[cfg(target_arch = "xtensa")]
+const BUZZER_PWM_PERIOD_TICKS: u16 = 999;
+#[cfg(target_arch = "xtensa")]
+const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(target_arch = "xtensa")]
@@ -273,6 +287,14 @@ struct HeaterPidSnapshot {
     control_error_c: f32,
     filtered_temp_c: f32,
     phase: HeaterControlPhase,
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct BuzzerHardwareState {
+    frequency_hz: Option<u32>,
+    duty_percent: u8,
+    generation: u32,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -488,6 +510,7 @@ enum FanPolicyState {
     Minimum,
     SafeHalf,
     Full,
+    ActiveCoolingCooldown { until_ms: u64 },
     CoolingDisabledPulse { duty_percent: u8 },
 }
 
@@ -499,6 +522,13 @@ impl FanPolicyState {
             Self::Minimum => FanHardwareCommand::from_profile(FanVoltageProfile::Minimum),
             Self::SafeHalf => FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
             Self::Full => FanHardwareCommand::from_profile(FanVoltageProfile::Full),
+            Self::ActiveCoolingCooldown { until_ms } => {
+                if elapsed_ms < until_ms {
+                    FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+                } else {
+                    FanHardwareCommand::disabled()
+                }
+            }
             Self::CoolingDisabledPulse { duty_percent } => {
                 if duty_percent == 0 {
                     return FanHardwareCommand::disabled();
@@ -512,10 +542,6 @@ impl FanPolicyState {
                 }
             }
         }
-    }
-
-    const fn enabled(self, elapsed_ms: u64) -> bool {
-        self.command(elapsed_ms).enabled
     }
 }
 
@@ -541,17 +567,27 @@ fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn auto_cooling_command(current_temp_c: i16, previous_state: FanPolicyState) -> FanPolicyState {
+fn auto_cooling_command(
+    current_temp_c: i16,
+    elapsed_ms: u64,
+    previous_state: FanPolicyState,
+) -> FanPolicyState {
     if current_temp_c > AUTO_COOLING_FAN_FULL_TEMP_C {
         FanPolicyState::Full
-    } else if current_temp_c > AUTO_COOLING_FAN_START_TEMP_C {
-        FanPolicyState::Minimum
-    } else if current_temp_c < AUTO_COOLING_FAN_STOP_TEMP_C {
-        FanPolicyState::Disabled
-    } else if previous_state.enabled(0) {
+    } else if current_temp_c >= AUTO_COOLING_FAN_MIN_TEMP_C {
         FanPolicyState::Minimum
     } else {
-        FanPolicyState::Disabled
+        match previous_state {
+            FanPolicyState::Full | FanPolicyState::Minimum => {
+                FanPolicyState::ActiveCoolingCooldown {
+                    until_ms: elapsed_ms.saturating_add(AUTO_COOLING_FAN_COOLDOWN_MS),
+                }
+            }
+            FanPolicyState::ActiveCoolingCooldown { until_ms } if elapsed_ms < until_ms => {
+                FanPolicyState::ActiveCoolingCooldown { until_ms }
+            }
+            _ => FanPolicyState::Disabled,
+        }
     }
 }
 
@@ -612,7 +648,7 @@ fn fan_policy_decision(
     } else if heater_enabled {
         cooling_disabled_state(current_temp_c)
     } else if active_cooling_enabled {
-        auto_cooling_command(current_temp_c, previous_state)
+        auto_cooling_command(current_temp_c, elapsed_ms, previous_state)
     } else {
         cooling_disabled_state(current_temp_c)
     };
@@ -683,6 +719,74 @@ fn is_overtemp_sample(temp_c: f32) -> bool {
 fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16) {
     *latest_temp_c = 0.0;
     *latest_temp_i16 = 0;
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn update_fault_attention_state(
+    fault_present: bool,
+    last_fault_present: &mut bool,
+    attention_pending_after_fault_clear: &mut bool,
+    next_attention_reminder_ms: &mut Option<u64>,
+    buzzer: &mut BuzzerController,
+    now_ms: u64,
+) -> bool {
+    let mut changed = false;
+
+    if fault_present && !*last_fault_present {
+        *attention_pending_after_fault_clear = false;
+        *next_attention_reminder_ms = None;
+        let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, now_ms);
+        changed = true;
+    } else if !fault_present && *last_fault_present {
+        *attention_pending_after_fault_clear = true;
+        *next_attention_reminder_ms =
+            Some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
+        if buzzer.active_cue() == Some(BuzzerCueId::ProtectionAlarm) {
+            let _ = buzzer.stop();
+        }
+        changed = true;
+    }
+
+    *last_fault_present = fault_present;
+    changed
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn consume_attention_input_if_pending(
+    attention_pending_after_fault_clear: &mut bool,
+    next_attention_reminder_ms: &mut Option<u64>,
+    buzzer: &mut BuzzerController,
+) -> bool {
+    if !*attention_pending_after_fault_clear {
+        return false;
+    }
+
+    *attention_pending_after_fault_clear = false;
+    *next_attention_reminder_ms = None;
+    let _ = buzzer.stop();
+    true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn maybe_play_attention_reminder(
+    attention_pending_after_fault_clear: bool,
+    fault_present: bool,
+    next_attention_reminder_ms: &mut Option<u64>,
+    buzzer: &mut BuzzerController,
+    now_ms: u64,
+) -> bool {
+    if !attention_pending_after_fault_clear || fault_present {
+        return false;
+    }
+
+    if next_attention_reminder_ms.is_some_and(|next| now_ms >= next) {
+        let _ = buzzer.play(BuzzerCueId::AttentionReminder, now_ms);
+        *next_attention_reminder_ms =
+            Some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
+        return true;
+    }
+
+    false
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -910,6 +1014,52 @@ fn apply_fan_output<PWM>(
         FAN_PWM_FREQUENCY_HZ,
     );
     *last_command = Some(command);
+}
+
+#[cfg(target_arch = "xtensa")]
+fn apply_buzzer_output<'a, PWM>(
+    buzzer_timer: &mut esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'a>>,
+    buzzer_pwm: &mut PWM,
+    peripheral_clock: &PeripheralClockConfig,
+    output: BuzzerOutput,
+    last_state: &mut BuzzerHardwareState,
+) where
+    PWM: SetDutyCycle,
+{
+    let next_state = BuzzerHardwareState {
+        frequency_hz: output.frequency_hz,
+        duty_percent: output.duty_percent.min(100),
+        generation: output.generation,
+    };
+    if *last_state == next_state {
+        return;
+    }
+
+    let restart_needed = last_state.generation != next_state.generation
+        || last_state.frequency_hz != next_state.frequency_hz;
+
+    if restart_needed {
+        let next_frequency_hz = next_state.frequency_hz.unwrap_or(BUZZER_IDLE_FREQUENCY_HZ);
+        let timer_cfg = peripheral_clock
+            .timer_clock_with_frequency(
+                BUZZER_PWM_PERIOD_TICKS,
+                PwmWorkingMode::Increase,
+                Rate::from_hz(next_frequency_hz),
+            )
+            .expect("failed to derive buzzer PWM timer clock");
+        buzzer_timer.stop();
+        buzzer_timer.set_counter(0, CounterDirection::Increasing);
+        buzzer_timer.start(timer_cfg);
+    }
+
+    let _ = buzzer_pwm.set_duty_cycle_percent(next_state.duty_percent);
+    info!(
+        "buzzer output -> freq_hz={=u32} duty={=u8}% gen={=u32}",
+        next_state.frequency_hz.unwrap_or(0),
+        next_state.duty_percent,
+        next_state.generation,
+    );
+    *last_state = next_state;
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1295,13 +1445,13 @@ async fn main(_spawner: Spawner) {
     let _ =
         fan_pwm.set_duty_cycle_percent(pwm_percent_from_permille(FAN_MINIMUM_VOLTAGE_PWM_PERMILLE));
     info!(
-        "fan runtime armed: gpio35 default=off gpio36 min={=u16}permille half={=u16}permille full={=u16}permille freq={=u32}Hz auto_off<{=i16}C auto_min>{=i16}C auto_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
+        "fan runtime armed: gpio35 default=off gpio36 min={=u16}permille half={=u16}permille full={=u16}permille freq={=u32}Hz active_min>={=i16}C cooldown_ms={=u64} active_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
         FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
         FAN_HALF_SPEED_PWM_PERMILLE,
         FAN_FULL_SPEED_PWM_PERMILLE,
         FAN_PWM_FREQUENCY_HZ,
-        AUTO_COOLING_FAN_STOP_TEMP_C,
-        AUTO_COOLING_FAN_START_TEMP_C,
+        AUTO_COOLING_FAN_MIN_TEMP_C,
+        AUTO_COOLING_FAN_COOLDOWN_MS,
         AUTO_COOLING_FAN_FULL_TEMP_C,
         COOLING_DISABLED_PULSE_START_TEMP_C,
         COOLING_DISABLED_HEATER_LOCK_TEMP_C,
@@ -1321,6 +1471,24 @@ async fn main(_spawner: Spawner) {
         .expect("failed to derive heater PWM timer clock");
     mcpwm.timer1.start(heater_timer_cfg);
     let _ = heater_pwm.set_duty_cycle_percent(0);
+
+    mcpwm.operator2.set_timer(&mcpwm.timer2);
+    let mut buzzer_pwm = mcpwm
+        .operator2
+        .with_pin_a(peripherals.GPIO48, PwmPinConfig::UP_ACTIVE_HIGH);
+    let buzzer_timer_cfg = pwm_clock_cfg
+        .timer_clock_with_frequency(
+            BUZZER_PWM_PERIOD_TICKS,
+            PwmWorkingMode::Increase,
+            Rate::from_hz(BUZZER_IDLE_FREQUENCY_HZ),
+        )
+        .expect("failed to derive buzzer PWM timer clock");
+    mcpwm.timer2.start(buzzer_timer_cfg);
+    let _ = buzzer_pwm.set_duty_cycle_percent(0);
+    info!(
+        "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
+        BUZZER_PWM_PERIOD_TICKS,
+    );
     let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
         await_ch224q_pd_ready(&mut pd_i2c, ch224q_address).await
     {
@@ -1413,7 +1581,6 @@ async fn main(_spawner: Spawner) {
     let mut last_heater_duty = 0_u8;
     let mut cooling_disabled_lock_latched = false;
     let mut cooling_disabled_lock_armed = true;
-    let mut fan_command = FanHardwareCommand::disabled();
     let mut fan_policy_state = FanPolicyState::Disabled;
     let mut last_fan_command: Option<FanHardwareCommand> = None;
     if HEATER_SELFTEST_AUTO_ARM_ON_BOOT
@@ -1434,7 +1601,7 @@ async fn main(_spawner: Spawner) {
         is_sensor_fault(current_rtd_fault),
     );
     fan_policy_state = initial_fan_decision.state;
-    fan_command = initial_fan_decision.command;
+    let mut fan_command = initial_fan_decision.command;
     let _ = sync_frontpanel_runtime_state(
         &mut ui_state,
         initial_fan_decision,
@@ -1450,6 +1617,21 @@ async fn main(_spawner: Spawner) {
         &mut fan_pwm,
         fan_command,
         &mut last_fan_command,
+    );
+    let mut buzzer = BuzzerController::new();
+    let mut last_fault_present = current_rtd_fault.is_some();
+    let mut attention_pending_after_fault_clear = false;
+    let mut next_attention_reminder_ms: Option<u64> = None;
+    let mut buzzer_output_applied = BuzzerHardwareState::default();
+    if last_fault_present {
+        let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, 0);
+    }
+    apply_buzzer_output(
+        &mut mcpwm.timer2,
+        &mut buzzer_pwm,
+        &pwm_clock_cfg,
+        buzzer.tick(0),
+        &mut buzzer_output_applied,
     );
     flush_ui(&mut display, canvas, &ui_state)
         .await
@@ -1485,10 +1667,31 @@ async fn main(_spawner: Spawner) {
                 event.gesture.label(),
                 event.at_ms,
             );
+            if consume_attention_input_if_pending(
+                &mut attention_pending_after_fault_clear,
+                &mut next_attention_reminder_ms,
+                &mut buzzer,
+            ) {
+                info!(
+                    "fault attention reminder acknowledged -> consume input raw={=str} logical={=str} gesture={=str}",
+                    event.raw_key.label(),
+                    event.key.label(),
+                    event.gesture.label(),
+                );
+                continue;
+            }
             if ui_state.handle_event(event) {
                 needs_redraw = true;
             }
             if ui_state.active_cooling_enabled != active_cooling_enabled_before {
+                let _ = buzzer.play(
+                    if ui_state.active_cooling_enabled {
+                        BuzzerCueId::ActiveCoolingOn
+                    } else {
+                        BuzzerCueId::ActiveCoolingOff
+                    },
+                    elapsed_ms,
+                );
                 info!(
                     "active cooling policy -> {=str}",
                     if ui_state.active_cooling_enabled {
@@ -1512,15 +1715,20 @@ async fn main(_spawner: Spawner) {
                     if heater_controller.fault_latched().is_some() {
                         if let Some(reason) = current_rtd_fault {
                             ui_state.heater_enabled = false;
+                            let _ = buzzer.play(BuzzerCueId::HeaterReject, elapsed_ms);
+                            needs_redraw = true;
                             info!("heater re-arm blocked reason={=str}", reason.label(),);
                         } else {
                             heater_controller.clear_fault_latch();
+                            let _ = buzzer.play(BuzzerCueId::HeaterOn, elapsed_ms);
                             info!("heater re-arm -> cleared latched fault");
                         }
                     } else {
+                        let _ = buzzer.play(BuzzerCueId::HeaterOn, elapsed_ms);
                         info!("heater arm -> on");
                     }
                 } else {
+                    let _ = buzzer.play(BuzzerCueId::HeaterOff, elapsed_ms);
                     info!("heater arm -> off");
                 }
             }
@@ -1579,6 +1787,24 @@ async fn main(_spawner: Spawner) {
                 ui_state.heater_enabled = false;
                 needs_redraw = true;
                 info!("heater fault latched reason={=str}", reason.label());
+            }
+
+            let fault_present = current_rtd_fault.is_some();
+            let attention_state_changed = update_fault_attention_state(
+                fault_present,
+                &mut last_fault_present,
+                &mut attention_pending_after_fault_clear,
+                &mut next_attention_reminder_ms,
+                &mut buzzer,
+                elapsed_ms,
+            );
+            if attention_state_changed && fault_present {
+                info!("protection alarm -> active");
+            } else if attention_state_changed && !fault_present {
+                info!(
+                    "protection cleared -> reminder pending interval_ms={=u64}",
+                    BUZZER_ATTENTION_REMINDER_INTERVAL_MS,
+                );
             }
 
             let current_pd_observation = read_ch224q_status(&mut pd_i2c, ch224q_address);
@@ -1700,6 +1926,29 @@ async fn main(_spawner: Spawner) {
             needs_redraw = true;
         }
 
+        if current_rtd_fault.is_some() && buzzer.active_cue() != Some(BuzzerCueId::ProtectionAlarm)
+        {
+            let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, elapsed_ms);
+        }
+
+        if maybe_play_attention_reminder(
+            attention_pending_after_fault_clear,
+            current_rtd_fault.is_some(),
+            &mut next_attention_reminder_ms,
+            &mut buzzer,
+            elapsed_ms,
+        ) {
+            info!("fault attention reminder -> chirp");
+        }
+
+        apply_buzzer_output(
+            &mut mcpwm.timer2,
+            &mut buzzer_pwm,
+            &pwm_clock_cfg,
+            buzzer.tick(elapsed_ms),
+            &mut buzzer_output_applied,
+        );
+
         if needs_redraw {
             flush_ui(&mut display, canvas, &ui_state)
                 .await
@@ -1820,29 +2069,52 @@ mod tests {
     }
 
     #[test]
-    fn auto_cooling_policy_uses_requested_hysteresis_and_speed_steps() {
-        let stopped = fan_policy_decision(34, 0, false, true, FanPolicyState::Disabled, false);
+    fn auto_cooling_policy_runs_a_30_second_low_voltage_cooldown_below_40c() {
+        let stopped = fan_policy_decision(39, 0, false, true, FanPolicyState::Disabled, false);
         assert_eq!(stopped.command, FanHardwareCommand::disabled());
         assert_eq!(stopped.display_state, FanDisplayState::Auto);
 
-        let minimum = fan_policy_decision(41, 0, false, true, FanPolicyState::Disabled, false);
+        let minimum = fan_policy_decision(40, 0, false, true, FanPolicyState::Disabled, false);
         assert_eq!(
             minimum.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
         );
         assert_eq!(minimum.display_state, FanDisplayState::Run);
 
-        let hysteresis = fan_policy_decision(37, 0, false, true, FanPolicyState::Minimum, false);
+        let cooldown = fan_policy_decision(39, 1_000, false, true, FanPolicyState::Minimum, false);
         assert_eq!(
-            hysteresis.command,
+            cooldown.state,
+            FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 }
+        );
+        assert_eq!(
+            cooldown.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
         );
 
-        let still_minimum =
-            fan_policy_decision(60, 0, false, true, FanPolicyState::Disabled, false);
+        let still_cooling = fan_policy_decision(
+            39,
+            30_500,
+            false,
+            true,
+            FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 },
+            false,
+        );
         assert_eq!(
-            still_minimum.command,
+            still_cooling.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+        );
+
+        let stopped_after_cooldown = fan_policy_decision(
+            39,
+            31_000,
+            false,
+            true,
+            FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 },
+            false,
+        );
+        assert_eq!(
+            stopped_after_cooldown.command,
+            FanHardwareCommand::disabled()
         );
 
         let full = fan_policy_decision(61, 0, false, true, FanPolicyState::Disabled, false);
@@ -1994,5 +2266,85 @@ mod tests {
         clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
         assert_eq!(latest_temp_c, 0.0);
         assert_eq!(latest_temp_i16, 0);
+    }
+
+    #[test]
+    fn fault_attention_transitions_alarm_to_pending_reminder() {
+        let mut last_fault_present = false;
+        let mut attention_pending = false;
+        let mut next_reminder_ms = None;
+        let mut buzzer = BuzzerController::new();
+
+        assert!(update_fault_attention_state(
+            true,
+            &mut last_fault_present,
+            &mut attention_pending,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            3_000,
+        ));
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
+        assert!(!attention_pending);
+        assert_eq!(next_reminder_ms, None);
+
+        assert!(update_fault_attention_state(
+            false,
+            &mut last_fault_present,
+            &mut attention_pending,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            8_000,
+        ));
+        assert_eq!(buzzer.active_cue(), None);
+        assert!(attention_pending);
+        assert_eq!(
+            next_reminder_ms,
+            Some(8_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn attention_pending_consumes_first_input_and_stops_reminders() {
+        let mut attention_pending = true;
+        let mut next_reminder_ms = Some(15_000);
+        let mut buzzer = BuzzerController::new();
+        let _ = buzzer.play(BuzzerCueId::AttentionReminder, 10_000);
+
+        assert!(consume_attention_input_if_pending(
+            &mut attention_pending,
+            &mut next_reminder_ms,
+            &mut buzzer,
+        ));
+        assert!(!attention_pending);
+        assert_eq!(next_reminder_ms, None);
+        assert_eq!(buzzer.active_cue(), None);
+    }
+
+    #[test]
+    fn attention_reminder_rearms_every_10_seconds_until_acknowledged() {
+        let mut next_reminder_ms = Some(10_000);
+        let mut buzzer = BuzzerController::new();
+
+        assert!(!maybe_play_attention_reminder(
+            true,
+            false,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            9_999,
+        ));
+        assert_eq!(buzzer.active_cue(), None);
+
+        assert!(maybe_play_attention_reminder(
+            true,
+            false,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            10_000,
+        ));
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::AttentionReminder));
+        assert_eq!(
+            next_reminder_ms,
+            Some(10_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
+        );
     }
 }

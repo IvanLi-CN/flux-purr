@@ -545,7 +545,7 @@ function drawActiveCoolingScreen(
   })
   drawBitmapText(
     ctx,
-    `PD ${Math.round(screen.pdContractMv / 1000)}V | <${screen.autoStopTempC} OFF >${screen.autoStartTempC} 50% >${screen.autoFullTempC} MAX`,
+    `PD ${Math.round(screen.pdContractMv / 1000)}V | >=${screen.cooldownTempC} MIN >${screen.autoFullTempC} MAX`,
     8,
     20,
     {
@@ -554,11 +554,16 @@ function drawActiveCoolingScreen(
       letterSpacing: 1,
     }
   )
+  drawBitmapText(ctx, `<${screen.cooldownTempC} LOW ${screen.cooldownSeconds}S THEN OFF`, 8, 33, {
+    color: palette.success,
+    scale: 1,
+    letterSpacing: 1,
+  })
   drawBitmapText(
     ctx,
     `SAFE >${screen.pulseStartTempC} PLS >${screen.lockTempC} 50% >${screen.fullTempC} MAX`,
     8,
-    33,
+    42,
     {
       color: palette.warning,
       scale: 1,

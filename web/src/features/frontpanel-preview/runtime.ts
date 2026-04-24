@@ -42,6 +42,7 @@ export interface FrontPanelRuntimeState {
   selectedPresetIndex: number
   presetsC: ReadonlyArray<number | null>
   activeCoolingEnabled: boolean
+  activeCoolingCooldownEndsAtMs: number | null
   pdContractMv: number
   coolingDisabledLockLatched: boolean
   coolingDisabledLockArmed: boolean
@@ -57,9 +58,9 @@ export interface FrontPanelRuntimeState {
   }
 }
 
-const AUTO_COOLING_STOP_TEMP_C = 35
-const AUTO_COOLING_START_TEMP_C = 40
+const AUTO_COOLING_MIN_TEMP_C = 40
 const AUTO_COOLING_FULL_TEMP_C = 60
+const AUTO_COOLING_FAN_COOLDOWN_MS = 30_000
 const COOLING_DISABLED_PULSE_START_TEMP_C = 100
 const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 const COOLING_DISABLED_FAN_FULL_TEMP_C = 360
@@ -235,8 +236,10 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
   let fanRuntimeEnabled = state.fanRuntimeEnabled
   let fanDisplayState: FanDisplayState = state.activeCoolingEnabled ? 'auto' : 'off'
   let heaterEnabled = state.heaterEnabled
+  let activeCoolingCooldownEndsAtMs = state.activeCoolingCooldownEndsAtMs
 
   if (heaterEnabled) {
+    activeCoolingCooldownEndsAtMs = null
     if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
       fanRuntimeEnabled = true
     } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
@@ -250,14 +253,26 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
   } else if (state.activeCoolingEnabled) {
     if (state.currentTempC > AUTO_COOLING_FULL_TEMP_C) {
       fanRuntimeEnabled = true
-    } else if (state.currentTempC > AUTO_COOLING_START_TEMP_C) {
+      activeCoolingCooldownEndsAtMs = null
+    } else if (state.currentTempC >= AUTO_COOLING_MIN_TEMP_C) {
       fanRuntimeEnabled = true
-    } else if (state.currentTempC < AUTO_COOLING_STOP_TEMP_C) {
+      activeCoolingCooldownEndsAtMs = null
+    } else if (
+      activeCoolingCooldownEndsAtMs != null &&
+      state.elapsedMs < activeCoolingCooldownEndsAtMs
+    ) {
+      fanRuntimeEnabled = true
+    } else if (state.fanRuntimeEnabled) {
+      fanRuntimeEnabled = true
+      activeCoolingCooldownEndsAtMs = state.elapsedMs + AUTO_COOLING_FAN_COOLDOWN_MS
+    } else {
       fanRuntimeEnabled = false
+      activeCoolingCooldownEndsAtMs = null
     }
     fanDisplayState = fanRuntimeEnabled ? 'run' : 'auto'
   } else {
-    if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
+    activeCoolingCooldownEndsAtMs = null
+    if (state.currentTempC > AUTO_COOLING_FULL_TEMP_C) {
       fanRuntimeEnabled = true
     } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
       fanRuntimeEnabled = true
@@ -279,6 +294,7 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     heaterOutputPercent: heaterEnabled ? state.heaterOutputPercent : 0,
     fanRuntimeEnabled,
     fanDisplayState,
+    activeCoolingCooldownEndsAtMs,
     coolingDisabledLockLatched: coolingDisabledLock.coolingDisabledLockLatched,
     coolingDisabledLockArmed: coolingDisabledLock.coolingDisabledLockArmed,
     heaterLockReason,
@@ -306,6 +322,7 @@ export function createFrontPanelRuntimeState(
     selectedPresetIndex: 1,
     presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
     activeCoolingEnabled: true,
+    activeCoolingCooldownEndsAtMs: null,
     pdContractMv: DEFAULT_PD_CONTRACT_MV,
     coolingDisabledLockLatched: false,
     coolingDisabledLockArmed: true,
@@ -512,7 +529,8 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
     return {
       kind: 'dashboard',
       title: 'Dashboard',
-      subtitle: 'Up/down ±1°C · center short heat · center double cooling · center long menu',
+      subtitle:
+        'Up/down ±1°C · center short heat · center double active cooling · center long menu',
       currentTempC: state.currentTempC,
       currentTempDeciC: state.currentTempDeciC,
       targetTempC: state.targetTempC,
@@ -555,8 +573,8 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
       subtitle: 'Readonly policy summary · center/left back',
       enabled: state.activeCoolingEnabled,
       pdContractMv: state.pdContractMv,
-      autoStopTempC: AUTO_COOLING_STOP_TEMP_C,
-      autoStartTempC: AUTO_COOLING_START_TEMP_C,
+      cooldownTempC: AUTO_COOLING_MIN_TEMP_C,
+      cooldownSeconds: AUTO_COOLING_FAN_COOLDOWN_MS / 1000,
       autoFullTempC: AUTO_COOLING_FULL_TEMP_C,
       pulseStartTempC: COOLING_DISABLED_PULSE_START_TEMP_C,
       lockTempC: COOLING_DISABLED_HEATER_LOCK_TEMP_C,

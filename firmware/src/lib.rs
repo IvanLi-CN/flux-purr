@@ -2,6 +2,7 @@
 
 pub mod adapters;
 pub mod board;
+pub mod buzzer;
 pub mod display;
 pub mod frontpanel;
 
