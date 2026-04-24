@@ -47,11 +47,11 @@ export function FrontPanelRuntimeHarness({
   }, [seedState])
 
   useEffect(() => {
-    const needsTick =
-      state.heaterLockReason != null ||
-      (!state.activeCoolingEnabled &&
-        state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C &&
-        state.currentTempC <= COOLING_DISABLED_HEATER_LOCK_TEMP_C)
+    const needsPulseTick =
+      state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C &&
+      state.currentTempC <= COOLING_DISABLED_HEATER_LOCK_TEMP_C &&
+      (state.heaterEnabled || !state.activeCoolingEnabled)
+    const needsTick = state.heaterLockReason != null || needsPulseTick
 
     if (!needsTick) {
       return undefined
@@ -62,7 +62,7 @@ export function FrontPanelRuntimeHarness({
     }, RUNTIME_TICK_MS)
 
     return () => window.clearInterval(intervalId)
-  }, [state.activeCoolingEnabled, state.currentTempC, state.heaterLockReason])
+  }, [state.activeCoolingEnabled, state.currentTempC, state.heaterEnabled, state.heaterLockReason])
 
   const screen = useMemo(() => frontPanelRuntimeToScreen(state), [state])
 
