@@ -184,6 +184,10 @@ None
 
 ![Dashboard overtemp B](./assets/dashboard-overtemp-b.png)
 
+- Current default temperature palette（Aurora / C）：
+
+![Temperature palette current](./assets/temperature-palette-current.png)
+
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 落地正式 `HeaterController`、heater fault-latch 与风扇策略状态机
