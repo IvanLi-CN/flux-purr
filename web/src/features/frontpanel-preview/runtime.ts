@@ -66,8 +66,18 @@ const COOLING_DISABLED_FAN_FULL_TEMP_C = 360
 const HARD_OVERTEMP_TEMP_C = 420
 const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS = 500
 const FAN_PULSE_PERIOD_MS = 10_000
-const DEFAULT_PD_CONTRACT_MV = 20_000
 const DEFAULT_HEATER_OUTPUT_PERCENT = 18
+
+function resolveDefaultPdContractMv() {
+  const rawValue = import.meta.env.VITE_FRONTPANEL_PD_CONTRACT_MV
+  const parsed = Number.parseInt(rawValue ?? '', 10)
+  if (parsed === 12_000 || parsed === 20_000 || parsed === 28_000) {
+    return parsed
+  }
+  return 20_000
+}
+
+const DEFAULT_PD_CONTRACT_MV = resolveDefaultPdContractMv()
 
 const menuItems: ReadonlyArray<{ id: MenuItemId; label: string }> = [
   { id: 'preset-temp', label: 'Preset Temp' },
@@ -215,8 +225,9 @@ function coolingDisabledPulseEnabled(state: FrontPanelRuntimeState) {
 
 function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntimeState {
   const coolingDisabledLock = reconcileCoolingDisabledLock(state)
-  const hardOvertemp = state.currentTempC >= HARD_OVERTEMP_TEMP_C
-  const heaterLockReason: HeaterLockReason | null = hardOvertemp
+  const hardOvertempLatched =
+    state.currentTempC >= HARD_OVERTEMP_TEMP_C || state.heaterLockReason === 'hard-overtemp'
+  const heaterLockReason: HeaterLockReason | null = hardOvertempLatched
     ? 'hard-overtemp'
     : coolingDisabledLock.coolingDisabledLockLatched
       ? 'cooling-disabled-overtemp'
@@ -367,6 +378,14 @@ export function applyFrontPanelInteraction(
     }
     if (interaction.key === 'center' && interaction.gesture === 'short') {
       const heaterEnabled = !state.heaterEnabled
+      const clearsHardOvertempLock =
+        heaterEnabled &&
+        state.heaterLockReason === 'hard-overtemp' &&
+        state.currentTempC < HARD_OVERTEMP_TEMP_C
+      const blocksHardOvertempRearm =
+        heaterEnabled &&
+        state.heaterLockReason === 'hard-overtemp' &&
+        state.currentTempC >= HARD_OVERTEMP_TEMP_C
       const lockOverrideState =
         heaterEnabled && state.heaterLockReason === 'cooling-disabled-overtemp'
           ? {
@@ -377,8 +396,10 @@ export function applyFrontPanelInteraction(
       return reconcileCoolingState({
         ...state,
         ...lockOverrideState,
-        heaterEnabled,
-        heaterOutputPercent: heaterEnabled ? DEFAULT_HEATER_OUTPUT_PERCENT : 0,
+        heaterEnabled: blocksHardOvertempRearm ? false : heaterEnabled,
+        heaterOutputPercent:
+          blocksHardOvertempRearm || !heaterEnabled ? 0 : DEFAULT_HEATER_OUTPUT_PERCENT,
+        heaterLockReason: clearsHardOvertempLock ? null : state.heaterLockReason,
       })
     }
     if (interaction.key === 'center' && interaction.gesture === 'double') {
