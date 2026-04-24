@@ -395,10 +395,11 @@ function drawDashboardScreen(
   drawTempUnitIcon(ctx, 60, 24, palette.text)
 
   fillRect(ctx, 78, 4, 78, 36, palette.panel)
+  const dashboardStatusColor = screen.heaterLockReason ? palette.warning : palette.text
   if (screen.heaterLockReason && screen.dashboardWarningVisible) {
     drawStatusLine(ctx, 7, palette.warning, 'WARN', 'OTEMP')
   } else {
-    drawStatusLine(ctx, 7, palette.text, 'SET', `${screen.targetTempC}`)
+    drawStatusLine(ctx, 7, dashboardStatusColor, 'SET', `${screen.targetTempC}`)
   }
   drawStatusLine(ctx, 18, palette.cyan, 'PPS', `${Math.round(screen.pdContractMv / 1000)}V`)
   drawStatusLine(ctx, 29, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
