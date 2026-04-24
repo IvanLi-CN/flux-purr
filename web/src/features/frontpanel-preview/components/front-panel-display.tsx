@@ -237,6 +237,16 @@ function measureSevenSegmentNumber(text: string) {
   return text.length * 17 - 2
 }
 
+function deciCToParts(valueDeciC: number) {
+  const magnitude = Math.abs(Math.trunc(valueDeciC))
+  const whole = Math.trunc(magnitude / 10)
+  const tenth = Math.trunc(magnitude % 10)
+  return {
+    integer: `${valueDeciC < 0 ? '-' : ''}${whole}`,
+    fractional: `${tenth}`,
+  }
+}
+
 const keyMaskColors: Record<KeyGestureId, string> = {
   short: palette.success,
   double: palette.accent,
@@ -381,7 +391,10 @@ function drawDashboardScreen(
   screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
 ) {
   const valueColor = temperatureColor(screen.currentTempC, screen.temperatureThresholdsC)
-  const valueText = String(Math.round(screen.currentTempC))
+  const valueParts = deciCToParts(screen.currentTempDeciC)
+  const digitsWidth = measureSevenSegmentNumber(valueParts.integer)
+  const digitsRightEdge = 57
+  const digitsX = digitsRightEdge - digitsWidth
   const fanColor =
     screen.fanDisplayState === 'run'
       ? palette.success
@@ -391,15 +404,20 @@ function drawDashboardScreen(
 
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
   fillRect(ctx, 4, 4, 72, 36, palette.panelStrong)
-  drawSevenSegmentNumber(ctx, valueText, 8, 8, valueColor)
+  drawSevenSegmentNumber(ctx, valueParts.integer, digitsX, 8, valueColor)
+  drawBitmapText(ctx, valueParts.fractional, 66, 8, {
+    color: palette.text,
+    scale: 2,
+    letterSpacing: 1,
+    align: 'center',
+  })
   drawTempUnitIcon(ctx, 60, 24, palette.text)
 
   fillRect(ctx, 78, 4, 78, 36, palette.panel)
-  const dashboardStatusColor = screen.heaterLockReason ? palette.warning : palette.text
   if (screen.heaterLockReason && screen.dashboardWarningVisible) {
     drawStatusLine(ctx, 7, palette.warning, 'WARN', 'OTEMP')
   } else {
-    drawStatusLine(ctx, 7, dashboardStatusColor, 'SET', `${screen.targetTempC}`)
+    drawStatusLine(ctx, 7, palette.warning, 'SET', `${screen.targetTempC}`)
   }
   drawStatusLine(ctx, 18, palette.cyan, 'PPS', `${Math.round(screen.pdContractMv / 1000)}V`)
   drawStatusLine(ctx, 29, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
