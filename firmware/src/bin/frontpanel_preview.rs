@@ -61,8 +61,8 @@ fn base_dashboard_state() -> FrontPanelUiState {
     state.target_temp_c = 180;
     state.current_temp_c = 32;
     state.current_temp_deci_c = 321;
-    state.heater_enabled = true;
-    state.heater_output_percent = 18;
+    state.heater_enabled = false;
+    state.heater_output_percent = 0;
     state
 }
 
@@ -141,12 +141,13 @@ impl PreviewPreset {
             Self::KeyTestLong => {
                 build_key_test_state(RawFrontPanelKey::Down, KeyGesture::LongPress)
             }
-            Self::Dashboard => FrontPanelUiState::new(FrontPanelRuntimeMode::App),
+            Self::Dashboard => base_dashboard_state(),
             Self::DashboardManual => {
                 let mut state = base_dashboard_state();
                 state.current_temp_c = 365;
                 state.current_temp_deci_c = 3654;
                 state.target_temp_c = 380;
+                state.heater_enabled = true;
                 state.heater_output_percent = 64;
                 state.fan_enabled = true;
                 state.fan_display_state = FanDisplayState::Run;
