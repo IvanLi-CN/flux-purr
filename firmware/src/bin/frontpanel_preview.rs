@@ -250,6 +250,73 @@ fn default_output_path(preset: PreviewPreset) -> PathBuf {
     ))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedCliArgs {
+    preset: PreviewPreset,
+    output_path: PathBuf,
+    dashboard_temp_c: Option<i16>,
+    palette_id: TemperaturePaletteId,
+}
+
+fn parse_cli_args<I>(args: I) -> Result<ParsedCliArgs, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut args = args.into_iter();
+    let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
+    let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
+        return Err(format!(
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info)",
+            preset_slug
+        ));
+    };
+
+    let mut output_path = None;
+    let mut dashboard_temp_c = None;
+    let mut palette_id = TemperaturePaletteId::Current;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--temp" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("missing value for --temp"));
+                };
+                let Ok(parsed) = value.parse::<i16>() else {
+                    return Err(format!("invalid --temp value '{}'", value));
+                };
+                dashboard_temp_c = Some(parsed);
+            }
+            "--palette" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("missing value for --palette"));
+                };
+                let Some(parsed) = TemperaturePaletteId::from_slug(&value) else {
+                    return Err(format!(
+                        "unknown --palette '{}' (known: current, balanced-white-low|a, glacier-white-low|b, aurora-white-low|c, marine-white-low|d, industrial-white-low|e, ember-white-low|f)",
+                        value
+                    ));
+                };
+                palette_id = parsed;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown argument '{}'", other));
+            }
+            other => {
+                if output_path.is_some() {
+                    return Err(format!("unknown argument '{}'", other));
+                }
+                output_path = Some(PathBuf::from(other));
+            }
+        }
+    }
+
+    Ok(ParsedCliArgs {
+        preset,
+        output_path: output_path.unwrap_or_else(|| default_output_path(preset)),
+        dashboard_temp_c,
+        palette_id,
+    })
+}
+
 fn panel_output_path(logical_output_path: &Path) -> PathBuf {
     let file_name = logical_output_path
         .file_name()
@@ -268,54 +335,18 @@ fn panel_output_path(logical_output_path: &Path) -> PathBuf {
 }
 
 fn main() -> ExitCode {
-    let mut args = env::args().skip(1);
-    let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
-    let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
-        eprintln!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info)",
-            preset_slug
-        );
-        return ExitCode::FAILURE;
-    };
-    let output_path = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_output_path(preset));
-    let mut dashboard_temp_c = None;
-    let mut palette_id = TemperaturePaletteId::Current;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--temp" => {
-                let Some(value) = args.next() else {
-                    eprintln!("missing value for --temp");
-                    return ExitCode::FAILURE;
-                };
-                let Ok(parsed) = value.parse::<i16>() else {
-                    eprintln!("invalid --temp value '{}'", value);
-                    return ExitCode::FAILURE;
-                };
-                dashboard_temp_c = Some(parsed);
-            }
-            "--palette" => {
-                let Some(value) = args.next() else {
-                    eprintln!("missing value for --palette");
-                    return ExitCode::FAILURE;
-                };
-                let Some(parsed) = TemperaturePaletteId::from_slug(&value) else {
-                    eprintln!(
-                        "unknown --palette '{}' (known: current, balanced-white-low|a, glacier-white-low|b, aurora-white-low|c, marine-white-low|d, industrial-white-low|e, ember-white-low|f)",
-                        value
-                    );
-                    return ExitCode::FAILURE;
-                };
-                palette_id = parsed;
-            }
-            other => {
-                eprintln!("unknown argument '{}'", other);
-                return ExitCode::FAILURE;
-            }
+    let ParsedCliArgs {
+        preset,
+        output_path,
+        dashboard_temp_c,
+        palette_id,
+    } = match parse_cli_args(env::args().skip(1)) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
         }
-    }
+    };
     let panel_path = panel_output_path(&output_path);
 
     let mut canvas = DisplayCanvas::new();
@@ -368,6 +399,49 @@ mod tests {
         assert_eq!(
             panel_output_path(Path::new("/tmp/dashboard.framebuffer.bin")),
             PathBuf::from("/tmp/dashboard.panel.framebuffer.bin")
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_allows_option_only_dashboard_temp_invocation() {
+        let parsed = parse_cli_args([
+            String::from("dashboard-temp"),
+            String::from("--temp"),
+            String::from("25"),
+        ])
+        .expect("option-only invocation should parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCliArgs {
+                preset: PreviewPreset::DashboardTemp,
+                output_path: default_output_path(PreviewPreset::DashboardTemp),
+                dashboard_temp_c: Some(25),
+                palette_id: TemperaturePaletteId::Current,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_cli_args_accepts_output_path_after_flags() {
+        let parsed = parse_cli_args([
+            String::from("dashboard-temp"),
+            String::from("--temp"),
+            String::from("80"),
+            String::from("--palette"),
+            String::from("c"),
+            String::from("/tmp/custom.framebuffer.bin"),
+        ])
+        .expect("flags before output path should parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCliArgs {
+                preset: PreviewPreset::DashboardTemp,
+                output_path: PathBuf::from("/tmp/custom.framebuffer.bin"),
+                dashboard_temp_c: Some(80),
+                palette_id: TemperaturePaletteId::AuroraWhiteLow,
+            }
         );
     }
 }
