@@ -60,16 +60,17 @@
 - `Dashboard` 上/下必须以 `1°C` 步进调整当前目标温度。
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
 - `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
-- `Dashboard` 中键短按只切 heater arm；中键双击切换 `active_cooling_enabled`；中键长按只进菜单。
+- `Dashboard` 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
 - 一级菜单必须固定为 `Preset Temp / Active Cooling / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
 - `Preset Temp` 默认预设温度必须固定为 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`，并按 `M1-M10` 顺序展示。
 - `Preset Temp` 页中，当槽位值降到 `0°C` 以下时必须进入 `---` 状态并置灰；再次上调时必须能从 `---` 回到 `0°C`。
 - `Dashboard` 仅在左右切换记忆温度时忽略灰色 / `---` 槽位，不得把无效预设当作可命中的目标值。
-- `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；只保留返回/退出导航，不再承载可写 fan mock。
+- `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；用户开启这一项时，口径统一称为“开启主动降温”；页面只保留返回/退出导航，不再承载可写 fan mock。
 - `WiFi Info / Device Info` 必须保持只读页，仅处理返回/退出。
-- 真实 heater / fan 执行链路、保护与运行态真相源由后续 runtime spec 冻结，本 spec 只冻结输入与导航语义。
+- 若 runtime 处于“fault 已消失但 attention reminder 仍待确认”状态，则第一次任意输入只负责确认/静音，不执行 heater/fan/menu 原动作；第二次输入才恢复正常语义。
+- 真实 heater / fan 执行链路、保护与运行态真相源以 `#q2aw6` 为准；本 spec 只冻结输入与导航语义。
 - Storybook 必须提供 docs/gallery 与交互故事，作为 Web 侧视觉主证据源。
 - 视觉证据必须同时包含 Storybook render 与 firmware preview render，并绑定到本 spec 的 `assets/`。
 
@@ -113,7 +114,7 @@
 - `Center short`：切换 `heaterEnabled`
 - `Center double`：切换 `active_cooling_enabled`
 - `Center long`：进入 `Menu`
-- 目标温度、路由、heater arm 与 active cooling 策略位进入统一 UI/runtime state；真实 fan runtime 由 `#q2aw6` 约束，不由双击直接切换
+- 目标温度、路由、heater arm 与主动降温策略位进入统一 UI/runtime state；真实 fan runtime 由 `#q2aw6` 约束，不由双击直接切换
 
 ### Menu（一级菜单）
 
@@ -140,6 +141,7 @@
 - 不同方向键的 pending click 不得互相串扰。
 - 短按必须等待双击窗口收敛后再发出，避免误判。
 - 当没有更低或更高的已启用预设时，Dashboard 左/右保持当前温度不变。
+- 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入必须被消费为确认动作，不得顺带触发页面导航或 heater/fan 切换。
 - mock 页面不因无效手势崩溃或跳到未知路由。
 
 ## 接口契约（Interfaces & Contracts）
@@ -165,11 +167,12 @@ None
 - Given `Dashboard`，When 主人按上/下，Then 目标温度每次严格 `±1°C`。
 - Given `Dashboard`，When 主人按左/右，Then 跳转基于已启用预设的实际温度值排序，而不是按槽位编号。
 - Given `Dashboard`，When 当前温度命中某个预设值或刚从预设值调离，Then 界面仍不显示当前预设槽位标签。
-- Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、切换 `active_cooling_enabled`、进入菜单，不发生混用。
+- Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、切换主动降温、进入菜单，不发生混用。
 - Given 一级菜单，When 主人左右移动并中键进入，Then 始终只在四个固定项之间切换。
 - Given 任意子页，When 主人中键短按或长按，Then 都能回到上一级菜单；When 主人按左键，Then 也能返回菜单。
 - Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并重新调回有效温度。
 - Given `WiFi Info / Device Info`，When 主人操作返回手势，Then 页面只发生返回，不产生额外 mock 副作用。
+- Given runtime 刚从活动 fault 退出且仍在 attention reminder pending，When 主人第一次进行任意输入，Then 该输入只会确认/静音，不会执行原本对应的 heater/fan/menu 动作。
 - Given Storybook docs/gallery，When 打开故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页和两条交互流故事。
 - Given firmware preview 与 Storybook 截图，When 对比同一路由，Then 颜色、布局和文案口径保持一致。
 

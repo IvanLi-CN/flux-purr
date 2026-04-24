@@ -54,8 +54,8 @@ export interface FrontPanelCoolingScreen extends FrontPanelBaseScreen {
   kind: 'active-cooling'
   enabled: boolean
   pdContractMv: number
-  autoStopTempC: number
-  autoStartTempC: number
+  cooldownTempC: number
+  cooldownSeconds: number
   autoFullTempC: number
   pulseStartTempC: number
   lockTempC: number

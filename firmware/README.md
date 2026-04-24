@@ -6,7 +6,7 @@
 - Current bring-up board profile: `S3 frontpanel GC9D01 display baseline`
 - Runtime style:
   - host preview: shared scene renderer + framebuffer dump + PNG conversion
-  - device runtime: `Embassy + esp-hal-embassy + SPI2.into_async() + five-way input + PID heater runtime`
+  - device runtime: `Embassy + esp-hal-embassy + SPI2.into_async() + five-way input + PID heater runtime + GPIO48 buzzer cues`
 
 ## GC9D01 display bring-up baseline
 
@@ -52,10 +52,11 @@
   - dashboard-overtemp-a / dashboard-overtemp-b
   - menu / preset temp / active cooling / WiFi info / device info
 
-## Fan / heater output contract
+## Fan / heater / buzzer output contract
 
 - Shared GPIO contract:
   - `HEATER_PWM = GPIO47`
+  - `BUZZER_PWM = GPIO48`
   - `FAN_EN = GPIO35`
   - `FAN_PWM = GPIO36`
   - `RGB_B_PWM = GPIO37`
@@ -67,6 +68,7 @@
   - `target_temp_c` is clamped to `0..=400°C`
   - `Preset Temp` defaults are `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`
   - `heater_enabled` is the user arm state toggled by center short-press
+  - `active_cooling_enabled` is the user-facing “主动降温” policy bit toggled by center double-press
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - Heater control:
@@ -75,12 +77,20 @@
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
 - Fan control:
-  - heater disabled + active cooling enabled: `<35°C` stop, `>40°C` `50%` run, `>60°C` full speed, `35~40°C` keeps the previous enable state for hysteresis
+  - heater disabled + active cooling enabled: `>=40°C` runs at the minimum-voltage profile, `>60°C` switches to full speed
+  - once active cooling has the fan running and temperature drops below `40°C`, the firmware keeps the minimum-voltage profile alive for `30s`, then stops the fan
   - heater enabled: `<=100°C` keeps the fan off; `>100°C` hands control to the safety path
   - active cooling disabled: `>100°C` minimum-voltage `0.1Hz` enable pulse, `>350°C` heater lock + `50%` fan, `>360°C` full speed
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
-  - the `Active Cooling` page is informational in the formal runtime; it documents the safety policy instead of exposing a writable fan override
+  - the `Active Cooling` page is informational in the formal runtime; owner-facing wording should call this setting “开启主动降温”, not “风扇开机”
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
+- Buzzer control:
+  - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
+  - boot and idle are silent
+  - fixed one-shot cues cover `heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
+  - active protection (`SensorShort / SensorOpen / AdcReadFailed / OverTemp`) forces an urgent looping alarm
+  - when the active fault disappears, the looping alarm stops and a single reminder chirp repeats every `10s` until any user input acknowledges it
+  - retriggering the same cue always restarts from the first note; the hardware PWM must not continue from the previous half-played frequency stage
 - PD policy:
   - default build requests `20 V` from `CH224Q`
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
@@ -149,7 +159,7 @@
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
 - `GPIO47` (chip pin `37`) is the heater-control PWM output for a low-side `BUK9Y14-40B,115` MOSFET stage.
-- `GPIO48` (chip pin `36`) is reserved as the buzzer PWM / tone output.
+- `GPIO48` (chip pin `36`) is the active buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
 - The archived 2026-04-22 main-board netlist keeps a second RGB footprint (`LED2`) only as DNI; the populated baseline still uses one RGB status LED with one ballast resistor per color.
