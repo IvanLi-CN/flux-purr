@@ -106,7 +106,7 @@ const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_HALF_SPEED_PWM_PERMILLE: u16 = 250;
 #[cfg(any(target_arch = "xtensa", test))]
-const FAN_MINIMUM_VOLTAGE_PWM_PERMILLE: u16 = 500;
+const FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE: u16 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_WARMUP_EXIT_ERROR_C: f32 = 2.2;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -472,7 +472,7 @@ enum FanVoltageProfile {
 impl FanVoltageProfile {
     const fn pwm_permille(self) -> u16 {
         match self {
-            Self::Minimum => FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+            Self::Minimum => FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
             Self::SafeHalf => FAN_HALF_SPEED_PWM_PERMILLE,
             Self::Full => FAN_FULL_SPEED_PWM_PERMILLE,
         }
@@ -491,7 +491,7 @@ impl FanHardwareCommand {
     const fn disabled() -> Self {
         Self {
             enabled: false,
-            pwm_permille: FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+            pwm_permille: FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
         }
     }
 
@@ -538,7 +538,7 @@ impl FanPolicyState {
                 let on_window_ms = FAN_PULSE_PERIOD_MS.saturating_mul(duty_percent as u64) / 100;
                 FanHardwareCommand {
                     enabled: elapsed_in_period_ms < on_window_ms,
-                    pwm_permille: FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+                    pwm_permille: FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
                 }
             }
         }
@@ -1442,11 +1442,12 @@ async fn main(_spawner: Spawner) {
         )
         .expect("failed to derive fan PWM timer clock");
     mcpwm.timer0.start(fan_timer_cfg);
-    let _ =
-        fan_pwm.set_duty_cycle_percent(pwm_percent_from_permille(FAN_MINIMUM_VOLTAGE_PWM_PERMILLE));
+    let _ = fan_pwm.set_duty_cycle_percent(pwm_percent_from_permille(
+        FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
+    ));
     info!(
-        "fan runtime armed: gpio35 default=off gpio36 min={=u16}permille half={=u16}permille full={=u16}permille freq={=u32}Hz active_min>={=i16}C cooldown_ms={=u64} active_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
-        FAN_MINIMUM_VOLTAGE_PWM_PERMILLE,
+        "fan runtime armed: gpio35 default=off gpio36 min_output={=u16}permille half={=u16}permille full={=u16}permille freq={=u32}Hz active_min>={=i16}C cooldown_ms={=u64} active_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
+        FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
         FAN_HALF_SPEED_PWM_PERMILLE,
         FAN_FULL_SPEED_PWM_PERMILLE,
         FAN_PWM_FREQUENCY_HZ,
@@ -2144,7 +2145,7 @@ mod tests {
         assert!(heating_over_100.command.enabled);
         assert_eq!(
             heating_over_100.command.pwm_permille,
-            FAN_MINIMUM_VOLTAGE_PWM_PERMILLE
+            FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
         );
         assert_eq!(heating_over_100.display_state, FanDisplayState::Run);
     }
@@ -2166,7 +2167,7 @@ mod tests {
         assert_eq!(pulse_on.display_state, FanDisplayState::Off);
         assert_eq!(
             pulse_on.command.pwm_permille,
-            FAN_MINIMUM_VOLTAGE_PWM_PERMILLE
+            FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
         );
 
         let pulse_off =

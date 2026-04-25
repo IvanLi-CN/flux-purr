@@ -84,6 +84,7 @@
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
   - the `Active Cooling` page is informational in the formal runtime; owner-facing wording should call this setting “开启主动降温”, not “风扇开机”
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
+  - on the current board, the minimum-output-voltage fan profile is `GPIO35=high` plus `GPIO36 duty=100%` (`1000‰`); the fan rail control law is inverted
 - Buzzer control:
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
