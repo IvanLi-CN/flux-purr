@@ -88,7 +88,8 @@
 - Buzzer control:
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
-  - fixed one-shot cues cover `heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
+  - fixed one-shot cues cover `ui_input / heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
+  - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions use the generic `ui_input` prompt cue
   - active protection (`SensorShort / SensorOpen / AdcReadFailed / OverTemp`) forces an urgent looping alarm
   - when the active fault disappears, the looping alarm stops and a single reminder chirp repeats every `10s` until any user input acknowledges it
   - retriggering the same cue always restarts from the first note; the hardware PWM must not continue from the previous half-played frequency stage

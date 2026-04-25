@@ -789,6 +789,21 @@ fn maybe_play_attention_reminder(
     false
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn maybe_play_frontpanel_ui_input_feedback(
+    interaction_handled: bool,
+    specialized_feedback_played: bool,
+    buzzer: &mut BuzzerController,
+    now_ms: u64,
+) -> bool {
+    if !interaction_handled || specialized_feedback_played {
+        return false;
+    }
+
+    let _ = buzzer.play(BuzzerCueId::UiInput, now_ms);
+    true
+}
+
 #[cfg(target_arch = "xtensa")]
 fn temp_c_to_deci_c(temp_c: f32) -> i16 {
     let scaled = temp_c * 10.0;
@@ -1681,9 +1696,11 @@ async fn main(_spawner: Spawner) {
                 );
                 continue;
             }
-            if ui_state.handle_event(event) {
+            let interaction_handled = ui_state.handle_event(event);
+            if interaction_handled {
                 needs_redraw = true;
             }
+            let mut specialized_feedback_played = false;
             if ui_state.active_cooling_enabled != active_cooling_enabled_before {
                 let _ = buzzer.play(
                     if ui_state.active_cooling_enabled {
@@ -1701,6 +1718,7 @@ async fn main(_spawner: Spawner) {
                         "disabled"
                     }
                 );
+                specialized_feedback_played = true;
                 if ui_state.active_cooling_enabled {
                     cooling_disabled_lock_latched = false;
                     cooling_disabled_lock_armed = true;
@@ -1717,21 +1735,38 @@ async fn main(_spawner: Spawner) {
                         if let Some(reason) = current_rtd_fault {
                             ui_state.heater_enabled = false;
                             let _ = buzzer.play(BuzzerCueId::HeaterReject, elapsed_ms);
+                            specialized_feedback_played = true;
                             needs_redraw = true;
                             info!("heater re-arm blocked reason={=str}", reason.label(),);
                         } else {
                             heater_controller.clear_fault_latch();
                             let _ = buzzer.play(BuzzerCueId::HeaterOn, elapsed_ms);
+                            specialized_feedback_played = true;
                             info!("heater re-arm -> cleared latched fault");
                         }
                     } else {
                         let _ = buzzer.play(BuzzerCueId::HeaterOn, elapsed_ms);
+                        specialized_feedback_played = true;
                         info!("heater arm -> on");
                     }
                 } else {
                     let _ = buzzer.play(BuzzerCueId::HeaterOff, elapsed_ms);
+                    specialized_feedback_played = true;
                     info!("heater arm -> off");
                 }
+            }
+            if maybe_play_frontpanel_ui_input_feedback(
+                interaction_handled,
+                specialized_feedback_played,
+                &mut buzzer,
+                elapsed_ms,
+            ) {
+                info!(
+                    "ui input feedback -> route={=str} key={=str} gesture={=str}",
+                    route_label(ui_state.route),
+                    event.key.label(),
+                    event.gesture.label(),
+                );
             }
         }
 
@@ -2347,5 +2382,33 @@ mod tests {
             next_reminder_ms,
             Some(10_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
         );
+    }
+
+    #[test]
+    fn generic_ui_feedback_plays_for_handled_non_specialized_actions() {
+        let mut buzzer = BuzzerController::new();
+
+        assert!(maybe_play_frontpanel_ui_input_feedback(
+            true,
+            false,
+            &mut buzzer,
+            2_500,
+        ));
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::UiInput));
+        assert_eq!(buzzer.output().frequency_hz, Some(1_080));
+    }
+
+    #[test]
+    fn generic_ui_feedback_skips_specialized_actions() {
+        let mut buzzer = BuzzerController::new();
+
+        assert!(!maybe_play_frontpanel_ui_input_feedback(
+            true,
+            true,
+            &mut buzzer,
+            2_500,
+        ));
+        assert_eq!(buzzer.active_cue(), None);
+        assert_eq!(buzzer.output().frequency_hz, None);
     }
 }

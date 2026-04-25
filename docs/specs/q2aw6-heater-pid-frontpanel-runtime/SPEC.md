@@ -68,6 +68,7 @@
 - Dashboard 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
 - `GPIO48` 蜂鸣器必须使用独立 PWM 通道；boot 和 idle 保持静音，不得复用 heater/fan 已占用的 PWM 输出。
 - heater 成功切换必须播放 `heater_on / heater_off`；主动降温成功切换必须播放 `active_cooling_on / active_cooling_off`；heater 重臂被拒绝时必须播放 `heater_reject`。
+- 任何已接受的前面板用户操作都必须有提示音；其中非 heater / 主动降温专用反馈的已接受操作（如菜单导航、子页进入/退出、预设编辑）统一播放通用 `ui_input` 提示音。
 - 同一个蜂鸣器 cue 被重复触发时，必须从第一拍重新开始，不得沿用上一轮尚未结束的频率段。
 - 过温保护不得占用 Dashboard 的风扇元素；SET 行必须在告警激活时以 `1Hz` 闪烁 `WARN / OTEMP` 两关键帧。
 - `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页；用户开启这一项时，口径统一称为“开启主动降温”，并必须同步默认 `20V`（及 `12V / 28V` build variants）、`>=40 / >60 / >100 / >350 / >360°C` 与 `<40°C + 30s` 拖尾包线。
