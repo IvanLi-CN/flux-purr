@@ -104,6 +104,8 @@ const FAN_PULSE_PERIOD_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
+const FAN_ACTIVE_COOLING_PWM_PERMILLE: u16 = 500;
+#[cfg(any(target_arch = "xtensa", test))]
 const FAN_HALF_SPEED_PWM_PERMILLE: u16 = 250;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE: u16 = 1_000;
@@ -507,7 +509,7 @@ impl FanHardwareCommand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FanPolicyState {
     Disabled,
-    Minimum,
+    ActiveCooling,
     SafeHalf,
     Full,
     ActiveCoolingCooldown { until_ms: u64 },
@@ -519,7 +521,10 @@ impl FanPolicyState {
     const fn command(self, elapsed_ms: u64) -> FanHardwareCommand {
         match self {
             Self::Disabled => FanHardwareCommand::disabled(),
-            Self::Minimum => FanHardwareCommand::from_profile(FanVoltageProfile::Minimum),
+            Self::ActiveCooling => FanHardwareCommand {
+                enabled: true,
+                pwm_permille: FAN_ACTIVE_COOLING_PWM_PERMILLE,
+            },
             Self::SafeHalf => FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
             Self::Full => FanHardwareCommand::from_profile(FanVoltageProfile::Full),
             Self::ActiveCoolingCooldown { until_ms } => {
@@ -575,10 +580,10 @@ fn auto_cooling_command(
     if current_temp_c > AUTO_COOLING_FAN_FULL_TEMP_C {
         FanPolicyState::Full
     } else if current_temp_c >= AUTO_COOLING_FAN_MIN_TEMP_C {
-        FanPolicyState::Minimum
+        FanPolicyState::ActiveCooling
     } else {
         match previous_state {
-            FanPolicyState::Full | FanPolicyState::Minimum => {
+            FanPolicyState::Full | FanPolicyState::ActiveCooling => {
                 FanPolicyState::ActiveCoolingCooldown {
                     until_ms: elapsed_ms.saturating_add(AUTO_COOLING_FAN_COOLDOWN_MS),
                 }
@@ -1461,8 +1466,9 @@ async fn main(_spawner: Spawner) {
         FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
     ));
     info!(
-        "fan runtime armed: gpio35 default=off gpio36 min_output={=u16}permille half={=u16}permille full={=u16}permille freq={=u32}Hz active_min>={=i16}C cooldown_ms={=u64} active_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
+        "fan runtime armed: gpio35 default=off gpio36 min_output={=u16}permille active_pwm_40_60={=u16}permille safety_half={=u16}permille full={=u16}permille freq={=u32}Hz active_min>={=i16}C cooldown_ms={=u64} active_full>{=i16}C pulse>{=i16}C lock>{=i16}C full>{=i16}C",
         FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
+        FAN_ACTIVE_COOLING_PWM_PERMILLE,
         FAN_HALF_SPEED_PWM_PERMILLE,
         FAN_FULL_SPEED_PWM_PERMILLE,
         FAN_PWM_FREQUENCY_HZ,
@@ -2110,14 +2116,28 @@ mod tests {
         assert_eq!(stopped.command, FanHardwareCommand::disabled());
         assert_eq!(stopped.display_state, FanDisplayState::Auto);
 
-        let minimum = fan_policy_decision(40, 0, false, true, FanPolicyState::Disabled, false);
+        let active = fan_policy_decision(40, 0, false, true, FanPolicyState::Disabled, false);
         assert_eq!(
-            minimum.command,
-            FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+            active.command,
+            FanHardwareCommand {
+                enabled: true,
+                pwm_permille: FAN_ACTIVE_COOLING_PWM_PERMILLE,
+            }
         );
-        assert_eq!(minimum.display_state, FanDisplayState::Run);
+        assert_eq!(active.state, FanPolicyState::ActiveCooling);
+        assert_eq!(active.display_state, FanDisplayState::Run);
 
-        let cooldown = fan_policy_decision(39, 1_000, false, true, FanPolicyState::Minimum, false);
+        let still_active = fan_policy_decision(60, 0, false, true, FanPolicyState::Disabled, false);
+        assert_eq!(
+            still_active.command,
+            FanHardwareCommand {
+                enabled: true,
+                pwm_permille: FAN_ACTIVE_COOLING_PWM_PERMILLE,
+            }
+        );
+
+        let cooldown =
+            fan_policy_decision(39, 1_000, false, true, FanPolicyState::ActiveCooling, false);
         assert_eq!(
             cooldown.state,
             FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 }
@@ -2226,10 +2246,13 @@ mod tests {
 
     #[test]
     fn rtd_sensor_fault_keeps_existing_policy_state() {
-        let auto = fan_policy_decision(0, 0, false, true, FanPolicyState::Minimum, true);
+        let auto = fan_policy_decision(0, 0, false, true, FanPolicyState::ActiveCooling, true);
         assert_eq!(
             auto.command,
-            FanHardwareCommand::from_profile(FanVoltageProfile::Minimum)
+            FanHardwareCommand {
+                enabled: true,
+                pwm_permille: FAN_ACTIVE_COOLING_PWM_PERMILLE,
+            }
         );
         assert_eq!(auto.display_state, FanDisplayState::Run);
 

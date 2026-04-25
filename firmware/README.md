@@ -77,8 +77,8 @@
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
 - Fan control:
-  - heater disabled + active cooling enabled: `>=40°C` runs at the minimum-voltage profile, `>60°C` switches to full speed
-  - once active cooling has the fan running and temperature drops below `40°C`, the firmware keeps the minimum-voltage profile alive for `30s`, then stops the fan
+  - heater disabled + active cooling enabled: `40~60°C` runs at `GPIO36 duty=50%` (`500‰`), `>60°C` switches to full speed (`0‰`)
+  - once active cooling has the fan running and temperature drops below `40°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
   - heater enabled: `<=100°C` keeps the fan off; `>100°C` hands control to the safety path
   - active cooling disabled: `>100°C` minimum-voltage `0.1Hz` enable pulse, `>350°C` heater lock + `50%` fan, `>360°C` full speed
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
