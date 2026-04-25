@@ -77,17 +77,19 @@
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
 - Fan control:
-  - heater disabled + active cooling enabled: `>=40°C` runs at the minimum-voltage profile, `>60°C` switches to full speed
-  - once active cooling has the fan running and temperature drops below `40°C`, the firmware keeps the minimum-voltage profile alive for `30s`, then stops the fan
+  - heater disabled + active cooling enabled: `40~60°C` runs at `GPIO36 duty=50%` (`500‰`), `>60°C` switches to full speed (`0‰`)
+  - once active cooling has the fan running and temperature drops below `40°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
   - heater enabled: `<=100°C` keeps the fan off; `>100°C` hands control to the safety path
   - active cooling disabled: `>100°C` minimum-voltage `0.1Hz` enable pulse, `>350°C` heater lock + `50%` fan, `>360°C` full speed
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
   - the `Active Cooling` page is informational in the formal runtime; owner-facing wording should call this setting “开启主动降温”, not “风扇开机”
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
+  - on the current board, the minimum-output-voltage fan profile is `GPIO35=high` plus `GPIO36 duty=100%` (`1000‰`); the fan rail control law is inverted
 - Buzzer control:
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
-  - fixed one-shot cues cover `heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
+  - fixed one-shot cues cover `ui_input / heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
+  - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions use the generic `ui_input` prompt cue
   - active protection (`SensorShort / SensorOpen / AdcReadFailed / OverTemp`) forces an urgent looping alarm
   - when the active fault disappears, the looping alarm stops and a single reminder chirp repeats every `10s` until any user input acknowledges it
   - retriggering the same cue always restarts from the first note; the hardware PWM must not continue from the previous half-played frequency stage

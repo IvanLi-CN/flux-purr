@@ -19,7 +19,7 @@
 - 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式 PID PWM 闭环。
 - 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN` 三态风扇显示与实际 heater 输出强度。
 - 冻结正式风扇/保护包线：
-  - heater `OFF` 且 active cooling `ON`：`>=40°C` 以最低电压档运行、`>60°C` 全速；一旦温度回落到 `<40°C`，继续以最低电压拖尾 `30s` 后再关闭。
+  - heater `OFF` 且 active cooling `ON`：`40~60°C` 以 `GPIO36 duty=50%`（`500‰`）运行、`>60°C` 以 `GPIO36 duty=0%`（`0‰`）全速；一旦温度回落到 `<40°C`，继续以 `GPIO36 duty=100%`（`1000‰`）拖尾 `30s` 后再关闭。
   - heater `ON`：`<=100°C` 不主动散热，超过 `100°C` 后由安全链路接管。
   - active cooling `OFF`：`>100°C` 进入最低电压 `0.1Hz` 使能脉冲，脉冲占空比按 `floor((temp-100)/10)%` 递增并封顶 `25%`。
   - active cooling `OFF` 且 `>350°C`：锁住停热并保持风扇 `50%`；`>360°C` 改为全速。
@@ -68,9 +68,11 @@
 - Dashboard 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
 - `GPIO48` 蜂鸣器必须使用独立 PWM 通道；boot 和 idle 保持静音，不得复用 heater/fan 已占用的 PWM 输出。
 - heater 成功切换必须播放 `heater_on / heater_off`；主动降温成功切换必须播放 `active_cooling_on / active_cooling_off`；heater 重臂被拒绝时必须播放 `heater_reject`。
+- 任何已接受的前面板用户操作都必须有提示音；其中非 heater / 主动降温专用反馈的已接受操作（如菜单导航、子页进入/退出、预设编辑）统一播放通用 `ui_input` 提示音。
 - 同一个蜂鸣器 cue 被重复触发时，必须从第一拍重新开始，不得沿用上一轮尚未结束的频率段。
 - 过温保护不得占用 Dashboard 的风扇元素；SET 行必须在告警激活时以 `1Hz` 闪烁 `WARN / OTEMP` 两关键帧。
-- `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页；用户开启这一项时，口径统一称为“开启主动降温”，并必须同步默认 `20V`（及 `12V / 28V` build variants）、`>=40 / >60 / >100 / >350 / >360°C` 与 `<40°C + 30s` 拖尾包线。
+- `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页；用户开启这一项时，口径统一称为“开启主动降温”，并必须同步默认 `20V`（及 `12V / 28V` build variants）、`40~60°C => 50% PWM`、`>60°C => 0% PWM`、`<40°C => 100% PWM + 30s` 与 `>100 / >350 / >360°C` 包线。
+- 当前风扇硬件为反相 `FB` 注入控制：`GPIO36 duty=0%` 表示最高风扇轨电压，`GPIO36 duty=100%`（`1000‰`）才表示最低风扇轨电压；所有 `minimum-voltage profile` 语义都必须落到该 `1000‰` 档位。
 - 任一活动保护（`SensorShort / SensorOpen / AdcReadFailed / OverTemp`）出现时，蜂鸣器必须立即进入急促、持续的循环警告音；保护解除后改为每 `10s` 一次 reminder，直到用户任意输入确认。
 - defmt 日志必须覆盖 RTD 读数、PID 输入/输出、fault 原因、fan policy 输出与 PD 状态变化。
 
@@ -95,7 +97,7 @@
   - `OFF`：风扇策略关闭
   - `AUTO`：风扇策略开启但当前无需工作
   - `RUN`：风扇策略开启且当前已使能输出
-- 当 `active_cooling_enabled=true` 且温度从 `>=40°C` 回落到 `<40°C` 时，真实风扇必须继续以最低电压运行 `30s`，然后才关闭。
+- 当 `active_cooling_enabled=true` 且温度位于 `40~60°C` 时，真实风扇必须使用 `GPIO36 duty=50%`（`500‰`）；当温度 `>60°C` 时必须切到 `GPIO36 duty=0%`（`0‰`）全速；当温度从 `>=40°C` 回落到 `<40°C` 时，真实风扇必须继续以 `GPIO36 duty=100%`（`1000‰`）运行 `30s`，然后才关闭。
 - 当 `active_cooling_enabled=false` 且 `temp > 350°C` 时，heater 必须被强制关断并锁住；用户重新开启风扇策略或手动重新使能 heater 后才允许退出该锁态。
 - 当 `active_cooling_enabled=false` 且 `temp > 360°C` 时，真实风扇输出升级为全速，但 Dashboard fan line 仍保持 `OFF`。
 - PD 状态只做观测：即使 PD 丢失或降档，也不自动清空 `heater_enabled`，只在日志中体现。
@@ -129,8 +131,8 @@ None
 
 - Given 固件刚启动，When RTD 已有有效样本，Then Dashboard 左侧显示实时温度，右侧显示 `SET/PPS/FAN`，其中 `FAN` 只会显示 `OFF/AUTO/RUN`。
 - Given Dashboard，When 用户短按中键，Then 只切换 heater arm；When 双击中键，Then 只切换主动降温；When 长按中键，Then 仍进入菜单。
-- Given heater 关闭且主动降温开启，When 温度 `39°C / 40°C / 61°C`，Then fan 必须分别进入停止或 30 秒拖尾 / 最低电压 / 全速。
-- Given 主动降温已经把风扇拉起，When 温度跌到 `<40°C`，Then fan 必须以最低电压再持续 `30s` 后关闭。
+- Given heater 关闭且主动降温开启，When 温度 `39°C / 40°C / 60°C / 61°C`，Then fan 必须分别进入停止或 30 秒拖尾 / `50% PWM` / `50% PWM` / `0% PWM`。
+- Given 主动降温已经把风扇拉起，When 温度跌到 `<40°C`，Then fan 必须以 `100% PWM` 再持续 `30s` 后关闭。
 - Given heater 开启，When 温度 `<=100°C`，Then fan 不得因为 idle cooling 阈值而提前启动。
 - Given active cooling 关闭，When 温度 `100 / 110 / 350 / 351 / 361°C`，Then fan 必须分别满足无脉冲 / `1%` 脉冲 / `25%` 脉冲 / `50%` / 全速。
 - Given active cooling 关闭且温度 `>350°C`，When 控制循环更新，Then heater 必须被锁住停热；When 用户重新开启风扇策略或手动重新 arm heater，Then 才允许离开锁态。

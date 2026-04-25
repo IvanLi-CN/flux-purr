@@ -1,5 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuzzerCueId {
+    UiInput,
     HeaterOn,
     HeaterOff,
     ActiveCoolingOn,
@@ -166,6 +167,7 @@ impl BuzzerController {
     }
 }
 
+const UI_INPUT_PATTERN: [BuzzerStep; 1] = [BuzzerStep::tone(1_080, 45)];
 const HEATER_ON_PATTERN: [BuzzerStep; 3] = [
     BuzzerStep::tone(1_240, 60),
     BuzzerStep::rest(30),
@@ -216,6 +218,10 @@ const ATTENTION_REMINDER_PATTERN: [BuzzerStep; 3] = [
 
 const fn pattern_for(cue: BuzzerCueId) -> BuzzerPattern {
     match cue {
+        BuzzerCueId::UiInput => BuzzerPattern {
+            steps: &UI_INPUT_PATTERN,
+            looping: false,
+        },
         BuzzerCueId::HeaterOn => BuzzerPattern {
             steps: &HEATER_ON_PATTERN,
             looping: false,
