@@ -650,6 +650,10 @@ impl FrontPanelUiState {
                 self.selected_preset_slot = self.advance_preset_slot();
                 true
             }
+            (FrontPanelKey::Left, KeyGesture::ShortPress) => {
+                self.selected_preset_slot = self.retreat_preset_slot();
+                true
+            }
             (FrontPanelKey::Up, KeyGesture::ShortPress) => {
                 self.ensure_selected_preset_slot();
                 let next_temp = self.presets_c[self.selected_preset_slot]
@@ -674,8 +678,7 @@ impl FrontPanelUiState {
                 }
                 true
             }
-            (FrontPanelKey::Left, KeyGesture::ShortPress)
-            | (FrontPanelKey::Center, KeyGesture::ShortPress)
+            (FrontPanelKey::Center, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::LongPress) => {
                 self.route = FrontPanelRoute::Menu;
                 true
@@ -737,6 +740,14 @@ impl FrontPanelUiState {
 
     fn advance_preset_slot(&self) -> usize {
         (self.selected_preset_slot + 1) % FRONTPANEL_PRESET_COUNT
+    }
+
+    fn retreat_preset_slot(&self) -> usize {
+        if self.selected_preset_slot == 0 {
+            FRONTPANEL_PRESET_COUNT - 1
+        } else {
+            self.selected_preset_slot - 1
+        }
     }
 }
 
@@ -1067,6 +1078,31 @@ mod tests {
         }));
         assert_eq!(state.selected_preset_slot, 2);
         assert_eq!(state.selected_preset(), None);
+    }
+
+    #[test]
+    fn preset_temp_left_moves_to_previous_slot_without_exiting() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.route = FrontPanelRoute::PresetTemp;
+        state.selected_preset_slot = 1;
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Left,
+            key: FrontPanelKey::Left,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.route, FrontPanelRoute::PresetTemp);
+        assert_eq!(state.selected_preset_slot, 0);
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Left,
+            key: FrontPanelKey::Left,
+            gesture: KeyGesture::ShortPress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.route, FrontPanelRoute::PresetTemp);
+        assert_eq!(state.selected_preset_slot, FRONTPANEL_PRESET_COUNT - 1);
     }
 
     #[test]

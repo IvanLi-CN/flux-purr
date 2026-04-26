@@ -139,8 +139,6 @@ const HEATER_OVERSHOOT_CUTOFF_C: f32 = 0.25;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_TEMP_FILTER_ALPHA: f32 = 0.45;
 #[cfg(target_arch = "xtensa")]
-const HEATER_SELFTEST_AUTO_ARM_ON_BOOT: bool = true;
-#[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
 const FAN_PWM_PERIOD_TICKS: u16 = 99;
@@ -1726,13 +1724,6 @@ async fn main(_spawner: Spawner) {
     let mut cooling_disabled_lock_armed = true;
     let mut fan_policy_state = FanPolicyState::Disabled;
     let mut last_fan_command: Option<FanHardwareCommand> = None;
-    if HEATER_SELFTEST_AUTO_ARM_ON_BOOT
-        && current_rtd_fault.is_none()
-        && heater_controller.fault_latched().is_none()
-    {
-        ui_state.heater_enabled = true;
-        info!("heater selftest auto-arm -> on");
-    }
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
     let initial_fan_decision = fan_policy_decision(
