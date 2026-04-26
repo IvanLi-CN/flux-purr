@@ -5,6 +5,7 @@ pub mod board;
 pub mod buzzer;
 pub mod display;
 pub mod frontpanel;
+pub mod memory;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_os = "none"))]

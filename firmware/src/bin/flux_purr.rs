@@ -40,7 +40,15 @@ use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(target_arch = "xtensa", test))]
-use flux_purr_firmware::frontpanel::{FanDisplayState, HeaterLockReason};
+use flux_purr_firmware::frontpanel::{FanDisplayState, FrontPanelUiState, HeaterLockReason};
+#[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::memory::MemoryConfig;
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::memory::{
+    M24C64_PAGE_SIZE, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
+    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, decode_memory_record, encode_memory_record,
+    select_latest_memory_record,
+};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ, pwm_percent_from_permille,
@@ -52,8 +60,7 @@ use flux_purr_firmware::{
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
         FrontPanelInputController, FrontPanelInputTimings, FrontPanelKeyMap, FrontPanelRawState,
-        FrontPanelRoute, FrontPanelRuntimeMode, FrontPanelUiState, RawFrontPanelKey,
-        render::render_frontpanel_ui,
+        FrontPanelRoute, FrontPanelRuntimeMode, RawFrontPanelKey, render::render_frontpanel_ui,
     },
 };
 #[cfg(target_arch = "xtensa")]
@@ -132,8 +139,6 @@ const HEATER_OVERSHOOT_CUTOFF_C: f32 = 0.25;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_TEMP_FILTER_ALPHA: f32 = 0.45;
 #[cfg(target_arch = "xtensa")]
-const HEATER_SELFTEST_AUTO_ARM_ON_BOOT: bool = true;
-#[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
 const FAN_PWM_PERIOD_TICKS: u16 = 99;
@@ -186,6 +191,8 @@ const CH224Q_PD_SETTLE_MS: u64 = 150;
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
+#[cfg(target_arch = "xtensa")]
+const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -989,6 +996,107 @@ fn read_ch224q_status(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn load_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryRecord> {
+    let mut eeprom = M24c64::new(i2c);
+    let mut slot_a = [0u8; MEMORY_SLOT_SIZE];
+    let mut slot_b = [0u8; MEMORY_SLOT_SIZE];
+    let slot_a_read = eeprom
+        .read_bytes(MEMORY_SLOT_A_OFFSET, &mut slot_a)
+        .map(|_| decode_memory_record(&slot_a))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let slot_b_read = eeprom
+        .read_bytes(MEMORY_SLOT_B_OFFSET, &mut slot_b)
+        .map(|_| decode_memory_record(&slot_b))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let selected = select_latest_memory_record(slot_a_read, slot_b_read);
+
+    if let Some(record) = &selected {
+        info!(
+            "memory restore ok seq={=u32} target_c={=i16} slot={=u8} active_cooling={=bool} wifi_ssid_len={=u8} telemetry_ms={=u32}",
+            record.sequence,
+            record.config.target_temp_c,
+            record.config.selected_preset_slot as u8,
+            record.config.active_cooling_enabled,
+            record.config.wifi_ssid.len() as u8,
+            record.config.telemetry_interval_ms,
+        );
+    } else {
+        info!("memory restore unavailable -> using defaults");
+    }
+
+    selected
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn write_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>, record: &MemoryRecord) -> bool {
+    let mut bytes = [0xffu8; MEMORY_SLOT_SIZE];
+    let Ok(record_len) = encode_memory_record(record, &mut bytes) else {
+        info!("memory commit encode failed");
+        return false;
+    };
+    let base_offset = memory_slot_offset_for_sequence(record.sequence);
+    let mut eeprom = M24c64::new(i2c);
+    let mut written = 0usize;
+    while written < record_len {
+        let absolute_offset = usize::from(base_offset) + written;
+        let page_room = M24C64_PAGE_SIZE - (absolute_offset % M24C64_PAGE_SIZE);
+        let chunk_len = (record_len - written).min(page_room).min(M24C64_PAGE_SIZE);
+        let Ok(page_offset) = u16::try_from(absolute_offset) else {
+            info!("memory commit offset overflow");
+            return false;
+        };
+        if eeprom
+            .write_page(page_offset, &bytes[written..written + chunk_len])
+            .is_err()
+        {
+            info!("memory commit write failed seq={=u32}", record.sequence);
+            return false;
+        }
+        written += chunk_len;
+        EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
+    }
+    info!(
+        "memory commit ok seq={=u32} bytes={=u16} slot=0x{=u16:04x}",
+        record.sequence, record_len as u16, base_offset,
+    );
+    true
+}
+
+#[cfg(target_arch = "xtensa")]
+const fn memory_slot_offset_for_sequence(sequence: u32) -> u16 {
+    if sequence % 2 == 1 {
+        MEMORY_SLOT_A_OFFSET
+    } else {
+        MEMORY_SLOT_B_OFFSET
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfig) {
+    state.set_target_temp_c(config.target_temp_c);
+    state.selected_preset_slot = config.selected_preset_slot;
+    state.ensure_selected_preset_slot();
+    state.presets_c = config.presets_c;
+    state.active_cooling_enabled = config.active_cooling_enabled;
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> MemoryConfig {
+    MemoryConfig {
+        target_temp_c: state.target_temp_c,
+        selected_preset_slot: state.selected_preset_slot,
+        presets_c: state.presets_c,
+        active_cooling_enabled: state.active_cooling_enabled,
+        wifi_ssid: previous.wifi_ssid.clone(),
+        wifi_password: previous.wifi_password.clone(),
+        wifi_auto_reconnect: previous.wifi_auto_reconnect,
+        telemetry_interval_ms: previous.telemetry_interval_ms,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 fn apply_heater_duty<PWM>(heater_pwm: &mut PWM, duty_percent: u8, last_duty_percent: &mut u8)
 where
     PWM: SetDutyCycle,
@@ -1435,6 +1543,16 @@ async fn main(_spawner: Spawner) {
         CH224Q_PD_SETTLE_MS,
     );
     EmbassyTimer::after_millis(CH224Q_PD_SETTLE_MS).await;
+    let restored_memory_record = load_memory_record(&mut pd_i2c);
+    let mut memory_config = restored_memory_record
+        .as_ref()
+        .map(|record| record.config.clone())
+        .unwrap_or_default();
+    let mut memory_sequence = restored_memory_record
+        .as_ref()
+        .map(|record| record.sequence)
+        .unwrap_or(0);
+    let mut memory_commit_due_ms: Option<u64> = None;
 
     let mut adc1_config = AdcConfig::new();
     let mut rtd_adc_pin = adc1_config
@@ -1562,6 +1680,7 @@ async fn main(_spawner: Spawner) {
     );
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
     ui_state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+    apply_memory_config_to_ui(&mut ui_state, &memory_config);
     let mut heater_controller = HeaterController::new();
     let mut current_rtd_fault: Option<HeaterFaultReason> = None;
     let mut latest_temp_c = 0.0_f32;
@@ -1605,13 +1724,6 @@ async fn main(_spawner: Spawner) {
     let mut cooling_disabled_lock_armed = true;
     let mut fan_policy_state = FanPolicyState::Disabled;
     let mut last_fan_command: Option<FanHardwareCommand> = None;
-    if HEATER_SELFTEST_AUTO_ARM_ON_BOOT
-        && current_rtd_fault.is_none()
-        && heater_controller.fault_latched().is_none()
-    {
-        ui_state.heater_enabled = true;
-        info!("heater selftest auto-arm -> on");
-    }
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
     let initial_fan_decision = fan_policy_decision(
@@ -1774,6 +1886,21 @@ async fn main(_spawner: Spawner) {
                     event.gesture.label(),
                 );
             }
+            if interaction_handled {
+                let next_memory_config = memory_config_from_ui(&ui_state, &memory_config);
+                if next_memory_config != memory_config {
+                    memory_config = next_memory_config;
+                    memory_commit_due_ms =
+                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                    info!(
+                        "memory dirty -> debounce_until_ms={=u64} target_c={=i16} slot={=u8} active_cooling={=bool}",
+                        memory_commit_due_ms.unwrap_or(0),
+                        memory_config.target_temp_c,
+                        memory_config.selected_preset_slot as u8,
+                        memory_config.active_cooling_enabled,
+                    );
+                }
+            }
         }
 
         if elapsed_ms.saturating_sub(last_control_ms) >= HEATER_CONTROL_INTERVAL_MS {
@@ -1901,6 +2028,20 @@ async fn main(_spawner: Spawner) {
                     .map(|reason| reason.label())
                     .unwrap_or("none"),
             );
+        }
+
+        if memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms) {
+            memory_commit_due_ms = None;
+            let next_sequence = memory_sequence.saturating_add(1);
+            let record = MemoryRecord {
+                sequence: next_sequence,
+                config: memory_config.clone(),
+            };
+            if write_memory_record(&mut pd_i2c, &record).await {
+                memory_sequence = next_sequence;
+            } else {
+                memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            }
         }
 
         let (
@@ -2433,5 +2574,24 @@ mod tests {
         ));
         assert_eq!(buzzer.active_cue(), None);
         assert_eq!(buzzer.output().frequency_hz, None);
+    }
+
+    #[test]
+    fn memory_restore_does_not_restore_heater_arm() {
+        let mut state = flux_purr_firmware::frontpanel::FrontPanelUiState::new(
+            flux_purr_firmware::frontpanel::FrontPanelRuntimeMode::App,
+        );
+        let config = MemoryConfig {
+            target_temp_c: 180,
+            active_cooling_enabled: false,
+            ..MemoryConfig::default()
+        };
+
+        apply_memory_config_to_ui(&mut state, &config);
+
+        assert!(!state.heater_enabled);
+        let persisted = memory_config_from_ui(&state, &config);
+        assert_eq!(persisted.target_temp_c, 180);
+        assert!(!persisted.active_cooling_enabled);
     }
 }

@@ -73,3 +73,4 @@
 | jb85u | Release 失败 Telegram 告警接入 | 待实现 | `jb85u-release-failure-telegram-alerts/SPEC.md` | 2026-04-12 | Add a repo-local notifier for Release Web / Release Firmware and keep a manual Telegram smoke test path |
 | q2aw6 | Flux Purr 正式 PID 加热闭环与前面板运行态同步 | 已完成 | `q2aw6-heater-pid-frontpanel-runtime/SPEC.md` | 2026-04-21 | PR #11 |
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
+| 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | 2026-04-27 | M24C64-backed target/preset/cooling/Wi-Fi persistence |
