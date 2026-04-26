@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "components": {},
+  "pr_head_sha": "8299301a75b6c27d45060e4c58963497c2147efc",
+  "pr_number": 19,
+  "pr_title": "ci: harden label-driven releases",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "rollout_pr_labels",
+  "target_sha": "a0d619a96484522572d0268ea2900632a44d7d16",
+  "type_label": "type:skip"
+}
