@@ -71,6 +71,12 @@
   - `active_cooling_enabled` is the user-facing “主动降温” policy bit toggled by center double-press
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
+- EEPROM memory:
+  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config with two `512 B` slots at `0x0000` and `0x0200`
+  - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
+  - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended
+  - accepted front-panel edits debounce for about `2s` before writing the next slot
+  - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
   - `GPIO47` runs formal PID PWM at `2 kHz`
   - control interval is `1 Hz`
