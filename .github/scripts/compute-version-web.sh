@@ -5,12 +5,19 @@ root_dir="$(git rev-parse --show-toplevel)"
 git fetch --tags --force >/dev/null 2>&1 || true
 
 pkg_json="${root_dir}/web/package.json"
-base_version="$(grep -m1 '"version"' "$pkg_json" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+manifest_version="$(grep -m1 '"version"' "$pkg_json" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
 
-if [[ -z "${base_version:-}" ]]; then
+if [[ -z "${manifest_version:-}" ]]; then
   echo "Failed to parse web version from ${pkg_json}" >&2
   exit 1
 fi
+
+base_version="$(
+  {
+    git tag --list 'web/v[0-9]*.[0-9]*.[0-9]*' | sed -E 's#^web/v([0-9]+)\.([0-9]+)\.([0-9]+)$#\1 \2 \3#'
+    printf '%s\n' "${manifest_version}" | sed -E 's#^([0-9]+)\.([0-9]+)\.([0-9]+)$#\1 \2 \3#'
+  } | awk 'NF == 3 { printf "%010d %010d %010d %d.%d.%d\n", $1, $2, $3, $1, $2, $3 }' | sort | tail -n1 | awk '{ print $4 }'
+)"
 
 release_level="${RELEASE_LEVEL:-patch}"
 release_channel="${RELEASE_CHANNEL:-stable}"
@@ -50,11 +57,6 @@ if [[ "${release_channel}" == "rc" ]]; then
   fi
   tag="web/v${effective}-rc.${short_sha}"
 else
-  candidate="${patch}"
-  while git rev-parse -q --verify "refs/tags/web/v${major}.${minor}.${candidate}" >/dev/null; do
-    candidate="$((candidate + 1))"
-  done
-  effective="${major}.${minor}.${candidate}"
   tag="web/v${effective}"
 fi
 
