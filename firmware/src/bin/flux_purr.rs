@@ -1376,7 +1376,11 @@ where
         elapsed_ms = elapsed_ms.saturating_add(20);
 
         let raw_state = inputs.sample();
-        let sample = controller.sample(elapsed_ms, raw_state);
+        let sample = controller.sample_with_capabilities(
+            elapsed_ms,
+            raw_state,
+            ui_state.gesture_capabilities(),
+        );
         let mut needs_redraw = false;
 
         if sample.raw_state != last_raw_state {
@@ -1779,7 +1783,11 @@ async fn main(_spawner: Spawner) {
         elapsed_ms = elapsed_ms.saturating_add(20);
 
         let raw_state = inputs.sample();
-        let sample = controller.sample(elapsed_ms, raw_state);
+        let sample = controller.sample_with_capabilities(
+            elapsed_ms,
+            raw_state,
+            ui_state.gesture_capabilities(),
+        );
         let mut needs_redraw = false;
 
         if sample.raw_state != last_raw_state {
