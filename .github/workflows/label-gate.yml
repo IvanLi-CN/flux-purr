@@ -1,14 +1,21 @@
 name: Label Gate
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+concurrency:
+  group: label-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: read
 
 jobs:
   validate-labels:
+    name: Validate PR labels
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -17,3 +24,12 @@ jobs:
 
       - name: Validate PR labels
         run: bash .github/scripts/label-gate.sh
+
+      - name: Freeze release intent
+        if: github.event.pull_request.state == 'open'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/release_snapshot.py capture-intent \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --github-token "${GITHUB_TOKEN}"

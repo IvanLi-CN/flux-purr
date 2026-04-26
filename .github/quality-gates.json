@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "baseline_policy": "explicit-waiver-required",
+    "require_signed_commits": true,
+    "branch_protection": {
+      "protected_branches": ["main"],
+      "require_pull_request": true,
+      "disallow_direct_pushes": true,
+      "disallow_branch_deletions": true,
+      "disallow_force_pushes": true,
+      "required_status_checks": {
+        "strict": true
+      }
+    },
+    "review_policy": {
+      "mode": "github-native",
+      "required_approvals": 1,
+      "exempt_repository_owner": true,
+      "exempt_author_permissions": ["admin", "maintain"]
+    }
+  },
+  "required_checks": [
+    "Validate PR labels",
+    "Firmware checks",
+    "Web checks"
+  ],
+  "informational_checks": [],
+  "waivers": [],
+  "expected_pr_workflows": [
+    {
+      "workflow": "Label Gate",
+      "path": ".github/workflows/label-gate.yml",
+      "jobs": ["Validate PR labels"]
+    },
+    {
+      "workflow": "CI PR",
+      "path": ".github/workflows/ci.yml",
+      "jobs": ["Firmware checks", "Web checks"]
+    }
+  ],
+  "expected_main_workflows": [
+    {
+      "workflow": "CI Main",
+      "path": ".github/workflows/ci-main.yml",
+      "jobs": ["Firmware checks", "Web checks", "Release Snapshot"]
+    }
+  ],
+  "expected_release_workflows": [
+    {
+      "workflow": "Release Web",
+      "path": ".github/workflows/release-web.yml",
+      "jobs": ["Release Web Meta", "Release Web Package"]
+    },
+    {
+      "workflow": "Release Firmware",
+      "path": ".github/workflows/release-firmware.yml",
+      "jobs": ["Release Firmware Meta", "Release Firmware Package"]
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" ]]; then
+if [[ "${GITHUB_EVENT_NAME:-}" != "pull_request" && "${GITHUB_EVENT_NAME:-}" != "pull_request_target" ]]; then
   echo "label-gate only validates pull_request events"
   exit 0
 fi
