@@ -1,54 +1,103 @@
 name: Release Web
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows:
+      - CI Main
+    types:
+      - completed
+    branches:
+      - main
   workflow_dispatch:
     inputs:
-      release_level:
-        description: "major | minor | patch"
+      commit_sha:
+        description: "Commit SHA on main to release or backfill"
         required: true
-        default: patch
-        type: choice
-        options: [major, minor, patch]
-      release_channel:
-        description: "stable | rc"
-        required: true
-        default: stable
-        type: choice
-        options: [stable, rc]
+        type: string
+
+concurrency:
+  group: release-web-${{ github.event.workflow_run.head_sha || inputs.commit_sha || github.run_id }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
+env:
+  RELEASE_SNAPSHOT_NOTES_REF: refs/notes/release-snapshots
+
 jobs:
-  release-intent:
+  release-meta:
+    name: Release Web Meta
     runs-on: ubuntu-latest
     outputs:
-      enabled: ${{ steps.intent.outputs.release_enabled }}
-      level: ${{ steps.intent.outputs.release_level }}
-      channel: ${{ steps.intent.outputs.release_channel }}
+      target_sha: ${{ steps.target.outputs.target_sha }}
+      enabled: ${{ steps.snapshot.outputs.release_enabled }}
+      level: ${{ steps.snapshot.outputs.release_level }}
+      channel: ${{ steps.snapshot.outputs.release_channel }}
+      effective_version: ${{ steps.snapshot.outputs.web_effective_version }}
+      tag: ${{ steps.snapshot.outputs.web_tag }}
     steps:
-      - name: Checkout
+      - name: Checkout full history
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Determine release intent
-        id: intent
+      - name: Resolve target commit
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            target_sha="${{ inputs.commit_sha }}"
+          else
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "target_sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "${{ github.event.workflow_run.event }}" != "push" ]; then
+              echo "target_sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            target_sha="${{ github.event.workflow_run.head_sha }}"
+          fi
+          if [[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid target SHA: ${target_sha}" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git cat-file -e "${target_sha}^{commit}"
+          if ! git merge-base --is-ancestor "${target_sha}" origin/main; then
+            echo "Commit ${target_sha} is not contained in origin/main" >&2
+            exit 1
+          fi
+          echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Load release snapshot
+        if: steps.target.outputs.target_sha != ''
+        id: snapshot
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_RELEASE_LEVEL: ${{ inputs.release_level }}
-          INPUT_RELEASE_CHANNEL: ${{ inputs.release_channel }}
-        run: bash .github/scripts/release-intent.sh
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+        run: |
+          python3 .github/scripts/release_snapshot.py export \
+            --target-sha "${TARGET_SHA}" \
+            --notes-ref "${RELEASE_SNAPSHOT_NOTES_REF}" \
+            --github-output "$GITHUB_OUTPUT"
 
   release:
+    name: Release Web Package
     runs-on: ubuntu-latest
-    needs: [release-intent]
-    if: needs.release-intent.outputs.enabled == 'true'
+    needs: [release-meta]
+    if: needs.release-meta.outputs.enabled == 'true'
     steps:
       - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Checkout release target
+        env:
+          TARGET_SHA: ${{ needs.release-meta.outputs.target_sha }}
+        run: git checkout --detach "${TARGET_SHA}"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -61,11 +110,18 @@ jobs:
       - name: Build web
         run: bun run --cwd web build
 
-      - name: Compute version
+      - name: Use snapshot version
         env:
-          RELEASE_LEVEL: ${{ needs.release-intent.outputs.level }}
-          RELEASE_CHANNEL: ${{ needs.release-intent.outputs.channel }}
-        run: bash .github/scripts/compute-version-web.sh
+          WEB_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          WEB_TAG: ${{ needs.release-meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WEB_EFFECTIVE_VERSION}" ] || [ -z "${WEB_TAG}" ]; then
+            echo "Release snapshot did not provide Web version outputs" >&2
+            exit 1
+          fi
+          echo "WEB_EFFECTIVE_VERSION=${WEB_EFFECTIVE_VERSION}" >> "$GITHUB_ENV"
+          echo "WEB_TAG=${WEB_TAG}" >> "$GITHUB_ENV"
 
       - name: Create and push tag
         run: |
@@ -89,7 +145,7 @@ jobs:
         with:
           tag_name: ${{ env.WEB_TAG }}
           name: ${{ env.WEB_TAG }}
-          prerelease: ${{ needs.release-intent.outputs.channel == 'rc' }}
+          prerelease: ${{ needs.release-meta.outputs.channel == 'rc' }}
           generate_release_notes: true
           files: |
             web-${{ env.WEB_EFFECTIVE_VERSION }}.tar.gz

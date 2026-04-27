@@ -74,3 +74,4 @@
 | q2aw6 | Flux Purr 正式 PID 加热闭环与前面板运行态同步 | 已完成 | `q2aw6-heater-pid-frontpanel-runtime/SPEC.md` | 2026-04-21 | PR #11 |
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
 | 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | 2026-04-27 | M24C64-backed target/preset/cooling/Wi-Fi persistence |
+| r9k3m | Flux Purr PR 标签发布与主分支保护 | 已完成 | `r9k3m-pr-label-release-protection/SPEC.md` | 2026-04-27 | Label-driven release intent, immutable mainline snapshots, and quality-gates declaration |

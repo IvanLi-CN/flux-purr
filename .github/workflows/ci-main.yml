@@ -1,19 +1,20 @@
-name: CI PR
+name: CI Main
 
 on:
-  pull_request:
+  push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: ci-pr-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-main-${{ github.sha }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  RELEASE_SNAPSHOT_NOTES_REF: refs/notes/release-snapshots
 
 jobs:
   firmware:
@@ -80,3 +81,35 @@ jobs:
         env:
           SKIP_E2E: "1"
         run: bash scripts/check-web-e2e.sh
+
+  release-snapshot:
+    name: Release Snapshot
+    runs-on: ubuntu-latest
+    needs: [firmware, web]
+    if: github.event_name == 'push'
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: read
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Ensure immutable release snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/release_snapshot.py ensure \
+            --target-sha "${GITHUB_SHA}" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --github-token "${GITHUB_TOKEN}" \
+            --notes-ref "${RELEASE_SNAPSHOT_NOTES_REF}" \
+            --output "$RUNNER_TEMP/release-snapshot.json"

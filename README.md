@@ -36,6 +36,23 @@ bun run check:web:build
 bun run check:storybook
 ```
 
+## PR labels, releases, and branch protection
+
+PRs targeting `main` must carry exactly one release type label and exactly one release channel label:
+
+- Type: `type:patch`, `type:minor`, `type:major`, `type:docs`, or `type:skip`
+- Channel: `channel:stable` or `channel:rc`
+
+`type:patch`, `type:minor`, and `type:major` publish both Web and Firmware after `CI Main` succeeds on the merged commit. `type:docs` and `type:skip` intentionally skip both release workflows. Stable releases use `web/vX.Y.Z` and `fw/vX.Y.Z`; RC releases use `web/vX.Y.Z-rc.<sha7>` and `fw/vX.Y.Z-rc.<sha7>`.
+
+`Label Gate` records the validated release intent against the PR head SHA before merge. After `CI Main` succeeds, release intent is frozen on `main` in git notes under `refs/notes/release-snapshots`; main release jobs read only that snapshot, not mutable post-merge PR labels. Manual release backfill uses the `Release Web` or `Release Firmware` workflow with an explicit `main` commit SHA and reads the existing snapshot for that commit.
+
+The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require PRs, require signed commits, disallow force pushes/deletions, and require these checks before merge:
+
+- `Validate PR labels`
+- `Firmware checks`
+- `Web checks`
+
 ## Firmware target notes
 
 Current default target direction is ESP32-S3. For Xtensa builds in CI/release:
