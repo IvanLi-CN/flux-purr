@@ -6,7 +6,7 @@
 - `Label Gate` 负责 release intent 标签检查，并把 intent 绑定到 PR head SHA 写入冻结 marker。
 - `CI Main` 负责 `main` 上的非抢占式验证和 release snapshot 写入。
 - `Release Web` 与 `Release Firmware` 从 release snapshot 导出发布意图。
-- `.github/quality-gates.json` 声明主分支保护、签名提交和 required checks。
+- `.github/quality-gates.json` 声明主分支保护、签名提交、required checks，以及 owner PR 不强制 approval 的 review policy。
 
 ## Validation
 
