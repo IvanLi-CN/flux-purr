@@ -23,9 +23,13 @@ const RUNTIME_TICK_MS = 100
 const COOLING_DISABLED_PULSE_START_TEMP_C = 100
 const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 
-const shortcuts: ReadonlyArray<FrontPanelRuntimeInteraction> = keyOrder.flatMap((key) =>
-  gestureOrder.map((gesture) => ({ key, gesture }))
-)
+const shortcuts: ReadonlyArray<FrontPanelRuntimeInteraction> = [
+  ...keyOrder.flatMap((key) =>
+    gestureOrder.map((gesture) => ({ key, gesture }) satisfies FrontPanelRuntimeInteraction)
+  ),
+  { key: 'up', gesture: 'repeat' },
+  { key: 'down', gesture: 'repeat' },
+]
 
 function interactionLabel(key: FrontPanelKeyId, gesture: KeyGestureId) {
   return `${key} ${gesture}`

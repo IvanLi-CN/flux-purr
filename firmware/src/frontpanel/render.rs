@@ -495,6 +495,7 @@ fn gesture_color(gesture: Option<KeyGesture>) -> Rgb565 {
         Some(KeyGesture::ShortPress) => COLOR_SUCCESS,
         Some(KeyGesture::DoublePress) => COLOR_ACCENT,
         Some(KeyGesture::LongPress) => COLOR_CYAN,
+        Some(KeyGesture::RepeatPress) => COLOR_CYAN,
         None => COLOR_TEXT,
     }
 }

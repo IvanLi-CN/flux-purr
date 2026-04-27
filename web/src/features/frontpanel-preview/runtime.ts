@@ -357,7 +357,10 @@ export function applyFrontPanelInteraction(
   if (state.mode === 'key-test') return state
 
   if (state.route === 'dashboard') {
-    if (interaction.key === 'up' && interaction.gesture === 'short') {
+    if (
+      interaction.key === 'up' &&
+      (interaction.gesture === 'short' || interaction.gesture === 'repeat')
+    ) {
       const targetTempC = clampTargetTemp(state.targetTempC + 1)
       return reconcileCoolingState({
         ...state,
@@ -365,7 +368,10 @@ export function applyFrontPanelInteraction(
         selectedPresetIndex: matchingPresetIndex(state, targetTempC) ?? state.selectedPresetIndex,
       })
     }
-    if (interaction.key === 'down' && interaction.gesture === 'short') {
+    if (
+      interaction.key === 'down' &&
+      (interaction.gesture === 'short' || interaction.gesture === 'repeat')
+    ) {
       const targetTempC = clampTargetTemp(state.targetTempC - 1)
       return reconcileCoolingState({
         ...state,
@@ -460,14 +466,20 @@ export function applyFrontPanelInteraction(
       const entry = nextPresetSlot(state)
       return entry ? { ...state, selectedPresetIndex: entry.index } : state
     }
-    if (interaction.key === 'up' && interaction.gesture === 'short') {
+    if (
+      interaction.key === 'up' &&
+      (interaction.gesture === 'short' || interaction.gesture === 'repeat')
+    ) {
       const nextPresets = [...state.presetsC]
       const currentValue = nextPresets[state.selectedPresetIndex]
       const nextValue = clampTargetTemp(currentValue == null ? 0 : currentValue + 1)
       nextPresets[state.selectedPresetIndex] = nextValue
       return reconcileCoolingState({ ...state, presetsC: nextPresets, targetTempC: nextValue })
     }
-    if (interaction.key === 'down' && interaction.gesture === 'short') {
+    if (
+      interaction.key === 'down' &&
+      (interaction.gesture === 'short' || interaction.gesture === 'repeat')
+    ) {
       const nextPresets = [...state.presetsC]
       const currentValue = nextPresets[state.selectedPresetIndex]
       if (currentValue == null || currentValue <= 0) {
@@ -530,7 +542,7 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
       kind: 'dashboard',
       title: 'Dashboard',
       subtitle:
-        'Up/down ±1°C · center short heat · center double active cooling · center long menu',
+        'Up/down ±1°C, hold repeats · center short heat · center double active cooling · center long menu',
       currentTempC: state.currentTempC,
       currentTempDeciC: state.currentTempDeciC,
       targetTempC: state.targetTempC,
@@ -559,7 +571,7 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
     return {
       kind: 'preset-temp',
       title: 'Preset Temp',
-      subtitle: 'All preset slots · right next · up/down set value or ---',
+      subtitle: 'All preset slots · right next · up/down set value or ---, hold repeats',
       selectedPresetIndex: state.selectedPresetIndex,
       presetsC: state.presetsC,
       temperatureThresholdsC: frontPanelDefaultThresholdsC,

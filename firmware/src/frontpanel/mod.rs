@@ -5,6 +5,9 @@ pub mod render;
 pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
 pub const FRONTPANEL_LONG_PRESS_MS: u64 = 500;
 pub const FRONTPANEL_DOUBLE_CLICK_MS: u64 = 250;
+pub const FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS: u64 = 200;
+pub const FRONTPANEL_REPEAT_FAST_AFTER_MS: u64 = 1_500;
+pub const FRONTPANEL_REPEAT_FAST_INTERVAL_MS: u64 = 100;
 pub const FRONTPANEL_PRESET_COUNT: usize = 10;
 pub const FRONTPANEL_TARGET_TEMP_MIN_C: i16 = 0;
 pub const FRONTPANEL_TARGET_TEMP_MAX_C: i16 = 400;
@@ -92,6 +95,7 @@ pub enum KeyGesture {
     ShortPress,
     DoublePress,
     LongPress,
+    RepeatPress,
 }
 
 impl KeyGesture {
@@ -100,6 +104,7 @@ impl KeyGesture {
             Self::ShortPress => "SHORT",
             Self::DoublePress => "DOUBLE",
             Self::LongPress => "LONG",
+            Self::RepeatPress => "REPEAT",
         }
     }
 }
@@ -196,6 +201,7 @@ struct KeyTracker {
     last_raw_change_ms: u64,
     press_started_ms: Option<u64>,
     long_fired: bool,
+    next_repeat_ms: Option<u64>,
     pending_short_release_ms: Option<u64>,
 }
 
@@ -207,6 +213,7 @@ impl KeyTracker {
             last_raw_change_ms: 0,
             press_started_ms: None,
             long_fired: false,
+            next_repeat_ms: None,
             pending_short_release_ms: None,
         }
     }
@@ -267,9 +274,13 @@ impl FrontPanelInputController {
                 if pressed {
                     tracker.press_started_ms = Some(now_ms);
                     tracker.long_fired = false;
-                } else if !tracker.stable_pressed {
-                    tracker.press_started_ms = None;
-                    tracker.long_fired = false;
+                    tracker.next_repeat_ms = None;
+                } else {
+                    tracker.next_repeat_ms = None;
+                    if !tracker.stable_pressed {
+                        tracker.press_started_ms = None;
+                        tracker.long_fired = false;
+                    }
                 }
             }
 
@@ -291,23 +302,27 @@ impl FrontPanelInputController {
                 tracker.stable_pressed = tracker.raw_pressed;
                 if tracker.stable_pressed {
                     tracker.long_fired = false;
-                } else if tracker.press_started_ms.take().is_some() && !tracker.long_fired {
-                    if let Some(previous_release_ms) = tracker.pending_short_release_ms {
-                        if now_ms.saturating_sub(previous_release_ms)
-                            <= self.timings.double_click_ms
-                        {
-                            tracker.pending_short_release_ms = None;
-                            let _ = result.events.push(KeyEvent {
-                                raw_key,
-                                key: logical_key,
-                                gesture: KeyGesture::DoublePress,
-                                at_ms: now_ms,
-                            });
+                    tracker.next_repeat_ms = None;
+                } else {
+                    tracker.next_repeat_ms = None;
+                    if tracker.press_started_ms.take().is_some() && !tracker.long_fired {
+                        if let Some(previous_release_ms) = tracker.pending_short_release_ms {
+                            if now_ms.saturating_sub(previous_release_ms)
+                                <= self.timings.double_click_ms
+                            {
+                                tracker.pending_short_release_ms = None;
+                                let _ = result.events.push(KeyEvent {
+                                    raw_key,
+                                    key: logical_key,
+                                    gesture: KeyGesture::DoublePress,
+                                    at_ms: now_ms,
+                                });
+                            } else {
+                                tracker.pending_short_release_ms = Some(now_ms);
+                            }
                         } else {
                             tracker.pending_short_release_ms = Some(now_ms);
                         }
-                    } else {
-                        tracker.pending_short_release_ms = Some(now_ms);
                     }
                 }
             }
@@ -320,10 +335,44 @@ impl FrontPanelInputController {
             {
                 tracker.long_fired = true;
                 tracker.pending_short_release_ms = None;
+                tracker.next_repeat_ms =
+                    Some(now_ms.saturating_add(FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS));
                 let _ = result.events.push(KeyEvent {
                     raw_key,
                     key: logical_key,
                     gesture: KeyGesture::LongPress,
+                    at_ms: now_ms,
+                });
+            }
+
+            if tracker.stable_pressed
+                && tracker.raw_pressed
+                && tracker.long_fired
+                && matches!(logical_key, FrontPanelKey::Up | FrontPanelKey::Down)
+                && tracker
+                    .next_repeat_ms
+                    .is_some_and(|repeat_ms| now_ms >= repeat_ms)
+            {
+                let interval_ms = tracker
+                    .press_started_ms
+                    .map(|started| {
+                        if now_ms.saturating_sub(started)
+                            >= self
+                                .timings
+                                .long_press_ms
+                                .saturating_add(FRONTPANEL_REPEAT_FAST_AFTER_MS)
+                        {
+                            FRONTPANEL_REPEAT_FAST_INTERVAL_MS
+                        } else {
+                            FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS
+                        }
+                    })
+                    .unwrap_or(FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS);
+                tracker.next_repeat_ms = Some(now_ms.saturating_add(interval_ms));
+                let _ = result.events.push(KeyEvent {
+                    raw_key,
+                    key: logical_key,
+                    gesture: KeyGesture::RepeatPress,
                     at_ms: now_ms,
                 });
             }
@@ -567,11 +616,11 @@ impl FrontPanelUiState {
 
     fn apply_dashboard_event(&mut self, event: KeyEvent) -> bool {
         match (event.key, event.gesture) {
-            (FrontPanelKey::Up, KeyGesture::ShortPress) => {
+            (FrontPanelKey::Up, KeyGesture::ShortPress | KeyGesture::RepeatPress) => {
                 self.set_target_temp_c(self.target_temp_c.saturating_add(1));
                 true
             }
-            (FrontPanelKey::Down, KeyGesture::ShortPress) => {
+            (FrontPanelKey::Down, KeyGesture::ShortPress | KeyGesture::RepeatPress) => {
                 self.set_target_temp_c(self.target_temp_c.saturating_sub(1));
                 true
             }
@@ -654,7 +703,7 @@ impl FrontPanelUiState {
                 self.selected_preset_slot = self.retreat_preset_slot();
                 true
             }
-            (FrontPanelKey::Up, KeyGesture::ShortPress) => {
+            (FrontPanelKey::Up, KeyGesture::ShortPress | KeyGesture::RepeatPress) => {
                 self.ensure_selected_preset_slot();
                 let next_temp = self.presets_c[self.selected_preset_slot]
                     .map(|temp| temp.saturating_add(1))
@@ -664,7 +713,7 @@ impl FrontPanelUiState {
                 self.set_target_temp_c(next_temp);
                 true
             }
-            (FrontPanelKey::Down, KeyGesture::ShortPress) => {
+            (FrontPanelKey::Down, KeyGesture::ShortPress | KeyGesture::RepeatPress) => {
                 self.ensure_selected_preset_slot();
                 match self.presets_c[self.selected_preset_slot] {
                     Some(temp) if temp > FRONTPANEL_TARGET_TEMP_MIN_C => {
@@ -905,6 +954,123 @@ mod tests {
         assert_eq!(events[0].key, FrontPanelKey::Right);
         assert_eq!(events[0].gesture, KeyGesture::LongPress);
         assert_eq!(events[0].at_ms, 510);
+    }
+
+    #[test]
+    fn repeat_press_waits_until_after_long_press_threshold() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Up])),
+                (30, raw_state(&[RawFrontPanelKey::Up])),
+                (509, raw_state(&[RawFrontPanelKey::Up])),
+                (510, raw_state(&[RawFrontPanelKey::Up])),
+                (709, raw_state(&[RawFrontPanelKey::Up])),
+            ],
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, FrontPanelKey::Up);
+        assert_eq!(events[0].gesture, KeyGesture::LongPress);
+    }
+
+    #[test]
+    fn repeat_press_accelerates_after_the_initial_hold_window() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Up])),
+                (30, raw_state(&[RawFrontPanelKey::Up])),
+                (510, raw_state(&[RawFrontPanelKey::Up])),
+                (710, raw_state(&[RawFrontPanelKey::Up])),
+                (910, raw_state(&[RawFrontPanelKey::Up])),
+                (1_110, raw_state(&[RawFrontPanelKey::Up])),
+                (1_310, raw_state(&[RawFrontPanelKey::Up])),
+                (1_510, raw_state(&[RawFrontPanelKey::Up])),
+                (1_710, raw_state(&[RawFrontPanelKey::Up])),
+                (1_910, raw_state(&[RawFrontPanelKey::Up])),
+                (2_110, raw_state(&[RawFrontPanelKey::Up])),
+                (2_210, raw_state(&[RawFrontPanelKey::Up])),
+            ],
+        );
+
+        assert_eq!(events[0].gesture, KeyGesture::LongPress);
+        let repeat_events: Vec<KeyEvent, 16> = events
+            .iter()
+            .copied()
+            .filter(|event| event.gesture == KeyGesture::RepeatPress)
+            .collect();
+        assert_eq!(repeat_events.len(), 9);
+        assert_eq!(repeat_events[0].at_ms, 710);
+        assert_eq!(repeat_events[7].at_ms - repeat_events[6].at_ms, 200);
+        assert_eq!(repeat_events[8].at_ms - repeat_events[7].at_ms, 100);
+    }
+
+    #[test]
+    fn repeat_press_stops_on_release_without_short_backfill() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Left])),
+                (30, raw_state(&[RawFrontPanelKey::Left])),
+                (510, raw_state(&[RawFrontPanelKey::Left])),
+                (710, raw_state(&[RawFrontPanelKey::Left])),
+                (720, raw_state(&[])),
+                (740, raw_state(&[])),
+                (1_000, raw_state(&[])),
+            ],
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].gesture, KeyGesture::LongPress);
+        assert_eq!(events[1].gesture, KeyGesture::RepeatPress);
+    }
+
+    #[test]
+    fn repeat_press_stops_immediately_on_raw_release_edge() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Up])),
+                (30, raw_state(&[RawFrontPanelKey::Up])),
+                (510, raw_state(&[RawFrontPanelKey::Up])),
+                (700, raw_state(&[])),
+                (710, raw_state(&[])),
+                (730, raw_state(&[])),
+                (1_000, raw_state(&[])),
+            ],
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].gesture, KeyGesture::LongPress);
+    }
+
+    #[test]
+    fn repeat_press_only_emits_for_vertical_temperature_keys() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Right])),
+                (30, raw_state(&[RawFrontPanelKey::Right])),
+                (510, raw_state(&[RawFrontPanelKey::Right])),
+                (710, raw_state(&[RawFrontPanelKey::Right])),
+                (910, raw_state(&[RawFrontPanelKey::Right])),
+            ],
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, FrontPanelKey::Right);
+        assert_eq!(events[0].gesture, KeyGesture::LongPress);
     }
 
     #[test]
@@ -1160,6 +1326,28 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_repeat_press_adjusts_target_temperature() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Up,
+            key: FrontPanelKey::Up,
+            gesture: KeyGesture::RepeatPress,
+            at_ms: 710,
+        }));
+        assert_eq!(state.target_temp_c, 101);
+
+        state.set_target_temp_c(FRONTPANEL_TARGET_TEMP_MIN_C);
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Down,
+            key: FrontPanelKey::Down,
+            gesture: KeyGesture::RepeatPress,
+            at_ms: 910,
+        }));
+        assert_eq!(state.target_temp_c, FRONTPANEL_TARGET_TEMP_MIN_C);
+    }
+
+    #[test]
     fn preset_temp_editing_clamps_to_working_range() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         state.route = FrontPanelRoute::PresetTemp;
@@ -1174,6 +1362,32 @@ mod tests {
         }));
         assert_eq!(state.presets_c[3], Some(FRONTPANEL_TARGET_TEMP_MAX_C));
         assert_eq!(state.target_temp_c, FRONTPANEL_TARGET_TEMP_MAX_C);
+    }
+
+    #[test]
+    fn preset_temp_repeat_press_crosses_between_zero_and_disabled_state() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.route = FrontPanelRoute::PresetTemp;
+        state.selected_preset_slot = 2;
+        state.presets_c[2] = None;
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Up,
+            key: FrontPanelKey::Up,
+            gesture: KeyGesture::RepeatPress,
+            at_ms: 710,
+        }));
+        assert_eq!(state.presets_c[2], Some(0));
+        assert_eq!(state.target_temp_c, 0);
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::Down,
+            key: FrontPanelKey::Down,
+            gesture: KeyGesture::RepeatPress,
+            at_ms: 910,
+        }));
+        assert_eq!(state.presets_c[2], None);
+        assert_eq!(state.target_temp_c, 0);
     }
 
     #[test]

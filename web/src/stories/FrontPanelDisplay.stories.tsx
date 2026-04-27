@@ -314,6 +314,11 @@ export const KeyTestInteractions: Story = {
       await userEvent.click(await canvas.findByTestId('frontpanel-action-left-long'))
       await expect(debug).toHaveTextContent('keyTest: D / L / LONG')
     })
+
+    await step('repeat press reports vertical hold-repeat gesture', async () => {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-repeat'))
+      await expect(debug).toHaveTextContent('keyTest: U / U / REPEAT')
+    })
   },
 }
 
@@ -328,7 +333,9 @@ export const AppInteractionFlow: Story = {
       await expect(debug).toHaveTextContent('route: dashboard')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
       await expect(debug).toHaveTextContent('targetTempC: 101')
-      for (let index = 0; index < 19; index += 1) {
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-repeat'))
+      await expect(debug).toHaveTextContent('targetTempC: 102')
+      for (let index = 0; index < 18; index += 1) {
         await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
       }
       await expect(debug).toHaveTextContent('targetTempC: 120')
@@ -362,7 +369,7 @@ export const AppInteractionFlow: Story = {
       await expect(debug).toHaveTextContent('selectedMenuItem: preset-temp')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: preset-temp')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-repeat'))
       await expect(debug).toHaveTextContent('targetTempC: 121')
       await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
       await expect(debug).toHaveTextContent('route: menu')

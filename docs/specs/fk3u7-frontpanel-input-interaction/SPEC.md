@@ -91,14 +91,14 @@
 
 - `RawFrontPanelKey`：表示物理采样位。
 - `FrontPanelKey`：逻辑方向键，固定为 `Center / Right / Down / Left / Up`。
-- `KeyGesture`：`ShortPress / DoublePress / LongPress`。
+- `KeyGesture`：`ShortPress / DoublePress / LongPress / RepeatPress`。
 - `KeyEvent`：一条稳定事件，包含逻辑键、手势与诊断元数据。
 - `FrontPanelRuntimeMode`：`KeyTest` 或 `App`。
 
 ### Key Test（阶段 1）
 
 - 默认停留在 `Key Test` 路由时，五向示意图全部白色。
-- 任意键稳定触发 `short / double / long` 后，对应方向图形切换到目标颜色。
+- 任意键稳定触发 `short / double / long` 后，对应方向图形切换到目标颜色；`up/down` 的 hold-repeat 诊断显示为 `repeat`。
 - 同时显示：
   - raw key label
   - logical key label
@@ -108,8 +108,8 @@
 
 ### Dashboard（阶段 2）
 
-- `Up short`：`targetTempC += 1`
-- `Down short`：`targetTempC -= 1`
+- `Up short / repeat`：`targetTempC += 1`
+- `Down short / repeat`：`targetTempC -= 1`
 - `Left short`：跳到严格小于当前温度、且最接近的已启用预设值
 - `Right short`：跳到严格大于当前温度、且最接近的已启用预设值
 - `Center short`：切换 `heaterEnabled`
@@ -127,8 +127,8 @@
 
 - `Preset Temp`
   - `Right short`：按槽位顺序循环到下一个 `M1-M10`
-  - `Up short`：对当前槽位做 `+1°C`；若当前为 `---`，则恢复到 `0°C`
-  - `Down short`：对当前槽位做 `-1°C`；若值降到 `0°C` 以下，则变成 `---`
+  - `Up short / repeat`：对当前槽位做 `+1°C`；若当前为 `---`，则恢复到 `0°C`
+  - `Down short / repeat`：对当前槽位做 `-1°C`；若值降到 `0°C` 以下，则变成 `---`
   - `Left short / Center short / Center long`：返回 `Menu`
 - `Active Cooling`
   - 只读显示当前安全策略（overtemp-only 风扇包线说明）
@@ -141,6 +141,8 @@
 
 - 不同方向键的 pending click 不得互相串扰。
 - 短按必须等待双击窗口收敛后再发出，避免误判。
+- 长按阈值仍为 `500ms`；`up/down` 到达长按后进入温度 hold-repeat，先约每 `200ms` 产生一次 `repeat`，持续约 `1.5s` 后加速到约每 `100ms`，释放即停止且不得回补 `short`。
+- hold-repeat 只用于 `up/down` 温度调整；`left/right/center` 长按仍只产生单次 `long`，不得重复触发导航或开关动作。
 - 当没有更低或更高的已启用预设时，Dashboard 左/右保持当前温度不变。
 - 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入必须被消费为确认动作，不得顺带触发页面导航或 heater/fan 切换。
 - mock 页面不因无效手势崩溃或跳到未知路由。
@@ -165,13 +167,13 @@ None
 
 - Given `Key Test` 模式，When 任意物理方向键或中键在真机上触发短按 / 双击 / 长按，Then 屏幕会点亮正确的逻辑方向，并显示匹配的 raw/logical/gesture 诊断信息。
 - Given `Key Test` 模式，When 单击一次，Then 不会被误判成双击；When 长按一次，Then 只发出一次长按事件；When 换键测试，Then 不会串扰前一个键的 pending click。
-- Given `Dashboard`，When 主人按上/下，Then 目标温度每次严格 `±1°C`。
+- Given `Dashboard`，When 主人短按或长按保持上/下，Then 目标温度每次事件严格 `±1°C`，长按保持按先慢后快节奏连续调整。
 - Given `Dashboard`，When 主人按左/右，Then 跳转基于已启用预设的实际温度值排序，而不是按槽位编号。
 - Given `Dashboard`，When 当前温度命中某个预设值或刚从预设值调离，Then 界面仍不显示当前预设槽位标签。
 - Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、切换主动降温、进入菜单，不发生混用。
 - Given 一级菜单，When 主人左右移动并中键进入，Then 始终只在四个固定项之间切换。
 - Given 任意子页，When 主人中键短按或长按，Then 都能回到上一级菜单；When 主人按左键，Then 也能返回菜单。
-- Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并重新调回有效温度。
+- Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并通过短按或 hold-repeat 上调重新调回有效温度。
 - Given `WiFi Info / Device Info`，When 主人操作返回手势，Then 页面只发生返回，不产生额外 mock 副作用。
 - Given runtime 刚从活动 fault 退出且仍在 attention reminder pending，When 主人第一次进行任意输入，Then 该输入只会确认/静音，不会执行原本对应的 heater/fan/menu 动作。
 - Given Storybook docs/gallery，When 打开故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页和两条交互流故事。
@@ -242,6 +244,10 @@ None
 #### Dashboard
 
 ![Front panel Storybook dashboard](./assets/storybook-dashboard.png)
+
+#### Hold Repeat App Flow
+
+![Front panel Storybook hold repeat app flow](./assets/storybook-hold-repeat-app-flow.png)
 
 #### Preset Temp
 
