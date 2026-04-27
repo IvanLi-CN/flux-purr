@@ -40,7 +40,9 @@ use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(target_arch = "xtensa", test))]
-use flux_purr_firmware::frontpanel::{FanDisplayState, FrontPanelUiState, HeaterLockReason};
+use flux_purr_firmware::frontpanel::{
+    FanDisplayState, FrontPanelRawState, FrontPanelUiState, HeaterLockReason,
+};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::MemoryConfig;
 #[cfg(target_arch = "xtensa")]
@@ -59,8 +61,8 @@ use flux_purr_firmware::{
     board::s3_frontpanel,
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
-        FrontPanelInputController, FrontPanelInputTimings, FrontPanelKeyMap, FrontPanelRawState,
-        FrontPanelRoute, FrontPanelRuntimeMode, RawFrontPanelKey, render::render_frontpanel_ui,
+        FrontPanelInputController, FrontPanelInputTimings, FrontPanelKeyMap, FrontPanelRoute,
+        FrontPanelRuntimeMode, RawFrontPanelKey, render::render_frontpanel_ui,
     },
 };
 #[cfg(target_arch = "xtensa")]
@@ -777,6 +779,19 @@ fn consume_attention_input_if_pending(
     *next_attention_reminder_ms = None;
     let _ = buzzer.stop();
     true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn should_consume_attention_raw_input(
+    attention_pending_after_fault_clear: bool,
+    suppressing_current_input: bool,
+    previous_raw_state: FrontPanelRawState,
+    current_raw_state: FrontPanelRawState,
+) -> bool {
+    attention_pending_after_fault_clear
+        && !suppressing_current_input
+        && current_raw_state != previous_raw_state
+        && current_raw_state.pressed_mask() != 0
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1759,6 +1774,7 @@ async fn main(_spawner: Spawner) {
     let mut buzzer = BuzzerController::new();
     let mut last_fault_present = current_rtd_fault.is_some();
     let mut attention_pending_after_fault_clear = false;
+    let mut suppress_attention_ack_input = false;
     let mut next_attention_reminder_ms: Option<u64> = None;
     let mut buzzer_output_applied = BuzzerHardwareState::default();
     if last_fault_present {
@@ -1791,6 +1807,22 @@ async fn main(_spawner: Spawner) {
         let mut needs_redraw = false;
 
         if sample.raw_state != last_raw_state {
+            if should_consume_attention_raw_input(
+                attention_pending_after_fault_clear,
+                suppress_attention_ack_input,
+                last_raw_state,
+                sample.raw_state,
+            ) && consume_attention_input_if_pending(
+                &mut attention_pending_after_fault_clear,
+                &mut next_attention_reminder_ms,
+                &mut buzzer,
+            ) {
+                suppress_attention_ack_input = true;
+                info!(
+                    "fault attention reminder acknowledged -> consume raw input mask={=u8}",
+                    sample.raw_state.pressed_mask(),
+                );
+            }
             ui_state.set_raw_state(sample.raw_state);
             last_raw_state = sample.raw_state;
             info!("raw mask={=u8}", sample.raw_state.pressed_mask());
@@ -1809,6 +1841,15 @@ async fn main(_spawner: Spawner) {
                 event.gesture.label(),
                 event.at_ms,
             );
+            if suppress_attention_ack_input {
+                info!(
+                    "fault attention acknowledgement suppresses event raw={=str} logical={=str} gesture={=str}",
+                    event.raw_key.label(),
+                    event.key.label(),
+                    event.gesture.label(),
+                );
+                continue;
+            }
             if consume_attention_input_if_pending(
                 &mut attention_pending_after_fault_clear,
                 &mut next_attention_reminder_ms,
@@ -1909,6 +1950,9 @@ async fn main(_spawner: Spawner) {
                     );
                 }
             }
+        }
+        if suppress_attention_ack_input && sample.raw_state.pressed_mask() == 0 {
+            suppress_attention_ack_input = false;
         }
 
         if elapsed_ms.saturating_sub(last_control_ms) >= HEATER_CONTROL_INTERVAL_MS {
@@ -2526,6 +2570,38 @@ mod tests {
         assert!(!attention_pending);
         assert_eq!(next_reminder_ms, None);
         assert_eq!(buzzer.active_cue(), None);
+    }
+
+    #[test]
+    fn attention_pending_can_be_acknowledged_by_raw_unsupported_input() {
+        let idle = flux_purr_firmware::frontpanel::FrontPanelRawState::default();
+        let mut unsupported_press = idle;
+        unsupported_press.set_pressed(flux_purr_firmware::frontpanel::RawFrontPanelKey::Up, true);
+
+        assert!(should_consume_attention_raw_input(
+            true,
+            false,
+            idle,
+            unsupported_press,
+        ));
+        assert!(!should_consume_attention_raw_input(
+            true,
+            true,
+            idle,
+            unsupported_press,
+        ));
+        assert!(!should_consume_attention_raw_input(
+            false,
+            false,
+            idle,
+            unsupported_press,
+        ));
+        assert!(!should_consume_attention_raw_input(
+            true,
+            false,
+            unsupported_press,
+            idle,
+        ));
     }
 
     #[test]

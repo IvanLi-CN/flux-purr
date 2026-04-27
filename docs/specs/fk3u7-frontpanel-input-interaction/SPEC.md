@@ -274,6 +274,7 @@ None
 - 2026-04-13: 创建前面板五向输入与交互导航规格，冻结两阶段范围、手势阈值、Key Test 与导航口径。
 - 2026-04-16: 完成真机 Key Test 校准、App runtime mock 导航验证与视觉证据回填；同步 Dashboard 与 Preset Temp 的最终验收口径。
 - 2026-04-27: 将 App runtime 手势识别改为按当前 route 有效输入能力收窄，避免方向键快速连续短按被双击窗口吞掉。
+- 2026-04-27: 保持 fault-clear attention reminder 的任意 raw 输入确认语义，即使该键在当前 route 不生成页面事件。
 
 ## 参考（References）
 
