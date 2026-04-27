@@ -61,8 +61,9 @@ use flux_purr_firmware::{
     board::s3_frontpanel,
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
-        FrontPanelInputController, FrontPanelInputTimings, FrontPanelKeyMap, FrontPanelRoute,
-        FrontPanelRuntimeMode, RawFrontPanelKey, render::render_frontpanel_ui,
+        FRONTPANEL_DEBOUNCE_MS, FRONTPANEL_DOUBLE_CLICK_MS, FrontPanelInputController,
+        FrontPanelInputTimings, FrontPanelKeyMap, FrontPanelRoute, FrontPanelRuntimeMode,
+        KeyGesture, RawFrontPanelKey, render::render_frontpanel_ui,
     },
 };
 #[cfg(target_arch = "xtensa")]
@@ -792,6 +793,22 @@ fn should_consume_attention_raw_input(
         && !suppressing_current_input
         && current_raw_state != previous_raw_state
         && current_raw_state.pressed_mask() != 0
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn should_clear_attention_ack_suppression(
+    suppressing_current_input: bool,
+    waits_for_delayed_event: bool,
+    suppressed_event_seen: bool,
+    current_raw_state: FrontPanelRawState,
+    clear_after_ms: Option<u64>,
+    now_ms: u64,
+) -> bool {
+    suppressing_current_input
+        && current_raw_state.pressed_mask() == 0
+        && (!waits_for_delayed_event
+            || suppressed_event_seen
+            || clear_after_ms.is_some_and(|deadline| now_ms >= deadline))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1775,6 +1792,9 @@ async fn main(_spawner: Spawner) {
     let mut last_fault_present = current_rtd_fault.is_some();
     let mut attention_pending_after_fault_clear = false;
     let mut suppress_attention_ack_input = false;
+    let mut suppress_attention_ack_waits_for_event = false;
+    let mut suppress_attention_ack_event_seen = false;
+    let mut suppress_attention_ack_clear_after_ms: Option<u64> = None;
     let mut next_attention_reminder_ms: Option<u64> = None;
     let mut buzzer_output_applied = BuzzerHardwareState::default();
     if last_fault_present {
@@ -1818,6 +1838,16 @@ async fn main(_spawner: Spawner) {
                 &mut buzzer,
             ) {
                 suppress_attention_ack_input = true;
+                suppress_attention_ack_event_seen = false;
+                suppress_attention_ack_clear_after_ms = None;
+                suppress_attention_ack_waits_for_event =
+                    sample.raw_state.first_pressed().is_some_and(|raw_key| {
+                        let key = FrontPanelKeyMap::default().logical_from_raw(raw_key);
+                        ui_state
+                            .gesture_capabilities()
+                            .gestures_for(key)
+                            .supports(KeyGesture::DoublePress)
+                    });
                 info!(
                     "fault attention reminder acknowledged -> consume raw input mask={=u8}",
                     sample.raw_state.pressed_mask(),
@@ -1848,6 +1878,7 @@ async fn main(_spawner: Spawner) {
                     event.key.label(),
                     event.gesture.label(),
                 );
+                suppress_attention_ack_event_seen = true;
                 continue;
             }
             if consume_attention_input_if_pending(
@@ -1951,8 +1982,29 @@ async fn main(_spawner: Spawner) {
                 }
             }
         }
-        if suppress_attention_ack_input && sample.raw_state.pressed_mask() == 0 {
+        if suppress_attention_ack_input
+            && suppress_attention_ack_waits_for_event
+            && sample.raw_state.pressed_mask() == 0
+            && suppress_attention_ack_clear_after_ms.is_none()
+        {
+            suppress_attention_ack_clear_after_ms = Some(
+                elapsed_ms
+                    .saturating_add(FRONTPANEL_DOUBLE_CLICK_MS)
+                    .saturating_add(FRONTPANEL_DEBOUNCE_MS),
+            );
+        }
+        if should_clear_attention_ack_suppression(
+            suppress_attention_ack_input,
+            suppress_attention_ack_waits_for_event,
+            suppress_attention_ack_event_seen,
+            sample.raw_state,
+            suppress_attention_ack_clear_after_ms,
+            elapsed_ms,
+        ) {
             suppress_attention_ack_input = false;
+            suppress_attention_ack_waits_for_event = false;
+            suppress_attention_ack_event_seen = false;
+            suppress_attention_ack_clear_after_ms = None;
         }
 
         if elapsed_ms.saturating_sub(last_control_ms) >= HEATER_CONTROL_INTERVAL_MS {
@@ -2601,6 +2653,39 @@ mod tests {
             false,
             unsupported_press,
             idle,
+        ));
+    }
+
+    #[test]
+    fn attention_ack_suppression_waits_for_delayed_double_capable_events() {
+        let idle = flux_purr_firmware::frontpanel::FrontPanelRawState::default();
+
+        assert!(should_clear_attention_ack_suppression(
+            true, false, false, idle, None, 1_000,
+        ));
+        assert!(!should_clear_attention_ack_suppression(
+            true,
+            true,
+            false,
+            idle,
+            Some(1_250),
+            1_200,
+        ));
+        assert!(should_clear_attention_ack_suppression(
+            true,
+            true,
+            true,
+            idle,
+            Some(1_250),
+            1_200,
+        ));
+        assert!(should_clear_attention_ack_suppression(
+            true,
+            true,
+            false,
+            idle,
+            Some(1_250),
+            1_250,
         ));
     }
 
