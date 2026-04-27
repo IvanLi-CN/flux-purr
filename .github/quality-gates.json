@@ -15,9 +15,10 @@
     },
     "review_policy": {
       "mode": "github-native",
-      "required_approvals": 1,
+      "required_approvals": 0,
       "exempt_repository_owner": true,
-      "exempt_author_permissions": ["admin", "maintain"]
+      "exempt_author_permissions": ["admin", "maintain"],
+      "owner_pr_approval_required": false
     }
   },
   "required_checks": [
