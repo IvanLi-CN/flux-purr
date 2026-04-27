@@ -17,22 +17,32 @@ interface FrontPanelRuntimeHarnessProps {
   scale?: number
 }
 
-const keyOrder: ReadonlyArray<FrontPanelKeyId> = ['up', 'down', 'left', 'right', 'center']
-const gestureOrder: ReadonlyArray<KeyGestureId> = ['short', 'double', 'long']
 const RUNTIME_TICK_MS = 100
 const COOLING_DISABLED_PULSE_START_TEMP_C = 100
 const COOLING_DISABLED_HEATER_LOCK_TEMP_C = 350
 
-const shortcuts: ReadonlyArray<FrontPanelRuntimeInteraction> = [
-  ...keyOrder.flatMap((key) =>
-    gestureOrder.map((gesture) => ({ key, gesture }) satisfies FrontPanelRuntimeInteraction)
-  ),
-  { key: 'up', gesture: 'repeat' },
-  { key: 'down', gesture: 'repeat' },
+const gestureOptions: ReadonlyArray<{ id: KeyGestureId; label: string }> = [
+  { id: 'short', label: 'Tap' },
+  { id: 'double', label: 'Double' },
+  { id: 'long', label: 'Hold' },
+  { id: 'repeat', label: 'Repeat' },
 ]
 
-function interactionLabel(key: FrontPanelKeyId, gesture: KeyGestureId) {
-  return `${key} ${gesture}`
+const switchKeys: ReadonlyArray<{
+  id: FrontPanelKeyId
+  label: string
+  className: string
+  symbol: string
+}> = [
+  { id: 'up', label: 'Up', className: 'col-start-2 row-start-1', symbol: 'U' },
+  { id: 'left', label: 'Left', className: 'col-start-1 row-start-2', symbol: 'L' },
+  { id: 'center', label: 'Center', className: 'col-start-2 row-start-2', symbol: 'C' },
+  { id: 'right', label: 'Right', className: 'col-start-3 row-start-2', symbol: 'R' },
+  { id: 'down', label: 'Down', className: 'col-start-2 row-start-3', symbol: 'D' },
+]
+
+function canApplyGesture(key: FrontPanelKeyId, gesture: KeyGestureId) {
+  return gesture !== 'repeat' || key === 'up' || key === 'down'
 }
 
 export function FrontPanelRuntimeHarness({
@@ -45,6 +55,7 @@ export function FrontPanelRuntimeHarness({
     [initialState, mode]
   )
   const [state, setState] = useState<FrontPanelRuntimeState>(seedState)
+  const [selectedGesture, setSelectedGesture] = useState<KeyGestureId>('short')
 
   useEffect(() => {
     setState(seedState)
@@ -70,42 +81,98 @@ export function FrontPanelRuntimeHarness({
 
   const screen = useMemo(() => frontPanelRuntimeToScreen(state), [state])
 
+  function applyKey(key: FrontPanelKeyId) {
+    if (!canApplyGesture(key, selectedGesture)) return
+
+    const interaction = {
+      key,
+      gesture: selectedGesture,
+    } satisfies FrontPanelRuntimeInteraction
+
+    setState((current) => applyFrontPanelInteraction(current, interaction))
+  }
+
   return (
     <div
-      className="grid gap-6 lg:grid-cols-[auto_minmax(320px,1fr)]"
+      className="frontpanel-arcade-shell grid gap-6 p-4 sm:p-6 2xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.36fr)]"
       data-testid="frontpanel-runtime-harness"
     >
-      <FrontPanelDisplay screen={screen} scale={scale} />
+      <div className="frontpanel-crt-stage">
+        <div className="frontpanel-marquee">FLUX PURR CRT BAY</div>
+        <div className="frontpanel-crt-screen">
+          <FrontPanelDisplay screen={screen} scale={scale} className="frontpanel-crt-display" />
+        </div>
+        <div className="frontpanel-coin-slot" aria-hidden="true">
+          INSERT COIN
+        </div>
+      </div>
 
-      <div className="grid gap-4 rounded-3xl border border-slate-700/70 bg-slate-950/90 p-5 text-slate-100 shadow-[0_20px_60px_rgba(2,6,23,0.35)]">
-        <div className="grid gap-2">
-          <h3 className="text-lg font-semibold">Interaction driver</h3>
-          <p className="text-sm text-slate-400">
-            Deterministic mock controls for Storybook play coverage and local review.
+      <div className="frontpanel-control-deck">
+        <div className="grid gap-1">
+          <div className="frontpanel-panel-kicker">NEON INPUT RIG</div>
+          <h3 className="text-xl font-bold text-[oklch(0.94_0.04_205)]">Five-way switch</h3>
+          <p className="max-w-[54ch] text-sm leading-6 text-[oklch(0.72_0.05_230)]">
+            One physical control surface drives the front-panel runtime, with repeat locked to the
+            vertical temperature path.
           </p>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-3">
-          {shortcuts.map((interaction) => {
-            const label = interactionLabel(interaction.key, interaction.gesture)
-            return (
-              <button
-                key={label}
-                type="button"
-                className="rounded-2xl border border-slate-700 bg-slate-900 px-4 py-3 text-left text-sm font-medium text-slate-100 transition hover:border-cyan-400/70 hover:text-cyan-200"
-                data-testid={`frontpanel-action-${interaction.key}-${interaction.gesture}`}
-                onClick={() =>
-                  setState((current) => applyFrontPanelInteraction(current, interaction))
-                }
-              >
-                {label}
-              </button>
-            )
-          })}
+        <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <div className="grid content-start gap-2">
+            <div className="frontpanel-section-label">Gesture</div>
+            <div className="grid grid-cols-2 gap-2">
+              {gestureOptions.map((gesture) => {
+                const isSelected = gesture.id === selectedGesture
+                return (
+                  <button
+                    key={gesture.id}
+                    type="button"
+                    className={[
+                      'frontpanel-gesture-button',
+                      isSelected ? 'frontpanel-gesture-button-active' : '',
+                    ].join(' ')}
+                    data-testid={`frontpanel-gesture-${gesture.id}`}
+                    aria-pressed={isSelected}
+                    onClick={() => setSelectedGesture(gesture.id)}
+                  >
+                    {gesture.label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+
+          <div className="grid justify-items-center gap-2">
+            <div className="frontpanel-section-label">Cabinet controls</div>
+            <div className="frontpanel-switch-plate grid grid-cols-3 grid-rows-3 gap-2">
+              {switchKeys.map((switchKey) => {
+                const disabled = !canApplyGesture(switchKey.id, selectedGesture)
+                return (
+                  <button
+                    key={switchKey.id}
+                    type="button"
+                    className={[
+                      switchKey.className,
+                      'frontpanel-switch-key',
+                      disabled ? 'frontpanel-switch-key-disabled' : '',
+                    ].join(' ')}
+                    data-testid={`frontpanel-switch-${switchKey.id}`}
+                    aria-label={`${switchKey.label} ${selectedGesture}`}
+                    disabled={disabled}
+                    onClick={() => applyKey(switchKey.id)}
+                  >
+                    <span aria-hidden="true" className="text-sm font-bold">
+                      {switchKey.symbol}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
         </div>
 
         <div
-          className="grid gap-2 rounded-2xl border border-slate-800 bg-slate-900/80 p-4 text-sm"
+          className="frontpanel-debug-readout grid gap-2 text-sm"
           data-testid="frontpanel-runtime-debug"
         >
           <div>

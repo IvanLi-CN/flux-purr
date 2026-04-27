@@ -245,10 +245,6 @@ None
 
 ![Front panel Storybook dashboard](./assets/storybook-dashboard.png)
 
-#### Hold Repeat App Flow
-
-![Front panel Storybook hold repeat app flow](./assets/storybook-hold-repeat-app-flow.png)
-
 #### Preset Temp
 
 ![Front panel Storybook preset temp](./assets/storybook-preset-temp.png)
