@@ -23,7 +23,7 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 
 - 不改变 Web 与 Firmware 当前产物类型。
 - 不把 release 失败 Telegram 告警替换为新的通知系统。
-- 不在代码中绕过 GitHub 原生 branch protection / review policy。
+- 不在代码中绕过 GitHub 原生 branch protection；仓库 owner 创建的 PR 不要求额外 approval。
 
 ## 范围（Scope）
 
@@ -91,7 +91,7 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 - `main` 必须禁止强推和删除。
 - Commit 签名应为必需项。
 - Required checks 必须使用 GitHub 显示的 job 名称，而不是本地别名。
-- Review policy 优先用 GitHub 原生规则表达；如果工具无法直接写入远端规则，仓库声明即为待对齐的 source of truth。
+- Review policy 优先用 GitHub 原生规则表达；仓库 owner 创建的 PR 不应因缺少 reviewer approval 被阻塞。
 
 ## 验收标准
 
