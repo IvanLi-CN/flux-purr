@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "components": {},
+  "pr_head_sha": "98ffcf846e63605f368a1da41db32d6cd19bb91e",
+  "pr_number": 21,
+  "pr_title": "docs: relax owner review gate",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "manual_rollout_repair",
+  "target_sha": "41d1067b96f479f01217ee034b598281c621203f",
+  "type_label": "type:skip"
+}
