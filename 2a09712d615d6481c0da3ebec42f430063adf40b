@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "components": {},
+  "pr_head_sha": "2d67e44052325a9d66c6d42a51e6f4febb6b327e",
+  "pr_number": 20,
+  "pr_title": "ci: allow label gate to write PR intent",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "2a09712d615d6481c0da3ebec42f430063adf40b",
+  "type_label": "type:skip"
+}
