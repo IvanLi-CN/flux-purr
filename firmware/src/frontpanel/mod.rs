@@ -5,9 +5,9 @@ pub mod render;
 pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
 pub const FRONTPANEL_LONG_PRESS_MS: u64 = 500;
 pub const FRONTPANEL_DOUBLE_CLICK_MS: u64 = 250;
-pub const FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS: u64 = 200;
+pub const FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS: u64 = 120;
 pub const FRONTPANEL_REPEAT_FAST_AFTER_MS: u64 = 1_500;
-pub const FRONTPANEL_REPEAT_FAST_INTERVAL_MS: u64 = 100;
+pub const FRONTPANEL_REPEAT_FAST_INTERVAL_MS: u64 = 60;
 pub const FRONTPANEL_PRESET_COUNT: usize = 10;
 pub const FRONTPANEL_TARGET_TEMP_MIN_C: i16 = 0;
 pub const FRONTPANEL_TARGET_TEMP_MAX_C: i16 = 400;
@@ -1106,7 +1106,7 @@ mod tests {
                 (30, raw_state(&[RawFrontPanelKey::Up])),
                 (509, raw_state(&[RawFrontPanelKey::Up])),
                 (510, raw_state(&[RawFrontPanelKey::Up])),
-                (709, raw_state(&[RawFrontPanelKey::Up])),
+                (629, raw_state(&[RawFrontPanelKey::Up])),
             ],
         );
 
@@ -1125,15 +1125,20 @@ mod tests {
                 (10, raw_state(&[RawFrontPanelKey::Up])),
                 (30, raw_state(&[RawFrontPanelKey::Up])),
                 (510, raw_state(&[RawFrontPanelKey::Up])),
-                (710, raw_state(&[RawFrontPanelKey::Up])),
-                (910, raw_state(&[RawFrontPanelKey::Up])),
+                (630, raw_state(&[RawFrontPanelKey::Up])),
+                (750, raw_state(&[RawFrontPanelKey::Up])),
+                (870, raw_state(&[RawFrontPanelKey::Up])),
+                (990, raw_state(&[RawFrontPanelKey::Up])),
                 (1_110, raw_state(&[RawFrontPanelKey::Up])),
-                (1_310, raw_state(&[RawFrontPanelKey::Up])),
-                (1_510, raw_state(&[RawFrontPanelKey::Up])),
+                (1_230, raw_state(&[RawFrontPanelKey::Up])),
+                (1_350, raw_state(&[RawFrontPanelKey::Up])),
+                (1_470, raw_state(&[RawFrontPanelKey::Up])),
+                (1_590, raw_state(&[RawFrontPanelKey::Up])),
                 (1_710, raw_state(&[RawFrontPanelKey::Up])),
-                (1_910, raw_state(&[RawFrontPanelKey::Up])),
-                (2_110, raw_state(&[RawFrontPanelKey::Up])),
-                (2_210, raw_state(&[RawFrontPanelKey::Up])),
+                (1_830, raw_state(&[RawFrontPanelKey::Up])),
+                (1_950, raw_state(&[RawFrontPanelKey::Up])),
+                (2_070, raw_state(&[RawFrontPanelKey::Up])),
+                (2_130, raw_state(&[RawFrontPanelKey::Up])),
             ],
         );
 
@@ -1143,10 +1148,10 @@ mod tests {
             .copied()
             .filter(|event| event.gesture == KeyGesture::RepeatPress)
             .collect();
-        assert_eq!(repeat_events.len(), 9);
-        assert_eq!(repeat_events[0].at_ms, 710);
-        assert_eq!(repeat_events[7].at_ms - repeat_events[6].at_ms, 200);
-        assert_eq!(repeat_events[8].at_ms - repeat_events[7].at_ms, 100);
+        assert_eq!(repeat_events.len(), 14);
+        assert_eq!(repeat_events[0].at_ms, 630);
+        assert_eq!(repeat_events[12].at_ms - repeat_events[11].at_ms, 120);
+        assert_eq!(repeat_events[13].at_ms - repeat_events[12].at_ms, 60);
     }
 
     #[test]

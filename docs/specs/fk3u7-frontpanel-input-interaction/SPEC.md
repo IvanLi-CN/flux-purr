@@ -142,7 +142,7 @@
 
 - 不同方向键的 pending click 不得互相串扰。
 - 只有当前 route 支持同一逻辑键双击时，短按才必须等待双击窗口收敛；只支持短按的方向键必须在释放去抖后立即发出短按，避免快速连续单击被合成为无效双击。
-- 长按阈值仍为 `500ms`；`up/down` 到达长按后进入温度 hold-repeat，先约每 `200ms` 产生一次 `repeat`，持续约 `1.5s` 后加速到约每 `100ms`，释放即停止且不得回补 `short`。
+- 长按阈值仍为 `500ms`；`up/down` 到达长按后进入温度 hold-repeat，先约每 `120ms` 产生一次 `repeat`，持续约 `1.5s` 后加速到约每 `60ms`，释放即停止且不得回补 `short`。
 - hold-repeat 只用于 `up/down` 温度调整；`left/right/center` 长按仍只产生单次 `long`，不得重复触发导航或开关动作。
 - 当没有更低或更高的已启用预设时，Dashboard 左/右保持当前温度不变。
 - 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入必须被消费为确认动作，不得顺带触发页面导航或 heater/fan 切换。
