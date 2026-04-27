@@ -1794,6 +1794,7 @@ async fn main(_spawner: Spawner) {
     let mut suppress_attention_ack_input = false;
     let mut suppress_attention_ack_waits_for_event = false;
     let mut suppress_attention_ack_event_seen = false;
+    let mut suppress_attention_ack_clear_delay_ms = FRONTPANEL_DEBOUNCE_MS;
     let mut suppress_attention_ack_clear_after_ms: Option<u64> = None;
     let mut next_attention_reminder_ms: Option<u64> = None;
     let mut buzzer_output_applied = BuzzerHardwareState::default();
@@ -1840,13 +1841,18 @@ async fn main(_spawner: Spawner) {
                 suppress_attention_ack_input = true;
                 suppress_attention_ack_event_seen = false;
                 suppress_attention_ack_clear_after_ms = None;
+                suppress_attention_ack_clear_delay_ms = FRONTPANEL_DEBOUNCE_MS;
                 suppress_attention_ack_waits_for_event =
                     sample.raw_state.first_pressed().is_some_and(|raw_key| {
                         let key = FrontPanelKeyMap::default().logical_from_raw(raw_key);
-                        ui_state
-                            .gesture_capabilities()
-                            .gestures_for(key)
-                            .supports(KeyGesture::DoublePress)
+                        let gestures = ui_state.gesture_capabilities().gestures_for(key);
+                        if gestures.supports(KeyGesture::DoublePress) {
+                            suppress_attention_ack_clear_delay_ms =
+                                FRONTPANEL_DOUBLE_CLICK_MS.saturating_add(FRONTPANEL_DEBOUNCE_MS);
+                        }
+                        gestures.supports(KeyGesture::ShortPress)
+                            || gestures.supports(KeyGesture::DoublePress)
+                            || gestures.supports(KeyGesture::LongPress)
                     });
                 info!(
                     "fault attention reminder acknowledged -> consume raw input mask={=u8}",
@@ -1987,11 +1993,8 @@ async fn main(_spawner: Spawner) {
             && sample.raw_state.pressed_mask() == 0
             && suppress_attention_ack_clear_after_ms.is_none()
         {
-            suppress_attention_ack_clear_after_ms = Some(
-                elapsed_ms
-                    .saturating_add(FRONTPANEL_DOUBLE_CLICK_MS)
-                    .saturating_add(FRONTPANEL_DEBOUNCE_MS),
-            );
+            suppress_attention_ack_clear_after_ms =
+                Some(elapsed_ms.saturating_add(suppress_attention_ack_clear_delay_ms));
         }
         if should_clear_attention_ack_suppression(
             suppress_attention_ack_input,
@@ -2004,6 +2007,7 @@ async fn main(_spawner: Spawner) {
             suppress_attention_ack_input = false;
             suppress_attention_ack_waits_for_event = false;
             suppress_attention_ack_event_seen = false;
+            suppress_attention_ack_clear_delay_ms = FRONTPANEL_DEBOUNCE_MS;
             suppress_attention_ack_clear_after_ms = None;
         }
 
@@ -2657,11 +2661,27 @@ mod tests {
     }
 
     #[test]
-    fn attention_ack_suppression_waits_for_delayed_double_capable_events() {
+    fn attention_ack_suppression_waits_for_delayed_supported_events() {
         let idle = flux_purr_firmware::frontpanel::FrontPanelRawState::default();
 
         assert!(should_clear_attention_ack_suppression(
             true, false, false, idle, None, 1_000,
+        ));
+        assert!(!should_clear_attention_ack_suppression(
+            true,
+            true,
+            false,
+            idle,
+            Some(1_020),
+            1_019,
+        ));
+        assert!(should_clear_attention_ack_suppression(
+            true,
+            true,
+            false,
+            idle,
+            Some(1_020),
+            1_020,
         ));
         assert!(!should_clear_attention_ack_suppression(
             true,
