@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:stable",
+  "components": {
+    "firmware": {
+      "effective_version": "0.2.5",
+      "tag": "fw/v0.2.5"
+    },
+    "web": {
+      "effective_version": "0.2.8",
+      "tag": "web/v0.2.8"
+    }
+  },
+  "pr_head_sha": "57dc58db7e68c37685585c2c13a951acb005b226",
+  "pr_number": 18,
+  "pr_title": "fix(firmware): make frontpanel gestures route aware",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "e6d6dd6ff445918078234435d96a862257b4eaa0",
+  "type_label": "type:patch"
+}
