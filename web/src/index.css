@@ -129,3 +129,290 @@
     @apply bg-background text-foreground;
   }
 }
+
+@keyframes arcade-crt-scan {
+  0% {
+    transform: translateY(-8px);
+  }
+  100% {
+    transform: translateY(8px);
+  }
+}
+
+@keyframes arcade-coin-pulse {
+  0%,
+  100% {
+    opacity: 0.42;
+    text-shadow: 0 0 4px oklch(0.72 0.18 42 / 45%);
+  }
+  50% {
+    opacity: 1;
+    text-shadow:
+      0 0 10px oklch(0.78 0.2 42 / 80%),
+      0 0 24px oklch(0.68 0.22 30 / 48%);
+  }
+}
+
+@layer components {
+  .frontpanel-arcade-shell {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid oklch(0.32 0.08 256 / 74%);
+    border-radius: 10px;
+    background:
+      radial-gradient(circle at 30% 20%, oklch(0.44 0.18 198 / 22%), transparent 34%),
+      radial-gradient(circle at 84% 70%, oklch(0.5 0.2 330 / 18%), transparent 34%),
+      linear-gradient(
+        145deg,
+        oklch(0.12 0.026 262) 0%,
+        oklch(0.08 0.018 271) 42%,
+        oklch(0.055 0.014 275) 100%
+      );
+    box-shadow:
+      inset 0 1px 0 oklch(0.72 0.08 225 / 18%),
+      inset 0 -18px 44px oklch(0.02 0.01 270 / 72%),
+      0 28px 80px oklch(0.02 0.02 270 / 55%);
+  }
+
+  .frontpanel-arcade-shell::before {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    content: "";
+    background:
+      linear-gradient(transparent 50%, oklch(0.98 0.02 210 / 4%) 50%),
+      linear-gradient(
+        90deg,
+        oklch(0.72 0.22 25 / 3%),
+        oklch(0.82 0.18 160 / 2%),
+        oklch(0.68 0.2 286 / 3%)
+      );
+    background-size:
+      100% 4px,
+      6px 100%;
+    mix-blend-mode: screen;
+    opacity: 0.55;
+  }
+
+  .frontpanel-crt-stage {
+    position: relative;
+    display: grid;
+    align-content: center;
+    gap: 14px;
+    min-height: 100%;
+    padding: 18px;
+    border: 1px solid oklch(0.28 0.06 250 / 86%);
+    border-radius: 9px;
+    background:
+      linear-gradient(
+        180deg,
+        oklch(0.18 0.035 260) 0%,
+        oklch(0.08 0.02 270) 62%,
+        oklch(0.045 0.015 280) 100%
+      ),
+      repeating-linear-gradient(90deg, transparent 0 10px, oklch(0.6 0.08 240 / 4%) 10px 11px);
+    box-shadow:
+      inset 0 0 0 4px oklch(0.03 0.015 270 / 70%),
+      inset 0 14px 34px oklch(0.72 0.12 210 / 7%);
+  }
+
+  .frontpanel-marquee,
+  .frontpanel-panel-kicker,
+  .frontpanel-section-label,
+  .frontpanel-coin-slot {
+    font-family: "Space Grotesk", "Noto Sans SC", sans-serif;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+
+  .frontpanel-marquee {
+    width: fit-content;
+    border: 1px solid oklch(0.72 0.22 327 / 74%);
+    border-radius: 4px;
+    padding: 6px 10px;
+    color: oklch(0.86 0.18 326);
+    background: oklch(0.12 0.04 300 / 72%);
+    font-size: 12px;
+    font-weight: 800;
+    text-shadow:
+      0 0 10px oklch(0.74 0.24 326 / 82%),
+      0 0 26px oklch(0.65 0.24 326 / 42%);
+    box-shadow:
+      0 0 18px oklch(0.62 0.22 326 / 28%),
+      inset 0 0 16px oklch(0.72 0.2 326 / 14%);
+  }
+
+  .frontpanel-crt-screen {
+    position: relative;
+    overflow: hidden;
+    width: min(100%, fit-content);
+    border: 6px solid oklch(0.04 0.01 260);
+    border-radius: 14px;
+    background: oklch(0.035 0.012 260);
+    box-shadow:
+      0 0 34px oklch(0.74 0.16 198 / 34%),
+      0 0 90px oklch(0.55 0.18 246 / 22%),
+      inset 0 0 24px oklch(0.02 0.01 260 / 70%);
+  }
+
+  .frontpanel-crt-display {
+    max-width: 100%;
+  }
+
+  .frontpanel-crt-display > div {
+    max-width: 100%;
+  }
+
+  .frontpanel-crt-screen::after {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    content: "";
+    background:
+      linear-gradient(transparent 48%, oklch(0.95 0.02 180 / 9%) 50%, transparent 52%),
+      radial-gradient(ellipse at center, transparent 54%, oklch(0.02 0.012 260 / 52%) 100%);
+    background-size:
+      100% 5px,
+      100% 100%;
+    animation: arcade-crt-scan 5.2s linear infinite;
+    mix-blend-mode: screen;
+  }
+
+  .frontpanel-coin-slot {
+    width: fit-content;
+    border: 1px solid oklch(0.66 0.18 50 / 52%);
+    border-radius: 3px;
+    padding: 5px 9px;
+    color: oklch(0.82 0.18 63);
+    background: oklch(0.1 0.03 60 / 54%);
+    font-size: 11px;
+    font-weight: 800;
+    animation: arcade-coin-pulse 2.4s ease-in-out infinite;
+  }
+
+  .frontpanel-control-deck {
+    display: grid;
+    gap: 18px;
+    align-content: start;
+    border: 1px solid oklch(0.34 0.1 255 / 80%);
+    border-radius: 9px;
+    padding: 20px;
+    color: oklch(0.92 0.04 216);
+    background:
+      linear-gradient(180deg, oklch(0.16 0.04 268 / 96%) 0%, oklch(0.08 0.03 275 / 98%) 100%),
+      repeating-linear-gradient(135deg, transparent 0 12px, oklch(0.78 0.15 205 / 4%) 12px 13px);
+    box-shadow:
+      inset 0 1px 0 oklch(0.8 0.12 210 / 14%),
+      inset 0 -18px 32px oklch(0.03 0.015 280 / 64%),
+      0 18px 48px oklch(0.02 0.02 280 / 38%);
+  }
+
+  .frontpanel-panel-kicker,
+  .frontpanel-section-label {
+    color: oklch(0.76 0.17 196);
+    font-size: 11px;
+    font-weight: 800;
+    text-shadow: 0 0 14px oklch(0.72 0.18 196 / 48%);
+  }
+
+  .frontpanel-gesture-button {
+    min-height: 44px;
+    border: 1px solid oklch(0.34 0.09 256 / 86%);
+    border-radius: 6px;
+    padding: 10px 12px;
+    color: oklch(0.78 0.06 222);
+    background: linear-gradient(180deg, oklch(0.14 0.04 262) 0%, oklch(0.08 0.028 272) 100%);
+    font-size: 13px;
+    font-weight: 800;
+    text-align: left;
+    transition:
+      border-color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+      color 180ms cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .frontpanel-gesture-button-active {
+    border-color: oklch(0.82 0.2 196);
+    color: oklch(0.95 0.12 190);
+    background:
+      radial-gradient(circle at 24% 18%, oklch(0.8 0.2 196 / 30%), transparent 42%),
+      linear-gradient(180deg, oklch(0.18 0.06 230) 0%, oklch(0.1 0.04 260) 100%);
+    box-shadow:
+      0 0 22px oklch(0.72 0.2 196 / 36%),
+      inset 0 0 20px oklch(0.8 0.18 196 / 15%);
+  }
+
+  .frontpanel-switch-plate {
+    border: 1px solid oklch(0.24 0.07 280 / 92%);
+    border-radius: 8px;
+    padding: 14px;
+    background:
+      radial-gradient(circle at 50% 50%, oklch(0.5 0.16 325 / 14%), transparent 55%),
+      linear-gradient(180deg, oklch(0.12 0.035 278) 0%, oklch(0.055 0.02 284) 100%);
+    box-shadow:
+      inset 0 0 0 1px oklch(0.72 0.16 300 / 10%),
+      inset 0 -16px 30px oklch(0.02 0.012 285 / 72%);
+  }
+
+  .frontpanel-switch-key {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    border: 1px solid oklch(0.5 0.14 328 / 70%);
+    border-radius: 999px;
+    color: oklch(0.94 0.09 330);
+    background:
+      radial-gradient(circle at 34% 24%, oklch(0.86 0.18 330 / 54%), transparent 24%),
+      linear-gradient(180deg, oklch(0.33 0.13 330) 0%, oklch(0.17 0.08 325) 100%);
+    box-shadow:
+      0 6px 0 oklch(0.06 0.03 320),
+      0 0 22px oklch(0.7 0.22 328 / 22%);
+    transition:
+      border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      box-shadow 160ms cubic-bezier(0.16, 1, 0.3, 1),
+      transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .frontpanel-switch-key:hover,
+  .frontpanel-switch-key:focus-visible,
+  .frontpanel-switch-key-active {
+    border-color: oklch(0.82 0.18 32);
+    color: oklch(0.96 0.12 50);
+    box-shadow:
+      0 4px 0 oklch(0.06 0.03 320),
+      0 0 28px oklch(0.74 0.2 32 / 42%),
+      inset 0 0 18px oklch(0.9 0.16 52 / 18%);
+    transform: translateY(2px) scale(1.03);
+  }
+
+  .frontpanel-switch-key-disabled {
+    cursor: not-allowed;
+    border-color: oklch(0.2 0.035 270 / 80%);
+    color: oklch(0.38 0.035 270);
+    background: linear-gradient(180deg, oklch(0.11 0.018 270) 0%, oklch(0.07 0.014 275) 100%);
+    box-shadow:
+      0 4px 0 oklch(0.035 0.014 280),
+      inset 0 0 14px oklch(0.01 0.01 280 / 50%);
+    transform: none;
+  }
+
+  .frontpanel-debug-readout {
+    border: 1px solid oklch(0.32 0.08 195 / 78%);
+    border-radius: 6px;
+    padding: 14px;
+    color: oklch(0.77 0.08 192);
+    background:
+      linear-gradient(transparent 50%, oklch(0.85 0.08 190 / 5%) 50%), oklch(0.055 0.02 252);
+    background-size: 100% 4px;
+    box-shadow:
+      inset 0 0 22px oklch(0.5 0.16 195 / 14%),
+      0 0 18px oklch(0.5 0.16 195 / 12%);
+  }
+
+  .frontpanel-debug-readout span {
+    color: oklch(0.58 0.06 220);
+  }
+}

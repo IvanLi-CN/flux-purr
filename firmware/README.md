@@ -66,6 +66,7 @@
 - Runtime truth source:
   - `current_temp_c` is the live PT1000-derived temperature sample from `GPIO2 / ADC1`
   - `target_temp_c` is clamped to `0..=400°C`
+  - Dashboard and `Preset Temp` up/down short-presses adjust by `1°C`; holding up/down repeats after the `500ms` long-press threshold, first about every `120ms` and then about every `60ms`
   - `Preset Temp` defaults are `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`
   - `heater_enabled` is the user arm state toggled by center short-press
   - `active_cooling_enabled` is the user-facing “主动降温” policy bit toggled by center double-press

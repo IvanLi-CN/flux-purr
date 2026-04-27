@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fireEvent, userEvent, within } from 'storybook/test'
 import { FrontPanelDesignBoard } from '@/features/frontpanel-preview/components/front-panel-design-board'
 import { FrontPanelDisplay } from '@/features/frontpanel-preview/components/front-panel-display'
 import { FrontPanelGallery } from '@/features/frontpanel-preview/components/front-panel-gallery'
@@ -31,6 +31,14 @@ const meta = {
 
 export default meta
 type Story = StoryObj<typeof meta>
+
+const SHORT_PRESS_SETTLE_MS = 340
+const LONG_PRESS_SETTLE_MS = 560
+const FIRST_REPEAT_SETTLE_MS = 760
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
 
 const coolingDisabledManualOverrideSeed = {
   ...createFrontPanelRuntimeState('app'),
@@ -298,21 +306,55 @@ export const KeyTestInteractions: Story = {
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
     const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+    const pressShort = async (key: 'up' | 'down' | 'left' | 'right' | 'center') => {
+      await userEvent.click(await canvas.findByTestId(`frontpanel-switch-${key}`))
+      await wait(SHORT_PRESS_SETTLE_MS)
+    }
+    const pressLong = async (key: 'up' | 'down' | 'left' | 'right' | 'center') => {
+      const button = await canvas.findByTestId(`frontpanel-switch-${key}`)
+      fireEvent.pointerDown(button, { pointerId: 1 })
+      await wait(LONG_PRESS_SETTLE_MS)
+      fireEvent.pointerUp(button, { pointerId: 1 })
+    }
+    const pressKeyboardShort = async (key: string) => {
+      fireEvent.keyDown(window, { key })
+      fireEvent.keyUp(window, { key })
+      await wait(SHORT_PRESS_SETTLE_MS)
+    }
 
     await step('short press keeps success color semantics', async () => {
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await pressShort('up')
       await expect(debug).toHaveTextContent('keyTest: U / U / SHORT')
       await expect(debug).toHaveTextContent('route: key-test')
+      await expect(await canvas.findByTestId('frontpanel-gesture-short')).toHaveAttribute(
+        'data-active',
+        'true'
+      )
     })
 
     await step('double press reports accent gesture', async () => {
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-right-double'))
+      await userEvent.dblClick(await canvas.findByTestId('frontpanel-switch-right'))
       await expect(debug).toHaveTextContent('keyTest: R / R / DOUBLE')
     })
 
     await step('long press reports info-cyan gesture', async () => {
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-left-long'))
+      await pressLong('left')
       await expect(debug).toHaveTextContent('keyTest: D / L / LONG')
+    })
+
+    await step('repeat press reports vertical hold-repeat gesture', async () => {
+      const button = await canvas.findByTestId('frontpanel-switch-up')
+      fireEvent.pointerDown(button, { pointerId: 2 })
+      await wait(FIRST_REPEAT_SETTLE_MS)
+      fireEvent.pointerUp(button, { pointerId: 2 })
+      await expect(debug).toHaveTextContent('keyTest: U / U / REPEAT')
+    })
+
+    await step('keyboard mapping mirrors the five-way switch', async () => {
+      await pressKeyboardShort('s')
+      await expect(debug).toHaveTextContent('keyTest: L / D / SHORT')
+      await pressKeyboardShort('Enter')
+      await expect(debug).toHaveTextContent('keyTest: CTR / CTR / SHORT')
     })
   },
 }
@@ -323,50 +365,71 @@ export const AppInteractionFlow: Story = {
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
     const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+    const pressShort = async (key: 'up' | 'down' | 'left' | 'right' | 'center') => {
+      await userEvent.click(await canvas.findByTestId(`frontpanel-switch-${key}`))
+      await wait(SHORT_PRESS_SETTLE_MS)
+    }
+    const pressDouble = async (key: 'up' | 'down' | 'left' | 'right' | 'center') => {
+      await userEvent.dblClick(await canvas.findByTestId(`frontpanel-switch-${key}`))
+    }
+    const pressLong = async (key: 'up' | 'down' | 'left' | 'right' | 'center') => {
+      const button = await canvas.findByTestId(`frontpanel-switch-${key}`)
+      fireEvent.pointerDown(button, { pointerId: 3 })
+      await wait(LONG_PRESS_SETTLE_MS)
+      fireEvent.pointerUp(button, { pointerId: 3 })
+    }
+    const holdForRepeat = async (key: 'up' | 'down') => {
+      const button = await canvas.findByTestId(`frontpanel-switch-${key}`)
+      fireEvent.pointerDown(button, { pointerId: 4 })
+      await wait(FIRST_REPEAT_SETTLE_MS)
+      fireEvent.pointerUp(button, { pointerId: 4 })
+    }
 
     await step('dashboard short and double presses stay on dashboard', async () => {
       await expect(debug).toHaveTextContent('route: dashboard')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await pressShort('up')
       await expect(debug).toHaveTextContent('targetTempC: 101')
-      for (let index = 0; index < 19; index += 1) {
-        await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await holdForRepeat('up')
+      await expect(debug).toHaveTextContent('targetTempC: 102')
+      for (let index = 0; index < 18; index += 1) {
+        await pressShort('up')
       }
       await expect(debug).toHaveTextContent('targetTempC: 120')
       await expect(debug).toHaveTextContent('selectedPresetIndex: 2')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await pressShort('center')
       await expect(debug).toHaveTextContent('heaterEnabled: true')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-double'))
+      await pressDouble('center')
       await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
       await expect(debug).toHaveTextContent('fanDisplayState: off')
       await expect(debug).toHaveTextContent('fanRuntimeEnabled: false')
     })
 
     await step('center long enters menu and active cooling page stays readonly', async () => {
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
+      await pressLong('center')
       await expect(debug).toHaveTextContent('route: menu')
       await expect(debug).toHaveTextContent('selectedMenuItem: active-cooling')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await pressShort('center')
       await expect(debug).toHaveTextContent('route: active-cooling')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-right-short'))
+      await pressShort('right')
       await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
       await expect(debug).toHaveTextContent('route: active-cooling')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await pressShort('up')
       await expect(debug).toHaveTextContent('activeCoolingEnabled: false')
       await expect(debug).toHaveTextContent('route: active-cooling')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
+      await pressLong('center')
       await expect(debug).toHaveTextContent('route: menu')
     })
 
     await step('left moves to preset temp and exit fallback returns dashboard', async () => {
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-left-short'))
+      await pressShort('left')
       await expect(debug).toHaveTextContent('selectedMenuItem: preset-temp')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await pressShort('center')
       await expect(debug).toHaveTextContent('route: preset-temp')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-up-short'))
+      await holdForRepeat('up')
       await expect(debug).toHaveTextContent('targetTempC: 121')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await pressShort('center')
       await expect(debug).toHaveTextContent('route: menu')
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-long'))
+      await pressLong('center')
       await expect(debug).toHaveTextContent('route: dashboard')
     })
   },
@@ -389,7 +452,8 @@ export const CoolingDisabledManualRearm: Story = {
     })
 
     await step('center short clears the cooling-disabled lock and re-arms heater', async () => {
-      await userEvent.click(await canvas.findByTestId('frontpanel-action-center-short'))
+      await userEvent.click(await canvas.findByTestId('frontpanel-switch-center'))
+      await wait(SHORT_PRESS_SETTLE_MS)
       await expect(debug).toHaveTextContent('heaterEnabled: true')
       await expect(debug).toHaveTextContent('heaterLockReason: none')
       await expect(debug).toHaveTextContent('fanDisplayState: off')

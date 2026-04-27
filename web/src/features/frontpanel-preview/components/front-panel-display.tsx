@@ -251,6 +251,7 @@ const keyMaskColors: Record<KeyGestureId, string> = {
   short: palette.success,
   double: palette.accent,
   long: palette.cyan,
+  repeat: palette.cyan,
 }
 
 function activeKeyColor(

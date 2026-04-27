@@ -1,5 +1,5 @@
 export type FrontPanelKeyId = 'center' | 'right' | 'down' | 'left' | 'up'
-export type KeyGestureId = 'short' | 'double' | 'long'
+export type KeyGestureId = 'short' | 'double' | 'long' | 'repeat'
 export type FanDisplayState = 'off' | 'auto' | 'run'
 export type HeaterLockReason = 'cooling-disabled-overtemp' | 'hard-overtemp'
 export type MenuItemId = 'preset-temp' | 'active-cooling' | 'wifi-info' | 'device-info'
