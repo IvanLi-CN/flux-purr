@@ -113,6 +113,74 @@ pub struct KeyEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyGestureSet {
+    short_press: bool,
+    double_press: bool,
+    long_press: bool,
+}
+
+impl KeyGestureSet {
+    pub const NONE: Self = Self {
+        short_press: false,
+        double_press: false,
+        long_press: false,
+    };
+
+    pub const ALL: Self = Self {
+        short_press: true,
+        double_press: true,
+        long_press: true,
+    };
+
+    pub const SHORT: Self = Self {
+        short_press: true,
+        double_press: false,
+        long_press: false,
+    };
+
+    pub const SHORT_LONG: Self = Self {
+        short_press: true,
+        double_press: false,
+        long_press: true,
+    };
+
+    pub const SHORT_DOUBLE_LONG: Self = Self::ALL;
+
+    pub const fn supports(self, gesture: KeyGesture) -> bool {
+        match gesture {
+            KeyGesture::ShortPress => self.short_press,
+            KeyGesture::DoublePress => self.double_press,
+            KeyGesture::LongPress => self.long_press,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrontPanelGestureCapabilities {
+    gestures: [KeyGestureSet; FrontPanelKey::ALL.len()],
+}
+
+impl FrontPanelGestureCapabilities {
+    pub const ALL: Self = Self {
+        gestures: [KeyGestureSet::ALL; FrontPanelKey::ALL.len()],
+    };
+
+    pub const fn new(gestures: [KeyGestureSet; FrontPanelKey::ALL.len()]) -> Self {
+        Self { gestures }
+    }
+
+    pub const fn gestures_for(self, key: FrontPanelKey) -> KeyGestureSet {
+        self.gestures[key as usize]
+    }
+}
+
+impl Default for FrontPanelGestureCapabilities {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrontPanelKeyMap {
     mapping: [FrontPanelKey; RawFrontPanelKey::ALL.len()],
 }
@@ -253,10 +321,20 @@ impl FrontPanelInputController {
     }
 
     pub fn sample(&mut self, now_ms: u64, raw_state: FrontPanelRawState) -> FrontPanelSampleResult {
+        self.sample_with_capabilities(now_ms, raw_state, FrontPanelGestureCapabilities::ALL)
+    }
+
+    pub fn sample_with_capabilities(
+        &mut self,
+        now_ms: u64,
+        raw_state: FrontPanelRawState,
+        capabilities: FrontPanelGestureCapabilities,
+    ) -> FrontPanelSampleResult {
         let mut result = FrontPanelSampleResult::new(raw_state);
 
         for raw_key in RawFrontPanelKey::ALL {
             let logical_key = self.key_map.logical_from_raw(raw_key);
+            let key_gestures = capabilities.gestures_for(logical_key);
             let pressed = raw_state.is_pressed(raw_key);
             let tracker = &mut self.trackers[raw_key.index()];
 
@@ -273,16 +351,19 @@ impl FrontPanelInputController {
                 }
             }
 
-            if tracker.pending_short_release_ms.is_some_and(|released| {
-                now_ms.saturating_sub(released) > self.timings.double_click_ms
-            }) {
+            if let Some(released) = tracker.pending_short_release_ms
+                && (!key_gestures.supports(KeyGesture::DoublePress)
+                    || now_ms.saturating_sub(released) > self.timings.double_click_ms)
+            {
                 tracker.pending_short_release_ms = None;
-                let _ = result.events.push(KeyEvent {
-                    raw_key,
-                    key: logical_key,
-                    gesture: KeyGesture::ShortPress,
-                    at_ms: now_ms,
-                });
+                if key_gestures.supports(KeyGesture::ShortPress) {
+                    let _ = result.events.push(KeyEvent {
+                        raw_key,
+                        key: logical_key,
+                        gesture: KeyGesture::ShortPress,
+                        at_ms: now_ms,
+                    });
+                }
             }
 
             if tracker.raw_pressed != tracker.stable_pressed
@@ -292,28 +373,38 @@ impl FrontPanelInputController {
                 if tracker.stable_pressed {
                     tracker.long_fired = false;
                 } else if tracker.press_started_ms.take().is_some() && !tracker.long_fired {
-                    if let Some(previous_release_ms) = tracker.pending_short_release_ms {
-                        if now_ms.saturating_sub(previous_release_ms)
-                            <= self.timings.double_click_ms
-                        {
-                            tracker.pending_short_release_ms = None;
-                            let _ = result.events.push(KeyEvent {
-                                raw_key,
-                                key: logical_key,
-                                gesture: KeyGesture::DoublePress,
-                                at_ms: now_ms,
-                            });
+                    if key_gestures.supports(KeyGesture::DoublePress) {
+                        if let Some(previous_release_ms) = tracker.pending_short_release_ms {
+                            if now_ms.saturating_sub(previous_release_ms)
+                                <= self.timings.double_click_ms
+                            {
+                                tracker.pending_short_release_ms = None;
+                                let _ = result.events.push(KeyEvent {
+                                    raw_key,
+                                    key: logical_key,
+                                    gesture: KeyGesture::DoublePress,
+                                    at_ms: now_ms,
+                                });
+                            } else {
+                                tracker.pending_short_release_ms = Some(now_ms);
+                            }
                         } else {
                             tracker.pending_short_release_ms = Some(now_ms);
                         }
-                    } else {
-                        tracker.pending_short_release_ms = Some(now_ms);
+                    } else if key_gestures.supports(KeyGesture::ShortPress) {
+                        let _ = result.events.push(KeyEvent {
+                            raw_key,
+                            key: logical_key,
+                            gesture: KeyGesture::ShortPress,
+                            at_ms: now_ms,
+                        });
                     }
                 }
             }
 
             if tracker.stable_pressed
                 && !tracker.long_fired
+                && key_gestures.supports(KeyGesture::LongPress)
                 && tracker.press_started_ms.is_some_and(|started| {
                     now_ms.saturating_sub(started) >= self.timings.long_press_ms
                 })
@@ -519,6 +610,45 @@ impl FrontPanelUiState {
         match self.runtime_mode {
             FrontPanelRuntimeMode::KeyTest => true,
             FrontPanelRuntimeMode::App => self.apply_app_event(event),
+        }
+    }
+
+    pub const fn gesture_capabilities(&self) -> FrontPanelGestureCapabilities {
+        match self.runtime_mode {
+            FrontPanelRuntimeMode::KeyTest => FrontPanelGestureCapabilities::ALL,
+            FrontPanelRuntimeMode::App => match self.route {
+                FrontPanelRoute::KeyTest => FrontPanelGestureCapabilities::ALL,
+                FrontPanelRoute::Dashboard => FrontPanelGestureCapabilities::new([
+                    KeyGestureSet::SHORT_DOUBLE_LONG,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                ]),
+                FrontPanelRoute::Menu => FrontPanelGestureCapabilities::new([
+                    KeyGestureSet::SHORT_LONG,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::NONE,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::NONE,
+                ]),
+                FrontPanelRoute::PresetTemp => FrontPanelGestureCapabilities::new([
+                    KeyGestureSet::SHORT_LONG,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
+                ]),
+                FrontPanelRoute::ActiveCooling
+                | FrontPanelRoute::WifiInfo
+                | FrontPanelRoute::DeviceInfo => FrontPanelGestureCapabilities::new([
+                    KeyGestureSet::SHORT_LONG,
+                    KeyGestureSet::NONE,
+                    KeyGestureSet::NONE,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::NONE,
+                ]),
+            },
         }
     }
 
@@ -771,9 +901,17 @@ mod tests {
         controller: &mut FrontPanelInputController,
         samples: &[(u64, FrontPanelRawState)],
     ) -> Vec<KeyEvent, 16> {
+        collect_events_with_capabilities(controller, FrontPanelGestureCapabilities::ALL, samples)
+    }
+
+    fn collect_events_with_capabilities(
+        controller: &mut FrontPanelInputController,
+        capabilities: FrontPanelGestureCapabilities,
+        samples: &[(u64, FrontPanelRawState)],
+    ) -> Vec<KeyEvent, 16> {
         let mut events = Vec::new();
         for (timestamp_ms, state) in samples {
-            let result = controller.sample(*timestamp_ms, *state);
+            let result = controller.sample_with_capabilities(*timestamp_ms, *state, capabilities);
             for event in result.events {
                 let _ = events.push(event);
             }
@@ -957,6 +1095,99 @@ mod tests {
         assert_eq!(events[0].gesture, KeyGesture::ShortPress);
         assert_eq!(events[1].key, FrontPanelKey::Up);
         assert_eq!(events[1].gesture, KeyGesture::ShortPress);
+    }
+
+    #[test]
+    fn short_only_direction_repeats_emit_immediate_short_presses() {
+        let mut controller = FrontPanelInputController::default();
+        let capabilities =
+            FrontPanelUiState::new(FrontPanelRuntimeMode::App).gesture_capabilities();
+        let events = collect_events_with_capabilities(
+            &mut controller,
+            capabilities,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::Up])),
+                (40, raw_state(&[RawFrontPanelKey::Up])),
+                (50, raw_state(&[])),
+                (70, raw_state(&[])),
+                (100, raw_state(&[RawFrontPanelKey::Up])),
+                (130, raw_state(&[RawFrontPanelKey::Up])),
+                (140, raw_state(&[])),
+                (160, raw_state(&[])),
+            ],
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].key, FrontPanelKey::Up);
+        assert_eq!(events[0].gesture, KeyGesture::ShortPress);
+        assert_eq!(events[0].at_ms, 70);
+        assert_eq!(events[1].key, FrontPanelKey::Up);
+        assert_eq!(events[1].gesture, KeyGesture::ShortPress);
+        assert_eq!(events[1].at_ms, 160);
+    }
+
+    #[test]
+    fn dashboard_center_keeps_double_and_long_gestures() {
+        let dashboard_capabilities =
+            FrontPanelUiState::new(FrontPanelRuntimeMode::App).gesture_capabilities();
+
+        let mut double_controller = FrontPanelInputController::default();
+        let double_events = collect_events_with_capabilities(
+            &mut double_controller,
+            dashboard_capabilities,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (40, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (50, raw_state(&[])),
+                (80, raw_state(&[])),
+                (120, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (150, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (160, raw_state(&[])),
+                (200, raw_state(&[])),
+            ],
+        );
+        assert_eq!(double_events.len(), 1);
+        assert_eq!(double_events[0].key, FrontPanelKey::Center);
+        assert_eq!(double_events[0].gesture, KeyGesture::DoublePress);
+
+        let mut long_controller = FrontPanelInputController::default();
+        let long_events = collect_events_with_capabilities(
+            &mut long_controller,
+            dashboard_capabilities,
+            &[
+                (0, raw_state(&[])),
+                (10, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (30, raw_state(&[RawFrontPanelKey::CenterBoot])),
+                (510, raw_state(&[RawFrontPanelKey::CenterBoot])),
+            ],
+        );
+        assert_eq!(long_events.len(), 1);
+        assert_eq!(long_events[0].key, FrontPanelKey::Center);
+        assert_eq!(long_events[0].gesture, KeyGesture::LongPress);
+    }
+
+    #[test]
+    fn key_test_capabilities_keep_all_gestures_enabled() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
+        let capabilities = state.gesture_capabilities();
+
+        for key in FrontPanelKey::ALL {
+            let gestures = capabilities.gestures_for(key);
+            assert!(gestures.supports(KeyGesture::ShortPress));
+            assert!(gestures.supports(KeyGesture::DoublePress));
+            assert!(gestures.supports(KeyGesture::LongPress));
+        }
+
+        assert!(state.handle_event(KeyEvent {
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::DoublePress,
+            at_ms: 0,
+        }));
+        assert_eq!(state.key_test.last_gesture, Some(KeyGesture::DoublePress));
+        assert_eq!(state.route, FrontPanelRoute::KeyTest);
     }
 
     #[test]

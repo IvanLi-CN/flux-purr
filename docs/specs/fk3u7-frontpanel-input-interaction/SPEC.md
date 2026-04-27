@@ -54,6 +54,7 @@
 - 五向键去抖阈值固定在 `20-30ms`，当前实现口径使用 `20ms`。
 - 长按阈值固定为 `500ms`；双击窗口固定为 `250ms`。
 - 长按每次按住只允许发出一次 `long` 事件，且不得在释放时回补 `short`。
+- App runtime 的手势识别必须按当前 route 的有效输入能力收窄；只有当前 route 支持同一逻辑键双击时，短按才等待双击窗口。
 - `Key Test` 画面必须显示五向示意图，默认白色，短按=`Success`、双击=`Accent`、长按=`Info Cyan`。
 - `Key Test` 必须同时显示 raw pin / logical key / gesture 诊断信息，用于真机回填 GPIO 映射表。
 - 诊断入口不得依赖 `GPIO0` 上电长按；必须使用 build-time `FrontPanelRuntimeMode` 切换。
@@ -140,7 +141,7 @@
 ### 边界条件
 
 - 不同方向键的 pending click 不得互相串扰。
-- 短按必须等待双击窗口收敛后再发出，避免误判。
+- 只有当前 route 支持同一逻辑键双击时，短按才必须等待双击窗口收敛；只支持短按的方向键必须在释放去抖后立即发出短按，避免快速连续单击被合成为无效双击。
 - 当没有更低或更高的已启用预设时，Dashboard 左/右保持当前温度不变。
 - 当 runtime 仍在播放 fault-clear attention reminder 时，第一次任意输入必须被消费为确认动作，不得顺带触发页面导航或 heater/fan 切换。
 - mock 页面不因无效手势崩溃或跳到未知路由。
@@ -166,6 +167,7 @@ None
 - Given `Key Test` 模式，When 任意物理方向键或中键在真机上触发短按 / 双击 / 长按，Then 屏幕会点亮正确的逻辑方向，并显示匹配的 raw/logical/gesture 诊断信息。
 - Given `Key Test` 模式，When 单击一次，Then 不会被误判成双击；When 长按一次，Then 只发出一次长按事件；When 换键测试，Then 不会串扰前一个键的 pending click。
 - Given `Dashboard`，When 主人按上/下，Then 目标温度每次严格 `±1°C`。
+- Given `Dashboard` 或 `Preset Temp`，When 主人快速连续按上/下方向键，Then 每次有效释放都生成独立短按，不会被合成为无效双击。
 - Given `Dashboard`，When 主人按左/右，Then 跳转基于已启用预设的实际温度值排序，而不是按槽位编号。
 - Given `Dashboard`，When 当前温度命中某个预设值或刚从预设值调离，Then 界面仍不显示当前预设槽位标签。
 - Given `Dashboard`，When 主人短按 / 双击 / 长按中键，Then 分别只触发 heater arm、切换主动降温、进入菜单，不发生混用。
@@ -271,6 +273,8 @@ None
 
 - 2026-04-13: 创建前面板五向输入与交互导航规格，冻结两阶段范围、手势阈值、Key Test 与导航口径。
 - 2026-04-16: 完成真机 Key Test 校准、App runtime mock 导航验证与视觉证据回填；同步 Dashboard 与 Preset Temp 的最终验收口径。
+- 2026-04-27: 将 App runtime 手势识别改为按当前 route 有效输入能力收窄，避免方向键快速连续短按被双击窗口吞掉。
+- 2026-04-27: 保持 fault-clear attention reminder 的任意 raw 输入确认语义，即使该键在当前 route 不生成页面事件，或会在 release 去抖 / 双击窗口后延迟生成事件。
 
 ## 参考（References）
 
