@@ -255,6 +255,7 @@ struct ParsedCliArgs {
     preset: PreviewPreset,
     output_path: PathBuf,
     dashboard_temp_c: Option<i16>,
+    pd_contract_mv: Option<u16>,
     palette_id: TemperaturePaletteId,
 }
 
@@ -273,6 +274,7 @@ where
 
     let mut output_path = None;
     let mut dashboard_temp_c = None;
+    let mut pd_contract_mv = None;
     let mut palette_id = TemperaturePaletteId::Current;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -284,6 +286,15 @@ where
                     return Err(format!("invalid --temp value '{}'", value));
                 };
                 dashboard_temp_c = Some(parsed);
+            }
+            "--pd-mv" => {
+                let Some(value) = args.next() else {
+                    return Err(String::from("missing value for --pd-mv"));
+                };
+                let Ok(parsed) = value.parse::<u16>() else {
+                    return Err(format!("invalid --pd-mv value '{}'", value));
+                };
+                pd_contract_mv = Some(parsed);
             }
             "--palette" => {
                 let Some(value) = args.next() else {
@@ -313,6 +324,7 @@ where
         preset,
         output_path: output_path.unwrap_or_else(|| default_output_path(preset)),
         dashboard_temp_c,
+        pd_contract_mv,
         palette_id,
     })
 }
@@ -339,6 +351,7 @@ fn main() -> ExitCode {
         preset,
         output_path,
         dashboard_temp_c,
+        pd_contract_mv,
         palette_id,
     } = match parse_cli_args(env::args().skip(1)) {
         Ok(parsed) => parsed,
@@ -350,7 +363,10 @@ fn main() -> ExitCode {
     let panel_path = panel_output_path(&output_path);
 
     let mut canvas = DisplayCanvas::new();
-    let state = preset.build_state(dashboard_temp_c);
+    let mut state = preset.build_state(dashboard_temp_c);
+    if let Some(pd_contract_mv) = pd_contract_mv {
+        state.pd_contract_mv = pd_contract_mv;
+    }
     render_frontpanel_ui_with_palette(&mut canvas, &state, temperature_palette(palette_id));
 
     let mut logical_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
@@ -417,6 +433,7 @@ mod tests {
                 preset: PreviewPreset::DashboardTemp,
                 output_path: default_output_path(PreviewPreset::DashboardTemp),
                 dashboard_temp_c: Some(25),
+                pd_contract_mv: None,
                 palette_id: TemperaturePaletteId::Current,
             }
         );
@@ -428,6 +445,8 @@ mod tests {
             String::from("dashboard-temp"),
             String::from("--temp"),
             String::from("80"),
+            String::from("--pd-mv"),
+            String::from("28000"),
             String::from("--palette"),
             String::from("c"),
             String::from("/tmp/custom.framebuffer.bin"),
@@ -440,6 +459,7 @@ mod tests {
                 preset: PreviewPreset::DashboardTemp,
                 output_path: PathBuf::from("/tmp/custom.framebuffer.bin"),
                 dashboard_temp_c: Some(80),
+                pd_contract_mv: Some(28_000),
                 palette_id: TemperaturePaletteId::AuroraWhiteLow,
             }
         );

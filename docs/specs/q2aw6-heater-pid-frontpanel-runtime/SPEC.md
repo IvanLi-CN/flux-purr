@@ -16,7 +16,7 @@
 
 ### Goals
 
-- 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式 PID PWM 闭环。
+- 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式闭环；当 CH224Q 读取到 PPS APDO 覆盖 `20V` 时，heater 后端使用 `PPS/AVS 调压 + MOS 静态通断`，否则回退原 `GPIO47` PWM 调功。
 - 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN` 三态风扇显示与实际 heater 输出强度。
 - 冻结正式风扇/保护包线：
   - heater `OFF` 且 active cooling `ON`：`40~60°C` 以 `GPIO36 duty=50%`（`500‰`）运行、`>60°C` 以 `GPIO36 duty=0%`（`0‰`）全速；一旦温度回落到 `<40°C`，继续以 `GPIO36 duty=100%`（`1000‰`）拖尾 `30s` 后再关闭。
@@ -24,13 +24,13 @@
   - active cooling `OFF`：`>100°C` 进入最低电压 `0.1Hz` 使能脉冲，脉冲占空比按 `floor((temp-100)/10)%` 递增并封顶 `25%`。
   - active cooling `OFF` 且 `>350°C`：锁住停热并保持风扇 `50%`；`>360°C` 改为全速。
   - `temp >= 420°C`：保持 heater hard cutoff fault-latch。
-- 默认启动时把 CH224Q 请求固定为 `20V`，并通过 build features 提供 `12V / 28V` 变体，同时保持外部 `fan_enabled + fan_pwm_permille` 归一化契约不变。
+- 默认启动时把 CH224Q 请求固定为 `20V`，再读取 CH224Q `0x60~0x8F` power data；只有 PPS capability 覆盖 `20V` 时才启用可调加热后端。可调请求范围为 `12V..28V`，并受 source capability 钳制。
 - 产出 merge-ready 所需的 spec、视觉证据、板级验证与 review 收敛材料。
 
 ### Non-goals
 
 - 不提供运行时 PID 参数调节入口。
-- 不实现 fan tach 闭环、4 线 PWM、持久化风扇档位或按 VIN 自动切换 PD 请求。
+- 不实现 fan tach 闭环、4 线 PWM、持久化风扇档位或按 VIN 自动切换固定 PD 请求。
 - 不修改外部 HTTP / RPC / 持久化字段结构。
 - 不扩展新的前面板菜单层级或联网业务逻辑。
 
@@ -59,11 +59,12 @@
 
 ### MUST
 
-- heater PWM 频率固定为 `2 kHz`，控制周期固定为 `1 Hz`。
+- heater 控制周期固定为 `1 Hz`。`pps-mos` 后端下 `GPIO47` 只允许静态 `0% / 100%` 输出，中间功率由 `12V..28V` 可调 PD 请求承担；fallback 后端继续使用 `2 kHz` PWM。
 - 目标温度与 preset 写入都必须 clamp 到 `0~400°C`。
 - RTD 开路、短路、ADC 读失败、`temp >= 420°C` 时，heater 必须立即关断并进入 fault-latch。
 - fault-latch 期间 heater 不得自动恢复；故障解除后必须由用户再次短按中键重臂。
-- CH224Q 在启动时默认请求 `20V`；`pd-request-12v` / `pd-request-28v` 仅改变默认请求值。PD 状态变化只允许进入日志/状态观测，不得触发 heater 锁死或自动关断。
+- CH224Q 在启动时默认请求 `20V`；`pd-request-12v` / `pd-request-28v` 仅改变默认固定请求值。随后必须读取 CH224Q power data 并只在 PPS APDO 覆盖 `20V` 时启用 `pps-mos`。固定 `20V` PDO 不得被当作 PPS 覆盖 `20V`。
+- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS，并请求 `12V` 或 source 宣告的更高 PPS 最小电压；控制输出 `1..100%` 必须映射到 `12V..28V` 并受 source capability 上下限钳制，先关 MOS、写入 PPS/AVS 电压、settle 后再开 MOS。任一关键调压写入失败必须切回固定 PD + `GPIO47` PWM fallback。
 - `active_cooling_enabled=true` 时，Dashboard fan line 必须只显示 `AUTO` 或 `RUN`；`active_cooling_enabled=false` 时必须显示 `OFF`，即使保护链路正在临时驱动真实风扇。
 - Dashboard 中键短按只切 heater arm；中键双击切换主动降温（`active_cooling_enabled`）；中键长按只进菜单。
 - `GPIO48` 蜂鸣器必须使用独立 PWM 通道；boot 和 idle 保持静音，不得复用 heater/fan 已占用的 PWM 输出。
@@ -74,7 +75,7 @@
 - `Active Cooling` 页面在正式 runtime 中为只读安全策略说明页；用户开启这一项时，口径统一称为“开启主动降温”，并必须同步默认 `20V`（及 `12V / 28V` build variants）、`40~60°C => 50% PWM`、`>60°C => 0% PWM`、`<40°C => 100% PWM + 30s` 与 `>100 / >350 / >360°C` 包线。
 - 当前风扇硬件为反相 `FB` 注入控制：`GPIO36 duty=0%` 表示最高风扇轨电压，`GPIO36 duty=100%`（`1000‰`）才表示最低风扇轨电压；所有 `minimum-voltage profile` 语义都必须落到该 `1000‰` 档位。
 - 任一活动保护（`SensorShort / SensorOpen / AdcReadFailed / OverTemp`）出现时，蜂鸣器必须立即进入急促、持续的循环警告音；保护解除后改为每 `10s` 一次 reminder，直到用户任意输入确认。
-- defmt 日志必须覆盖 RTD 读数、PID 输入/输出、fault 原因、fan policy 输出与 PD 状态变化。
+- defmt 日志必须覆盖 RTD 读数、PID 输入/输出、heater backend 选择、PPS/AVS 请求电压、MOS gate 输出、fault 原因、fan policy 输出与 PD 状态变化。
 
 ### SHOULD
 
@@ -90,8 +91,8 @@
 
 ### Core flows
 
-- 启动后先请求 feature-selected PD 电压（默认 `20V`），随后初始化 RTD、heater PWM、fan 运行态、蜂鸣器与前面板 UI。
-- 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则 PID 开始按 `target_temp_c - current_temp_c` 驱动 duty。
+- 启动后先请求 feature-selected 固定 PD 电压（默认 `20V`），随后读取 CH224Q status 与 power data。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
+- 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端把该控制量映射到可调 PD 电压并静态打开 MOS；fallback 后端把该控制量作为原 PWM duty。
 - Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / active cooling / menu 语义不受 hold-repeat 影响。
 - 用户双击中键后，切换的是“主动降温”策略位，而不是直接强制 fan GPIO。
 - Dashboard fan line 只反映“策略开关 + 当前是否实际运行”：
@@ -101,7 +102,7 @@
 - 当 `active_cooling_enabled=true` 且温度位于 `40~60°C` 时，真实风扇必须使用 `GPIO36 duty=50%`（`500‰`）；当温度 `>60°C` 时必须切到 `GPIO36 duty=0%`（`0‰`）全速；当温度从 `>=40°C` 回落到 `<40°C` 时，真实风扇必须继续以 `GPIO36 duty=100%`（`1000‰`）运行 `30s`，然后才关闭。
 - 当 `active_cooling_enabled=false` 且 `temp > 350°C` 时，heater 必须被强制关断并锁住；用户重新开启风扇策略或手动重新使能 heater 后才允许退出该锁态。
 - 当 `active_cooling_enabled=false` 且 `temp > 360°C` 时，真实风扇输出升级为全速，但 Dashboard fan line 仍保持 `OFF`。
-- PD 状态只做观测：即使 PD 丢失或降档，也不自动清空 `heater_enabled`，只在日志中体现。
+- PD 状态只做观测：即使 PD 丢失或降档，也不自动清空 `heater_enabled`。但 PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
 - 任一活动保护出现时，蜂鸣器立即切到持续 alarm；fault clear 后停止连续 alarm，并改为每 `10s` 的 reminder cadence，直到任意输入确认。
 
 ### Edge cases / errors
@@ -139,6 +140,8 @@ None
 - Given active cooling 关闭且温度 `>350°C`，When 控制循环更新，Then heater 必须被锁住停热；When 用户重新开启风扇策略或手动重新 arm heater，Then 才允许离开锁态。
 - Given `temp >= 420°C`，When 故障出现，Then heater 立即归零并进入 `hard-overtemp` fault-latch。
 - Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。
+- Given CH224Q power data 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`，`0% / 50% / 100%` 控制量分别请求 `12V / 20V / 28V`（若 source capability 允许）且 GPIO47 只输出静态关/开。
+- Given CH224Q 只提供固定 `20V` PDO 或 PPS APDO 不覆盖 `20V`，When runtime 初始化 heater 后端，Then 选择 `fixed-pd-pwm-fallback`，不得把固定 `20V` 误判为 PPS 可调能力。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -152,6 +155,8 @@ None
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-pps-12v.framebuffer.bin --pd-mv 12000`
+- `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-pps-28v.framebuffer.bin --pd-mv 28000`
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web build-storybook`
@@ -187,6 +192,14 @@ None
 
 ![Dashboard fan run](./assets/dashboard-fan-run.png)
 
+- Dashboard PPS `12V`：
+
+![Dashboard PPS 12V](./assets/dashboard-pps-12v.png)
+
+- Dashboard PPS `28V`：
+
+![Dashboard PPS 28V](./assets/dashboard-pps-28v.png)
+
 - Dashboard overtemp warning frame A：
 
 ![Dashboard overtemp A](./assets/dashboard-overtemp-a.png)
@@ -214,7 +227,8 @@ None
 
 - 用单一 `HeaterController` 管理 PID 与 hard fault-latch，再把 cooling-disabled lock 作为独立安全层挂在 fan policy 旁边。
 - 用 `fan_display_state + heater_lock_reason + dashboard_warning_visible` 作为 Dashboard 真相源，不再复用单布尔 fan 标记表达全部运行态。
-- 继续把 CH224Q 作为电源准备层而不是 heater interlock，只把 feature-selected 默认请求（默认 `20V`）和观测日志纳入当前合同。
+- 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 CH224Q PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
+- CH224Q 仍作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 

@@ -35,6 +35,12 @@ use esp_hal::{
 };
 #[cfg(target_arch = "xtensa")]
 use esp_println as _;
+#[cfg(test)]
+use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
+#[cfg(test)]
+use flux_purr_firmware::adapters::ch224q;
+#[cfg(test)]
+use flux_purr_firmware::adapters::ch224q::Status;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -109,6 +115,12 @@ const HEATER_CONTROL_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS: u64 = 500;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_ADJUSTABLE_MIN_MV: u16 = 12_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_ADJUSTABLE_MAX_MV: u16 = 28_000;
+#[cfg(target_arch = "xtensa")]
+const HEATER_PPS_MOS_SETTLE_MS: u64 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_PULSE_PERIOD_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -887,6 +899,65 @@ struct PdStatusObservation {
     current_ma: u16,
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaterPowerBackendReason {
+    PpsCovers20v,
+    NoPps20vCapability,
+    CapabilityReadFailed,
+    AdjustableRequestFailed,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+impl HeaterPowerBackendReason {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PpsCovers20v => "pps-covers-20v",
+            Self::NoPps20vCapability => "no-pps-20v-capability",
+            Self::CapabilityReadFailed => "capability-read-failed",
+            Self::AdjustableRequestFailed => "adjustable-request-failed",
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaterPowerBackend {
+    PpsMos {
+        adjustable_min_mv: u16,
+        pps_max_mv: u16,
+        adjustable_max_mv: u16,
+        current_mode: Option<ch224q::AdjustableVoltageMode>,
+        current_request_mv: u16,
+    },
+    FixedPdPwmFallback {
+        reason: HeaterPowerBackendReason,
+        fixed_request_confirmed: bool,
+    },
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+impl HeaterPowerBackend {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PpsMos { .. } => "pps-mos",
+            Self::FixedPdPwmFallback { .. } => "fixed-pd-pwm-fallback",
+        }
+    }
+
+    const fn pd_contract_mv(self) -> u16 {
+        match self {
+            Self::PpsMos {
+                current_request_mv, ..
+            } => current_request_mv,
+            Self::FixedPdPwmFallback { .. } => DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+        }
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 fn log_ui_state(state: &FrontPanelUiState) {
     info!(
@@ -1128,6 +1199,93 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn round_mv_to_100mv(millivolts: u16) -> u16 {
+    (((u32::from(millivolts) + 50) / 100) * 100) as u16
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_request_mv_from_percent(
+    duty_percent: u8,
+    adjustable_min_mv: u16,
+    adjustable_max_mv: u16,
+) -> u16 {
+    let bounded_min_mv =
+        adjustable_min_mv.clamp(HEATER_ADJUSTABLE_MIN_MV, HEATER_ADJUSTABLE_MAX_MV);
+    let bounded_max_mv = adjustable_max_mv.clamp(bounded_min_mv, HEATER_ADJUSTABLE_MAX_MV);
+    let span_mv = u32::from(bounded_max_mv - bounded_min_mv);
+    let requested_mv =
+        u32::from(bounded_min_mv) + ((span_mv * u32::from(duty_percent.min(100)) + 50) / 100);
+
+    round_mv_to_100mv((requested_mv as u16).clamp(bounded_min_mv, bounded_max_mv))
+        .clamp(bounded_min_mv, bounded_max_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::AdjustableVoltageMode {
+    if request_mv <= pps_max_mv.min(ch224q::CH224Q_PPS_MAX_MV) {
+        ch224q::AdjustableVoltageMode::Pps
+    } else {
+        ch224q::AdjustableVoltageMode::Avs
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_heater_power_backend(
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+    status: Option<Status>,
+) -> HeaterPowerBackend {
+    let Some(capabilities) = capabilities else {
+        return HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::CapabilityReadFailed,
+            fixed_request_confirmed: true,
+        };
+    };
+
+    if !capabilities.pps_covers_20v {
+        return HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::NoPps20vCapability,
+            fixed_request_confirmed: true,
+        };
+    }
+
+    let pps_max_mv = capabilities
+        .pps_max_mv
+        .unwrap_or(ch224q::PPS_GATE_MV)
+        .clamp(ch224q::PPS_GATE_MV, ch224q::CH224Q_PPS_MAX_MV);
+    let adjustable_min_mv = capabilities
+        .pps_min_mv
+        .unwrap_or(HEATER_ADJUSTABLE_MIN_MV)
+        .clamp(HEATER_ADJUSTABLE_MIN_MV, pps_max_mv);
+    let avs_max_mv = if status.is_some_and(|status| status.avs_exist) {
+        capabilities
+            .avs_min_mv
+            .zip(capabilities.avs_max_mv)
+            .and_then(|(avs_min_mv, avs_max_mv)| {
+                let bounded_avs_max_mv =
+                    avs_max_mv.min(HEATER_ADJUSTABLE_MAX_MV.min(ch224q::CH224Q_AVS_MAX_MV));
+                let first_avs_request_mv = pps_max_mv.saturating_add(100);
+                if avs_min_mv <= first_avs_request_mv && bounded_avs_max_mv > pps_max_mv {
+                    Some(bounded_avs_max_mv)
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    };
+    let adjustable_max_mv = avs_max_mv.unwrap_or_else(|| pps_max_mv.min(HEATER_ADJUSTABLE_MAX_MV));
+
+    HeaterPowerBackend::PpsMos {
+        adjustable_min_mv,
+        pps_max_mv,
+        adjustable_max_mv,
+        current_mode: None,
+        current_request_mv: adjustable_min_mv,
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 fn apply_heater_duty<PWM>(heater_pwm: &mut PWM, duty_percent: u8, last_duty_percent: &mut u8)
 where
@@ -1143,6 +1301,108 @@ where
         duty_percent, *last_duty_percent,
     );
     *last_duty_percent = duty_percent;
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn apply_heater_power_output<PWM>(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    ch224q_address: Address,
+    heater_pwm: &mut PWM,
+    backend: &mut HeaterPowerBackend,
+    duty_percent: u8,
+    last_physical_duty_percent: &mut u8,
+) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    match *backend {
+        HeaterPowerBackend::FixedPdPwmFallback {
+            reason,
+            fixed_request_confirmed,
+        } => {
+            if !fixed_request_confirmed {
+                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+                if write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
+                    *backend = HeaterPowerBackend::FixedPdPwmFallback {
+                        reason,
+                        fixed_request_confirmed: true,
+                    };
+                    info!("heater backend fallback fixed-pd request confirmed");
+                } else {
+                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                    info!(
+                        "heater backend fallback waiting for fixed-pd request reason={=str}",
+                        reason.label(),
+                    );
+                    return false;
+                }
+            }
+            apply_heater_duty(heater_pwm, duty_percent, last_physical_duty_percent);
+            false
+        }
+        HeaterPowerBackend::PpsMos {
+            adjustable_min_mv,
+            pps_max_mv,
+            adjustable_max_mv,
+            current_mode,
+            current_request_mv,
+        } => {
+            let request_mv =
+                heater_request_mv_from_percent(duty_percent, adjustable_min_mv, adjustable_max_mv);
+            let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
+            let mode_changed = current_mode != Some(request_mode);
+            let voltage_changed = current_request_mv != request_mv;
+            let gate_duty_percent = if duty_percent == 0 { 0 } else { 100 };
+
+            if gate_duty_percent == 0 {
+                apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+            } else if voltage_changed || mode_changed {
+                apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+            }
+
+            if voltage_changed || mode_changed {
+                if !request_ch224q_adjustable_voltage(
+                    i2c,
+                    ch224q_address,
+                    request_mv,
+                    request_mode,
+                    mode_changed,
+                )
+                .await
+                {
+                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                    let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+                    let fixed_request_confirmed =
+                        write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
+                    *backend = HeaterPowerBackend::FixedPdPwmFallback {
+                        reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+                        fixed_request_confirmed,
+                    };
+                    if fixed_request_confirmed {
+                        apply_heater_duty(heater_pwm, duty_percent, last_physical_duty_percent);
+                    }
+                    info!(
+                        "heater backend fallback -> reason={=str} fixed_request_confirmed={=bool}",
+                        HeaterPowerBackendReason::AdjustableRequestFailed.label(),
+                        fixed_request_confirmed,
+                    );
+                    return true;
+                }
+
+                *backend = HeaterPowerBackend::PpsMos {
+                    adjustable_min_mv,
+                    pps_max_mv,
+                    adjustable_max_mv,
+                    current_mode: Some(request_mode),
+                    current_request_mv: request_mv,
+                };
+                EmbassyTimer::after_millis(HEATER_PPS_MOS_SETTLE_MS).await;
+            }
+
+            apply_heater_duty(heater_pwm, gate_duty_percent, last_physical_duty_percent);
+            false
+        }
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1328,6 +1588,77 @@ async fn request_ch224q_voltage(
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn write_ch224q_payload(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    address: Address,
+    payload: &[u8],
+) -> bool {
+    for attempt in 1..=CH224Q_RETRY_ATTEMPTS {
+        if i2c.write(address.as_u8(), payload).is_ok() {
+            return true;
+        }
+
+        info!(
+            "ch224q write retry={=u8}/{=u8} addr=0x{=u8:02x} reg=0x{=u8:02x}",
+            attempt,
+            CH224Q_RETRY_ATTEMPTS,
+            address.as_u8(),
+            payload.first().copied().unwrap_or(0),
+        );
+        EmbassyTimer::after_millis(CH224Q_RETRY_DELAY_MS).await;
+    }
+
+    false
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn request_ch224q_adjustable_voltage(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    address: Address,
+    request_mv: u16,
+    mode: ch224q::AdjustableVoltageMode,
+    mode_changed: bool,
+) -> bool {
+    let voltage_written = match mode {
+        ch224q::AdjustableVoltageMode::Pps => {
+            let Some(payload) = ch224q::pps_voltage_payload(request_mv) else {
+                info!("ch224q pps request invalid mv={=u16}", request_mv);
+                return false;
+            };
+            write_ch224q_payload(i2c, address, &payload).await
+        }
+        ch224q::AdjustableVoltageMode::Avs => {
+            let Some((high_payload, low_payload)) = ch224q::avs_voltage_payloads(request_mv) else {
+                info!("ch224q avs request invalid mv={=u16}", request_mv);
+                return false;
+            };
+            write_ch224q_payload(i2c, address, &high_payload).await
+                && write_ch224q_payload(i2c, address, &low_payload).await
+        }
+    };
+    if !voltage_written {
+        return false;
+    }
+
+    if mode_changed {
+        let payload = ch224q::voltage_request_payload(mode.control_request());
+        if !write_ch224q_payload(i2c, address, &payload).await {
+            return false;
+        }
+    }
+
+    info!(
+        "ch224q adjustable request ok mode={=str} mv={=u16}",
+        match mode {
+            ch224q::AdjustableVoltageMode::Pps => "pps",
+            ch224q::AdjustableVoltageMode::Avs => "avs",
+        },
+        request_mv,
+    );
+    true
+}
+
+#[cfg(target_arch = "xtensa")]
 fn read_ch224q_register(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     address: Address,
@@ -1337,6 +1668,21 @@ fn read_ch224q_register(
     i2c.write_read(address.as_u8(), &[register], &mut value)
         .ok()
         .map(|_| value[0])
+}
+
+#[cfg(target_arch = "xtensa")]
+fn read_ch224q_power_data(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    address: Address,
+) -> Option<[u8; ch224q::PD_POWER_DATA_REGISTER_COUNT]> {
+    let mut bytes = [0u8; ch224q::PD_POWER_DATA_REGISTER_COUNT];
+    i2c.write_read(
+        address.as_u8(),
+        &[ch224q::PD_POWER_DATA_START_REGISTER],
+        &mut bytes,
+    )
+    .ok()
+    .map(|_| bytes)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1708,6 +2054,42 @@ async fn main(_spawner: Spawner) {
         HEATER_HOLD_DUTY_PERCENT,
         0_u8,
     );
+    let power_data_capabilities = read_ch224q_power_data(&mut pd_i2c, ch224q_address)
+        .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes));
+    match power_data_capabilities {
+        Some(capabilities) => info!(
+            "ch224q power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16}",
+            capabilities.pps_covers_20v,
+            capabilities.pps_min_mv.unwrap_or(0),
+            capabilities.pps_max_mv.unwrap_or(0),
+        ),
+        None => info!("ch224q power data read failed"),
+    }
+    let mut heater_power_backend = select_heater_power_backend(
+        power_data_capabilities,
+        last_pd_observation.map(|status| status.status),
+    );
+    match heater_power_backend {
+        HeaterPowerBackend::PpsMos {
+            pps_max_mv,
+            adjustable_max_mv,
+            ..
+        } => info!(
+            "heater backend selected mode={=str} reason={=str} min_mv={=u16} pps_max_mv={=u16} adjustable_max_mv={=u16} gate_mv={=u16}",
+            heater_power_backend.label(),
+            HeaterPowerBackendReason::PpsCovers20v.label(),
+            HEATER_ADJUSTABLE_MIN_MV,
+            pps_max_mv,
+            adjustable_max_mv,
+            ch224q::PPS_GATE_MV,
+        ),
+        HeaterPowerBackend::FixedPdPwmFallback { reason, .. } => info!(
+            "heater backend selected mode={=str} reason={=str} fixed_mv={=u16}",
+            heater_power_backend.label(),
+            reason.label(),
+            DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+        ),
+    }
 
     let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin);
     let mut controller = FrontPanelInputController::new(
@@ -1715,7 +2097,7 @@ async fn main(_spawner: Spawner) {
         FrontPanelInputTimings::default(),
     );
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
-    ui_state.pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
+    ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
     apply_memory_config_to_ui(&mut ui_state, &memory_config);
     let mut heater_controller = HeaterController::new();
     let mut current_rtd_fault: Option<HeaterFaultReason> = None;
@@ -1781,7 +2163,16 @@ async fn main(_spawner: Spawner) {
         ),
         0,
     );
-    apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
+    let _ = apply_heater_power_output(
+        &mut pd_i2c,
+        ch224q_address,
+        &mut heater_pwm,
+        &mut heater_power_backend,
+        0,
+        &mut last_heater_duty,
+    )
+    .await;
+    ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
     apply_fan_output(
         &mut fan_enable,
         &mut fan_pwm,
@@ -2100,12 +2491,6 @@ async fn main(_spawner: Spawner) {
                 }
                 last_pd_observation = current_pd_observation;
             }
-            let next_pd_contract_mv = DEFAULT_PD_VOLTAGE_REQUEST.millivolts();
-            if ui_state.pd_contract_mv != next_pd_contract_mv {
-                ui_state.pd_contract_mv = next_pd_contract_mv;
-                needs_redraw = true;
-            }
-
             let pid_snapshot = heater_controller.update(
                 ui_state.target_temp_c,
                 latest_temp_c,
@@ -2115,17 +2500,32 @@ async fn main(_spawner: Spawner) {
                 ui_state.heater_output_percent = pid_snapshot.duty_percent;
                 needs_redraw = true;
             }
-            apply_heater_duty(
+            if apply_heater_power_output(
+                &mut pd_i2c,
+                ch224q_address,
                 &mut heater_pwm,
+                &mut heater_power_backend,
                 pid_snapshot.duty_percent,
                 &mut last_heater_duty,
-            );
+            )
+            .await
+            {
+                needs_redraw = true;
+            }
+            let next_pd_contract_mv = heater_power_backend.pd_contract_mv();
+            if ui_state.pd_contract_mv != next_pd_contract_mv {
+                ui_state.pd_contract_mv = next_pd_contract_mv;
+                needs_redraw = true;
+            }
 
             info!(
-                "heater loop set_c={=i16} temp_c={=f32} duty={=u8}% error_c={=f32} control_error_c={=f32} temp_avg_c={=f32} phase={=str} arm={=bool} fault={=str}",
+                "heater loop set_c={=i16} temp_c={=f32} control={=u8}% pd_mv={=u16} backend={=str} mos_gate={=u8}% error_c={=f32} control_error_c={=f32} temp_avg_c={=f32} phase={=str} arm={=bool} fault={=str}",
                 ui_state.target_temp_c,
                 latest_temp_c,
                 pid_snapshot.duty_percent,
+                heater_power_backend.pd_contract_mv(),
+                heater_power_backend.label(),
+                last_heater_duty,
                 pid_snapshot.error_c,
                 pid_snapshot.control_error_c,
                 pid_snapshot.filtered_temp_c,
@@ -2184,7 +2584,19 @@ async fn main(_spawner: Spawner) {
             && (last_heater_duty != 0 || ui_state.heater_output_percent != 0)
         {
             ui_state.heater_output_percent = 0;
-            apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
+            let _ = apply_heater_power_output(
+                &mut pd_i2c,
+                ch224q_address,
+                &mut heater_pwm,
+                &mut heater_power_backend,
+                0,
+                &mut last_heater_duty,
+            )
+            .await;
+            let next_pd_contract_mv = heater_power_backend.pd_contract_mv();
+            if ui_state.pd_contract_mv != next_pd_contract_mv {
+                ui_state.pd_contract_mv = next_pd_contract_mv;
+            }
             needs_redraw = true;
         }
 
@@ -2357,6 +2769,196 @@ mod tests {
 
         let overshoot = controller.update(100, 100.3, true);
         assert_eq!(overshoot.duty_percent, 0);
+    }
+
+    #[test]
+    fn heater_adjustable_voltage_maps_percent_to_12v_28v() {
+        assert_eq!(
+            heater_request_mv_from_percent(0, HEATER_ADJUSTABLE_MIN_MV, HEATER_ADJUSTABLE_MAX_MV),
+            12_000
+        );
+        assert_eq!(
+            heater_request_mv_from_percent(50, HEATER_ADJUSTABLE_MIN_MV, HEATER_ADJUSTABLE_MAX_MV),
+            20_000
+        );
+        assert_eq!(
+            heater_request_mv_from_percent(100, HEATER_ADJUSTABLE_MIN_MV, HEATER_ADJUSTABLE_MAX_MV),
+            28_000
+        );
+    }
+
+    #[test]
+    fn heater_adjustable_voltage_clamps_to_source_capability() {
+        assert_eq!(
+            heater_request_mv_from_percent(100, HEATER_ADJUSTABLE_MIN_MV, 21_000),
+            21_000
+        );
+        assert_eq!(
+            heater_request_mv_from_percent(100, HEATER_ADJUSTABLE_MIN_MV, 19_000),
+            19_000
+        );
+        assert_eq!(heater_request_mv_from_percent(0, 15_000, 21_000), 15_000);
+    }
+
+    #[test]
+    fn heater_backend_uses_pps_mos_only_when_pps_covers_20v() {
+        let backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(3_300),
+                pps_max_mv: Some(21_000),
+                avs_min_mv: Some(15_000),
+                avs_max_mv: Some(28_000),
+            }),
+            Some(Status {
+                avs_exist: true,
+                ..Status::default()
+            }),
+        );
+
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                adjustable_min_mv: 12_000,
+                pps_max_mv: 21_000,
+                adjustable_max_mv: 28_000,
+                current_mode: None,
+                current_request_mv: 12_000,
+            }
+        );
+
+        let fallback = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: false,
+                pps_min_mv: Some(3_300),
+                pps_max_mv: Some(15_000),
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }),
+            Some(Status::default()),
+        );
+        assert_eq!(
+            fallback,
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason: HeaterPowerBackendReason::NoPps20vCapability,
+                fixed_request_confirmed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn heater_backend_limits_to_pps_when_avs_is_unavailable() {
+        let backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(3_300),
+                pps_max_mv: Some(21_000),
+                avs_min_mv: Some(15_000),
+                avs_max_mv: Some(28_000),
+            }),
+            Some(Status::default()),
+        );
+
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                adjustable_min_mv: 12_000,
+                pps_max_mv: 21_000,
+                adjustable_max_mv: 21_000,
+                current_mode: None,
+                current_request_mv: 12_000,
+            }
+        );
+        assert_eq!(
+            heater_request_mv_from_percent(100, HEATER_ADJUSTABLE_MIN_MV, 21_000),
+            21_000
+        );
+    }
+
+    #[test]
+    fn heater_backend_clamps_avs_to_advertised_capability() {
+        let backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(3_300),
+                pps_max_mv: Some(21_000),
+                avs_min_mv: Some(15_000),
+                avs_max_mv: Some(24_000),
+            }),
+            Some(Status {
+                avs_exist: true,
+                ..Status::default()
+            }),
+        );
+
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                adjustable_min_mv: 12_000,
+                pps_max_mv: 21_000,
+                adjustable_max_mv: 24_000,
+                current_mode: None,
+                current_request_mv: 12_000,
+            }
+        );
+        assert_eq!(
+            heater_request_mv_from_percent(100, HEATER_ADJUSTABLE_MIN_MV, 24_000),
+            24_000
+        );
+    }
+
+    #[test]
+    fn heater_backend_ignores_avs_without_advertised_range() {
+        let backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(3_300),
+                pps_max_mv: Some(21_000),
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }),
+            Some(Status {
+                avs_exist: true,
+                ..Status::default()
+            }),
+        );
+
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                adjustable_min_mv: 12_000,
+                pps_max_mv: 21_000,
+                adjustable_max_mv: 21_000,
+                current_mode: None,
+                current_request_mv: 12_000,
+            }
+        );
+    }
+
+    #[test]
+    fn heater_backend_clamps_low_end_to_advertised_pps_minimum() {
+        let backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(15_000),
+                pps_max_mv: Some(21_000),
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }),
+            Some(Status::default()),
+        );
+
+        assert_eq!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                adjustable_min_mv: 15_000,
+                pps_max_mv: 21_000,
+                adjustable_max_mv: 21_000,
+                current_mode: None,
+                current_request_mv: 15_000,
+            }
+        );
+        assert_eq!(heater_request_mv_from_percent(0, 15_000, 21_000), 15_000);
     }
 
     #[test]

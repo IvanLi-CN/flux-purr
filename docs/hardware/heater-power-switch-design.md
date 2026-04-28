@@ -4,11 +4,11 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 
 ## 1) Scope
 
-- Heater supply bus: `VBUS`, expected operating range `20 V ~ 28 V` for the intended operating mode
-- Lower PD voltages remain compatibility-only and are not required to deliver usable heating performance
+- Heater supply bus: `VBUS`, expected adjustable operating range `12 V ~ 28 V` when the connected source exposes PPS that covers `20 V`
+- Sources that do not expose PPS covering `20 V` remain compatibility/fallback-only and use the original fixed-PD PWM firmware backend
 - Load type: resistive hotplate heater
 - Switch topology: low-side N-channel MOSFET
-- PWM source: `ESP32-S3 GPIO47` (chip pin `37`)
+- MOSFET gate source: `ESP32-S3 GPIO47` (chip pin `37`)
 
 ## 2) Frozen topology
 
@@ -77,23 +77,26 @@ Connection:
 
 Do not leave the gate floating at reset or during boot.
 
-## 5) PWM baseline
+## 5) Heater modulation baseline
 
-Recommended initial PWM range:
+Preferred runtime mode:
 
-- `1 kHz ~ 2 kHz`
+- CH224Q adjustable-PD request controls heater power across `12 V ~ 28 V`
+- `GPIO47` only drives the low-side MOSFET statically off or on
+- firmware may enable this mode only after CH224Q power data proves that PPS covers `20 V`
 
-Preferred first bring-up value:
+Fallback mode:
 
-- `2 kHz`
+- if PPS does not cover `20 V`, capability data cannot be read, or adjustable-voltage writes fail, firmware falls back to fixed-PD `GPIO47` PWM
+- fallback PWM uses the existing `2 kHz` first-bring-up value
 
 Reasoning:
 
-- very low heater PWM frequencies turn the PD input bus into a visibly pulsed load and push more work onto the local bulk capacitance
-- very high PWM frequencies increase switching loss and radiated/conducted noise with little thermal-control benefit
-- the hotplate is a slow thermal system, so it does not need motor-style or display-style high-frequency PWM
+- PPS/AVS modulation avoids turning the PD input bus into a visibly pulsed high-current load during normal operation
+- static MOSFET drive keeps the gate waveform simple in the preferred mode
+- the fallback keeps the existing hardware usable with fixed-voltage PD sources
 
-If ADC noise becomes visible in temperature or VIN sensing, firmware should prefer sampling during the PWM off-window.
+If ADC noise becomes visible in fallback mode, firmware should prefer sampling during the PWM off-window.
 
 ## 6) Input decoupling and bulk capacitance
 
@@ -138,11 +141,11 @@ Hard check:
 
 The design is only valid if the worst-case on-state current remains inside the negotiated PD current budget with margin for the rest of the board.
 
-First-order average power estimate:
+First-order full-on power estimate in `pps-mos`:
 
-- `P_AVG ~= duty * VIN^2 / R_HEATER`
+- `P_ON ~= VIN^2 / R_HEATER`
 
-Firmware should not treat the same PWM duty as equivalent power at every PD voltage. Duty limits must tighten as `VIN` rises.
+Firmware maps the controller output to a requested `VIN` instead of treating one PWM duty as equivalent power at every PD voltage. The requested voltage must stay inside the source capability discovered through CH224Q.
 
 ## 8) Layout baseline
 
@@ -178,7 +181,7 @@ This footprint is optional and should not be populated by default without oscill
 - verify drain overshoot at `5 / 9 / 12 / 15 / 20 / 28 V`
 - verify the gate waveform with the real `3.3 V` MCU drive
 - confirm that worst-case on-state heater current stays inside the PD contract
-- confirm that VIN and RTD sampling remain stable while heater PWM is active
+- confirm that VIN and RTD sampling remain stable in both `pps-mos` and fallback PWM modes
 
 ## References
 
