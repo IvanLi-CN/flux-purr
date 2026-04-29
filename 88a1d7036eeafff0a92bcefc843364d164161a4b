@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:rc",
+  "components": {
+    "firmware": {
+      "effective_version": "0.4.0",
+      "tag": "fw/v0.4.0-rc.88a1d70"
+    },
+    "web": {
+      "effective_version": "0.4.0",
+      "tag": "web/v0.4.0-rc.88a1d70"
+    }
+  },
+  "pr_head_sha": "f3c0717a4f1340c02be7a44a644e9474f93d68e9",
+  "pr_number": 23,
+  "pr_title": "feat(firmware): add PPS heater backend",
+  "release_channel": "rc",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "88a1d7036eeafff0a92bcefc843364d164161a4b",
+  "type_label": "type:minor"
+}
