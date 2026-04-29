@@ -79,7 +79,9 @@
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
-  - `GPIO47` runs formal PID PWM at `2 kHz`
+  - the control loop runs at `1 Hz` and produces a normalized `0..100%` heater output
+  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum, `1..100%` maps into `12 V..28 V` subject to source capability, and `GPIO47` is only driven as static MOS off/on
+  - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
   - control interval is `1 Hz`
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
@@ -103,13 +105,16 @@
 - PD policy:
   - default build requests `20 V` from `CH224Q`
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
-  - later PD status changes are observed and logged only; they do not latch or gate heater output
+  - the app runtime reads CH224Q `0x60~0x8F` power data after the boot request; fixed `20 V` PDO alone is not enough to enable PPS heating
+  - later PD status changes are observed and logged only; they do not latch heater output, but failed adjustable-voltage writes demote heater control to the fixed-PD PWM fallback
 - Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
 ## CH224Q PD request bring-up
 
 - `GPIO8/9` host the shared I2C bus for `CH224Q` and `M24C64`.
 - The app runtime programs `CH224Q` register `0x0A` on boot and requests the feature-selected voltage (`20 V` by default, optional `12 V` / `28 V` build variants).
+- The runtime then reads CH224Q `0x60~0x8F` power data. If a PPS APDO covers `20 V`, heater control can switch to `pps-mos`; otherwise it remains on `fixed-pd-pwm-fallback`.
+- In `pps-mos`, CH224Q `0x53` is used for PPS voltage requests and `0x51/0x52` for AVS requests above the PPS range. The first request writes the voltage register before writing `0x0A = 6` or `0x0A = 7`.
 - Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the app runtime continues.
 - After boot request/settle, the runtime polls CH224Q status for observation and defmt logging only.
 
@@ -167,7 +172,7 @@
 - GPIO profile is locked to the S3 front-panel baseline (`24` firmware-active GPIO, center key on `GPIO0`).
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
-- `GPIO47` (chip pin `37`) is the heater-control PWM output for a low-side `BUK9Y14-40B,115` MOSFET stage.
+- `GPIO47` (chip pin `37`) controls the low-side `BUK9Y14-40B,115` MOSFET stage. In `pps-mos` mode it is a static off/on gate output; in fallback mode it remains the `2 kHz` heater PWM output.
 - `GPIO48` (chip pin `36`) is the active buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
@@ -184,4 +189,4 @@
 - The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
 - Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
-- This round still does not implement touch input, tach feedback, external PID tuning, or VIN/PD-aware power compensation.
+- This round still does not implement touch input, tach feedback, external PID tuning, or closed-loop VIN/current power compensation.

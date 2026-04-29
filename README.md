@@ -67,6 +67,7 @@ Current firmware runtime baseline also assumes:
 
 - CH224Q default PD request is `20 V`
 - optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
+- heater control prefers `PPS/AVS + MOS static switching` only when CH224Q power data proves PPS covers `20 V`; otherwise it falls back to the original fixed-PD `GPIO47` PWM backend
 - Dashboard center double toggles the active-cooling policy
 - Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
 
