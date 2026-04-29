@@ -163,57 +163,101 @@ pub struct AdjustablePowerCapabilities {
 impl AdjustablePowerCapabilities {
     pub fn from_pd_power_data(bytes: &[u8]) -> Self {
         let mut capabilities = Self::default();
+        let mut parsed_source_cap = false;
 
-        for chunk in bytes.chunks_exact(4) {
-            let raw = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            if raw == 0 {
-                continue;
+        if let Some((pdo_offset, pdo_count)) = source_cap_pdo_window(bytes) {
+            parsed_source_cap = true;
+            for pdo_index in 0..pdo_count {
+                let offset = pdo_offset + pdo_index * 4;
+                Self::merge_power_data_object(
+                    &mut capabilities,
+                    u32::from_le_bytes([
+                        bytes[offset],
+                        bytes[offset + 1],
+                        bytes[offset + 2],
+                        bytes[offset + 3],
+                    ]),
+                );
             }
+        }
 
-            if pd_object_type(raw) != 0b11 {
-                continue;
-            }
-
-            match augmented_pd_object_type(raw) {
-                0 => {
-                    let min_mv = pps_apdo_min_mv(raw);
-                    let max_mv = pps_apdo_max_mv(raw);
-                    if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
-                        continue;
-                    }
-
-                    capabilities.pps_min_mv = Some(match capabilities.pps_min_mv {
-                        Some(previous) => previous.min(min_mv),
-                        None => min_mv,
-                    });
-                    capabilities.pps_max_mv = Some(match capabilities.pps_max_mv {
-                        Some(previous) => previous.max(max_mv),
-                        None => max_mv,
-                    });
-                    capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
-                }
-                1 => {
-                    let min_mv = epr_avs_apdo_min_mv(raw);
-                    let max_mv = epr_avs_apdo_max_mv(raw);
-                    if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
-                        continue;
-                    }
-
-                    capabilities.avs_min_mv = Some(match capabilities.avs_min_mv {
-                        Some(previous) => previous.min(min_mv),
-                        None => min_mv,
-                    });
-                    capabilities.avs_max_mv = Some(match capabilities.avs_max_mv {
-                        Some(previous) => previous.max(max_mv),
-                        None => max_mv,
-                    });
-                }
-                _ => continue,
+        if !parsed_source_cap {
+            for chunk in bytes.chunks_exact(4) {
+                Self::merge_power_data_object(
+                    &mut capabilities,
+                    u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                );
             }
         }
 
         capabilities
     }
+
+    fn merge_power_data_object(capabilities: &mut Self, raw: u32) {
+        if raw == 0 || pd_object_type(raw) != 0b11 {
+            return;
+        }
+
+        match augmented_pd_object_type(raw) {
+            0 => {
+                let min_mv = pps_apdo_min_mv(raw);
+                let max_mv = pps_apdo_max_mv(raw);
+                if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
+                    return;
+                }
+
+                capabilities.pps_min_mv = Some(match capabilities.pps_min_mv {
+                    Some(previous) => previous.min(min_mv),
+                    None => min_mv,
+                });
+                capabilities.pps_max_mv = Some(match capabilities.pps_max_mv {
+                    Some(previous) => previous.max(max_mv),
+                    None => max_mv,
+                });
+                capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
+            }
+            1 => {
+                let min_mv = epr_avs_apdo_min_mv(raw);
+                let max_mv = epr_avs_apdo_max_mv(raw);
+                if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
+                    return;
+                }
+
+                capabilities.avs_min_mv = Some(match capabilities.avs_min_mv {
+                    Some(previous) => previous.min(min_mv),
+                    None => min_mv,
+                });
+                capabilities.avs_max_mv = Some(match capabilities.avs_max_mv {
+                    Some(previous) => previous.max(max_mv),
+                    None => max_mv,
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+fn source_cap_pdo_window(bytes: &[u8]) -> Option<(usize, usize)> {
+    if bytes.len() < 2 {
+        return None;
+    }
+
+    let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+    let pdo_count = source_cap_pdo_count(header);
+    let pdo_offset = if source_cap_is_extended(header) { 4 } else { 2 };
+    if pdo_count == 0 || bytes.len() < pdo_offset + pdo_count * 4 {
+        return None;
+    }
+
+    Some((pdo_offset, pdo_count))
+}
+
+const fn source_cap_pdo_count(header: u16) -> usize {
+    ((header >> 12) & 0b111) as usize
+}
+
+const fn source_cap_is_extended(header: u16) -> bool {
+    (header & (1 << 15)) != 0
 }
 
 const fn pd_object_type(raw: u32) -> u32 {
@@ -325,6 +369,40 @@ mod tests {
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
         assert_eq!(capabilities.avs_min_mv, None);
         assert_eq!(capabilities.avs_max_mv, None);
+    }
+
+    #[test]
+    fn detects_pps_apdo_after_source_cap_header() {
+        let fixed_5v_3a = (100_u32 << 10) | 300_u32;
+        let pps_apdo = (0b11_u32 << 30) | (210_u32 << 17) | (33_u32 << 8) | 60_u32;
+        let header = (2_u16 << 12) | 1;
+        let mut bytes = [0_u8; 10];
+        bytes[0..2].copy_from_slice(&header.to_le_bytes());
+        bytes[2..6].copy_from_slice(&fixed_5v_3a.to_le_bytes());
+        bytes[6..10].copy_from_slice(&pps_apdo.to_le_bytes());
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
+
+        assert!(capabilities.pps_covers_20v);
+        assert_eq!(capabilities.pps_min_mv, Some(3_300));
+        assert_eq!(capabilities.pps_max_mv, Some(21_000));
+    }
+
+    #[test]
+    fn ignores_bytes_after_declared_source_cap_objects() {
+        let fixed_5v_3a = (100_u32 << 10) | 300_u32;
+        let pps_apdo = (0b11_u32 << 30) | (210_u32 << 17) | (33_u32 << 8) | 60_u32;
+        let header = (1_u16 << 12) | 1;
+        let mut bytes = [0_u8; 10];
+        bytes[0..2].copy_from_slice(&header.to_le_bytes());
+        bytes[2..6].copy_from_slice(&fixed_5v_3a.to_le_bytes());
+        bytes[6..10].copy_from_slice(&pps_apdo.to_le_bytes());
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
+
+        assert!(!capabilities.pps_covers_20v);
+        assert_eq!(capabilities.pps_min_mv, None);
+        assert_eq!(capabilities.pps_max_mv, None);
     }
 
     #[test]
