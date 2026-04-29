@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:stable",
+  "components": {
+    "firmware": {
+      "effective_version": "0.3.0",
+      "tag": "fw/v0.3.0"
+    },
+    "web": {
+      "effective_version": "0.3.0",
+      "tag": "web/v0.3.0"
+    }
+  },
+  "pr_head_sha": "69dd26bc360fe4925bdc79e709399b7558db178c",
+  "pr_number": 22,
+  "pr_title": "feat(frontpanel): add hold repeat temperature adjustment",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "254bba8be66bf375c66ada009c670d5e5e94129a",
+  "type_label": "type:minor"
+}
