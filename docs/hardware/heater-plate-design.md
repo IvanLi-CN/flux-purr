@@ -67,6 +67,8 @@ Estimated maximum heater power for `R20 = 3.2 ohm`:
 
 | Heater temperature | Estimated resistance | PD 65 W | PD 100 W | PD 140 W class |
 | ---: | ---: | ---: | ---: | ---: |
+| `0 C` | `2.95 ohm` | `31 W` | `74 W` | `74 W` |
+| `20 C` | `3.20 ohm` | `34 W` | `80 W` | `80 W` |
 | `60 C` | `3.70 ohm` | `39 W` | `93 W` | `93 W` |
 | `138 C` | `4.68 ohm` | `49 W` | `85 W` | `117 W` |
 | `183 C` | `5.25 ohm` | `55 W` | `76 W` | `131 W` |
@@ -75,7 +77,7 @@ Estimated maximum heater power for `R20 = 3.2 ohm`:
 | `245 C` | `6.03 ohm` | `64 W` | `66 W` | `130 W` |
 | `250 C` | `6.09 ohm` | `64 W` | `66 W` | `129 W` |
 
-Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up.
+Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up. At `20 C`, the expected current-limit voltage is about `10.4 V` for a `3.25 A` source and about `16.0 V` for a `5 A` source.
 
 ## 5) Gerber Package
 
@@ -150,4 +152,3 @@ Target cold heater resistance is 3.2 ohm after fabrication.
 Intended heater operation is up to about 250 C, with firmware cap at 300 C and forced protection at 360 C.
 Confirm solder mask and dielectric suitability for repeated thermal cycling in this use case.
 ```
-
