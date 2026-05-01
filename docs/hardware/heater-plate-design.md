@@ -79,6 +79,20 @@ Estimated maximum heater power for `R20 = 3.2 ohm`:
 
 Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up. At `20 C`, the expected current-limit voltage is about `10.4 V` for a `3.25 A` source and about `16.0 V` for a `5 A` source.
 
+Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying source current limits:
+
+| Heater temperature | Estimated resistance | 5.5 V | 9 V | 12 V | 15 V | 20 V | 28 V |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0 C` | `2.95 ohm` | `1.87 A / 10 W` | `3.05 A / 27 W` | `4.07 A / 49 W` | `5.09 A / 76 W` | `6.78 A / 136 W` | `9.50 A / 266 W` |
+| `20 C` | `3.20 ohm` | `1.72 A / 9 W` | `2.81 A / 25 W` | `3.75 A / 45 W` | `4.69 A / 70 W` | `6.25 A / 125 W` | `8.75 A / 245 W` |
+| `60 C` | `3.70 ohm` | `1.49 A / 8 W` | `2.43 A / 22 W` | `3.24 A / 39 W` | `4.05 A / 61 W` | `5.40 A / 108 W` | `7.56 A / 212 W` |
+| `138 C` | `4.68 ohm` | `1.17 A / 6 W` | `1.92 A / 17 W` | `2.56 A / 31 W` | `3.20 A / 48 W` | `4.27 A / 85 W` | `5.98 A / 167 W` |
+| `183 C` | `5.25 ohm` | `1.05 A / 6 W` | `1.71 A / 15 W` | `2.29 A / 27 W` | `2.86 A / 43 W` | `3.81 A / 76 W` | `5.33 A / 149 W` |
+| `217 C` | `5.68 ohm` | `0.97 A / 5 W` | `1.59 A / 14 W` | `2.11 A / 25 W` | `2.64 A / 40 W` | `3.52 A / 70 W` | `4.93 A / 138 W` |
+| `235 C` | `5.90 ohm` | `0.93 A / 5 W` | `1.52 A / 14 W` | `2.03 A / 24 W` | `2.54 A / 38 W` | `3.39 A / 68 W` | `4.74 A / 133 W` |
+| `245 C` | `6.03 ohm` | `0.91 A / 5 W` | `1.49 A / 13 W` | `1.99 A / 24 W` | `2.49 A / 37 W` | `3.32 A / 66 W` | `4.64 A / 130 W` |
+| `250 C` | `6.09 ohm` | `0.90 A / 5 W` | `1.48 A / 13 W` | `1.97 A / 24 W` | `2.46 A / 37 W` | `3.28 A / 66 W` | `4.60 A / 129 W` |
+
 ## 5) Gerber Package
 
 The checked manufacturing package is stored at:
