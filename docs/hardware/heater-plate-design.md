@@ -81,7 +81,7 @@ Low-temperature operation must be voltage-limited because full source voltage ca
 
 PD 65 W cold-start compatibility is conditional: at `0 C` and `20 C`, a `12 V` full-on drive exceeds a `3.25 A` source contract. A `3.25 A` source must therefore use a negotiated voltage below the current-limit voltage, or a validated firmware current-limit mode, before static full-on operation. Static `12 V` operation on a `3.25 A` source becomes approximately current-contract safe only once the plate is near `60 C` or hotter.
 
-The fixed-PD table below is intended for firmware voltage-step selection. Temperature rows are rounded and biased toward the points where each fixed voltage crosses about `3 A` or `5 A`, before applying source current limits.
+The fixed-PD table below is intended for firmware voltage-step selection. Temperature rows are rounded and biased toward the points where each fixed voltage crosses about `3 A` or `5 A`, before applying source current limits. Rows above `250 C` are included for cap and protection behavior, not as normal operating targets.
 
 Approximate fixed-voltage threshold guide:
 
@@ -114,6 +114,9 @@ Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying s
 | `220 C` | `5.72 ohm` | `0.87 A / 4 W` | `1.57 A / 14 W` | `2.10 A / 25 W` | `2.62 A / 39 W` | `3.50 A / 70 W` | `4.90 A / 137 W` |
 | `245 C` | `6.03 ohm` | `0.83 A / 4 W` | `1.49 A / 13 W` | `1.99 A / 24 W` | `2.49 A / 37 W` | `3.32 A / 66 W` | `4.64 A / 130 W` |
 | `250 C` | `6.09 ohm` | `0.82 A / 4 W` | `1.48 A / 13 W` | `1.97 A / 24 W` | `2.46 A / 37 W` | `3.28 A / 66 W` | `4.60 A / 129 W` |
+| `295 C` | `6.66 ohm` | `0.75 A / 4 W` | `1.35 A / 12 W` | `1.80 A / 22 W` | `2.25 A / 34 W` | `3.00 A / 60 W` | `4.21 A / 118 W` |
+| `300 C` | `6.72 ohm` | `0.74 A / 4 W` | `1.34 A / 12 W` | `1.79 A / 21 W` | `2.23 A / 33 W` | `2.98 A / 60 W` | `4.17 A / 117 W` |
+| `350 C` | `7.35 ohm` | `0.68 A / 3 W` | `1.22 A / 11 W` | `1.63 A / 20 W` | `2.04 A / 31 W` | `2.72 A / 54 W` | `3.81 A / 107 W` |
 
 ## 5) Gerber Package
 
