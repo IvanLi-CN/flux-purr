@@ -81,19 +81,39 @@ Low-temperature operation must be voltage-limited because full source voltage ca
 
 PD 65 W cold-start compatibility is conditional: at `0 C` and `20 C`, a `12 V` full-on drive exceeds a `3.25 A` source contract. A `3.25 A` source must therefore use a negotiated voltage below the current-limit voltage, or a validated firmware current-limit mode, before static full-on operation. Static `12 V` operation on a `3.25 A` source becomes approximately current-contract safe only once the plate is near `60 C` or hotter.
 
+The fixed-PD table below is intended for firmware voltage-step selection. Temperature rows are rounded and biased toward the points where each fixed voltage crosses about `3 A` or `5 A`, before applying source current limits.
+
+Approximate fixed-voltage threshold guide:
+
+| Fixed voltage | About 5 A | About 3 A | Use note |
+| ---: | ---: | ---: | --- |
+| `5 V` | below normal range | below normal range | safe low-power fallback |
+| `9 V` | below normal range | about `5 C` | below about `5 C`, 9 V is slightly above 3 A |
+| `12 V` | below normal range | about `85 C` | below about `85 C`, 12 V is above 3 A |
+| `15 V` | about `5 C` | about `165 C` | useful middle step after cold-start limiting |
+| `20 V` | about `85 C` | about `296 C` | still about `3.3 A` at `250 C` |
+| `28 V` | about `211 C` | about `508 C` | high-power step for EPR-class sources only |
+
 Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying source current limits:
 
-| Heater temperature | Estimated resistance | 5.5 V | 9 V | 12 V | 15 V | 20 V | 28 V |
+| Heater temperature | Estimated resistance | 5 V | 9 V | 12 V | 15 V | 20 V | 28 V |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `0 C` | `2.95 ohm` | `1.87 A / 10 W` | `3.05 A / 27 W` | `4.07 A / 49 W` | `5.09 A / 76 W` | `6.78 A / 136 W` | `9.50 A / 266 W` |
-| `20 C` | `3.20 ohm` | `1.72 A / 9 W` | `2.81 A / 25 W` | `3.75 A / 45 W` | `4.69 A / 70 W` | `6.25 A / 125 W` | `8.75 A / 245 W` |
-| `60 C` | `3.70 ohm` | `1.49 A / 8 W` | `2.43 A / 22 W` | `3.24 A / 39 W` | `4.05 A / 61 W` | `5.40 A / 108 W` | `7.56 A / 212 W` |
-| `138 C` | `4.68 ohm` | `1.17 A / 6 W` | `1.92 A / 17 W` | `2.56 A / 31 W` | `3.20 A / 48 W` | `4.27 A / 85 W` | `5.98 A / 167 W` |
-| `183 C` | `5.25 ohm` | `1.05 A / 6 W` | `1.71 A / 15 W` | `2.29 A / 27 W` | `2.86 A / 43 W` | `3.81 A / 76 W` | `5.33 A / 149 W` |
-| `217 C` | `5.68 ohm` | `0.97 A / 5 W` | `1.59 A / 14 W` | `2.11 A / 25 W` | `2.64 A / 40 W` | `3.52 A / 70 W` | `4.93 A / 138 W` |
-| `235 C` | `5.90 ohm` | `0.93 A / 5 W` | `1.52 A / 14 W` | `2.03 A / 24 W` | `2.54 A / 38 W` | `3.39 A / 68 W` | `4.74 A / 133 W` |
-| `245 C` | `6.03 ohm` | `0.91 A / 5 W` | `1.49 A / 13 W` | `1.99 A / 24 W` | `2.49 A / 37 W` | `3.32 A / 66 W` | `4.64 A / 130 W` |
-| `250 C` | `6.09 ohm` | `0.90 A / 5 W` | `1.48 A / 13 W` | `1.97 A / 24 W` | `2.46 A / 37 W` | `3.28 A / 66 W` | `4.60 A / 129 W` |
+| `0 C` | `2.95 ohm` | `1.70 A / 8 W` | `3.05 A / 27 W` | `4.07 A / 49 W` | `5.09 A / 76 W` | `6.78 A / 136 W` | `9.50 A / 266 W` |
+| `5 C` | `3.01 ohm` | `1.66 A / 8 W` | `2.99 A / 27 W` | `3.98 A / 48 W` | `4.98 A / 75 W` | `6.64 A / 133 W` | `9.30 A / 260 W` |
+| `20 C` | `3.20 ohm` | `1.56 A / 8 W` | `2.81 A / 25 W` | `3.75 A / 45 W` | `4.69 A / 70 W` | `6.25 A / 125 W` | `8.75 A / 245 W` |
+| `60 C` | `3.70 ohm` | `1.35 A / 7 W` | `2.43 A / 22 W` | `3.24 A / 39 W` | `4.05 A / 61 W` | `5.40 A / 108 W` | `7.56 A / 212 W` |
+| `80 C` | `3.95 ohm` | `1.26 A / 6 W` | `2.28 A / 20 W` | `3.03 A / 36 W` | `3.79 A / 57 W` | `5.06 A / 101 W` | `7.08 A / 198 W` |
+| `85 C` | `4.02 ohm` | `1.24 A / 6 W` | `2.24 A / 20 W` | `2.99 A / 36 W` | `3.73 A / 56 W` | `4.98 A / 100 W` | `6.97 A / 195 W` |
+| `90 C` | `4.08 ohm` | `1.23 A / 6 W` | `2.21 A / 20 W` | `2.94 A / 35 W` | `3.68 A / 55 W` | `4.90 A / 98 W` | `6.86 A / 192 W` |
+| `140 C` | `4.71 ohm` | `1.06 A / 5 W` | `1.91 A / 17 W` | `2.55 A / 31 W` | `3.19 A / 48 W` | `4.25 A / 85 W` | `5.95 A / 166 W` |
+| `160 C` | `4.96 ohm` | `1.01 A / 5 W` | `1.81 A / 16 W` | `2.42 A / 29 W` | `3.02 A / 45 W` | `4.03 A / 81 W` | `5.64 A / 158 W` |
+| `165 C` | `5.02 ohm` | `1.00 A / 5 W` | `1.79 A / 16 W` | `2.39 A / 29 W` | `2.99 A / 45 W` | `3.98 A / 80 W` | `5.57 A / 156 W` |
+| `180 C` | `5.21 ohm` | `0.96 A / 5 W` | `1.73 A / 16 W` | `2.30 A / 28 W` | `2.88 A / 43 W` | `3.84 A / 77 W` | `5.37 A / 150 W` |
+| `210 C` | `5.59 ohm` | `0.89 A / 4 W` | `1.61 A / 14 W` | `2.15 A / 26 W` | `2.68 A / 40 W` | `3.58 A / 72 W` | `5.01 A / 140 W` |
+| `215 C` | `5.65 ohm` | `0.88 A / 4 W` | `1.59 A / 14 W` | `2.12 A / 25 W` | `2.65 A / 40 W` | `3.54 A / 71 W` | `4.95 A / 139 W` |
+| `220 C` | `5.72 ohm` | `0.87 A / 4 W` | `1.57 A / 14 W` | `2.10 A / 25 W` | `2.62 A / 39 W` | `3.50 A / 70 W` | `4.90 A / 137 W` |
+| `245 C` | `6.03 ohm` | `0.83 A / 4 W` | `1.49 A / 13 W` | `1.99 A / 24 W` | `2.49 A / 37 W` | `3.32 A / 66 W` | `4.64 A / 130 W` |
+| `250 C` | `6.09 ohm` | `0.82 A / 4 W` | `1.48 A / 13 W` | `1.97 A / 24 W` | `2.46 A / 37 W` | `3.28 A / 66 W` | `4.60 A / 129 W` |
 
 ## 5) Gerber Package
 
