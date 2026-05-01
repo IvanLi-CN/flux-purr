@@ -63,7 +63,7 @@ The heater plate is intended to work across these source classes:
 - PD 100 W: `20 V / 5 A`
 - PD 140 W class: `28 V` class operation, current-limited by the discovered source contract
 
-Estimated maximum heater power for `R20 = 3.2 ohm`:
+Estimated maximum heater power for `R20 = 3.2 ohm`, after applying the source current contract:
 
 | Heater temperature | Estimated resistance | PD 65 W | PD 100 W | PD 140 W class |
 | ---: | ---: | ---: | ---: | ---: |
@@ -78,6 +78,8 @@ Estimated maximum heater power for `R20 = 3.2 ohm`:
 | `250 C` | `6.09 ohm` | `64 W` | `66 W` | `129 W` |
 
 Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up. At `20 C`, the expected current-limit voltage is about `10.4 V` for a `3.25 A` source and about `16.0 V` for a `5 A` source.
+
+PD 65 W cold-start compatibility is conditional: at `0 C` and `20 C`, a `12 V` full-on drive exceeds a `3.25 A` source contract. A `3.25 A` source must therefore use a negotiated voltage below the current-limit voltage, or a validated firmware current-limit mode, before static full-on operation. Static `12 V` operation on a `3.25 A` source becomes approximately current-contract safe only once the plate is near `60 C` or hotter.
 
 Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying source current limits:
 

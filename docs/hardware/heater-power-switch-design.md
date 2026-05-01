@@ -4,7 +4,7 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 
 ## 1) Scope
 
-- Heater supply bus: `VBUS`, expected adjustable operating range `12 V ~ 28 V` when the connected source exposes PPS that covers `20 V`
+- Heater supply bus: `VBUS`, expected adjustable operating range `12 V ~ 28 V` when the connected source exposes PPS that covers `20 V`; lower-voltage operation is allowed only when the source exposes it and firmware uses it for heater current limiting
 - Sources that do not expose PPS covering `20 V` remain compatibility/fallback-only and use the original fixed-PD PWM firmware backend
 - Load type: resistive hotplate heater
 - Heater plate baseline: [heater-plate-design.md](heater-plate-design.md)
@@ -85,6 +85,7 @@ Preferred runtime mode:
 - CH224Q adjustable-PD request controls heater power across `12 V ~ 28 V`
 - `GPIO47` only drives the low-side MOSFET statically off or on
 - firmware may enable this mode only after CH224Q power data proves that PPS covers `20 V`
+- with the `3.2 ohm` heater plate, PD 65 W cold start is not valid at static `12 V`; firmware must request a lower available voltage or use a validated current-limit fallback until the estimated heater resistance keeps full-on current inside the negotiated contract
 
 Fallback mode:
 
