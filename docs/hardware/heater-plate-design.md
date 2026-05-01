@@ -130,7 +130,8 @@ Recommended solder mask:
 
 - Black solder mask on the circuit side
 - Heater traces covered by solder mask
-- Copper-post contact pads opened
+- Circular pads opened in the checked package
+- Only the lower circular pads are heater supply pressure contacts
 
 Preferred contact-pad finish:
 
@@ -163,7 +164,8 @@ Order notes should include:
 
 ```text
 Single-sided aluminum-core PCB heater, 1 oz copper, black solder mask on the circuit side.
-Heater traces are covered by solder mask. Lower circular contact pads are exposed pressure-contact pads.
+Heater traces are covered by solder mask. Circular pads are exposed in the checked Gerber package.
+Only the lower circular pads are heater supply pressure-contact pads; upper exposed circular pads are isolated no-connect features.
 Target cold heater resistance is 3.2 ohm after fabrication.
 Intended heater operation is up to about 250 C, with firmware cap at 300 C and forced protection at 360 C.
 Confirm solder mask and dielectric suitability for repeated thermal cycling in this use case.
