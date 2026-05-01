@@ -142,7 +142,7 @@ docs/hardware/gerbers/heater-plate-5p6cm-3p2ohm/flux-purr-heater-plate-5p6cm-3p2
 Package SHA-256:
 
 ```text
-b9242944dca5ce4694d6f99190d23b1e1a734579c363672fb13361258e878057
+74600dd40e183d3de0b55f0e0bdb7623979e4d34b551e5f9761e83998d37ea30
 ```
 
 Key parsed dimensions from the package:
@@ -219,7 +219,7 @@ docs/hardware/gerbers/heater-plate-5p6cm-4p5ohm-original/flux-purr-heater-plate-
 Package SHA-256:
 
 ```text
-5e129bae9dd70da7062a82b9a16e9308dbc47833101f81fe97bc9545da045e34
+690eb6daf2a8ea5fc04415b0826d52d519622f332e638756355c3671bcd83ff2
 ```
 
 Key parsed dimensions from the package:
