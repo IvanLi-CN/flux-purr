@@ -7,6 +7,7 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 - Heater supply bus: `VBUS`, expected adjustable operating range `12 V ~ 28 V` when the connected source exposes PPS that covers `20 V`
 - Sources that do not expose PPS covering `20 V` remain compatibility/fallback-only and use the original fixed-PD PWM firmware backend
 - Load type: resistive hotplate heater
+- Heater plate baseline: [heater-plate-design.md](heater-plate-design.md)
 - Switch topology: low-side N-channel MOSFET
 - MOSFET gate source: `ESP32-S3 GPIO47` (chip pin `37`)
 
@@ -134,6 +135,8 @@ Fuse and TVS baseline:
 ## 7) Current and power constraints
 
 The PD source and the hotplate switch stage must be checked against the heater current when the MOSFET is fully on.
+
+The current heater-plate baseline targets `R_HEATER_COLD ~= 3.2 ohm`; each plate must still be measured and calibrated during bring-up.
 
 Hard check:
 
