@@ -1,6 +1,6 @@
-# Flux Purr Heater Plate Design
+# Flux Purr Heater Plate Versions
 
-This document defines the heater-plate baseline used with the Flux Purr heater power-switch stage.
+This document defines the supported heater-plate versions used with the Flux Purr heater power-switch stage.
 
 ## 1) Scope
 
@@ -13,7 +13,7 @@ This document defines the heater-plate baseline used with the Flux Purr heater p
 
 ## 2) Thermal Targets
 
-The heater plate is optimized for soldering and reflow work around these solder systems:
+The heater plate family is optimized for soldering and reflow work around these solder systems:
 
 - Low-temperature solder: `138 C`
 - SnPb eutectic solder: `183 C`
@@ -25,21 +25,20 @@ Operating limits:
 - Firmware temperature cap: `300 C`
 - Forced protection threshold: `360 C`
 
-The resistance target is chosen for useful power through the normal reflow range, not for sustained high power above `250 C`.
+Rows above `250 C` in the fixed-PD tables are included for cap and protection behavior, not as normal operating targets.
 
-## 3) Electrical Target
+## 3) Supported Versions
 
-Nominal cold resistance:
+Firmware must treat the heater plate as a calibrated load profile. The board revision, measured cold resistance, and selected firmware profile must match during bring-up.
 
-```text
-R20 = 3.2 ohm
-```
+| Profile ID | Board size | Nominal `R20` | Trace width | Routed length | Role |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `heater-5p6-3p2` | `56 mm x 56 mm` | `3.2 ohm` | `0.40 mm` | `2570.05 mm` | lower-resistance high-power version |
+| `heater-5p6-4p5-original` | `56 mm x 56 mm` | `4.5 ohm` | `0.30 mm` | `2742.89 mm` | original higher-resistance version |
 
-Accepted calibrated board range:
+The `heater-5p6-3p2` version is the current preferred high-power version. The `heater-5p6-4p5-original` version remains supported for existing boards and must keep its own firmware power table.
 
-```text
-3.1 ohm <= R20 <= 3.3 ohm
-```
+## 4) Common Electrical Model
 
 Each heater plate must be measured during bring-up and the measured cold resistance must be used by firmware power limiting.
 
@@ -55,9 +54,25 @@ Copper temperature coefficient used for first-order estimation:
 R(T) = R20 * (1 + 0.00393 * (T - 20))
 ```
 
-## 4) Power Compatibility
+The fixed-PD tables below are intended for firmware voltage-step selection. Temperature rows are rounded and biased toward the points where each fixed voltage crosses about `3 A` or `5 A`, before applying source current limits.
 
-The heater plate is intended to work across these source classes:
+## 5) `heater-5p6-3p2` Profile
+
+Nominal cold resistance:
+
+```text
+R20 = 3.2 ohm
+```
+
+Accepted calibrated board range:
+
+```text
+3.1 ohm <= R20 <= 3.3 ohm
+```
+
+### 5.1 Power Compatibility
+
+The `heater-5p6-3p2` version is intended to work across these source classes:
 
 - PD 65 W: typically `20 V / 3.25 A`
 - PD 100 W: `20 V / 5 A`
@@ -80,8 +95,6 @@ Estimated maximum heater power for `R20 = 3.2 ohm`, after applying the source cu
 Low-temperature operation must be voltage-limited because full source voltage can exceed the source current contract before the copper trace heats up. At `20 C`, the expected current-limit voltage is about `10.4 V` for a `3.25 A` source and about `16.0 V` for a `5 A` source.
 
 PD 65 W cold-start compatibility is conditional: at `0 C` and `20 C`, a `12 V` full-on drive exceeds a `3.25 A` source contract. A `3.25 A` source must therefore use a negotiated voltage below the current-limit voltage, or a validated firmware current-limit mode, before static full-on operation. Static `12 V` operation on a `3.25 A` source becomes approximately current-contract safe only once the plate is near `60 C` or hotter.
-
-The fixed-PD table below is intended for firmware voltage-step selection. Temperature rows are rounded and biased toward the points where each fixed voltage crosses about `3 A` or `5 A`, before applying source current limits. Rows above `250 C` are included for cap and protection behavior, not as normal operating targets.
 
 Approximate fixed-voltage threshold guide:
 
@@ -118,12 +131,12 @@ Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying s
 | `300 C` | `6.72 ohm` | `0.74 A / 4 W` | `1.34 A / 12 W` | `1.79 A / 21 W` | `2.23 A / 33 W` | `2.98 A / 60 W` | `4.17 A / 117 W` |
 | `350 C` | `7.35 ohm` | `0.68 A / 3 W` | `1.22 A / 11 W` | `1.63 A / 20 W` | `2.04 A / 31 W` | `2.72 A / 54 W` | `3.81 A / 107 W` |
 
-## 5) Gerber Package
+### 5.2 Gerber Package
 
 The checked manufacturing package is stored at:
 
 ```text
-docs/hardware/gerbers/heater-plate-3p2ohm/flux-purr-heater-plate-3p2ohm-gerbers.zip
+docs/hardware/gerbers/heater-plate-5p6cm-3p2ohm/flux-purr-heater-plate-5p6cm-3p2ohm-gerbers.zip
 ```
 
 Package SHA-256:
@@ -145,16 +158,93 @@ Key parsed dimensions from the package:
 | Copper-to-copper spacing | about `0.6 mm` |
 | Heater copper to board edge | about `1.3 mm` minimum |
 
-The Gerber uses the lower two circular pads as the heater supply contacts. The upper circular pads and side pads are isolated copper features in the checked package and must not be used as the heater supply path.
+## 6) `heater-5p6-4p5-original` Profile
 
-## 6) Surface Finish and Solder Mask
+Nominal cold resistance:
 
-Recommended solder mask:
+```text
+R20 = 4.5 ohm
+```
+
+Expected calibrated board range:
+
+```text
+4.3 ohm <= R20 <= 4.8 ohm
+```
+
+Boards outside this range require a separate firmware profile or a hardware review.
+
+### 6.1 Power Compatibility
+
+The original `4.5 ohm` version draws less current at the same fixed voltage and is easier to keep inside a `3 A` source at low fixed-PD voltages. It also heats more slowly at the same source voltage.
+
+Approximate fixed-voltage threshold guide:
+
+| Fixed voltage | About 5 A | About 3 A | Use note |
+| ---: | ---: | ---: | --- |
+| `5 V` | below normal range | below normal range | safe low-power fallback |
+| `9 V` | below normal range | below normal range | below 3 A through the normal range |
+| `12 V` | below normal range | below normal range | below 3 A through the normal range |
+| `15 V` | below normal range | about `50 C` | cold operation is slightly above 3 A |
+| `20 V` | below normal range | about `143 C` | useful high step after warm-up |
+| `28 V` | about `82 C` | about `293 C` | EPR-class step, current-limited before warm-up |
+
+Fixed-voltage current and power estimates for `R20 = 4.5 ohm`, before applying source current limits:
+
+| Heater temperature | Estimated resistance | 5 V | 9 V | 12 V | 15 V | 20 V | 28 V |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `0 C` | `4.15 ohm` | `1.21 A / 6 W` | `2.17 A / 20 W` | `2.89 A / 35 W` | `3.62 A / 54 W` | `4.82 A / 96 W` | `6.75 A / 189 W` |
+| `20 C` | `4.50 ohm` | `1.11 A / 6 W` | `2.00 A / 18 W` | `2.67 A / 32 W` | `3.33 A / 50 W` | `4.44 A / 89 W` | `6.22 A / 174 W` |
+| `50 C` | `5.03 ohm` | `0.99 A / 5 W` | `1.79 A / 16 W` | `2.39 A / 29 W` | `2.98 A / 45 W` | `3.98 A / 80 W` | `5.57 A / 156 W` |
+| `60 C` | `5.21 ohm` | `0.96 A / 5 W` | `1.73 A / 16 W` | `2.30 A / 28 W` | `2.88 A / 43 W` | `3.84 A / 77 W` | `5.38 A / 151 W` |
+| `80 C` | `5.56 ohm` | `0.90 A / 4 W` | `1.62 A / 15 W` | `2.16 A / 26 W` | `2.70 A / 40 W` | `3.60 A / 72 W` | `5.03 A / 141 W` |
+| `85 C` | `5.65 ohm` | `0.89 A / 4 W` | `1.59 A / 14 W` | `2.12 A / 25 W` | `2.66 A / 40 W` | `3.54 A / 71 W` | `4.96 A / 139 W` |
+| `138 C` | `6.59 ohm` | `0.76 A / 4 W` | `1.37 A / 12 W` | `1.82 A / 22 W` | `2.28 A / 34 W` | `3.04 A / 61 W` | `4.25 A / 119 W` |
+| `180 C` | `7.33 ohm` | `0.68 A / 3 W` | `1.23 A / 11 W` | `1.64 A / 20 W` | `2.05 A / 31 W` | `2.73 A / 55 W` | `3.82 A / 107 W` |
+| `190 C` | `7.51 ohm` | `0.67 A / 3 W` | `1.20 A / 11 W` | `1.60 A / 19 W` | `2.00 A / 30 W` | `2.66 A / 53 W` | `3.73 A / 104 W` |
+| `217 C` | `7.98 ohm` | `0.63 A / 3 W` | `1.13 A / 10 W` | `1.50 A / 18 W` | `1.88 A / 28 W` | `2.51 A / 50 W` | `3.51 A / 98 W` |
+| `250 C` | `8.57 ohm` | `0.58 A / 3 W` | `1.05 A / 9 W` | `1.40 A / 17 W` | `1.75 A / 26 W` | `2.33 A / 47 W` | `3.27 A / 92 W` |
+| `293 C` | `9.33 ohm` | `0.54 A / 3 W` | `0.96 A / 9 W` | `1.29 A / 15 W` | `1.61 A / 24 W` | `2.14 A / 43 W` | `3.00 A / 84 W` |
+| `300 C` | `9.45 ohm` | `0.53 A / 3 W` | `0.95 A / 9 W` | `1.27 A / 15 W` | `1.59 A / 24 W` | `2.12 A / 42 W` | `2.96 A / 83 W` |
+| `350 C` | `10.34 ohm` | `0.48 A / 2 W` | `0.87 A / 8 W` | `1.16 A / 14 W` | `1.45 A / 22 W` | `1.93 A / 39 W` | `2.71 A / 76 W` |
+
+### 6.2 Gerber Package
+
+The checked manufacturing package is stored at:
+
+```text
+docs/hardware/gerbers/heater-plate-5p6cm-4p5ohm-original/flux-purr-heater-plate-5p6cm-4p5ohm-original-gerbers.zip
+```
+
+Package SHA-256:
+
+```text
+5e129bae9dd70da7062a82b9a16e9308dbc47833101f81fe97bc9545da045e34
+```
+
+Key parsed dimensions from the package:
+
+| Item | Value |
+| --- | ---: |
+| Board outline | about `56 mm x 56 mm` |
+| Mounting holes | four `3.0 mm` NPTH holes |
+| Heater trace width | `0.30 mm` |
+| Heater routed length | `2742.89 mm` |
+| Estimated cold resistance | about `4.50 ohm` |
+| Heater trace pitch | about `1.0 mm` |
+| Copper-to-copper spacing | about `0.7 mm` |
+| Heater copper to board edge | about `1.3 mm` minimum |
+
+## 7) Surface Finish and Solder Mask
+
+Common solder mask rules:
 
 - Black solder mask on the circuit side
 - Heater traces covered by solder mask
-- Circular pads opened in the checked package
+- Circular pads opened in the checked packages
 - Only the lower circular pads are heater supply pressure contacts
+
+The checked packages use the lower two circular pads as the heater supply contacts. The upper circular pads and side pads are isolated copper features and must not be used as the heater supply path.
 
 Preferred contact-pad finish:
 
@@ -169,7 +259,7 @@ For low-cost builds, treat OSP as a temporary shipping and handling protection f
 
 `HASL` is not selected for the pressure-contact pads because tin can soften, creep, oxidize, or reflow in the intended operating temperature range.
 
-## 7) Contact Mechanics
+## 8) Contact Mechanics
 
 The copper posts must provide a stable low-resistance pressure contact:
 
@@ -181,15 +271,15 @@ The copper posts must provide a stable low-resistance pressure contact:
 
 Contact voltage drop is part of the heater power path and must be treated as a bring-up measurement, not as a fixed design constant.
 
-## 8) Manufacturing Notes
+## 9) Manufacturing Notes
 
-Order notes should include:
+Order notes should include the selected profile ID and package path:
 
 ```text
 Single-sided aluminum-core PCB heater, 1 oz copper, black solder mask on the circuit side.
 Heater traces are covered by solder mask. Circular pads are exposed in the checked Gerber package.
 Only the lower circular pads are heater supply pressure-contact pads; upper exposed circular pads are isolated no-connect features.
-Target cold heater resistance is 3.2 ohm after fabrication.
+Confirm the selected profile ID and target cold heater resistance after fabrication.
 Intended heater operation is up to about 250 C, with firmware cap at 300 C and forced protection at 360 C.
 Confirm solder mask and dielectric suitability for repeated thermal cycling in this use case.
 ```

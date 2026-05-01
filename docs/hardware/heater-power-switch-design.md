@@ -137,7 +137,7 @@ Fuse and TVS baseline:
 
 The PD source and the hotplate switch stage must be checked against the heater current when the MOSFET is fully on.
 
-The current heater-plate baseline targets `R_HEATER_COLD ~= 3.2 ohm`; each plate must still be measured and calibrated during bring-up.
+Supported heater-plate profiles currently target `R_HEATER_COLD ~= 3.2 ohm` and `R_HEATER_COLD ~= 4.5 ohm`; each plate must still be measured and calibrated during bring-up.
 
 Hard check:
 
