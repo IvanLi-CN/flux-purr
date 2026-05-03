@@ -1,6 +1,6 @@
-# Flux Purr Heater Plate Versions
+# Flux Purr Heater Plate Versions and Gerber Archives
 
-This document defines the supported heater-plate versions used with the Flux Purr heater power-switch stage.
+This document defines the supported heater-plate profile and archived heater Gerber packages used with the Flux Purr heater power-switch stage.
 
 ## 1) Scope
 
@@ -27,16 +27,16 @@ Operating limits:
 
 Rows above `250 C` in the fixed-PD tables are included for cap and protection behavior, not as normal operating targets.
 
-## 3) Supported Versions
+## 3) Heater Plate Profiles and Archives
 
 Firmware must treat the heater plate as a calibrated load profile. The board revision, measured cold resistance, and selected firmware profile must match during bring-up.
 
-| Profile ID | Board size | Nominal `R20` | Trace width | Routed length | Role |
+| ID | Board size | `R20` basis | Trace width | Routed length | Role |
 | --- | ---: | ---: | ---: | ---: | --- |
-| `heater-5p6-3p2` | `56 mm x 56 mm` | `3.2 ohm` | `0.40 mm` | `2570.05 mm` | lower-resistance high-power version |
-| `heater-5p6-4p5-original` | `56 mm x 56 mm` | `4.5 ohm` | `0.30 mm` | `2742.89 mm` | original higher-resistance version |
+| `heater-5p6-3p2` | `56 mm x 56 mm` | nominal `3.2 ohm` | `0.40 mm` | `2570.05 mm` | supported lower-resistance high-power profile |
+| `heater-5p6-original-archive` | `56 mm x 56 mm` | Gerber-estimated about `4.5 ohm` | `0.30 mm` | `2742.89 mm` | original Gerber archive, not a named production resistance target |
 
-The `heater-5p6-3p2` version is the current preferred high-power version. The `heater-5p6-4p5-original` version remains supported for existing boards and must keep its own firmware power table.
+The `heater-5p6-3p2` profile is the current intended high-power heater plate. The original Gerber archive is documented so old boards can be identified and measured; it must not be treated as an intentionally approved `4.5 ohm` product variant unless a board is measured and assigned a calibrated firmware profile.
 
 ## 4) Common Electrical Model
 
@@ -158,25 +158,27 @@ Key parsed dimensions from the package:
 | Copper-to-copper spacing | about `0.6 mm` |
 | Heater copper to board edge | about `1.3 mm` minimum |
 
-## 6) `heater-5p6-4p5-original` Profile
+## 6) Original Gerber Archive
 
-Nominal cold resistance:
+The original Gerber package is archived for traceability. Its geometry estimates to about `4.5 ohm` at `20 C`, but that value is a Gerber-derived estimate rather than an approved nominal design target.
 
-```text
-R20 = 4.5 ohm
-```
-
-Expected calibrated board range:
+Estimated cold resistance from the checked Gerber:
 
 ```text
-4.3 ohm <= R20 <= 4.8 ohm
+R20 ~= 4.5 ohm
 ```
 
-Boards outside this range require a separate firmware profile or a hardware review.
+Bring-up rule:
 
-### 6.1 Power Compatibility
+```text
+measure actual R20 before selecting or creating any firmware profile
+```
 
-The original `4.5 ohm` version draws less current at the same fixed voltage and is easier to keep inside a `3 A` source at low fixed-PD voltages. It also heats more slowly at the same source voltage.
+Boards using this archive require their own measured calibration. Do not infer that Flux Purr has a formal `4.5 ohm` heater version from this archive name or estimate.
+
+### 6.1 Reference Power Estimates
+
+The reference table below uses `R20 = 4.5 ohm` only to show the expected operating envelope for boards matching this archived Gerber geometry. It is not a substitute for measuring the real board.
 
 Approximate fixed-voltage threshold guide:
 
@@ -189,7 +191,7 @@ Approximate fixed-voltage threshold guide:
 | `20 V` | below normal range | about `143 C` | useful high step after warm-up |
 | `28 V` | about `82 C` | about `293 C` | EPR-class step, current-limited before warm-up |
 
-Fixed-voltage current and power estimates for `R20 = 4.5 ohm`, before applying source current limits:
+Fixed-voltage current and power estimates for estimated `R20 = 4.5 ohm`, before applying source current limits:
 
 | Heater temperature | Estimated resistance | 5 V | 9 V | 12 V | 15 V | 20 V | 28 V |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -213,7 +215,7 @@ Fixed-voltage current and power estimates for `R20 = 4.5 ohm`, before applying s
 The checked manufacturing package is stored at:
 
 ```text
-docs/hardware/gerbers/heater-plate-5p6cm-4p5ohm-original/flux-purr-heater-plate-5p6cm-4p5ohm-original-gerbers.zip
+docs/hardware/gerbers/heater-plate-5p6cm-original/flux-purr-heater-plate-5p6cm-original-gerbers.zip
 ```
 
 Package SHA-256:
