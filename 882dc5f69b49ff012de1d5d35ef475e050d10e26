@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:rc",
+  "components": {},
+  "pr_head_sha": "a2ebb4d079cf43579df33c4e2ef5d4a38023225b",
+  "pr_number": 25,
+  "pr_title": "docs(hardware): add heater plate design baseline",
+  "release_channel": "rc",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "882dc5f69b49ff012de1d5d35ef475e050d10e26",
+  "type_label": "type:docs"
+}
