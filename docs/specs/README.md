@@ -71,7 +71,7 @@
 | vmekj | Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与启动后界面轮播 | 已完成 | `vmekj-s3-gc9d01-display-bringup/SPEC.md` | 2026-04-13 | Orientation/colors confirmed; runtime behavior later superseded by #fk3u7 while display bring-up baseline stays canonical |
 | fk3u7 | Flux Purr 前面板五向输入与交互导航 | 已完成 | `fk3u7-frontpanel-input-interaction/SPEC.md` | 2026-04-21 | Key Test mapping + dashboard/menu navigation remain canonical; heater/fan runtime semantics are superseded by #q2aw6 |
 | jb85u | Release 失败 Telegram 告警接入 | 待实现 | `jb85u-release-failure-telegram-alerts/SPEC.md` | 2026-04-12 | Add a repo-local notifier for Release Web / Release Firmware and keep a manual Telegram smoke test path |
-| q2aw6 | Flux Purr 正式 PID 加热闭环与前面板运行态同步 | 已完成 | `q2aw6-heater-pid-frontpanel-runtime/SPEC.md` | 2026-04-21 | PR #11 |
+| q2aw6 | Flux Purr 正式 PID 加热闭环与前面板运行态同步 | 已完成 | `q2aw6-heater-pid-frontpanel-runtime/SPEC.md` | 2026-04-21 | PR #11; includes fixed-PD 12V/20V step experiment contract |
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
 | 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | 2026-04-27 | M24C64-backed target/preset/cooling/Wi-Fi persistence |
 | r9k3m | Flux Purr PR 标签发布与主分支保护 | 已完成 | `r9k3m-pr-label-release-protection/SPEC.md` | 2026-04-27 | Label-driven release intent, immutable mainline snapshots, and quality-gates declaration |

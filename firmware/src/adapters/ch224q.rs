@@ -153,6 +153,8 @@ pub const fn current_ma_from_register(value: u8) -> u16 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AdjustablePowerCapabilities {
+    pub fixed_12v: bool,
+    pub fixed_20v: bool,
     pub pps_covers_20v: bool,
     pub pps_min_mv: Option<u16>,
     pub pps_max_mv: Option<u16>,
@@ -194,44 +196,52 @@ impl AdjustablePowerCapabilities {
     }
 
     fn merge_power_data_object(capabilities: &mut Self, raw: u32) {
-        if raw == 0 || pd_object_type(raw) != 0b11 {
+        if raw == 0 {
             return;
         }
 
-        match augmented_pd_object_type(raw) {
-            0 => {
-                let min_mv = pps_apdo_min_mv(raw);
-                let max_mv = pps_apdo_max_mv(raw);
-                if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
-                    return;
-                }
+        match pd_object_type(raw) {
+            0b00 => match fixed_pdo_mv(raw) {
+                12_000 => capabilities.fixed_12v = true,
+                20_000 => capabilities.fixed_20v = true,
+                _ => {}
+            },
+            0b11 => match augmented_pd_object_type(raw) {
+                0 => {
+                    let min_mv = pps_apdo_min_mv(raw);
+                    let max_mv = pps_apdo_max_mv(raw);
+                    if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
+                        return;
+                    }
 
-                capabilities.pps_min_mv = Some(match capabilities.pps_min_mv {
-                    Some(previous) => previous.min(min_mv),
-                    None => min_mv,
-                });
-                capabilities.pps_max_mv = Some(match capabilities.pps_max_mv {
-                    Some(previous) => previous.max(max_mv),
-                    None => max_mv,
-                });
-                capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
-            }
-            1 => {
-                let min_mv = epr_avs_apdo_min_mv(raw);
-                let max_mv = epr_avs_apdo_max_mv(raw);
-                if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
-                    return;
+                    capabilities.pps_min_mv = Some(match capabilities.pps_min_mv {
+                        Some(previous) => previous.min(min_mv),
+                        None => min_mv,
+                    });
+                    capabilities.pps_max_mv = Some(match capabilities.pps_max_mv {
+                        Some(previous) => previous.max(max_mv),
+                        None => max_mv,
+                    });
+                    capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
                 }
+                1 => {
+                    let min_mv = epr_avs_apdo_min_mv(raw);
+                    let max_mv = epr_avs_apdo_max_mv(raw);
+                    if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
+                        return;
+                    }
 
-                capabilities.avs_min_mv = Some(match capabilities.avs_min_mv {
-                    Some(previous) => previous.min(min_mv),
-                    None => min_mv,
-                });
-                capabilities.avs_max_mv = Some(match capabilities.avs_max_mv {
-                    Some(previous) => previous.max(max_mv),
-                    None => max_mv,
-                });
-            }
+                    capabilities.avs_min_mv = Some(match capabilities.avs_min_mv {
+                        Some(previous) => previous.min(min_mv),
+                        None => min_mv,
+                    });
+                    capabilities.avs_max_mv = Some(match capabilities.avs_max_mv {
+                        Some(previous) => previous.max(max_mv),
+                        None => max_mv,
+                    });
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -266,6 +276,10 @@ const fn pd_object_type(raw: u32) -> u32 {
 
 const fn augmented_pd_object_type(raw: u32) -> u32 {
     (raw >> 28) & 0b11
+}
+
+const fn fixed_pdo_mv(raw: u32) -> u16 {
+    (((raw >> 10) & 0x3ff) as u16) * 50
 }
 
 const fn pps_apdo_min_mv(raw: u32) -> u16 {
@@ -364,6 +378,8 @@ mod tests {
         let bytes = pps_apdo.to_le_bytes();
         let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
 
+        assert!(!capabilities.fixed_12v);
+        assert!(!capabilities.fixed_20v);
         assert!(capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
@@ -423,6 +439,8 @@ mod tests {
         let bytes = fixed_20v_pdo.to_le_bytes();
         let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
 
+        assert!(!capabilities.fixed_12v);
+        assert!(capabilities.fixed_20v);
         assert!(!capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, None);
         assert_eq!(capabilities.pps_max_mv, None);
@@ -439,5 +457,24 @@ mod tests {
         assert!(!capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(15_000));
+    }
+
+    #[test]
+    fn detects_fixed_12v_and_20v_pdos_after_source_cap_header() {
+        let fixed_5v_3a = (100_u32 << 10) | 300_u32;
+        let fixed_12v_3a = (240_u32 << 10) | 300_u32;
+        let fixed_20v_2a = (400_u32 << 10) | 200_u32;
+        let header = (3_u16 << 12) | 1;
+        let mut bytes = [0_u8; 14];
+        bytes[0..2].copy_from_slice(&header.to_le_bytes());
+        bytes[2..6].copy_from_slice(&fixed_5v_3a.to_le_bytes());
+        bytes[6..10].copy_from_slice(&fixed_12v_3a.to_le_bytes());
+        bytes[10..14].copy_from_slice(&fixed_20v_2a.to_le_bytes());
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
+
+        assert!(capabilities.fixed_12v);
+        assert!(capabilities.fixed_20v);
+        assert!(!capabilities.pps_covers_20v);
     }
 }

@@ -81,7 +81,9 @@
 - Heater control:
   - the control loop runs at `1 Hz` and produces a normalized `0..100%` heater output
   - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum, `1..100%` maps into `12 V..28 V` subject to source capability, and `GPIO47` is only driven as static MOS off/on
+  - the experimental `heater-fixed-pd-step-experiment` feature forces a `fixed-pd-step-mos` backend when the source advertises both fixed `12 V` and `20 V` PDOs; it starts from `12 V`, switches up to `20 V` at `>=80°C` while heater output is nonzero, switches back to `12 V` at `<=70°C` or `0%` output, and confirms each fixed-PD step with GPIO1 VIN sensing before re-enabling the MOS
   - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
+  - if the fixed-PD step experiment cannot find both fixed PDOs or cannot write/confirm a requested step, it demotes to the same `fixed-pd-pwm-fallback`
   - control interval is `1 Hz`
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
@@ -106,6 +108,7 @@
   - default build requests `20 V` from `CH224Q`
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
   - the app runtime reads CH224Q `0x60~0x8F` power data after the boot request; fixed `20 V` PDO alone is not enough to enable PPS heating
+  - the fixed-PD step experiment is a bench-validation mode, not a guarantee that every adapter keeps VBUS and the MCU rail uninterrupted during fixed-PDO transitions
   - later PD status changes are observed and logged only; they do not latch heater output, but failed adjustable-voltage writes demote heater control to the fixed-PD PWM fallback
 - Historical `fan-cycle` smoke-test behavior remains documented in `#8tesd`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
@@ -115,6 +118,7 @@
 - The app runtime programs `CH224Q` register `0x0A` on boot and requests the feature-selected voltage (`20 V` by default, optional `12 V` / `28 V` build variants).
 - The runtime then reads CH224Q `0x60~0x8F` power data. If a PPS APDO covers `20 V`, heater control can switch to `pps-mos`; otherwise it remains on `fixed-pd-pwm-fallback`.
 - In `pps-mos`, CH224Q `0x53` is used for PPS voltage requests and `0x51/0x52` for AVS requests above the PPS range. The first request writes the voltage register before writing `0x0A = 6` or `0x0A = 7`.
+- With `heater-fixed-pd-step-experiment`, the runtime prefers fixed `0x0A = 2` (`12 V`) and `0x0A = 4` (`20 V`) step requests when both fixed PDOs are advertised. It turns the heater MOS off before a step, waits for settle, checks GPIO1 VIN against the requested rail, and only then permits static MOS on.
 - Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the app runtime continues.
 - After boot request/settle, the runtime polls CH224Q status for observation and defmt logging only.
 
