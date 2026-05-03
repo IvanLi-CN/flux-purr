@@ -137,7 +137,7 @@ Fuse and TVS baseline:
 
 The PD source and the hotplate switch stage must be checked against the heater current when the MOSFET is fully on.
 
-The supported heater-plate profile currently targets `R_HEATER_COLD ~= 3.2 ohm`. The original archived Gerber estimates to about `4.5 ohm`, but old boards must be measured and assigned a calibrated firmware profile before use.
+Supported heater-plate profiles currently target `R_HEATER_COLD ~= 3.2 ohm` and `R_HEATER_COLD ~= 4.5 ohm`; each plate must still be measured and calibrated during bring-up.
 
 Hard check:
 
