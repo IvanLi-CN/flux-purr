@@ -1,6 +1,6 @@
-# Heater Plate `heater-5p6-4p5-original`
+# Heater Plate `heater-5p6-4p5`
 
-This file defines the original `56 mm x 56 mm`, `4.5 ohm` heater-plate version. Shared heater-plate rules live in [../heater-plate-design.md](../heater-plate-design.md).
+This file defines the `56 mm x 56 mm`, `4.5 ohm` heater-plate version. Shared heater-plate rules live in [../heater-plate-design.md](../heater-plate-design.md).
 
 ## 1) Profile
 
@@ -20,7 +20,7 @@ Boards outside this range require a separate firmware profile or a hardware revi
 
 ## 2) Power Compatibility
 
-The original `4.5 ohm` version draws less current at the same fixed voltage and is easier to keep inside a `3 A` source at low fixed-PD voltages. It also heats more slowly at the same source voltage.
+The `4.5 ohm` version draws less current at the same fixed voltage and is easier to keep inside a `3 A` source at low fixed-PD voltages. It also heats more slowly at the same source voltage.
 
 Approximate fixed-voltage threshold guide:
 
@@ -57,7 +57,7 @@ Fixed-voltage current and power estimates for `R20 = 4.5 ohm`, before applying s
 The checked manufacturing package is stored at:
 
 ```text
-docs/hardware/gerbers/heater-plate-5p6cm-4p5ohm-original/flux-purr-heater-plate-5p6cm-4p5ohm-original-gerbers.zip
+docs/hardware/gerbers/heater-plate-5p6cm-4p5ohm/flux-purr-heater-plate-5p6cm-4p5ohm-gerbers.zip
 ```
 
 Package SHA-256:

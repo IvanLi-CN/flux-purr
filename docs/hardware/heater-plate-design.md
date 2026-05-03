@@ -34,9 +34,9 @@ Firmware must treat the heater plate as a calibrated load profile. The board rev
 | Profile ID | Board size | Nominal `R20` | Trace width | Routed length | Version file |
 | --- | ---: | ---: | ---: | ---: | --- |
 | `heater-5p6-3p2` | `56 mm x 56 mm` | `3.2 ohm` | `0.40 mm` | `2570.05 mm` | [heater-5p6-3p2.md](heater-plates/heater-5p6-3p2.md) |
-| `heater-5p6-4p5-original` | `56 mm x 56 mm` | `4.5 ohm` | `0.30 mm` | `2742.89 mm` | [heater-5p6-4p5-original.md](heater-plates/heater-5p6-4p5-original.md) |
+| `heater-5p6-4p5` | `56 mm x 56 mm` | `4.5 ohm` | `0.30 mm` | `2742.89 mm` | [heater-5p6-4p5.md](heater-plates/heater-5p6-4p5.md) |
 
-The `heater-5p6-3p2` version is the current lower-resistance high-power plate. The `heater-5p6-4p5-original` version is the original higher-resistance plate and remains documented as its own supported profile.
+The `heater-5p6-3p2` and `heater-5p6-4p5` versions are peer heater-plate options. Firmware must select the matching calibrated profile for the installed plate.
 
 ## 4) Common Electrical Model
 
