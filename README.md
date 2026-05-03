@@ -88,6 +88,7 @@ Power design notes for the current board revision are frozen in:
 
 - [docs/hardware/tps62933-dual-rail-power-design.md](docs/hardware/tps62933-dual-rail-power-design.md)
 - [docs/hardware/heater-power-switch-design.md](docs/hardware/heater-power-switch-design.md)
+- [docs/hardware/heater-plate-design.md](docs/hardware/heater-plate-design.md)
 - [docs/hardware/fan-pcb-variants.md](docs/hardware/fan-pcb-variants.md)
 
 The fan rail is maintained as two sibling PCB variants that keep the same firmware-facing GPIO and status contract:
