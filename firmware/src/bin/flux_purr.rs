@@ -124,6 +124,8 @@ const HEATER_PPS_MOS_SETTLE_MS: u64 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_PULSE_PERIOD_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
+const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
+#[cfg(any(target_arch = "xtensa", test))]
 const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_ACTIVE_COOLING_PWM_PERMILLE: u16 = 500;
@@ -628,6 +630,33 @@ fn cooling_disabled_pulse_duty_percent(current_temp_c: i16) -> u8 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn heating_fan_pulse_duty_percent(current_temp_c: i16) -> u8 {
+    cooling_disabled_pulse_duty_percent(current_temp_c)
+        .saturating_mul(2)
+        .min(HEATING_FAN_PULSE_MAX_DUTY_PERCENT)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heating_fan_state(current_temp_c: i16, heater_output_percent: u8) -> FanPolicyState {
+    if current_temp_c > COOLING_DISABLED_FAN_FULL_TEMP_C {
+        return FanPolicyState::Full;
+    }
+    if current_temp_c > COOLING_DISABLED_HEATER_LOCK_TEMP_C {
+        return FanPolicyState::SafeHalf;
+    }
+    if current_temp_c <= COOLING_DISABLED_PULSE_START_TEMP_C || heater_output_percent == 0 {
+        return FanPolicyState::Disabled;
+    }
+
+    let duty_percent = heating_fan_pulse_duty_percent(current_temp_c);
+    if duty_percent == 0 {
+        return FanPolicyState::Disabled;
+    }
+
+    FanPolicyState::CoolingDisabledPulse { duty_percent }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn cooling_disabled_state(current_temp_c: i16) -> FanPolicyState {
     if current_temp_c > COOLING_DISABLED_FAN_FULL_TEMP_C {
         return FanPolicyState::Full;
@@ -666,6 +695,7 @@ fn fan_policy_decision(
     current_temp_c: i16,
     elapsed_ms: u64,
     heater_enabled: bool,
+    heater_output_percent: u8,
     active_cooling_enabled: bool,
     previous_state: FanPolicyState,
     hold_previous_output: bool,
@@ -673,7 +703,7 @@ fn fan_policy_decision(
     let state = if hold_previous_output {
         previous_state
     } else if heater_enabled {
-        cooling_disabled_state(current_temp_c)
+        heating_fan_state(current_temp_c, heater_output_percent)
     } else if active_cooling_enabled {
         auto_cooling_command(current_temp_c, elapsed_ms, previous_state)
     } else {
@@ -2148,6 +2178,7 @@ async fn main(_spawner: Spawner) {
         latest_temp_i16,
         0,
         ui_state.heater_enabled,
+        ui_state.heater_output_percent,
         ui_state.active_cooling_enabled,
         fan_policy_state,
         is_sensor_fault(current_rtd_fault),
@@ -2604,6 +2635,7 @@ async fn main(_spawner: Spawner) {
             latest_temp_i16,
             elapsed_ms,
             ui_state.heater_enabled,
+            ui_state.heater_output_percent,
             ui_state.active_cooling_enabled,
             fan_policy_state,
             is_sensor_fault(current_rtd_fault),
@@ -2963,11 +2995,11 @@ mod tests {
 
     #[test]
     fn auto_cooling_policy_runs_a_30_second_low_voltage_cooldown_below_40c() {
-        let stopped = fan_policy_decision(39, 0, false, true, FanPolicyState::Disabled, false);
+        let stopped = fan_policy_decision(39, 0, false, 0, true, FanPolicyState::Disabled, false);
         assert_eq!(stopped.command, FanHardwareCommand::disabled());
         assert_eq!(stopped.display_state, FanDisplayState::Auto);
 
-        let active = fan_policy_decision(40, 0, false, true, FanPolicyState::Disabled, false);
+        let active = fan_policy_decision(40, 0, false, 0, true, FanPolicyState::Disabled, false);
         assert_eq!(
             active.command,
             FanHardwareCommand {
@@ -2978,7 +3010,8 @@ mod tests {
         assert_eq!(active.state, FanPolicyState::ActiveCooling);
         assert_eq!(active.display_state, FanDisplayState::Run);
 
-        let still_active = fan_policy_decision(60, 0, false, true, FanPolicyState::Disabled, false);
+        let still_active =
+            fan_policy_decision(60, 0, false, 0, true, FanPolicyState::Disabled, false);
         assert_eq!(
             still_active.command,
             FanHardwareCommand {
@@ -2987,8 +3020,15 @@ mod tests {
             }
         );
 
-        let cooldown =
-            fan_policy_decision(39, 1_000, false, true, FanPolicyState::ActiveCooling, false);
+        let cooldown = fan_policy_decision(
+            39,
+            1_000,
+            false,
+            0,
+            true,
+            FanPolicyState::ActiveCooling,
+            false,
+        );
         assert_eq!(
             cooldown.state,
             FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 }
@@ -3002,6 +3042,7 @@ mod tests {
             39,
             30_500,
             false,
+            0,
             true,
             FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 },
             false,
@@ -3015,6 +3056,7 @@ mod tests {
             39,
             31_000,
             false,
+            0,
             true,
             FanPolicyState::ActiveCoolingCooldown { until_ms: 31_000 },
             false,
@@ -3024,7 +3066,7 @@ mod tests {
             FanHardwareCommand::disabled()
         );
 
-        let full = fan_policy_decision(61, 0, false, true, FanPolicyState::Disabled, false);
+        let full = fan_policy_decision(61, 0, false, 0, true, FanPolicyState::Disabled, false);
         assert_eq!(
             full.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Full)
@@ -3032,28 +3074,63 @@ mod tests {
     }
 
     #[test]
-    fn heater_enabled_does_not_use_idle_auto_cooling_thresholds() {
+    fn heater_enabled_uses_actual_output_for_heating_pulses() {
         let heating_below_100 =
-            fan_policy_decision(41, 0, true, true, FanPolicyState::Disabled, false);
+            fan_policy_decision(41, 0, true, 32, true, FanPolicyState::Disabled, false);
         assert_eq!(heating_below_100.command, FanHardwareCommand::disabled());
         assert_eq!(heating_below_100.display_state, FanDisplayState::Auto);
 
         let heating_with_policy_off =
-            fan_policy_decision(41, 0, true, false, FanPolicyState::Disabled, false);
+            fan_policy_decision(41, 0, true, 32, false, FanPolicyState::Disabled, false);
         assert_eq!(
             heating_with_policy_off.command,
             FanHardwareCommand::disabled()
         );
         assert_eq!(heating_with_policy_off.display_state, FanDisplayState::Off);
 
+        let armed_but_not_outputting =
+            fan_policy_decision(110, 0, true, 0, true, FanPolicyState::Disabled, false);
+        assert_eq!(
+            armed_but_not_outputting.command,
+            FanHardwareCommand::disabled()
+        );
+        assert_eq!(
+            armed_but_not_outputting.display_state,
+            FanDisplayState::Auto
+        );
+
         let heating_over_100 =
-            fan_policy_decision(110, 0, true, true, FanPolicyState::Disabled, false);
+            fan_policy_decision(110, 0, true, 32, true, FanPolicyState::Disabled, false);
         assert!(heating_over_100.command.enabled);
         assert_eq!(
             heating_over_100.command.pwm_permille,
             FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE
         );
         assert_eq!(heating_over_100.display_state, FanDisplayState::Run);
+    }
+
+    #[test]
+    fn heating_fan_pulses_double_the_cooling_disabled_window() {
+        assert_eq!(cooling_disabled_pulse_duty_percent(110), 1);
+        assert_eq!(heating_fan_pulse_duty_percent(110), 2);
+        assert_eq!(cooling_disabled_pulse_duty_percent(350), 25);
+        assert_eq!(heating_fan_pulse_duty_percent(350), 50);
+
+        let heating_on =
+            fan_policy_decision(110, 199, true, 32, true, FanPolicyState::Disabled, false);
+        assert!(heating_on.command.enabled);
+
+        let heating_off =
+            fan_policy_decision(110, 200, true, 32, true, FanPolicyState::Disabled, false);
+        assert!(!heating_off.command.enabled);
+
+        let capped_on =
+            fan_policy_decision(350, 4_999, true, 32, true, FanPolicyState::Disabled, false);
+        assert!(capped_on.command.enabled);
+
+        let capped_off =
+            fan_policy_decision(350, 5_000, true, 32, true, FanPolicyState::Disabled, false);
+        assert!(!capped_off.command.enabled);
     }
 
     #[test]
@@ -3068,7 +3145,8 @@ mod tests {
         assert_eq!(cooling_disabled_pulse_duty_percent(110), 1);
         assert_eq!(cooling_disabled_pulse_duty_percent(350), 25);
 
-        let pulse_on = fan_policy_decision(110, 0, false, false, FanPolicyState::Disabled, false);
+        let pulse_on =
+            fan_policy_decision(110, 0, false, 0, false, FanPolicyState::Disabled, false);
         assert!(pulse_on.command.enabled);
         assert_eq!(pulse_on.display_state, FanDisplayState::Off);
         assert_eq!(
@@ -3077,17 +3155,17 @@ mod tests {
         );
 
         let pulse_off =
-            fan_policy_decision(110, 200, false, false, FanPolicyState::Disabled, false);
+            fan_policy_decision(110, 200, false, 0, false, FanPolicyState::Disabled, false);
         assert!(!pulse_off.command.enabled);
 
-        let half = fan_policy_decision(351, 0, false, false, FanPolicyState::Disabled, false);
+        let half = fan_policy_decision(351, 0, false, 0, false, FanPolicyState::Disabled, false);
         assert_eq!(
             half.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf)
         );
         assert_eq!(half.display_state, FanDisplayState::Off);
 
-        let full = fan_policy_decision(361, 0, false, false, FanPolicyState::Disabled, false);
+        let full = fan_policy_decision(361, 0, false, 0, false, FanPolicyState::Disabled, false);
         assert_eq!(
             full.command,
             FanHardwareCommand::from_profile(FanVoltageProfile::Full)
@@ -3097,7 +3175,7 @@ mod tests {
 
     #[test]
     fn rtd_sensor_fault_keeps_existing_policy_state() {
-        let auto = fan_policy_decision(0, 0, false, true, FanPolicyState::ActiveCooling, true);
+        let auto = fan_policy_decision(0, 0, false, 0, true, FanPolicyState::ActiveCooling, true);
         assert_eq!(
             auto.command,
             FanHardwareCommand {
@@ -3111,6 +3189,7 @@ mod tests {
             0,
             0,
             false,
+            0,
             false,
             FanPolicyState::CoolingDisabledPulse { duty_percent: 10 },
             true,
@@ -3122,6 +3201,7 @@ mod tests {
             0,
             1_500,
             false,
+            0,
             false,
             FanPolicyState::CoolingDisabledPulse { duty_percent: 10 },
             true,

@@ -13,6 +13,7 @@
     "preview": "vite preview",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
+    "test:unit": "vitest --config vitest.unit.config.ts --run",
     "test:storybook": "vitest --project=storybook --run",
     "storybook:ci": "bun run build-storybook",
     "test:e2e": "playwright test --pass-with-no-tests"

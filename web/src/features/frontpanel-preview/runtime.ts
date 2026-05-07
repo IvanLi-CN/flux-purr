@@ -67,6 +67,7 @@ const COOLING_DISABLED_FAN_FULL_TEMP_C = 360
 const HARD_OVERTEMP_TEMP_C = 420
 const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS = 500
 const FAN_PULSE_PERIOD_MS = 10_000
+const HEATING_FAN_PULSE_MAX_DUTY_PERCENT = 50
 const DEFAULT_HEATER_OUTPUT_PERCENT = 18
 
 function resolveDefaultPdContractMv() {
@@ -213,15 +214,33 @@ function coolingDisabledPulseDutyPercent(currentTempC: number) {
   return Math.min(25, Math.floor((currentTempC - COOLING_DISABLED_PULSE_START_TEMP_C) / 10))
 }
 
-function coolingDisabledPulseEnabled(state: FrontPanelRuntimeState) {
-  const dutyPercent = coolingDisabledPulseDutyPercent(state.currentTempC)
+function heatingFanPulseDutyPercent(currentTempC: number) {
+  return Math.min(
+    HEATING_FAN_PULSE_MAX_DUTY_PERCENT,
+    coolingDisabledPulseDutyPercent(currentTempC) * 2
+  )
+}
+
+function pulseEnabled(elapsedMs: number, dutyPercent: number) {
   if (dutyPercent <= 0) {
     return false
   }
 
-  const elapsedInPeriodMs = state.elapsedMs % FAN_PULSE_PERIOD_MS
+  const elapsedInPeriodMs = elapsedMs % FAN_PULSE_PERIOD_MS
   const onWindowMs = Math.floor((FAN_PULSE_PERIOD_MS * dutyPercent) / 100)
   return elapsedInPeriodMs < onWindowMs
+}
+
+function coolingDisabledPulseEnabled(state: FrontPanelRuntimeState) {
+  return pulseEnabled(state.elapsedMs, coolingDisabledPulseDutyPercent(state.currentTempC))
+}
+
+function heatingFanPulseEnabled(state: FrontPanelRuntimeState) {
+  if (state.heaterOutputPercent <= 0) {
+    return false
+  }
+
+  return pulseEnabled(state.elapsedMs, heatingFanPulseDutyPercent(state.currentTempC))
 }
 
 function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntimeState {
@@ -245,7 +264,7 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
       fanRuntimeEnabled = true
     } else if (state.currentTempC > COOLING_DISABLED_PULSE_START_TEMP_C) {
-      fanRuntimeEnabled = coolingDisabledPulseEnabled(state)
+      fanRuntimeEnabled = heatingFanPulseEnabled(state)
     } else {
       fanRuntimeEnabled = false
     }
@@ -272,7 +291,7 @@ function reconcileCoolingState(state: FrontPanelRuntimeState): FrontPanelRuntime
     fanDisplayState = fanRuntimeEnabled ? 'run' : 'auto'
   } else {
     activeCoolingCooldownEndsAtMs = null
-    if (state.currentTempC > AUTO_COOLING_FULL_TEMP_C) {
+    if (state.currentTempC > COOLING_DISABLED_FAN_FULL_TEMP_C) {
       fanRuntimeEnabled = true
     } else if (state.currentTempC > COOLING_DISABLED_HEATER_LOCK_TEMP_C) {
       fanRuntimeEnabled = true
