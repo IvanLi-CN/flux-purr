@@ -26,7 +26,7 @@ describe('front panel fan policy preview', () => {
     const heatingOn = tickFrontPanelRuntime(
       {
         ...state,
-        elapsedMs: 199,
+        elapsedMs: 99,
         currentTempC: 110,
         heaterEnabled: true,
         heaterOutputPercent: 18,
@@ -36,7 +36,7 @@ describe('front panel fan policy preview', () => {
     const heatingOff = tickFrontPanelRuntime(
       {
         ...state,
-        elapsedMs: 200,
+        elapsedMs: 100,
         currentTempC: 110,
         heaterEnabled: true,
         heaterOutputPercent: 18,
@@ -47,7 +47,7 @@ describe('front panel fan policy preview', () => {
       {
         ...state,
         activeCoolingEnabled: false,
-        elapsedMs: 100,
+        elapsedMs: 50,
         currentTempC: 110,
       },
       0

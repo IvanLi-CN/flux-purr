@@ -122,7 +122,7 @@ const HEATER_ADJUSTABLE_MAX_MV: u16 = 28_000;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PPS_MOS_SETTLE_MS: u64 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
-const FAN_PULSE_PERIOD_MS: u64 = 10_000;
+const FAN_PULSE_PERIOD_MS: u64 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3117,19 +3117,19 @@ mod tests {
         assert_eq!(heating_fan_pulse_duty_percent(350), 50);
 
         let heating_on =
-            fan_policy_decision(110, 199, true, 32, true, FanPolicyState::Disabled, false);
+            fan_policy_decision(110, 99, true, 32, true, FanPolicyState::Disabled, false);
         assert!(heating_on.command.enabled);
 
         let heating_off =
-            fan_policy_decision(110, 200, true, 32, true, FanPolicyState::Disabled, false);
+            fan_policy_decision(110, 100, true, 32, true, FanPolicyState::Disabled, false);
         assert!(!heating_off.command.enabled);
 
         let capped_on =
-            fan_policy_decision(350, 4_999, true, 32, true, FanPolicyState::Disabled, false);
+            fan_policy_decision(350, 2_499, true, 32, true, FanPolicyState::Disabled, false);
         assert!(capped_on.command.enabled);
 
         let capped_off =
-            fan_policy_decision(350, 5_000, true, 32, true, FanPolicyState::Disabled, false);
+            fan_policy_decision(350, 2_500, true, 32, true, FanPolicyState::Disabled, false);
         assert!(!capped_off.command.enabled);
     }
 
