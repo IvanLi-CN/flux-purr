@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:stable",
+  "components": {
+    "firmware": {
+      "effective_version": "0.3.1",
+      "tag": "fw/v0.3.1"
+    },
+    "web": {
+      "effective_version": "0.3.1",
+      "tag": "web/v0.3.1"
+    }
+  },
+  "pr_head_sha": "d0cad7d3529d9a8cd2e69559a653ca0734763c79",
+  "pr_number": 26,
+  "pr_title": "fix(firmware): gate heating fan pulses on output",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "740757ad75fb356824c809d5561ba317c446cd87",
+  "type_label": "type:patch"
+}
