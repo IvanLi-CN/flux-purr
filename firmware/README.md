@@ -88,8 +88,8 @@
 - Fan control:
   - heater disabled + active cooling enabled: `40~60°C` runs at `GPIO36 duty=50%` (`500‰`), `>60°C` switches to full speed (`0‰`)
   - once active cooling has the fan running and temperature drops below `40°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
-  - heater enabled: `<=100°C` keeps the fan off; `>100°C` hands control to the safety path
-  - active cooling disabled: `>100°C` minimum-voltage `0.1Hz` enable pulse, `>350°C` heater lock + `50%` fan, `>360°C` full speed
+  - heater enabled: `<=100°C` keeps the fan off; `>100°C` uses minimum-voltage enable pulses only while the live heater output is non-zero; the pulse on-window is twice the cooling-disabled pulse and capped at `50%`
+  - active cooling disabled: `>100°C` minimum-voltage `0.2Hz` enable pulse capped at `25%`, `>350°C` heater lock + `50%` fan, `>360°C` full speed
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
   - the `Active Cooling` page is informational in the formal runtime; owner-facing wording should call this setting “开启主动降温”, not “风扇开机”
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`

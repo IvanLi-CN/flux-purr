@@ -8,7 +8,10 @@ import {
   frontPanelGalleryOrder,
   frontPanelStoryStates,
 } from '@/features/frontpanel-preview/mock-data'
-import { createFrontPanelRuntimeState } from '@/features/frontpanel-preview/runtime'
+import {
+  createFrontPanelRuntimeState,
+  tickFrontPanelRuntime,
+} from '@/features/frontpanel-preview/runtime'
 
 const meta = {
   title: 'Embedded/FrontPanelDisplay',
@@ -52,6 +55,29 @@ const coolingDisabledManualOverrideSeed = {
   heaterLockReason: 'cooling-disabled-overtemp' as const,
   dashboardWarningVisible: true,
 }
+
+const heatingPulseGatedSeed = tickFrontPanelRuntime(
+  {
+    ...createFrontPanelRuntimeState('app'),
+    currentTempC: 350,
+    currentTempDeciC: 3500,
+    heaterEnabled: true,
+    heaterOutputPercent: 0,
+  },
+  0
+)
+
+const heatingPulseActiveSeed = tickFrontPanelRuntime(
+  {
+    ...createFrontPanelRuntimeState('app'),
+    currentTempC: 350,
+    currentTempDeciC: 3500,
+    elapsedMs: 1_000,
+    heaterEnabled: true,
+    heaterOutputPercent: 18,
+  },
+  0
+)
 
 export const DocsGallery: Story = {
   name: 'Docs / Gallery',
@@ -457,6 +483,38 @@ export const CoolingDisabledManualRearm: Story = {
       await expect(debug).toHaveTextContent('heaterEnabled: true')
       await expect(debug).toHaveTextContent('heaterLockReason: none')
       await expect(debug).toHaveTextContent('fanDisplayState: off')
+    })
+  },
+}
+
+export const HeatingPulseGated: Story = {
+  name: 'Interaction / Heating Pulse Gated',
+  render: () => <FrontPanelRuntimeHarness initialState={heatingPulseGatedSeed} scale={6} />,
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+
+    await step('armed heater with zero output does not run fan pulse', async () => {
+      await expect(debug).toHaveTextContent('heaterEnabled: true')
+      await expect(debug).toHaveTextContent('heaterOutputPercent: 0')
+      await expect(debug).toHaveTextContent('fanRuntimeEnabled: false')
+      await expect(debug).toHaveTextContent('fanDisplayState: auto')
+    })
+  },
+}
+
+export const HeatingPulseActive: Story = {
+  name: 'Interaction / Heating Pulse Active',
+  render: () => <FrontPanelRuntimeHarness initialState={heatingPulseActiveSeed} scale={6} />,
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    const debug = await canvas.findByTestId('frontpanel-runtime-debug')
+
+    await step('live heater output uses the doubled fan pulse window', async () => {
+      await expect(debug).toHaveTextContent('heaterEnabled: true')
+      await expect(debug).toHaveTextContent('heaterOutputPercent: 18')
+      await expect(debug).toHaveTextContent('fanRuntimeEnabled: true')
+      await expect(debug).toHaveTextContent('fanDisplayState: run')
     })
   },
 }
