@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "components": {},
+  "pr_head_sha": "d563d09090e4a03f5ad4e8c9a8b634ff2ce0e176",
+  "pr_number": 27,
+  "pr_title": "docs(solutions): add web native wifi bridge architecture",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "1fcdd0af2546596090965dd4f174aa5956f50eb3",
+  "type_label": "type:docs"
+}
