@@ -11,7 +11,7 @@
     "format": "biome format --write .",
     "lint": "bun run check",
     "preview": "vite preview",
-    "storybook": "storybook dev -p 6006",
+    "storybook": "storybook dev --no-open",
     "build-storybook": "storybook build",
     "test:unit": "vitest --config vitest.unit.config.ts --run",
     "test:storybook": "vitest --project=storybook --run",
