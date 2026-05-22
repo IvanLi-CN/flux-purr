@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:stable",
+  "components": {
+    "firmware": {
+      "effective_version": "0.3.2",
+      "tag": "fw/v0.3.2"
+    },
+    "web": {
+      "effective_version": "0.3.2",
+      "tag": "web/v0.3.2"
+    }
+  },
+  "pr_head_sha": "0bc203cf6678ab7389fb4a640057de47061f939f",
+  "pr_number": 28,
+  "pr_title": "fix(web): prevent Storybook from opening browser",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "599c81ccf92d95e40639fe2fcd9d68df0c7b011c",
+  "type_label": "type:patch"
+}
