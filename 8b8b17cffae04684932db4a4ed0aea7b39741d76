@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:stable",
+  "components": {
+    "firmware": {
+      "effective_version": "0.4.0",
+      "tag": "fw/v0.4.0"
+    },
+    "web": {
+      "effective_version": "0.4.0",
+      "tag": "web/v0.4.0"
+    }
+  },
+  "pr_head_sha": "d9a962e0f0083a1c4e1ffb1da39ff10f13863cf7",
+  "pr_number": 29,
+  "pr_title": "feat(web): add thermal bench control plane demo",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "8b8b17cffae04684932db4a4ed0aea7b39741d76",
+  "type_label": "type:minor"
+}
