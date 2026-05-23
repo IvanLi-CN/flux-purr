@@ -815,8 +815,14 @@ async fn flash_device(
         }
     }
 
-    verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
+    let verification = verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
         .map_err(sanitize_io_error)?;
+    if !verification.verified {
+        return Err(HttpError::bad_request(
+            "artifact_verify_failed",
+            "Firmware artifact verification failed.",
+        ));
+    }
 
     if payload.dry_run {
         let mut state_lock = state.lock()?;
@@ -1086,6 +1092,35 @@ mod tests {
         let result = verify_artifact(&artifact, Some(dir.path())).unwrap();
         assert!(result.verified);
         assert_eq!(result.files[0].sha256, digest);
+    }
+
+    #[test]
+    fn artifact_verify_reports_hash_mismatch() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("firmware.bin");
+        fs::write(&file_path, b"flux-purr").unwrap();
+        let artifact = FirmwareArtifact {
+            artifact_id: "bad-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "debug".to_string(),
+            features: vec!["web_serial".to_string()],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "app".to_string(),
+                path: "firmware.bin".to_string(),
+                sha256: "sha256:bad".to_string(),
+                size: 9,
+                flash_address: Some(0x10000),
+            }],
+        };
+
+        let result = verify_artifact(&artifact, Some(dir.path())).unwrap();
+        assert!(!result.verified);
+        assert!(!result.files[0].ok);
     }
 
     #[test]

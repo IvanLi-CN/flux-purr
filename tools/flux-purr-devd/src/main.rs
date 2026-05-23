@@ -5,6 +5,11 @@ use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() {
+    if env::args().any(|arg| arg == "-h" || arg == "--help") {
+        print_help();
+        return;
+    }
+
     let config = parse_config();
     let listener = TcpListener::bind(config.bind)
         .await
@@ -18,6 +23,17 @@ async fn main() {
     axum::serve(listener, app(state))
         .await
         .expect("flux-purr-devd server failed");
+}
+
+fn print_help() {
+    println!(
+        "flux-purr-devd\n\n\
+         Environment:\n\
+           FLUX_PURR_DEVD_BIND=127.0.0.1:30080\n\
+           FLUX_PURR_DEVD_ARTIFACT_ROOT=<path>\n\
+           FLUX_PURR_DEVD_DEV_CORS=1\n\
+           FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1"
+    );
 }
 
 fn parse_config() -> AppConfig {
