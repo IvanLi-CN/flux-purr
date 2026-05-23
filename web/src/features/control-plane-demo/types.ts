@@ -1,0 +1,80 @@
+import type { LucideIcon } from 'lucide-react'
+
+export type TransportKind = 'http' | 'serial' | 'devd' | 'mock'
+export type DeviceSeverity = 'nominal' | 'warning' | 'offline'
+export type WorkstreamId = 'fleet' | 'connect' | 'overview' | 'wifi' | 'firmware' | 'monitor'
+
+export interface DeviceTarget {
+  id: string
+  alias: string
+  location: string
+  transport: TransportKind
+  severity: DeviceSeverity
+  baseUrl: string
+  firmware: string
+  buildId: string
+  uptime: string
+  boardTempC: number
+  currentTempC: number
+  targetTempC: number
+  voltageMv: number
+  currentMa: number
+  pdRequestMv: number
+  pdContractMv: number
+  pdState: 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
+  heaterOutputPercent: number
+  activeCoolingEnabled: boolean
+  fanState: 'OFF' | 'AUTO' | 'RUN'
+  wifiRssi: number | null
+  capabilities: string[]
+}
+
+export interface ControlPlaneMetric {
+  label: string
+  value: string
+  detail: string
+  tone: 'neutral' | 'accent' | 'success' | 'warning'
+}
+
+export interface WorkflowPhase {
+  label: string
+  detail: string
+  state: 'done' | 'active' | 'pending' | 'blocked'
+}
+
+export interface FirmwareArtifact {
+  id: string
+  version: string
+  target: string
+  profile: string
+  compatibility: 'match' | 'warning' | 'blocked'
+  hash: string
+  progressPercent: number
+}
+
+export interface EventLogEntry {
+  time: string
+  source: string
+  message: string
+  tone: 'info' | 'success' | 'warning' | 'danger'
+}
+
+export interface Workstream {
+  id: WorkstreamId
+  label: string
+  description: string
+  icon: LucideIcon
+}
+
+export interface ControlPlaneScenario {
+  name: string
+  headline: string
+  subhead: string
+  selectedDeviceId: string
+  devices: DeviceTarget[]
+  metrics: ControlPlaneMetric[]
+  wifiPhases: WorkflowPhase[]
+  flashPhases: WorkflowPhase[]
+  artifacts: FirmwareArtifact[]
+  events: EventLogEntry[]
+}

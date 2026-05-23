@@ -75,3 +75,4 @@
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
 | 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | 2026-04-27 | M24C64-backed target/preset/cooling/Wi-Fi persistence |
 | r9k3m | Flux Purr PR 标签发布与主分支保护 | 已完成 | `r9k3m-pr-label-release-protection/SPEC.md` | 2026-04-27 | Label-driven release intent, immutable mainline snapshots, and quality-gates declaration |
+| hhwq8 | Flux Purr 热控 Bench Web Demo | active | `hhwq8-web-control-plane-demo/SPEC.md` | 2026-05-23 | Industrial mock thermal bench tool for the #27 control-plane architecture |
