@@ -599,7 +599,14 @@ function createFlashPhases(
   device: DeviceTarget,
   flashRun: { status: FlashRunStatus; progress: number }
 ) {
-  const blocked = !artifact || artifact.compatibility === 'blocked' || device.severity === 'offline'
+  const missingFlashCapability = !device.capabilities.includes('flash')
+  const leaseBlocked = device.leaseState === 'conflict' || device.leaseState === 'expired'
+  const blocked =
+    !artifact ||
+    artifact.compatibility === 'blocked' ||
+    device.severity === 'offline' ||
+    missingFlashCapability ||
+    leaseBlocked
   const warning = artifact?.compatibility === 'warning' || device.severity === 'warning'
 
   if (blocked) {
@@ -611,7 +618,11 @@ function createFlashPhases(
         index === 2
           ? device.severity === 'offline'
             ? 'Target is offline.'
-            : 'Selected artifact does not match this device.'
+            : leaseBlocked
+              ? 'USB lease is not available for this target.'
+              : missingFlashCapability
+                ? 'Active transport does not expose flash capability.'
+                : 'Selected artifact does not match this device.'
           : phase.detail,
     }))
   }
@@ -743,6 +754,7 @@ function DeviceToolbar({
       </div>
 
       <StatusDatum label="Transport" value={transportLabels[device.transport]} />
+      <StatusDatum label="Lease" value={device.leaseState?.toUpperCase() ?? 'N/A'} />
       <StatusDatum label="Plate" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
 
@@ -912,6 +924,7 @@ function DashboardView({
         </button>
         <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
       </div>
+      <CapabilityStrip device={device} />
       <ActionFeedbackPanel feedback={feedback} />
     </div>
   )
@@ -1014,6 +1027,30 @@ function RuntimeMiniStatus({
       </span>
       <span>{artifact?.version ?? device.firmware}</span>
     </div>
+  )
+}
+
+function CapabilityStrip({ device }: { device: DeviceTarget }) {
+  const capabilities = [
+    ['status', 'Status'],
+    ['wifi_config', 'WiFi'],
+    ['monitor', 'Monitor'],
+    ['flash', 'Flash'],
+  ] as const
+
+  return (
+    <section className="industrial-capability-strip" aria-label="Transport capabilities">
+      {capabilities.map(([capability, label]) => (
+        <span
+          key={capability}
+          className={device.capabilities.includes(capability) ? 'is-enabled' : 'is-disabled'}
+        >
+          {label}
+        </span>
+      ))}
+      <strong>{device.networkState ?? 'unknown'}</strong>
+      {device.transportIssue ? <em>{device.transportIssue}</em> : null}
+    </section>
   )
 }
 
@@ -1219,7 +1256,12 @@ function UpdateView({
   const currentProgress =
     flashRun.status === 'idle' ? (artifact?.progressPercent ?? 0) : flashRun.progress
   const isBlocked =
-    device.severity === 'offline' || artifact?.compatibility === 'blocked' || Boolean(blockedPhase)
+    device.severity === 'offline' ||
+    artifact?.compatibility === 'blocked' ||
+    Boolean(blockedPhase) ||
+    !device.capabilities.includes('flash') ||
+    device.leaseState === 'conflict' ||
+    device.leaseState === 'expired'
   const verdict = isBlocked
     ? {
         tone: 'danger',
@@ -1227,7 +1269,11 @@ function UpdateView({
         detail:
           device.severity === 'offline'
             ? 'Target is offline.'
-            : (blockedPhase?.detail ?? 'Selected firmware does not match this target.'),
+            : device.leaseState === 'conflict'
+              ? 'Another client owns the USB lease.'
+              : !device.capabilities.includes('flash')
+                ? 'This transport does not expose flash capability.'
+                : (blockedPhase?.detail ?? 'Selected firmware does not match this target.'),
       }
     : flashRun.status === 'passed'
       ? {
@@ -1275,7 +1321,8 @@ function UpdateView({
             ))}
           </select>
           <p className="industrial-mono text-xs">
-            {artifact?.target ?? 'target unknown'} · {artifact?.hash ?? 'hash unavailable'}
+            {artifact?.target ?? 'target unknown'} · {artifact?.protocol ?? 'protocol unknown'} ·{' '}
+            {artifact?.hash ?? 'hash unavailable'}
           </p>
           <div
             className="industrial-progress"

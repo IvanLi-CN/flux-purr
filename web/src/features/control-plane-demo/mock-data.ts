@@ -69,6 +69,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       activeCoolingEnabled: true,
       fanState: 'AUTO',
       wifiRssi: -54,
+      networkState: 'connected',
+      leaseState: 'active',
       capabilities: ['identity', 'status', 'wifi_config', 'flash', 'monitor'],
     },
     {
@@ -93,6 +95,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       activeCoolingEnabled: true,
       fanState: 'RUN',
       wifiRssi: null,
+      networkState: 'idle',
+      leaseState: 'none',
       capabilities: ['identity', 'status', 'wifi_config', 'monitor'],
     },
     {
@@ -117,6 +121,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       activeCoolingEnabled: false,
       fanState: 'OFF',
       wifiRssi: null,
+      networkState: 'disabled',
+      leaseState: 'none',
       capabilities: ['identity', 'status'],
     },
   ],
@@ -199,6 +205,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       compatibility: 'match',
       hash: 'sha256:7b8c...42af',
       progressPercent: 64,
+      protocol: 'flux-purr.usb.v1',
+      features: ['web_serial', 'monitor'],
     },
     {
       id: 'wifi-http-rc',
@@ -208,6 +216,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       compatibility: 'warning',
       hash: 'sha256:92da...a103',
       progressPercent: 18,
+      protocol: 'flux-purr.usb.v1',
+      features: ['web_serial', 'net_http'],
     },
     {
       id: 'c3-legacy',
@@ -217,6 +227,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       compatibility: 'blocked',
       hash: 'sha256:0019...ee10',
       progressPercent: 0,
+      protocol: 'legacy',
+      features: [],
     },
   ],
   events: [
@@ -296,6 +308,16 @@ export const degradedControlPlaneScenario: ControlPlaneScenario = {
   subhead:
     'The same small tool keeps the operator on one screen when a USB lease or WiFi handoff fails.',
   selectedDeviceId: 'fp-kit-02',
+  devices: controlPlaneScenario.devices.map((device) =>
+    device.id === 'fp-kit-02'
+      ? {
+          ...device,
+          leaseState: 'conflict',
+          networkState: 'timeout',
+          transportIssue: 'Another browser tab owns the USB control lease.',
+        }
+      : device
+  ),
   metrics: [
     {
       label: 'Bound targets',

@@ -49,8 +49,6 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "uptimeSeconds": 123,
   "currentTempC": 183.6,
   "targetTempC": 220,
-  "selectedPresetSlot": 3,
-  "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "heaterEnabled": true,
   "heaterOutputPercent": 22,
   "activeCoolingEnabled": true,
@@ -70,34 +68,6 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN`.
-`presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
-
-### `FirmwareArtifact`
-
-```json
-{
-  "artifactId": "local-esp32s3-release",
-  "name": "Local ESP32-S3 release",
-  "version": "local-build",
-  "gitSha": "unknown",
-  "buildId": "54362508abf2",
-  "targetChip": "esp32s3",
-  "profile": "release + web_serial",
-  "features": ["web_serial"],
-  "protocol": "flux-purr.usb.v1",
-  "files": [
-    {
-      "kind": "elf",
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
-      "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
-      "size": 741452,
-      "flashAddress": null
-    }
-  ]
-}
-```
-
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
 
 ### `ApiError`
 
@@ -115,8 +85,6 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 Errors must not include WiFi passwords, PSK values, or unrelated host paths.
 
 ## Device HTTP
-
-Direct device HTTP is a planned transport surface for a future firmware `net_http` server. Current ESP32-S3 release artifacts do not implement or advertise this transport; real hardware runtime control uses Browser Web Serial over USB JSONL or Native `devd` HTTP over USB JSONL.
 
 Base URL: `http://<device-ip>`.
 
@@ -153,36 +121,9 @@ The response reports a redacted summary only:
 }
 ```
 
-## Browser Web Serial
-
-The Web app has two isolated browser variants selected by URL parameter:
-
-- `?demo=true`: demo-only scenario; no `devd`, Web Serial, or real backend requests.
-- `?demo=false`: live scenario; no demo fixtures, degraded demo data, or daemon mock devices.
-
-The selected demo flag is stored in browser storage. A later load without `demo` uses the remembered value and rewrites the URL to include the explicit parameter. The app must not switch variants unless the URL explicitly asks for `demo=true` or `demo=false`.
-
-Browser Web Serial uses the same USB CDC JSONL frames listed below. The Web app opens a port only from an explicit operator action with `navigator.serial.requestPort()`, then writes one newline-delimited JSON frame per request and waits for a matching `response.requestId`.
-
-Direct browser targets are represented in the Web app as `transport=serial`, `baseUrl=webserial://selected`, and `leaseState=active`. That state means the browser owns the selected serial port; it is not a `devd` lease.
-
-Supported direct operations:
-
-- `request` with `op=get_identity|get_network|get_status`
-- `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `activeCoolingEnabled`, and `heaterEnabled`
-
-Unsupported direct operations:
-
-- firmware artifact catalog and verification
-- dry-run and real flash
-- daemon-local bind/connect/disconnect
-
-Those unsupported operations require Native `devd` HTTP capability gates.
-
 ## Native `devd` HTTP
 
-Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`; loopback binds enable development CORS for local `localhost` / loopback origins so the Vite console can call the daemon from its own local port.
-Native serial discovery is constrained to the configured authorized port. The project default is `/dev/cu.usbmodem21221401`; if that path is absent, `devd` must not expose another native serial device.
+Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`.
 
 - `GET /health`
 - `GET /api/v1/devices`
@@ -197,99 +138,10 @@ Native serial discovery is constrained to the configured authorized port. The pr
 - `GET /api/v1/devices/:id/status?lease_id=...`
 - `GET /api/v1/devices/:id/events`
 - `PUT /api/v1/devices/:id/wifi`
-- `PUT /api/v1/devices/:id/runtime`
-- `GET /api/v1/artifacts`
 - `POST /api/v1/artifacts/verify`
 - `POST /api/v1/devices/:id/flash`
 
-Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`, and leased read endpoints pass it as `?lease_id=...`; JSON-body write endpoints use `leaseId`.
-
-`POST /api/v1/devices/:id/bind?lease_id=...` body:
-
-```json
-{
-  "alias": "Bench Alias"
-}
-```
-
-`POST /api/v1/devices/:id/connect?lease_id=...` and `POST /api/v1/devices/:id/disconnect?lease_id=...` return the updated daemon-local `DeviceRecord`.
-
-`GET /api/v1/devices/:id/events` returns `text/event-stream`. The stream first replays that device's bounded event backlog, then continues with live events. Each SSE event name matches the `kind` field (`serial`, `lease`, `wifi`, `runtime`, `flash`, `transport`, etc.) and each `data` frame is a `DevdEvent` JSON object. Events are scoped to the requested device ID. Native USB JSONL exchanges emit paired `transport` events with direction, transport, request ID, frame type, and a redacted frame payload so the Web Runtime trace can show complete TX/RX data without leaking WiFi passwords.
-
-`PUT /api/v1/devices/:id/runtime` body:
-
-```json
-{
-  "leaseId": "lease-001",
-  "targetTempC": 220,
-  "selectedPresetSlot": 3,
-  "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
-  "activeCoolingEnabled": true,
-  "heaterEnabled": true
-}
-```
-
-All runtime fields are optional except `leaseId`; the response is the updated `Status`.
-
-`GET /api/v1/artifacts` response:
-
-```json
-{
-  "artifacts": [
-    {
-      "artifactId": "local-esp32s3-release",
-      "targetChip": "esp32s3",
-      "files": [
-        {
-          "kind": "elf",
-          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
-          "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
-          "size": 741452,
-          "flashAddress": null
-        }
-      ]
-    }
-  ]
-}
-```
-
-`POST /api/v1/artifacts/verify` accepts one `FirmwareArtifact` manifest and validates every file's existence, size, and SHA-256:
-
-```json
-{
-  "artifact": {
-    "artifactId": "local-esp32s3-release",
-    "targetChip": "esp32s3",
-    "files": [
-      {
-        "kind": "elf",
-        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
-        "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
-        "size": 741452,
-        "flashAddress": null
-      }
-    ]
-  }
-}
-```
-
-Successful response:
-
-```json
-{
-  "verified": true,
-  "artifactId": "local-esp32s3-release",
-  "files": [
-    {
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
-      "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
-      "size": 741452
-    }
-  ]
-}
-```
-
-Web Update dry-check uses the catalog plus verify endpoint. Browser CORS preflight for development must allow `Content-Type` so JSON `POST /api/v1/artifacts/verify` works from Vite.
+Mutating device endpoints require a valid `lease_id`.
 
 ## USB CDC JSONL
 
@@ -341,45 +193,9 @@ Responses must redact the password:
   "requestId": "req-002",
   "ok": true,
   "result": {
-    "wifi": {
-      "op": "set",
-      "ssid": "FluxPurr-Lab",
-      "password": "<redacted>",
-      "autoReconnect": true,
-      "telemetryIntervalMs": 500
-    }
-  }
-}
-```
-
-### `runtime_config`
-
-```json
-{
-  "type": "runtime_config",
-  "requestId": "req-003",
-  "targetTempC": 220,
-  "selectedPresetSlot": 3,
-  "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
-  "activeCoolingEnabled": true,
-  "heaterEnabled": true
-}
-```
-
-The response returns the updated status:
-
-```json
-{
-  "type": "response",
-  "requestId": "req-003",
-  "ok": true,
-  "result": {
-    "status": {
-      "targetTempC": 220,
-      "selectedPresetSlot": 3,
-      "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
-      "activeCoolingEnabled": true,
-      "heaterEnabled": true
+    "network": {
+      "state": "saving",
+      "ssid": "FluxPurr-Lab"
     }
   }
 }

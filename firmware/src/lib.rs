@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod board;
 pub mod buzzer;
+pub mod control_plane;
 pub mod display;
 pub mod frontpanel;
 pub mod memory;

@@ -27,6 +27,9 @@ export interface DeviceTarget {
   fanState: 'OFF' | 'AUTO' | 'RUN'
   wifiRssi: number | null
   capabilities: string[]
+  networkState?: 'disabled' | 'idle' | 'saving' | 'connecting' | 'connected' | 'error' | 'timeout'
+  leaseState?: 'none' | 'active' | 'conflict' | 'expired'
+  transportIssue?: string
 }
 
 export interface ControlPlaneMetric {
@@ -50,6 +53,8 @@ export interface FirmwareArtifact {
   compatibility: 'match' | 'warning' | 'blocked'
   hash: string
   progressPercent: number
+  protocol?: string
+  features?: string[]
 }
 
 export interface EventLogEntry {

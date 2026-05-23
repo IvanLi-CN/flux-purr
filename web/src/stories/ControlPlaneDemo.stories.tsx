@@ -35,6 +35,25 @@ export const DegradedTransport: Story = {
   },
 }
 
+export const LeaseConflict: Story = {
+  name: 'Real transport / Lease conflict',
+  args: {
+    scenario: degradedControlPlaneScenario,
+    initialView: 'update',
+  },
+}
+
+export const WifiProvisioning: Story = {
+  name: 'Real transport / WiFi provisioning',
+  args: {
+    initialView: 'settings',
+  },
+}
+
+export const MonitorTrace: Story = {
+  name: 'Real transport / Monitor trace',
+}
+
 export const SettingsReview: Story = {
   args: {
     initialView: 'settings',
@@ -111,6 +130,8 @@ export const InteractionSmoke: Story = {
     )
     await expect(canvas.getByText('Fan policy updated')).toBeInTheDocument()
 
+    await userEvent.selectOptions(targetSelect, 'fp-lab-01')
+    await expect(targetSelect).toHaveValue('fp-lab-01')
     await userEvent.click(canvas.getByRole('button', { name: /update/i }))
     await expect(canvas.getByText('Firmware check')).toBeInTheDocument()
     await expect(canvas.getByText('Ready to check')).toBeInTheDocument()
@@ -127,7 +148,7 @@ export const InteractionSmoke: Story = {
     ).toBeInTheDocument()
     await expect(canvas.getByRole('button', { name: /run again/i })).toBeEnabled()
 
-    await userEvent.click(canvas.getByRole('button', { name: /degrade/i }))
+    await userEvent.selectOptions(targetSelect, 'fp-kit-02')
     await expect(canvas.getByText('CHECK')).toBeInTheDocument()
   },
 }

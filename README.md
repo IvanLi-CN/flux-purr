@@ -2,6 +2,12 @@
 
 Flux Purr is a device mono-repo for an embedded firmware + React control console stack.
 
+## Native devd
+
+`tools/flux-purr-devd` is the localhost native daemon for browser-to-device workflows that cannot be handled safely by Web UI alone: USB/serial discovery, exclusive leases, bounded monitor events, WiFi provisioning bridge, firmware artifact dry-run, and guarded `espflash` execution.
+
+Default bind is `127.0.0.1:30080`. Real flashing stays disabled unless `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` is set; dry-run verification is available without hardware.
+
 ## Repository layout
 
 - `firmware/` - Rust `no_std` firmware domain crate (ESP32-S3 first)

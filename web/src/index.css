@@ -282,6 +282,47 @@
     text-overflow: ellipsis;
   }
 
+  .industrial-capability-strip {
+    display: flex;
+    min-height: 2.5rem;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    border-top: 1px solid rgb(36 45 64 / 0.14);
+    padding-top: 0.75rem;
+    color: #3f4b5f;
+    font-size: 0.75rem;
+  }
+
+  .industrial-capability-strip span,
+  .industrial-capability-strip strong {
+    display: inline-flex;
+    min-height: 1.5rem;
+    align-items: center;
+    border: 1px solid rgb(36 45 64 / 0.16);
+    background: rgb(255 255 255 / 0.68);
+    padding: 0.15rem 0.5rem;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .industrial-capability-strip span.is-enabled {
+    border-color: rgb(55 126 96 / 0.35);
+    color: #1f6b4a;
+  }
+
+  .industrial-capability-strip span.is-disabled {
+    color: #8c5d51;
+    text-decoration: line-through;
+  }
+
+  .industrial-capability-strip em {
+    min-width: 12rem;
+    flex: 1;
+    color: #8a5a22;
+    font-style: normal;
+  }
+
   .industrial-action-feedback {
     display: grid;
     gap: 0.24rem;
