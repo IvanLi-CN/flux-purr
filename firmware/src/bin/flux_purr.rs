@@ -1825,7 +1825,11 @@ async fn request_ch224q_voltage(
         EmbassyTimer::after_millis(CH224Q_RETRY_DELAY_MS).await;
     }
 
-    panic!("failed to program CH224Q voltage request");
+    info!(
+        "ch224q request failed after {=u8} attempts; continuing with safe status-only fallback",
+        CH224Q_RETRY_ATTEMPTS,
+    );
+    Address::Primary
 }
 
 #[cfg(target_arch = "xtensa")]
