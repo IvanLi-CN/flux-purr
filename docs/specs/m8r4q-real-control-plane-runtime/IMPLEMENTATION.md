@@ -4,23 +4,26 @@
 
 ## Current Status
 
-- Implementation: 已完成
+- Implementation: 进行中
 - Lifecycle: active
 - Catalog note: Web + firmware + native devd real transport contract
 
 ## Coverage / rollout summary
 
 - 共享领域契约由 firmware、devd 与 Web 各自的 typed adapter 实现。
-- firmware v1 先交付 host-testable status adapter、USB JSONL parser/encoder、WiFi redaction 与 feature flags。
-- `tools/flux-purr-devd` 提供 localhost daemon、mock/serial scan、lease、bounded events、artifact verify、dry-run 与 flash command boundary。
-- Web demo 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate、live devd discovery bridge 与 Storybook scenarios。
-- 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease/status/WiFi redaction、artifact verify、dry-run guard、`mcu-agentd` flash 与 reset monitor。
+- firmware v1 先交付 host-testable status adapter、USB JSONL parser/encoder、WiFi redaction、runtime config 与 feature flags。
+- `tools/flux-purr-devd` 提供 localhost daemon、授权端口 serial discovery、lease、bounded events、USB identity/network/status/WiFi/runtime bridge、artifact verify、dry-run 与 flash command boundary。
+- `devd` artifact catalog 从当前 repo build outputs 计算 ESP32-S3 与 host binary 的 size、sha256、flash address；development CORS 支持 Vite JSON preflight。
+- Web app 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate、live devd discovery bridge 与 artifact catalog/verify dry-check；验证入口为 Vite Web App，不使用 ControlPlaneDemo Storybook 页面。
+- 主工作区既有真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease/status/WiFi redaction、artifact verify、dry-run guard、`mcu-agentd` flash 与 reset monitor；当前 Web-to-devd-to-firmware runtime bridge 仍需在授权端口在线时复验。
 - `devd` real flash path 绑定 lease 对应 native serial port；空 artifact 不再被 dry-run 视为通过。
 
 ## Remaining Gaps
 
 - PR 号在 PR 创建后回填。
-- Web Update 的 real flash catalog selection 仍以 manifest payload 为边界；完整 artifact catalog 管理页不属于本 spec 范围。
+- 当前授权端口 `/dev/cu.usbmodem21221401` 不存在时，devd 不暴露 native serial target，Web 只能使用 mock target；真实硬件读写、WiFi provisioning 与 runtime control 不能标记为完成。
+- Web Update 已能加载 `devd` catalog 并通过 `POST /api/v1/artifacts/verify` 执行 dry-check；真实 flash 仍需授权端口在线并显式允许真实写入后复验。
+- 完整 artifact catalog 管理页不属于本 spec 范围。
 
 ## Hardware Smoke
 

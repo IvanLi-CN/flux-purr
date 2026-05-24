@@ -17,6 +17,7 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
+    Blocking,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -32,6 +33,7 @@ use esp_hal::{
     },
     time::Rate,
     timer::timg::TimerGroup,
+    usb_serial_jtag::UsbSerialJtag,
 };
 #[cfg(target_arch = "xtensa")]
 use esp_println as _;
@@ -59,12 +61,17 @@ use flux_purr_firmware::memory::{
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ, pwm_percent_from_permille,
+    DEFAULT_PD_VOLTAGE_REQUEST, DeviceMode, DeviceStatus, FAN_PWM_FREQUENCY_HZ, PdState,
+    pwm_percent_from_permille,
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     adapters::ch224q::{self, Address, Status},
     board::s3_frontpanel,
+    control_plane::{
+        ApiError, ControlPlaneStatus, Identity, UsbFrame, UsbFrameError, UsbRequestOp,
+        UsbResponsePayload, hello_frame, network_from_memory, parse_usb_frame, write_usb_frame,
+    },
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
         FRONTPANEL_DEBOUNCE_MS, FRONTPANEL_DOUBLE_CLICK_MS, FrontPanelInputController,
@@ -125,6 +132,10 @@ const HEATER_PPS_MOS_SETTLE_MS: u64 = 150;
 const FAN_PULSE_PERIOD_MS: u64 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const USB_CONTROL_LINE_CAPACITY: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const USB_CONTROL_TX_BUFFER_LEN: usize = 1536;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1543,6 +1554,190 @@ fn sync_frontpanel_runtime_state(
     changed
 }
 
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_runtime_status(
+    ui_state: &FrontPanelUiState,
+    memory_config: &MemoryConfig,
+    elapsed_ms: u64,
+    last_pd_observation: Option<PdStatusObservation>,
+    heater_power_backend: HeaterPowerBackend,
+    fan_command: FanHardwareCommand,
+    current_rtd_fault: Option<HeaterFaultReason>,
+    last_raw_state: FrontPanelRawState,
+) -> ControlPlaneStatus {
+    let pd_contract_mv = heater_power_backend.pd_contract_mv();
+    let pd_state = if current_rtd_fault.is_some() {
+        PdState::Fault
+    } else if last_pd_observation.is_some_and(|observation| observation.status.pd_active) {
+        PdState::Ready
+    } else if pd_contract_mv <= 5_000 {
+        PdState::Fallback5V
+    } else {
+        PdState::Negotiating
+    };
+    let frontpanel_key = last_raw_state
+        .first_pressed()
+        .map(|raw_key| FrontPanelKeyMap::default().logical_from_raw(raw_key));
+
+    ControlPlaneStatus::from_device_status(
+        DeviceStatus {
+            mode: if current_rtd_fault.is_some() {
+                DeviceMode::Fault
+            } else if ui_state.heater_enabled {
+                DeviceMode::Sampling
+            } else {
+                DeviceMode::Idle
+            },
+            voltage_mv: u32::from(pd_contract_mv),
+            current_ma: u32::from(
+                last_pd_observation
+                    .map(|observation| observation.current_ma)
+                    .unwrap_or(0),
+            ),
+            board_temp_centi: i32::from(ui_state.current_temp_deci_c) * 10,
+            pd_request_mv: DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+            pd_contract_mv,
+            pd_state,
+            heater_output_percent: ui_state.heater_output_percent,
+            fan_enabled: ui_state.fan_enabled,
+            fan_pwm_permille: fan_command.pwm_permille,
+            frontpanel_key,
+        },
+        memory_config,
+        (elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
+        network_from_memory(memory_config),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_write_frame(
+    usb: &mut UsbSerialJtag<'_, Blocking>,
+    frame: &UsbFrame,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+) {
+    if let Ok(line) = write_usb_frame(frame, tx_buf) {
+        for byte in line.as_bytes() {
+            let _ = nb::block!(usb.write_byte_nb(*byte));
+        }
+        let _ = usb.flush_tx();
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_response(
+    request_id: heapless::String<flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN>,
+    result: UsbResponsePayload,
+) -> UsbFrame {
+    UsbFrame::Response {
+        request_id,
+        ok: true,
+        result: Some(result),
+        error: None,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_error_response(
+    request_id: heapless::String<flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN>,
+    code: &'static str,
+    message: &'static str,
+) -> UsbFrame {
+    UsbFrame::Response {
+        request_id,
+        ok: false,
+        result: None,
+        error: Some(ApiError::new(code, message, false)),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn handle_usb_control_line(
+    line: &str,
+    usb: &mut UsbSerialJtag<'_, Blocking>,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    ui_state: &mut FrontPanelUiState,
+    memory_config: &mut MemoryConfig,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+    last_pd_observation: Option<PdStatusObservation>,
+    heater_power_backend: HeaterPowerBackend,
+    fan_command: FanHardwareCommand,
+    current_rtd_fault: Option<HeaterFaultReason>,
+    last_raw_state: FrontPanelRawState,
+) -> bool {
+    let mut needs_redraw = false;
+    let response = match parse_usb_frame(line) {
+        Ok(UsbFrame::Request { request_id, op }) => match op {
+            UsbRequestOp::GetIdentity => usb_response(
+                request_id,
+                UsbResponsePayload::Identity(Identity::firmware_default()),
+            ),
+            UsbRequestOp::GetNetwork => usb_response(
+                request_id,
+                UsbResponsePayload::Network(network_from_memory(memory_config)),
+            ),
+            UsbRequestOp::GetStatus => usb_response(
+                request_id,
+                UsbResponsePayload::Status(usb_runtime_status(
+                    ui_state,
+                    memory_config,
+                    elapsed_ms,
+                    last_pd_observation,
+                    heater_power_backend,
+                    fan_command,
+                    current_rtd_fault,
+                    last_raw_state,
+                )),
+            ),
+            UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+        },
+        Ok(UsbFrame::WifiConfig { request_id, config }) => {
+            config.apply_to(memory_config);
+            apply_memory_config_to_ui(ui_state, memory_config);
+            *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            needs_redraw = true;
+            usb_response(
+                request_id,
+                UsbResponsePayload::Wifi(config.redacted_summary()),
+            )
+        }
+        Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
+            config.apply_to(memory_config);
+            apply_memory_config_to_ui(ui_state, memory_config);
+            if let Some(heater_enabled) = config.heater_enabled {
+                ui_state.heater_enabled = heater_enabled;
+            }
+            *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            needs_redraw = true;
+            usb_response(request_id, UsbResponsePayload::Ack)
+        }
+        Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
+            request_id,
+            "unsupported_frame",
+            "Host response frames are ignored.",
+        ),
+        Ok(_) => UsbFrame::Error {
+            request_id: None,
+            error: ApiError::new("unsupported_frame", "Unsupported USB frame type.", false),
+        },
+        Err(UsbFrameError::MalformedJson) => UsbFrame::Error {
+            request_id: None,
+            error: ApiError::new("malformed_json", "Malformed USB JSONL frame.", false),
+        },
+        Err(UsbFrameError::OutputTooSmall) => UsbFrame::Error {
+            request_id: None,
+            error: ApiError::new(
+                "output_too_small",
+                "USB JSONL frame exceeded buffer.",
+                false,
+            ),
+        },
+    };
+
+    usb_write_frame(usb, &response, tx_buf);
+    needs_redraw
+}
+
 #[cfg(target_arch = "xtensa")]
 fn present_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
@@ -1826,6 +2021,18 @@ async fn main(_spawner: Spawner) {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
+    #[cfg(feature = "web_serial")]
+    let mut usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE);
+    #[cfg(feature = "web_serial")]
+    let mut usb_rx_line: heapless::String<USB_CONTROL_LINE_CAPACITY> = heapless::String::new();
+    #[cfg(feature = "web_serial")]
+    let mut usb_tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+    #[cfg(feature = "web_serial")]
+    usb_write_frame(
+        &mut usb_serial,
+        &hello_frame(Identity::firmware_default()),
+        &mut usb_tx_buf,
+    );
 
     info!(
         "boot display_dc={=u8} mosi={=u8} sclk={=u8} blk={=u8} res={=u8} cs={=u8}",
@@ -1852,8 +2059,8 @@ async fn main(_spawner: Spawner) {
     let inputs = FrontPanelInputs {
         center: Input::new(peripherals.GPIO0, input_cfg),
         right: Input::new(peripherals.GPIO16, input_cfg),
-        down: Input::new(peripherals.GPIO17, input_cfg),
-        left: Input::new(peripherals.GPIO18, input_cfg),
+        down: Input::new(peripherals.GPIO18, input_cfg),
+        left: Input::new(peripherals.GPIO17, input_cfg),
         up: Input::new(peripherals.GPIO21, input_cfg),
     };
 
@@ -2248,6 +2455,36 @@ async fn main(_spawner: Spawner) {
             ui_state.gesture_capabilities(),
         );
         let mut needs_redraw = false;
+        #[cfg(feature = "web_serial")]
+        loop {
+            match usb_serial.read_byte() {
+                Ok(b'\n') => {
+                    needs_redraw |= handle_usb_control_line(
+                        usb_rx_line.as_str(),
+                        &mut usb_serial,
+                        &mut usb_tx_buf,
+                        &mut ui_state,
+                        &mut memory_config,
+                        &mut memory_commit_due_ms,
+                        elapsed_ms,
+                        last_pd_observation,
+                        heater_power_backend,
+                        fan_command,
+                        current_rtd_fault,
+                        last_raw_state,
+                    );
+                    usb_rx_line.clear();
+                }
+                Ok(b'\r') => {}
+                Ok(byte) => {
+                    if usb_rx_line.push(char::from(byte)).is_err() {
+                        usb_rx_line.clear();
+                    }
+                }
+                Err(nb::Error::WouldBlock) => break,
+                Err(_) => break,
+            }
+        }
 
         if sample.raw_state != last_raw_state {
             if should_consume_attention_raw_input(

@@ -15,8 +15,9 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import SimpleBar from 'simplebar-react'
 import { Switch } from '@/components/ui/switch'
-import { type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
+import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
+import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
 import type {
   ControlPlaneScenario,
   DeviceSeverity,
@@ -98,6 +99,11 @@ export function ControlPlaneDemo({
   devd,
 }: ControlPlaneDemoProps) {
   const liveScenario = useLiveDevdScenario(scenario, devd)
+  const controlClient = useMemo(
+    () => devd?.httpClient ?? createControlPlaneHttpClient(),
+    [devd?.httpClient]
+  )
+  const devdBaseUrl = devd?.devdBaseUrl ?? defaultDevdBaseUrl()
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
   const [activeView, setActiveView] = useState<ConsoleView>(initialView)
   const [showDegraded, setShowDegraded] = useState(false)
@@ -148,8 +154,21 @@ export function ControlPlaneDemo({
   useEffect(() => {
     if (!activeScenario.devices.some((device) => device.id === selectedDeviceId)) {
       setSelectedDeviceId(activeScenario.selectedDeviceId)
+      return
     }
-  }, [activeScenario.devices, activeScenario.selectedDeviceId, selectedDeviceId])
+
+    if (
+      selectedDeviceId === scenario.selectedDeviceId &&
+      activeScenario.selectedDeviceId !== scenario.selectedDeviceId
+    ) {
+      setSelectedDeviceId(activeScenario.selectedDeviceId)
+    }
+  }, [
+    activeScenario.devices,
+    activeScenario.selectedDeviceId,
+    scenario.selectedDeviceId,
+    selectedDeviceId,
+  ])
 
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
@@ -224,6 +243,58 @@ export function ControlPlaneDemo({
       )
     },
     []
+  )
+
+  const configureLiveRuntime = useCallback(
+    async (
+      patch: {
+        targetTempC?: number
+        activeCoolingEnabled?: boolean
+        heaterEnabled?: boolean
+      },
+      failureMessage: string
+    ) => {
+      if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
+        return false
+      }
+
+      try {
+        const status = await controlClient.configureRuntime(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+          ...patch,
+        })
+        setTargetTempByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: status.targetTempC,
+        }))
+        setFanPolicyByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: status.fanDisplayState,
+        }))
+        setHeaterHeldByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: !status.heaterEnabled,
+        }))
+        return true
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : failureMessage
+        setFeedback({
+          title: 'Runtime update failed',
+          detail,
+          tone: 'warning',
+        })
+        emitEvent('devd', failureMessage, 'warning')
+        return false
+      }
+    },
+    [
+      controlClient,
+      devdBaseUrl,
+      emitEvent,
+      visibleDevice.id,
+      visibleDevice.leaseId,
+      visibleDevice.transport,
+    ]
   )
 
   useEffect(() => {
@@ -343,8 +414,15 @@ export function ControlPlaneDemo({
     })
   }
 
-  const handleTargetTempChange = (nextTargetTemp: number) => {
+  const handleTargetTempChange = async (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
+    const liveUpdated = await configureLiveRuntime(
+      { targetTempC: clampedTarget },
+      'target temperature update was not accepted by devd'
+    )
+    if (visibleDevice.transport === 'devd' && !liveUpdated) {
+      return
+    }
     setTargetTempByDevice((current) => ({
       ...current,
       [visibleDevice.id]: clampedTarget,
@@ -357,7 +435,14 @@ export function ControlPlaneDemo({
     emitEvent('thermal', `target temperature updated to ${formatTemp(clampedTarget)}`, 'success')
   }
 
-  const handleFanPolicyChange = (fanState: DeviceTarget['fanState']) => {
+  const handleFanPolicyChange = async (fanState: DeviceTarget['fanState']) => {
+    const liveUpdated = await configureLiveRuntime(
+      { activeCoolingEnabled: fanState !== 'OFF' },
+      'fan policy update was not accepted by devd'
+    )
+    if (visibleDevice.transport === 'devd' && !liveUpdated) {
+      return
+    }
     setFanPolicyByDevice((current) => ({ ...current, [visibleDevice.id]: fanState }))
     setFeedback({
       title: 'Fan policy updated',
@@ -421,8 +506,15 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handleHeaterHoldToggle = () => {
+  const handleHeaterHoldToggle = async () => {
     const nextHeld = !heaterHeldByDevice[visibleDevice.id]
+    const liveUpdated = await configureLiveRuntime(
+      { heaterEnabled: !nextHeld },
+      'heater hold update was not accepted by devd'
+    )
+    if (visibleDevice.transport === 'devd' && !liveUpdated) {
+      return
+    }
     setHeaterHeldByDevice((current) => ({ ...current, [visibleDevice.id]: nextHeld }))
     setFeedback({
       title: nextHeld ? 'Heater held' : 'Heater resumed',
@@ -438,7 +530,7 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handleStartDryRun = () => {
+  const handleStartDryRun = async () => {
     if (
       visibleDevice.severity === 'offline' ||
       selectedArtifact?.compatibility === 'blocked' ||
@@ -464,6 +556,45 @@ export function ControlPlaneDemo({
       tone: selectedArtifact.compatibility === 'warning' ? 'warning' : 'info',
     })
     emitEvent('flash', `${selectedArtifact.version} dry-check started`, 'info')
+
+    if (!devdBaseUrl || !selectedArtifact.files?.length) {
+      return
+    }
+
+    try {
+      const result = await controlClient.verifyArtifact(
+        devdBaseUrl,
+        artifactToManifest(selectedArtifact)
+      )
+      if (!result.verified) {
+        setFlashRun({ status: 'idle', progress: 0 })
+        setFeedback({
+          title: 'Dry-run failed',
+          detail: `${selectedArtifact.version} failed local file verification.`,
+          tone: 'warning',
+        })
+        emitEvent('flash', `${selectedArtifact.version} verification failed`, 'warning')
+        return
+      }
+
+      flashCompletionEmittedRef.current = true
+      setFlashRun({ status: 'passed', progress: 100 })
+      setFeedback({
+        title: 'Dry-run passed',
+        detail: `${selectedArtifact.version} verified ${result.files.length} local file${result.files.length === 1 ? '' : 's'}.`,
+        tone: 'success',
+      })
+      emitEvent('flash', `${selectedArtifact.version} verified by devd`, 'success')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Artifact verification failed.'
+      setFlashRun({ status: 'idle', progress: 0 })
+      setFeedback({
+        title: 'Dry-run failed',
+        detail,
+        tone: 'warning',
+      })
+      emitEvent('flash', 'devd artifact verification failed', 'warning')
+    }
   }
 
   const handleArtifactChange = (artifactId: string) => {
@@ -1619,15 +1750,6 @@ function PanelHeader({ kicker, title }: { kicker: string; title: string }) {
         <h2>{title}</h2>
       </div>
     </header>
-  )
-}
-
-export function ControlPlaneDemoGallery() {
-  return (
-    <div className="grid gap-8 bg-[var(--industrial-bg)] p-6">
-      <ControlPlaneDemo devd={{ enabled: false }} />
-      <ControlPlaneDemo scenario={degradedControlPlaneScenario} devd={{ enabled: false }} />
-    </div>
   )
 }
 

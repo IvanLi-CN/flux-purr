@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, VecDeque},
-    fs, io,
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -10,25 +11,30 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, Query, State},
-    http::{HeaderValue, Method, StatusCode},
+    http::{Method, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
     },
     routing::{delete, get, post, put},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{process::Command, sync::broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
+pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
+const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
+const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(1_500);
+const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const SERIAL_LINE_LIMIT: usize = 4_096;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -36,6 +42,7 @@ pub struct AppConfig {
     pub artifact_root: Option<PathBuf>,
     pub allow_dev_cors: bool,
     pub allow_real_flash: bool,
+    pub serial_port: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -45,6 +52,7 @@ impl Default for AppConfig {
             artifact_root: None,
             allow_dev_cors: false,
             allow_real_flash: false,
+            serial_port: Some(PathBuf::from(DEFAULT_SERIAL_PORT)),
         }
     }
 }
@@ -393,11 +401,80 @@ pub struct WifiConfigRequest {
     pub telemetry_interval_ms: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConfigRequest {
+    pub lease_id: String,
+    pub target_temp_c: Option<i16>,
+    pub active_cooling_enabled: Option<bool>,
+    pub heater_enabled: Option<bool>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WifiConfigOp {
     Set,
     Clear,
+}
+
+impl WifiConfigOp {
+    const fn usb_op(self) -> &'static str {
+        match self {
+            Self::Set => "set",
+            Self::Clear => "clear",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbRequestWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbWifiConfigWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssid: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_reconnect: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    telemetry_interval_ms: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbRuntimeConfigWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_temp_c: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_cooling_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heater_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbResponseWire {
+    #[serde(rename = "type")]
+    frame_type: String,
+    request_id: Option<String>,
+    ok: Option<bool>,
+    result: Option<Value>,
+    error: Option<ApiError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,6 +490,12 @@ pub struct FirmwareArtifact {
     pub features: Vec<String>,
     pub protocol: String,
     pub files: Vec<ArtifactFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareArtifactCatalog {
+    pub artifacts: Vec<FirmwareArtifact>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,6 +644,11 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/devices/{device_id}/status", get(device_status))
         .route("/api/v1/devices/{device_id}/events", get(device_events))
         .route("/api/v1/devices/{device_id}/wifi", put(configure_wifi))
+        .route(
+            "/api/v1/devices/{device_id}/runtime",
+            put(configure_runtime),
+        )
+        .route("/api/v1/artifacts", get(list_artifacts_route))
         .route("/api/v1/artifacts/verify", post(verify_artifact_route))
         .route("/api/v1/devices/{device_id}/flash", post(flash_device))
         .with_state(state.clone());
@@ -568,8 +656,9 @@ pub fn app(state: AppState) -> Router {
     if state.config.allow_dev_cors {
         router = router.layer(
             CorsLayer::new()
-                .allow_origin(HeaderValue::from_static("http://localhost:5173"))
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE]),
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers(Any),
         );
     }
 
@@ -592,14 +681,9 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, HttpError>
 }
 
 async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
-    let serial_devices = scan_serial_devices();
+    let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
     let mut state_lock = state.lock()?;
-    for device in serial_devices {
-        state_lock
-            .devices
-            .entry(device.id.clone())
-            .or_insert(device);
-    }
+    refresh_serial_devices(&mut state_lock, serial_devices);
     let devices = state_lock.devices.values().cloned().collect::<Vec<_>>();
     Ok(Json(json!({ "devices": devices })))
 }
@@ -692,11 +776,24 @@ async fn device_identity(
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
 ) -> Result<Json<Identity>, HttpError> {
-    let mut state_lock = state.lock()?;
-    if requires_lease(&state_lock, &device_id) {
-        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let identity =
+            serial_request_payload::<Identity>(&target, "get_identity", "identity").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.identity = identity.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(identity));
     }
-    Ok(Json(device(&state_lock, &device_id)?.identity.clone()))
+    Ok(Json(target.identity))
 }
 
 async fn device_network(
@@ -704,11 +801,25 @@ async fn device_network(
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
 ) -> Result<Json<NetworkSummary>, HttpError> {
-    let mut state_lock = state.lock()?;
-    if requires_lease(&state_lock, &device_id) {
-        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let network =
+            serial_request_payload::<NetworkSummary>(&target, "get_network", "network").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.network = network.clone();
+            device.status.network = network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(network));
     }
-    Ok(Json(device(&state_lock, &device_id)?.network.clone()))
+    Ok(Json(target.network))
 }
 
 async fn device_status(
@@ -716,11 +827,25 @@ async fn device_status(
     AxumPath(device_id): AxumPath<String>,
     Query(query): Query<LeaseQuery>,
 ) -> Result<Json<ControlPlaneStatus>, HttpError> {
-    let mut state_lock = state.lock()?;
-    if requires_lease(&state_lock, &device_id) {
-        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let status =
+            serial_request_payload::<ControlPlaneStatus>(&target, "get_status", "status").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status = status.clone();
+            device.network = status.network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(status));
     }
-    Ok(Json(device(&state_lock, &device_id)?.status.clone()))
+    Ok(Json(target.status))
 }
 
 async fn device_events(
@@ -751,8 +876,39 @@ async fn configure_wifi(
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<WifiConfigRequest>,
 ) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let _wifi = serial_wifi_config(&target, &payload).await?;
+        let network =
+            serial_request_payload::<NetworkSummary>(&target, "get_network", "network").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.network = network.clone();
+            device.status.network = network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(json!({
+            "accepted": true,
+            "network": network,
+            "wifi": {
+                "op": payload.op,
+                "ssid": payload.ssid,
+                "password": payload.password.as_ref().map(|_| "<redacted>"),
+                "autoReconnect": payload.auto_reconnect,
+                "telemetryIntervalMs": payload.telemetry_interval_ms
+            }
+        })));
+    }
+
     let mut state_lock = state.lock()?;
-    state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
     let device = state_lock
         .devices
         .get_mut(&device_id)
@@ -790,6 +946,53 @@ async fn configure_wifi(
     Ok(Json(redacted))
 }
 
+async fn configure_runtime(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<RuntimeConfigRequest>,
+) -> Result<Json<ControlPlaneStatus>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        serial_runtime_config(&target, &payload).await?;
+        let status =
+            serial_request_payload::<ControlPlaneStatus>(&target, "get_status", "status").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status = status.clone();
+            device.network = status.network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(status));
+    }
+
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    if let Some(target_temp_c) = payload.target_temp_c {
+        device.status.target_temp_c = target_temp_c;
+    }
+    if let Some(active_cooling_enabled) = payload.active_cooling_enabled {
+        device.status.active_cooling_enabled = active_cooling_enabled;
+    }
+    if let Some(heater_enabled) = payload.heater_enabled {
+        device.status.heater_enabled = heater_enabled;
+        if !heater_enabled {
+            device.status.heater_output_percent = 0;
+        }
+    }
+    Ok(Json(device.status.clone()))
+}
+
 async fn verify_artifact_route(
     State(state): State<AppState>,
     Json(payload): Json<ArtifactVerifyRequest>,
@@ -797,6 +1000,204 @@ async fn verify_artifact_route(
     verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
         .map(Json)
         .map_err(sanitize_io_error)
+}
+
+async fn list_artifacts_route(
+    State(state): State<AppState>,
+) -> Result<Json<FirmwareArtifactCatalog>, HttpError> {
+    discover_firmware_artifacts(state.config.artifact_root.as_deref())
+        .map(|artifacts| Json(FirmwareArtifactCatalog { artifacts }))
+        .map_err(sanitize_io_error)
+}
+
+async fn serial_request_payload<T>(
+    target: &DeviceRecord,
+    op: &'static str,
+    payload_key: &'static str,
+) -> Result<T, HttpError>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-{op}", now_millis());
+    let request = serde_json::to_string(&UsbRequestWire {
+        frame_type: "request",
+        request_id: &request_id,
+        op,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB request"))?;
+    let result = serial_exchange(port_path, request_id, request).await?;
+    extract_usb_payload(result, payload_key)
+}
+
+async fn serial_wifi_config(
+    target: &DeviceRecord,
+    payload: &WifiConfigRequest,
+) -> Result<Value, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-wifi", now_millis());
+    let request = serde_json::to_string(&UsbWifiConfigWire {
+        frame_type: "wifi_config",
+        request_id: &request_id,
+        op: payload.op.usb_op(),
+        ssid: payload.ssid.as_deref(),
+        password: payload.password.as_deref(),
+        auto_reconnect: payload.auto_reconnect,
+        telemetry_interval_ms: payload.telemetry_interval_ms,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
+    serial_exchange(port_path, request_id, request).await
+}
+
+async fn serial_runtime_config(
+    target: &DeviceRecord,
+    payload: &RuntimeConfigRequest,
+) -> Result<Value, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-runtime", now_millis());
+    let request = serde_json::to_string(&UsbRuntimeConfigWire {
+        frame_type: "runtime_config",
+        request_id: &request_id,
+        target_temp_c: payload.target_temp_c,
+        active_cooling_enabled: payload.active_cooling_enabled,
+        heater_enabled: payload.heater_enabled,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
+    serial_exchange(port_path, request_id, request).await
+}
+
+async fn serial_exchange(
+    port_path: String,
+    request_id: String,
+    request: String,
+) -> Result<Value, HttpError> {
+    tokio::task::spawn_blocking(move || serial_exchange_blocking(&port_path, &request_id, &request))
+        .await
+        .map_err(|_| HttpError::internal("serial worker failed"))?
+}
+
+fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "Native serial transport is required.",
+        ));
+    }
+    target.port_path.clone().ok_or_else(|| {
+        HttpError::bad_request("missing_port", "Native serial device has no port path.")
+    })
+}
+
+fn extract_usb_payload<T>(result: Value, payload_key: &'static str) -> Result<T, HttpError>
+where
+    T: DeserializeOwned,
+{
+    let payload = result.get(payload_key).cloned().ok_or_else(|| {
+        HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "usb_payload_missing",
+            "USB response did not include the expected payload.",
+            true,
+        )
+    })?;
+    serde_json::from_value(payload).map_err(|_| {
+        HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "usb_payload_decode_failed",
+            "USB response payload could not be decoded.",
+            true,
+        )
+    })
+}
+
+fn serial_exchange_blocking(
+    port_path: &str,
+    request_id: &str,
+    request: &str,
+) -> Result<Value, HttpError> {
+    let mut port = serialport::new(port_path, DEFAULT_BAUD_RATE)
+        .timeout(SERIAL_READ_TIMEOUT)
+        .open()
+        .map_err(|error| {
+            HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "serial_open_failed",
+                &format!("Failed to open serial port: {error}"),
+                true,
+            )
+        })?;
+
+    port.write_all(request.as_bytes())
+        .and_then(|_| port.write_all(b"\n"))
+        .and_then(|_| port.flush())
+        .map_err(serial_io_http_error)?;
+
+    let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
+    let mut read_buf = [0_u8; 256];
+    let mut line = Vec::new();
+
+    while Instant::now() < deadline {
+        match port.read(&mut read_buf) {
+            Ok(0) => {}
+            Ok(read) => {
+                for byte in &read_buf[..read] {
+                    if *byte == b'\n' {
+                        if let Some(payload) = decode_usb_response_line(&line, request_id)? {
+                            return Ok(payload);
+                        }
+                        line.clear();
+                    } else if line.len() < SERIAL_LINE_LIMIT {
+                        line.push(*byte);
+                    } else {
+                        line.clear();
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
+            Err(error) => return Err(serial_io_http_error(error)),
+        }
+    }
+
+    Err(HttpError::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        "usb_response_timeout",
+        "Timed out waiting for a matching USB JSONL response.",
+        true,
+    ))
+}
+
+fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Value>, HttpError> {
+    let Ok(text) = std::str::from_utf8(line) else {
+        return Ok(None);
+    };
+    let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
+        return Ok(None);
+    };
+    if frame.frame_type != "response" || frame.request_id.as_deref() != Some(request_id) {
+        return Ok(None);
+    }
+    if frame.ok == Some(true) {
+        return Ok(Some(frame.result.unwrap_or(Value::Null)));
+    }
+
+    Err(HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: frame.error.unwrap_or_else(|| ApiError {
+            code: "usb_error".to_string(),
+            message: "Firmware returned an unsuccessful USB response.".to_string(),
+            retryable: true,
+            details: None,
+        }),
+    })
+}
+
+fn serial_io_http_error(error: io::Error) -> HttpError {
+    HttpError::new(
+        StatusCode::BAD_GATEWAY,
+        "serial_io_failed",
+        &format!("Serial I/O failed: {error}"),
+        true,
+    )
 }
 
 async fn flash_device(
@@ -886,46 +1287,73 @@ async fn flash_device(
     }))
 }
 
-pub fn scan_serial_devices() -> Vec<DeviceRecord> {
-    let mut devices = Vec::new();
-    let Ok(ports) = serialport::available_ports() else {
-        return devices;
+pub fn scan_serial_devices(serial_port: Option<&Path>) -> Vec<DeviceRecord> {
+    let Some(serial_port) = serial_port else {
+        return Vec::new();
     };
-
-    for port in ports {
-        let (id, display_name) = match &port.port_type {
-            serialport::SerialPortType::UsbPort(info) => {
-                let serial = info
-                    .serial_number
-                    .clone()
-                    .unwrap_or_else(|| port.port_name.replace('/', "_"));
-                (
-                    format!("serial-{:04x}-{:04x}-{serial}", info.vid, info.pid),
-                    info.product
-                        .clone()
-                        .unwrap_or_else(|| "USB serial device".to_string()),
-                )
-            }
-            _ => (
-                format!("serial-{}", port.port_name.replace('/', "_")),
-                "Serial device".to_string(),
-            ),
-        };
-        let mut device = DeviceRecord::mock(&id, DeviceTransport::NativeSerial);
-        device.display_name = display_name;
-        device.port_path = Some(port.port_name);
-        device.connection = ConnectionState::Disconnected;
-        device.identity.capabilities = vec![
-            "identity".to_string(),
-            "status".to_string(),
-            "network".to_string(),
-            "wifi_config".to_string(),
-            "monitor".to_string(),
-        ];
-        devices.push(device);
+    if !serial_port.exists() {
+        return Vec::new();
     }
 
-    devices
+    let port_name = serial_port.to_string_lossy().into_owned();
+    let port_info = serialport::available_ports()
+        .ok()
+        .and_then(|ports| ports.into_iter().find(|port| port.port_name == port_name));
+    vec![serial_device_record(&port_name, port_info.as_ref())]
+}
+
+fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecord>) {
+    let serial_ids = serial_devices
+        .iter()
+        .map(|device| device.id.clone())
+        .collect::<HashSet<_>>();
+
+    state.devices.retain(|_, device| {
+        device.transport != DeviceTransport::NativeSerial || serial_ids.contains(&device.id)
+    });
+    state
+        .leases
+        .retain(|_, lease| state.devices.contains_key(&lease.device_id));
+
+    for device in serial_devices {
+        state.devices.insert(device.id.clone(), device);
+    }
+}
+
+fn serial_device_record(
+    port_name: &str,
+    port_info: Option<&serialport::SerialPortInfo>,
+) -> DeviceRecord {
+    let (id, display_name) = match port_info.map(|port| &port.port_type) {
+        Some(serialport::SerialPortType::UsbPort(info)) => {
+            let serial = info
+                .serial_number
+                .clone()
+                .unwrap_or_else(|| port_name.replace('/', "_"));
+            (
+                format!("serial-{:04x}-{:04x}-{serial}", info.vid, info.pid),
+                info.product
+                    .clone()
+                    .unwrap_or_else(|| "USB serial device".to_string()),
+            )
+        }
+        _ => (
+            format!("serial-{}", port_name.replace('/', "_")),
+            "Authorized serial device".to_string(),
+        ),
+    };
+    let mut device = DeviceRecord::mock(&id, DeviceTransport::NativeSerial);
+    device.display_name = display_name;
+    device.port_path = Some(port_name.to_string());
+    device.connection = ConnectionState::Disconnected;
+    device.identity.capabilities = vec![
+        "identity".to_string(),
+        "status".to_string(),
+        "network".to_string(),
+        "wifi_config".to_string(),
+        "monitor".to_string(),
+    ];
+    device
 }
 
 pub fn verify_artifact(
@@ -951,6 +1379,71 @@ pub fn verify_artifact(
         verified: !files.is_empty() && files.iter().all(|file| file.ok),
         files,
     })
+}
+
+pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<FirmwareArtifact>> {
+    let candidates = [
+        (
+            "local-esp32s3-release",
+            "Local ESP32-S3 release",
+            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+            "release + web_serial",
+            vec!["web_serial".to_string()],
+        ),
+        (
+            "local-host-release",
+            "Local host release",
+            "firmware/target/release/flux-purr",
+            "host release",
+            Vec::new(),
+        ),
+    ];
+    let mut artifacts = Vec::new();
+
+    for (artifact_id, name, path, profile, features) in candidates {
+        let resolved_path = resolve_artifact_path(root, path);
+        if !resolved_path.is_file() {
+            continue;
+        }
+
+        let bytes = fs::read(&resolved_path)?;
+        let size = bytes.len() as u64;
+        let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
+        artifacts.push(FirmwareArtifact {
+            artifact_id: artifact_id.to_string(),
+            name: name.to_string(),
+            version: "local-build".to_string(),
+            git_sha: option_env!("VERGEN_GIT_SHA")
+                .unwrap_or("unknown")
+                .to_string(),
+            build_id: digest
+                .trim_start_matches("sha256:")
+                .chars()
+                .take(12)
+                .collect(),
+            target_chip: if artifact_id.contains("esp32s3") {
+                "esp32s3".to_string()
+            } else {
+                "host".to_string()
+            },
+            profile: profile.to_string(),
+            features,
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "app".to_string(),
+                path: path.to_string(),
+                sha256: digest,
+                size,
+                flash_address: if artifact_id.contains("esp32s3") {
+                    Some(DEFAULT_APP_FLASH_ADDRESS)
+                } else {
+                    None
+                },
+            }],
+        });
+    }
+
+    Ok(artifacts)
 }
 
 fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
@@ -1103,6 +1596,40 @@ mod tests {
     }
 
     #[test]
+    fn serial_scan_ignores_missing_authorized_port() {
+        let dir = tempdir().unwrap();
+        let missing_port = dir.path().join("missing-usbmodem");
+
+        assert!(scan_serial_devices(Some(&missing_port)).is_empty());
+    }
+
+    #[test]
+    fn serial_refresh_removes_stale_native_devices_and_leases() {
+        let mut state = DevdState::default();
+        state.seed_mock_device();
+        let mut serial_device = DeviceRecord::mock("serial-stale", DeviceTransport::NativeSerial);
+        serial_device.port_path = Some("/dev/tty.Bluetooth-Incoming-Port".to_string());
+        state
+            .devices
+            .insert(serial_device.id.clone(), serial_device.clone());
+        state.leases.insert(
+            "lease-stale".to_string(),
+            WebLease {
+                lease_id: "lease-stale".to_string(),
+                device_id: serial_device.id,
+                expires_at: Instant::now() + Duration::from_secs(1),
+                ttl_ms: DEFAULT_LEASE_TTL_MS,
+            },
+        );
+
+        refresh_serial_devices(&mut state, Vec::new());
+
+        assert!(state.devices.contains_key("mock-fp-lab-01"));
+        assert!(!state.devices.contains_key("serial-stale"));
+        assert!(state.leases.is_empty());
+    }
+
+    #[test]
     fn artifact_verify_checks_hash_and_size() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("firmware.bin");
@@ -1181,6 +1708,25 @@ mod tests {
     }
 
     #[test]
+    fn artifact_catalog_discovers_local_build_outputs() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir
+            .path()
+            .join("firmware/target/xtensa-esp32s3-none-elf/release");
+        fs::create_dir_all(&artifact_path).unwrap();
+        fs::write(artifact_path.join("flux-purr"), b"firmware-image").unwrap();
+
+        let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_id, "local-esp32s3-release");
+        assert_eq!(artifacts[0].target_chip, "esp32s3");
+        assert_eq!(artifacts[0].files[0].size, 14);
+        assert_eq!(artifacts[0].files[0].flash_address, Some(0x10000));
+        assert!(artifacts[0].files[0].sha256.starts_with("sha256:"));
+    }
+
+    #[test]
     fn real_flash_args_are_bound_to_explicit_port_and_artifact_root() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
@@ -1232,5 +1778,45 @@ mod tests {
         });
         assert!(value.to_string().contains("<redacted>"));
         assert!(!value.to_string().contains("secret-pass"));
+    }
+
+    #[test]
+    fn usb_response_decoder_ignores_logs_and_selects_matching_request() {
+        assert!(
+            decode_usb_response_line(b"INFO firmware booted", "req-1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_usb_response_line(
+                br#"{"type":"response","requestId":"other","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#,
+                "req-1"
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let payload = decode_usb_response_line(
+            br#"{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#,
+            "req-1",
+        )
+        .unwrap()
+        .unwrap();
+
+        let network = extract_usb_payload::<NetworkSummary>(payload, "network").unwrap();
+        assert_eq!(network.state, NetworkState::Disabled);
+    }
+
+    #[test]
+    fn usb_response_decoder_maps_firmware_errors() {
+        let error = decode_usb_response_line(
+            br#"{"type":"response","requestId":"req-1","ok":false,"error":{"code":"bad_op","message":"Bad op","retryable":false}}"#,
+            "req-1",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.error.code, "bad_op");
+        assert!(!error.error.retryable);
     }
 }

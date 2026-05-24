@@ -29,6 +29,7 @@ export interface DeviceTarget {
   capabilities: string[]
   networkState?: 'disabled' | 'idle' | 'saving' | 'connecting' | 'connected' | 'error' | 'timeout'
   leaseState?: 'none' | 'active' | 'conflict' | 'expired'
+  leaseId?: string
   transportIssue?: string
 }
 
@@ -55,6 +56,13 @@ export interface FirmwareArtifact {
   progressPercent: number
   protocol?: string
   features?: string[]
+  files?: Array<{
+    kind: string
+    path: string
+    sha256: string
+    size: number
+    flashAddress?: number | null
+  }>
 }
 
 export interface EventLogEntry {

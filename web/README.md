@@ -26,19 +26,16 @@ bun run --cwd web build-storybook
 ## Stories included
 
 - `ConsoleLayout`
-- `ControlPlaneDemo`
 - `DeviceStatusCard`
 - `FrontPanelDisplay`
 - `WifiConfigForm`
 - `TelemetryTrendCard`
 
-## Control plane demo
+## Control plane app
 
-The app entry renders a pure Web mock thermal bench console for the Flux Purr control-plane architecture. It demonstrates Dashboard runtime control, Settings preset/fan policy editing, Update dry-check, a compact target dropdown, and a desktop global log panel without connecting to real hardware.
+The app entry renders the Flux Purr control console. It demonstrates Dashboard runtime control, Settings preset/fan policy editing, Update dry-check, a compact target dropdown, and a desktop global log panel.
 
 The stable implementation surface is:
 
-- `src/features/control-plane-demo/**` for mock data, types, and UI components
-- `src/stories/ControlPlaneDemo.stories.tsx` for Storybook gallery, degraded state, mobile review, and interaction smoke coverage
-
-The demo intentionally does not implement native USB daemon endpoints, USB CDC, WiFi HTTP, persistent storage, or real firmware flashing.
+- `src/features/control-plane-demo/**` for runtime data, types, and UI components
+- `src/features/control-plane-demo/live-devd.ts` for local devd discovery

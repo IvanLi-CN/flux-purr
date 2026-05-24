@@ -49,11 +49,11 @@ export const controlPlaneScenario: ControlPlaneScenario = {
   devices: [
     {
       id: 'fp-lab-01',
-      alias: 'Bench Alpha',
-      location: 'Thermal lab',
-      transport: 'devd',
+      alias: 'Bench Alpha Fixture',
+      location: 'Mock thermal lab',
+      transport: 'mock',
       severity: 'nominal',
-      baseUrl: 'devd://localhost/flux-purr-alpha',
+      baseUrl: 'mock:bench-alpha',
       firmware: 'fw/v0.4.0-dev',
       buildId: 's3-7f31c9',
       uptime: '03:18:42',
@@ -70,7 +70,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       fanState: 'AUTO',
       wifiRssi: -54,
       networkState: 'connected',
-      leaseState: 'active',
+      leaseState: 'none',
       capabilities: ['identity', 'status', 'wifi_config', 'flash', 'monitor'],
     },
     {
@@ -130,7 +130,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
     {
       label: 'Bound targets',
       value: '03',
-      detail: '1 devd, 1 serial, 1 mock',
+      detail: 'mock fixtures only',
       tone: 'neutral',
     },
     {
@@ -234,8 +234,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
   events: [
     {
       time: '20:14:03',
-      source: 'devd',
-      message: 'lease heartbeat accepted for Bench Alpha',
+      source: 'mock',
+      message: 'bench fixture runtime sample loaded',
       tone: 'success',
     },
     {
@@ -259,7 +259,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
     {
       time: '20:14:21',
       source: 'probe',
-      message: 'identity frame matched Bench Alpha capability map',
+      message: 'identity frame matched Bench Alpha Fixture capability map',
       tone: 'success',
     },
     {

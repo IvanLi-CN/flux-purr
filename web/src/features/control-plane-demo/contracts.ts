@@ -95,6 +95,13 @@ export interface WifiConfigRequest {
   telemetryIntervalMs?: number
 }
 
+export interface RuntimeConfigRequest {
+  leaseId: string
+  targetTempC?: number
+  activeCoolingEnabled?: boolean
+  heaterEnabled?: boolean
+}
+
 export interface FirmwareArtifactManifest {
   artifactId: string
   name: string
@@ -111,6 +118,21 @@ export interface FirmwareArtifactManifest {
     sha256: string
     size: number
     flashAddress?: number | null
+  }>
+}
+
+export interface FirmwareArtifactCatalog {
+  artifacts: FirmwareArtifactManifest[]
+}
+
+export interface ArtifactVerifyResult {
+  artifactId: string
+  verified: boolean
+  files: Array<{
+    kind: string
+    sha256: string
+    size: number
+    ok: boolean
   }>
 }
 

@@ -69,6 +69,33 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN`.
 
+### `FirmwareArtifact`
+
+```json
+{
+  "artifactId": "local-esp32s3-release",
+  "name": "Local ESP32-S3 release",
+  "version": "local-build",
+  "gitSha": "unknown",
+  "buildId": "54362508abf2",
+  "targetChip": "esp32s3",
+  "profile": "release + web_serial",
+  "features": ["web_serial"],
+  "protocol": "flux-purr.usb.v1",
+  "files": [
+    {
+      "kind": "app",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
+      "size": 741452,
+      "flashAddress": 65536
+    }
+  ]
+}
+```
+
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors.
+
 ### `ApiError`
 
 ```json
@@ -124,6 +151,7 @@ The response reports a redacted summary only:
 ## Native `devd` HTTP
 
 Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`.
+Native serial discovery is constrained to the configured authorized port. The project default is `/dev/cu.usbmodem21221401`; if that path is absent, `devd` must not expose another native serial device.
 
 - `GET /health`
 - `GET /api/v1/devices`
@@ -138,10 +166,85 @@ Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`.
 - `GET /api/v1/devices/:id/status?lease_id=...`
 - `GET /api/v1/devices/:id/events`
 - `PUT /api/v1/devices/:id/wifi`
+- `PUT /api/v1/devices/:id/runtime`
+- `GET /api/v1/artifacts`
 - `POST /api/v1/artifacts/verify`
 - `POST /api/v1/devices/:id/flash`
 
 Mutating device endpoints require a valid `lease_id`.
+
+`PUT /api/v1/devices/:id/runtime` body:
+
+```json
+{
+  "leaseId": "lease-001",
+  "targetTempC": 220,
+  "activeCoolingEnabled": true,
+  "heaterEnabled": true
+}
+```
+
+All runtime fields are optional except `leaseId`; the response is the updated `Status`.
+
+`GET /api/v1/artifacts` response:
+
+```json
+{
+  "artifacts": [
+    {
+      "artifactId": "local-esp32s3-release",
+      "targetChip": "esp32s3",
+      "files": [
+        {
+          "kind": "app",
+          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+          "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
+          "size": 741452,
+          "flashAddress": 65536
+        }
+      ]
+    }
+  ]
+}
+```
+
+`POST /api/v1/artifacts/verify` accepts one `FirmwareArtifact` manifest and validates every file's existence, size, and SHA-256:
+
+```json
+{
+  "artifact": {
+    "artifactId": "local-esp32s3-release",
+    "targetChip": "esp32s3",
+    "files": [
+      {
+        "kind": "app",
+        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+        "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
+        "size": 741452,
+        "flashAddress": 65536
+      }
+    ]
+  }
+}
+```
+
+Successful response:
+
+```json
+{
+  "verified": true,
+  "artifactId": "local-esp32s3-release",
+  "files": [
+    {
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
+      "size": 741452
+    }
+  ]
+}
+```
+
+Web Update dry-check uses the catalog plus verify endpoint. Browser CORS preflight for development must allow `Content-Type` so JSON `POST /api/v1/artifacts/verify` works from Vite.
 
 ## USB CDC JSONL
 
@@ -196,6 +299,35 @@ Responses must redact the password:
     "network": {
       "state": "saving",
       "ssid": "FluxPurr-Lab"
+    }
+  }
+}
+```
+
+### `runtime_config`
+
+```json
+{
+  "type": "runtime_config",
+  "requestId": "req-003",
+  "targetTempC": 220,
+  "activeCoolingEnabled": true,
+  "heaterEnabled": true
+}
+```
+
+The response returns the updated status:
+
+```json
+{
+  "type": "response",
+  "requestId": "req-003",
+  "ok": true,
+  "result": {
+    "status": {
+      "targetTempC": 220,
+      "activeCoolingEnabled": true,
+      "heaterEnabled": true
     }
   }
 }

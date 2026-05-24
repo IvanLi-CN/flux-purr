@@ -1,6 +1,6 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
-use flux_purr_devd::{AppConfig, AppState, app};
+use flux_purr_devd::{AppConfig, AppState, DEFAULT_SERIAL_PORT, app};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -31,6 +31,7 @@ fn print_help() {
          Environment:\n\
            FLUX_PURR_DEVD_BIND=127.0.0.1:30080\n\
            FLUX_PURR_DEVD_ARTIFACT_ROOT=<path>\n\
+           FLUX_PURR_DEVD_SERIAL_PORT=/dev/cu.usbmodem21221401\n\
            FLUX_PURR_DEVD_DEV_CORS=1\n\
            FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1"
     );
@@ -50,11 +51,15 @@ fn parse_config() -> AppConfig {
     let allow_real_flash = env::var("FLUX_PURR_DEVD_ALLOW_REAL_FLASH")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let serial_port = Some(PathBuf::from(
+        env::var("FLUX_PURR_DEVD_SERIAL_PORT").unwrap_or_else(|_| DEFAULT_SERIAL_PORT.to_string()),
+    ));
 
     AppConfig {
         bind,
         artifact_root,
         allow_dev_cors,
         allow_real_flash,
+        serial_port,
     }
 }

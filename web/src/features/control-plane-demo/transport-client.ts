@@ -1,12 +1,15 @@
 import type {
   ApiErrorEnvelope,
+  ArtifactVerifyResult,
   ControlPlaneStatus,
   DevdDeviceList,
   DevdDeviceRecord,
   DevdLease,
+  FirmwareArtifactCatalog,
   FirmwareArtifactManifest,
   Identity,
   NetworkSummary,
+  RuntimeConfigRequest,
   UsbRequestFrame,
   UsbWifiConfigFrame,
   WifiConfigRequest,
@@ -36,14 +39,34 @@ export interface ControlPlaneHttpClient {
     network: NetworkSummary
     status: ControlPlaneStatus
   }>
+  probeDevdDevice(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<{
+    identity: Identity
+    network: NetworkSummary
+    status: ControlPlaneStatus
+  }>
   listDevdDevices(devdBaseUrl: string): Promise<DevdDeviceRecord[]>
   createDevdLease(devdBaseUrl: string, deviceId: string): Promise<DevdLease>
   heartbeatDevdLease(devdBaseUrl: string, leaseId: string): Promise<DevdLease>
+  releaseDevdLease(devdBaseUrl: string, leaseId: string): Promise<void>
+  configureRuntime(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: RuntimeConfigRequest
+  ): Promise<ControlPlaneStatus>
   configureWifi(
     devdBaseUrl: string,
     deviceId: string,
     request: WifiConfigRequest
   ): Promise<NetworkSummary>
+  listDevdArtifacts(devdBaseUrl: string): Promise<FirmwareArtifact[]>
+  verifyArtifact(
+    devdBaseUrl: string,
+    artifact: FirmwareArtifactManifest
+  ): Promise<ArtifactVerifyResult>
 }
 
 export function createControlPlaneHttpClient(
@@ -60,24 +83,72 @@ export function createControlPlaneHttpClient(
 
       return { identity, network, status }
     },
+    async probeDevdDevice(devdBaseUrl, deviceId, leaseId) {
+      const encodedDeviceId = encodeURIComponent(deviceId)
+      const suffix = `?lease_id=${encodeURIComponent(leaseId)}`
+      const [identity, network, status] = await Promise.all([
+        requestJson<Identity>(
+          fetcher,
+          `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/identity${suffix}`
+        ),
+        requestJson<NetworkSummary>(
+          fetcher,
+          `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/network${suffix}`
+        ),
+        requestJson<ControlPlaneStatus>(
+          fetcher,
+          `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/status${suffix}`
+        ),
+      ])
+
+      return { identity, network, status }
+    },
     async listDevdDevices(devdBaseUrl) {
       const response = await requestJson<DevdDeviceList>(fetcher, `${devdBaseUrl}/api/v1/devices`)
       return response.devices
     },
     createDevdLease(devdBaseUrl, deviceId) {
-      return requestJson<DevdLease>(fetcher, `${devdBaseUrl}/api/v1/devices/${deviceId}/leases`, {
-        method: 'POST',
-      })
+      return requestJson<DevdLease>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/leases`,
+        {
+          method: 'POST',
+        }
+      )
     },
     heartbeatDevdLease(devdBaseUrl, leaseId) {
-      return requestJson<DevdLease>(fetcher, `${devdBaseUrl}/api/v1/leases/${leaseId}/heartbeat`, {
-        method: 'POST',
-      })
+      return requestJson<DevdLease>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/leases/${encodeURIComponent(leaseId)}/heartbeat`,
+        {
+          method: 'POST',
+        }
+      )
+    },
+    async releaseDevdLease(devdBaseUrl, leaseId) {
+      await requestJson<{ released: boolean }>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/leases/${encodeURIComponent(leaseId)}`,
+        {
+          method: 'DELETE',
+        }
+      )
+    },
+    configureRuntime(devdBaseUrl, deviceId, request) {
+      return requestJson<ControlPlaneStatus>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/runtime`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
     },
     async configureWifi(devdBaseUrl, deviceId, request) {
       const response = await requestJson<{ network: NetworkSummary }>(
         fetcher,
-        `${devdBaseUrl}/api/v1/devices/${deviceId}/wifi`,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/wifi`,
         {
           method: 'PUT',
           headers: { 'content-type': 'application/json' },
@@ -85,6 +156,20 @@ export function createControlPlaneHttpClient(
         }
       )
       return response.network
+    },
+    async listDevdArtifacts(devdBaseUrl) {
+      const response = await requestJson<FirmwareArtifactCatalog>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/artifacts`
+      )
+      return response.artifacts.map(manifestToArtifact)
+    },
+    verifyArtifact(devdBaseUrl, artifact) {
+      return requestJson<ArtifactVerifyResult>(fetcher, `${devdBaseUrl}/api/v1/artifacts/verify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ artifact }),
+      })
     },
   }
 }
@@ -129,7 +214,22 @@ export function artifactToManifest(artifact: FirmwareArtifact): FirmwareArtifact
     profile: artifact.profile,
     features: artifact.features ?? [],
     protocol: artifact.protocol ?? 'flux-purr.usb.v1',
-    files: [],
+    files: artifact.files ?? [],
+  }
+}
+
+export function manifestToArtifact(manifest: FirmwareArtifactManifest): FirmwareArtifact {
+  return {
+    id: manifest.artifactId,
+    version: manifest.version,
+    target: manifest.targetChip,
+    profile: manifest.profile,
+    compatibility: manifest.targetChip === 'esp32s3' ? 'match' : 'blocked',
+    hash: manifest.files[0]?.sha256 ?? `sha256:${manifest.buildId}`,
+    progressPercent: 0,
+    protocol: manifest.protocol,
+    features: manifest.features,
+    files: manifest.files,
   }
 }
 

@@ -143,11 +143,7 @@ impl ControlPlaneStatus {
         uptime_seconds: u32,
         network: NetworkSummary,
     ) -> Self {
-        let heater_output_percent = if status.pd_state == PdState::Ready {
-            crate::pwm_percent_from_permille(status.fan_pwm_permille).min(100)
-        } else {
-            0
-        };
+        let heater_output_percent = status.heater_output_percent.min(100);
         let fan_display_state = if status.fan_enabled {
             if status.fan_pwm_permille <= crate::FAN_MID_PWM_PERMILLE {
                 FanDisplayState::Run
@@ -163,7 +159,7 @@ impl ControlPlaneStatus {
             uptime_seconds,
             current_temp_c: status.board_temp_centi as f32 / 100.0,
             target_temp_c: memory.target_temp_c,
-            heater_enabled: status.pd_state == PdState::Ready,
+            heater_enabled: matches!(status.mode, DeviceMode::Sampling),
             heater_output_percent,
             active_cooling_enabled: memory.active_cooling_enabled,
             fan_display_state,
@@ -307,6 +303,26 @@ pub struct RedactedWifiConfig {
     pub telemetry_interval_ms: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConfigCommand {
+    pub target_temp_c: Option<i16>,
+    pub active_cooling_enabled: Option<bool>,
+    pub heater_enabled: Option<bool>,
+}
+
+impl RuntimeConfigCommand {
+    pub fn apply_to(&self, config: &mut MemoryConfig) {
+        if let Some(target_temp_c) = self.target_temp_c {
+            config.target_temp_c = target_temp_c;
+        }
+        if let Some(active_cooling_enabled) = self.active_cooling_enabled {
+            config.active_cooling_enabled = active_cooling_enabled;
+        }
+        config.sanitize();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsbFrame {
     Hello {
@@ -322,6 +338,10 @@ pub enum UsbFrame {
     WifiConfig {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: WifiConfigCommand,
+    },
+    RuntimeConfig {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        config: RuntimeConfigCommand,
     },
     Response {
         request_id: String<REQUEST_ID_MAX_LEN>,
@@ -359,6 +379,9 @@ struct UsbFrameWire {
     password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
     auto_reconnect: Option<bool>,
     telemetry_interval_ms: Option<u32>,
+    target_temp_c: Option<i16>,
+    active_cooling_enabled: Option<bool>,
+    heater_enabled: Option<bool>,
     ok: Option<bool>,
     result: Option<UsbResponsePayload>,
     error: Option<ApiError>,
@@ -390,6 +413,14 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     password: value.password,
                     auto_reconnect: value.auto_reconnect,
                     telemetry_interval_ms: value.telemetry_interval_ms,
+                },
+            }),
+            "runtime_config" => Ok(UsbFrame::RuntimeConfig {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: RuntimeConfigCommand {
+                    target_temp_c: value.target_temp_c,
+                    active_cooling_enabled: value.active_cooling_enabled,
+                    heater_enabled: value.heater_enabled,
                 },
             }),
             "response" => Ok(UsbFrame::Response {
@@ -428,6 +459,9 @@ impl From<&UsbFrame> for UsbFrameWire {
             password: None,
             auto_reconnect: None,
             telemetry_interval_ms: None,
+            target_temp_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
             ok: None,
             result: None,
             error: None,
@@ -462,6 +496,13 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.password = config.password.clone();
                 wire.auto_reconnect = config.auto_reconnect;
                 wire.telemetry_interval_ms = config.telemetry_interval_ms;
+            }
+            UsbFrame::RuntimeConfig { request_id, config } => {
+                wire.frame_type = string("runtime_config");
+                wire.request_id = Some(request_id.clone());
+                wire.target_temp_c = config.target_temp_c;
+                wire.active_cooling_enabled = config.active_cooling_enabled;
+                wire.heater_enabled = config.heater_enabled;
             }
             UsbFrame::Response {
                 request_id,
@@ -703,6 +744,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_command_updates_memory_policy() {
+        let command = RuntimeConfigCommand {
+            target_temp_c: Some(250),
+            active_cooling_enabled: Some(false),
+            heater_enabled: Some(true),
+        };
+        let mut config = MemoryConfig::default();
+        command.apply_to(&mut config);
+
+        assert_eq!(config.target_temp_c, 250);
+        assert!(!config.active_cooling_enabled);
+        assert_eq!(command.heater_enabled, Some(true));
+    }
+
+    #[test]
     fn parse_usb_request_with_request_id() {
         let frame =
             parse_usb_frame(r#"{"type":"request","requestId":"req-001","op":"get_status"}"#)
@@ -740,6 +796,26 @@ mod tests {
         assert!(json.contains(r#""password":"<redacted>""#));
         assert!(!json.contains("secret-pass"));
         assert!(json.ends_with('\n'));
+    }
+
+    #[test]
+    fn parse_runtime_config_frame() {
+        let frame = parse_usb_frame(
+            r#"{"type":"runtime_config","requestId":"req-003","targetTempC":230,"activeCoolingEnabled":false,"heaterEnabled":true}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame,
+            UsbFrame::RuntimeConfig {
+                request_id: string("req-003"),
+                config: RuntimeConfigCommand {
+                    target_temp_c: Some(230),
+                    active_cooling_enabled: Some(false),
+                    heater_enabled: Some(true),
+                },
+            }
+        );
     }
 
     #[test]

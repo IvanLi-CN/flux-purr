@@ -32,7 +32,6 @@
 - `firmware/src/control_plane.rs` 及 feature flags。
 - `tools/flux-purr-devd/**` native daemon。
 - `web/src/features/control-plane-demo/contracts.ts` 与 transport client。
-- `web/src/stories/ControlPlaneDemo.stories.tsx` 真实 transport / degraded capability stories。
 - `docs/interfaces/http-api.md` 当前 HTTP/devd/USB contract。
 
 ### Out of scope
@@ -49,17 +48,20 @@
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
+- runtime config frame 和 devd runtime endpoint 必须能更新目标温度、主动散热开关与 heater hold 状态。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
+- devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
 - logs、trace、events 必须有固定上限。
 - firmware artifact verify 必须校验 file existence、size 和 sha256；real flash 必须先通过 dry-run。
+- devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
 
 ### SHOULD
 
-- devd scan 应利用 serial USB metadata 构造稳定 ID。
+- devd scan 应在授权端口范围内利用 serial USB metadata 构造稳定 ID。
 - direct HTTP 与 devd bridge endpoint 的返回 shape 应可由同一 Web parser 处理。
-- Storybook 应覆盖 nominal、devd unavailable、lease conflict、WiFi provisioning、monitor/trace 与 firmware blocked/warning states。
+- Web app 验证应覆盖 nominal、devd unavailable、lease conflict、WiFi provisioning、monitor/trace 与 firmware blocked/warning states。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -72,6 +74,8 @@
 - `GET /api/v1/devices/:id/identity|network|status`：读取同一领域契约；leased USB session 需要 `lease_id`。
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
+- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`active_cooling_enabled`、`heater_enabled` 的部分更新。
+- `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file path、size、sha256 与 flash address。
 - `POST /api/v1/artifacts/verify`：校验 catalog/artifact 文件。
 - `POST /api/v1/devices/:id/flash`：`dry_run=true` 只校验；`dry_run=false` 必须先有同 artifact 的通过记录。
 
@@ -80,16 +84,18 @@
 - `hello`：device 主动或 host 请求；返回 protocol、framing、identity、capabilities。
 - `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
+- `runtime_config`：`request_id` + runtime fields；response 返回更新后的 status。
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 无硬件环境，When 运行 host tests，Then USB frame parsing、request ID matching、redaction、status adapter、lease expiry、bounded buffer、artifact verify 与 mock serial session 均通过。
+- Given 无硬件环境，When 运行 host tests，Then USB frame parsing、request ID matching、redaction、runtime config、status adapter、lease expiry、bounded buffer、artifact verify 与 serial authorization guard 均通过。
 - Given devd mock target，When 创建 lease 并 heartbeat，Then lease 未过期前 mutating endpoint 成功，过期后返回 conflict/expired error。
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
-- Given Web Storybook，When 查看真实控制面 stories，Then nominal、devd unavailable、lease conflict、WiFi phases、monitor trace、firmware blocked/warning 状态都可见。
-- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test/storybook 均通过；真机 smoke 标记为后续 owner-triggered 验证。
+- Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
+- Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、WiFi phases、monitor trace、firmware blocked/warning 状态都可见。
+- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test 与 Web app browser smoke 均通过；真机 smoke 标记为后续 owner-triggered 验证。
 
 ## 非功能性验收 / 质量门槛
 
@@ -100,29 +106,13 @@
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web build`
-- `bun run --cwd web build-storybook`
-- `bun run --cwd web test:storybook`
+- Web app browser smoke against Vite preview with `devd` running.
 
 ## Visual Evidence
 
-- 证据来源：Storybook deterministic scenarios。
-- 绑定说明：以下图片来自 Storybook canvas，覆盖真实 transport capability、lease conflict 和 mobile review。
-
-### Desktop nominal 1440px
-
-![Real control plane desktop](./assets/real-control-plane-desktop.png)
-
-### Default Storybook refresh 1440px
-
-![Real control plane default refresh](./assets/real-control-plane-default-refresh.png)
-
-### Lease conflict 1440px
-
-![Real control plane lease conflict](./assets/real-control-plane-lease-conflict.png)
-
-### Mobile 390px
-
-![Real control plane mobile](./assets/real-control-plane-mobile.png)
+- 证据来源：Web app runtime。
+- `assets/web-app-devd-no-authorized-serial.png`：Vite Web App 连接当前租约 `devd`；授权端口缺失时只显示 daemon mock target，并在 trace 中标明没有授权 native serial target。
+- `assets/web-app-devd-artifact-dry-check.png`：Vite Web App Update 页通过 `devd` 校验本地 ESP32-S3 固件产物，dry-check 返回通过。
 
 ## 参考（References）
 
