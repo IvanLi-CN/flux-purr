@@ -152,6 +152,8 @@ const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
 const USB_CONTROL_LINE_CAPACITY: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 const USB_CONTROL_TX_BUFFER_LEN: usize = 1536;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const USB_CONTROL_TX_RETRY_LIMIT: usize = 4096;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1632,8 +1634,19 @@ fn usb_write_frame(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
 ) {
     if let Ok(line) = write_usb_frame(frame, tx_buf) {
-        let _ = usb.write(line.as_bytes());
-        let _ = usb.flush_tx();
+        let mut retries = 0;
+        for byte in line.as_bytes() {
+            loop {
+                match usb.write_byte_nb(*byte) {
+                    Ok(()) => break,
+                    Err(nb::Error::WouldBlock) if retries < USB_CONTROL_TX_RETRY_LIMIT => {
+                        retries += 1;
+                    }
+                    Err(_) => return,
+                }
+            }
+        }
+        let _ = usb.flush_tx_nb();
     }
 }
 
