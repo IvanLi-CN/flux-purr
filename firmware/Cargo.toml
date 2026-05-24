@@ -51,11 +51,10 @@ embassy-executor = "0.7.0"
 embassy-time = "0.4.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
-esp-backtrace = { version = "0.17.0", features = ["esp32s3", "panic-handler", "println"] }
+esp-backtrace = { version = "0.17.0", features = ["esp32s3", "panic-handler", "defmt"] }
 esp-hal = { version = "1.0.0-rc.0", features = ["esp32s3", "unstable", "defmt"] }
 esp-hal-embassy = { version = "0.9.1", features = ["esp32s3", "defmt"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
-esp-println = { version = "0.15.0", features = ["esp32s3", "defmt-espflash"] }
 static_cell = "2.1.0"
 
 [dev-dependencies]

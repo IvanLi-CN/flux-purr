@@ -15,9 +15,10 @@ use embedded_hal::pwm::SetDutyCycle;
 use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
 use esp_backtrace as _;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use esp_hal::{Blocking, usb_serial_jtag::UsbSerialJtag};
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
-    Blocking,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
@@ -33,10 +34,7 @@ use esp_hal::{
     },
     time::Rate,
     timer::timg::TimerGroup,
-    usb_serial_jtag::UsbSerialJtag,
 };
-#[cfg(target_arch = "xtensa")]
-use esp_println as _;
 #[cfg(test)]
 use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 #[cfg(test)]
@@ -47,6 +45,11 @@ use flux_purr_firmware::adapters::ch224q::Status;
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::{
+    ApiError, ControlPlaneStatus, Identity, UsbFrame, UsbFrameError, UsbRequestOp,
+    UsbResponsePayload, hello_frame, network_from_memory, parse_usb_frame, write_usb_frame,
+};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
     FanDisplayState, FrontPanelRawState, FrontPanelUiState, HeaterLockReason,
@@ -61,17 +64,14 @@ use flux_purr_firmware::memory::{
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    DEFAULT_PD_VOLTAGE_REQUEST, DeviceMode, DeviceStatus, FAN_PWM_FREQUENCY_HZ, PdState,
-    pwm_percent_from_permille,
+    DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ, pwm_percent_from_permille,
 };
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::{DeviceMode, DeviceStatus, PdState};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     adapters::ch224q::{self, Address, Status},
     board::s3_frontpanel,
-    control_plane::{
-        ApiError, ControlPlaneStatus, Identity, UsbFrame, UsbFrameError, UsbRequestOp,
-        UsbResponsePayload, hello_frame, network_from_memory, parse_usb_frame, write_usb_frame,
-    },
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
         FRONTPANEL_DEBOUNCE_MS, FRONTPANEL_DOUBLE_CLICK_MS, FrontPanelInputController,
@@ -86,6 +86,22 @@ use static_cell::StaticCell;
 
 #[cfg(target_arch = "xtensa")]
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[cfg(target_arch = "xtensa")]
+#[defmt::global_logger]
+struct UsbControlNoopLogger;
+
+#[cfg(target_arch = "xtensa")]
+unsafe impl defmt::Logger for UsbControlNoopLogger {
+    fn acquire() {}
+
+    unsafe fn flush() {}
+
+    unsafe fn release() {}
+
+    unsafe fn write(_bytes: &[u8]) {}
+}
+
 #[cfg(target_arch = "xtensa")]
 const _: [(); s3_frontpanel::PIN_LCD_DC as usize] = [(); 10];
 #[cfg(target_arch = "xtensa")]
@@ -1625,7 +1641,7 @@ fn usb_write_frame(
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn usb_response(
-    request_id: heapless::String<flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     result: UsbResponsePayload,
 ) -> UsbFrame {
     UsbFrame::Response {
@@ -1638,7 +1654,7 @@ fn usb_response(
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn usb_error_response(
-    request_id: heapless::String<flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     code: &'static str,
     message: &'static str,
 ) -> UsbFrame {
