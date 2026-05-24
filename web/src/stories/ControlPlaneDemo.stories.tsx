@@ -9,6 +9,9 @@ import {
 const meta = {
   title: 'Pages/ControlPlaneDemo',
   component: ControlPlaneDemo,
+  args: {
+    devd: { enabled: false },
+  },
   tags: ['autodocs'],
   parameters: {
     layout: 'fullscreen',
@@ -84,7 +87,7 @@ export const MobileReview: Story = {
   },
   render: () => (
     <div style={{ maxWidth: 390 }}>
-      <ControlPlaneDemo />
+      <ControlPlaneDemo devd={{ enabled: false }} />
     </div>
   ),
 }

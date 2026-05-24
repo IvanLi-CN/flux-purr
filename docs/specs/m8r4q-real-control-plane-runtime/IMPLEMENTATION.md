@@ -13,12 +13,14 @@
 - 共享领域契约由 firmware、devd 与 Web 各自的 typed adapter 实现。
 - firmware v1 先交付 host-testable status adapter、USB JSONL parser/encoder、WiFi redaction 与 feature flags。
 - `tools/flux-purr-devd` 提供 localhost daemon、mock/serial scan、lease、bounded events、artifact verify、dry-run 与 flash command boundary。
-- Web demo 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate 与 Storybook scenarios。
+- Web demo 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate、live devd discovery bridge 与 Storybook scenarios。
 - 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease/status/WiFi redaction、artifact verify、dry-run guard、`mcu-agentd` flash 与 reset monitor。
+- `devd` real flash path 绑定 lease 对应 native serial port；空 artifact 不再被 dry-run 视为通过。
 
 ## Remaining Gaps
 
 - PR 号在 PR 创建后回填。
+- Web Update 的 real flash catalog selection 仍以 manifest payload 为边界；完整 artifact catalog 管理页不属于本 spec 范围。
 
 ## Hardware Smoke
 

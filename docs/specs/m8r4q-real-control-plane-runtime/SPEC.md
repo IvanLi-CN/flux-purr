@@ -112,6 +112,10 @@
 
 ![Real control plane desktop](./assets/real-control-plane-desktop.png)
 
+### Default Storybook refresh 1440px
+
+![Real control plane default refresh](./assets/real-control-plane-default-refresh.png)
+
 ### Lease conflict 1440px
 
 ![Real control plane lease conflict](./assets/real-control-plane-lease-conflict.png)

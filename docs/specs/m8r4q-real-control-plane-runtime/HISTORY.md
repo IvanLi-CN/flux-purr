@@ -7,3 +7,4 @@
 - 决策：`#hhwq8` 继续代表轻量 Web demo；真实 transport work 由本 spec 承接，避免把 demo spec 扩张成全量后台。
 - 主工作区真机 smoke 完成：`mcu-agentd` flash 成功，reset monitor 观察到 frontpanel app runtime、CH224Q/PPS、heater `pps-mos` backend 与 dashboard loop 稳定输出。
 - 真机 smoke 发现并修复 `devd` 两个缺口：artifact verify 失败不再允许 dry-run 通过，`--help` 不再误启动 daemon。
+- `devd` real flash 边界要求真实写入绑定 lease 对应的 native serial port，空 artifact manifest 不再通过 dry-run；Web 控制台默认从本机 `devd` discovery 合入 live targets，Storybook 保持 deterministic fixture。

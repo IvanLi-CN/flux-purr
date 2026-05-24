@@ -15,6 +15,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import SimpleBar from 'simplebar-react'
 import { Switch } from '@/components/ui/switch'
+import { type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
 import type {
   ControlPlaneScenario,
@@ -29,6 +30,7 @@ import type {
 interface ControlPlaneDemoProps {
   scenario?: ControlPlaneScenario
   initialView?: ConsoleView
+  devd?: LiveDevdOptions
 }
 
 type ConsoleView = 'dashboard' | 'settings' | 'update'
@@ -93,7 +95,9 @@ const consoleViews: Array<{
 export function ControlPlaneDemo({
   scenario = controlPlaneScenario,
   initialView = 'dashboard',
+  devd,
 }: ControlPlaneDemoProps) {
+  const liveScenario = useLiveDevdScenario(scenario, devd)
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
   const [activeView, setActiveView] = useState<ConsoleView>(initialView)
   const [showDegraded, setShowDegraded] = useState(false)
@@ -120,7 +124,7 @@ export function ControlPlaneDemo({
     detail: 'Thermal state is sampled from the mock device contract.',
     tone: 'info',
   })
-  const activeScenario = showDegraded ? degradedControlPlaneScenario : scenario
+  const activeScenario = showDegraded ? degradedControlPlaneScenario : liveScenario
 
   useEffect(() => {
     if (activeScenario.events.length < 2) {
@@ -140,6 +144,12 @@ export function ControlPlaneDemo({
       activeScenario.devices[0],
     [activeScenario.devices, selectedDeviceId]
   )
+
+  useEffect(() => {
+    if (!activeScenario.devices.some((device) => device.id === selectedDeviceId)) {
+      setSelectedDeviceId(activeScenario.selectedDeviceId)
+    }
+  }, [activeScenario.devices, activeScenario.selectedDeviceId, selectedDeviceId])
 
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
@@ -1615,8 +1625,8 @@ function PanelHeader({ kicker, title }: { kicker: string; title: string }) {
 export function ControlPlaneDemoGallery() {
   return (
     <div className="grid gap-8 bg-[var(--industrial-bg)] p-6">
-      <ControlPlaneDemo />
-      <ControlPlaneDemo scenario={degradedControlPlaneScenario} />
+      <ControlPlaneDemo devd={{ enabled: false }} />
+      <ControlPlaneDemo scenario={degradedControlPlaneScenario} devd={{ enabled: false }} />
     </div>
   )
 }

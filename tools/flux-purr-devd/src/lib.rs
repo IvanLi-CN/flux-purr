@@ -804,16 +804,26 @@ async fn flash_device(
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
-    {
+    let port_path = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
-        if !state_lock.devices.contains_key(&device_id) {
-            return Err(HttpError::not_found(
-                "device_not_found",
-                "Device not found.",
-            ));
+        let device = state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+        match device.transport {
+            DeviceTransport::NativeSerial => device.port_path.clone().ok_or_else(|| {
+                HttpError::bad_request("missing_port", "Native serial device has no port path.")
+            })?,
+            DeviceTransport::Mock if payload.dry_run => String::new(),
+            DeviceTransport::Mock => {
+                return Err(HttpError::bad_request(
+                    "real_flash_requires_native_serial",
+                    "Real flash requires a native serial target.",
+                ));
+            }
         }
-    }
+    };
 
     let verification = verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
         .map_err(sanitize_io_error)?;
@@ -862,11 +872,16 @@ async fn flash_device(
         ));
     }
 
-    run_espflash(&payload.artifact).await?;
+    run_espflash(
+        &payload.artifact,
+        state.config.artifact_root.as_deref(),
+        &port_path,
+    )
+    .await?;
     Ok(Json(FlashResult {
         artifact_id: payload.artifact.artifact_id,
         dry_run: false,
-        status: "started".to_string(),
+        status: "completed".to_string(),
         message: "espflash command completed.".to_string(),
     }))
 }
@@ -933,7 +948,7 @@ pub fn verify_artifact(
     }
     Ok(ArtifactVerifyResult {
         artifact_id: artifact.artifact_id.clone(),
-        verified: files.iter().all(|file| file.ok),
+        verified: !files.is_empty() && files.iter().all(|file| file.ok),
         files,
     })
 }
@@ -949,24 +964,14 @@ fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
     }
 }
 
-async fn run_espflash(artifact: &FirmwareArtifact) -> Result<(), HttpError> {
-    let Some(app_image) = artifact.files.iter().find(|file| file.kind == "app") else {
-        return Err(HttpError::bad_request(
-            "missing_app_image",
-            "Artifact does not contain an app image.",
-        ));
-    };
+async fn run_espflash(
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+) -> Result<(), HttpError> {
+    let args = build_espflash_args(artifact, root, port_path)?;
     let status = Command::new("espflash")
-        .arg("write-bin")
-        .arg(
-            app_image
-                .flash_address
-                .ok_or_else(|| {
-                    HttpError::bad_request("missing_flash_address", "Missing flash address.")
-                })?
-                .to_string(),
-        )
-        .arg(&app_image.path)
+        .args(args)
         .status()
         .await
         .map_err(|_| HttpError::internal("Failed to start espflash."))?;
@@ -976,6 +981,39 @@ async fn run_espflash(artifact: &FirmwareArtifact) -> Result<(), HttpError> {
     } else {
         Err(HttpError::internal("espflash returned a non-zero status."))
     }
+}
+
+fn build_espflash_args(
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+) -> Result<Vec<String>, HttpError> {
+    if port_path.is_empty() {
+        return Err(HttpError::bad_request(
+            "missing_port",
+            "Real flash requires an explicit serial port.",
+        ));
+    }
+    let Some(app_image) = artifact.files.iter().find(|file| file.kind == "app") else {
+        return Err(HttpError::bad_request(
+            "missing_app_image",
+            "Artifact does not contain an app image.",
+        ));
+    };
+    let flash_address = app_image
+        .flash_address
+        .ok_or_else(|| HttpError::bad_request("missing_flash_address", "Missing flash address."))?;
+    let path = resolve_artifact_path(root, &app_image.path);
+    Ok(vec![
+        "write-bin".to_string(),
+        "--chip".to_string(),
+        artifact.target_chip.clone(),
+        "--port".to_string(),
+        port_path.to_string(),
+        "--non-interactive".to_string(),
+        flash_address.to_string(),
+        path.to_string_lossy().into_owned(),
+    ])
 }
 
 fn requires_lease(state: &DevdState, device_id: &str) -> bool {
@@ -1121,6 +1159,58 @@ mod tests {
         let result = verify_artifact(&artifact, Some(dir.path())).unwrap();
         assert!(!result.verified);
         assert!(!result.files[0].ok);
+    }
+
+    #[test]
+    fn artifact_verify_rejects_empty_file_list() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "empty-artifact".to_string(),
+            name: "Empty".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "debug".to_string(),
+            features: Vec::new(),
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: Vec::new(),
+        };
+
+        let result = verify_artifact(&artifact, None).unwrap();
+        assert!(!result.verified);
+    }
+
+    #[test]
+    fn real_flash_args_are_bound_to_explicit_port_and_artifact_root() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec!["web_serial".to_string()],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "app".to_string(),
+                path: "firmware.bin".to_string(),
+                sha256: "sha256:test".to_string(),
+                size: 9,
+                flash_address: Some(0x10000),
+            }],
+        };
+
+        let dir = tempdir().unwrap();
+        let args =
+            build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--port", "/dev/cu.usbmodem21221401"])
+        );
+        assert!(args.contains(&"65536".to_string()));
+        assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
     }
 
     #[test]
