@@ -1632,9 +1632,7 @@ fn usb_write_frame(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
 ) {
     if let Ok(line) = write_usb_frame(frame, tx_buf) {
-        for byte in line.as_bytes() {
-            let _ = nb::block!(usb.write_byte_nb(*byte));
-        }
+        let _ = usb.write(line.as_bytes());
         let _ = usb.flush_tx();
     }
 }
