@@ -1116,6 +1116,7 @@ fn serial_exchange_blocking(
     request: &str,
 ) -> Result<Value, HttpError> {
     let mut port = serialport::new(port_path, DEFAULT_BAUD_RATE)
+        .dtr_on_open(false)
         .timeout(SERIAL_READ_TIMEOUT)
         .open()
         .map_err(|error| {
@@ -1126,6 +1127,8 @@ fn serial_exchange_blocking(
                 true,
             )
         })?;
+    let _ = port.write_request_to_send(false);
+    let _ = port.write_data_terminal_ready(false);
 
     port.write_all(request.as_bytes())
         .and_then(|_| port.write_all(b"\n"))
