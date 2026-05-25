@@ -84,10 +84,10 @@ PD request build variants:
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
 
 # 12 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-12v --bin flux-purr --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-12v --bin flux-purr --release
 
 # 28 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-28v --bin flux-purr --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-28v --bin flux-purr --release
 ```
 
 Power design notes for the current board revision are frozen in:

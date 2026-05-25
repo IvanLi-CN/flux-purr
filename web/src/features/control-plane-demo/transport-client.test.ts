@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { DevdDeviceRecord } from './contracts'
+import { mergeDevdProbeRecord } from './live-devd'
 import {
   artifactToManifest,
   createControlPlaneHttpClient,
   createUsbWifiConfigFrame,
+  devdEventToLogEntry,
   devdRecordToDeviceTarget,
   manifestToArtifact,
   redactWifiConfigFrame,
@@ -65,6 +67,95 @@ describe('control-plane transport client', () => {
     expect(target.capabilities).toContain('wifi_config')
   })
 
+  it('keeps daemon-local capabilities after a successful native firmware probe', () => {
+    const record: DevdDeviceRecord = {
+      id: 'serial-1',
+      displayName: 'Authorized USB target',
+      portPath: '/dev/cu.usbmodem21221401',
+      transport: 'native_serial',
+      connection: 'disconnected',
+      identity: {
+        deviceId: 'serial-1',
+        firmwareVersion: 'devd-placeholder',
+        buildId: 'devd',
+        gitSha: 'unknown',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-23',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'serial-1',
+        capabilities: ['identity', 'status', 'network', 'wifi_config', 'firmware_check', 'flash'],
+      },
+      network: {
+        state: 'idle',
+        wifiRssi: null,
+      },
+      status: {
+        mode: 'idle',
+        uptimeSeconds: 0,
+        currentTempC: 0,
+        targetTempC: 220,
+        heaterEnabled: false,
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanDisplayState: 'OFF',
+        fanEnabled: false,
+        fanPwmPermille: 1000,
+        voltageMv: 5000,
+        currentMa: 0,
+        boardTempCenti: 0,
+        pdRequestMv: 20000,
+        pdContractMv: 5000,
+        pdState: 'fallback_5v',
+        frontpanelKey: null,
+        network: {
+          state: 'idle',
+          wifiRssi: null,
+        },
+      },
+    }
+
+    const merged = mergeDevdProbeRecord(record, {
+      identity: {
+        deviceId: 'flux-purr-s3-001',
+        firmwareVersion: '0.1.0',
+        buildId: 'firmware-build',
+        gitSha: 'abc',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-23',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'flux-purr-s3-001',
+        capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'wifi_config', 'monitor'],
+      },
+      network: {
+        state: 'connected',
+        ssid: 'FluxPurr-Lab',
+        wifiRssi: -52,
+      },
+      status: {
+        ...record.status,
+        network: {
+          state: 'connected',
+          ssid: 'FluxPurr-Lab',
+          wifiRssi: -52,
+        },
+      },
+    })
+
+    expect(merged.connection).toBe('connected')
+    expect(merged.identity.deviceId).toBe('flux-purr-s3-001')
+    expect(merged.identity.capabilities).toEqual([
+      'identity',
+      'status',
+      'network',
+      'wifi_config',
+      'firmware_check',
+      'flash',
+      'usb_jsonl',
+      'monitor',
+    ])
+    expect(devdRecordToDeviceTarget(merged).capabilities).toContain('flash')
+  })
+
   it('redacts wifi password before writing trace history', () => {
     const frame = createUsbWifiConfigFrame('req-1', {
       op: 'set',
@@ -76,6 +167,77 @@ describe('control-plane transport client', () => {
       password: '<redacted>',
     })
     expect(JSON.stringify(redactWifiConfigFrame(frame))).not.toContain('secret-pass')
+  })
+
+  it('maps devd events into monitor trace entries without raw payload dumps', () => {
+    const entry = devdEventToLogEntry({
+      id: 'event-1',
+      timestamp: '12345',
+      deviceId: 'serial-1',
+      kind: 'serial',
+      message: 'native serial RPC failed',
+      payload: {
+        stage: 'identity',
+        code: 'usb_response_timeout',
+        message: 'Timed out waiting for a matching USB JSONL response.',
+        retryable: true,
+      },
+    })
+
+    expect(entry).toMatchObject({
+      time: '12345',
+      source: 'serial',
+      tone: 'danger',
+      message: 'native serial RPC failed: identity / usb_response_timeout',
+    })
+    expect(JSON.stringify(entry)).not.toContain('Timed out waiting')
+
+    const wifiEntry = devdEventToLogEntry({
+      id: 'event-2',
+      timestamp: '12346',
+      deviceId: 'serial-1',
+      kind: 'wifi',
+      message: 'wifi config accepted',
+      payload: {
+        ssid: 'FluxPurr-Lab',
+        passwordPresent: true,
+        password: 'secret-pass',
+      },
+    })
+    expect(wifiEntry).toMatchObject({
+      source: 'wifi',
+      tone: 'success',
+      message: 'wifi config accepted: FluxPurr-Lab / password present',
+    })
+    expect(JSON.stringify(wifiEntry)).not.toContain('secret-pass')
+
+    const runtimeEntry = devdEventToLogEntry({
+      id: 'event-3',
+      timestamp: '12347',
+      deviceId: 'serial-1',
+      kind: 'runtime',
+      message: 'runtime config applied',
+      payload: {
+        status: {
+          targetTempC: 231,
+          activeCoolingEnabled: false,
+          heaterEnabled: false,
+        },
+      },
+    })
+    expect(runtimeEntry.tone).toBe('success')
+    expect(runtimeEntry.message).toBe(
+      'runtime config applied: target 231C / cooling off / heater off'
+    )
+
+    const partialRuntimeEntry = devdEventToLogEntry({
+      id: 'event-4',
+      timestamp: '12348',
+      kind: 'runtime',
+      message: 'runtime config applied',
+      payload: { status: { targetTempC: null, heaterEnabled: true } },
+    })
+    expect(partialRuntimeEntry.message).toBe('runtime config applied: heater on')
   })
 
   it('surfaces API error envelopes with retry metadata', async () => {
@@ -99,7 +261,14 @@ describe('control-plane transport client', () => {
   })
 
   it('probes devd device endpoints with the active lease', async () => {
+    let inFlight = 0
+    let maxInFlight = 0
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      inFlight -= 1
+
       const url = String(input)
       if (url.endsWith('/identity?lease_id=lease-1')) {
         return {
@@ -162,6 +331,7 @@ describe('control-plane transport client', () => {
     )
 
     expect(result.identity.deviceId).toBe('frontpanel-1')
+    expect(maxInFlight).toBe(1)
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:30080/api/v1/devices/native%20target/identity?lease_id=lease-1',
       undefined
@@ -188,11 +358,11 @@ describe('control-plane transport client', () => {
                 protocol: 'flux-purr.usb.v1',
                 files: [
                   {
-                    kind: 'app',
+                    kind: 'elf',
                     path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr',
                     sha256: 'sha256:abc',
                     size: 42,
-                    flashAddress: 65536,
+                    flashAddress: null,
                   },
                 ],
               },
@@ -205,7 +375,7 @@ describe('control-plane transport client', () => {
         json: async () => ({
           artifactId: 'local-esp32s3-release',
           verified: true,
-          files: [{ kind: 'app', sha256: 'sha256:abc', size: 42, ok: true }],
+          files: [{ kind: 'elf', sha256: 'sha256:abc', size: 42, ok: true }],
         }),
       }
     }) as unknown as typeof fetch
@@ -220,12 +390,216 @@ describe('control-plane transport client', () => {
       compatibility: 'match',
       files: [{ size: 42 }],
     })
-    expect(manifest.files[0].flashAddress).toBe(65536)
+    expect(manifest.files[0].kind).toBe('elf')
+    expect(manifest.files[0].flashAddress).toBeNull()
     expect(result.verified).toBe(true)
     expect(fetcher).toHaveBeenLastCalledWith(
       'http://127.0.0.1:30080/api/v1/artifacts/verify',
       expect.objectContaining({ method: 'POST' })
     )
+  })
+
+  it('sends runtime, wifi, and flash mutations through devd endpoints', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) : null
+
+      if (url.endsWith('/runtime')) {
+        expect(body).toMatchObject({
+          leaseId: 'lease-1',
+          targetTempC: 225,
+          activeCoolingEnabled: false,
+          heaterEnabled: true,
+        })
+        return {
+          ok: true,
+          json: async () => ({
+            mode: 'sampling',
+            uptimeSeconds: 8,
+            currentTempC: 180,
+            targetTempC: 225,
+            heaterEnabled: true,
+            heaterOutputPercent: 24,
+            activeCoolingEnabled: false,
+            fanDisplayState: 'OFF',
+            fanEnabled: false,
+            fanPwmPermille: 1000,
+            voltageMv: 20000,
+            currentMa: 850,
+            boardTempCenti: 3700,
+            pdRequestMv: 20000,
+            pdContractMv: 20000,
+            pdState: 'ready',
+            frontpanelKey: null,
+            network: { state: 'connected', ssid: 'FluxPurr-Lab', wifiRssi: -52 },
+          }),
+        }
+      }
+
+      if (url.endsWith('/wifi')) {
+        expect(body).toMatchObject({
+          leaseId: 'lease-1',
+          op: 'set',
+          ssid: 'FluxPurr-Lab',
+          password: 'secret-pass',
+          autoReconnect: true,
+          telemetryIntervalMs: 500,
+        })
+        return {
+          ok: true,
+          json: async () => ({
+            network: { state: 'saving', ssid: 'FluxPurr-Lab', wifiRssi: null },
+            wifi: { password: '<redacted>' },
+          }),
+        }
+      }
+
+      expect(url).toMatch(/\/flash$/)
+      expect(body).toMatchObject({
+        leaseId: 'lease-1',
+        dryRun: false,
+        confirm: 'FLASH',
+        artifact: { artifactId: 'local-esp32s3-release' },
+      })
+      return {
+        ok: true,
+        json: async () => ({
+          artifactId: 'local-esp32s3-release',
+          dryRun: false,
+          status: 'completed',
+          message: 'espflash command completed.',
+        }),
+      }
+    }) as unknown as typeof fetch
+    const client = createControlPlaneHttpClient(fetcher)
+    const artifact = {
+      artifactId: 'local-esp32s3-release',
+      name: 'Local ESP32-S3 release',
+      version: 'local-build',
+      gitSha: 'abc',
+      buildId: 'build-1',
+      targetChip: 'esp32s3',
+      profile: 'release + web_serial',
+      features: ['web_serial'],
+      protocol: 'flux-purr.usb.v1',
+      files: [
+        {
+          kind: 'elf',
+          path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr',
+          sha256: 'sha256:abc',
+          size: 42,
+          flashAddress: null,
+        },
+      ],
+    }
+
+    const status = await client.configureRuntime('http://127.0.0.1:30080', 'native target', {
+      leaseId: 'lease-1',
+      targetTempC: 225,
+      activeCoolingEnabled: false,
+      heaterEnabled: true,
+    })
+    const network = await client.configureWifi('http://127.0.0.1:30080', 'native target', {
+      leaseId: 'lease-1',
+      op: 'set',
+      ssid: 'FluxPurr-Lab',
+      password: 'secret-pass',
+      autoReconnect: true,
+      telemetryIntervalMs: 500,
+    })
+    const flash = await client.flashDevice('http://127.0.0.1:30080', 'native target', {
+      leaseId: 'lease-1',
+      artifact,
+      dryRun: false,
+      confirm: 'FLASH',
+    })
+
+    expect(status.targetTempC).toBe(225)
+    expect(network.state).toBe('saving')
+    expect(flash.status).toBe('completed')
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/runtime',
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/wifi',
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/flash',
+    ])
+    for (const call of calls) {
+      expect(call.init).toMatchObject({
+        method: expect.stringMatching(/PUT|POST/),
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+  })
+
+  it('sends daemon-local device mutations with the active lease', async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init })
+
+      return {
+        ok: true,
+        json: async () => ({
+          id: 'native target',
+          displayName: 'Bench Alias',
+          portPath: '/dev/cu.usbmodem-test',
+          transport: 'native_serial',
+          connection: 'connected',
+          identity: {
+            deviceId: 'native target',
+            firmwareVersion: '0.1.0',
+            buildId: 'build-1',
+            gitSha: 'abc',
+            board: 'esp32-s3',
+            apiVersion: '2026-05-23',
+            protocolVersion: 'flux-purr.usb.v1',
+            hostname: 'native-target',
+            capabilities: ['identity', 'status', 'network'],
+          },
+          network: { state: 'idle', wifiRssi: null },
+          status: {
+            mode: 'idle',
+            uptimeSeconds: 0,
+            currentTempC: 0,
+            targetTempC: 220,
+            heaterEnabled: false,
+            heaterOutputPercent: 0,
+            activeCoolingEnabled: true,
+            fanDisplayState: 'OFF',
+            fanEnabled: false,
+            fanPwmPermille: 0,
+            voltageMv: 5000,
+            currentMa: 0,
+            boardTempCenti: 0,
+            pdRequestMv: 20000,
+            pdContractMv: 5000,
+            pdState: 'fallback_5v',
+            frontpanelKey: null,
+            network: { state: 'idle', wifiRssi: null },
+          },
+        }),
+      }
+    }) as unknown as typeof fetch
+    const client = createControlPlaneHttpClient(fetcher)
+
+    await client.bindDevdDevice('http://127.0.0.1:30080', 'native target', 'lease-1', {
+      alias: 'Bench Alias',
+    })
+    await client.connectDevdDevice('http://127.0.0.1:30080', 'native target', 'lease-1')
+    await client.disconnectDevdDevice('http://127.0.0.1:30080', 'native target', 'lease-1')
+
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/bind?lease_id=lease-1',
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/connect?lease_id=lease-1',
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/disconnect?lease_id=lease-1',
+    ])
+    expect(calls[0]?.init).toMatchObject({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ alias: 'Bench Alias' }),
+    })
+    expect(calls[1]?.init).toMatchObject({ method: 'POST' })
+    expect(calls[2]?.init).toMatchObject({ method: 'POST' })
   })
 
   it('marks non-esp32s3 catalog entries as blocked', () => {

@@ -10,11 +10,14 @@ import {
   SlidersHorizontal,
   ToggleRight,
   Upload,
+  Wifi,
   Zap,
 } from 'lucide-react'
+import type { FormEvent } from 'react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import SimpleBar from 'simplebar-react'
 import { Switch } from '@/components/ui/switch'
+import type { NetworkSummary } from '../contracts'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
 import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
@@ -34,8 +37,8 @@ interface ControlPlaneDemoProps {
   devd?: LiveDevdOptions
 }
 
-type ConsoleView = 'dashboard' | 'settings' | 'update'
-type FlashRunStatus = 'idle' | 'running' | 'passed'
+type ConsoleView = 'dashboard' | 'settings' | 'wifi' | 'update'
+type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 
 interface ActionFeedback {
   title: string
@@ -53,6 +56,8 @@ const PRESET_COMMIT_DEBOUNCE_MS = 650
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESET_ENABLED = [true, true, false, true, true, true, true, true, true, false]
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
+const DEFAULT_WIFI_TELEMETRY_INTERVAL_MS = 500
+const BLOCKED_NETWORK_STATES = new Set<NetworkSummary['state']>(['error', 'timeout'])
 
 const severityLabels: Record<DeviceSeverity, string> = {
   nominal: 'READY',
@@ -86,6 +91,12 @@ const consoleViews: Array<{
     icon: SlidersHorizontal,
   },
   {
+    id: 'wifi',
+    label: 'WiFi',
+    caption: 'provisioning',
+    icon: Wifi,
+  },
+  {
     id: 'update',
     label: 'Update',
     caption: 'firmware dry-run',
@@ -116,6 +127,7 @@ export function ControlPlaneDemo({
     Record<string, DeviceTarget['fanState']>
   >({})
   const [currentTempByDevice, setCurrentTempByDevice] = useState<Record<string, number>>({})
+  const [networkByDevice, setNetworkByDevice] = useState<Record<string, NetworkSummary>>({})
   const [heaterHeldByDevice, setHeaterHeldByDevice] = useState<Record<string, boolean>>({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
   const [flashRun, setFlashRun] = useState<{ status: FlashRunStatus; progress: number }>({
@@ -175,6 +187,8 @@ export function ControlPlaneDemo({
       return activeScenario.devices[0]
     }
 
+    const liveNetwork = networkByDevice[selectedDevice.id]
+
     return {
       ...selectedDevice,
       currentTempC: currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC,
@@ -195,12 +209,15 @@ export function ControlPlaneDemo({
                 )
             )
           ),
+      wifiRssi: liveNetwork?.wifiRssi ?? selectedDevice.wifiRssi,
+      networkState: liveNetwork?.state ?? selectedDevice.networkState,
     }
   }, [
     activeScenario.devices,
     currentTempByDevice,
     fanPolicyByDevice,
     heaterHeldByDevice,
+    networkByDevice,
     selectedDevice,
     targetTempByDevice,
   ])
@@ -217,6 +234,18 @@ export function ControlPlaneDemo({
   const visibleFlashPhases = useMemo(
     () => createFlashPhases(activeScenario.flashPhases, selectedArtifact, visibleDevice, flashRun),
     [activeScenario.flashPhases, flashRun, selectedArtifact, visibleDevice]
+  )
+  const visibleNetwork = useMemo<NetworkSummary>(
+    () =>
+      networkByDevice[visibleDevice.id] ?? {
+        state: visibleDevice.networkState ?? 'disabled',
+        wifiRssi: visibleDevice.wifiRssi,
+      },
+    [networkByDevice, visibleDevice.id, visibleDevice.networkState, visibleDevice.wifiRssi]
+  )
+  const visibleWifiPhases = useMemo(
+    () => createWifiPhases(activeScenario.wifiPhases, visibleDevice, visibleNetwork),
+    [activeScenario.wifiPhases, visibleDevice, visibleNetwork]
   )
   const liveEvents = useMemo(
     () => createLiveEventFeed(activeScenario.events, streamTick),
@@ -258,6 +287,17 @@ export function ControlPlaneDemo({
         return false
       }
 
+      const blockedReason = deviceControlBlockReason(visibleDevice, visibleNetwork)
+      if (blockedReason) {
+        setFeedback({
+          title: 'Runtime update blocked',
+          detail: blockedReason,
+          tone: 'warning',
+        })
+        emitEvent('devd', 'runtime update blocked by transport state', 'warning')
+        return false
+      }
+
       try {
         const status = await controlClient.configureRuntime(devdBaseUrl, visibleDevice.id, {
           leaseId: visibleDevice.leaseId,
@@ -287,14 +327,7 @@ export function ControlPlaneDemo({
         return false
       }
     },
-    [
-      controlClient,
-      devdBaseUrl,
-      emitEvent,
-      visibleDevice.id,
-      visibleDevice.leaseId,
-      visibleDevice.transport,
-    ]
+    [controlClient, devdBaseUrl, emitEvent, visibleDevice, visibleNetwork]
   )
 
   useEffect(() => {
@@ -340,17 +373,20 @@ export function ControlPlaneDemo({
   ])
 
   useEffect(() => {
-    if (flashRun.status !== 'running') {
+    if (flashRun.status !== 'running' && flashRun.status !== 'flashing') {
       return
     }
 
     const timer = window.setInterval(() => {
       setFlashRun((current) => {
-        if (current.status !== 'running') {
+        if (current.status !== 'running' && current.status !== 'flashing') {
           return current
         }
 
-        return { ...current, progress: Math.min(100, current.progress + 14) }
+        return {
+          ...current,
+          progress: Math.min(current.status === 'flashing' ? 92 : 100, current.progress + 14),
+        }
       })
     }, 420)
 
@@ -530,6 +566,138 @@ export function ControlPlaneDemo({
     )
   }
 
+  const handleWifiConfigure = async (ssid: string, password: string) => {
+    const trimmedSsid = ssid.trim()
+    const trimmedPassword = password.trim()
+
+    if (!trimmedSsid) {
+      setFeedback({
+        title: 'WiFi blocked',
+        detail: 'SSID is required before provisioning.',
+        tone: 'warning',
+      })
+      emitEvent('wifi', 'provisioning blocked: missing SSID', 'warning')
+      return
+    }
+
+    if (
+      visibleDevice.severity === 'offline' ||
+      deviceControlBlockReason(visibleDevice, visibleNetwork) ||
+      !visibleDevice.capabilities.includes('wifi_config')
+    ) {
+      const blockedReason = deviceControlBlockReason(visibleDevice, visibleNetwork)
+      setFeedback({
+        title: 'WiFi unavailable',
+        detail:
+          blockedReason ??
+          (visibleDevice.severity === 'offline'
+            ? `${visibleDevice.alias} is offline.`
+            : 'Active transport does not expose WiFi provisioning.'),
+        tone: 'warning',
+      })
+      emitEvent('wifi', 'provisioning blocked by target capability', 'warning')
+      return
+    }
+
+    if (visibleDevice.transport === 'devd') {
+      if (!visibleDevice.leaseId || !devdBaseUrl) {
+        setFeedback({
+          title: 'WiFi lease required',
+          detail: 'Native serial provisioning requires an active devd lease.',
+          tone: 'warning',
+        })
+        emitEvent('wifi', 'provisioning blocked: missing devd lease', 'warning')
+        return
+      }
+
+      try {
+        const network = await controlClient.configureWifi(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+          op: 'set',
+          ssid: trimmedSsid,
+          password: trimmedPassword || undefined,
+          autoReconnect: true,
+          telemetryIntervalMs: DEFAULT_WIFI_TELEMETRY_INTERVAL_MS,
+        })
+        setNetworkByDevice((current) => ({ ...current, [visibleDevice.id]: network }))
+        setFeedback({
+          title: 'WiFi provisioned',
+          detail: `${visibleDevice.alias} stored ${network.ssid ?? trimmedSsid}.`,
+          tone: 'success',
+        })
+        emitEvent('wifi', `credentials stored for ${trimmedSsid}`, 'success')
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'WiFi provisioning failed.'
+        setFeedback({
+          title: 'WiFi failed',
+          detail,
+          tone: 'warning',
+        })
+        emitEvent('wifi', 'devd WiFi provisioning failed', 'warning')
+      }
+      return
+    }
+
+    const network: NetworkSummary = {
+      state: 'connected',
+      ssid: trimmedSsid,
+      wifiRssi: visibleDevice.wifiRssi ?? -54,
+    }
+    setNetworkByDevice((current) => ({ ...current, [visibleDevice.id]: network }))
+    setFeedback({
+      title: 'WiFi provisioned',
+      detail: `${visibleDevice.alias} stored ${trimmedSsid}.`,
+      tone: 'success',
+    })
+    emitEvent('wifi', `credentials stored for ${trimmedSsid}`, 'success')
+  }
+
+  const handleWifiClear = async () => {
+    if (visibleDevice.transport === 'devd') {
+      if (!visibleDevice.leaseId || !devdBaseUrl) {
+        setFeedback({
+          title: 'WiFi lease required',
+          detail: 'Clearing native serial credentials requires an active devd lease.',
+          tone: 'warning',
+        })
+        emitEvent('wifi', 'clear blocked: missing devd lease', 'warning')
+        return
+      }
+
+      try {
+        const network = await controlClient.configureWifi(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+          op: 'clear',
+        })
+        setNetworkByDevice((current) => ({ ...current, [visibleDevice.id]: network }))
+        setFeedback({
+          title: 'WiFi cleared',
+          detail: `${visibleDevice.alias} no longer stores WiFi credentials.`,
+          tone: 'success',
+        })
+        emitEvent('wifi', 'credentials cleared by devd', 'success')
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'WiFi clear failed.'
+        setFeedback({
+          title: 'WiFi clear failed',
+          detail,
+          tone: 'warning',
+        })
+        emitEvent('wifi', 'devd WiFi clear failed', 'warning')
+      }
+      return
+    }
+
+    const network: NetworkSummary = { state: 'disabled', ssid: null, wifiRssi: null }
+    setNetworkByDevice((current) => ({ ...current, [visibleDevice.id]: network }))
+    setFeedback({
+      title: 'WiFi cleared',
+      detail: `${visibleDevice.alias} credentials cleared.`,
+      tone: 'success',
+    })
+    emitEvent('wifi', 'credentials cleared', 'success')
+  }
+
   const handleStartDryRun = async () => {
     if (
       visibleDevice.severity === 'offline' ||
@@ -545,6 +713,22 @@ export function ControlPlaneDemo({
         tone: 'warning',
       })
       emitEvent('flash', 'dry-check blocked before start', 'warning')
+      return
+    }
+
+    if (
+      visibleDevice.transport === 'devd' &&
+      (!visibleDevice.leaseId ||
+        !devdBaseUrl ||
+        visibleDevice.leaseState === 'conflict' ||
+        visibleDevice.leaseState === 'expired')
+    ) {
+      setFeedback({
+        title: 'Dry-run lease required',
+        detail: 'Firmware recovery requires an active devd lease for the native target.',
+        tone: 'warning',
+      })
+      emitEvent('flash', 'dry-check blocked: missing devd lease', 'warning')
       return
     }
 
@@ -577,6 +761,15 @@ export function ControlPlaneDemo({
         return
       }
 
+      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId) {
+        const dryRun = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+          artifact: artifactToManifest(selectedArtifact),
+          dryRun: true,
+        })
+        emitEvent('flash', `${dryRun.artifactId} dry-run registered by devd`, 'success')
+      }
+
       flashCompletionEmittedRef.current = true
       setFlashRun({ status: 'passed', progress: 100 })
       setFeedback({
@@ -594,6 +787,59 @@ export function ControlPlaneDemo({
         tone: 'warning',
       })
       emitEvent('flash', 'devd artifact verification failed', 'warning')
+    }
+  }
+
+  const handleStartFlash = async () => {
+    if (
+      !selectedArtifact ||
+      selectedArtifact.compatibility === 'blocked' ||
+      visibleDevice.transport !== 'devd' ||
+      !visibleDevice.leaseId ||
+      !devdBaseUrl ||
+      flashRun.status !== 'passed'
+    ) {
+      setFeedback({
+        title: 'Flash unavailable',
+        detail:
+          'Real flash requires a devd target, active lease, compatible artifact, and passed dry-run.',
+        tone: 'warning',
+      })
+      emitEvent('flash', 'real flash blocked before start', 'warning')
+      return
+    }
+
+    setFlashRun({ status: 'flashing', progress: 8 })
+    setFeedback({
+      title: 'Flash started',
+      detail: `${selectedArtifact.version} is being written by devd.`,
+      tone: 'warning',
+    })
+    emitEvent('flash', `${selectedArtifact.version} flash command submitted`, 'warning')
+
+    try {
+      const result = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
+        leaseId: visibleDevice.leaseId,
+        artifact: artifactToManifest(selectedArtifact),
+        dryRun: false,
+        confirm: 'FLASH',
+      })
+      setFlashRun({ status: 'flashed', progress: 100 })
+      setFeedback({
+        title: 'Flash completed',
+        detail: result.message,
+        tone: 'success',
+      })
+      emitEvent('flash', `${result.artifactId} flashed by devd`, 'success')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Real flash failed.'
+      setFlashRun({ status: 'passed', progress: 100 })
+      setFeedback({
+        title: 'Flash blocked',
+        detail,
+        tone: 'warning',
+      })
+      emitEvent('flash', 'devd real flash failed or was blocked', 'warning')
     }
   }
 
@@ -678,8 +924,10 @@ export function ControlPlaneDemo({
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
                 flashPhases={visibleFlashPhases}
+                wifiPhases={visibleWifiPhases}
                 artifacts={activeScenario.artifacts}
                 artifact={selectedArtifact}
+                network={visibleNetwork}
                 feedback={feedback}
                 flashRun={flashRun}
                 onTargetTempChange={handleTargetTempChange}
@@ -687,9 +935,12 @@ export function ControlPlaneDemo({
                 onPresetTempChange={handlePresetTempChange}
                 onPresetEnabledChange={handlePresetEnabledChange}
                 onFanPolicyChange={handleFanPolicyChange}
+                onWifiConfigure={handleWifiConfigure}
+                onWifiClear={handleWifiClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onArtifactChange={handleArtifactChange}
                 onStartDryRun={handleStartDryRun}
+                onStartFlash={handleStartFlash}
               />
             </section>
 
@@ -792,6 +1043,53 @@ function createFlashPhases(
   }))
 }
 
+function createWifiPhases(
+  basePhases: WorkflowPhase[],
+  device: DeviceTarget,
+  network: NetworkSummary
+) {
+  const missingWifiCapability = !device.capabilities.includes('wifi_config')
+  const leaseBlocked = device.leaseState === 'conflict' || device.leaseState === 'expired'
+  const transportBlockedReason = deviceControlBlockReason(device, network)
+  const blocked =
+    device.severity === 'offline' ||
+    Boolean(transportBlockedReason) ||
+    missingWifiCapability ||
+    leaseBlocked
+  const activeIndex = network.state === 'saving' ? 1 : network.state === 'connecting' ? 2 : 3
+
+  if (blocked) {
+    return basePhases.map((phase, index) => ({
+      ...phase,
+      state: index === 0 ? ('blocked' as const) : ('pending' as const),
+      detail:
+        index === 0
+          ? device.severity === 'offline'
+            ? 'Target is offline.'
+            : leaseBlocked
+              ? 'USB lease is not available for this target.'
+              : transportBlockedReason
+                ? transportBlockedReason
+                : 'Active transport does not expose WiFi provisioning.'
+          : phase.detail,
+    }))
+  }
+
+  if (network.state === 'connected') {
+    return basePhases.map((phase) => ({ ...phase, state: 'done' as const }))
+  }
+
+  return basePhases.map((phase, index) => ({
+    ...phase,
+    state:
+      index < activeIndex
+        ? ('done' as const)
+        : index === activeIndex
+          ? ('active' as const)
+          : ('pending' as const),
+  }))
+}
+
 function dryRunPhaseState(index: number, progress: number): WorkflowPhase['state'] {
   if (index === 0) {
     return 'done'
@@ -806,6 +1104,19 @@ function dryRunPhaseState(index: number, progress: number): WorkflowPhase['state
   }
 
   return index < 3 ? 'done' : 'active'
+}
+
+function deviceControlBlockReason(device: DeviceTarget, network?: NetworkSummary) {
+  if (device.severity === 'offline') {
+    return 'Target is offline.'
+  }
+
+  const networkState = network?.state ?? device.networkState
+  if (networkState && BLOCKED_NETWORK_STATES.has(networkState)) {
+    return device.transportIssue ?? 'Device control is blocked until the transport recovers.'
+  }
+
+  return null
 }
 
 function formatTemp(value: number) {
@@ -918,8 +1229,10 @@ function ViewPanel({
   presetTemps,
   presetEnabled,
   flashPhases,
+  wifiPhases,
   artifacts,
   artifact,
+  network,
   feedback,
   flashRun,
   onTargetTempChange,
@@ -927,9 +1240,12 @@ function ViewPanel({
   onPresetTempChange,
   onPresetEnabledChange,
   onFanPolicyChange,
+  onWifiConfigure,
+  onWifiClear,
   onHeaterHoldToggle,
   onArtifactChange,
   onStartDryRun,
+  onStartFlash,
 }: {
   view: ConsoleView
   device: DeviceTarget
@@ -937,8 +1253,10 @@ function ViewPanel({
   presetTemps: number[]
   presetEnabled: boolean[]
   flashPhases: WorkflowPhase[]
+  wifiPhases: WorkflowPhase[]
   artifacts: FirmwareArtifact[]
   artifact?: FirmwareArtifact
+  network: NetworkSummary
   feedback: ActionFeedback
   flashRun: { status: FlashRunStatus; progress: number }
   onTargetTempChange: (nextTargetTemp: number) => void
@@ -946,9 +1264,12 @@ function ViewPanel({
   onPresetTempChange: (nextTempC: number) => void
   onPresetEnabledChange: (nextEnabled: boolean) => void
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onWifiConfigure: (ssid: string, password: string) => void
+  onWifiClear: () => void
   onHeaterHoldToggle: () => void
   onArtifactChange: (artifactId: string) => void
   onStartDryRun: () => void
+  onStartFlash: () => void
 }) {
   if (view === 'settings') {
     return (
@@ -966,6 +1287,19 @@ function ViewPanel({
     )
   }
 
+  if (view === 'wifi') {
+    return (
+      <WifiView
+        device={device}
+        network={network}
+        wifiPhases={wifiPhases}
+        feedback={feedback}
+        onWifiConfigure={onWifiConfigure}
+        onWifiClear={onWifiClear}
+      />
+    )
+  }
+
   if (view === 'update') {
     return (
       <UpdateView
@@ -977,6 +1311,7 @@ function ViewPanel({
         flashRun={flashRun}
         onArtifactChange={onArtifactChange}
         onStartDryRun={onStartDryRun}
+        onStartFlash={onStartFlash}
       />
     )
   }
@@ -1373,6 +1708,156 @@ function PresetTemperatureEditor({
   )
 }
 
+function WifiView({
+  device,
+  network,
+  wifiPhases,
+  feedback,
+  onWifiConfigure,
+  onWifiClear,
+}: {
+  device: DeviceTarget
+  network: NetworkSummary
+  wifiPhases: WorkflowPhase[]
+  feedback: ActionFeedback
+  onWifiConfigure: (ssid: string, password: string) => void
+  onWifiClear: () => void
+}) {
+  const [ssid, setSsid] = useState(network.ssid ?? 'FluxPurr-Lab')
+  const [password, setPassword] = useState('')
+  const blockedPhase = wifiPhases.find((phase) => phase.state === 'blocked')
+  const transportBlockedReason = deviceControlBlockReason(device, network)
+  const isBlocked =
+    device.severity === 'offline' ||
+    Boolean(transportBlockedReason) ||
+    !device.capabilities.includes('wifi_config') ||
+    device.leaseState === 'conflict' ||
+    device.leaseState === 'expired' ||
+    Boolean(blockedPhase)
+  const verdict = isBlocked
+    ? {
+        tone: 'danger',
+        title: 'Provisioning blocked',
+        detail:
+          blockedPhase?.detail ??
+          (device.severity === 'offline'
+            ? 'Target is offline.'
+            : transportBlockedReason || 'Active transport cannot write WiFi settings.'),
+      }
+    : network.state === 'connected'
+      ? {
+          tone: 'safe',
+          title: 'Network connected',
+          detail: `${network.ssid ?? 'Configured network'} is reported by the device.`,
+        }
+      : {
+          tone: 'warning',
+          title: 'Ready to provision',
+          detail:
+            device.transport === 'devd'
+              ? 'Credentials will be sent through the active devd lease.'
+              : 'Credentials will update the current mock device state.',
+        }
+
+  useEffect(() => {
+    if (network.ssid) {
+      setSsid(network.ssid)
+    }
+  }, [network.ssid])
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    onWifiConfigure(ssid, password)
+    setPassword('')
+  }
+
+  return (
+    <div className="industrial-view-panel">
+      <PanelHeader kicker="WiFi" title="Provisioning" />
+      <div className={`industrial-gate-verdict is-${verdict.tone}`}>
+        <div>
+          <p className="industrial-label">Network</p>
+          <strong>{verdict.title}</strong>
+          <span>{verdict.detail}</span>
+        </div>
+        <Wifi size={22} aria-hidden="true" />
+      </div>
+
+      <div className="industrial-update-grid">
+        <section className="industrial-settings-section">
+          <div className="industrial-settings-summary">
+            <div>
+              <span>{network.state}</span>
+              <small>Device state</small>
+            </div>
+            <div>
+              <span>{network.wifiRssi == null ? 'N/A' : `${network.wifiRssi} dBm`}</span>
+              <small>WiFi RSSI</small>
+            </div>
+          </div>
+
+          <form className="industrial-wifi-form" onSubmit={handleSubmit}>
+            <label>
+              <span className="industrial-label">SSID</span>
+              <input
+                type="text"
+                name="ssid"
+                value={ssid}
+                disabled={isBlocked}
+                maxLength={32}
+                autoComplete="off"
+                onChange={(event) => setSsid(event.currentTarget.value)}
+              />
+            </label>
+            <label>
+              <span className="industrial-label">Password</span>
+              <input
+                type="password"
+                name="password"
+                value={password}
+                disabled={isBlocked}
+                maxLength={64}
+                autoComplete="new-password"
+                onChange={(event) => setPassword(event.currentTarget.value)}
+              />
+            </label>
+            <div className="industrial-command-row">
+              <button
+                type="submit"
+                className="industrial-button industrial-button--primary"
+                disabled={isBlocked}
+              >
+                <Wifi size={16} aria-hidden="true" />
+                Provision
+              </button>
+              <button
+                type="button"
+                className="industrial-button industrial-button--secondary"
+                disabled={isBlocked && device.transport === 'devd'}
+                onClick={onWifiClear}
+              >
+                <Minus size={16} aria-hidden="true" />
+                Clear
+              </button>
+            </div>
+          </form>
+        </section>
+
+        <section className="industrial-settings-section">
+          <CompactPhase label="WiFi handoff" phases={wifiPhases} />
+          <StatusCard
+            label="Transport"
+            value={transportLabels[device.transport]}
+            detail={`${device.leaseState?.toUpperCase() ?? 'no lease'} / ${device.networkState ?? network.state}`}
+          />
+        </section>
+      </div>
+
+      <ActionFeedbackPanel feedback={feedback} />
+    </div>
+  )
+}
+
 function UpdateView({
   device,
   artifacts,
@@ -1382,6 +1867,7 @@ function UpdateView({
   flashRun,
   onArtifactChange,
   onStartDryRun,
+  onStartFlash,
 }: {
   device: DeviceTarget
   artifacts: FirmwareArtifact[]
@@ -1391,6 +1877,7 @@ function UpdateView({
   flashRun: { status: FlashRunStatus; progress: number }
   onArtifactChange: (artifactId: string) => void
   onStartDryRun: () => void
+  onStartFlash: () => void
 }) {
   const blockedPhase = flashPhases.find((phase) => phase.state === 'blocked')
   const activePhase = flashPhases.find((phase) => phase.state === 'active') ?? flashPhases[0]
@@ -1403,6 +1890,12 @@ function UpdateView({
     !device.capabilities.includes('flash') ||
     device.leaseState === 'conflict' ||
     device.leaseState === 'expired'
+  const isBusy = flashRun.status === 'running' || flashRun.status === 'flashing'
+  const canFlash =
+    flashRun.status === 'passed' &&
+    device.transport === 'devd' &&
+    !isBlocked &&
+    Boolean(device.leaseId)
   const verdict = isBlocked
     ? {
         tone: 'danger',
@@ -1416,23 +1909,40 @@ function UpdateView({
                 ? 'This transport does not expose flash capability.'
                 : (blockedPhase?.detail ?? 'Selected firmware does not match this target.'),
       }
-    : flashRun.status === 'passed'
+    : flashRun.status === 'flashed'
       ? {
           tone: 'safe',
-          title: 'Check passed',
-          detail: `${artifact?.version ?? 'Artifact'} matches the dry-check contract.`,
+          title: 'Flash complete',
+          detail: `${artifact?.version ?? 'Artifact'} was written by devd.`,
         }
-      : artifact?.compatibility === 'warning'
+      : flashRun.status === 'flashing'
         ? {
             tone: 'warning',
-            title: 'Check recommended',
-            detail: `${artifact.version} can be checked, but the profile differs from the active runtime.`,
+            title: 'Writing firmware',
+            detail: `${artifact?.version ?? 'Artifact'} is being written by devd.`,
           }
-        : {
-            tone: 'safe',
-            title: 'Ready to check',
-            detail: `${activePhase?.label ?? 'Dry-run'} can run without changing firmware.`,
-          }
+        : flashRun.status === 'passed'
+          ? {
+              tone: 'safe',
+              title: 'Check passed',
+              detail: `${artifact?.version ?? 'Artifact'} is verified and ready for guarded flash.`,
+            }
+          : artifact?.compatibility === 'warning'
+            ? {
+                tone: 'warning',
+                title: 'Check recommended',
+                detail: `${artifact.version} can be checked, but the profile differs from the active runtime.`,
+              }
+            : {
+                tone: 'safe',
+                title: 'Ready to check',
+                detail: `${activePhase?.label ?? 'Dry-run'} can run without changing firmware.`,
+              }
+
+  const recoveryNote =
+    deviceControlBlockReason(device) && !isBlocked
+      ? 'Serial control is degraded; firmware recovery remains available through devd flash.'
+      : null
 
   return (
     <div className="industrial-view-panel">
@@ -1452,7 +1962,7 @@ function UpdateView({
             className="industrial-artifact-select"
             value={artifact?.id ?? ''}
             aria-label="Firmware artifact"
-            disabled={flashRun.status === 'running'}
+            disabled={isBusy}
             onChange={(event) => onArtifactChange(event.currentTarget.value)}
           >
             {artifacts.map((item) => (
@@ -1482,19 +1992,29 @@ function UpdateView({
         </div>
         <CompactPhase label="Dry-run" phases={flashPhases} />
       </div>
+      {recoveryNote ? <p className="industrial-mono text-xs">{recoveryNote}</p> : null}
       <div className="industrial-command-row">
         <button
           type="button"
           className="industrial-button industrial-button--primary"
-          disabled={flashRun.status === 'running' || isBlocked}
+          disabled={isBusy || isBlocked}
           onClick={onStartDryRun}
         >
           <Upload size={16} aria-hidden="true" />
-          {flashRun.status === 'running'
-            ? 'Checking'
-            : flashRun.status === 'passed'
-              ? 'Run again'
-              : 'Run dry-check'}
+          {flashRun.status === 'running' ? 'Checking' : 'Run dry-check'}
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={!canFlash || isBusy}
+          onClick={onStartFlash}
+        >
+          <Zap size={16} aria-hidden="true" />
+          {flashRun.status === 'flashing'
+            ? 'Flashing'
+            : flashRun.status === 'flashed'
+              ? 'Flashed'
+              : 'Flash'}
         </button>
       </div>
       <ActionFeedbackPanel feedback={feedback} />

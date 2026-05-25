@@ -4,4 +4,8 @@ if [[ ! -d firmware ]]; then
   echo "firmware/ not found; skipping"
   exit 0
 fi
-cargo build --manifest-path firmware/Cargo.toml --release
+cargo +esp build \
+  --manifest-path firmware/Cargo.toml \
+  --target xtensa-esp32s3-none-elf \
+  --target-dir firmware/target \
+  --release

@@ -229,7 +229,6 @@ def main() -> int:
             lease_id,
         )
         add_step(result, "lease_event_stream", True, summarize_events(stream_events))
-        heartbeat_lease(result, args, lease_id, "lease_heartbeat")
 
         suffix = f"?{urllib.parse.urlencode({'lease_id': lease_id})}"
         identity = request_step(
@@ -311,7 +310,6 @@ def main() -> int:
                 timeout=args.timeout_sec,
             )
             add_step(result, "flash_dry_run", True, summarize_flash(dry_run))
-            heartbeat_lease(result, args, lease_id, "flash_lease_heartbeat")
             events = fetch_device_events(args.base_url, device_id, args.timeout_sec)
             assert_device_event(
                 "flash_dry_run_event",
@@ -324,7 +322,6 @@ def main() -> int:
             add_step(result, "flash_dry_run_event", True, summarize_events(events))
 
         if args.wifi_ssid:
-            heartbeat_lease(result, args, lease_id, "wifi_lease_heartbeat")
             provision_wifi(
                 result,
                 args,
@@ -339,7 +336,6 @@ def main() -> int:
             )
 
             if args.exercise_wifi_clear:
-                heartbeat_lease(result, args, lease_id, "wifi_clear_lease_heartbeat")
                 wifi_clear = provision_wifi(
                     result,
                     args,
@@ -353,7 +349,6 @@ def main() -> int:
                     None,
                 )
                 assert_network_state("wifi_clear", wifi_clear.get("network"), "disabled")
-                heartbeat_lease(result, args, lease_id, "wifi_restore_lease_heartbeat")
                 provision_wifi(
                     result,
                     args,
@@ -391,7 +386,6 @@ def main() -> int:
                     "heaterEnabled": False,
                 }
 
-            heartbeat_lease(result, args, lease_id, f"{runtime_step}_lease_heartbeat")
             runtime = request_step(
                 result,
                 runtime_step,
@@ -410,7 +404,12 @@ def main() -> int:
                 runtime_request,
             )
             add_step(result, f"{runtime_step}_event", True, summarize_events(events))
-            heartbeat_lease(result, args, lease_id, f"{runtime_step}_readback_lease_heartbeat")
+            request_json(
+                "POST",
+                args.base_url,
+                f"/api/v1/leases/{quote(lease_id)}/heartbeat",
+                timeout=args.timeout_sec,
+            )
             time.sleep(DEFAULT_RUNTIME_READBACK_DELAY_SEC)
 
             runtime_readback = request_step(
@@ -572,33 +571,6 @@ def request_step(
         return request_json(method, base_url, path, body=body, timeout=timeout)
     except urllib.error.HTTPError as error:
         raise SmokeFailure(step, f"HTTP {error.code}", decode_error_payload(error)) from error
-
-
-def heartbeat_lease(
-    result: dict[str, Any],
-    args: argparse.Namespace,
-    lease_id: str,
-    step: str,
-) -> dict[str, Any]:
-    heartbeat = request_step(
-        result,
-        step,
-        "POST",
-        args.base_url,
-        f"/api/v1/leases/{quote(lease_id)}/heartbeat",
-        timeout=args.timeout_sec,
-    )
-    add_step(
-        result,
-        step,
-        True,
-        {
-            "leaseId": heartbeat.get("leaseId"),
-            "deviceId": heartbeat.get("deviceId"),
-            "ttlMs": heartbeat.get("ttlMs"),
-        },
-    )
-    return heartbeat
 
 
 def provision_wifi(
@@ -1050,7 +1022,6 @@ def summarize_verify(verify: dict[str, Any]) -> dict[str, Any]:
         "verified": verify.get("verified"),
         "files": [
             {
-                "path": file.get("path"),
                 "kind": file.get("kind"),
                 "ok": file.get("ok"),
                 "size": file.get("size"),

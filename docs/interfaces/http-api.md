@@ -84,17 +84,17 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "protocol": "flux-purr.usb.v1",
   "files": [
     {
-      "kind": "app",
+      "kind": "elf",
       "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452,
-      "flashAddress": 65536
+      "flashAddress": null
     }
   ]
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
 
 ### `ApiError`
 
@@ -112,6 +112,8 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 Errors must not include WiFi passwords, PSK values, or unrelated host paths.
 
 ## Device HTTP
+
+Direct device HTTP is a planned transport surface for a future firmware `net_http` server. Current ESP32-S3 release artifacts do not implement or advertise this transport; real hardware control uses Native `devd` HTTP over USB JSONL.
 
 Base URL: `http://<device-ip>`.
 
@@ -171,7 +173,19 @@ Native serial discovery is constrained to the configured authorized port. The pr
 - `POST /api/v1/artifacts/verify`
 - `POST /api/v1/devices/:id/flash`
 
-Mutating device endpoints require a valid `lease_id`.
+Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`, and leased read endpoints pass it as `?lease_id=...`; JSON-body write endpoints use `leaseId`.
+
+`POST /api/v1/devices/:id/bind?lease_id=...` body:
+
+```json
+{
+  "alias": "Bench Alias"
+}
+```
+
+`POST /api/v1/devices/:id/connect?lease_id=...` and `POST /api/v1/devices/:id/disconnect?lease_id=...` return the updated daemon-local `DeviceRecord`.
+
+`GET /api/v1/devices/:id/events` returns `text/event-stream`. The stream first replays that device's bounded event backlog, then continues with live events. Each SSE event name matches the `kind` field (`serial`, `lease`, `wifi`, `runtime`, `flash`, etc.) and each `data` frame is a `DevdEvent` JSON object. Events are scoped to the requested device ID.
 
 `PUT /api/v1/devices/:id/runtime` body:
 
@@ -196,11 +210,11 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
       "targetChip": "esp32s3",
       "files": [
         {
-          "kind": "app",
+          "kind": "elf",
           "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
           "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
           "size": 741452,
-          "flashAddress": 65536
+          "flashAddress": null
         }
       ]
     }
@@ -217,11 +231,11 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
     "targetChip": "esp32s3",
     "files": [
       {
-        "kind": "app",
+        "kind": "elf",
         "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
         "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
         "size": 741452,
-        "flashAddress": 65536
+        "flashAddress": null
       }
     ]
   }
@@ -296,9 +310,12 @@ Responses must redact the password:
   "requestId": "req-002",
   "ok": true,
   "result": {
-    "network": {
-      "state": "saving",
-      "ssid": "FluxPurr-Lab"
+    "wifi": {
+      "op": "set",
+      "ssid": "FluxPurr-Lab",
+      "password": "<redacted>",
+      "autoReconnect": true,
+      "telemetryIntervalMs": 500
     }
   }
 }

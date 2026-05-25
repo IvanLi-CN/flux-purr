@@ -4,9 +4,12 @@ import type {
   ControlPlaneStatus,
   DevdDeviceList,
   DevdDeviceRecord,
+  DevdEvent,
   DevdLease,
   FirmwareArtifactCatalog,
   FirmwareArtifactManifest,
+  FlashRequest,
+  FlashResult,
   Identity,
   NetworkSummary,
   RuntimeConfigRequest,
@@ -14,7 +17,7 @@ import type {
   UsbWifiConfigFrame,
   WifiConfigRequest,
 } from './contracts'
-import type { DeviceTarget, FirmwareArtifact } from './types'
+import type { DeviceTarget, EventLogEntry, FirmwareArtifact } from './types'
 
 export class ControlPlaneClientError extends Error {
   readonly code: string
@@ -49,6 +52,22 @@ export interface ControlPlaneHttpClient {
     status: ControlPlaneStatus
   }>
   listDevdDevices(devdBaseUrl: string): Promise<DevdDeviceRecord[]>
+  bindDevdDevice(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string,
+    request: { alias?: string }
+  ): Promise<DevdDeviceRecord>
+  connectDevdDevice(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<DevdDeviceRecord>
+  disconnectDevdDevice(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<DevdDeviceRecord>
   createDevdLease(devdBaseUrl: string, deviceId: string): Promise<DevdLease>
   heartbeatDevdLease(devdBaseUrl: string, leaseId: string): Promise<DevdLease>
   releaseDevdLease(devdBaseUrl: string, leaseId: string): Promise<void>
@@ -67,6 +86,7 @@ export interface ControlPlaneHttpClient {
     devdBaseUrl: string,
     artifact: FirmwareArtifactManifest
   ): Promise<ArtifactVerifyResult>
+  flashDevice(devdBaseUrl: string, deviceId: string, request: FlashRequest): Promise<FlashResult>
 }
 
 export function createControlPlaneHttpClient(
@@ -86,26 +106,53 @@ export function createControlPlaneHttpClient(
     async probeDevdDevice(devdBaseUrl, deviceId, leaseId) {
       const encodedDeviceId = encodeURIComponent(deviceId)
       const suffix = `?lease_id=${encodeURIComponent(leaseId)}`
-      const [identity, network, status] = await Promise.all([
-        requestJson<Identity>(
-          fetcher,
-          `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/identity${suffix}`
-        ),
-        requestJson<NetworkSummary>(
-          fetcher,
-          `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/network${suffix}`
-        ),
-        requestJson<ControlPlaneStatus>(
-          fetcher,
-          `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/status${suffix}`
-        ),
-      ])
+      const identity = await requestJson<Identity>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/identity${suffix}`
+      )
+      const network = await requestJson<NetworkSummary>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/network${suffix}`
+      )
+      const status = await requestJson<ControlPlaneStatus>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodedDeviceId}/status${suffix}`
+      )
 
       return { identity, network, status }
     },
     async listDevdDevices(devdBaseUrl) {
       const response = await requestJson<DevdDeviceList>(fetcher, `${devdBaseUrl}/api/v1/devices`)
       return response.devices
+    },
+    bindDevdDevice(devdBaseUrl, deviceId, leaseId, request) {
+      return requestJson<DevdDeviceRecord>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/bind?lease_id=${encodeURIComponent(leaseId)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
+    connectDevdDevice(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<DevdDeviceRecord>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/connect?lease_id=${encodeURIComponent(leaseId)}`,
+        {
+          method: 'POST',
+        }
+      )
+    },
+    disconnectDevdDevice(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<DevdDeviceRecord>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/disconnect?lease_id=${encodeURIComponent(leaseId)}`,
+        {
+          method: 'POST',
+        }
+      )
     },
     createDevdLease(devdBaseUrl, deviceId) {
       return requestJson<DevdLease>(
@@ -171,6 +218,17 @@ export function createControlPlaneHttpClient(
         body: JSON.stringify({ artifact }),
       })
     },
+    flashDevice(devdBaseUrl, deviceId, request) {
+      return requestJson<FlashResult>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/flash`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
   }
 }
 
@@ -201,6 +259,98 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     networkState: record.network.state,
     leaseState: record.transport === 'native_serial' ? 'none' : undefined,
   }
+}
+
+export function devdEventToLogEntry(event: DevdEvent): EventLogEntry {
+  const detail = devdEventDetail(event)
+  return {
+    time: event.timestamp,
+    source: event.kind,
+    message: detail ? `${event.message}: ${detail}` : event.message,
+    tone: devdEventTone(event),
+  }
+}
+
+function devdEventDetail(event: DevdEvent) {
+  if (event.kind === 'wifi') {
+    return [safeString(event.payload?.ssid), passwordPresence(event.payload?.passwordPresent)]
+      .filter(Boolean)
+      .join(' / ')
+  }
+  if (event.kind === 'runtime') {
+    const status = recordPayload(event.payload?.status)
+    return [
+      targetTempLabel(status?.targetTempC),
+      boolLabel('cooling', status?.activeCoolingEnabled),
+      boolLabel('heater', status?.heaterEnabled),
+    ]
+      .filter(Boolean)
+      .join(' / ')
+  }
+  if (event.kind === 'flash') {
+    return [safeString(event.payload?.artifactId), safeString(event.payload?.code)]
+      .filter(Boolean)
+      .join(' / ')
+  }
+  if (event.kind === 'lease') {
+    return safeString(event.payload?.leaseId)
+  }
+
+  return [safeString(event.payload?.stage), safeString(event.payload?.code)]
+    .filter(Boolean)
+    .join(' / ')
+}
+
+function safeString(value: unknown) {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function safeNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function targetTempLabel(value: unknown) {
+  const targetTempC = safeNumber(value)
+  return targetTempC === null ? null : `target ${targetTempC}C`
+}
+
+function passwordPresence(value: unknown) {
+  if (typeof value !== 'boolean') {
+    return null
+  }
+  return value ? 'password present' : 'open network'
+}
+
+function recordPayload(value: unknown) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+function boolLabel(label: string, value: unknown) {
+  if (typeof value !== 'boolean') {
+    return null
+  }
+  return `${label} ${value ? 'on' : 'off'}`
+}
+
+function devdEventTone(event: DevdEvent): EventLogEntry['tone'] {
+  if (event.kind === 'serial') {
+    return 'danger'
+  }
+  if (event.kind === 'flash' && event.message.toLowerCase().includes('failed')) {
+    return 'danger'
+  }
+  if (event.kind === 'lease') {
+    return 'info'
+  }
+  if (event.kind === 'wifi' || event.kind === 'runtime') {
+    return 'success'
+  }
+  if (event.kind === 'flash') {
+    return 'success'
+  }
+  return 'info'
 }
 
 export function artifactToManifest(artifact: FirmwareArtifact): FirmwareArtifactManifest {

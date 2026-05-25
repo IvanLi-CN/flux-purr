@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::{self, Read, Write},
+    io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -32,8 +32,10 @@ pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
-const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(1_500);
+const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
+const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const SERIAL_LINE_LIMIT: usize = 4_096;
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,7 @@ pub struct AppState {
     config: AppConfig,
     inner: Arc<Mutex<DevdState>>,
     events: broadcast::Sender<DevdEvent>,
+    serial_rpc: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -74,6 +77,7 @@ impl AppState {
             config,
             inner: Arc::new(Mutex::new(state)),
             events,
+            serial_rpc: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -691,9 +695,11 @@ async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
 async fn bind_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
     Json(payload): Json<BindRequest>,
 ) -> Result<Json<DeviceRecord>, HttpError> {
     let mut state_lock = state.lock()?;
+    state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
     let device = state_lock
         .devices
         .get_mut(&device_id)
@@ -707,8 +713,10 @@ async fn bind_device(
 async fn connect_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
 ) -> Result<Json<DeviceRecord>, HttpError> {
     let mut state_lock = state.lock()?;
+    state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
     let device = state_lock
         .devices
         .get_mut(&device_id)
@@ -720,8 +728,10 @@ async fn connect_device(
 async fn disconnect_device(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
 ) -> Result<Json<DeviceRecord>, HttpError> {
     let mut state_lock = state.lock()?;
+    state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
     let device = state_lock
         .devices
         .get_mut(&device_id)
@@ -766,8 +776,18 @@ async fn delete_lease(
     State(state): State<AppState>,
     AxumPath(lease_id): AxumPath<String>,
 ) -> Result<Json<Value>, HttpError> {
-    let mut state_lock = state.lock()?;
-    let removed = state_lock.leases.remove(&lease_id);
+    let removed = {
+        let mut state_lock = state.lock()?;
+        state_lock.leases.remove(&lease_id)
+    };
+    if let Some(lease) = removed.as_ref() {
+        state.emit(event(
+            &lease.device_id,
+            "lease",
+            "lease released",
+            json!({ "leaseId": lease.lease_id }),
+        ));
+    }
     Ok(Json(json!({ "released": removed.is_some() })))
 }
 
@@ -785,7 +805,15 @@ async fn device_identity(
     };
     if target.transport == DeviceTransport::NativeSerial {
         let identity =
-            serial_request_payload::<Identity>(&target, "get_identity", "identity").await?;
+            match serial_request_payload::<Identity>(&state, &target, "get_identity", "identity")
+                .await
+            {
+                Ok(identity) => identity,
+                Err(error) => {
+                    record_serial_bridge_error(&state, &device_id, "identity", &error);
+                    return Err(error);
+                }
+            };
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.identity = identity.clone();
@@ -809,8 +837,20 @@ async fn device_network(
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        let network =
-            serial_request_payload::<NetworkSummary>(&target, "get_network", "network").await?;
+        let network = match serial_request_payload::<NetworkSummary>(
+            &state,
+            &target,
+            "get_network",
+            "network",
+        )
+        .await
+        {
+            Ok(network) => network,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "network", &error);
+                return Err(error);
+            }
+        };
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.network = network.clone();
@@ -835,8 +875,20 @@ async fn device_status(
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        let status =
-            serial_request_payload::<ControlPlaneStatus>(&target, "get_status", "status").await?;
+        let status = match serial_request_payload::<ControlPlaneStatus>(
+            &state,
+            &target,
+            "get_status",
+            "status",
+        )
+        .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "status", &error);
+                return Err(error);
+            }
+        };
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.status = status.clone();
@@ -852,23 +904,38 @@ async fn device_events(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, axum::Error>>>, HttpError> {
-    if !state.lock()?.devices.contains_key(&device_id) {
-        return Err(HttpError::not_found(
-            "device_not_found",
-            "Device not found.",
-        ));
-    }
+    let backlog = device_event_backlog(&state, &device_id)?;
+    let replay = tokio_stream::iter(
+        backlog
+            .into_iter()
+            .map(|event| Ok(devd_event_to_sse(event))),
+    );
     let stream = BroadcastStream::new(state.events.subscribe()).filter_map(move |event| {
         let device_id = device_id.clone();
         match event {
             Ok(event) if event.device_id.as_deref() == Some(&device_id) => {
-                let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
-                Some(Ok(Event::default().event(event.kind).data(data)))
+                Some(Ok(devd_event_to_sse(event)))
             }
             _ => None,
         }
     });
-    Ok(Sse::new(stream))
+    Ok(Sse::new(replay.chain(stream)))
+}
+
+fn device_event_backlog(state: &AppState, device_id: &str) -> Result<Vec<DevdEvent>, HttpError> {
+    let state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get(device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+
+    Ok(device.events.iter().cloned().collect())
+}
+
+fn devd_event_to_sse(event: DevdEvent) -> Event {
+    let kind = event.kind.clone();
+    let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+    Event::default().event(kind).data(data)
 }
 
 async fn configure_wifi(
@@ -886,15 +953,31 @@ async fn configure_wifi(
             .clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        let _wifi = serial_wifi_config(&target, &payload).await?;
-        let network =
-            serial_request_payload::<NetworkSummary>(&target, "get_network", "network").await?;
+        if let Err(error) = serial_wifi_config(&state, &target, &payload).await {
+            record_serial_bridge_error(&state, &device_id, "wifi_config", &error);
+            return Err(error);
+        }
+        let network = match serial_request_payload::<NetworkSummary>(
+            &state,
+            &target,
+            "get_network",
+            "network",
+        )
+        .await
+        {
+            Ok(network) => network,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "network_after_wifi", &error);
+                return Err(error);
+            }
+        };
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.network = network.clone();
             device.status.network = network.clone();
             device.connection = ConnectionState::Connected;
         }
+        emit_wifi_config_event(&state, &device_id, &payload);
         return Ok(Json(json!({
             "accepted": true,
             "network": network,
@@ -943,6 +1026,8 @@ async fn configure_wifi(
             "telemetryIntervalMs": payload.telemetry_interval_ms
         }
     });
+    drop(state_lock);
+    emit_wifi_config_event(&state, &device_id, &payload);
     Ok(Json(redacted))
 }
 
@@ -961,15 +1046,21 @@ async fn configure_runtime(
             .clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        serial_runtime_config(&target, &payload).await?;
-        let status =
-            serial_request_payload::<ControlPlaneStatus>(&target, "get_status", "status").await?;
+        let status = match serial_runtime_config(&state, &target, &payload).await {
+            Ok(status) => status,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "runtime_config", &error);
+                return Err(error);
+            }
+        };
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.status = status.clone();
             device.network = status.network.clone();
             device.connection = ConnectionState::Connected;
         }
+        drop(state_lock);
+        emit_runtime_config_event(&state, &device_id, &payload, &status);
         return Ok(Json(status));
     }
 
@@ -990,7 +1081,10 @@ async fn configure_runtime(
             device.status.heater_output_percent = 0;
         }
     }
-    Ok(Json(device.status.clone()))
+    let status = device.status.clone();
+    drop(state_lock);
+    emit_runtime_config_event(&state, &device_id, &payload, &status);
+    Ok(Json(status))
 }
 
 async fn verify_artifact_route(
@@ -1011,6 +1105,7 @@ async fn list_artifacts_route(
 }
 
 async fn serial_request_payload<T>(
+    state: &AppState,
     target: &DeviceRecord,
     op: &'static str,
     payload_key: &'static str,
@@ -1026,11 +1121,12 @@ where
         op,
     })
     .map_err(|_| HttpError::internal("failed to encode USB request"))?;
-    let result = serial_exchange(port_path, request_id, request).await?;
+    let result = serial_exchange(state, port_path, request_id, request, true).await?;
     extract_usb_payload(result, payload_key)
 }
 
 async fn serial_wifi_config(
+    state: &AppState,
     target: &DeviceRecord,
     payload: &WifiConfigRequest,
 ) -> Result<Value, HttpError> {
@@ -1046,13 +1142,14 @@ async fn serial_wifi_config(
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
-    serial_exchange(port_path, request_id, request).await
+    serial_exchange(state, port_path, request_id, request, true).await
 }
 
 async fn serial_runtime_config(
+    state: &AppState,
     target: &DeviceRecord,
     payload: &RuntimeConfigRequest,
-) -> Result<Value, HttpError> {
+) -> Result<ControlPlaneStatus, HttpError> {
     let port_path = native_port_path(target)?;
     let request_id = format!("devd-{}-runtime", now_millis());
     let request = serde_json::to_string(&UsbRuntimeConfigWire {
@@ -1063,17 +1160,23 @@ async fn serial_runtime_config(
         heater_enabled: payload.heater_enabled,
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
-    serial_exchange(port_path, request_id, request).await
+    let result = serial_exchange(state, port_path, request_id, request, true).await?;
+    extract_usb_payload(result, "status")
 }
 
 async fn serial_exchange(
+    state: &AppState,
     port_path: String,
     request_id: String,
     request: String,
+    retry_on_silence: bool,
 ) -> Result<Value, HttpError> {
-    tokio::task::spawn_blocking(move || serial_exchange_blocking(&port_path, &request_id, &request))
-        .await
-        .map_err(|_| HttpError::internal("serial worker failed"))?
+    let _serial_rpc = state.serial_rpc.lock().await;
+    tokio::task::spawn_blocking(move || {
+        serial_exchange_blocking(&port_path, &request_id, &request, retry_on_silence)
+    })
+    .await
+    .map_err(|_| HttpError::internal("serial worker failed"))?
 }
 
 fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
@@ -1114,7 +1217,78 @@ fn serial_exchange_blocking(
     port_path: &str,
     request_id: &str,
     request: &str,
+    retry_on_silence: bool,
 ) -> Result<Value, HttpError> {
+    let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
+    let mut port = open_serial_port(port_path)?;
+    write_serial_request(&mut *port, request)?;
+
+    let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
+    let mut read_buf = [0_u8; 256];
+    let mut line = Vec::new();
+
+    while Instant::now() < deadline {
+        match port.read(&mut read_buf) {
+            Ok(0) => {
+                maybe_retry_silent_serial_request(
+                    &mut *port,
+                    request,
+                    retry_on_silence,
+                    &mut next_silent_retry_at,
+                    deadline,
+                )?;
+            }
+            Ok(read) => {
+                for byte in &read_buf[..read] {
+                    if *byte == b'\n' {
+                        match decode_usb_response_line(&line, request_id) {
+                            Ok(Some(payload)) => return Ok(payload),
+                            Ok(None) => {}
+                            Err(error)
+                                if is_retryable_startup_busy(&error)
+                                    && Instant::now() < deadline =>
+                            {
+                                std::thread::sleep(SERIAL_STARTUP_RETRY_DELAY);
+                                write_serial_request(&mut *port, request)?;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                        line.clear();
+                    } else if line.len() < SERIAL_LINE_LIMIT {
+                        line.push(*byte);
+                    } else {
+                        line.clear();
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                maybe_retry_silent_serial_request(
+                    &mut *port,
+                    request,
+                    retry_on_silence,
+                    &mut next_silent_retry_at,
+                    deadline,
+                )?;
+            }
+            Err(error) if is_recoverable_serial_io_error(&error) => {
+                port = reopen_serial_port(port_path, deadline)?;
+                write_serial_request(&mut *port, request)?;
+                next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
+                line.clear();
+            }
+            Err(error) => return Err(serial_io_http_error(error)),
+        }
+    }
+
+    Err(HttpError::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        "usb_response_timeout",
+        "Timed out waiting for a matching USB JSONL response.",
+        true,
+    ))
+}
+
+fn open_serial_port(port_path: &str) -> Result<Box<dyn serialport::SerialPort>, HttpError> {
     let mut port = serialport::new(port_path, DEFAULT_BAUD_RATE)
         .dtr_on_open(false)
         .timeout(SERIAL_READ_TIMEOUT)
@@ -1129,44 +1303,81 @@ fn serial_exchange_blocking(
         })?;
     let _ = port.write_request_to_send(false);
     let _ = port.write_data_terminal_ready(false);
+    Ok(port)
+}
 
-    port.write_all(request.as_bytes())
-        .and_then(|_| port.write_all(b"\n"))
-        .and_then(|_| port.flush())
-        .map_err(serial_io_http_error)?;
-
-    let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
-    let mut read_buf = [0_u8; 256];
-    let mut line = Vec::new();
-
+fn reopen_serial_port(
+    port_path: &str,
+    deadline: Instant,
+) -> Result<Box<dyn serialport::SerialPort>, HttpError> {
     while Instant::now() < deadline {
-        match port.read(&mut read_buf) {
-            Ok(0) => {}
-            Ok(read) => {
-                for byte in &read_buf[..read] {
-                    if *byte == b'\n' {
-                        if let Some(payload) = decode_usb_response_line(&line, request_id)? {
-                            return Ok(payload);
-                        }
-                        line.clear();
-                    } else if line.len() < SERIAL_LINE_LIMIT {
-                        line.push(*byte);
-                    } else {
-                        line.clear();
-                    }
-                }
+        if Path::new(port_path).exists() {
+            match open_serial_port(port_path) {
+                Ok(port) => return Ok(port),
+                Err(error) if error.error.retryable => {}
+                Err(error) => return Err(error),
             }
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(serial_io_http_error(error)),
         }
+        std::thread::sleep(SERIAL_STARTUP_RETRY_DELAY);
     }
 
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
-        "usb_response_timeout",
-        "Timed out waiting for a matching USB JSONL response.",
+        "serial_reconnect_timeout",
+        "Timed out waiting for the USB serial port to reappear.",
         true,
     ))
+}
+
+fn write_serial_request(
+    port: &mut dyn serialport::SerialPort,
+    request: &str,
+) -> Result<(), HttpError> {
+    port.write_all(request.as_bytes())
+        .and_then(|_| port.write_all(b"\n"))
+        .and_then(|_| port.flush())
+        .map_err(serial_io_http_error)
+}
+
+fn maybe_retry_silent_serial_request(
+    port: &mut dyn serialport::SerialPort,
+    request: &str,
+    retry_on_silence: bool,
+    next_retry_at: &mut Instant,
+    deadline: Instant,
+) -> Result<(), HttpError> {
+    let now = Instant::now();
+    if should_retry_silent_serial_request(retry_on_silence, now, *next_retry_at, deadline) {
+        write_serial_request(port, request)?;
+        *next_retry_at = now + SERIAL_SILENT_RETRY_DELAY;
+    }
+    Ok(())
+}
+
+fn should_retry_silent_serial_request(
+    retry_on_silence: bool,
+    now: Instant,
+    next_retry_at: Instant,
+    deadline: Instant,
+) -> bool {
+    retry_on_silence && now >= next_retry_at && now < deadline
+}
+
+fn is_recoverable_serial_io_error(error: &io::Error) -> bool {
+    let message = error.to_string();
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::UnexpectedEof
+    ) || message.contains("Device not configured")
+        || message.contains("device not configured")
+}
+
+fn is_retryable_startup_busy(error: &HttpError) -> bool {
+    error.error.retryable && error.error.code == "startup_busy"
 }
 
 fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Value>, HttpError> {
@@ -1208,6 +1419,7 @@ async fn flash_device(
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
+    let artifact_id = payload.artifact.artifact_id.clone();
     let port_path = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -1232,6 +1444,12 @@ async fn flash_device(
     let verification = verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
         .map_err(sanitize_io_error)?;
     if !verification.verified {
+        state.emit(event(
+            &device_id,
+            "flash",
+            "artifact verification failed",
+            json!({ "artifactId": artifact_id, "code": "artifact_verify_failed" }),
+        ));
         return Err(HttpError::bad_request(
             "artifact_verify_failed",
             "Firmware artifact verification failed.",
@@ -1242,9 +1460,19 @@ async fn flash_device(
         let mut state_lock = state.lock()?;
         state_lock
             .dry_run_passes
-            .insert(device_id.clone(), payload.artifact.artifact_id.clone());
+            .insert(device_id.clone(), artifact_id.clone());
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.selected_artifact_id = Some(artifact_id.clone());
+        }
+        drop(state_lock);
+        state.emit(event(
+            &device_id,
+            "flash",
+            "artifact dry-run passed",
+            json!({ "artifactId": artifact_id, "dryRun": true }),
+        ));
         return Ok(Json(FlashResult {
-            artifact_id: payload.artifact.artifact_id,
+            artifact_id,
             dry_run: true,
             status: "passed".to_string(),
             message: "Artifact verified; no flash write performed.".to_string(),
@@ -1254,7 +1482,14 @@ async fn flash_device(
     {
         let state_lock = state.lock()?;
         let prior = state_lock.dry_run_passes.get(&device_id);
-        if prior != Some(&payload.artifact.artifact_id) {
+        if prior != Some(&artifact_id) {
+            drop(state_lock);
+            state.emit(event(
+                &device_id,
+                "flash",
+                "real flash blocked",
+                json!({ "artifactId": artifact_id, "code": "dry_run_required" }),
+            ));
             return Err(HttpError::forbidden(
                 "dry_run_required",
                 "Real flash requires a successful dry-run for the same artifact.",
@@ -1263,6 +1498,12 @@ async fn flash_device(
     }
 
     if payload.confirm.as_deref() != Some("FLASH") {
+        state.emit(event(
+            &device_id,
+            "flash",
+            "real flash blocked",
+            json!({ "artifactId": artifact_id, "code": "confirmation_required" }),
+        ));
         return Err(HttpError::forbidden(
             "confirmation_required",
             "Real flash requires confirm=FLASH.",
@@ -1270,20 +1511,53 @@ async fn flash_device(
     }
 
     if !state.config.allow_real_flash {
+        state.emit(event(
+            &device_id,
+            "flash",
+            "real flash blocked",
+            json!({ "artifactId": artifact_id, "code": "real_flash_disabled" }),
+        ));
         return Err(HttpError::forbidden(
             "real_flash_disabled",
             "Real flashing is disabled unless FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1.",
         ));
     }
 
-    run_espflash(
+    state.emit(event(
+        &device_id,
+        "flash",
+        "real flash started",
+        json!({ "artifactId": artifact_id, "dryRun": false }),
+    ));
+    if let Err(error) = run_espflash(
         &payload.artifact,
         state.config.artifact_root.as_deref(),
         &port_path,
     )
-    .await?;
+    .await
+    {
+        state.emit(event(
+            &device_id,
+            "flash",
+            "real flash failed",
+            json!({ "artifactId": artifact_id, "code": error.error.code }),
+        ));
+        return Err(error);
+    }
+    {
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.selected_artifact_id = Some(artifact_id.clone());
+        }
+    }
+    state.emit(event(
+        &device_id,
+        "flash",
+        "real flash completed",
+        json!({ "artifactId": artifact_id, "dryRun": false }),
+    ));
     Ok(Json(FlashResult {
-        artifact_id: payload.artifact.artifact_id,
+        artifact_id,
         dry_run: false,
         status: "completed".to_string(),
         message: "espflash command completed.".to_string(),
@@ -1319,7 +1593,13 @@ fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecor
         .retain(|_, lease| state.devices.contains_key(&lease.device_id));
 
     for device in serial_devices {
-        state.devices.insert(device.id.clone(), device);
+        if let Some(existing) = state.devices.get_mut(&device.id) {
+            existing.display_name = device.display_name;
+            existing.port_path = device.port_path;
+            existing.transport = device.transport;
+        } else {
+            state.devices.insert(device.id.clone(), device);
+        }
     }
 }
 
@@ -1355,6 +1635,8 @@ fn serial_device_record(
         "network".to_string(),
         "wifi_config".to_string(),
         "monitor".to_string(),
+        "firmware_check".to_string(),
+        "flash".to_string(),
     ];
     device
 }
@@ -1392,6 +1674,7 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
             "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
             "release + web_serial",
             vec!["web_serial".to_string()],
+            "elf",
         ),
         (
             "local-host-release",
@@ -1399,11 +1682,12 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
             "firmware/target/release/flux-purr",
             "host release",
             Vec::new(),
+            "host_binary",
         ),
     ];
     let mut artifacts = Vec::new();
 
-    for (artifact_id, name, path, profile, features) in candidates {
+    for (artifact_id, name, path, profile, features, kind) in candidates {
         let resolved_path = resolve_artifact_path(root, path);
         if !resolved_path.is_file() {
             continue;
@@ -1433,11 +1717,11 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
             features,
             protocol: "flux-purr.usb.v1".to_string(),
             files: vec![ArtifactFile {
-                kind: "app".to_string(),
+                kind: kind.to_string(),
                 path: path.to_string(),
                 sha256: digest,
                 size,
-                flash_address: if artifact_id.contains("esp32s3") {
+                flash_address: if kind == "app" {
                     Some(DEFAULT_APP_FLASH_ADDRESS)
                 } else {
                     None
@@ -1490,15 +1774,31 @@ fn build_espflash_args(
             "Real flash requires an explicit serial port.",
         ));
     }
+    if let Some(elf_image) = artifact.files.iter().find(|file| file.kind == "elf") {
+        let path = resolve_artifact_path(root, &elf_image.path);
+        return Ok(vec![
+            "flash".to_string(),
+            "--chip".to_string(),
+            artifact.target_chip.clone(),
+            "--port".to_string(),
+            port_path.to_string(),
+            "--non-interactive".to_string(),
+            "--after".to_string(),
+            "hard-reset".to_string(),
+            "-S".to_string(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
+
     let Some(app_image) = artifact.files.iter().find(|file| file.kind == "app") else {
         return Err(HttpError::bad_request(
-            "missing_app_image",
-            "Artifact does not contain an app image.",
+            "missing_flash_image",
+            "Artifact does not contain an ELF or raw app image.",
         ));
     };
-    let flash_address = app_image
-        .flash_address
-        .ok_or_else(|| HttpError::bad_request("missing_flash_address", "Missing flash address."))?;
+    let flash_address = app_image.flash_address.ok_or_else(|| {
+        HttpError::bad_request("missing_flash_address", "Missing app flash address.")
+    })?;
     let path = resolve_artifact_path(root, &app_image.path);
     Ok(vec![
         "write-bin".to_string(),
@@ -1507,6 +1807,9 @@ fn build_espflash_args(
         "--port".to_string(),
         port_path.to_string(),
         "--non-interactive".to_string(),
+        "--after".to_string(),
+        "hard-reset".to_string(),
+        "-S".to_string(),
         flash_address.to_string(),
         path.to_string_lossy().into_owned(),
     ])
@@ -1525,6 +1828,77 @@ fn device<'a>(state: &'a DevdState, device_id: &str) -> Result<&'a DeviceRecord,
         .devices
         .get(device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))
+}
+
+fn record_serial_bridge_error(
+    state: &AppState,
+    device_id: &str,
+    stage: &'static str,
+    error: &HttpError,
+) {
+    if let Ok(mut state_lock) = state.lock()
+        && let Some(device) = state_lock.devices.get_mut(device_id)
+    {
+        device.connection = ConnectionState::Error;
+        device.network.state = if error.error.code == "usb_response_timeout" {
+            NetworkState::Timeout
+        } else {
+            NetworkState::Error
+        };
+        device.network.last_error = Some(error.error.message.clone());
+        device.status.network = device.network.clone();
+    }
+    state.emit(event(
+        device_id,
+        "serial",
+        "native serial RPC failed",
+        json!({
+            "stage": stage,
+            "code": error.error.code,
+            "message": error.error.message,
+            "retryable": error.error.retryable,
+        }),
+    ));
+}
+
+fn emit_wifi_config_event(state: &AppState, device_id: &str, payload: &WifiConfigRequest) {
+    state.emit(event(
+        device_id,
+        "wifi",
+        "wifi config accepted",
+        json!({
+            "op": payload.op,
+            "ssid": payload.ssid,
+            "passwordPresent": payload.password.is_some(),
+            "autoReconnect": payload.auto_reconnect,
+            "telemetryIntervalMs": payload.telemetry_interval_ms,
+        }),
+    ));
+}
+
+fn emit_runtime_config_event(
+    state: &AppState,
+    device_id: &str,
+    payload: &RuntimeConfigRequest,
+    status: &ControlPlaneStatus,
+) {
+    state.emit(event(
+        device_id,
+        "runtime",
+        "runtime config applied",
+        json!({
+            "requested": {
+                "targetTempC": payload.target_temp_c,
+                "activeCoolingEnabled": payload.active_cooling_enabled,
+                "heaterEnabled": payload.heater_enabled,
+            },
+            "status": {
+                "targetTempC": status.target_temp_c,
+                "activeCoolingEnabled": status.active_cooling_enabled,
+                "heaterEnabled": status.heater_enabled,
+            },
+        }),
+    ));
 }
 
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
@@ -1589,6 +1963,49 @@ mod tests {
         assert!(state.lease_device("mock-fp-lab-01").is_ok());
     }
 
+    #[tokio::test]
+    async fn release_lease_records_device_event() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+
+        let response = delete_lease(State(state.clone()), AxumPath(lease.lease_id.clone()))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(response["released"], true);
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("mock-fp-lab-01").unwrap();
+        assert!(device.events.iter().any(|event| {
+            event.kind == "lease"
+                && event.message == "lease released"
+                && event.payload["leaseId"] == lease.lease_id
+        }));
+    }
+
+    #[test]
+    fn device_event_backlog_replays_existing_bounded_events() {
+        let state = AppState::test();
+        state.emit(event(
+            "mock-fp-lab-01",
+            "lease",
+            "lease created",
+            json!({ "leaseId": "lease-test" }),
+        ));
+        state.emit(event(
+            "other-device",
+            "lease",
+            "lease created",
+            json!({ "leaseId": "lease-other" }),
+        ));
+
+        let backlog = device_event_backlog(&state, "mock-fp-lab-01").unwrap();
+
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(backlog[0].kind, "lease");
+        assert_eq!(backlog[0].payload["leaseId"], "lease-test");
+    }
+
     #[test]
     fn bounded_queue_rotates_oldest_entries() {
         let mut values = VecDeque::new();
@@ -1604,6 +2021,20 @@ mod tests {
         let missing_port = dir.path().join("missing-usbmodem");
 
         assert!(scan_serial_devices(Some(&missing_port)).is_empty());
+    }
+
+    #[test]
+    fn native_serial_devices_advertise_devd_flash_capabilities() {
+        let device = serial_device_record("/dev/cu.usbmodem-test", None);
+
+        assert_eq!(device.transport, DeviceTransport::NativeSerial);
+        assert!(
+            device
+                .identity
+                .capabilities
+                .contains(&"firmware_check".to_string())
+        );
+        assert!(device.identity.capabilities.contains(&"flash".to_string()));
     }
 
     #[test]
@@ -1630,6 +2061,75 @@ mod tests {
         assert!(state.devices.contains_key("mock-fp-lab-01"));
         assert!(!state.devices.contains_key("serial-stale"));
         assert!(state.leases.is_empty());
+    }
+
+    #[test]
+    fn serial_refresh_preserves_native_error_diagnostics() {
+        let mut state = DevdState::default();
+        let mut existing = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
+        existing.port_path = Some("/dev/cu.usbmodem-test".to_string());
+        existing.connection = ConnectionState::Error;
+        existing.network.state = NetworkState::Timeout;
+        existing.network.last_error = Some("Timed out waiting for USB response.".to_string());
+        existing.events.push_back(event(
+            "serial-known",
+            "serial",
+            "native serial RPC failed",
+            json!({ "code": "usb_response_timeout" }),
+        ));
+        state.devices.insert(existing.id.clone(), existing);
+
+        let mut refreshed = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
+        refreshed.display_name = "USB JTAG/serial debug unit".to_string();
+        refreshed.port_path = Some("/dev/cu.usbmodem-test".to_string());
+        refreshed.connection = ConnectionState::Disconnected;
+
+        refresh_serial_devices(&mut state, vec![refreshed]);
+
+        let device = state.devices.get("serial-known").unwrap();
+        assert_eq!(device.display_name, "USB JTAG/serial debug unit");
+        assert_eq!(device.connection, ConnectionState::Error);
+        assert_eq!(device.network.state, NetworkState::Timeout);
+        assert_eq!(
+            device.network.last_error.as_deref(),
+            Some("Timed out waiting for USB response.")
+        );
+        assert_eq!(device.events.len(), 1);
+    }
+
+    #[test]
+    fn serial_bridge_error_marks_device_and_records_event() {
+        let state = AppState::test();
+        let mut serial_device = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
+        serial_device.port_path = Some("/dev/cu.usbmodem-test".to_string());
+        {
+            let mut inner = state.lock().unwrap();
+            inner
+                .devices
+                .insert(serial_device.id.clone(), serial_device);
+        }
+
+        let error = HttpError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "usb_response_timeout",
+            "Timed out waiting for a matching USB JSONL response.",
+            true,
+        );
+
+        record_serial_bridge_error(&state, "serial-known", "identity", &error);
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("serial-known").unwrap();
+        assert_eq!(device.connection, ConnectionState::Error);
+        assert_eq!(device.network.state, NetworkState::Timeout);
+        assert_eq!(
+            device.network.last_error.as_deref(),
+            Some("Timed out waiting for a matching USB JSONL response.")
+        );
+        assert_eq!(device.events.len(), 1);
+        assert_eq!(device.events[0].kind, "serial");
+        assert_eq!(device.events[0].payload["stage"], "identity");
+        assert_eq!(device.events[0].payload["code"], "usb_response_timeout");
     }
 
     #[test]
@@ -1724,13 +2224,55 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_id, "local-esp32s3-release");
         assert_eq!(artifacts[0].target_chip, "esp32s3");
+        assert_eq!(artifacts[0].profile, "release + web_serial");
+        assert_eq!(artifacts[0].features, ["web_serial"]);
+        assert_eq!(artifacts[0].files[0].kind, "elf");
         assert_eq!(artifacts[0].files[0].size, 14);
-        assert_eq!(artifacts[0].files[0].flash_address, Some(0x10000));
+        assert_eq!(artifacts[0].files[0].flash_address, None);
         assert!(artifacts[0].files[0].sha256.starts_with("sha256:"));
     }
 
     #[test]
-    fn real_flash_args_are_bound_to_explicit_port_and_artifact_root() {
+    fn real_flash_args_flash_elf_and_hard_reset() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec!["web_serial".to_string()],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "elf".to_string(),
+                path: "firmware.elf".to_string(),
+                sha256: "sha256:test".to_string(),
+                size: 9,
+                flash_address: None,
+            }],
+        };
+
+        let dir = tempdir().unwrap();
+        let args =
+            build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
+
+        assert_eq!(args[0], "flash");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--port", "/dev/cu.usbmodem21221401"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--after", "hard-reset"])
+        );
+        assert!(args.contains(&"-S".to_string()));
+        assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
+        assert!(!args.contains(&"65536".to_string()));
+    }
+
+    #[test]
+    fn real_flash_args_write_raw_app_bin_with_explicit_address() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -1746,7 +2288,7 @@ mod tests {
                 path: "firmware.bin".to_string(),
                 sha256: "sha256:test".to_string(),
                 size: 9,
-                flash_address: Some(0x10000),
+                flash_address: Some(DEFAULT_APP_FLASH_ADDRESS),
             }],
         };
 
@@ -1754,12 +2296,257 @@ mod tests {
         let args =
             build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
 
+        assert_eq!(args[0], "write-bin");
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--port", "/dev/cu.usbmodem21221401"])
         );
-        assert!(args.contains(&"65536".to_string()));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--after", "hard-reset"])
+        );
+        assert!(args.contains(&DEFAULT_APP_FLASH_ADDRESS.to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
+    }
+
+    #[tokio::test]
+    async fn runtime_endpoint_requires_valid_lease() {
+        let state = AppState::test();
+        let error = configure_runtime(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: "missing-lease".to_string(),
+                target_temp_c: Some(230),
+                active_cooling_enabled: None,
+                heater_enabled: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.error.code, "lease_expired");
+    }
+
+    #[tokio::test]
+    async fn daemon_local_device_mutations_require_valid_lease() {
+        let state = AppState::test();
+        let missing_lease = bind_device(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(LeaseQuery {
+                lease_id: Some("missing-lease".to_string()),
+            }),
+            Json(BindRequest {
+                alias: Some("Bench Alias".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing_lease.status, StatusCode::FORBIDDEN);
+        assert_eq!(missing_lease.error.code, "lease_expired");
+
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let bound = bind_device(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(LeaseQuery {
+                lease_id: Some(lease.lease_id.clone()),
+            }),
+            Json(BindRequest {
+                alias: Some("Bench Alias".to_string()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(bound.display_name, "Bench Alias");
+
+        let connected = connect_device(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(LeaseQuery {
+                lease_id: Some(lease.lease_id.clone()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(connected.connection, ConnectionState::Connected);
+
+        let disconnected = disconnect_device(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(LeaseQuery {
+                lease_id: Some(lease.lease_id),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(disconnected.connection, ConnectionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn wifi_and_runtime_successes_record_safe_events() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+
+        let _ = configure_wifi(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(WifiConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                op: WifiConfigOp::Set,
+                ssid: Some("FluxPurr-Lab".to_string()),
+                password: Some("secret-pass".to_string()),
+                auto_reconnect: Some(true),
+                telemetry_interval_ms: Some(500),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let _ = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: Some(231),
+                active_cooling_enabled: Some(false),
+                heater_enabled: Some(false),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("mock-fp-lab-01").unwrap();
+        let wifi_event = device
+            .events
+            .iter()
+            .find(|event| event.kind == "wifi" && event.message == "wifi config accepted")
+            .unwrap();
+        assert_eq!(wifi_event.payload["ssid"], "FluxPurr-Lab");
+        assert_eq!(wifi_event.payload["passwordPresent"], true);
+        assert!(
+            !serde_json::to_string(&wifi_event.payload)
+                .unwrap()
+                .contains("secret-pass")
+        );
+
+        let runtime_event = device
+            .events
+            .iter()
+            .find(|event| event.kind == "runtime" && event.message == "runtime config applied")
+            .unwrap();
+        assert_eq!(runtime_event.payload["status"]["targetTempC"], 231);
+        assert_eq!(
+            runtime_event.payload["status"]["activeCoolingEnabled"],
+            false
+        );
+        assert_eq!(runtime_event.payload["status"]["heaterEnabled"], false);
+    }
+
+    #[tokio::test]
+    async fn real_flash_requires_dry_run_confirmation_and_allow_flag() {
+        let dir = tempdir().unwrap();
+        let artifact = test_artifact_with_file(dir.path(), "firmware.bin", b"firmware-image");
+        let state = AppState::new(AppConfig {
+            artifact_root: Some(dir.path().to_path_buf()),
+            ..AppConfig::default()
+        });
+        let mut native = DeviceRecord::mock("serial-test", DeviceTransport::NativeSerial);
+        native.port_path = Some("/dev/cu.usbmodem21221401".to_string());
+        {
+            let mut inner = state.lock().unwrap();
+            inner.devices.insert(native.id.clone(), native);
+        }
+        let lease = state.lease_device("serial-test").unwrap();
+
+        let without_dry_run = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: artifact.clone(),
+                dry_run: false,
+                confirm: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(without_dry_run.status, StatusCode::FORBIDDEN);
+        assert_eq!(without_dry_run.error.code, "dry_run_required");
+
+        let dry_run = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: artifact.clone(),
+                dry_run: true,
+                confirm: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(dry_run.dry_run);
+        assert_eq!(dry_run.status, "passed");
+        {
+            let inner = state.lock().unwrap();
+            let device = inner.devices.get("serial-test").unwrap();
+            assert_eq!(
+                device.selected_artifact_id.as_deref(),
+                Some("test-artifact")
+            );
+            assert!(device.events.iter().any(|event| {
+                event.kind == "flash"
+                    && event.message == "artifact dry-run passed"
+                    && event.payload["artifactId"] == "test-artifact"
+            }));
+        }
+
+        let without_confirm = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: artifact.clone(),
+                dry_run: false,
+                confirm: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(without_confirm.status, StatusCode::FORBIDDEN);
+        assert_eq!(without_confirm.error.code, "confirmation_required");
+
+        let flash_disabled = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id,
+                artifact,
+                dry_run: false,
+                confirm: Some("FLASH".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(flash_disabled.status, StatusCode::FORBIDDEN);
+        assert_eq!(flash_disabled.error.code, "real_flash_disabled");
+        {
+            let inner = state.lock().unwrap();
+            let device = inner.devices.get("serial-test").unwrap();
+            assert!(device.events.iter().any(|event| {
+                event.kind == "flash"
+                    && event.message == "real flash blocked"
+                    && event.payload["code"] == "real_flash_disabled"
+            }));
+        }
     }
 
     #[test]
@@ -1811,6 +2598,22 @@ mod tests {
     }
 
     #[test]
+    fn usb_response_decoder_extracts_runtime_config_status_payload() {
+        let payload = decode_usb_response_line(
+            br#"{"type":"response","requestId":"runtime-1","ok":true,"result":{"status":{"mode":"sampling","uptimeSeconds":12,"currentTempC":194.0,"targetTempC":240,"heaterEnabled":true,"heaterOutputPercent":25,"activeCoolingEnabled":false,"fanDisplayState":"AUTO","fanEnabled":true,"fanPwmPermille":500,"voltageMv":20000,"currentMa":850,"boardTempCenti":1940,"pdRequestMv":20000,"pdContractMv":20000,"pdState":"ready","frontpanelKey":null,"network":{"state":"idle","dns":[],"wifiRssi":null}}}}"#,
+            "runtime-1",
+        )
+        .unwrap()
+        .unwrap();
+
+        let status = extract_usb_payload::<ControlPlaneStatus>(payload, "status").unwrap();
+
+        assert_eq!(status.target_temp_c, 240);
+        assert!(status.heater_enabled);
+        assert!(!status.active_cooling_enabled);
+    }
+
+    #[test]
     fn usb_response_decoder_maps_firmware_errors() {
         let error = decode_usb_response_line(
             br#"{"type":"response","requestId":"req-1","ok":false,"error":{"code":"bad_op","message":"Bad op","retryable":false}}"#,
@@ -1821,5 +2624,67 @@ mod tests {
         assert_eq!(error.status, StatusCode::BAD_GATEWAY);
         assert_eq!(error.error.code, "bad_op");
         assert!(!error.error.retryable);
+    }
+
+    #[test]
+    fn usb_response_decoder_marks_startup_busy_retryable() {
+        let error = decode_usb_response_line(
+            br#"{"type":"response","requestId":"req-1","ok":false,"error":{"code":"startup_busy","message":"Runtime status is not available until hardware initialization completes.","retryable":true}}"#,
+            "req-1",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert!(is_retryable_startup_busy(&error));
+    }
+
+    #[test]
+    fn silent_serial_retry_only_applies_to_read_only_policy_window() {
+        let now = Instant::now();
+        let retry_at = now - Duration::from_millis(1);
+        let deadline = now + Duration::from_millis(100);
+
+        assert!(should_retry_silent_serial_request(
+            true, now, retry_at, deadline
+        ));
+        assert!(!should_retry_silent_serial_request(
+            false, now, retry_at, deadline
+        ));
+        assert!(!should_retry_silent_serial_request(
+            true,
+            now,
+            now + Duration::from_millis(1),
+            deadline
+        ));
+        assert!(!should_retry_silent_serial_request(
+            true, now, retry_at, now
+        ));
+    }
+
+    fn test_artifact_with_file(root: &Path, relative_path: &str, bytes: &[u8]) -> FirmwareArtifact {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, bytes).unwrap();
+
+        FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec!["web_serial".to_string()],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "app".to_string(),
+                path: relative_path.to_string(),
+                sha256: format!("sha256:{:x}", Sha256::digest(bytes)),
+                size: bytes.len() as u64,
+                flash_address: Some(0x10000),
+            }],
+        }
     }
 }

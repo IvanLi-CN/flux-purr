@@ -85,12 +85,6 @@ impl Identity {
             push_str(&mut capabilities, "wifi_config");
             push_str(&mut capabilities, "monitor");
         }
-        #[cfg(feature = "net_http")]
-        {
-            push_str(&mut capabilities, "http");
-            push_str(&mut capabilities, "events");
-        }
-
         Self {
             device_id: string("flux-purr-s3-001"),
             firmware_version: string(env!("CARGO_PKG_VERSION")),
@@ -200,6 +194,7 @@ impl From<DeviceMode> for DeviceModeWire {
 pub enum PdStateWire {
     Negotiating,
     Ready,
+    #[serde(rename = "fallback_5v")]
     Fallback5v,
     Fault,
 }
@@ -607,6 +602,13 @@ pub fn hello_frame(identity: Identity) -> UsbFrame {
     }
 }
 
+pub fn log_frame(level: &str, message: &str) -> UsbFrame {
+    UsbFrame::Log {
+        level: string(level),
+        message: string(message),
+    }
+}
+
 pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
     serde_json_core::from_str::<UsbFrameWire>(trimmed)
@@ -688,6 +690,21 @@ mod tests {
                 .any(|value| value == "identity")
         );
         assert!(identity.capabilities.iter().any(|value| value == "status"));
+        #[cfg(feature = "web_serial")]
+        {
+            assert!(
+                identity
+                    .capabilities
+                    .iter()
+                    .any(|value| value == "usb_jsonl")
+            );
+            assert!(
+                identity
+                    .capabilities
+                    .iter()
+                    .any(|value| value == "wifi_config")
+            );
+        }
     }
 
     #[test]
@@ -711,6 +728,39 @@ mod tests {
         assert_eq!(status.network.state, NetworkState::Idle);
         assert_eq!(status.network.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(status.frontpanel_key, Some(FrontPanelKeyWire::Center));
+    }
+
+    #[test]
+    fn status_frame_serializes_pd_fallback_for_web_contract() {
+        let status = ControlPlaneStatus::from_device_status(
+            snapshot_at(17, 0),
+            &MemoryConfig::default(),
+            17,
+            NetworkSummary::default(),
+        );
+        let frame = UsbFrame::Response {
+            request_id: string("req-pd"),
+            ok: true,
+            result: Some(UsbResponsePayload::Status(status)),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).unwrap();
+
+        assert!(json.contains(r#""pdState":"fallback_5v""#));
+        assert!(!json.contains("fallback5v"));
+    }
+
+    #[test]
+    fn log_frame_serializes_lifecycle_message() {
+        let frame = log_frame("info", "frontpanel runtime ready");
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).unwrap();
+
+        assert!(json.contains(r#""type":"log""#));
+        assert!(json.contains(r#""level":"info""#));
+        assert!(json.contains(r#""message":"frontpanel runtime ready""#));
+        assert!(json.ends_with('\n'));
     }
 
     #[test]

@@ -6,16 +6,16 @@
 
 - PR #27 已把 Web、native USB daemon、USB CDC、WiFi provisioning、firmware flashing 与 monitoring 的长期架构沉淀到 `docs/solutions/device-control/web-native-wifi-bridge-console.md`。
 - `#hhwq8` 只冻结 mock-first Web demo，不代表真实 transport、daemon、USB CDC、WiFi HTTP 或真实 flashing 已交付。
-- 本规范冻结 Flux Purr 真实控制面 v1：同一领域契约通过 mock、direct HTTP、USB serial 和 native `devd` 暴露，Web 只根据能力启用操作。
+- 本规范冻结 Flux Purr 真实控制面 v1：同一领域契约通过 mock、USB serial 和 native `devd` 暴露，Web 只根据能力启用操作；direct firmware HTTP 属于后续 `net_http` server 能力，不得在固件实现前声明。
 
 ## 目标 / 非目标
 
 ### Goals
 
 - 定义 Web、firmware 与 `devd` 共享的 identity、network、status、USB JSONL、devd HTTP、firmware artifact 与 error envelope。
-- firmware 提供 feature-gated `web_serial` / `net_http` contract adapter，复用现有热控 runtime 和 EEPROM WiFi 字段。
+- firmware 提供 feature-gated `web_serial` contract adapter，复用现有热控 runtime 和 EEPROM WiFi 字段；direct `net_http` 只有在固件 HTTP server 落地后才可声明。
 - `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
-- Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock、HTTP 与 devd contract，并对危险操作做 capability gate。
+- Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock 与 devd contract，并对危险操作做 capability gate。
 - 无真机时必须能用 host tests、mock serial 和 devd dry-run 验证主要契约。
 
 ### Non-goals
@@ -36,7 +36,6 @@
 
 ### Out of scope
 
-- 真机 smoke 结果记录；由主人后续切换工作区后触发。
 - host power actions。
 - 用户认证、多租户 fleet 管理和远端云服务。
 
@@ -60,7 +59,7 @@
 ### SHOULD
 
 - devd scan 应在授权端口范围内利用 serial USB metadata 构造稳定 ID。
-- direct HTTP 与 devd bridge endpoint 的返回 shape 应可由同一 Web parser 处理。
+- 后续 direct firmware HTTP 若落地，返回 shape 应与 devd bridge endpoint 共用 Web parser。
 - Web app 验证应覆盖 nominal、devd unavailable、lease conflict、WiFi provisioning、monitor/trace 与 firmware blocked/warning states。
 
 ## 接口契约（Interfaces & Contracts）
@@ -75,7 +74,7 @@
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
 - `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`active_cooling_enabled`、`heater_enabled` 的部分更新。
-- `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file path、size、sha256 与 flash address。
+- `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file kind、path、size、sha256 与可选 flash address；本地 ESP32-S3 release ELF 必须作为 `elf` artifact 走 `espflash flash`。
 - `POST /api/v1/artifacts/verify`：校验 catalog/artifact 文件。
 - `POST /api/v1/devices/:id/flash`：`dry_run=true` 只校验；`dry_run=false` 必须先有同 artifact 的通过记录。
 
@@ -95,7 +94,7 @@
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
 - Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、WiFi phases、monitor trace、firmware blocked/warning 状态都可见。
-- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test 与 Web app browser smoke 均通过；真机 smoke 标记为后续 owner-triggered 验证。
+- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；未提供目标 SSID 时，WiFi provisioning 真机写入可作为独立后续复验项。
 
 ## 非功能性验收 / 质量门槛
 
@@ -113,6 +112,10 @@
 - 证据来源：Web app runtime。
 - `assets/web-app-devd-no-authorized-serial.png`：Vite Web App 连接当前租约 `devd`；授权端口缺失时只显示 daemon mock target，并在 trace 中标明没有授权 native serial target。
 - `assets/web-app-devd-artifact-dry-check.png`：Vite Web App Update 页通过 `devd` 校验本地 ESP32-S3 固件产物，dry-check 返回通过。
+- `assets/web-app-wifi-provisioning-story.png`：Storybook canvas 中的 Web WiFi provisioning 页；表单通过 mock transport 写入 SSID，展示 network connected、provisioned feedback 与 WiFi handoff 阶段。
+- `assets/web-app-wifi-lease-blocked-story.png`：Storybook canvas 中的 Web WiFi lease conflict 页；USB lease conflict 时 provisioning 被阻断，SSID/password 输入与 Provision 命令禁用，并显示阻断原因。
+- `assets/web-app-native-serial-timeout-story.png`：Storybook canvas 中的 authorized native serial timeout 页；`devd` lease 存在但 USB JSONL identity 超时，Web 显示 timeout 原因并禁用 WiFi Provision / Clear 命令。
+- `assets/web-app-devd-runtime-trace-story.png`：Storybook canvas 中的 Runtime trace；Web 将 daemon serial、lease 与 flash bounded events 显示为安全摘要，不暴露 raw payload。
 
 ## 参考（References）
 

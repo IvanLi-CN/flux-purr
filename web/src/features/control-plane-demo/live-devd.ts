@@ -1,14 +1,24 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { DevdDeviceRecord, DevdLease } from './contracts'
+import type {
+  ControlPlaneStatus,
+  DevdDeviceRecord,
+  DevdEvent,
+  DevdLease,
+  Identity,
+  NetworkSummary,
+} from './contracts'
 import type { ControlPlaneHttpClient } from './transport-client'
 import {
   ControlPlaneClientError,
   createControlPlaneHttpClient,
+  devdEventToLogEntry,
   devdRecordToDeviceTarget,
 } from './transport-client'
 import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 
 const DEVD_POLL_MS = 5_000
+const DEVD_TRACE_LIMIT = 80
+const DEVD_EVENT_KINDS = ['serial', 'lease', 'wifi', 'runtime', 'flash'] as const
 
 export interface LiveDevdOptions {
   enabled?: boolean
@@ -35,11 +45,19 @@ export function useLiveDevdScenario(
   const client = useMemo(() => httpClient ?? createControlPlaneHttpClient(), [httpClient])
   const [devices, setDevices] = useState<DeviceTarget[]>([])
   const [artifacts, setArtifacts] = useState<ControlPlaneScenario['artifacts']>([])
+  const [recordEvents, setRecordEvents] = useState<DevdEvent[]>([])
+  const [streamEvents, setStreamEvents] = useState<DevdEvent[]>([])
+  const liveDevdDeviceId = useMemo(
+    () => devices.find((device) => device.transport === 'devd')?.id,
+    [devices]
+  )
 
   useEffect(() => {
     if (!enabled || !devdBaseUrl) {
       setDevices([])
       setArtifacts([])
+      setRecordEvents([])
+      setStreamEvents([])
       return
     }
 
@@ -56,6 +74,7 @@ export function useLiveDevdScenario(
         records = nextRecords
         if (!cancelled) {
           setArtifacts(nextArtifacts)
+          setRecordEvents(devdRecordsToEvents(records))
         }
         const baseDevices = records.map(devdRecordToDeviceTarget)
         const liveRecord = selectLiveDevdRecord(records)
@@ -77,13 +96,7 @@ export function useLiveDevdScenario(
           }
 
           const live = await client.probeDevdDevice(devdBaseUrl, liveRecord.id, activeLease.leaseId)
-          const liveDevice = devdRecordToDeviceTarget({
-            ...liveRecord,
-            connection: 'connected',
-            identity: live.identity,
-            network: live.network,
-            status: live.status,
-          })
+          const liveDevice = devdRecordToDeviceTarget(mergeDevdProbeRecord(liveRecord, live))
           liveDevice.leaseState = 'active'
           liveDevice.leaseId = activeLease.leaseId
 
@@ -108,6 +121,8 @@ export function useLiveDevdScenario(
         if (!cancelled) {
           setDevices(records.map(devdRecordToDeviceTarget))
           setArtifacts([])
+          setRecordEvents([])
+          setStreamEvents([])
         }
       }
     }
@@ -118,11 +133,48 @@ export function useLiveDevdScenario(
     return () => {
       cancelled = true
       window.clearInterval(timer)
+      setStreamEvents([])
       if (activeLease) {
         void client.releaseDevdLease(devdBaseUrl, activeLease.leaseId)
       }
     }
   }, [client, devdBaseUrl, enabled])
+
+  useEffect(() => {
+    if (!enabled || !devdBaseUrl || !liveDevdDeviceId || typeof EventSource === 'undefined') {
+      setStreamEvents([])
+      return
+    }
+
+    const eventSource = new EventSource(
+      `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(liveDevdDeviceId)}/events`
+    )
+    const handleEvent = (message: MessageEvent<string>) => {
+      const event = parseDevdEvent(message.data)
+      if (!event || event.deviceId !== liveDevdDeviceId) {
+        return
+      }
+      setStreamEvents((current) => appendDevdEvent(current, event))
+    }
+
+    eventSource.onmessage = handleEvent
+    for (const kind of DEVD_EVENT_KINDS) {
+      eventSource.addEventListener(kind, handleEvent)
+    }
+
+    return () => {
+      for (const kind of DEVD_EVENT_KINDS) {
+        eventSource.removeEventListener(kind, handleEvent)
+      }
+      eventSource.close()
+      setStreamEvents([])
+    }
+  }, [devdBaseUrl, enabled, liveDevdDeviceId])
+
+  const devdEvents = useMemo(
+    () => devdEventsToLogEntries(recordEvents, streamEvents),
+    [recordEvents, streamEvents]
+  )
 
   return useMemo(() => {
     if (devices.length === 0) {
@@ -165,9 +217,29 @@ export function useLiveDevdScenario(
             }
           : metric
       ),
-      events: [devdEvent, ...scenario.events],
+      events: [devdEvent, ...devdEvents, ...scenario.events],
     }
-  }, [artifacts, devices, scenario])
+  }, [artifacts, devdEvents, devices, scenario])
+}
+
+export function mergeDevdProbeRecord(
+  record: DevdDeviceRecord,
+  live: {
+    identity: Identity
+    network: NetworkSummary
+    status: ControlPlaneStatus
+  }
+): DevdDeviceRecord {
+  return {
+    ...record,
+    connection: 'connected',
+    identity: {
+      ...live.identity,
+      capabilities: mergeCapabilities(record.identity.capabilities, live.identity.capabilities),
+    },
+    network: live.network,
+    status: live.status,
+  }
 }
 
 function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
@@ -180,6 +252,42 @@ function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
 
 function replaceDevice(devices: DeviceTarget[], nextDevice: DeviceTarget) {
   return devices.map((device) => (device.id === nextDevice.id ? nextDevice : device))
+}
+
+function mergeCapabilities(...capabilitySets: string[][]) {
+  return Array.from(new Set(capabilitySets.flat()))
+}
+
+function devdRecordsToEvents(records: DevdDeviceRecord[]) {
+  return records.flatMap((record) => record.events ?? []).slice(-DEVD_TRACE_LIMIT)
+}
+
+function devdEventsToLogEntries(recordEvents: DevdEvent[], streamEvents: DevdEvent[]) {
+  return mergeDevdEvents(recordEvents, streamEvents).map(devdEventToLogEntry).reverse()
+}
+
+function mergeDevdEvents(recordEvents: DevdEvent[], streamEvents: DevdEvent[]) {
+  const eventsById = new Map<string, DevdEvent>()
+  for (const event of [...recordEvents, ...streamEvents]) {
+    eventsById.set(event.id, event)
+  }
+
+  return Array.from(eventsById.values())
+    .sort((left, right) => Number(left.timestamp) - Number(right.timestamp))
+    .slice(-DEVD_TRACE_LIMIT)
+}
+
+function appendDevdEvent(events: DevdEvent[], event: DevdEvent) {
+  return mergeDevdEvents(events, [event])
+}
+
+function parseDevdEvent(data: string): DevdEvent | null {
+  try {
+    const event = JSON.parse(data) as DevdEvent
+    return typeof event.id === 'string' && typeof event.kind === 'string' ? event : null
+  } catch {
+    return null
+  }
 }
 
 function leaseStateForError(

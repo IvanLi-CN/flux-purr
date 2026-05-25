@@ -16,8 +16,8 @@ pub const PIN_LCD_RES: u8 = 14;
 pub const PIN_LCD_CS: u8 = 15;
 pub const PIN_KEY_RIGHT: u8 = 16;
 
-pub const PIN_KEY_DOWN: u8 = 17;
-pub const PIN_KEY_LEFT: u8 = 18;
+pub const PIN_KEY_LEFT: u8 = 17;
+pub const PIN_KEY_DOWN: u8 = 18;
 
 pub const PIN_USB_D_MINUS: u8 = 19;
 pub const PIN_USB_D_PLUS: u8 = 20;
@@ -97,6 +97,10 @@ mod tests {
         assert_eq!(PIN_RTD_ADC, 2);
         assert_eq!(PIN_LCD_DC, 10);
         assert_eq!(PIN_LCD_BLK, 13);
+        // Keep in sync with docs/hardware/netlists/main-controller-board.enet:
+        // GPIO17=BTN_LEFT, GPIO18=BTN_DOWN.
+        assert_eq!(PIN_KEY_LEFT, 17);
+        assert_eq!(PIN_KEY_DOWN, 18);
         assert_eq!(PIN_FAN_TACH, 34);
         assert_eq!(PIN_FAN_EN, 35);
         assert_eq!(PIN_FAN_PWM, 36);

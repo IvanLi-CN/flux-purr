@@ -24,7 +24,7 @@ path = "src/bin/frontpanel_preview.rs"
 required-features = ["host-preview"]
 
 [features]
-default = ["esp32s3", "pd-request-20v"]
+default = ["esp32s3", "web_serial", "pd-request-20v"]
 esp32s3 = []
 esp32c3 = []
 host-preview = []
@@ -39,7 +39,7 @@ pd-request-28v = []
 embassy-futures = "0.1.2"
 embedded-graphics = "0.8.1"
 embedded-hal = "1.0.0"
-gc9d01 = { git = "https://github.com/IvanLi-CN/gc9d01-rs", rev = "6b75d9dc818be04e57932b750a7d209aaed3bd57", features = ["async", "defmt", "panel_160x50"] }
+gc9d01 = { git = "https://github.com/IvanLi-CN/gc9d01-rs", rev = "6b75d9dc818be04e57932b750a7d209aaed3bd57", features = ["async", "panel_160x50"] }
 heapless = "0.8.0"
 nb = "1.1.0"
 serde = { version = "1.0.228", default-features = false, features = ["derive"] }
@@ -47,13 +47,12 @@ serde-json-core = "0.6.0"
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 defmt = "1.0.1"
-embassy-executor = "0.7.0"
+embassy-executor = { version = "0.7.0", features = ["task-arena-size-32768"] }
 embassy-time = "0.4.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
-esp-backtrace = { version = "0.17.0", features = ["esp32s3", "panic-handler", "defmt"] }
-esp-hal = { version = "1.0.0-rc.0", features = ["esp32s3", "unstable", "defmt"] }
-esp-hal-embassy = { version = "0.9.1", features = ["esp32s3", "defmt"] }
+esp-hal = { version = "1.0.0-rc.0", features = ["esp32s3", "unstable"] }
+esp-hal-embassy = { version = "0.9.1", features = ["esp32s3"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
 static_cell = "2.1.0"
 

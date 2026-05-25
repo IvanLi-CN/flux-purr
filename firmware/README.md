@@ -130,11 +130,12 @@
 - Host release build:
   - `cargo build --manifest-path firmware/Cargo.toml --release`
 - Xtensa app runtime build:
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release`
+  - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,web_serial --bin flux-purr --release`
 - Xtensa app runtime build (`12 V` variant):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-12v --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-12v --bin flux-purr --release`
 - Xtensa app runtime build (`28 V` variant):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,pd-request-28v --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-28v --bin flux-purr --release`
 - Xtensa key-test calibration build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,frontpanel-key-test --bin flux-purr --release`
 
@@ -158,12 +159,13 @@
   - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
 - Typical flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` (default `20 V`)
-  - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,pd-request-12v` or `--no-default-features --features esp32s3,pd-request-28v`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release` (default `20 V` + real control-plane transport)
+  - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,web_serial,pd-request-12v` or `--no-default-features --features esp32s3,web_serial,pd-request-28v`
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`
   - after the intended selector is confirmed, `mcu-agentd --non-interactive flash esp32s3_frontpanel`
+  - repo config performs a post-flash hard reset so the app runtime starts instead of staying in bootloader/stub mode
   - `mcu-agentd --non-interactive monitor esp32s3_frontpanel --reset`
   - 板级验证 heater/fan/runtime logs 后，如需输入校准再临时构建 `frontpanel-key-test` 版本
 

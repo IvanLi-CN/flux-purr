@@ -74,6 +74,27 @@ export interface DevdDeviceRecord {
   identity: Identity
   network: NetworkSummary
   status: ControlPlaneStatus
+  events?: DevdEvent[]
+}
+
+export interface DevdEvent {
+  id: string
+  timestamp: string
+  deviceId?: string | null
+  kind: string
+  message: string
+  payload?:
+    | (Record<string, unknown> & {
+        stage?: string
+        code?: string
+        message?: string
+        retryable?: boolean
+        ssid?: string
+        passwordPresent?: boolean
+        artifactId?: string
+        leaseId?: string
+      })
+    | null
 }
 
 export interface DevdDeviceList {
@@ -134,6 +155,20 @@ export interface ArtifactVerifyResult {
     size: number
     ok: boolean
   }>
+}
+
+export interface FlashRequest {
+  leaseId: string
+  artifact: FirmwareArtifactManifest
+  dryRun: boolean
+  confirm?: 'FLASH'
+}
+
+export interface FlashResult {
+  artifactId: string
+  dryRun: boolean
+  status: string
+  message: string
 }
 
 export interface UsbRequestFrame {
