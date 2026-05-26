@@ -13,7 +13,7 @@
 - 共享领域契约由 firmware、devd 与 Web 各自的 typed adapter 实现。
 - firmware v1 先交付 host-testable status adapter、USB JSONL parser/encoder、WiFi redaction、runtime config 与 feature flags。
 - `tools/flux-purr-devd` 提供 localhost daemon、授权端口 serial discovery、lease、bounded events、USB identity/network/status/WiFi/runtime bridge、artifact verify、dry-run 与 flash command boundary。
-- `devd` 对 native serial RPC 使用 daemon-local 串行化访问；Web 对 devd identity/network/status 探测顺序读取，避免多个 HTTP 请求同时抢占同一个 USB CDC 端口。
+- `devd` 对 native serial RPC 使用 daemon-local 串行化访问，并为每个授权 port 保留持久 serial session；Web 对 devd identity/network/status 探测顺序读取，避免多个 HTTP 请求同时抢占或反复打开同一个 USB CDC 端口。
 - `devd` USB serial exchange 会在单次 RPC 总超时内重试 firmware 返回的可重试 `startup_busy`；对只读 identity/network/status 请求，还会在无响应时做 bounded resend，覆盖设备刚 reset 后 USB/JTAG 尚未初始化或第一条请求被启动窗口吞掉的情况。WiFi/runtime 写命令不做静默重发，只在 firmware 明确返回 `startup_busy` 时重试。
 - `devd` 会在 native serial RPC 失败时把设备标记为 `connection=error`，把网络态标记为 `timeout` 或 `error`，并在设备事件里记录失败 stage 与错误 code。
 - `devd` handler tests 覆盖 daemon-local `bind/connect/disconnect`、runtime mutating endpoint 的 lease guard，以及 real flash 必须先同 artifact dry-run、再显式 `confirm=FLASH`、最后仍受 `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` 保护。
@@ -32,7 +32,7 @@
 - firmware 运行期 `runtime_config` response 返回更新后的 `status` payload，USB 契约本身即可证明目标温度、主动散热和 heater hold 已生效；`devd` 会直接使用该 status 更新 daemon device record，避免写入后再追加一次 `get_status` USB 轮询。
 - firmware host tests 覆盖 USB TX 64-byte FIFO 满后的分块 flush 完整性、底层 TX hard error 会中止 response 发送、启动期 identity/network 响应，以及启动期 status 延迟语义。
 - `scripts/devd-hardware-smoke.py` 提供可重复的 live `devd` smoke：默认检查授权端口 native discovery、lease、identity/network/status 读取、artifact catalog/verify/flash dry-run、runtime 写回响应和读回状态一致性，以及 lease/WiFi/runtime/flash bounded event 证据，并通过 `/api/v1/devices/:id/events` SSE backlog 证明 monitor event stream 可读到当前 lease event；输出为机器可读 JSON。脚本会在长 smoke 阶段之间 heartbeat 当前 lease，避免 artifact、WiFi 或 runtime 读回步骤误用过期 lease。显式 `--device-id mock-fp-lab-01 --allow-mock-device` 只验证 localhost HTTP contract，不可视为硬件验证。WiFi provisioning 只有显式传入 SSID 时才执行，runtime 变更证明需显式传入 `--exercise-runtime-mutation`，WiFi clear 证明需显式传入 `--exercise-wifi-clear` 并会恢复提供的 WiFi 配置，真实烧录证明需同时传入 `--exercise-real-flash --real-flash-confirm FLASH` 且 `devd` 必须已启用真实烧录。
-- native serial RPC 在打开授权 USB Serial/JTAG port 前会获取 port-scoped process lock；同一 port 上多个 `devd` 进程的 RPC 会串行化，等待超过当前 RPC timeout 时返回 retryable `serial_lock_timeout`，避免浏览器预览、旧 daemon 或 smoke 同时打同一授权端口。
+- native serial RPC 会为授权 USB Serial/JTAG port 获取 port-scoped process lock，并把该 lock 与打开的 serial fd 一起保存在 daemon-local session map 中。正常 polling 会复用同一 fd；只有 recoverable I/O error 才丢弃 session 并等待 port 重新出现。等待跨进程锁超过当前 RPC timeout 时返回 retryable `serial_lock_timeout`，避免浏览器预览、旧 daemon 或 smoke 同时打同一授权端口。
 - 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease、identity/network/status、WiFi provisioning set/clear event redaction、artifact verify、dry-run guard、runtime mutation/readback/restore、`mcu-agentd` flash、direct USB JSONL `hello` / `get_identity` / `wifi_config clear` / `get_network` 与 lease event stream。当前授权端口在线时，Web -> `devd` -> USB JSONL -> firmware 的真实硬件控制链路可用。
 - `devd` real flash path 绑定 lease 对应 native serial port；本地 ESP32-S3 release ELF 通过 `espflash flash --after hard-reset` 写入，只有 raw app binary artifact 才允许 `espflash write-bin` + explicit flash address；空 artifact 不再被 dry-run 视为通过。
 
@@ -42,6 +42,7 @@
 - 真实 flash 仍需授权端口在线、明确允许真实写入、并完成 dry-run 后复验。
 - Web Update 已能加载 `devd` catalog 并通过 `POST /api/v1/artifacts/verify` 执行 dry-check；真实 flash 仍需授权端口在线并显式允许真实写入后复验。
 - Direct firmware HTTP / `net_http` server 尚未实现；当前真实硬件控制路径必须走 Web -> `devd` -> USB JSONL。
+- macOS 打开 ESP32-S3 USB Serial/JTAG port 时仍可能触发一次设备 reset；`devd` 的稳定性契约是避免 Web/devd polling 期间反复 open/close 造成持续重启。
 - 完整 artifact catalog 管理页不属于本 spec 范围。
 
 ## Hardware Smoke
@@ -84,6 +85,7 @@
 - `esp-println` and `esp-backtrace` are not firmware dependencies in the current implementation. The firmware provides a local panic handler, keeps `defmt` output no-op, uses `esp-hal` `UsbSerialJtag` directly for USB Serial/JTAG reads and writes, and sets `embassy-executor` `task-arena-size-32768` to avoid the pre-main `task arena is full` panic observed after removing the old logging stack.
 - Current Web-to-hardware browser smoke: lease-managed Vite `127.0.0.1:32082` pointed at CORS-enabled `devd` `127.0.0.1:32083` with `FLUX_PURR_DEVD_SERIAL_PORT=/dev/cu.usbmodem21221401`. Chrome DevTools a11y snapshot showed the Web app automatically selected `USB JTAG/serial debug unit / DEVD` ahead of daemon mock devices, reached `LEASE ACTIVE`, displayed real hardware `PD 12V`, and showed WiFi capability state `DISABLED`. Browser network evidence included `/api/v1/devices`, lease heartbeat, identity/network/status reads, and runtime `PUT` with the active lease; final browser readback displayed the live firmware status instead of mock simulation drift, with `heaterEnabled=false`, `heaterOutputPercent=0`, and WiFi `state=disabled`.
 - Current WiFi hardware smoke: `python3 scripts/devd-hardware-smoke.py --base-url http://127.0.0.1:32083 --serial-port /dev/cu.usbmodem21221401 --skip-runtime --skip-artifact --wifi-ssid FluxPurr-Web-HW-Smoke --wifi-password '' --exercise-wifi-clear --timeout-sec 10` passed after the native WiFi success path dropped `state_lock` before emitting the bounded event. The smoke verified WiFi set, clear, restore, redacted bounded events, lease heartbeat, and lease release; a final authorized-port direct JSONL `wifi_config clear` plus `get_network` returned `state=disabled` and `ssid=null`.
+- Persistent serial session validation: lease-managed CORS `devd` `127.0.0.1:41270` and Vite `127.0.0.1:41271` used `FLUX_PURR_DEVD_SERIAL_PORT=/dev/cu.usbmodem21221401` with one browser tab. Direct API polling over the reused session read identity/network/status for 12 cycles; the initial open observed `uptimeSeconds=0`, then uptime increased monotonically to `56` with `heaterEnabled=false`, `heaterOutputPercent=0`, and WiFi `state=disabled`. With the browser page active and `LEASE ACTIVE`, daemon state observed browser polling increase uptime from `147` to `206` without reset. A safe runtime write through the active lease returned `targetTempC=30`, `heaterEnabled=false`, `heaterOutputPercent=0`, and `network.state=disabled`; follow-up browser-poll state increased uptime from `280` to `304` without reset. Chrome DevTools network evidence showed heartbeat, identity, network, and status requests returning 200 after the transient 409 conflicts caused by earlier API validation leases expired.
 
 ## References
 

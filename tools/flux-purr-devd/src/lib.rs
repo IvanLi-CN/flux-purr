@@ -1,14 +1,14 @@
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
     io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 
 use axum::{
     Json, Router,
@@ -78,6 +78,7 @@ pub struct AppState {
     inner: Arc<Mutex<DevdState>>,
     events: broadcast::Sender<DevdEvent>,
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
+    serial_sessions: Arc<Mutex<SerialSessionMap>>,
 }
 
 impl AppState {
@@ -91,6 +92,7 @@ impl AppState {
             inner: Arc::new(Mutex::new(state)),
             events,
             serial_rpc: Arc::new(tokio::sync::Mutex::new(())),
+            serial_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -1186,8 +1188,15 @@ async fn serial_exchange(
     retry_on_silence: bool,
 ) -> Result<Value, HttpError> {
     let _serial_rpc = state.serial_rpc.lock().await;
+    let serial_sessions = state.serial_sessions.clone();
     tokio::task::spawn_blocking(move || {
-        serial_exchange_blocking(&port_path, &request_id, &request, retry_on_silence)
+        serial_exchange_blocking(
+            &serial_sessions,
+            &port_path,
+            &request_id,
+            &request,
+            retry_on_silence,
+        )
     })
     .await
     .map_err(|_| HttpError::internal("serial worker failed"))?
@@ -1228,25 +1237,26 @@ where
 }
 
 fn serial_exchange_blocking(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
     port_path: &str,
     request_id: &str,
     request: &str,
     retry_on_silence: bool,
 ) -> Result<Value, HttpError> {
     let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
-    let _serial_lock = SerialPortProcessLock::acquire(port_path, deadline)?;
-    let mut port = open_serial_port(port_path)?;
-    write_serial_request(&mut *port, request)?;
+    let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    let mut session = take_or_open_serial_session(&mut serial_sessions, port_path, deadline)?;
+    write_serial_request(&mut *session.port, request)?;
 
     let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
 
     while Instant::now() < deadline {
-        match port.read(&mut read_buf) {
+        match session.port.read(&mut read_buf) {
             Ok(0) => {
                 maybe_retry_silent_serial_request(
-                    &mut *port,
+                    &mut *session.port,
                     request,
                     retry_on_silence,
                     &mut next_silent_retry_at,
@@ -1257,16 +1267,22 @@ fn serial_exchange_blocking(
                 for byte in &read_buf[..read] {
                     if *byte == b'\n' {
                         match decode_usb_response_line(&line, request_id) {
-                            Ok(Some(payload)) => return Ok(payload),
+                            Ok(Some(payload)) => {
+                                store_serial_session(&mut serial_sessions, port_path, session);
+                                return Ok(payload);
+                            }
                             Ok(None) => {}
                             Err(error)
                                 if is_retryable_startup_busy(&error)
                                     && Instant::now() < deadline =>
                             {
                                 std::thread::sleep(SERIAL_STARTUP_RETRY_DELAY);
-                                write_serial_request(&mut *port, request)?;
+                                write_serial_request(&mut *session.port, request)?;
                             }
-                            Err(error) => return Err(error),
+                            Err(error) => {
+                                store_serial_session(&mut serial_sessions, port_path, session);
+                                return Err(error);
+                            }
                         }
                         line.clear();
                     } else if line.len() < SERIAL_LINE_LIMIT {
@@ -1278,7 +1294,7 @@ fn serial_exchange_blocking(
             }
             Err(error) if error.kind() == io::ErrorKind::TimedOut => {
                 maybe_retry_silent_serial_request(
-                    &mut *port,
+                    &mut *session.port,
                     request,
                     retry_on_silence,
                     &mut next_silent_retry_at,
@@ -1286,8 +1302,9 @@ fn serial_exchange_blocking(
                 )?;
             }
             Err(error) if is_recoverable_serial_io_error(&error) => {
-                port = reopen_serial_port(port_path, deadline)?;
-                write_serial_request(&mut *port, request)?;
+                drop(session);
+                session = reopen_serial_session(port_path, deadline)?;
+                write_serial_request(&mut *session.port, request)?;
                 next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
                 line.clear();
             }
@@ -1295,12 +1312,47 @@ fn serial_exchange_blocking(
         }
     }
 
+    store_serial_session(&mut serial_sessions, port_path, session);
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+type SerialSessionMap = HashMap<String, SerialSession>;
+
+struct SerialSession {
+    _serial_lock: SerialPortProcessLock,
+    port: Box<dyn serialport::SerialPort>,
+}
+
+fn lock_serial_sessions(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+) -> Result<MutexGuard<'_, SerialSessionMap>, HttpError> {
+    serial_sessions
+        .lock()
+        .map_err(|_| HttpError::internal("serial session lock poisoned"))
+}
+
+fn take_or_open_serial_session(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    deadline: Instant,
+) -> Result<SerialSession, HttpError> {
+    serial_sessions
+        .remove(port_path)
+        .map(Ok)
+        .unwrap_or_else(|| open_serial_session(port_path, deadline))
+}
+
+fn store_serial_session(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    session: SerialSession,
+) {
+    serial_sessions.insert(port_path.to_string(), session);
 }
 
 struct SerialPortProcessLock {
@@ -1322,7 +1374,10 @@ impl SerialPortProcessLock {
                     HttpError::new(
                         StatusCode::BAD_GATEWAY,
                         "serial_lock_failed",
-                        &format!("Failed to open serial lock {}: {error}", lock_path.display()),
+                        &format!(
+                            "Failed to open serial lock {}: {error}",
+                            lock_path.display()
+                        ),
                         true,
                     )
                 })?;
@@ -1395,14 +1450,20 @@ fn open_serial_port(port_path: &str) -> Result<Box<dyn serialport::SerialPort>, 
     Ok(port)
 }
 
-fn reopen_serial_port(
-    port_path: &str,
-    deadline: Instant,
-) -> Result<Box<dyn serialport::SerialPort>, HttpError> {
+fn open_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSession, HttpError> {
+    let serial_lock = SerialPortProcessLock::acquire(port_path, deadline)?;
+    let port = open_serial_port(port_path)?;
+    Ok(SerialSession {
+        _serial_lock: serial_lock,
+        port,
+    })
+}
+
+fn reopen_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSession, HttpError> {
     while Instant::now() < deadline {
         if Path::new(port_path).exists() {
-            match open_serial_port(port_path) {
-                Ok(port) => return Ok(port),
+            match open_serial_session(port_path, deadline) {
+                Ok(session) => return Ok(session),
                 Err(error) if error.error.retryable => {}
                 Err(error) => return Err(error),
             }

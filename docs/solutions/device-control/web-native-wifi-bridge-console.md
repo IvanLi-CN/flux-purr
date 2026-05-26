@@ -102,6 +102,8 @@ daemon endpoint 在更新 registry 后再发布 bounded event 时，必须先释
 
 同一个 native serial port 必须有跨进程互斥保护。进程内 mutex 只能保护单个 daemon；开发时残留的旧 daemon、浏览器预览或 smoke 进程可能同时打开同一个 USB Serial/JTAG port，造成 `Broken pipe`、短时断线或看起来像硬件重启的现象。serial RPC 应该在 open/write/read 前获取 port-scoped process lock，并在超时窗口内等待或返回 retryable lock timeout。
 
+对 ESP32-S3 USB Serial/JTAG 这类 host open 可能触发 reset 的设备，daemon 不应在每个 HTTP polling request 中反复 open/close 串口。更稳的模型是 per-port 持久 serial session：process lock 与 fd 同生命周期，正常 identity/network/status/runtime RPC 复用同一个 fd；只有 recoverable I/O error 才丢弃 session 并等待 port 重新出现。
+
 ### USB Lease 模型
 
 Mains Aegis 用短生命周期 Web lease 保护 USB 控制权：
