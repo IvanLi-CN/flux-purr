@@ -4,7 +4,7 @@
 
 ## Current Status
 
-- Implementation: devd + USB JSONL hardware loop verified; active for WiFi provisioning and future direct HTTP
+- Implementation: Web + devd + USB JSONL hardware loop verified for identity, network, status, WiFi provisioning, runtime mutation, artifact dry-run, and monitor events; direct HTTP remains future work
 - Lifecycle: active
 - Catalog note: Web + firmware + native devd real transport contract
 
@@ -31,14 +31,14 @@
 - firmware 在完整 frontpanel runtime 主循环就绪前会轮询 USB JSONL 并响应 `get_identity`、`get_network`、`set_log_level`；`get_status` 与 mutating command 在启动期返回可重试 `startup_busy`，避免 host 在显示、PD、EEPROM 或传感器初始化窗口内只能等待超时。
 - firmware 运行期 `runtime_config` response 返回更新后的 `status` payload，USB 契约本身即可证明目标温度、主动散热和 heater hold 已生效；`devd` 会直接使用该 status 更新 daemon device record，避免写入后再追加一次 `get_status` USB 轮询。
 - firmware host tests 覆盖 USB TX 64-byte FIFO 满后的分块 flush 完整性、底层 TX hard error 会中止 response 发送、启动期 identity/network 响应，以及启动期 status 延迟语义。
-- `scripts/devd-hardware-smoke.py` 提供可重复的 live `devd` smoke：默认检查授权端口 native discovery、lease、identity/network/status 读取、artifact catalog/verify/flash dry-run、runtime 写回响应和读回状态一致性，以及 lease/WiFi/runtime/flash bounded event 证据，并通过 `/api/v1/devices/:id/events` SSE backlog 证明 monitor event stream 可读到当前 lease event；输出为机器可读 JSON。显式 `--device-id mock-fp-lab-01 --allow-mock-device` 只验证 localhost HTTP contract，不可视为硬件验证。WiFi provisioning 只有显式传入 SSID 时才执行，runtime 变更证明需显式传入 `--exercise-runtime-mutation`，WiFi clear 证明需显式传入 `--exercise-wifi-clear` 并会恢复提供的 WiFi 配置，真实烧录证明需同时传入 `--exercise-real-flash --real-flash-confirm FLASH` 且 `devd` 必须已启用真实烧录。
-- 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease、identity/network/status、WiFi redaction、artifact verify、dry-run guard、runtime mutation/readback/restore、`mcu-agentd` flash、direct USB JSONL `hello` / `get_identity` 与 lease event stream。当前授权端口在线时，Web -> `devd` -> USB JSONL -> firmware 的真实硬件控制链路可用。
+- `scripts/devd-hardware-smoke.py` 提供可重复的 live `devd` smoke：默认检查授权端口 native discovery、lease、identity/network/status 读取、artifact catalog/verify/flash dry-run、runtime 写回响应和读回状态一致性，以及 lease/WiFi/runtime/flash bounded event 证据，并通过 `/api/v1/devices/:id/events` SSE backlog 证明 monitor event stream 可读到当前 lease event；输出为机器可读 JSON。脚本会在长 smoke 阶段之间 heartbeat 当前 lease，避免 artifact、WiFi 或 runtime 读回步骤误用过期 lease。显式 `--device-id mock-fp-lab-01 --allow-mock-device` 只验证 localhost HTTP contract，不可视为硬件验证。WiFi provisioning 只有显式传入 SSID 时才执行，runtime 变更证明需显式传入 `--exercise-runtime-mutation`，WiFi clear 证明需显式传入 `--exercise-wifi-clear` 并会恢复提供的 WiFi 配置，真实烧录证明需同时传入 `--exercise-real-flash --real-flash-confirm FLASH` 且 `devd` 必须已启用真实烧录。
+- 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease、identity/network/status、WiFi provisioning set/clear event redaction、artifact verify、dry-run guard、runtime mutation/readback/restore、`mcu-agentd` flash、direct USB JSONL `hello` / `get_identity` / `wifi_config clear` / `get_network` 与 lease event stream。当前授权端口在线时，Web -> `devd` -> USB JSONL -> firmware 的真实硬件控制链路可用。
 - `devd` real flash path 绑定 lease 对应 native serial port；本地 ESP32-S3 release ELF 通过 `espflash flash --after hard-reset` 写入，只有 raw app binary artifact 才允许 `espflash write-bin` + explicit flash address；空 artifact 不再被 dry-run 视为通过。
 
 ## Remaining Gaps
 
 - PR 号在 PR 创建后回填。
-- 当前代码已在授权 MCU 端口完成真实 USB JSONL `hello`、identity/network/status、artifact dry-run、runtime mutation/readback/restore smoke；WiFi provisioning 与 clear 仍需在提供目标 SSID 后复验。
+- 真实 flash 仍需授权端口在线、明确允许真实写入、并完成 dry-run 后复验。
 - Web Update 已能加载 `devd` catalog 并通过 `POST /api/v1/artifacts/verify` 执行 dry-check；真实 flash 仍需授权端口在线并显式允许真实写入后复验。
 - Direct firmware HTTP / `net_http` server 尚未实现；当前真实硬件控制路径必须走 Web -> `devd` -> USB JSONL。
 - 完整 artifact catalog 管理页不属于本 spec 范围。
@@ -81,6 +81,8 @@
 - Hardware-boundary guard: `scripts/devd-hardware-smoke.py` preflights the authorized serial port before contacting `devd` when no explicit `--device-id` is provided. If the authorized port is absent, the smoke exits at step `authorized_serial_port` before any network or serial I/O and refuses to auto-select a re-enumerated path.
 - Current authorized-port hardware smoke: selector `/dev/cu.usbmodem21221401` is present and was flashed with `mcu-agentd --non-interactive flash esp32s3_frontpanel` using the current ESP32-S3 release artifact. Direct authorized-port JSONL returned boot `hello` and a matching `get_identity` response for request `final-direct-id`. The live `devd` smoke on lease-managed `127.0.0.1:25240` passed: `python3 scripts/devd-hardware-smoke.py --base-url http://127.0.0.1:25240 --serial-port /dev/cu.usbmodem21221401 --timeout-sec 8 --exercise-runtime-mutation` covered health, native discovery, lease/SSE backlog, identity, network, status, local artifact verify, flash dry-run, runtime mutation, runtime event, delayed readback after firmware persistence debounce, runtime restore, and lease release. The verified artifact was `sha256:ae18a9d9e10f8a5ed5be1db3a4ca874f3106af1fde54daa8314f2f38d0cda139`.
 - `esp-println` and `esp-backtrace` are not firmware dependencies in the current implementation. The firmware provides a local panic handler, keeps `defmt` output no-op, uses `esp-hal` `UsbSerialJtag` directly for USB Serial/JTAG reads and writes, and sets `embassy-executor` `task-arena-size-32768` to avoid the pre-main `task arena is full` panic observed after removing the old logging stack.
+- Current Web-to-hardware browser smoke: lease-managed Vite `127.0.0.1:32082` pointed at CORS-enabled `devd` `127.0.0.1:32083` with `FLUX_PURR_DEVD_SERIAL_PORT=/dev/cu.usbmodem21221401`. Chrome DevTools a11y snapshot showed the Web app automatically selected `USB JTAG/serial debug unit / DEVD` ahead of daemon mock devices, reached `LEASE ACTIVE`, displayed real hardware `PD 12V`, and showed WiFi capability state `DISABLED`. Browser network evidence included `/api/v1/devices`, lease heartbeat, identity/network/status reads, and runtime `PUT` with the active lease; final browser readback displayed the live firmware status instead of mock simulation drift, with `heaterEnabled=false`, `heaterOutputPercent=0`, and WiFi `state=disabled`.
+- Current WiFi hardware smoke: `python3 scripts/devd-hardware-smoke.py --base-url http://127.0.0.1:32083 --serial-port /dev/cu.usbmodem21221401 --skip-runtime --skip-artifact --wifi-ssid FluxPurr-Web-HW-Smoke --wifi-password '' --exercise-wifi-clear --timeout-sec 10` passed after the native WiFi success path dropped `state_lock` before emitting the bounded event. The smoke verified WiFi set, clear, restore, redacted bounded events, lease heartbeat, and lease release; a final authorized-port direct JSONL `wifi_config clear` plus `get_network` returned `state=disabled` and `ssid=null`.
 
 ## References
 

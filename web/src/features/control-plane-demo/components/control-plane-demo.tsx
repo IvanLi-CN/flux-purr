@@ -182,33 +182,55 @@ export function ControlPlaneDemo({
     selectedDeviceId,
   ])
 
+  useEffect(() => {
+    const nextSelectedDevice = activeScenario.devices.find(
+      (device) => device.id === activeScenario.selectedDeviceId
+    )
+    if (
+      nextSelectedDevice?.transport === 'devd' &&
+      feedback.detail === 'Thermal state is sampled from the mock device contract.'
+    ) {
+      setFeedback({
+        title: 'Runtime synced',
+        detail: 'Thermal state is sampled from live devd firmware status.',
+        tone: 'info',
+      })
+    }
+  }, [activeScenario.devices, activeScenario.selectedDeviceId, feedback.detail])
+
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
       return activeScenario.devices[0]
     }
 
+    const isLiveDevdDevice = selectedDevice.transport === 'devd'
     const liveNetwork = networkByDevice[selectedDevice.id]
+    const currentTempC = isLiveDevdDevice
+      ? selectedDevice.currentTempC
+      : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
+    const targetTempC = isLiveDevdDevice
+      ? selectedDevice.targetTempC
+      : (targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC)
+    const fanState = isLiveDevdDevice
+      ? selectedDevice.fanState
+      : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
+    const heaterOutputPercent = isLiveDevdDevice
+      ? selectedDevice.heaterOutputPercent
+      : Math.min(
+          100,
+          Math.max(
+            0,
+            selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
+          )
+        )
 
     return {
       ...selectedDevice,
-      currentTempC: currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC,
-      targetTempC: targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC,
-      fanState: fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState,
+      currentTempC,
+      targetTempC,
+      fanState,
       activeCoolingEnabled: selectedDevice.activeCoolingEnabled,
-      heaterOutputPercent: heaterHeldByDevice[selectedDevice.id]
-        ? 0
-        : Math.min(
-            100,
-            Math.max(
-              0,
-              selectedDevice.heaterOutputPercent +
-                Math.round(
-                  ((targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC) -
-                    (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)) /
-                    8
-                )
-            )
-          ),
+      heaterOutputPercent: heaterHeldByDevice[selectedDevice.id] ? 0 : heaterOutputPercent,
       wifiRssi: liveNetwork?.wifiRssi ?? selectedDevice.wifiRssi,
       networkState: liveNetwork?.state ?? selectedDevice.networkState,
     }
@@ -299,22 +321,10 @@ export function ControlPlaneDemo({
       }
 
       try {
-        const status = await controlClient.configureRuntime(devdBaseUrl, visibleDevice.id, {
+        await controlClient.configureRuntime(devdBaseUrl, visibleDevice.id, {
           leaseId: visibleDevice.leaseId,
           ...patch,
         })
-        setTargetTempByDevice((current) => ({
-          ...current,
-          [visibleDevice.id]: status.targetTempC,
-        }))
-        setFanPolicyByDevice((current) => ({
-          ...current,
-          [visibleDevice.id]: status.fanDisplayState,
-        }))
-        setHeaterHeldByDevice((current) => ({
-          ...current,
-          [visibleDevice.id]: !status.heaterEnabled,
-        }))
         return true
       } catch (error) {
         const detail = error instanceof Error ? error.message : failureMessage
@@ -334,6 +344,9 @@ export function ControlPlaneDemo({
     const timer = window.setInterval(() => {
       setCurrentTempByDevice((current) => {
         if (!selectedDevice || visibleDevice.severity === 'offline') {
+          return current
+        }
+        if (selectedDevice.transport === 'devd') {
           return current
         }
 
@@ -461,7 +474,7 @@ export function ControlPlaneDemo({
     }
     setTargetTempByDevice((current) => ({
       ...current,
-      [visibleDevice.id]: clampedTarget,
+      ...(visibleDevice.transport === 'devd' ? {} : { [visibleDevice.id]: clampedTarget }),
     }))
     setFeedback({
       title: 'Target updated',
@@ -479,7 +492,10 @@ export function ControlPlaneDemo({
     if (visibleDevice.transport === 'devd' && !liveUpdated) {
       return
     }
-    setFanPolicyByDevice((current) => ({ ...current, [visibleDevice.id]: fanState }))
+    setFanPolicyByDevice((current) => ({
+      ...current,
+      ...(visibleDevice.transport === 'devd' ? {} : { [visibleDevice.id]: fanState }),
+    }))
     setFeedback({
       title: 'Fan policy updated',
       detail: `${visibleDevice.alias} fan policy is now ${fanState}.`,
@@ -551,7 +567,10 @@ export function ControlPlaneDemo({
     if (visibleDevice.transport === 'devd' && !liveUpdated) {
       return
     }
-    setHeaterHeldByDevice((current) => ({ ...current, [visibleDevice.id]: nextHeld }))
+    setHeaterHeldByDevice((current) => ({
+      ...current,
+      ...(visibleDevice.transport === 'devd' ? {} : { [visibleDevice.id]: nextHeld }),
+    }))
     setFeedback({
       title: nextHeld ? 'Heater held' : 'Heater resumed',
       detail: nextHeld

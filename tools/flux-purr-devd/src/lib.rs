@@ -977,6 +977,7 @@ async fn configure_wifi(
             device.status.network = network.clone();
             device.connection = ConnectionState::Connected;
         }
+        drop(state_lock);
         emit_wifi_config_event(&state, &device_id, &payload);
         return Ok(Json(json!({
             "accepted": true,

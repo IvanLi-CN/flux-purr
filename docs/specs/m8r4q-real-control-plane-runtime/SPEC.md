@@ -94,7 +94,7 @@
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
 - Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、WiFi phases、monitor trace、firmware blocked/warning 状态都可见。
-- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；未提供目标 SSID 时，WiFi provisioning 真机写入可作为独立后续复验项。
+- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入必须至少覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
 
 ## 非功能性验收 / 质量门槛
 
@@ -116,6 +116,7 @@
 - `assets/web-app-wifi-lease-blocked-story.png`：Storybook canvas 中的 Web WiFi lease conflict 页；USB lease conflict 时 provisioning 被阻断，SSID/password 输入与 Provision 命令禁用，并显示阻断原因。
 - `assets/web-app-native-serial-timeout-story.png`：Storybook canvas 中的 authorized native serial timeout 页；`devd` lease 存在但 USB JSONL identity 超时，Web 显示 timeout 原因并禁用 WiFi Provision / Clear 命令。
 - `assets/web-app-devd-runtime-trace-story.png`：Storybook canvas 中的 Runtime trace；Web 将 daemon serial、lease 与 flash bounded events 显示为安全摘要，不暴露 raw payload。
+- Chrome DevTools a11y snapshot on lease-managed `127.0.0.1:32082` against CORS-enabled `devd` `127.0.0.1:32083` verified the live Web page selects `USB JTAG/serial debug unit / DEVD` before daemon mock devices, reaches `LEASE ACTIVE`, displays real hardware PD/status values without mock simulation drift, shows WiFi state `DISABLED`, and includes bounded WiFi set/clear events in Runtime trace.
 
 ## 参考（References）
 

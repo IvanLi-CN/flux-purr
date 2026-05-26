@@ -181,13 +181,15 @@ export function useLiveDevdScenario(
       return scenario
     }
 
+    const liveDevices = prioritizeLiveDevdDevices(devices)
+    const selectedDeviceId = selectPreferredLiveDevdDeviceId(liveDevices)
     const fixtureDevices = scenario.devices.filter(
       (device) =>
         device.transport === 'mock' &&
         device.severity !== 'nominal' &&
-        !devices.some((liveDevice) => liveDevice.id === device.id)
+        !liveDevices.some((liveDevice) => liveDevice.id === device.id)
     )
-    const nativeCount = devices.filter((device) => device.transport === 'devd').length
+    const nativeCount = liveDevices.filter((device) => device.transport === 'devd').length
     const devdEvent: EventLogEntry = {
       time: 'live',
       source: 'devd',
@@ -201,8 +203,8 @@ export function useLiveDevdScenario(
     return {
       ...scenario,
       name: 'Live devd bridge',
-      selectedDeviceId: devices[0].id,
-      devices: [...devices, ...fixtureDevices],
+      selectedDeviceId,
+      devices: [...liveDevices, ...fixtureDevices],
       artifacts: artifacts.length > 0 ? artifacts : scenario.artifacts,
       metrics: scenario.metrics.map((metric) =>
         metric.label === 'Bound targets'
@@ -220,6 +222,14 @@ export function useLiveDevdScenario(
       events: [devdEvent, ...devdEvents, ...scenario.events],
     }
   }, [artifacts, devdEvents, devices, scenario])
+}
+
+export function prioritizeLiveDevdDevices(devices: DeviceTarget[]) {
+  return [...devices].sort((left, right) => liveDevicePriority(left) - liveDevicePriority(right))
+}
+
+export function selectPreferredLiveDevdDeviceId(devices: DeviceTarget[]) {
+  return devices.find((device) => device.transport === 'devd')?.id ?? devices[0]?.id ?? ''
 }
 
 export function mergeDevdProbeRecord(
@@ -252,6 +262,16 @@ function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
 
 function replaceDevice(devices: DeviceTarget[], nextDevice: DeviceTarget) {
   return devices.map((device) => (device.id === nextDevice.id ? nextDevice : device))
+}
+
+function liveDevicePriority(device: DeviceTarget) {
+  if (device.transport === 'devd' && device.leaseState === 'active') {
+    return 0
+  }
+  if (device.transport === 'devd') {
+    return 1
+  }
+  return 2
 }
 
 function mergeCapabilities(...capabilitySets: string[][]) {

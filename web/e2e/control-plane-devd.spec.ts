@@ -28,6 +28,21 @@ test.describe('control plane live devd bridge', () => {
         sendJson(response, 200, {
           devices: [
             {
+              id: 'mock-fp-lab-01',
+              displayName: 'Daemon mock target',
+              portPath: null,
+              transport: 'mock',
+              connection: 'connected',
+              identity: {
+                ...identity(['identity', 'status']),
+                deviceId: 'mock-fp-lab-01',
+                hostname: 'mock-fp-lab-01',
+              },
+              network: network('connected'),
+              status: status(network('connected')),
+              events: [],
+            },
+            {
               id: deviceId,
               displayName: 'E2E authorized USB target',
               portPath: '/dev/cu.usbmodem-e2e',
@@ -228,6 +243,10 @@ test.describe('control plane live devd bridge', () => {
     await expect(targetRegion).toContainText('DEVD')
     await expect(targetRegion).toContainText('Lease')
     await expect(targetRegion).toContainText('ACTIVE')
+    await page.waitForTimeout(1800)
+    await expect(page.getByText('181.5').first()).toBeVisible()
+    await expect(page.getByText('Heater 18%')).toBeVisible()
+    await expect(page.getByText('live devd firmware status')).toBeVisible()
     await expect(
       page.getByText('native serial RPC failed: status / usb_response_timeout').first()
     ).toBeVisible()

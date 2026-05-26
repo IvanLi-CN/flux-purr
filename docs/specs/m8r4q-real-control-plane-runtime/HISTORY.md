@@ -31,3 +31,12 @@
 - 固件运行期 `runtime_config` USB response 从 ack 对齐为更新后的 `status` payload，避免 host 只能依赖后续 status 轮询证明 runtime 写入生效。
 - `devd` runtime bridge 直接解析 `runtime_config` response 内的 `status` payload 并更新 device record，减少写操作后的额外 USB request 和超时面。
 - 固件与 artifact catalog 不再声明尚未实现的 direct `net_http` / HTTP events capability；当前硬件控制路径以 `devd` + USB JSONL 为准。
+
+## 2026-05-26
+
+- Web live devd scenario 默认目标选择改为优先 active/native `devd` 设备，不再依赖 daemon 返回顺序；Playwright e2e 覆盖 daemon mock 在前、native serial 在后的回归场景。
+- Web Dashboard 对 live `devd` 设备显示 daemon/firmware status，不再套用 mock 温度仿真或乐观 runtime 覆盖；Playwright e2e 覆盖 live devd 数值在刷新窗口内不漂移。
+- 修复 native `devd` WiFi 成功路径持锁 emit event 的死锁；WiFi set/clear/restore 真机 smoke 可通过同一授权 USB JSONL 链路完成。
+- `scripts/devd-hardware-smoke.py` 在长 smoke 阶段之间 heartbeat lease，避免 artifact、WiFi 或 runtime 读回步骤误用过期 lease。
+- 授权端口 `/dev/cu.usbmodem21221401` 上完成 Web -> `devd` -> USB JSONL -> firmware 浏览器验证：Web 自动选中 `USB JTAG/serial debug unit / DEVD`，达到 active lease，读取真实 PD/status/network，并通过 active lease 执行 runtime 写入。
+- 授权端口 WiFi provisioning 复验完成：临时 SSID set、clear、restore 与 redacted bounded events 通过 smoke；最终直接 USB JSONL clear 后 `get_network` 返回 `state=disabled`、`ssid=null`。
