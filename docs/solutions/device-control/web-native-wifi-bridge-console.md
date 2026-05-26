@@ -100,6 +100,8 @@ Daemon 应该是本地 HTTP 服务，而不是 UI 专用私有通道。Mains Aeg
 
 daemon endpoint 在更新 registry 后再发布 bounded event 时，必须先释放 registry/state lock。event publisher 往往会再次读取或写入同一个 registry；如果成功路径持锁 emit event，WiFi/runtime 这类 mutating endpoint 会在真实硬件返回成功后卡死，浏览器只看到挂起请求。
 
+同一个 native serial port 必须有跨进程互斥保护。进程内 mutex 只能保护单个 daemon；开发时残留的旧 daemon、浏览器预览或 smoke 进程可能同时打开同一个 USB Serial/JTAG port，造成 `Broken pipe`、短时断线或看起来像硬件重启的现象。serial RPC 应该在 open/write/read 前获取 port-scoped process lock，并在超时窗口内等待或返回 retryable lock timeout。
+
 ### USB Lease 模型
 
 Mains Aegis 用短生命周期 Web lease 保护 USB 控制权：

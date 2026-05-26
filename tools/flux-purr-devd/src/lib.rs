@@ -1,12 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    fs,
+    fs::{self, File},
     io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use axum::{
     Json, Router,
@@ -37,6 +39,17 @@ const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const SERIAL_LINE_LIMIT: usize = 4_096;
+#[cfg(unix)]
+const LOCK_EX: i32 = 2;
+#[cfg(unix)]
+const LOCK_NB: i32 = 4;
+#[cfg(unix)]
+const LOCK_UN: i32 = 8;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -1221,6 +1234,7 @@ fn serial_exchange_blocking(
     retry_on_silence: bool,
 ) -> Result<Value, HttpError> {
     let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
+    let _serial_lock = SerialPortProcessLock::acquire(port_path, deadline)?;
     let mut port = open_serial_port(port_path)?;
     write_serial_request(&mut *port, request)?;
 
@@ -1287,6 +1301,80 @@ fn serial_exchange_blocking(
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+struct SerialPortProcessLock {
+    #[cfg(unix)]
+    file: File,
+}
+
+impl SerialPortProcessLock {
+    fn acquire(port_path: &str, deadline: Instant) -> Result<Self, HttpError> {
+        #[cfg(unix)]
+        {
+            let lock_path = serial_lock_path(port_path);
+            let file = File::options()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|error| {
+                    HttpError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "serial_lock_failed",
+                        &format!("Failed to open serial lock {}: {error}", lock_path.display()),
+                        true,
+                    )
+                })?;
+
+            while Instant::now() < deadline {
+                // SAFETY: flock is called with a valid file descriptor owned by `file`.
+                let lock_result = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+                if lock_result == 0 {
+                    return Ok(Self { file });
+                }
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    return Err(serial_io_http_error(error));
+                }
+                std::thread::sleep(SERIAL_READ_TIMEOUT);
+            }
+
+            Err(HttpError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "serial_lock_timeout",
+                "Timed out waiting for exclusive USB serial access.",
+                true,
+            ))
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = (port_path, deadline);
+            Ok(Self {})
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SerialPortProcessLock {
+    fn drop(&mut self) {
+        // SAFETY: flock is called with a valid file descriptor owned by `self.file`.
+        let _ = unsafe { flock(self.file.as_raw_fd(), LOCK_UN) };
+    }
+}
+
+#[cfg(unix)]
+fn serial_lock_path(port_path: &str) -> PathBuf {
+    let mut hasher = Sha256::new();
+    hasher.update(port_path.as_bytes());
+    let digest = hasher.finalize();
+    let mut name = String::from("flux-purr-devd-serial-");
+    for byte in &digest[..8] {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    name.push_str(".lock");
+    std::env::temp_dir().join(name)
 }
 
 fn open_serial_port(port_path: &str) -> Result<Box<dyn serialport::SerialPort>, HttpError> {
