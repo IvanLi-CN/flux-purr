@@ -112,7 +112,7 @@
 - 证据来源：Web app runtime。
 - `assets/web-app-devd-no-authorized-serial.png`：Vite Web App 连接当前租约 `devd`；授权端口缺失时只显示 daemon mock target，并在 trace 中标明没有授权 native serial target。
 - `assets/web-app-devd-artifact-dry-check.png`：Vite Web App Update 页通过 `devd` 校验本地 ESP32-S3 固件产物，dry-check 返回通过。
-- `assets/web-app-wifi-provisioning-story.png`：Storybook canvas 中的 Web WiFi provisioning 页；表单通过 mock transport 写入 SSID，展示 network connected、provisioned feedback 与 WiFi handoff 阶段。
+- `assets/web-app-wifi-provisioning-story.png`：Storybook canvas 中的 Web WiFi provisioning 页；SSID 与 password 渲染为清晰可编辑输入框，表单通过 mock transport 写入 SSID，展示 WiFi handoff 阶段与 provisioning feedback。
 - `assets/web-app-wifi-lease-blocked-story.png`：Storybook canvas 中的 Web WiFi lease conflict 页；USB lease conflict 时 provisioning 被阻断，SSID/password 输入与 Provision 命令禁用，并显示阻断原因。
 - `assets/web-app-native-serial-timeout-story.png`：Storybook canvas 中的 authorized native serial timeout 页；`devd` lease 存在但 USB JSONL identity 超时，Web 显示 timeout 原因并禁用 WiFi Provision / Clear 命令。
 - `assets/web-app-devd-runtime-trace-story.png`：Storybook canvas 中的 Runtime trace；Web 将 daemon serial、lease 与 flash bounded events 显示为安全摘要，不暴露 raw payload。

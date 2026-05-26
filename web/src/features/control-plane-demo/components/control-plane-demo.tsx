@@ -1844,7 +1844,7 @@ function WifiView({
           </div>
 
           <form className="industrial-wifi-form" onSubmit={handleSubmit}>
-            <label>
+            <label className="industrial-wifi-field">
               <span className="industrial-label">SSID</span>
               <input
                 type="text"
@@ -1853,10 +1853,11 @@ function WifiView({
                 disabled={isBlocked}
                 maxLength={32}
                 autoComplete="off"
+                placeholder="Network SSID"
                 onChange={(event) => setSsid(event.currentTarget.value)}
               />
             </label>
-            <label>
+            <label className="industrial-wifi-field">
               <span className="industrial-label">Password</span>
               <input
                 type="password"
@@ -1865,6 +1866,7 @@ function WifiView({
                 disabled={isBlocked}
                 maxLength={64}
                 autoComplete="new-password"
+                placeholder="Network password"
                 onChange={(event) => setPassword(event.currentTarget.value)}
               />
             </label>
