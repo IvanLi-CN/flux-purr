@@ -214,6 +214,22 @@ export function ControlPlaneDemo({
     })
   }, [activeScenario.devices])
 
+  useEffect(() => {
+    setFanPolicyByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        if (device.transport !== 'devd' || current[device.id] !== device.fanState) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
       return activeScenario.devices[0]
@@ -225,9 +241,7 @@ export function ControlPlaneDemo({
       ? selectedDevice.currentTempC
       : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
     const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
-    const fanState = isLiveDevdDevice
-      ? selectedDevice.fanState
-      : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
+    const fanState = fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState
     const heaterOutputPercent = isLiveDevdDevice
       ? selectedDevice.heaterOutputPercent
       : Math.min(
@@ -508,7 +522,7 @@ export function ControlPlaneDemo({
     }
     setFanPolicyByDevice((current) => ({
       ...current,
-      ...(visibleDevice.transport === 'devd' ? {} : { [visibleDevice.id]: fanState }),
+      [visibleDevice.id]: fanState,
     }))
     setFeedback({
       title: 'Fan policy updated',

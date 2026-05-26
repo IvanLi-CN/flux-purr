@@ -43,3 +43,4 @@
 - 授权端口 WiFi provisioning 复验完成：临时 SSID set、clear、restore 与 redacted bounded events 通过 smoke；最终直接 USB JSONL clear 后 `get_network` 返回 `state=disabled`、`ssid=null`。
 - `devd` native serial RPC 改为复用持久 per-port session，并让 port-scoped process lock 跟打开的 fd 同生命周期，避免 Web/devd polling 每轮重新打开 ESP32-S3 USB Serial/JTAG 造成持续 reset；硬件验证显示首次 open 仍可能 reset，但后续 API/Web polling 和安全 runtime 写入期间 uptime 单调增加。
 - Web runtime target control 改为在 devd/firmware 确认 `PUT /runtime` 成功后立即回显目标温度，并在下一轮真实 polling 对齐后清理临时覆盖，减少 live 硬件控制时的回显等待。
+- Web Settings fan policy segmented control 改为在 devd runtime 写入成功后立即回显 operator 选择，避免按钮组选中态与反馈文本分裂；当前 firmware status 的 `fanDisplayState` 仍代表实际风扇显示状态。
