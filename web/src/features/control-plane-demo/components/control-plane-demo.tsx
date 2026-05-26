@@ -198,6 +198,22 @@ export function ControlPlaneDemo({
     }
   }, [activeScenario.devices, activeScenario.selectedDeviceId, feedback.detail])
 
+  useEffect(() => {
+    setTargetTempByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        if (device.transport !== 'devd' || current[device.id] !== device.targetTempC) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
       return activeScenario.devices[0]
@@ -208,9 +224,7 @@ export function ControlPlaneDemo({
     const currentTempC = isLiveDevdDevice
       ? selectedDevice.currentTempC
       : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
-    const targetTempC = isLiveDevdDevice
-      ? selectedDevice.targetTempC
-      : (targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC)
+    const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
     const fanState = isLiveDevdDevice
       ? selectedDevice.fanState
       : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
@@ -474,7 +488,7 @@ export function ControlPlaneDemo({
     }
     setTargetTempByDevice((current) => ({
       ...current,
-      ...(visibleDevice.transport === 'devd' ? {} : { [visibleDevice.id]: clampedTarget }),
+      [visibleDevice.id]: clampedTarget,
     }))
     setFeedback({
       title: 'Target updated',
