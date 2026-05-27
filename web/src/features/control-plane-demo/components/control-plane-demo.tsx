@@ -15,6 +15,13 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import SimpleBar from 'simplebar-react'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import {
@@ -1140,22 +1147,21 @@ export function DeviceToolbar({
   return (
     <section className="industrial-status-strip" aria-label="Current target">
       <div className="industrial-target-picker">
-        <label htmlFor="control-plane-target" className="sr-only">
-          Target
-        </label>
-        <select
-          id="control-plane-target"
-          name="controlPlaneTarget"
-          className="industrial-device-select"
-          value={device.id}
-          onChange={(event) => onDeviceChange(event.target.value)}
-        >
-          {devices.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.alias} / {transportLabels[item.transport]}
-            </option>
-          ))}
-        </select>
+        <Select value={device.id} onValueChange={onDeviceChange}>
+          <SelectTrigger
+            aria-label="Target"
+            className="industrial-device-select industrial-radix-select"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="industrial-select-content">
+            {devices.map((item) => (
+              <SelectItem key={item.id} value={item.id} className="industrial-select-item">
+                {item.alias} / {transportLabels[item.transport]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
 
       <StatusDatum label="Transport" value={transportLabels[device.transport]} />
@@ -1752,19 +1758,22 @@ function UpdateView({
       <div className="industrial-update-grid">
         <div className="industrial-artifact industrial-artifact--compact">
           <p className="industrial-label">Artifact</p>
-          <select
-            className="industrial-artifact-select"
-            value={artifact?.id ?? ''}
-            aria-label="Firmware artifact"
-            disabled={isBusy}
-            onChange={(event) => onArtifactChange(event.currentTarget.value)}
-          >
-            {artifacts.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.version} · {item.profile}
-              </option>
-            ))}
-          </select>
+          <Select value={artifact?.id} onValueChange={onArtifactChange}>
+            <SelectTrigger
+              aria-label="Firmware artifact"
+              className="industrial-artifact-select industrial-radix-select"
+              disabled={isBusy || artifacts.length === 0}
+            >
+              <SelectValue placeholder="No firmware artifact" />
+            </SelectTrigger>
+            <SelectContent className="industrial-select-content">
+              {artifacts.map((item) => (
+                <SelectItem key={item.id} value={item.id} className="industrial-select-item">
+                  {item.version} · {item.profile}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="industrial-mono text-xs">
             {artifact?.target ?? 'target unknown'} · {artifact?.protocol ?? 'protocol unknown'} ·{' '}
             {artifact?.hash ?? 'hash unavailable'}
