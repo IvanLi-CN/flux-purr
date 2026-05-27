@@ -17,7 +17,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import SimpleBar from 'simplebar-react'
 import { Switch } from '@/components/ui/switch'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
-import { type LiveWebSerialControls, useLiveWebSerialScenario } from '../live-web-serial'
+import {
+  type LiveWebSerialControls,
+  type LiveWebSerialOptions,
+  useLiveWebSerialScenario,
+} from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
 import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
 import type {
@@ -35,6 +39,8 @@ interface ControlPlaneDemoProps {
   scenario?: ControlPlaneScenario
   initialView?: ConsoleView
   devd?: LiveDevdOptions
+  webSerial?: LiveWebSerialOptions
+  allowDemoControls?: boolean
 }
 
 type ConsoleView = 'dashboard' | 'settings' | 'update'
@@ -101,9 +107,14 @@ export function ControlPlaneDemo({
   scenario = controlPlaneScenario,
   initialView = 'dashboard',
   devd,
+  webSerial: webSerialOptions,
+  allowDemoControls = true,
 }: ControlPlaneDemoProps) {
   const liveDevdScenario = useLiveDevdScenario(scenario, devd)
-  const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario)
+  const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(
+    liveDevdScenario,
+    webSerialOptions
+  )
   const controlClient = useMemo(
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
     [devd?.httpClient]
@@ -131,11 +142,14 @@ export function ControlPlaneDemo({
   const actionClockRef = useRef(LOG_FEED_START_SECONDS + 60)
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
   const [feedback, setFeedback] = useState<ActionFeedback>({
-    title: 'Runtime synced',
-    detail: 'Thermal state is sampled from the mock device contract.',
+    title: allowDemoControls ? 'Runtime synced' : 'No live target',
+    detail: allowDemoControls
+      ? 'Thermal state is sampled from the mock device contract.'
+      : 'Connect a browser Web Serial port to load live hardware state.',
     tone: 'info',
   })
-  const activeScenario = showDegraded ? degradedControlPlaneScenario : liveScenario
+  const activeScenario =
+    allowDemoControls && showDegraded ? degradedControlPlaneScenario : liveScenario
 
   useEffect(() => {
     if (activeScenario.events.length < 2) {
@@ -251,15 +265,18 @@ export function ControlPlaneDemo({
       : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
     const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
     const fanState = fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState
-    const heaterOutputPercent = isLiveRuntimeDevice
-      ? selectedDevice.heaterOutputPercent
-      : Math.min(
-          100,
-          Math.max(
-            0,
-            selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
-          )
-        )
+    const heaterOutputPercent =
+      selectedDevice.severity === 'offline'
+        ? selectedDevice.heaterOutputPercent
+        : isLiveRuntimeDevice
+          ? selectedDevice.heaterOutputPercent
+          : Math.min(
+              100,
+              Math.max(
+                0,
+                selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
+              )
+            )
 
     return {
       ...selectedDevice,
@@ -856,6 +873,7 @@ export function ControlPlaneDemo({
               devices={activeScenario.devices}
               device={visibleDevice}
               showDegraded={showDegraded}
+              allowDegradedMode={allowDemoControls}
               webSerial={webSerial}
               onDeviceChange={handleDeviceChange}
               onToggleDegraded={handleToggleDegraded}
@@ -1094,6 +1112,7 @@ export function DeviceToolbar({
   devices,
   device,
   showDegraded,
+  allowDegradedMode,
   webSerial,
   onDeviceChange,
   onToggleDegraded,
@@ -1102,6 +1121,7 @@ export function DeviceToolbar({
   devices: DeviceTarget[]
   device: DeviceTarget
   showDegraded: boolean
+  allowDegradedMode: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onDeviceChange: (deviceId: string) => void
   onToggleDegraded: () => void
@@ -1153,14 +1173,16 @@ export function DeviceToolbar({
         {webSerialLabel}
       </button>
 
-      <button
-        type="button"
-        className="industrial-button industrial-button--secondary industrial-status-strip__button"
-        onClick={onToggleDegraded}
-      >
-        <RefreshCw size={16} aria-hidden="true" />
-        {showDegraded ? 'Nominal' : 'Degrade'}
-      </button>
+      {allowDegradedMode ? (
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary industrial-status-strip__button"
+          onClick={onToggleDegraded}
+        >
+          <RefreshCw size={16} aria-hidden="true" />
+          {showDegraded ? 'Nominal' : 'Degrade'}
+        </button>
+      ) : null}
     </section>
   )
 }
@@ -1315,6 +1337,7 @@ function DashboardView({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
+          disabled={device.severity === 'offline'}
           onClick={onHeaterHoldToggle}
         >
           <Power size={16} aria-hidden="true" />

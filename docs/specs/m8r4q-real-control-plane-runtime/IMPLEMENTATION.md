@@ -23,6 +23,7 @@
 - `devd` artifact catalog 从当前 repo build outputs 计算 ESP32-S3 ELF 与 host binary 的 kind、size、sha256；development CORS 支持 Vite JSON preflight。
 - Web app 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate、live devd discovery bridge 与 artifact catalog/verify dry-check；devd native probe 顺序请求由 unit test 覆盖；native serial `timeout/error` 状态会阻断 runtime 与 dry-check 写路径。
 - Web app 支持 browser Web Serial 直连：工具栏的 USB 连接动作调用 `navigator.serial.requestPort()`，打开后按 USB JSONL 顺序读取 identity、network、status，并把 Dashboard target temperature、Settings fan policy 与 Dashboard heater hold 写成 `runtime_config`。直连 target 标记为 `transport=serial` / `baseUrl=webserial://selected`，只暴露 runtime/status/monitor 能力，不暴露 artifact verify、dry-run 或 real flash。
+- Web app 通过 `variant=demo|live` URL 参数隔离 demo 和 live 版本，并把最近一次显式 URL 选择写入 browser storage。Demo 版本禁用 `devd` 与 Web Serial，不发真实后端请求；Live 版本使用独立 live scenario，禁用 degraded demo controls，并过滤 `devd` mock records，只显示 native serial 或 browser Web Serial live target。
 - Web Serial client tests 使用 fake browser serial port 覆盖 `get_identity` / `get_network` / `get_status` 探测、直连 target 映射、`runtime_config` 写入与 status payload 解析。
 - Storybook 仅新增控制台工具栏组件入口，展示 Web Serial idle、connected 与 unsupported 状态；不创建完整页面 story。
 - Web Serial browser-client verification covers static Web checks, typecheck, production build, unit tests, Storybook build, and whitespace checks. Hardware/browser smoke for a real user-selected Web Serial port remains pending an operator-approved browser session and authorized port selection.

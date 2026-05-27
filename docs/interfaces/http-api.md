@@ -152,6 +152,13 @@ The response reports a redacted summary only:
 
 ## Browser Web Serial
 
+The Web app has two isolated browser variants selected by URL parameter:
+
+- `?variant=demo`: demo-only scenario; no `devd`, Web Serial, or real backend requests.
+- `?variant=live`: live scenario; no demo fixtures, degraded demo data, or daemon mock devices.
+
+The selected variant is stored in browser storage. A later load without `variant` uses the remembered value and rewrites the URL to include the explicit parameter. The app must not switch variants unless the URL explicitly asks for `variant=demo` or `variant=live`.
+
 Browser Web Serial uses the same USB CDC JSONL frames listed below. The Web app opens a port only from an explicit operator action with `navigator.serial.requestPort()`, then writes one newline-delimited JSON frame per request and waits for a matching `response.requestId`.
 
 Direct browser targets are represented in the Web app as `transport=serial`, `baseUrl=webserial://selected`, and `leaseState=active`. That state means the browser owns the selected serial port; it is not a `devd` lease.

@@ -9,6 +9,7 @@ const meta = {
     devices: controlPlaneScenario.devices,
     device: controlPlaneScenario.devices[0],
     showDegraded: false,
+    allowDegradedMode: true,
     webSerial: {
       state: 'idle',
       supported: true,

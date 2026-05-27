@@ -24,6 +24,7 @@ export interface LiveDevdOptions {
   enabled?: boolean
   devdBaseUrl?: string | null
   httpClient?: ControlPlaneHttpClient
+  includeMockDevices?: boolean
 }
 
 export function defaultDevdBaseUrl() {
@@ -40,7 +41,12 @@ export function defaultDevdBaseUrl() {
 
 export function useLiveDevdScenario(
   scenario: ControlPlaneScenario,
-  { enabled = true, devdBaseUrl = defaultDevdBaseUrl(), httpClient }: LiveDevdOptions = {}
+  {
+    enabled = true,
+    devdBaseUrl = defaultDevdBaseUrl(),
+    httpClient,
+    includeMockDevices = true,
+  }: LiveDevdOptions = {}
 ) {
   const client = useMemo(() => httpClient ?? createControlPlaneHttpClient(), [httpClient])
   const [devices, setDevices] = useState<DeviceTarget[]>([])
@@ -76,7 +82,10 @@ export function useLiveDevdScenario(
           setArtifacts(nextArtifacts)
           setRecordEvents(devdRecordsToEvents(records))
         }
-        const baseDevices = records.map(devdRecordToDeviceTarget)
+        const visibleRecords = includeMockDevices
+          ? records
+          : records.filter((record) => record.transport === 'native_serial')
+        const baseDevices = visibleRecords.map(devdRecordToDeviceTarget)
         const liveRecord = selectLiveDevdRecord(records)
         if (!liveRecord) {
           if (!cancelled) {
@@ -119,7 +128,7 @@ export function useLiveDevdScenario(
         }
       } catch {
         if (!cancelled) {
-          setDevices(records.map(devdRecordToDeviceTarget))
+          setDevices([])
           setArtifacts([])
           setRecordEvents([])
           setStreamEvents([])
@@ -138,7 +147,7 @@ export function useLiveDevdScenario(
         void client.releaseDevdLease(devdBaseUrl, activeLease.leaseId)
       }
     }
-  }, [client, devdBaseUrl, enabled])
+  }, [client, devdBaseUrl, enabled, includeMockDevices])
 
   useEffect(() => {
     if (!enabled || !devdBaseUrl || !liveDevdDeviceId || typeof EventSource === 'undefined') {
