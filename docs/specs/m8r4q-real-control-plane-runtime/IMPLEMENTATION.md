@@ -4,7 +4,7 @@
 
 ## Current Status
 
-- Implementation: Web + devd + USB JSONL hardware loop verified for identity, network, status, WiFi provisioning, runtime mutation, artifact dry-run, and monitor events; direct HTTP remains future work
+- Implementation: Web + browser Web Serial + devd + USB JSONL hardware loop covers identity, network, status, runtime mutation, artifact dry-run, and monitor events; direct HTTP remains future work
 - Lifecycle: active
 - Catalog note: Web + firmware + native devd real transport contract
 
@@ -22,6 +22,10 @@
 - `devd` native serial device record 会声明 daemon-local `firmware_check` 与 `flash` capability；Web live devd bridge 在成功读取 firmware USB identity 后保留 daemon-local capabilities，避免 firmware identity 覆盖掉由 `devd` 提供的 artifact verify / flash 恢复路径。
 - `devd` artifact catalog 从当前 repo build outputs 计算 ESP32-S3 ELF 与 host binary 的 kind、size、sha256；development CORS 支持 Vite JSON preflight。
 - Web app 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate、live devd discovery bridge 与 artifact catalog/verify dry-check；devd native probe 顺序请求由 unit test 覆盖；native serial `timeout/error` 状态会阻断 runtime 与 dry-check 写路径。
+- Web app 支持 browser Web Serial 直连：工具栏的 USB 连接动作调用 `navigator.serial.requestPort()`，打开后按 USB JSONL 顺序读取 identity、network、status，并把 Dashboard target temperature、Settings fan policy 与 Dashboard heater hold 写成 `runtime_config`。直连 target 标记为 `transport=serial` / `baseUrl=webserial://selected`，只暴露 runtime/status/monitor 能力，不暴露 artifact verify、dry-run 或 real flash。
+- Web Serial client tests 使用 fake browser serial port 覆盖 `get_identity` / `get_network` / `get_status` 探测、直连 target 映射、`runtime_config` 写入与 status payload 解析。
+- Storybook 仅新增控制台工具栏组件入口，展示 Web Serial idle、connected 与 unsupported 状态；不创建完整页面 story。
+- Web Serial browser-client verification covers static Web checks, typecheck, production build, unit tests, Storybook build, and whitespace checks. Hardware/browser smoke for a real user-selected Web Serial port remains pending an operator-approved browser session and authorized port selection.
 - Web Playwright e2e 覆盖 Vite Web App 到 live `devd` HTTP contract 的浏览器路径：页面通过 `VITE_FLUX_PURR_DEVD_URL` 发现 native serial target、创建 active lease、展示 daemon artifact catalog；Update 页点击 dry-check 后向 `POST /api/v1/artifacts/verify` 与 `POST /api/v1/devices/:id/flash` 发出真实 browser fetch；runtime controls 会带 active lease 向 `PUT /api/v1/devices/:id/runtime` 发出真实 browser fetch，覆盖 target temperature、fan policy 与 heater hold。
 - Web runtime target control 对 live `devd` 设备只在 `PUT /runtime` 成功后更新目标温度回显；该回显使用 daemon/firmware 已确认的值，并在下一轮真实 polling 对齐后清理临时覆盖，避免等待 5 秒 polling 周期造成明显延迟。Settings 的 fan policy segmented control 也会在 runtime 写入成功后回显 operator 选择，避免按钮组选中态与反馈文本分裂；当前 firmware runtime API 只接收 `activeCoolingEnabled`，因此该控件表达散热策略选择，实际风扇显示仍以 status `fanDisplayState` 为准。
 - Web live devd bridge 会通过 `GET /api/v1/devices/:id/events` 的 EventSource 消费 daemon SSE，同时保留 `/api/v1/devices` snapshot 里的 bounded events；两路事件按 event id 去重后映射进 Runtime trace。serial RPC 失败、lease create/release、WiFi/runtime success、flash 等 native 事件可在控制台 monitor 面板中可见，同时只显示 stage/code 等安全摘要，不 dump raw payload；WiFi success event 只记录 op、SSID 与密码是否存在，不记录密码本体。
@@ -42,7 +46,7 @@
 - PR 号在 PR 创建后回填。
 - 真实 flash 仍需授权端口在线、明确允许真实写入、并完成 dry-run 后复验。
 - Web Update 已能加载 `devd` catalog 并通过 `POST /api/v1/artifacts/verify` 执行 dry-check；真实 flash 仍需授权端口在线并显式允许真实写入后复验。
-- Direct firmware HTTP / `net_http` server 尚未实现；当前真实硬件控制路径必须走 Web -> `devd` -> USB JSONL。
+- Direct firmware HTTP / `net_http` server 尚未实现；当前真实硬件 runtime 控制路径可走 browser Web Serial -> USB JSONL 或 Web -> `devd` -> USB JSONL。Firmware artifact verify、dry-run 与 real flash 仍必须走 `devd`。
 - macOS 打开 ESP32-S3 USB Serial/JTAG port 时仍可能触发一次设备 reset；`devd` 的稳定性契约是避免 Web/devd polling 期间反复 open/close 造成持续重启。
 - 完整 artifact catalog 管理页不属于本 spec 范围。
 

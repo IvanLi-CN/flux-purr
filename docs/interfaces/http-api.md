@@ -113,7 +113,7 @@ Errors must not include WiFi passwords, PSK values, or unrelated host paths.
 
 ## Device HTTP
 
-Direct device HTTP is a planned transport surface for a future firmware `net_http` server. Current ESP32-S3 release artifacts do not implement or advertise this transport; real hardware control uses Native `devd` HTTP over USB JSONL.
+Direct device HTTP is a planned transport surface for a future firmware `net_http` server. Current ESP32-S3 release artifacts do not implement or advertise this transport; real hardware runtime control uses Browser Web Serial over USB JSONL or Native `devd` HTTP over USB JSONL.
 
 Base URL: `http://<device-ip>`.
 
@@ -149,6 +149,25 @@ The response reports a redacted summary only:
   }
 }
 ```
+
+## Browser Web Serial
+
+Browser Web Serial uses the same USB CDC JSONL frames listed below. The Web app opens a port only from an explicit operator action with `navigator.serial.requestPort()`, then writes one newline-delimited JSON frame per request and waits for a matching `response.requestId`.
+
+Direct browser targets are represented in the Web app as `transport=serial`, `baseUrl=webserial://selected`, and `leaseState=active`. That state means the browser owns the selected serial port; it is not a `devd` lease.
+
+Supported direct operations:
+
+- `request` with `op=get_identity|get_network|get_status`
+- `runtime_config` for `targetTempC`, `activeCoolingEnabled`, and `heaterEnabled`
+
+Unsupported direct operations:
+
+- firmware artifact catalog and verification
+- dry-run and real flash
+- daemon-local bind/connect/disconnect
+
+Those unsupported operations require Native `devd` HTTP capability gates.
 
 ## Native `devd` HTTP
 

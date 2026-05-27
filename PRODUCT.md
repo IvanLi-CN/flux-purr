@@ -6,11 +6,11 @@ product
 
 ## Users
 
-Flux Purr is used by hardware and firmware operators working with an ESP32-S3 thermal bench device. They are usually validating live runtime state, provisioning WiFi, checking firmware artifacts, or confirming safety boundaries while a device is connected over USB and native devd.
+Flux Purr is used by hardware and firmware operators working with an ESP32-S3 thermal bench device. They are usually validating live runtime state, adjusting safe thermal controls over browser Web Serial or native devd, checking firmware artifacts, or confirming safety boundaries while a device is connected over USB.
 
 ## Product Purpose
 
-The product provides a focused embedded-device control console for a small thermal bench. Success means the operator can see the real device state, adjust safe runtime settings, provision WiFi, and verify firmware artifacts without mistaking mock data, stale feedback, or disabled hardware for live control.
+The product provides a focused embedded-device control console for a small thermal bench. Success means the operator can see the real device state, adjust safe runtime settings through the active USB transport, and verify firmware artifacts without mistaking mock data, stale feedback, or disabled hardware for live control.
 
 ## Brand Personality
 

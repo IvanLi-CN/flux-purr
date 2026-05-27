@@ -6,7 +6,7 @@
 
 - PR #27 已把 Web、native USB daemon、USB CDC、WiFi provisioning、firmware flashing 与 monitoring 的长期架构沉淀到 `docs/solutions/device-control/web-native-wifi-bridge-console.md`。
 - `#hhwq8` 只冻结 mock-first Web demo，不代表真实 transport、daemon、USB CDC、WiFi HTTP 或真实 flashing 已交付。
-- 本规范冻结 Flux Purr 真实控制面 v1：同一领域契约通过 mock、USB serial 和 native `devd` 暴露，Web 只根据能力启用操作；direct firmware HTTP 属于后续 `net_http` server 能力，不得在固件实现前声明。
+- 本规范冻结 Flux Purr 真实控制面 v1：同一领域契约通过 mock、browser Web Serial、USB serial 和 native `devd` 暴露，Web 只根据能力启用操作；direct firmware HTTP 属于后续 `net_http` server 能力，不得在固件实现前声明。
 
 ## 目标 / 非目标
 
@@ -15,7 +15,7 @@
 - 定义 Web、firmware 与 `devd` 共享的 identity、network、status、USB JSONL、devd HTTP、firmware artifact 与 error envelope。
 - firmware 提供 feature-gated `web_serial` contract adapter，复用现有热控 runtime 和 EEPROM WiFi 字段；direct `net_http` 只有在固件 HTTP server 落地后才可声明。
 - `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
-- Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock 与 devd contract，并对危险操作做 capability gate。
+- Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock、browser Web Serial 与 devd contract，并对危险操作做 capability gate。
 - 无真机时必须能用 host tests、mock serial 和 devd dry-run 验证主要契约。
 
 ### Non-goals
@@ -31,7 +31,7 @@
 
 - `firmware/src/control_plane.rs` 及 feature flags。
 - `tools/flux-purr-devd/**` native daemon。
-- `web/src/features/control-plane-demo/contracts.ts` 与 transport client。
+- `web/src/features/control-plane-demo/contracts.ts`、browser Web Serial client 与 transport client。
 - `docs/interfaces/http-api.md` 当前 HTTP/devd/USB contract。
 
 ### Out of scope
@@ -48,6 +48,8 @@
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - runtime config frame 和 devd runtime endpoint 必须能更新目标温度、主动散热开关与 heater hold 状态。
+- Web app 必须提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、主动散热开关与 heater hold 状态。
+- Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
@@ -87,6 +89,13 @@
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 
+### Browser Web Serial
+
+- Web app 使用浏览器 `navigator.serial.requestPort()` 作为显式用户动作入口；未支持 Web Serial 的浏览器必须保持 mock/devd 路径可用并禁用直连按钮。
+- Web Serial port 使用 `115200` baud 打开，按 USB JSONL 一行一帧写入 `request` / `runtime_config`，并只消费匹配 `requestId` 的 `response`。
+- 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
+- Direct Web Serial 控制项只包括 runtime control 与 status polling；firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
+
 ## 验收标准（Acceptance Criteria）
 
 - Given 无硬件环境，When 运行 host tests，Then USB frame parsing、request ID matching、redaction、runtime config、status adapter、lease expiry、bounded buffer、artifact verify 与 serial authorization guard 均通过。
@@ -94,6 +103,8 @@
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
 - Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见。
+- Given 支持 Web Serial 的浏览器，When operator 点击 USB 连接动作并选择 ESP32-S3 端口，Then Web app 通过 USB JSONL 读取 identity/network/status，并把目标温度、fan policy 与 heater hold 写为 `runtime_config`。
+- Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
 - Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
 
 ## 非功能性验收 / 质量门槛

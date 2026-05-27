@@ -1,5 +1,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
+  Cable,
   CheckCircle2,
   Fan,
   Gauge,
@@ -16,6 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import SimpleBar from 'simplebar-react'
 import { Switch } from '@/components/ui/switch'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
+import { type LiveWebSerialControls, useLiveWebSerialScenario } from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
 import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
 import type {
@@ -27,6 +29,7 @@ import type {
   TransportKind,
   WorkflowPhase,
 } from '../types'
+import { isDirectWebSerialDevice } from '../web-serial'
 
 interface ControlPlaneDemoProps {
   scenario?: ControlPlaneScenario
@@ -99,7 +102,8 @@ export function ControlPlaneDemo({
   initialView = 'dashboard',
   devd,
 }: ControlPlaneDemoProps) {
-  const liveScenario = useLiveDevdScenario(scenario, devd)
+  const liveDevdScenario = useLiveDevdScenario(scenario, devd)
+  const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario)
   const controlClient = useMemo(
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
     [devd?.httpClient]
@@ -188,10 +192,23 @@ export function ControlPlaneDemo({
   }, [activeScenario.devices, activeScenario.selectedDeviceId, feedback.detail])
 
   useEffect(() => {
+    if (webSerial.state === 'error' && webSerial.error) {
+      setFeedback({
+        title: 'Web Serial unavailable',
+        detail: webSerial.error,
+        tone: 'warning',
+      })
+    }
+  }, [webSerial.error, webSerial.state])
+
+  useEffect(() => {
     setTargetTempByDevice((current) => {
       let next = current
       for (const device of activeScenario.devices) {
-        if (device.transport !== 'devd' || current[device.id] !== device.targetTempC) {
+        if (
+          !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
+          current[device.id] !== device.targetTempC
+        ) {
           continue
         }
         if (next === current) {
@@ -207,7 +224,10 @@ export function ControlPlaneDemo({
     setFanPolicyByDevice((current) => {
       let next = current
       for (const device of activeScenario.devices) {
-        if (device.transport !== 'devd' || current[device.id] !== device.fanState) {
+        if (
+          !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
+          current[device.id] !== device.fanState
+        ) {
           continue
         }
         if (next === current) {
@@ -224,13 +244,14 @@ export function ControlPlaneDemo({
       return activeScenario.devices[0]
     }
 
-    const isLiveDevdDevice = selectedDevice.transport === 'devd'
-    const currentTempC = isLiveDevdDevice
+    const isLiveRuntimeDevice =
+      selectedDevice.transport === 'devd' || isDirectWebSerialDevice(selectedDevice)
+    const currentTempC = isLiveRuntimeDevice
       ? selectedDevice.currentTempC
       : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
     const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
     const fanState = fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState
-    const heaterOutputPercent = isLiveDevdDevice
+    const heaterOutputPercent = isLiveRuntimeDevice
       ? selectedDevice.heaterOutputPercent
       : Math.min(
           100,
@@ -308,10 +329,6 @@ export function ControlPlaneDemo({
       },
       failureMessage: string
     ) => {
-      if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
-        return false
-      }
-
       const blockedReason = deviceControlBlockReason(visibleDevice)
       if (blockedReason) {
         setFeedback({
@@ -320,6 +337,23 @@ export function ControlPlaneDemo({
           tone: 'warning',
         })
         emitEvent('devd', 'runtime update blocked by transport state', 'warning')
+        return false
+      }
+
+      if (isDirectWebSerialDevice(visibleDevice)) {
+        const updated = await webSerial.configureRuntime(patch)
+        if (!updated) {
+          setFeedback({
+            title: 'Runtime update failed',
+            detail: webSerial.error ?? failureMessage,
+            tone: 'warning',
+          })
+          emitEvent('webserial', failureMessage, 'warning')
+        }
+        return updated
+      }
+
+      if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
         return false
       }
 
@@ -340,7 +374,7 @@ export function ControlPlaneDemo({
         return false
       }
     },
-    [controlClient, devdBaseUrl, emitEvent, visibleDevice]
+    [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
   )
 
   useEffect(() => {
@@ -349,7 +383,7 @@ export function ControlPlaneDemo({
         if (!selectedDevice || visibleDevice.severity === 'offline') {
           return current
         }
-        if (selectedDevice.transport === 'devd') {
+        if (selectedDevice.transport === 'devd' || isDirectWebSerialDevice(selectedDevice)) {
           return current
         }
 
@@ -466,13 +500,49 @@ export function ControlPlaneDemo({
     })
   }
 
+  const handleWebSerialConnect = async () => {
+    if (webSerial.state === 'connected') {
+      await webSerial.disconnect()
+      setFeedback({
+        title: 'Web Serial disconnected',
+        detail: 'Browser direct USB control is closed.',
+        tone: 'info',
+      })
+      emitEvent('webserial', 'browser direct USB control disconnected', 'info')
+      return
+    }
+
+    const connected = await webSerial.connect()
+    setFeedback(
+      connected
+        ? {
+            title: 'Web Serial connected',
+            detail: 'Browser direct USB JSONL control is active.',
+            tone: 'success',
+          }
+        : {
+            title: 'Web Serial unavailable',
+            detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+            tone: 'warning',
+          }
+    )
+    emitEvent(
+      'webserial',
+      connected ? 'browser direct USB control connected' : 'browser direct USB control failed',
+      connected ? 'success' : 'warning'
+    )
+  }
+
   const handleTargetTempChange = async (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
     const liveUpdated = await configureLiveRuntime(
       { targetTempC: clampedTarget },
       'target temperature update was not accepted by devd'
     )
-    if (visibleDevice.transport === 'devd' && !liveUpdated) {
+    if (
+      (visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)) &&
+      !liveUpdated
+    ) {
       return
     }
     setTargetTempByDevice((current) => ({
@@ -492,7 +562,10 @@ export function ControlPlaneDemo({
       { activeCoolingEnabled: fanState !== 'OFF' },
       'fan policy update was not accepted by devd'
     )
-    if (visibleDevice.transport === 'devd' && !liveUpdated) {
+    if (
+      (visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)) &&
+      !liveUpdated
+    ) {
       return
     }
     setFanPolicyByDevice((current) => ({
@@ -567,12 +640,17 @@ export function ControlPlaneDemo({
       { heaterEnabled: !nextHeld },
       'heater hold update was not accepted by devd'
     )
-    if (visibleDevice.transport === 'devd' && !liveUpdated) {
+    if (
+      (visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)) &&
+      !liveUpdated
+    ) {
       return
     }
     setHeaterHeldByDevice((current) => ({
       ...current,
-      ...(visibleDevice.transport === 'devd' ? {} : { [visibleDevice.id]: nextHeld }),
+      ...(visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)
+        ? {}
+        : { [visibleDevice.id]: nextHeld }),
     }))
     setFeedback({
       title: nextHeld ? 'Heater held' : 'Heater resumed',
@@ -778,8 +856,10 @@ export function ControlPlaneDemo({
               devices={activeScenario.devices}
               device={visibleDevice}
               showDegraded={showDegraded}
+              webSerial={webSerial}
               onDeviceChange={handleDeviceChange}
               onToggleDegraded={handleToggleDegraded}
+              onWebSerialConnect={handleWebSerialConnect}
             />
           </header>
 
@@ -1010,19 +1090,33 @@ function temperatureBand(tempC: number) {
   return 'cool'
 }
 
-function DeviceToolbar({
+export function DeviceToolbar({
   devices,
   device,
   showDegraded,
+  webSerial,
   onDeviceChange,
   onToggleDegraded,
+  onWebSerialConnect,
 }: {
   devices: DeviceTarget[]
   device: DeviceTarget
   showDegraded: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onDeviceChange: (deviceId: string) => void
   onToggleDegraded: () => void
+  onWebSerialConnect: () => void
 }) {
+  const webSerialDisabled = webSerial.state === 'unsupported' || webSerial.state === 'connecting'
+  const webSerialLabel =
+    webSerial.state === 'connected'
+      ? 'Disconnect USB'
+      : webSerial.state === 'connecting'
+        ? 'Connecting'
+        : webSerial.supported
+          ? 'Connect USB'
+          : 'No Web Serial'
+
   return (
     <section className="industrial-status-strip" aria-label="Current target">
       <div className="industrial-target-picker">
@@ -1048,6 +1142,16 @@ function DeviceToolbar({
       <StatusDatum label="Lease" value={device.leaseState?.toUpperCase() ?? 'N/A'} />
       <StatusDatum label="Plate" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
+
+      <button
+        type="button"
+        className="industrial-button industrial-button--primary industrial-status-strip__button"
+        disabled={webSerialDisabled}
+        onClick={onWebSerialConnect}
+      >
+        <Cable size={16} aria-hidden="true" />
+        {webSerialLabel}
+      </button>
 
       <button
         type="button"

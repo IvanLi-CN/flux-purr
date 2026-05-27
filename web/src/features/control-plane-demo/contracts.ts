@@ -123,6 +123,8 @@ export interface RuntimeConfigRequest {
   heaterEnabled?: boolean
 }
 
+export type DirectRuntimeConfigRequest = Omit<RuntimeConfigRequest, 'leaseId'>
+
 export interface FirmwareArtifactManifest {
   artifactId: string
   name: string
@@ -185,4 +187,12 @@ export interface UsbWifiConfigFrame {
   password?: string
   autoReconnect?: boolean
   telemetryIntervalMs?: number
+}
+
+export interface UsbRuntimeConfigFrame {
+  type: 'runtime_config'
+  requestId: string
+  targetTempC?: number
+  activeCoolingEnabled?: boolean
+  heaterEnabled?: boolean
 }
