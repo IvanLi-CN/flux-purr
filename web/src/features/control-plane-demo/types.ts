@@ -1,6 +1,6 @@
 import type { LucideIcon } from 'lucide-react'
 
-export type TransportKind = 'http' | 'serial' | 'devd' | 'mock'
+export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
 export type DeviceSeverity = 'nominal' | 'warning' | 'offline'
 export type WorkstreamId = 'fleet' | 'connect' | 'overview' | 'wifi' | 'firmware' | 'monitor'
 

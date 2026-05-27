@@ -16,7 +16,6 @@ const meta = {
     },
     onDeviceChange: () => undefined,
     onToggleDegraded: () => undefined,
-    onWebSerialConnect: () => undefined,
   },
 } satisfies Meta<typeof DeviceToolbar>
 

@@ -1599,6 +1599,24 @@
     color: var(--industrial-accent);
   }
 
+  .industrial-select-item--add {
+    color: var(--industrial-text);
+  }
+
+  .industrial-select-label {
+    color: var(--industrial-muted-text);
+    font-size: 0.68rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .industrial-select-separator {
+    height: 1px;
+    margin: 0.35rem 0.25rem;
+    background: rgba(183, 192, 210, 0.7);
+  }
+
   .industrial-status-strip {
     display: flex;
     flex-wrap: wrap;

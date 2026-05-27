@@ -48,7 +48,8 @@
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - runtime config frame 和 devd runtime endpoint 必须能更新目标温度、主动散热开关与 heater hold 状态。
-- Web app 必须提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、主动散热开关与 heater hold 状态。
+- Web app 必须在目标下拉的底部提供 `Add device` 入口，新增类型包括 WiFi、Web Serial 与 Bridge；不得再用下拉外的独立按钮作为新增设备入口。
+- Web app 必须通过 `Add device -> Web Serial` 提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、主动散热开关与 heater hold 状态。
 - Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
@@ -65,7 +66,7 @@
 
 - devd scan 应在授权端口范围内利用 serial USB metadata 构造稳定 ID。
 - 后续 direct firmware HTTP 若落地，返回 shape 应与 devd bridge endpoint 共用 Web parser。
-- Web app 验证应覆盖 nominal、devd unavailable、lease conflict、monitor/trace 与 firmware blocked/warning states；WiFi credential provisioning 属于 devd/USB contract，不作为 Web app 设置页面暴露，直到固件具备实际 WiFi station 连接能力。
+- Web app 验证应覆盖 nominal、devd unavailable、lease conflict、monitor/trace 与 firmware blocked/warning states；WiFi credential provisioning 属于 devd/USB contract，不作为 Web app 设置页面暴露，直到固件具备实际 WiFi station 连接能力。目标下拉中的 WiFi 与 Bridge 新增项在未绑定真实 transport 前只能展示待绑定状态，不得伪装为已连接硬件。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -94,7 +95,7 @@
 
 ### Browser Web Serial
 
-- Web app 使用浏览器 `navigator.serial.requestPort()` 作为显式用户动作入口；未支持 Web Serial 的浏览器必须保持 mock/devd 路径可用并禁用直连按钮。
+- Web app 使用目标下拉里的 `Add device -> Web Serial` 调用浏览器 `navigator.serial.requestPort()`；未支持 Web Serial 的浏览器必须保持 mock/devd 路径可用并禁用 Web Serial 新增项。
 - Web Serial port 使用 `115200` baud 打开，按 USB JSONL 一行一帧写入 `request` / `runtime_config`，并只消费匹配 `requestId` 的 `response`。
 - 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
 - Direct Web Serial 控制项只包括 runtime control 与 status polling；firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
@@ -106,7 +107,7 @@
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
 - Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见。
-- Given 支持 Web Serial 的浏览器，When operator 点击 USB 连接动作并选择 ESP32-S3 端口，Then Web app 通过 USB JSONL 读取 identity/network/status，并把目标温度、fan policy 与 heater hold 写为 `runtime_config`。
+- Given 支持 Web Serial 的浏览器，When operator 在目标下拉底部选择 `Add device -> Web Serial` 并选择 ESP32-S3 端口，Then Web app 通过 USB JSONL 读取 identity/network/status，并把目标温度、fan policy 与 heater hold 写为 `runtime_config`。
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
 - Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
 

@@ -1,6 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
-  Cable,
   CheckCircle2,
   Fan,
   Gauge,
@@ -18,7 +17,10 @@ import SimpleBar from 'simplebar-react'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -52,6 +54,7 @@ interface ControlPlaneDemoProps {
 
 type ConsoleView = 'dashboard' | 'settings' | 'update'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
+type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 
 interface ActionFeedback {
   title: string
@@ -70,6 +73,7 @@ const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESET_ENABLED = [true, true, false, true, true, true, true, true, true, false]
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
 const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
+const ADD_DEVICE_VALUE_PREFIX = '__add_device__'
 
 const severityLabels: Record<DeviceSeverity, string> = {
   nominal: 'READY',
@@ -82,7 +86,19 @@ const transportLabels: Record<TransportKind, string> = {
   serial: 'SERIAL',
   devd: 'DEVD',
   mock: 'MOCK',
+  wifi: 'WIFI',
+  bridge: 'BRIDGE',
 }
+
+const addDeviceOptions: Array<{
+  kind: AddDeviceKind
+  value: string
+  label: string
+}> = [
+  { kind: 'wifi', value: `${ADD_DEVICE_VALUE_PREFIX}:wifi`, label: 'WiFi' },
+  { kind: 'web-serial', value: `${ADD_DEVICE_VALUE_PREFIX}:web-serial`, label: 'Web Serial' },
+  { kind: 'bridge', value: `${ADD_DEVICE_VALUE_PREFIX}:bridge`, label: 'Bridge' },
+]
 
 const consoleViews: Array<{
   id: ConsoleView
@@ -109,6 +125,73 @@ const consoleViews: Array<{
     icon: Upload,
   },
 ]
+
+function addDeviceKindFromValue(value: string): AddDeviceKind | null {
+  const option = addDeviceOptions.find((item) => item.value === value)
+  return option?.kind ?? null
+}
+
+function pendingDeviceId(kind: AddDeviceKind) {
+  return `pending-${kind}-target`
+}
+
+function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
+  const common = {
+    id: pendingDeviceId(kind),
+    severity: 'offline' as const,
+    firmware: 'pending',
+    buildId: 'pending',
+    uptime: 'pending',
+    boardTempC: 0,
+    currentTempC: 0,
+    targetTempC: TARGET_TEMP_MIN,
+    voltageMv: 0,
+    currentMa: 0,
+    pdRequestMv: 0,
+    pdContractMv: 0,
+    pdState: 'fault' as const,
+    heaterOutputPercent: 0,
+    activeCoolingEnabled: false,
+    fanState: 'OFF' as const,
+    wifiRssi: null,
+    capabilities: [],
+    leaseState: 'none' as const,
+  }
+
+  if (kind === 'wifi') {
+    return {
+      ...common,
+      alias: 'WiFi target',
+      location: 'Awaiting WiFi handoff',
+      transport: 'wifi',
+      baseUrl: 'wifi://pending',
+      networkState: 'idle',
+      transportIssue: 'WiFi handoff is pending; no live station address is bound yet.',
+    }
+  }
+
+  if (kind === 'bridge') {
+    return {
+      ...common,
+      alias: 'Native bridge',
+      location: 'Awaiting devd bridge',
+      transport: 'bridge',
+      baseUrl: 'bridge://pending',
+      networkState: 'disabled',
+      transportIssue: 'Start or select a native bridge target before runtime control.',
+    }
+  }
+
+  return {
+    ...common,
+    alias: 'Web Serial target',
+    location: 'Awaiting browser port',
+    transport: 'serial',
+    baseUrl: 'webserial://pending',
+    networkState: 'disabled',
+    transportIssue: 'Open this in live mode to select a browser Web Serial port.',
+  }
+}
 
 export function ControlPlaneDemo({
   scenario = controlPlaneScenario,
@@ -141,6 +224,8 @@ export function ControlPlaneDemo({
   const [currentTempByDevice, setCurrentTempByDevice] = useState<Record<string, number>>({})
   const [heaterHeldByDevice, setHeaterHeldByDevice] = useState<Record<string, boolean>>({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
+  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>([])
+  const pendingDeviceModeRef = useRef(allowDemoControls)
   const [flashRun, setFlashRun] = useState<{ status: FlashRunStatus; progress: number }>({
     status: 'idle',
     progress: 0,
@@ -157,6 +242,19 @@ export function ControlPlaneDemo({
   })
   const activeScenario =
     allowDemoControls && showDegraded ? degradedControlPlaneScenario : liveScenario
+  const deviceOptions = useMemo(
+    () => [...activeScenario.devices, ...pendingDevices],
+    [activeScenario.devices, pendingDevices]
+  )
+
+  useEffect(() => {
+    if (pendingDeviceModeRef.current === allowDemoControls) {
+      return
+    }
+
+    pendingDeviceModeRef.current = allowDemoControls
+    setPendingDevices([])
+  }, [allowDemoControls])
 
   useEffect(() => {
     if (activeScenario.events.length < 2) {
@@ -172,13 +270,14 @@ export function ControlPlaneDemo({
 
   const selectedDevice = useMemo(
     () =>
-      activeScenario.devices.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions[0] ??
       activeScenario.devices[0],
-    [activeScenario.devices, selectedDeviceId]
+    [activeScenario.devices, deviceOptions, selectedDeviceId]
   )
 
   useEffect(() => {
-    if (!activeScenario.devices.some((device) => device.id === selectedDeviceId)) {
+    if (!deviceOptions.some((device) => device.id === selectedDeviceId)) {
       setSelectedDeviceId(activeScenario.selectedDeviceId)
       return
     }
@@ -189,12 +288,7 @@ export function ControlPlaneDemo({
     ) {
       setSelectedDeviceId(activeScenario.selectedDeviceId)
     }
-  }, [
-    activeScenario.devices,
-    activeScenario.selectedDeviceId,
-    scenario.selectedDeviceId,
-    selectedDeviceId,
-  ])
+  }, [activeScenario.selectedDeviceId, deviceOptions, scenario.selectedDeviceId, selectedDeviceId])
 
   useEffect(() => {
     const nextSelectedDevice = activeScenario.devices.find(
@@ -487,7 +581,13 @@ export function ControlPlaneDemo({
   }, [emitEvent, flashRun.progress, flashRun.status, selectedArtifact?.version])
 
   const handleDeviceChange = (deviceId: string) => {
-    const nextDevice = activeScenario.devices.find((device) => device.id === deviceId)
+    const addKind = addDeviceKindFromValue(deviceId)
+    if (addKind) {
+      void handleAddDevice(addKind)
+      return
+    }
+
+    const nextDevice = deviceOptions.find((device) => device.id === deviceId)
 
     setSelectedDeviceId(deviceId)
     setFlashRun({ status: 'idle', progress: 0 })
@@ -509,6 +609,39 @@ export function ControlPlaneDemo({
     )
   }
 
+  const handleAddDevice = async (kind: AddDeviceKind) => {
+    setFlashRun({ status: 'idle', progress: 0 })
+    flashCompletionEmittedRef.current = false
+
+    if (kind === 'web-serial' && !allowDemoControls) {
+      if (webSerial.state === 'connected') {
+        setFeedback({
+          title: 'Web Serial already connected',
+          detail: 'The browser Web Serial target is already listed in the target selector.',
+          tone: 'info',
+        })
+        emitEvent('webserial', 'browser Web Serial target already connected', 'info')
+        return
+      }
+
+      await handleWebSerialConnect()
+      return
+    }
+
+    const nextDevice = createPendingDevice(kind)
+    setPendingDevices((current) =>
+      current.some((device) => device.id === nextDevice.id) ? current : [...current, nextDevice]
+    )
+    setSelectedDeviceId(nextDevice.id)
+    setFeedback({
+      title: `${nextDevice.alias} added`,
+      detail:
+        nextDevice.transportIssue ?? `${transportLabels[nextDevice.transport]} target pending.`,
+      tone: 'warning',
+    })
+    emitEvent('target', `${nextDevice.alias} added from target selector`, 'warning')
+  }
+
   const handleToggleDegraded = () => {
     const nextDegraded = !showDegraded
     setShowDegraded(nextDegraded)
@@ -524,7 +657,7 @@ export function ControlPlaneDemo({
     })
   }
 
-  const handleWebSerialConnect = async () => {
+  async function handleWebSerialConnect() {
     if (webSerial.state === 'connected') {
       await webSerial.disconnect()
       setFeedback({
@@ -877,14 +1010,13 @@ export function ControlPlaneDemo({
             </div>
 
             <DeviceToolbar
-              devices={activeScenario.devices}
+              devices={deviceOptions}
               device={visibleDevice}
               showDegraded={showDegraded}
               allowDegradedMode={allowDemoControls}
               webSerial={webSerial}
               onDeviceChange={handleDeviceChange}
               onToggleDegraded={handleToggleDegraded}
-              onWebSerialConnect={handleWebSerialConnect}
             />
           </header>
 
@@ -1123,7 +1255,6 @@ export function DeviceToolbar({
   webSerial,
   onDeviceChange,
   onToggleDegraded,
-  onWebSerialConnect,
 }: {
   devices: DeviceTarget[]
   device: DeviceTarget
@@ -1132,17 +1263,20 @@ export function DeviceToolbar({
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onDeviceChange: (deviceId: string) => void
   onToggleDegraded: () => void
-  onWebSerialConnect: () => void
 }) {
-  const webSerialDisabled = webSerial.state === 'unsupported' || webSerial.state === 'connecting'
-  const webSerialLabel =
-    webSerial.state === 'connected'
-      ? 'Disconnect USB'
-      : webSerial.state === 'connecting'
-        ? 'Connecting'
-        : webSerial.supported
-          ? 'Connect USB'
-          : 'No Web Serial'
+  const webSerialAddDisabled =
+    !allowDegradedMode &&
+    (webSerial.state === 'unsupported' ||
+      webSerial.state === 'connecting' ||
+      webSerial.state === 'connected')
+  const webSerialAddLabel =
+    allowDegradedMode || webSerial.supported
+      ? webSerial.state === 'connecting'
+        ? 'Web Serial (connecting)'
+        : webSerial.state === 'connected'
+          ? 'Web Serial connected'
+          : 'Web Serial'
+      : 'Web Serial unavailable'
 
   return (
     <section className="industrial-status-strip" aria-label="Current target">
@@ -1160,6 +1294,20 @@ export function DeviceToolbar({
                 {item.alias} / {transportLabels[item.transport]}
               </SelectItem>
             ))}
+            <SelectSeparator className="industrial-select-separator" />
+            <SelectGroup>
+              <SelectLabel className="industrial-select-label">Add device</SelectLabel>
+              {addDeviceOptions.map((item) => (
+                <SelectItem
+                  key={item.value}
+                  value={item.value}
+                  className="industrial-select-item industrial-select-item--add"
+                  disabled={item.kind === 'web-serial' && webSerialAddDisabled}
+                >
+                  {item.kind === 'web-serial' ? webSerialAddLabel : item.label}
+                </SelectItem>
+              ))}
+            </SelectGroup>
           </SelectContent>
         </Select>
       </div>
@@ -1168,16 +1316,6 @@ export function DeviceToolbar({
       <StatusDatum label="Lease" value={device.leaseState?.toUpperCase() ?? 'N/A'} />
       <StatusDatum label="Plate" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
-
-      <button
-        type="button"
-        className="industrial-button industrial-button--primary industrial-status-strip__button"
-        disabled={webSerialDisabled}
-        onClick={onWebSerialConnect}
-      >
-        <Cable size={16} aria-hidden="true" />
-        {webSerialLabel}
-      </button>
 
       {allowDegradedMode ? (
         <button

@@ -44,3 +44,8 @@
 - `devd` native serial RPC 改为复用持久 per-port session，并让 port-scoped process lock 跟打开的 fd 同生命周期，避免 Web/devd polling 每轮重新打开 ESP32-S3 USB Serial/JTAG 造成持续 reset；硬件验证显示首次 open 仍可能 reset，但后续 API/Web polling 和安全 runtime 写入期间 uptime 单调增加。
 - Web runtime target control 改为在 devd/firmware 确认 `PUT /runtime` 成功后立即回显目标温度，并在下一轮真实 polling 对齐后清理临时覆盖，减少 live 硬件控制时的回显等待。
 - Web Settings fan policy segmented control 改为在 devd runtime 写入成功后立即回显 operator 选择，避免按钮组选中态与反馈文本分裂；当前 firmware status 的 `fanDisplayState` 仍代表实际风扇显示状态。
+
+## 2026-05-28
+
+- 目标选择器的新增设备入口收敛到下拉底部的 `Add device` 分组，不再使用下拉外的独立 USB 连接按钮；新增类型固定为 WiFi、Web Serial 与 Bridge。
+- Web Serial 新增入口在 live 模式继续作为 `navigator.serial.requestPort()` 的显式用户动作；demo 模式只创建待绑定预览目标，不触发真实后端或浏览器串口请求。

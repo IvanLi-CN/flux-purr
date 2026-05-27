@@ -9,7 +9,7 @@ export const liveControlPlaneScenario: ControlPlaneScenario = {
     {
       id: 'live-no-target',
       alias: 'No live target',
-      location: 'Connect USB',
+      location: 'Add Web Serial',
       transport: 'serial',
       severity: 'offline',
       baseUrl: 'webserial://pending',
