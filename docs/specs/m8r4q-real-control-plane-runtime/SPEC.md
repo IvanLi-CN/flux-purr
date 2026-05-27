@@ -60,7 +60,7 @@
 
 - devd scan 应在授权端口范围内利用 serial USB metadata 构造稳定 ID。
 - 后续 direct firmware HTTP 若落地，返回 shape 应与 devd bridge endpoint 共用 Web parser。
-- Web app 验证应覆盖 nominal、devd unavailable、lease conflict、WiFi provisioning、monitor/trace 与 firmware blocked/warning states。
+- Web app 验证应覆盖 nominal、devd unavailable、lease conflict、monitor/trace 与 firmware blocked/warning states；WiFi credential provisioning 属于 devd/USB contract，不作为 Web app 设置页面暴露，直到固件具备实际 WiFi station 连接能力。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -93,8 +93,8 @@
 - Given devd mock target，When 创建 lease 并 heartbeat，Then lease 未过期前 mutating endpoint 成功，过期后返回 conflict/expired error。
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
-- Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、WiFi phases、monitor trace、firmware blocked/warning 状态都可见。
-- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入必须至少覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
+- Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见。
+- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
 
 ## 非功能性验收 / 质量门槛
 
@@ -112,10 +112,6 @@
 - 证据来源：Web app runtime。
 - `assets/web-app-devd-no-authorized-serial.png`：Vite Web App 连接当前租约 `devd`；授权端口缺失时只显示 daemon mock target，并在 trace 中标明没有授权 native serial target。
 - `assets/web-app-devd-artifact-dry-check.png`：Vite Web App Update 页通过 `devd` 校验本地 ESP32-S3 固件产物，dry-check 返回通过。
-- `assets/web-app-wifi-provisioning-story.png`：Storybook canvas 中的 Web WiFi provisioning 页；SSID 与 password 渲染为清晰可编辑输入框，表单通过 mock transport 写入 SSID，展示 WiFi handoff 阶段与 provisioning feedback。
-- `assets/web-app-wifi-lease-blocked-story.png`：Storybook canvas 中的 Web WiFi lease conflict 页；USB lease conflict 时 provisioning 被阻断，SSID/password 输入与 Provision 命令禁用，并显示阻断原因。
-- `assets/web-app-native-serial-timeout-story.png`：Storybook canvas 中的 authorized native serial timeout 页；`devd` lease 存在但 USB JSONL identity 超时，Web 显示 timeout 原因并禁用 WiFi Provision / Clear 命令。
-- `assets/web-app-devd-runtime-trace-story.png`：Storybook canvas 中的 Runtime trace；Web 将 daemon serial、lease 与 flash bounded events 显示为安全摘要，不暴露 raw payload。
 - Chrome DevTools a11y snapshot on lease-managed `127.0.0.1:32082` against CORS-enabled `devd` `127.0.0.1:32083` verified the live Web page selects `USB JTAG/serial debug unit / DEVD` before daemon mock devices, reaches `LEASE ACTIVE`, displays real hardware PD/status values without mock simulation drift, shows WiFi state `DISABLED`, and includes bounded WiFi set/clear events in Runtime trace.
 
 ## 参考（References）

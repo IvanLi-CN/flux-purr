@@ -289,19 +289,10 @@ test.describe('control plane live devd bridge', () => {
       .toBeGreaterThanOrEqual(1)
   })
 
-  test('sends WiFi and runtime commands through the active devd lease', async ({ page }) => {
+  test('sends runtime commands through the active devd lease', async ({ page }) => {
     await page.goto('/')
 
     await expect(page.getByRole('combobox', { name: 'Target' })).toHaveValue(deviceId)
-
-    await page.getByRole('button', { name: /wifi/i }).click()
-    await page.getByLabel('SSID').fill('FluxPurr-E2E-Updated')
-    await page.getByLabel('Password').fill('secret-e2e')
-    await page.getByRole('button', { name: 'Provision' }).click()
-    await expect(page.getByText('WiFi provisioned')).toBeVisible()
-
-    await page.getByRole('button', { name: 'Clear' }).click()
-    await expect(page.getByText('WiFi cleared')).toBeVisible()
 
     await page.getByRole('button', { name: /dashboard/i }).click()
     await page.getByLabel('Dashboard target temperature').fill('235')
@@ -315,20 +306,7 @@ test.describe('control plane live devd bridge', () => {
     await page.getByRole('button', { name: 'Hold heater' }).click()
     await expect(page.getByText('Heater held')).toBeVisible()
 
-    await expect.poll(() => wifiRequests().length).toBeGreaterThanOrEqual(2)
-    expect(wifiRequests()[0]?.body).toMatchObject({
-      leaseId: 'lease-e2e',
-      op: 'set',
-      ssid: 'FluxPurr-E2E-Updated',
-      password: 'secret-e2e',
-      autoReconnect: true,
-      telemetryIntervalMs: 500,
-    })
-    expect(wifiRequests()[1]?.body).toMatchObject({
-      leaseId: 'lease-e2e',
-      op: 'clear',
-    })
-
+    expect(wifiRequests()).toHaveLength(0)
     await expect.poll(() => runtimeRequests().length).toBeGreaterThanOrEqual(3)
     expect(runtimeRequests()).toEqual(
       expect.arrayContaining([
