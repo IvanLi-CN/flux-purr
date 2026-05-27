@@ -8,11 +8,6 @@ const meta = {
   args: {
     devices: controlPlaneScenario.devices,
     device: controlPlaneScenario.devices[0],
-    allowDemoControls: true,
-    webSerial: {
-      state: 'idle',
-      supported: true,
-    },
     onDeviceChange: () => undefined,
   },
 } satisfies Meta<typeof DeviceToolbar>
@@ -32,18 +27,9 @@ export const WebSerialConnected: Story = {
       leaseState: 'active',
       capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
     },
-    webSerial: {
-      state: 'connected',
-      supported: true,
-    },
   },
 }
 
 export const Unsupported: Story = {
-  args: {
-    webSerial: {
-      state: 'unsupported',
-      supported: false,
-    },
-  },
+  args: {},
 }

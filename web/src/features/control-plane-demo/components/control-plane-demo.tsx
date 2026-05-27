@@ -16,9 +16,7 @@ import SimpleBar from 'simplebar-react'
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectSeparator,
   SelectTrigger,
   SelectValue,
@@ -51,7 +49,7 @@ interface ControlPlaneDemoProps {
   allowDemoControls?: boolean
 }
 
-type ConsoleView = 'dashboard' | 'settings' | 'update'
+type ConsoleView = 'dashboard' | 'settings' | 'update' | 'add-device'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 
@@ -72,7 +70,7 @@ const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESET_ENABLED = [true, true, false, true, true, true, true, true, true, false]
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
 const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
-const ADD_DEVICE_VALUE_PREFIX = '__add_device__'
+const ADD_DEVICE_VALUE = '__add_device__'
 
 const severityLabels: Record<DeviceSeverity, string> = {
   nominal: 'READY',
@@ -91,12 +89,24 @@ const transportLabels: Record<TransportKind, string> = {
 
 const addDeviceOptions: Array<{
   kind: AddDeviceKind
-  value: string
   label: string
+  detail: string
 }> = [
-  { kind: 'wifi', value: `${ADD_DEVICE_VALUE_PREFIX}:wifi`, label: 'WiFi' },
-  { kind: 'web-serial', value: `${ADD_DEVICE_VALUE_PREFIX}:web-serial`, label: 'Web Serial' },
-  { kind: 'bridge', value: `${ADD_DEVICE_VALUE_PREFIX}:bridge`, label: 'Bridge' },
+  {
+    kind: 'wifi',
+    label: 'WiFi',
+    detail: 'Bind a future station address without marking hardware online.',
+  },
+  {
+    kind: 'web-serial',
+    label: 'Web Serial',
+    detail: 'Open a browser USB serial port and probe identity, network, and status.',
+  },
+  {
+    kind: 'bridge',
+    label: 'Bridge',
+    detail: 'Prepare a native devd bridge target for local hardware control.',
+  },
 ]
 
 const consoleViews: Array<{
@@ -124,11 +134,6 @@ const consoleViews: Array<{
     icon: Upload,
   },
 ]
-
-function addDeviceKindFromValue(value: string): AddDeviceKind | null {
-  const option = addDeviceOptions.find((item) => item.value === value)
-  return option?.kind ?? null
-}
 
 function pendingDeviceId(kind: AddDeviceKind) {
   return `pending-${kind}-target`
@@ -578,9 +583,15 @@ export function ControlPlaneDemo({
   }, [emitEvent, flashRun.progress, flashRun.status, selectedArtifact?.version])
 
   const handleDeviceChange = (deviceId: string) => {
-    const addKind = addDeviceKindFromValue(deviceId)
-    if (addKind) {
-      void handleAddDevice(addKind)
+    if (deviceId === ADD_DEVICE_VALUE) {
+      setActiveView('add-device')
+      setFlashRun({ status: 'idle', progress: 0 })
+      flashCompletionEmittedRef.current = false
+      setFeedback({
+        title: 'Add device',
+        detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
+        tone: 'info',
+      })
       return
     }
 
@@ -630,6 +641,7 @@ export function ControlPlaneDemo({
       current.some((device) => device.id === nextDevice.id) ? current : [...current, nextDevice]
     )
     setSelectedDeviceId(nextDevice.id)
+    setActiveView('dashboard')
     setFeedback({
       title: `${nextDevice.alias} added`,
       detail:
@@ -994,8 +1006,6 @@ export function ControlPlaneDemo({
             <DeviceToolbar
               devices={deviceOptions}
               device={visibleDevice}
-              allowDemoControls={allowDemoControls}
-              webSerial={webSerial}
               onDeviceChange={handleDeviceChange}
             />
           </header>
@@ -1027,6 +1037,8 @@ export function ControlPlaneDemo({
               <ViewPanel
                 view={activeView}
                 device={visibleDevice}
+                allowDemoControls={allowDemoControls}
+                webSerial={webSerial}
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
@@ -1042,6 +1054,7 @@ export function ControlPlaneDemo({
                 onFanPolicyChange={handleFanPolicyChange}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onArtifactChange={handleArtifactChange}
+                onAddDevice={handleAddDevice}
                 onStartDryRun={handleStartDryRun}
                 onStartFlash={handleStartFlash}
               />
@@ -1230,30 +1243,12 @@ function temperatureBand(tempC: number) {
 export function DeviceToolbar({
   devices,
   device,
-  allowDemoControls,
-  webSerial,
   onDeviceChange,
 }: {
   devices: DeviceTarget[]
   device: DeviceTarget
-  allowDemoControls: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onDeviceChange: (deviceId: string) => void
 }) {
-  const webSerialAddDisabled =
-    !allowDemoControls &&
-    (webSerial.state === 'unsupported' ||
-      webSerial.state === 'connecting' ||
-      webSerial.state === 'connected')
-  const webSerialAddLabel =
-    allowDemoControls || webSerial.supported
-      ? webSerial.state === 'connecting'
-        ? 'Web Serial (connecting)'
-        : webSerial.state === 'connected'
-          ? 'Web Serial connected'
-          : 'Web Serial'
-      : 'Web Serial unavailable'
-
   return (
     <section className="industrial-status-strip" aria-label="Current target">
       <div className="industrial-target-picker">
@@ -1271,19 +1266,12 @@ export function DeviceToolbar({
               </SelectItem>
             ))}
             <SelectSeparator className="industrial-select-separator" />
-            <SelectGroup>
-              <SelectLabel className="industrial-select-label">Add device</SelectLabel>
-              {addDeviceOptions.map((item) => (
-                <SelectItem
-                  key={item.value}
-                  value={item.value}
-                  className="industrial-select-item industrial-select-item--add"
-                  disabled={item.kind === 'web-serial' && webSerialAddDisabled}
-                >
-                  {item.kind === 'web-serial' ? webSerialAddLabel : item.label}
-                </SelectItem>
-              ))}
-            </SelectGroup>
+            <SelectItem
+              value={ADD_DEVICE_VALUE}
+              className="industrial-select-item industrial-select-item--add"
+            >
+              Add device
+            </SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -1299,6 +1287,8 @@ export function DeviceToolbar({
 function ViewPanel({
   view,
   device,
+  allowDemoControls,
+  webSerial,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
@@ -1314,11 +1304,14 @@ function ViewPanel({
   onFanPolicyChange,
   onHeaterHoldToggle,
   onArtifactChange,
+  onAddDevice,
   onStartDryRun,
   onStartFlash,
 }: {
   view: ConsoleView
   device: DeviceTarget
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -1334,9 +1327,21 @@ function ViewPanel({
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
   onHeaterHoldToggle: () => void
   onArtifactChange: (artifactId: string) => void
+  onAddDevice: (kind: AddDeviceKind) => void
   onStartDryRun: () => void
   onStartFlash: () => void
 }) {
+  if (view === 'add-device') {
+    return (
+      <AddDeviceView
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        feedback={feedback}
+        onAddDevice={onAddDevice}
+      />
+    )
+  }
+
   if (view === 'settings') {
     return (
       <SettingsView
@@ -1377,6 +1382,57 @@ function ViewPanel({
       onTargetTempChange={onTargetTempChange}
       onHeaterHoldToggle={onHeaterHoldToggle}
     />
+  )
+}
+
+function AddDeviceView({
+  allowDemoControls,
+  webSerial,
+  feedback,
+  onAddDevice,
+}: {
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  feedback: ActionFeedback
+  onAddDevice: (kind: AddDeviceKind) => void
+}) {
+  const webSerialDisabled =
+    !allowDemoControls &&
+    (webSerial.state === 'unsupported' ||
+      webSerial.state === 'connecting' ||
+      webSerial.state === 'connected')
+
+  return (
+    <div className="industrial-view-panel">
+      <PanelHeader kicker="Add device" title="Choose connection" />
+      <div className="industrial-add-device-grid">
+        {addDeviceOptions.map((item) => {
+          const disabled = item.kind === 'web-serial' && webSerialDisabled
+          const label =
+            item.kind === 'web-serial' && webSerial.state === 'connecting'
+              ? 'Web Serial (connecting)'
+              : item.kind === 'web-serial' && webSerial.state === 'connected'
+                ? 'Web Serial connected'
+                : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
+                  ? 'Web Serial unavailable'
+                  : item.label
+
+          return (
+            <button
+              key={item.kind}
+              type="button"
+              className="industrial-add-device-option"
+              disabled={disabled}
+              onClick={() => onAddDevice(item.kind)}
+            >
+              <span>{label}</span>
+              <small>{item.detail}</small>
+            </button>
+          )
+        })}
+      </div>
+      <ActionFeedbackPanel feedback={feedback} />
+    </div>
   )
 }
 
