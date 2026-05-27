@@ -6,7 +6,6 @@ import {
   Minus,
   Plus,
   Power,
-  RefreshCw,
   SlidersHorizontal,
   ToggleRight,
   Upload,
@@ -212,7 +211,6 @@ export function ControlPlaneDemo({
   const devdBaseUrl = devd?.devdBaseUrl ?? defaultDevdBaseUrl()
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
   const [activeView, setActiveView] = useState<ConsoleView>(initialView)
-  const [showDegraded, setShowDegraded] = useState(false)
   const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
@@ -240,8 +238,7 @@ export function ControlPlaneDemo({
       : 'Connect a browser Web Serial port to load live hardware state.',
     tone: 'info',
   })
-  const activeScenario =
-    allowDemoControls && showDegraded ? degradedControlPlaneScenario : liveScenario
+  const activeScenario = liveScenario
   const deviceOptions = useMemo(
     () => [...activeScenario.devices, ...pendingDevices],
     [activeScenario.devices, pendingDevices]
@@ -642,21 +639,6 @@ export function ControlPlaneDemo({
     emitEvent('target', `${nextDevice.alias} added from target selector`, 'warning')
   }
 
-  const handleToggleDegraded = () => {
-    const nextDegraded = !showDegraded
-    setShowDegraded(nextDegraded)
-    setFlashRun({ status: 'idle', progress: 0 })
-    flashCompletionEmittedRef.current = false
-    setActionEvents([])
-    setFeedback({
-      title: nextDegraded ? 'Degraded mock enabled' : 'Nominal mock restored',
-      detail: nextDegraded
-        ? 'Transport warnings and blocked checks are now visible.'
-        : 'Runtime state returned to the nominal fixture.',
-      tone: nextDegraded ? 'warning' : 'success',
-    })
-  }
-
   async function handleWebSerialConnect() {
     if (webSerial.state === 'connected') {
       await webSerial.disconnect()
@@ -1012,11 +994,9 @@ export function ControlPlaneDemo({
             <DeviceToolbar
               devices={deviceOptions}
               device={visibleDevice}
-              showDegraded={showDegraded}
-              allowDegradedMode={allowDemoControls}
+              allowDemoControls={allowDemoControls}
               webSerial={webSerial}
               onDeviceChange={handleDeviceChange}
-              onToggleDegraded={handleToggleDegraded}
             />
           </header>
 
@@ -1250,27 +1230,23 @@ function temperatureBand(tempC: number) {
 export function DeviceToolbar({
   devices,
   device,
-  showDegraded,
-  allowDegradedMode,
+  allowDemoControls,
   webSerial,
   onDeviceChange,
-  onToggleDegraded,
 }: {
   devices: DeviceTarget[]
   device: DeviceTarget
-  showDegraded: boolean
-  allowDegradedMode: boolean
+  allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onDeviceChange: (deviceId: string) => void
-  onToggleDegraded: () => void
 }) {
   const webSerialAddDisabled =
-    !allowDegradedMode &&
+    !allowDemoControls &&
     (webSerial.state === 'unsupported' ||
       webSerial.state === 'connecting' ||
       webSerial.state === 'connected')
   const webSerialAddLabel =
-    allowDegradedMode || webSerial.supported
+    allowDemoControls || webSerial.supported
       ? webSerial.state === 'connecting'
         ? 'Web Serial (connecting)'
         : webSerial.state === 'connected'
@@ -1316,17 +1292,6 @@ export function DeviceToolbar({
       <StatusDatum label="Lease" value={device.leaseState?.toUpperCase() ?? 'N/A'} />
       <StatusDatum label="Plate" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
-
-      {allowDegradedMode ? (
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary industrial-status-strip__button"
-          onClick={onToggleDegraded}
-        >
-          <RefreshCw size={16} aria-hidden="true" />
-          {showDegraded ? 'Nominal' : 'Degrade'}
-        </button>
-      ) : null}
     </section>
   )
 }

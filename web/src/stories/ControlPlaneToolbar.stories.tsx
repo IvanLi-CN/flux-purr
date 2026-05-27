@@ -8,14 +8,12 @@ const meta = {
   args: {
     devices: controlPlaneScenario.devices,
     device: controlPlaneScenario.devices[0],
-    showDegraded: false,
-    allowDegradedMode: true,
+    allowDemoControls: true,
     webSerial: {
       state: 'idle',
       supported: true,
     },
     onDeviceChange: () => undefined,
-    onToggleDegraded: () => undefined,
   },
 } satisfies Meta<typeof DeviceToolbar>
 
