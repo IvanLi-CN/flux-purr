@@ -57,9 +57,9 @@
 - firmware artifact verify 必须校验 file existence、size 和 sha256；real flash 必须先通过 dry-run。
 - devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
-- Web app 必须用 URL 参数 `variant=demo|live` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
-- `variant=demo` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
-- `variant=live` 必须使用独立 live scenario，不得混入 demo fixture、degraded demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。
+- Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
+- `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
+- `demo=false` 必须使用独立 live scenario，不得混入 demo fixture、degraded demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。
 
 ### SHOULD
 

@@ -154,10 +154,10 @@ The response reports a redacted summary only:
 
 The Web app has two isolated browser variants selected by URL parameter:
 
-- `?variant=demo`: demo-only scenario; no `devd`, Web Serial, or real backend requests.
-- `?variant=live`: live scenario; no demo fixtures, degraded demo data, or daemon mock devices.
+- `?demo=true`: demo-only scenario; no `devd`, Web Serial, or real backend requests.
+- `?demo=false`: live scenario; no demo fixtures, degraded demo data, or daemon mock devices.
 
-The selected variant is stored in browser storage. A later load without `variant` uses the remembered value and rewrites the URL to include the explicit parameter. The app must not switch variants unless the URL explicitly asks for `variant=demo` or `variant=live`.
+The selected demo flag is stored in browser storage. A later load without `demo` uses the remembered value and rewrites the URL to include the explicit parameter. The app must not switch variants unless the URL explicitly asks for `demo=true` or `demo=false`.
 
 Browser Web Serial uses the same USB CDC JSONL frames listed below. The Web app opens a port only from an explicit operator action with `navigator.serial.requestPort()`, then writes one newline-delimited JSON frame per request and waits for a matching `response.requestId`.
 
