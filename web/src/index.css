@@ -1961,8 +1961,133 @@
     position: relative;
     z-index: 1;
     display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.85rem;
     margin-block: 1.1rem;
+  }
+
+  .industrial-device-select-view {
+    align-content: start;
+  }
+
+  .industrial-device-select-view .industrial-add-device-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .industrial-console__workspace--selection {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-device-select-section {
+    display: grid;
+    gap: 0.75rem;
+  }
+
+  .industrial-known-device-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+    gap: 0.82rem;
+  }
+
+  .industrial-known-device-card,
+  .industrial-empty-device-grid {
+    border: 1px solid rgba(255, 255, 255, 0.54);
+    border-radius: 16px;
+    background: var(--industrial-bg);
+    box-shadow:
+      6px 6px 12px var(--industrial-shadow),
+      -6px -6px 12px var(--industrial-light);
+  }
+
+  .industrial-known-device-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 0.68rem;
+    min-height: 7rem;
+    padding: 0.92rem;
+    color: var(--industrial-text);
+    text-align: left;
+  }
+
+  .industrial-known-device-card:hover {
+    transform: translateY(-1px);
+    color: var(--industrial-accent);
+  }
+
+  .industrial-known-device-card:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 3px;
+  }
+
+  .industrial-known-device-card span {
+    display: grid;
+    gap: 0.3rem;
+    min-width: 0;
+  }
+
+  .industrial-known-device-card strong {
+    overflow-wrap: anywhere;
+    font-size: 0.95rem;
+    font-weight: 900;
+    line-height: 1.2;
+  }
+
+  .industrial-known-device-card small {
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 750;
+    line-height: 1.35;
+  }
+
+  .industrial-known-device-card em,
+  .industrial-known-device-card b {
+    width: fit-content;
+    border-radius: 999px;
+    padding: 0.32rem 0.48rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.62rem;
+    font-style: normal;
+    font-weight: 850;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .industrial-known-device-card em {
+    background: rgba(255, 255, 255, 0.52);
+    color: var(--industrial-muted-text);
+  }
+
+  .industrial-known-device-card b {
+    grid-column: 1 / -1;
+    border: 1px solid rgba(163, 177, 198, 0.62);
+    color: var(--industrial-text);
+  }
+
+  .industrial-empty-device-grid {
+    display: grid;
+    gap: 0.35rem;
+    padding: 1rem;
+  }
+
+  .industrial-empty-device-grid strong {
+    font-size: 0.95rem;
+    font-weight: 900;
+  }
+
+  .industrial-empty-device-grid span {
+    color: var(--industrial-muted-text);
+    font-size: 0.78rem;
+    font-weight: 750;
+  }
+
+  .industrial-device-select-divider {
+    border: 0;
+    height: 1px;
+    margin-block: 0.2rem;
+    background:
+      linear-gradient(90deg, transparent, rgba(96, 111, 132, 0.42), transparent),
+      linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent);
   }
 
   .industrial-add-device-option {
@@ -1978,6 +2103,12 @@
     box-shadow:
       6px 6px 12px var(--industrial-shadow),
       -6px -6px 12px var(--industrial-light);
+  }
+
+  @media (max-width: 819px) {
+    .industrial-add-device-grid {
+      grid-template-columns: 1fr;
+    }
   }
 
   .industrial-add-device-option:hover {
@@ -3776,5 +3907,10 @@
     .industrial-action-feedback--compact span {
       white-space: normal;
     }
+  }
+
+  .industrial-console__workspace.industrial-console__workspace--selection {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 }

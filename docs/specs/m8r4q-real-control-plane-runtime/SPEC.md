@@ -49,6 +49,7 @@
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - runtime config frame 和 devd runtime endpoint 必须能更新目标温度、主动散热开关与 heater hold 状态。
 - Web app 必须在目标下拉的底部只提供一个 `Add device` 入口；选择该入口后进入单独的 Add device 页面，并在该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型。
+- Web app 在 live 模式没有选中真实目标时，主工作区必须显示全宽设备选择页；该页上半部分显示 known devices 网格，中间显示分隔线，下半部分以单行三卡片显示 WiFi、Web Serial 与 Bridge 三种新增类型，且不显示右侧全局日志列。
 - Web app 必须通过 Add device 页面里的 Web Serial 类型提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、主动散热开关与 heater hold 状态。
 - Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
@@ -108,6 +109,7 @@
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
 - Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见。
 - Given 支持 Web Serial 的浏览器，When operator 在目标下拉底部选择 `Add device`、进入 Add device 页面选择 Web Serial 并选择 ESP32-S3 端口，Then Web app 通过 USB JSONL 读取 identity/network/status，并把目标温度、fan policy 与 heater hold 写为 `runtime_config`。
+- Given live 模式没有选中真实目标，When 打开 Dashboard、Settings 或 Update，Then 主工作区仍显示全宽设备选择页，不显示 Dashboard/Settings/Update 内容，不显示右侧全局日志列；WiFi、Web Serial 与 Bridge 三种新增卡片保持同一行，点击任一新增卡片进入 Add device 页面并触发对应新增动作。
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
 - Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
 
@@ -127,6 +129,7 @@
 - 证据来源：Web app runtime。
 - `assets/web-app-devd-no-authorized-serial.png`：Vite Web App 连接当前租约 `devd`；授权端口缺失时只显示 daemon mock target，并在 trace 中标明没有授权 native serial target。
 - `assets/web-app-devd-artifact-dry-check.png`：Vite Web App Update 页通过 `devd` 校验本地 ESP32-S3 固件产物，dry-check 返回通过。
+- `assets/web-app-live-no-device-selection.png`：Vite Web App live `demo=false` 无真实目标状态显示全宽设备选择页；known devices 网格与 Add device 单行三卡片可见，右侧全局日志列隐藏。
 - Chrome DevTools a11y snapshot on lease-managed `127.0.0.1:32082` against CORS-enabled `devd` `127.0.0.1:32083` verified the live Web page selects `USB JTAG/serial debug unit / DEVD` before daemon mock devices, reaches `LEASE ACTIVE`, displays real hardware PD/status values without mock simulation drift, shows WiFi state `DISABLED`, and includes bounded WiFi set/clear events in Runtime trace.
 
 ## 参考（References）

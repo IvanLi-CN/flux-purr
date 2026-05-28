@@ -84,6 +84,10 @@ export function useLiveWebSerialScenario(
       const nextDevice = webSerialProbeToDeviceTarget(probe)
       setDevice(nextDevice)
       setState('connected')
+      appendEvent(
+        `${nextDevice.alias} USB JSONL probe accepted: get_identity / get_network / get_status`,
+        'success'
+      )
       appendEvent(`${nextDevice.alias} connected over browser Web Serial`, 'success')
       return true
     } catch (error) {
@@ -154,7 +158,16 @@ export function useLiveWebSerialScenario(
               })
             : current
         )
-        appendEvent('runtime config applied over browser Web Serial', 'success')
+        appendEvent(
+          [
+            'runtime_config accepted over browser Web Serial',
+            `target ${status.targetTempC}C`,
+            `cooling ${status.activeCoolingEnabled ? 'on' : 'off'}`,
+            `heater ${status.heaterEnabled ? 'on' : 'off'}`,
+            `fan ${status.fanDisplayState}`,
+          ].join(' / '),
+          'success'
+        )
         return true
       } catch (error) {
         setError(error instanceof Error ? error.message : 'Web Serial runtime update failed.')

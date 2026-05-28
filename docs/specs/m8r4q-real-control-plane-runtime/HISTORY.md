@@ -49,3 +49,8 @@
 
 - 目标选择器的新增设备入口收敛为下拉底部唯一的 `Add device` 选项，不再使用下拉外的独立 USB 连接按钮，也不把 WiFi、Web Serial 与 Bridge 三种类型直接展开在目标下拉里。
 - `Add device` 会进入单独页面，页面内提供 WiFi、Web Serial 与 Bridge 三种新增类型；Web Serial 类型在 live 模式继续作为 `navigator.serial.requestPort()` 的显式用户动作，demo 模式只创建待绑定预览目标，不触发真实后端或浏览器串口请求。
+
+## 2026-05-29
+
+- 决策：live 模式未选中真实目标时，不再展示 Dashboard、Settings、Update 或右侧全局日志列，而是展示全宽设备选择页，避免无目标状态混入空运行面板或 demo trace。
+- 设备选择页按 known devices 网格、分隔线、单行 WiFi/Web Serial/Bridge 新增卡片组织；快捷新增入口先进入 Add device 页面再触发对应新增动作。

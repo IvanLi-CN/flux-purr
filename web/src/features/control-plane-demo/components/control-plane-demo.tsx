@@ -109,6 +109,8 @@ const addDeviceOptions: Array<{
   },
 ]
 
+const NO_LIVE_TARGET_ID = 'live-no-target'
+
 const consoleViews: Array<{
   id: ConsoleView
   label: string
@@ -259,7 +261,7 @@ export function ControlPlaneDemo({
   }, [allowDemoControls])
 
   useEffect(() => {
-    if (activeScenario.events.length < 2) {
+    if (!allowDemoControls || activeScenario.events.length < 2) {
       return
     }
 
@@ -268,7 +270,7 @@ export function ControlPlaneDemo({
     }, 2200)
 
     return () => window.clearInterval(timer)
-  }, [activeScenario.events.length])
+  }, [activeScenario.events.length, allowDemoControls])
 
   const selectedDevice = useMemo(
     () =>
@@ -413,13 +415,23 @@ export function ControlPlaneDemo({
     () => createFlashPhases(activeScenario.flashPhases, selectedArtifact, visibleDevice, flashRun),
     [activeScenario.flashPhases, flashRun, selectedArtifact, visibleDevice]
   )
-  const liveEvents = useMemo(
-    () => createLiveEventFeed(activeScenario.events, streamTick),
-    [activeScenario.events, streamTick]
+  const knownDevices = useMemo(
+    () => deviceOptions.filter((device) => isKnownDeviceChoice(device)),
+    [deviceOptions]
+  )
+  const isDeviceSelectionRequired = isNoLiveTargetDevice(visibleDevice)
+  const showDeviceSelection = isDeviceSelectionRequired && activeView !== 'add-device'
+  const isDeviceAddFlowActive = isDeviceSelectionRequired || activeView === 'add-device'
+  const scenarioEvents = useMemo(
+    () =>
+      allowDemoControls
+        ? createDemoEventFeed(activeScenario.events, streamTick)
+        : activeScenario.events,
+    [activeScenario.events, allowDemoControls, streamTick]
   )
   const visibleEvents = useMemo(
-    () => [...actionEvents, ...liveEvents].slice(0, LOG_FEED_SIZE),
-    [actionEvents, liveEvents]
+    () => [...actionEvents, ...scenarioEvents].slice(0, LOG_FEED_SIZE),
+    [actionEvents, scenarioEvents]
   )
 
   const emitEvent = useCallback(
@@ -617,7 +629,10 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handleAddDevice = async (kind: AddDeviceKind) => {
+  const handleAddDevice = async (
+    kind: AddDeviceKind,
+    { showPendingDashboard = true }: { showPendingDashboard?: boolean } = {}
+  ) => {
     setFlashRun({ status: 'idle', progress: 0 })
     flashCompletionEmittedRef.current = false
 
@@ -632,7 +647,10 @@ export function ControlPlaneDemo({
         return
       }
 
-      await handleWebSerialConnect()
+      const connected = await handleWebSerialConnect()
+      if (connected) {
+        setActiveView('dashboard')
+      }
       return
     }
 
@@ -641,7 +659,7 @@ export function ControlPlaneDemo({
       current.some((device) => device.id === nextDevice.id) ? current : [...current, nextDevice]
     )
     setSelectedDeviceId(nextDevice.id)
-    setActiveView('dashboard')
+    setActiveView(showPendingDashboard ? 'dashboard' : 'add-device')
     setFeedback({
       title: `${nextDevice.alias} added`,
       detail:
@@ -649,6 +667,11 @@ export function ControlPlaneDemo({
       tone: 'warning',
     })
     emitEvent('target', `${nextDevice.alias} added from target selector`, 'warning')
+  }
+
+  const handleQuickAddDevice = async (kind: AddDeviceKind) => {
+    setActiveView('add-device')
+    await handleAddDevice(kind, { showPendingDashboard: false })
   }
 
   async function handleWebSerialConnect() {
@@ -660,7 +683,7 @@ export function ControlPlaneDemo({
         tone: 'info',
       })
       emitEvent('webserial', 'browser direct USB control disconnected', 'info')
-      return
+      return false
     }
 
     const connected = await webSerial.connect()
@@ -682,6 +705,7 @@ export function ControlPlaneDemo({
       connected ? 'browser direct USB control connected' : 'browser direct USB control failed',
       connected ? 'success' : 'warning'
     )
+    return connected
   }
 
   const handleTargetTempChange = async (nextTargetTemp: number) => {
@@ -1032,11 +1056,19 @@ export function ControlPlaneDemo({
             })}
           </nav>
 
-          <div className="industrial-console__workspace">
+          <div
+            className={
+              isDeviceAddFlowActive
+                ? 'industrial-console__workspace industrial-console__workspace--selection'
+                : 'industrial-console__workspace'
+            }
+          >
             <section className="industrial-panel industrial-console__main">
               <ViewPanel
                 view={activeView}
                 device={visibleDevice}
+                showDeviceSelection={showDeviceSelection}
+                knownDevices={knownDevices}
                 allowDemoControls={allowDemoControls}
                 webSerial={webSerial}
                 selectedPresetIndex={selectedPresetIndex}
@@ -1054,17 +1086,15 @@ export function ControlPlaneDemo({
                 onFanPolicyChange={handleFanPolicyChange}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onArtifactChange={handleArtifactChange}
+                onDeviceSelect={handleDeviceChange}
+                onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDevice}
                 onStartDryRun={handleStartDryRun}
                 onStartFlash={handleStartFlash}
               />
             </section>
 
-            <GlobalLogPanel
-              events={visibleEvents}
-              quiet={activeView !== 'dashboard'}
-              currentView={activeView}
-            />
+            {isDeviceAddFlowActive ? null : <GlobalLogPanel events={visibleEvents} />}
           </div>
         </section>
       </div>
@@ -1072,7 +1102,7 @@ export function ControlPlaneDemo({
   )
 }
 
-function createLiveEventFeed(events: EventLogEntry[], tick: number) {
+function createDemoEventFeed(events: EventLogEntry[], tick: number) {
   if (events.length === 0) {
     return []
   }
@@ -1188,6 +1218,14 @@ function deviceControlBlockReason(device: DeviceTarget) {
   return null
 }
 
+function isNoLiveTargetDevice(device: DeviceTarget) {
+  return device.id === NO_LIVE_TARGET_ID
+}
+
+function isKnownDeviceChoice(device: DeviceTarget) {
+  return !isNoLiveTargetDevice(device) && !isDirectWebSerialDevice(device)
+}
+
 function formatTemp(value: number) {
   if (value <= 0) {
     return 'N/A'
@@ -1287,6 +1325,8 @@ export function DeviceToolbar({
 function ViewPanel({
   view,
   device,
+  showDeviceSelection,
+  knownDevices,
   allowDemoControls,
   webSerial,
   selectedPresetIndex,
@@ -1304,12 +1344,16 @@ function ViewPanel({
   onFanPolicyChange,
   onHeaterHoldToggle,
   onArtifactChange,
+  onDeviceSelect,
+  onQuickAddDevice,
   onAddDevice,
   onStartDryRun,
   onStartFlash,
 }: {
   view: ConsoleView
   device: DeviceTarget
+  showDeviceSelection: boolean
+  knownDevices: DeviceTarget[]
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   selectedPresetIndex: number
@@ -1327,10 +1371,25 @@ function ViewPanel({
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
   onHeaterHoldToggle: () => void
   onArtifactChange: (artifactId: string) => void
+  onDeviceSelect: (deviceId: string) => void
+  onQuickAddDevice: (kind: AddDeviceKind) => void
   onAddDevice: (kind: AddDeviceKind) => void
   onStartDryRun: () => void
   onStartFlash: () => void
 }) {
+  if (showDeviceSelection) {
+    return (
+      <DeviceSelectionView
+        knownDevices={knownDevices}
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        feedback={feedback}
+        onDeviceSelect={onDeviceSelect}
+        onAddDevice={onQuickAddDevice}
+      />
+    )
+  }
+
   if (view === 'add-device') {
     return (
       <AddDeviceView
@@ -1385,6 +1444,68 @@ function ViewPanel({
   )
 }
 
+function DeviceSelectionView({
+  knownDevices,
+  allowDemoControls,
+  webSerial,
+  feedback,
+  onDeviceSelect,
+  onAddDevice,
+}: {
+  knownDevices: DeviceTarget[]
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  feedback: ActionFeedback
+  onDeviceSelect: (deviceId: string) => void
+  onAddDevice: (kind: AddDeviceKind) => void
+}) {
+  return (
+    <div className="industrial-view-panel industrial-device-select-view">
+      <PanelHeader kicker="Device" title="Choose target" />
+      <section className="industrial-device-select-section">
+        <h3 className="industrial-section-title">Known devices</h3>
+        {knownDevices.length > 0 ? (
+          <div className="industrial-known-device-grid">
+            {knownDevices.map((device) => (
+              <button
+                key={device.id}
+                type="button"
+                className="industrial-known-device-card"
+                onClick={() => onDeviceSelect(device.id)}
+              >
+                <span>
+                  <strong>{device.alias}</strong>
+                  <small>{device.location}</small>
+                </span>
+                <em>{transportLabels[device.transport]}</em>
+                <b>{severityLabels[device.severity]}</b>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="industrial-empty-device-grid">
+            <strong>No known devices</strong>
+            <span>Connect a new target from one of the options below.</span>
+          </div>
+        )}
+      </section>
+
+      <hr className="industrial-device-select-divider" />
+
+      <section className="industrial-device-select-section">
+        <h3 className="industrial-section-title">Add device</h3>
+        <AddDeviceChoices
+          allowDemoControls={allowDemoControls}
+          webSerial={webSerial}
+          onAddDevice={onAddDevice}
+        />
+      </section>
+
+      <ActionFeedbackPanel feedback={feedback} />
+    </div>
+  )
+}
+
 function AddDeviceView({
   allowDemoControls,
   webSerial,
@@ -1396,6 +1517,28 @@ function AddDeviceView({
   feedback: ActionFeedback
   onAddDevice: (kind: AddDeviceKind) => void
 }) {
+  return (
+    <div className="industrial-view-panel">
+      <PanelHeader kicker="Add device" title="Choose connection" />
+      <AddDeviceChoices
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        onAddDevice={onAddDevice}
+      />
+      <ActionFeedbackPanel feedback={feedback} />
+    </div>
+  )
+}
+
+function AddDeviceChoices({
+  allowDemoControls,
+  webSerial,
+  onAddDevice,
+}: {
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  onAddDevice: (kind: AddDeviceKind) => void
+}) {
   const webSerialDisabled =
     !allowDemoControls &&
     (webSerial.state === 'unsupported' ||
@@ -1403,35 +1546,31 @@ function AddDeviceView({
       webSerial.state === 'connected')
 
   return (
-    <div className="industrial-view-panel">
-      <PanelHeader kicker="Add device" title="Choose connection" />
-      <div className="industrial-add-device-grid">
-        {addDeviceOptions.map((item) => {
-          const disabled = item.kind === 'web-serial' && webSerialDisabled
-          const label =
-            item.kind === 'web-serial' && webSerial.state === 'connecting'
-              ? 'Web Serial (connecting)'
-              : item.kind === 'web-serial' && webSerial.state === 'connected'
-                ? 'Web Serial connected'
-                : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
-                  ? 'Web Serial unavailable'
-                  : item.label
+    <div className="industrial-add-device-grid">
+      {addDeviceOptions.map((item) => {
+        const disabled = item.kind === 'web-serial' && webSerialDisabled
+        const label =
+          item.kind === 'web-serial' && webSerial.state === 'connecting'
+            ? 'Web Serial (connecting)'
+            : item.kind === 'web-serial' && webSerial.state === 'connected'
+              ? 'Web Serial connected'
+              : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
+                ? 'Web Serial unavailable'
+                : item.label
 
-          return (
-            <button
-              key={item.kind}
-              type="button"
-              className="industrial-add-device-option"
-              disabled={disabled}
-              onClick={() => onAddDevice(item.kind)}
-            >
-              <span>{label}</span>
-              <small>{item.detail}</small>
-            </button>
-          )
-        })}
-      </div>
-      <ActionFeedbackPanel feedback={feedback} />
+        return (
+          <button
+            key={item.kind}
+            type="button"
+            className="industrial-add-device-option"
+            disabled={disabled}
+            onClick={() => onAddDevice(item.kind)}
+          >
+            <span>{label}</span>
+            <small>{item.detail}</small>
+          </button>
+        )
+      })}
     </div>
   )
 }
@@ -1984,15 +2123,7 @@ function UpdateView({
   )
 }
 
-function GlobalLogPanel({
-  events,
-  quiet = false,
-  currentView = 'dashboard',
-}: {
-  events: EventLogEntry[]
-  quiet?: boolean
-  currentView?: ConsoleView
-}) {
+function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
   const [followTail, setFollowTail] = useState(false)
   const rowVirtualizer = useVirtualizer({
@@ -2038,26 +2169,9 @@ function GlobalLogPanel({
   }
 
   const virtualItems = rowVirtualizer.getVirtualItems()
-  const latestEvent = events[0]
 
   return (
-    <aside
-      className={
-        quiet
-          ? 'industrial-panel industrial-log-panel is-quiet'
-          : 'industrial-panel industrial-log-panel'
-      }
-      aria-label="Global log"
-    >
-      {quiet ? (
-        <div className="industrial-log-quiet-card">
-          <p className="industrial-label">Trace</p>
-          <strong>{events.length} frames</strong>
-          <span>
-            {currentView === 'settings' ? 'Settings' : 'Update'} · {latestEvent?.time ?? '--:--:--'}
-          </span>
-        </div>
-      ) : null}
+    <aside className="industrial-panel industrial-log-panel" aria-label="Global log">
       <div className="industrial-log-panel__header">
         <div>
           <p className="industrial-label text-[#a8b2d1]">Global log</p>
