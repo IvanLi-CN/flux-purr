@@ -20,7 +20,7 @@
 - `devd` flash route 会把 dry-run passed、real flash blocked/started/completed/failed 写入 bounded device events，并记录当前 selected artifact，供 Web Runtime trace 展示固件更新链路状态。
 - `devd` device events SSE 会先回放该设备已保存的 bounded event backlog，再继续推送 live broadcast events，避免 Web monitor/trace 在订阅较晚时丢掉 lease、serial timeout、WiFi/runtime、transport TX/RX 或 flash evidence。事件 ID 包含单调序列，避免同一毫秒内多事件被前端去重吞掉。
 - `devd` native serial device record 会声明 daemon-local `firmware_check` 与 `flash` capability；Web live devd bridge 在成功读取 firmware USB identity 后保留 daemon-local capabilities，避免 firmware identity 覆盖掉由 `devd` 提供的 artifact verify / flash 恢复路径。
-- `devd` artifact catalog 从当前 repo build outputs 计算 ESP32-S3 ELF 与 host binary 的 kind、size、sha256；development CORS 支持 Vite JSON preflight。
+- `devd` artifact catalog 从当前 repo build outputs 计算 ESP32-S3 ELF 与 host binary 的 kind、size、sha256；loopback bind 默认启用 development CORS，支持 Vite JSON preflight。
 - `devd` artifact verify 只接受配置 artifact root 内的相对路径，拒绝绝对路径、`..` 与解析后逃逸 artifact root 的文件。
 - Web app 保持 `#hhwq8` 轻量 bench console，新增 transport client、capability gate、live devd discovery bridge 与 artifact catalog/verify dry-check；devd native probe 顺序请求由 unit test 覆盖；native serial `timeout/error` 状态会阻断 runtime 与 dry-check 写路径。
 - Web app 支持 browser Web Serial 直连：目标下拉底部只提供一个 `Add device` 选项，选择后进入单独 Add device 页面；该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型，其中 Web Serial 在 live 模式调用 `navigator.serial.requestPort()`，打开后按 USB JSONL 顺序读取 identity、network、status，并把 Dashboard target temperature、Settings preset slot / preset 温度 / preset enabled、Settings fan policy 与 Dashboard heater hold 写成 `runtime_config`。直连 target 标记为 `transport=serial` / `baseUrl=webserial://selected`，只暴露 runtime/status/monitor 能力，不暴露 artifact verify、dry-run 或 real flash。

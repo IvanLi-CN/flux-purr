@@ -181,7 +181,7 @@ Those unsupported operations require Native `devd` HTTP capability gates.
 
 ## Native `devd` HTTP
 
-Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`.
+Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`; loopback binds enable development CORS so the Vite console can call the daemon from its own local port.
 Native serial discovery is constrained to the configured authorized port. The project default is `/dev/cu.usbmodem21221401`; if that path is absent, `devd` must not expose another native serial device.
 
 - `GET /health`

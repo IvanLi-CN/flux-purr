@@ -71,7 +71,7 @@ impl Default for AppConfig {
         Self {
             bind: "127.0.0.1:30080".parse().unwrap(),
             artifact_root: None,
-            allow_dev_cors: false,
+            allow_dev_cors: true,
             allow_real_flash: false,
             serial_port: Some(PathBuf::from(DEFAULT_SERIAL_PORT)),
         }
