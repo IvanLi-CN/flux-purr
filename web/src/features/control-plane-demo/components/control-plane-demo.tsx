@@ -1395,6 +1395,21 @@ function formatVolts(millivolts: number) {
   return `${(millivolts / 1000).toFixed(millivolts % 1000 === 0 ? 0 : 1)}V`
 }
 
+function formatAmps(milliamps: number) {
+  if (milliamps <= 0) {
+    return 'N/A'
+  }
+
+  return `${(milliamps / 1000).toFixed(1)}A`
+}
+
+function formatPdContract(millivolts: number, milliamps: number) {
+  const volts = formatVolts(millivolts)
+  const amps = formatAmps(milliamps)
+
+  return amps === 'N/A' ? volts : `${volts} / ${amps}`
+}
+
 function pdStateLabel(state: DeviceTarget['pdState']) {
   const labels: Record<DeviceTarget['pdState'], string> = {
     negotiating: 'negotiating',
@@ -1767,7 +1782,7 @@ function DashboardView({
         <div className="industrial-signal-stack">
           <StatusCard
             label="PD contract"
-            value={formatVolts(device.pdContractMv)}
+            value={formatPdContract(device.pdContractMv, device.currentMa)}
             detail={`${formatVolts(device.pdRequestMv)} requested / ${pdStateLabel(device.pdState)}`}
           />
           <StatusCard
@@ -1888,10 +1903,6 @@ function RuntimeMiniStatus({
         <p className="industrial-label">Runtime</p>
         <strong>{heaterState}</strong>
       </div>
-      <span>
-        <Zap size={14} aria-hidden="true" />
-        {device.currentMa}mA
-      </span>
       <span>
         <Fan size={14} aria-hidden="true" />
         {device.fanState}
