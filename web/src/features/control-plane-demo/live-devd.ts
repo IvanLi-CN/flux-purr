@@ -16,7 +16,7 @@ import {
 } from './transport-client'
 import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 
-const DEVD_POLL_MS = 5_000
+const DEVD_POLL_MS = 2_000
 const DEVD_TRACE_LIMIT = 80
 const DEVD_EVENT_KINDS = ['serial', 'lease', 'wifi', 'runtime', 'flash'] as const
 

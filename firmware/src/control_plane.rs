@@ -3,11 +3,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DeviceMode, DeviceStatus, PdState,
-    frontpanel::FrontPanelKey,
+    frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey},
     memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
 };
 
-pub const CONTROL_PLANE_API_VERSION: &str = "2026-05-23";
+pub const CONTROL_PLANE_API_VERSION: &str = "2026-05-29";
 pub const USB_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
 pub const USB_FRAMING: &str = "jsonl";
 pub const DEVICE_ID_MAX_LEN: usize = 48;
@@ -114,6 +114,8 @@ pub struct ControlPlaneStatus {
     pub uptime_seconds: u32,
     pub current_temp_c: f32,
     pub target_temp_c: i16,
+    pub selected_preset_slot: usize,
+    pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub heater_enabled: bool,
     pub heater_output_percent: u8,
     pub active_cooling_enabled: bool,
@@ -153,6 +155,8 @@ impl ControlPlaneStatus {
             uptime_seconds,
             current_temp_c: status.board_temp_centi as f32 / 100.0,
             target_temp_c: memory.target_temp_c,
+            selected_preset_slot: memory.selected_preset_slot,
+            presets_c: memory.presets_c,
             heater_enabled: matches!(status.mode, DeviceMode::Sampling),
             heater_output_percent,
             active_cooling_enabled: memory.active_cooling_enabled,
@@ -302,6 +306,8 @@ pub struct RedactedWifiConfig {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeConfigCommand {
     pub target_temp_c: Option<i16>,
+    pub selected_preset_slot: Option<usize>,
+    pub presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
     pub active_cooling_enabled: Option<bool>,
     pub heater_enabled: Option<bool>,
 }
@@ -310,6 +316,20 @@ impl RuntimeConfigCommand {
     pub fn apply_to(&self, config: &mut MemoryConfig) {
         if let Some(target_temp_c) = self.target_temp_c {
             config.target_temp_c = target_temp_c;
+        }
+        if let Some(selected_preset_slot) = self.selected_preset_slot {
+            config.selected_preset_slot = selected_preset_slot;
+        }
+        if let Some(presets_c) = self.presets_c {
+            config.presets_c = presets_c;
+            if self.target_temp_c.is_none()
+                && let Some(target_temp_c) = config
+                    .presets_c
+                    .get(config.selected_preset_slot)
+                    .and_then(|preset| *preset)
+            {
+                config.target_temp_c = target_temp_c;
+            }
         }
         if let Some(active_cooling_enabled) = self.active_cooling_enabled {
             config.active_cooling_enabled = active_cooling_enabled;
@@ -375,6 +395,8 @@ struct UsbFrameWire {
     auto_reconnect: Option<bool>,
     telemetry_interval_ms: Option<u32>,
     target_temp_c: Option<i16>,
+    selected_preset_slot: Option<usize>,
+    presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
     active_cooling_enabled: Option<bool>,
     heater_enabled: Option<bool>,
     ok: Option<bool>,
@@ -414,6 +436,8 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 config: RuntimeConfigCommand {
                     target_temp_c: value.target_temp_c,
+                    selected_preset_slot: value.selected_preset_slot,
+                    presets_c: value.presets_c,
                     active_cooling_enabled: value.active_cooling_enabled,
                     heater_enabled: value.heater_enabled,
                 },
@@ -455,6 +479,8 @@ impl From<&UsbFrame> for UsbFrameWire {
             auto_reconnect: None,
             telemetry_interval_ms: None,
             target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
             active_cooling_enabled: None,
             heater_enabled: None,
             ok: None,
@@ -496,6 +522,8 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.frame_type = string("runtime_config");
                 wire.request_id = Some(request_id.clone());
                 wire.target_temp_c = config.target_temp_c;
+                wire.selected_preset_slot = config.selected_preset_slot;
+                wire.presets_c = config.presets_c;
                 wire.active_cooling_enabled = config.active_cooling_enabled;
                 wire.heater_enabled = config.heater_enabled;
             }
@@ -797,6 +825,8 @@ mod tests {
     fn runtime_command_updates_memory_policy() {
         let command = RuntimeConfigCommand {
             target_temp_c: Some(250),
+            selected_preset_slot: None,
+            presets_c: None,
             active_cooling_enabled: Some(false),
             heater_enabled: Some(true),
         };
@@ -806,6 +836,35 @@ mod tests {
         assert_eq!(config.target_temp_c, 250);
         assert!(!config.active_cooling_enabled);
         assert_eq!(command.heater_enabled, Some(true));
+    }
+
+    #[test]
+    fn runtime_command_updates_memory_presets() {
+        let command = RuntimeConfigCommand {
+            target_temp_c: None,
+            selected_preset_slot: Some(3),
+            presets_c: Some([
+                Some(50),
+                Some(100),
+                None,
+                Some(155),
+                Some(180),
+                Some(200),
+                Some(210),
+                Some(220),
+                Some(250),
+                Some(300),
+            ]),
+            active_cooling_enabled: None,
+            heater_enabled: None,
+        };
+        let mut config = MemoryConfig::default();
+        command.apply_to(&mut config);
+
+        assert_eq!(config.selected_preset_slot, 3);
+        assert_eq!(config.presets_c[2], None);
+        assert_eq!(config.presets_c[3], Some(155));
+        assert_eq!(config.target_temp_c, 155);
     }
 
     #[test]
@@ -861,8 +920,43 @@ mod tests {
                 request_id: string("req-003"),
                 config: RuntimeConfigCommand {
                     target_temp_c: Some(230),
+                    selected_preset_slot: None,
+                    presets_c: None,
                     active_cooling_enabled: Some(false),
                     heater_enabled: Some(true),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_runtime_config_frame_with_presets() {
+        let frame = parse_usb_frame(
+            r#"{"type":"runtime_config","requestId":"req-004","selectedPresetSlot":3,"presetsC":[50,100,null,155,180,200,210,220,250,300]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame,
+            UsbFrame::RuntimeConfig {
+                request_id: string("req-004"),
+                config: RuntimeConfigCommand {
+                    target_temp_c: None,
+                    selected_preset_slot: Some(3),
+                    presets_c: Some([
+                        Some(50),
+                        Some(100),
+                        None,
+                        Some(155),
+                        Some(180),
+                        Some(200),
+                        Some(210),
+                        Some(220),
+                        Some(250),
+                        Some(300),
+                    ]),
+                    active_cooling_enabled: None,
+                    heater_enabled: None,
                 },
             }
         );

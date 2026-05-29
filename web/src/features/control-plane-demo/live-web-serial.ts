@@ -9,7 +9,7 @@ import {
   webSerialProbeToDeviceTarget,
 } from './web-serial'
 
-const WEB_SERIAL_POLL_MS = 3_000
+const WEB_SERIAL_POLL_MS = 1_000
 
 export interface LiveWebSerialOptions {
   enabled?: boolean
@@ -148,7 +148,7 @@ export function useLiveWebSerialScenario(
                   buildId: current.buildId,
                   gitSha: 'unknown',
                   board: 'esp32-s3',
-                  apiVersion: '2026-05-23',
+                  apiVersion: '2026-05-29',
                   protocolVersion: 'flux-purr.usb.v1',
                   hostname: current.alias,
                   capabilities: current.capabilities,
@@ -162,6 +162,7 @@ export function useLiveWebSerialScenario(
           [
             'runtime_config accepted over browser Web Serial',
             `target ${status.targetTempC}C`,
+            `preset M${(status.selectedPresetSlot ?? 0) + 1}`,
             `cooling ${status.activeCoolingEnabled ? 'on' : 'off'}`,
             `heater ${status.heaterEnabled ? 'on' : 'off'}`,
             `fan ${status.fanDisplayState}`,

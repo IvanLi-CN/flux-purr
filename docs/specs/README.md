@@ -76,4 +76,4 @@
 | 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | 2026-04-27 | M24C64-backed target/preset/cooling/Wi-Fi persistence |
 | r9k3m | Flux Purr PR 标签发布与主分支保护 | 已完成 | `r9k3m-pr-label-release-protection/SPEC.md` | 2026-04-27 | Label-driven release intent, immutable mainline snapshots, and quality-gates declaration |
 | hhwq8 | Flux Purr 热控 Bench Web Demo | active | `hhwq8-web-control-plane-demo/SPEC.md` | 2026-05-23 | Industrial mock thermal bench tool for the #27 control-plane architecture |
-| m8r4q | Flux Purr 真实控制平面运行时 | active | `m8r4q-real-control-plane-runtime/SPEC.md` | 2026-05-23 | Web + firmware + native devd real transport contract |
+| m8r4q | Flux Purr 真实控制平面运行时 | active | `m8r4q-real-control-plane-runtime/SPEC.md` | 2026-05-29 | Web + firmware + native devd real transport contract |

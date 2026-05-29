@@ -246,6 +246,8 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     boardTempC: record.status.boardTempCenti / 100,
     currentTempC: record.status.currentTempC,
     targetTempC: record.status.targetTempC,
+    selectedPresetIndex: record.status.selectedPresetSlot,
+    presetsC: record.status.presetsC,
     voltageMv: record.status.voltageMv,
     currentMa: record.status.currentMa,
     pdRequestMv: record.status.pdRequestMv,
@@ -281,6 +283,7 @@ function devdEventDetail(event: DevdEvent) {
     const status = recordPayload(event.payload?.status)
     return [
       targetTempLabel(status?.targetTempC),
+      presetSlotLabel(status?.selectedPresetSlot),
       boolLabel('cooling', status?.activeCoolingEnabled),
       boolLabel('heater', status?.heaterEnabled),
     ]
@@ -312,6 +315,11 @@ function safeNumber(value: unknown) {
 function targetTempLabel(value: unknown) {
   const targetTempC = safeNumber(value)
   return targetTempC === null ? null : `target ${targetTempC}C`
+}
+
+function presetSlotLabel(value: unknown) {
+  const selectedPresetSlot = safeNumber(value)
+  return selectedPresetSlot === null ? null : `preset M${selectedPresetSlot + 1}`
 }
 
 function passwordPresence(value: unknown) {

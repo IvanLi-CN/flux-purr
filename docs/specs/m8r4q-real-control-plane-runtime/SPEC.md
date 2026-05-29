@@ -47,10 +47,11 @@
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
-- runtime config frame 和 devd runtime endpoint 必须能更新目标温度、主动散热开关与 heater hold 状态。
+- runtime config frame 和 devd runtime endpoint 必须能更新目标温度、当前 preset slot、`presets_c[10]`、主动散热开关与 heater hold 状态。
 - Web app 必须在目标下拉的底部只提供一个 `Add device` 入口；选择该入口后进入单独的 Add device 页面，并在该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型。
 - Web app 在 live 模式没有选中真实目标时，主工作区必须显示全宽设备选择页；该页上半部分显示 known devices 网格，空设备提示不得呈现为卡片，中间显示分隔线，下半部分以单行三卡片显示 WiFi、Web Serial 与 Bridge 三种新增类型，且不显示右侧全局日志列或额外的分区标题。
-- Web app 必须通过 Add device 页面里的 Web Serial 类型提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、主动散热开关与 heater hold 状态。
+- Web app 必须通过 Add device 页面里的 Web Serial 类型提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、Settings preset slot / preset 温度 / preset 启用状态、主动散热开关与 heater hold 状态。
+- Web app 的 live Settings preset UI 必须以 firmware/devd/Web Serial status 回读为事实源；当 firmware 前面板在 preset 设置界面修改 slot、温度或禁用状态时，Web 必须通过 live status polling 更新回显；当 Web 修改同一数据时，firmware 必须应用到前面板 UI state 并触发重绘。
 - Web Serial 连接成功后，如果当前选中的是无目标或 WiFi/Web Serial/Bridge pending target，Web app 必须切换到真实 Web Serial target，不得继续显示 pending Bridge/WiFi runtime。
 - Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
@@ -81,7 +82,7 @@
 - `GET /api/v1/devices/:id/identity|network|status`：读取同一领域契约；leased USB session 需要 `lease_id`。
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
-- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`active_cooling_enabled`、`heater_enabled` 的部分更新。
+- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled` 的部分更新。
 - `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file kind、path、size、sha256 与可选 flash address；本地 ESP32-S3 release ELF 必须作为 `elf` artifact 走 `espflash flash`。
 - `POST /api/v1/artifacts/verify`：校验 catalog/artifact 文件。
 - `POST /api/v1/devices/:id/flash`：`dry_run=true` 只校验；`dry_run=false` 必须先有同 artifact 的通过记录。
@@ -91,7 +92,7 @@
 - `hello`：device 主动或 host 请求；返回 protocol、framing、identity、capabilities。
 - `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
-- `runtime_config`：`request_id` + runtime fields；response 返回更新后的 status。
+- `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`；response 返回更新后的 status。
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 
@@ -100,7 +101,7 @@
 - Web app 使用 Add device 页面里的 Web Serial 类型调用浏览器 `navigator.serial.requestPort()`；未支持 Web Serial 的浏览器必须保持 mock/devd 路径可用并禁用 Web Serial 类型。
 - Web Serial port 使用 `115200` baud 打开，按 USB JSONL 一行一帧写入 `request` / `runtime_config`，并只消费匹配 `requestId` 的 `response`。
 - 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
-- Direct Web Serial 控制项只包括 runtime control 与 status polling；firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
+- Direct Web Serial 控制项只包括 runtime control 与 status polling；status polling 必须回读 target、preset、cooling、heater 与 power/network summary，供 Web 与前面板设置界面双向回显。firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -110,6 +111,8 @@
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
 - Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见。
 - Given 支持 Web Serial 的浏览器，When operator 在目标下拉底部选择 `Add device`、进入 Add device 页面选择 Web Serial 并选择 ESP32-S3 端口，Then Web app 通过 USB JSONL 读取 identity/network/status，并把目标温度、fan policy 与 heater hold 写为 `runtime_config`。
+- Given Web Settings 与硬件前面板都显示 preset 设置界面，When operator 在 Web 选择 preset slot、修改 preset 温度或切换 enabled，Then firmware 通过 `runtime_config` 更新 `MemoryConfig` 与 `FrontPanelUiState`，前面板界面及时重绘，Web 从返回 status 或下一轮 polling 看到相同 `selectedPresetSlot` / `presetsC`。
+- Given Web Settings 与硬件前面板都显示 preset 设置界面，When operator 在硬件侧切换 slot、调整温度或禁用 preset，Then firmware status 反映新的 `selectedPresetSlot` / `presetsC`，Web live Settings 在下一轮 polling 内更新回显，不再显示前端硬编码 preset。
 - Given live 模式没有选中真实目标，When 打开 Dashboard、Settings 或 Update，Then 主工作区仍显示全宽设备选择页，不显示 Dashboard/Settings/Update 内容，不显示右侧全局日志列；WiFi、Web Serial 与 Bridge 三种新增卡片保持同一行，点击任一新增卡片进入 Add device 页面并触发对应新增动作。
 - Given Add device 页面当前选中 pending Bridge，When operator 点击 Web Serial 并连接成功，Then 目标选择器显示真实 Web Serial target，Dashboard 显示真实 runtime，而不是继续显示 `Native bridge / BRIDGE`。
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
@@ -132,6 +135,7 @@
 - `assets/web-app-devd-no-authorized-serial.png`：Vite Web App 连接当前租约 `devd`；授权端口缺失时只显示 daemon mock target，并在 trace 中标明没有授权 native serial target。
 - `assets/web-app-devd-artifact-dry-check.png`：Vite Web App Update 页通过 `devd` 校验本地 ESP32-S3 固件产物，dry-check 返回通过。
 - `assets/web-app-live-no-device-selection.png`：Vite Web App live `demo=false` 无真实目标状态显示全宽设备选择页；空设备提示以轻量文本呈现，单行三张新增卡片可见，右侧全局日志列和分区标题隐藏。
+- `assets/web-app-live-preset-sync.png`：Storybook live Web Serial 场景覆盖 Settings preset 写入后从 status 回显；M5 被 Web 写为 disabled 后，summary、slot grid、selected editor 和 Runtime trace 保持一致。
 - Chrome DevTools a11y snapshot on lease-managed `127.0.0.1:32082` against CORS-enabled `devd` `127.0.0.1:32083` verified the live Web page selects `USB JTAG/serial debug unit / DEVD` before daemon mock devices, reaches `LEASE ACTIVE`, displays real hardware PD/status values without mock simulation drift, shows WiFi state `DISABLED`, and includes bounded WiFi set/clear events in Runtime trace.
 
 ## 参考（References）

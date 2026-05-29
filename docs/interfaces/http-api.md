@@ -49,6 +49,8 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "uptimeSeconds": 123,
   "currentTempC": 183.6,
   "targetTempC": 220,
+  "selectedPresetSlot": 3,
+  "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "heaterEnabled": true,
   "heaterOutputPercent": 22,
   "activeCoolingEnabled": true,
@@ -68,6 +70,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN`.
+`presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 
 ### `FirmwareArtifact`
 
@@ -166,7 +169,7 @@ Direct browser targets are represented in the Web app as `transport=serial`, `ba
 Supported direct operations:
 
 - `request` with `op=get_identity|get_network|get_status`
-- `runtime_config` for `targetTempC`, `activeCoolingEnabled`, and `heaterEnabled`
+- `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `activeCoolingEnabled`, and `heaterEnabled`
 
 Unsupported direct operations:
 
@@ -219,6 +222,8 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 {
   "leaseId": "lease-001",
   "targetTempC": 220,
+  "selectedPresetSlot": 3,
+  "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
   "heaterEnabled": true
 }
@@ -354,6 +359,8 @@ Responses must redact the password:
   "type": "runtime_config",
   "requestId": "req-003",
   "targetTempC": 220,
+  "selectedPresetSlot": 3,
+  "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
   "heaterEnabled": true
 }
@@ -369,6 +376,8 @@ The response returns the updated status:
   "result": {
     "status": {
       "targetTempC": 220,
+      "selectedPresetSlot": 3,
+      "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
       "activeCoolingEnabled": true,
       "heaterEnabled": true
     }

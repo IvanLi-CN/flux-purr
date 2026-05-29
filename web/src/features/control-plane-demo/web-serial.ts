@@ -79,6 +79,8 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     boardTempC: probe.status.boardTempCenti / 100,
     currentTempC: probe.status.currentTempC,
     targetTempC: probe.status.targetTempC,
+    selectedPresetIndex: probe.status.selectedPresetSlot,
+    presetsC: probe.status.presetsC,
     voltageMv: probe.status.voltageMv,
     currentMa: probe.status.currentMa,
     pdRequestMv: probe.status.pdRequestMv,

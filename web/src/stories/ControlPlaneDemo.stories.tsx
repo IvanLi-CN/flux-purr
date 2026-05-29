@@ -86,6 +86,25 @@ export const LiveWebSerialAddDevice: Story = {
       ).toBeVisible()
       await expect(canvas.queryByText(/\d+ frames/)).not.toBeInTheDocument()
     })
+
+    await step(
+      'Settings preset edits write through Web Serial and re-render from status',
+      async () => {
+        await userEvent.click(await canvas.findByRole('button', { name: /M5 180℃ enabled/ }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('button', { name: /M5 180℃ enabled/ })).toHaveAttribute(
+            'aria-pressed',
+            'true'
+          )
+        })
+        await userEvent.click(await canvas.findByRole('switch', { name: 'Preset M5' }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('button', { name: /M5 --- disabled/ })).toBeVisible()
+        })
+      }
+    )
   },
 }
 
@@ -178,21 +197,32 @@ export const LiveQuickAddBridgeDevice: Story = {
 }
 
 class FakeWebSerialClient {
+  private currentStatus: ControlPlaneStatus = status
+
   connect() {
-    return Promise.resolve(webSerialProbe)
+    return Promise.resolve({ ...webSerialProbe, status: this.currentStatus })
   }
 
   probe() {
-    return Promise.resolve(webSerialProbe)
+    return Promise.resolve({ ...webSerialProbe, status: this.currentStatus })
   }
 
   configureRuntime(request: DirectRuntimeConfigRequest) {
-    return Promise.resolve({
-      ...status,
+    this.currentStatus = {
+      ...this.currentStatus,
       ...request,
-      heaterOutputPercent: request.heaterEnabled === false ? 0 : status.heaterOutputPercent,
-      fanDisplayState: request.activeCoolingEnabled === false ? 'OFF' : status.fanDisplayState,
-    } satisfies ControlPlaneStatus)
+      targetTempC:
+        request.targetTempC ??
+        request.presetsC?.[
+          request.selectedPresetSlot ?? this.currentStatus.selectedPresetSlot ?? 0
+        ] ??
+        this.currentStatus.targetTempC,
+      heaterOutputPercent:
+        request.heaterEnabled === false ? 0 : this.currentStatus.heaterOutputPercent,
+      fanDisplayState:
+        request.activeCoolingEnabled === false ? 'OFF' : this.currentStatus.fanDisplayState,
+    }
+    return Promise.resolve(this.currentStatus satisfies ControlPlaneStatus)
   }
 
   disconnect() {
@@ -206,7 +236,7 @@ const identity = {
   buildId: 'story-build',
   gitSha: 'story',
   board: 'esp32-s3',
-  apiVersion: '2026-05-23',
+  apiVersion: '2026-05-29',
   protocolVersion: 'flux-purr.usb.v1',
   hostname: 'flux-purr-s3-001',
   capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
@@ -227,6 +257,8 @@ const status = {
   uptimeSeconds: 44,
   currentTempC: 20.3,
   targetTempC: 30,
+  selectedPresetSlot: 3,
+  presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   heaterEnabled: false,
   heaterOutputPercent: 0,
   activeCoolingEnabled: true,

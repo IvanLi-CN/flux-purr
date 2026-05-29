@@ -55,3 +55,4 @@
 - 决策：live 模式未选中真实目标时，不再展示 Dashboard、Settings、Update 或右侧全局日志列，而是展示全宽设备选择页，避免无目标状态混入空运行面板或 demo trace。
 - 设备选择页按 known devices 网格、分隔线、单行 WiFi/Web Serial/Bridge 新增卡片组织；空设备提示不做成卡片，不显示额外分区标题；快捷新增入口先进入 Add device 页面再触发对应新增动作。
 - 修复 pending Bridge/WiFi target 与 Web Serial 连接状态的选择同步：Web Serial 连接成功后必须选中真实 browser Web Serial target，不能继续显示 pending Bridge runtime。
+- 将 preset 设置纳入真实 runtime contract：status 回传 `selectedPresetSlot` 与 `presetsC`，`runtime_config` 可写当前 slot 与完整 preset array；Web live Settings 以设备 status 为事实源，硬件前面板和 Web 同时显示 preset 设置界面时可通过写入 response 与轮询互相回显。

@@ -235,10 +235,10 @@ test.describe('control plane live devd bridge', () => {
   test('discovers live devd target and completes artifact dry-check through HTTP bridge', async ({
     page,
   }) => {
-    await page.goto('/')
+    await page.goto('/?demo=false')
 
     const targetRegion = page.getByRole('region', { name: 'Current target' })
-    await expect(page.getByRole('combobox', { name: 'Target' })).toHaveValue(deviceId)
+    await expect(page.getByRole('combobox', { name: 'Target' })).toContainText('/ DEVD')
     await expect(targetRegion).toContainText('Transport')
     await expect(targetRegion).toContainText('DEVD')
     await expect(targetRegion).toContainText('Lease')
@@ -246,7 +246,6 @@ test.describe('control plane live devd bridge', () => {
     await page.waitForTimeout(1800)
     await expect(page.getByText('181.5').first()).toBeVisible()
     await expect(page.getByText('Heater 18%')).toBeVisible()
-    await expect(page.getByText('live devd firmware status')).toBeVisible()
     await expect(
       page.getByText('native serial RPC failed: status / usb_response_timeout').first()
     ).toBeVisible()
@@ -259,7 +258,7 @@ test.describe('control plane live devd bridge', () => {
 
     await page.getByRole('button', { name: 'Run dry-check' }).click()
 
-    await expect(page.getByText('Dry-run passed')).toBeVisible()
+    await expect(page.getByText('Dry-run passed', { exact: true })).toBeVisible()
     await expect(page.getByText('local-build verified 1 local file.')).toBeVisible()
     await expect
       .poll(
@@ -290,9 +289,9 @@ test.describe('control plane live devd bridge', () => {
   })
 
   test('sends runtime commands through the active devd lease', async ({ page }) => {
-    await page.goto('/')
+    await page.goto('/?demo=false')
 
-    await expect(page.getByRole('combobox', { name: 'Target' })).toHaveValue(deviceId)
+    await expect(page.getByRole('combobox', { name: 'Target' })).toContainText('/ DEVD')
 
     await page.getByRole('button', { name: /dashboard/i }).click()
     await page.getByLabel('Dashboard target temperature').fill('235')

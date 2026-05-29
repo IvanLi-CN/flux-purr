@@ -3639,6 +3639,8 @@ mod tests {
             request_id,
             RuntimeConfigCommand {
                 target_temp_c: Some(240),
+                selected_preset_slot: None,
+                presets_c: None,
                 active_cooling_enabled: Some(false),
                 heater_enabled: Some(true),
             },

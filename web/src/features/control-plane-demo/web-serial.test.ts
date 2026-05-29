@@ -26,6 +26,8 @@ describe('web serial control-plane client', () => {
       leaseState: 'active',
       currentTempC: 181.5,
       targetTempC: 220,
+      selectedPresetIndex: 7,
+      presetsC: [50, 100, 120, null, 180, 200, 210, 220, 250, 300],
     })
     expect(target.capabilities).toContain('usb_jsonl')
     expect(isDirectWebSerialDevice(target)).toBe(true)
@@ -40,12 +42,16 @@ describe('web serial control-plane client', () => {
 
     const status = await client.configureRuntime({
       targetTempC: 235,
+      selectedPresetSlot: 3,
+      presetsC: [50, 100, 120, 235, 180, 200, 210, 220, 250, 300],
       activeCoolingEnabled: false,
       heaterEnabled: false,
     })
 
     expect(status).toMatchObject({
       targetTempC: 235,
+      selectedPresetSlot: 3,
+      presetsC: [50, 100, 120, 235, 180, 200, 210, 220, 250, 300],
       activeCoolingEnabled: false,
       heaterEnabled: false,
       fanDisplayState: 'OFF',
@@ -53,6 +59,8 @@ describe('web serial control-plane client', () => {
     expect(fake.requests.at(-1)).toMatchObject({
       type: 'runtime_config',
       targetTempC: 235,
+      selectedPresetSlot: 3,
+      presetsC: [50, 100, 120, 235, 180, 200, 210, 220, 250, 300],
       activeCoolingEnabled: false,
       heaterEnabled: false,
     })
@@ -127,6 +135,12 @@ function responseFor(request: Record<string, unknown>) {
     return { type: 'response', requestId, ok: true, result: { status: baseStatus } }
   }
   if (request.type === 'runtime_config') {
+    const selectedPresetSlot =
+      typeof request.selectedPresetSlot === 'number'
+        ? request.selectedPresetSlot
+        : baseStatus.selectedPresetSlot
+    const presetsC = Array.isArray(request.presetsC) ? request.presetsC : baseStatus.presetsC
+    const selectedPresetTemp = presetsC[selectedPresetSlot]
     return {
       type: 'response',
       requestId,
@@ -134,9 +148,20 @@ function responseFor(request: Record<string, unknown>) {
       result: {
         status: {
           ...baseStatus,
-          targetTempC: request.targetTempC,
-          activeCoolingEnabled: request.activeCoolingEnabled,
-          heaterEnabled: request.heaterEnabled,
+          targetTempC:
+            typeof request.targetTempC === 'number'
+              ? request.targetTempC
+              : (selectedPresetTemp ?? baseStatus.targetTempC),
+          selectedPresetSlot,
+          presetsC,
+          activeCoolingEnabled:
+            typeof request.activeCoolingEnabled === 'boolean'
+              ? request.activeCoolingEnabled
+              : baseStatus.activeCoolingEnabled,
+          heaterEnabled:
+            typeof request.heaterEnabled === 'boolean'
+              ? request.heaterEnabled
+              : baseStatus.heaterEnabled,
           heaterOutputPercent: request.heaterEnabled === false ? 0 : baseStatus.heaterOutputPercent,
           fanDisplayState:
             request.activeCoolingEnabled === false ? 'OFF' : baseStatus.fanDisplayState,
@@ -158,7 +183,7 @@ const identity = {
   buildId: 'build-1',
   gitSha: 'abc',
   board: 'esp32-s3',
-  apiVersion: '2026-05-23',
+  apiVersion: '2026-05-29',
   protocolVersion: 'flux-purr.usb.v1',
   hostname: 'flux-purr-s3-001',
   capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
@@ -179,6 +204,8 @@ const baseStatus = {
   uptimeSeconds: 3661,
   currentTempC: 181.5,
   targetTempC: 220,
+  selectedPresetSlot: 7,
+  presetsC: [50, 100, 120, null, 180, 200, 210, 220, 250, 300],
   heaterEnabled: true,
   heaterOutputPercent: 18,
   activeCoolingEnabled: true,

@@ -25,7 +25,7 @@ describe('control-plane transport client', () => {
         buildId: 'devd-mock',
         gitSha: 'abc',
         board: 'esp32-s3',
-        apiVersion: '2026-05-23',
+        apiVersion: '2026-05-29',
         protocolVersion: 'flux-purr.usb.v1',
         hostname: 'mock-fp-lab-01',
         capabilities: ['identity', 'status', 'wifi_config'],
@@ -40,6 +40,8 @@ describe('control-plane transport client', () => {
         uptimeSeconds: 3661,
         currentTempC: 183.6,
         targetTempC: 220,
+        selectedPresetSlot: 5,
+        presetsC: [50, 100, 120, 150, 180, 220, 210, 230, 250, 300],
         heaterEnabled: true,
         heaterOutputPercent: 22,
         activeCoolingEnabled: true,
@@ -65,6 +67,8 @@ describe('control-plane transport client', () => {
     expect(target.transport).toBe('devd')
     expect(target.uptime).toBe('01:01:01')
     expect(target.capabilities).toContain('wifi_config')
+    expect(target.selectedPresetIndex).toBe(5)
+    expect(target.presetsC?.[5]).toBe(220)
   })
 
   it('keeps daemon-local capabilities after a successful native firmware probe', () => {
@@ -80,7 +84,7 @@ describe('control-plane transport client', () => {
         buildId: 'devd',
         gitSha: 'unknown',
         board: 'esp32-s3',
-        apiVersion: '2026-05-23',
+        apiVersion: '2026-05-29',
         protocolVersion: 'flux-purr.usb.v1',
         hostname: 'serial-1',
         capabilities: ['identity', 'status', 'network', 'wifi_config', 'firmware_check', 'flash'],
@@ -121,7 +125,7 @@ describe('control-plane transport client', () => {
         buildId: 'firmware-build',
         gitSha: 'abc',
         board: 'esp32-s3',
-        apiVersion: '2026-05-23',
+        apiVersion: '2026-05-29',
         protocolVersion: 'flux-purr.usb.v1',
         hostname: 'flux-purr-s3-001',
         capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'wifi_config', 'monitor'],
@@ -279,7 +283,7 @@ describe('control-plane transport client', () => {
             buildId: 'build-1',
             gitSha: 'abc',
             board: 'esp32-s3',
-            apiVersion: '2026-05-23',
+            apiVersion: '2026-05-29',
             protocolVersion: 'flux-purr.usb.v1',
             hostname: 'frontpanel-1',
             capabilities: ['identity', 'status'],
@@ -551,7 +555,7 @@ describe('control-plane transport client', () => {
             buildId: 'build-1',
             gitSha: 'abc',
             board: 'esp32-s3',
-            apiVersion: '2026-05-23',
+            apiVersion: '2026-05-29',
             protocolVersion: 'flux-purr.usb.v1',
             hostname: 'native-target',
             capabilities: ['identity', 'status', 'network'],

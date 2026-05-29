@@ -34,6 +34,7 @@ pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
+const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -230,7 +231,7 @@ impl DeviceRecord {
             build_id: "devd-mock".to_string(),
             git_sha: "unknown".to_string(),
             board: "esp32-s3".to_string(),
-            api_version: "2026-05-23".to_string(),
+            api_version: "2026-05-29".to_string(),
             protocol_version: "flux-purr.usb.v1".to_string(),
             hostname: id.to_string(),
             capabilities: vec![
@@ -257,6 +258,19 @@ impl DeviceRecord {
             uptime_seconds: 123,
             current_temp_c: 183.6,
             target_temp_c: 220,
+            selected_preset_slot: Some(1),
+            presets_c: Some(vec![
+                Some(50),
+                Some(100),
+                Some(120),
+                Some(150),
+                Some(180),
+                Some(200),
+                Some(210),
+                Some(220),
+                Some(250),
+                Some(300),
+            ]),
             heater_enabled: true,
             heater_output_percent: 22,
             active_cooling_enabled: true,
@@ -351,6 +365,10 @@ pub struct ControlPlaneStatus {
     pub uptime_seconds: u32,
     pub current_temp_c: f32,
     pub target_temp_c: i16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_preset_slot: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presets_c: Option<Vec<Option<i16>>>,
     pub heater_enabled: bool,
     pub heater_output_percent: u8,
     pub active_cooling_enabled: bool,
@@ -425,6 +443,8 @@ pub struct WifiConfigRequest {
 pub struct RuntimeConfigRequest {
     pub lease_id: String,
     pub target_temp_c: Option<i16>,
+    pub selected_preset_slot: Option<usize>,
+    pub presets_c: Option<Vec<Option<i16>>>,
     pub active_cooling_enabled: Option<bool>,
     pub heater_enabled: Option<bool>,
 }
@@ -479,6 +499,10 @@ struct UsbRuntimeConfigWire<'a> {
     request_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_temp_c: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_preset_slot: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    presets_c: Option<&'a Vec<Option<i16>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     active_cooling_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1052,6 +1076,7 @@ async fn configure_runtime(
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<RuntimeConfigRequest>,
 ) -> Result<Json<ControlPlaneStatus>, HttpError> {
+    validate_runtime_config(&payload)?;
     let target = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -1088,6 +1113,18 @@ async fn configure_runtime(
     if let Some(target_temp_c) = payload.target_temp_c {
         device.status.target_temp_c = target_temp_c;
     }
+    if let Some(selected_preset_slot) = payload.selected_preset_slot {
+        device.status.selected_preset_slot = Some(selected_preset_slot);
+    }
+    if let Some(presets_c) = &payload.presets_c {
+        device.status.presets_c = Some(presets_c.clone());
+        if payload.target_temp_c.is_none()
+            && let Some(selected_preset_slot) = device.status.selected_preset_slot
+            && let Some(Some(target_temp_c)) = presets_c.get(selected_preset_slot)
+        {
+            device.status.target_temp_c = *target_temp_c;
+        }
+    }
     if let Some(active_cooling_enabled) = payload.active_cooling_enabled {
         device.status.active_cooling_enabled = active_cooling_enabled;
     }
@@ -1101,6 +1138,29 @@ async fn configure_runtime(
     drop(state_lock);
     emit_runtime_config_event(&state, &device_id, &payload, &status);
     Ok(Json(status))
+}
+
+fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
+    if payload
+        .selected_preset_slot
+        .is_some_and(|slot| slot >= FRONT_PANEL_PRESET_COUNT)
+    {
+        return Err(HttpError::bad_request(
+            "invalid_preset_slot",
+            "selectedPresetSlot must be between 0 and 9.",
+        ));
+    }
+    if payload
+        .presets_c
+        .as_ref()
+        .is_some_and(|presets| presets.len() != FRONT_PANEL_PRESET_COUNT)
+    {
+        return Err(HttpError::bad_request(
+            "invalid_presets",
+            "presetsC must contain exactly 10 values.",
+        ));
+    }
+    Ok(())
 }
 
 async fn verify_artifact_route(
@@ -1172,6 +1232,8 @@ async fn serial_runtime_config(
         frame_type: "runtime_config",
         request_id: &request_id,
         target_temp_c: payload.target_temp_c,
+        selected_preset_slot: payload.selected_preset_slot,
+        presets_c: payload.presets_c.as_ref(),
         active_cooling_enabled: payload.active_cooling_enabled,
         heater_enabled: payload.heater_enabled,
     })
@@ -2039,11 +2101,15 @@ fn emit_runtime_config_event(
         json!({
             "requested": {
                 "targetTempC": payload.target_temp_c,
+                "selectedPresetSlot": payload.selected_preset_slot,
+                "presetsC": payload.presets_c,
                 "activeCoolingEnabled": payload.active_cooling_enabled,
                 "heaterEnabled": payload.heater_enabled,
             },
             "status": {
                 "targetTempC": status.target_temp_c,
+                "selectedPresetSlot": status.selected_preset_slot,
+                "presetsC": status.presets_c,
                 "activeCoolingEnabled": status.active_cooling_enabled,
                 "heaterEnabled": status.heater_enabled,
             },
@@ -2468,6 +2534,8 @@ mod tests {
             Json(RuntimeConfigRequest {
                 lease_id: "missing-lease".to_string(),
                 target_temp_c: Some(230),
+                selected_preset_slot: None,
+                presets_c: None,
                 active_cooling_enabled: None,
                 heater_enabled: None,
             }),
@@ -2564,6 +2632,8 @@ mod tests {
             Json(RuntimeConfigRequest {
                 lease_id: lease.lease_id,
                 target_temp_c: Some(231),
+                selected_preset_slot: None,
+                presets_c: None,
                 active_cooling_enabled: Some(false),
                 heater_enabled: Some(false),
             }),

@@ -62,12 +62,13 @@ interface ActionFeedback {
 const LOG_FEED_SIZE = 1000
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
-const TARGET_TEMP_MIN = 30
-const TARGET_TEMP_MAX = 380
+const TARGET_TEMP_MIN = 0
+const TARGET_TEMP_MAX = 400
 const TARGET_TEMP_STEP = 5
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
-const PRESET_ENABLED = [true, true, false, true, true, true, true, true, true, false]
+const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
+const PRESET_ENABLED = PRESETS_C.map((preset) => preset != null)
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
 const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
 const ADD_DEVICE_VALUE = '__add_device__'
@@ -379,17 +380,20 @@ export function ControlPlaneDemo({
       return activeScenario.devices[0]
     }
 
-    const isLiveRuntimeDevice =
-      selectedDevice.transport === 'devd' || isDirectWebSerialDevice(selectedDevice)
-    const currentTempC = isLiveRuntimeDevice
+    const liveRuntimeDevice = isLiveRuntimeDevice(selectedDevice)
+    const currentTempC = liveRuntimeDevice
       ? selectedDevice.currentTempC
       : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
-    const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
-    const fanState = fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState
+    const targetTempC = liveRuntimeDevice
+      ? selectedDevice.targetTempC
+      : (targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC)
+    const fanState = liveRuntimeDevice
+      ? selectedDevice.fanState
+      : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
     const heaterOutputPercent =
       selectedDevice.severity === 'offline'
         ? selectedDevice.heaterOutputPercent
-        : isLiveRuntimeDevice
+        : liveRuntimeDevice
           ? selectedDevice.heaterOutputPercent
           : Math.min(
               100,
@@ -417,9 +421,19 @@ export function ControlPlaneDemo({
     selectedDevice,
     targetTempByDevice,
   ])
-  const selectedPresetIndex = selectedPresetByDevice[visibleDevice.id] ?? 3
-  const visiblePresetTemps = presetTempsByDevice[visibleDevice.id] ?? PRESET_TEMPS_C
-  const visiblePresetEnabled = presetEnabledByDevice[visibleDevice.id] ?? PRESET_ENABLED
+  const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
+  const visiblePresetValues =
+    visibleDeviceIsLive && visibleDevice.presetsC
+      ? normalizePresets(visibleDevice.presetsC)
+      : presetValuesFromEditorState(
+          presetTempsByDevice[visibleDevice.id] ?? PRESET_TEMPS_C,
+          presetEnabledByDevice[visibleDevice.id] ?? PRESET_ENABLED
+        )
+  const selectedPresetIndex = visibleDeviceIsLive
+    ? clampPresetIndex(visibleDevice.selectedPresetIndex)
+    : (selectedPresetByDevice[visibleDevice.id] ?? 3)
+  const visiblePresetTemps = presetTempsFromValues(visiblePresetValues)
+  const visiblePresetEnabled = presetEnabledFromValues(visiblePresetValues)
   const selectedArtifact = useMemo(
     () =>
       activeScenario.artifacts.find(
@@ -472,6 +486,8 @@ export function ControlPlaneDemo({
     async (
       patch: {
         targetTempC?: number
+        selectedPresetSlot?: number
+        presetsC?: Array<number | null>
         activeCoolingEnabled?: boolean
         heaterEnabled?: boolean
       },
@@ -734,16 +750,15 @@ export function ControlPlaneDemo({
       { targetTempC: clampedTarget },
       'target temperature update was not accepted by devd'
     )
-    if (
-      (visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)) &&
-      !liveUpdated
-    ) {
+    if (visibleDeviceIsLive && !liveUpdated) {
       return
     }
-    setTargetTempByDevice((current) => ({
-      ...current,
-      [visibleDevice.id]: clampedTarget,
-    }))
+    if (!visibleDeviceIsLive) {
+      setTargetTempByDevice((current) => ({
+        ...current,
+        [visibleDevice.id]: clampedTarget,
+      }))
+    }
     setFeedback({
       title: 'Target updated',
       detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
@@ -757,16 +772,15 @@ export function ControlPlaneDemo({
       { activeCoolingEnabled: fanState !== 'OFF' },
       'fan policy update was not accepted by devd'
     )
-    if (
-      (visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)) &&
-      !liveUpdated
-    ) {
+    if (visibleDeviceIsLive && !liveUpdated) {
       return
     }
-    setFanPolicyByDevice((current) => ({
-      ...current,
-      [visibleDevice.id]: fanState,
-    }))
+    if (!visibleDeviceIsLive) {
+      setFanPolicyByDevice((current) => ({
+        ...current,
+        [visibleDevice.id]: fanState,
+      }))
+    }
     setFeedback({
       title: 'Fan policy updated',
       detail: `${visibleDevice.alias} fan policy is now ${fanState}.`,
@@ -775,27 +789,53 @@ export function ControlPlaneDemo({
     emitEvent('cooling', `fan policy updated to ${fanState}`, 'info')
   }
 
-  const handlePresetSlotChange = (presetIndex: number) => {
+  const handlePresetSlotChange = async (presetIndex: number) => {
     const presetIsEnabled = visiblePresetEnabled[presetIndex] ?? true
-    setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
+    const liveUpdated = await configureLiveRuntime(
+      { selectedPresetSlot: presetIndex },
+      'preset slot update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
+    }
     setFeedback({
       title: `Preset M${presetIndex + 1} selected`,
       detail: presetIsEnabled
         ? `${formatTemp(visiblePresetTemps[presetIndex])} is ready for ${visibleDevice.alias}.`
-        : `${formatTemp(visiblePresetTemps[presetIndex])} is stored but disabled.`,
+        : `Preset M${presetIndex + 1} is disabled.`,
       tone: presetIsEnabled ? 'info' : 'warning',
     })
     emitEvent('preset', `selected M${presetIndex + 1}`, 'info')
   }
 
-  const handlePresetTempChange = (nextTempC: number) => {
+  const handlePresetTempChange = async (nextTempC: number) => {
     const clampedTemp = clampTargetTemp(nextTempC)
-    setPresetTempsByDevice((current) => {
-      const nextTemps = [...(current[visibleDevice.id] ?? PRESET_TEMPS_C)]
-      nextTemps[selectedPresetIndex] = clampedTemp
+    const nextPresetValues = [...visiblePresetValues]
+    nextPresetValues[selectedPresetIndex] = clampedTemp
+    const liveUpdated = await configureLiveRuntime(
+      { selectedPresetSlot: selectedPresetIndex, presetsC: nextPresetValues },
+      'preset temperature update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setPresetTempsByDevice((current) => {
+        const nextTemps = [...(current[visibleDevice.id] ?? PRESET_TEMPS_C)]
+        nextTemps[selectedPresetIndex] = clampedTemp
 
-      return { ...current, [visibleDevice.id]: nextTemps }
-    })
+        return { ...current, [visibleDevice.id]: nextTemps }
+      })
+      setPresetEnabledByDevice((current) => {
+        const nextEnabledState = [...(current[visibleDevice.id] ?? PRESET_ENABLED)]
+        nextEnabledState[selectedPresetIndex] = true
+
+        return { ...current, [visibleDevice.id]: nextEnabledState }
+      })
+    }
     setFeedback({
       title: `Preset M${selectedPresetIndex + 1} updated`,
       detail: `Preset temperature is now ${formatTemp(clampedTemp)}.`,
@@ -808,18 +848,31 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handlePresetEnabledChange = (nextEnabled: boolean) => {
-    setPresetEnabledByDevice((current) => {
-      const nextEnabledState = [...(current[visibleDevice.id] ?? PRESET_ENABLED)]
-      nextEnabledState[selectedPresetIndex] = nextEnabled
+  const handlePresetEnabledChange = async (nextEnabled: boolean) => {
+    const nextPresetValues = [...visiblePresetValues]
+    nextPresetValues[selectedPresetIndex] = nextEnabled
+      ? visiblePresetTemps[selectedPresetIndex]
+      : null
+    const liveUpdated = await configureLiveRuntime(
+      { selectedPresetSlot: selectedPresetIndex, presetsC: nextPresetValues },
+      'preset enabled update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setPresetEnabledByDevice((current) => {
+        const nextEnabledState = [...(current[visibleDevice.id] ?? PRESET_ENABLED)]
+        nextEnabledState[selectedPresetIndex] = nextEnabled
 
-      return { ...current, [visibleDevice.id]: nextEnabledState }
-    })
+        return { ...current, [visibleDevice.id]: nextEnabledState }
+      })
+    }
     setFeedback({
       title: `Preset M${selectedPresetIndex + 1} ${nextEnabled ? 'enabled' : 'disabled'}`,
       detail: nextEnabled
         ? `${formatTemp(visiblePresetTemps[selectedPresetIndex])} can be used as a live target.`
-        : 'This preset stays stored but is hidden from quick target use.',
+        : 'This preset is hidden from quick target use.',
       tone: nextEnabled ? 'success' : 'warning',
     })
     emitEvent(
@@ -835,17 +888,12 @@ export function ControlPlaneDemo({
       { heaterEnabled: !nextHeld },
       'heater hold update was not accepted by devd'
     )
-    if (
-      (visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)) &&
-      !liveUpdated
-    ) {
+    if (visibleDeviceIsLive && !liveUpdated) {
       return
     }
     setHeaterHeldByDevice((current) => ({
       ...current,
-      ...(visibleDevice.transport === 'devd' || isDirectWebSerialDevice(visibleDevice)
-        ? {}
-        : { [visibleDevice.id]: nextHeld }),
+      ...(visibleDeviceIsLive ? {} : { [visibleDevice.id]: nextHeld }),
     }))
     setFeedback({
       title: nextHeld ? 'Heater held' : 'Heater resumed',
@@ -1250,12 +1298,48 @@ function isPendingDeviceChoice(device: DeviceTarget) {
   return device.id.startsWith('pending-')
 }
 
+function isLiveRuntimeDevice(device: Pick<DeviceTarget, 'transport' | 'baseUrl'>) {
+  return device.transport === 'devd' || isDirectWebSerialDevice(device)
+}
+
+function clampPresetIndex(value: number | undefined) {
+  if (!Number.isFinite(value)) {
+    return 3
+  }
+  return Math.min(PRESET_SLOT_IDS.length - 1, Math.max(0, Math.trunc(value ?? 3)))
+}
+
+function normalizePresets(presets: Array<number | null> | undefined) {
+  if (!presets || presets.length !== PRESET_SLOT_IDS.length) {
+    return PRESETS_C
+  }
+  return presets.map((preset) => (typeof preset === 'number' ? clampTargetTemp(preset) : null))
+}
+
+function presetTempsFromValues(presets: Array<number | null>) {
+  return presets.map((preset, index) => preset ?? PRESET_TEMPS_C[index] ?? TARGET_TEMP_MIN)
+}
+
+function presetEnabledFromValues(presets: Array<number | null>) {
+  return presets.map((preset) => preset != null)
+}
+
+function presetValuesFromEditorState(presetTemps: number[], presetEnabled: boolean[]) {
+  return PRESET_SLOT_IDS.map((_, index) =>
+    presetEnabled[index] ? (presetTemps[index] ?? PRESET_TEMPS_C[index] ?? TARGET_TEMP_MIN) : null
+  )
+}
+
 function formatTemp(value: number) {
-  if (value <= 0) {
+  if (value < 0) {
     return 'N/A'
   }
 
   return `${formatTempNumber(value)}℃`
+}
+
+function formatPresetTemp(value: number, enabled: boolean) {
+  return enabled ? `${formatTempNumber(value)}℃` : '---'
 }
 
 function formatTempNumber(value: number) {
@@ -1389,9 +1473,9 @@ function ViewPanel({
   feedback: ActionFeedback
   flashRun: { status: FlashRunStatus; progress: number }
   onTargetTempChange: (nextTargetTemp: number) => void
-  onPresetSlotChange: (presetIndex: number) => void
-  onPresetTempChange: (nextTempC: number) => void
-  onPresetEnabledChange: (nextEnabled: boolean) => void
+  onPresetSlotChange: (presetIndex: number) => void | Promise<void>
+  onPresetTempChange: (nextTempC: number) => void | Promise<void>
+  onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
   onHeaterHoldToggle: () => void
   onArtifactChange: (artifactId: string) => void
@@ -1816,9 +1900,9 @@ function SettingsView({
   presetTemps: number[]
   presetEnabled: boolean[]
   feedback: ActionFeedback
-  onPresetSlotChange: (presetIndex: number) => void
-  onPresetTempChange: (nextTempC: number) => void
-  onPresetEnabledChange: (nextEnabled: boolean) => void
+  onPresetSlotChange: (presetIndex: number) => void | Promise<void>
+  onPresetTempChange: (nextTempC: number) => void | Promise<void>
+  onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
 }) {
   return (
@@ -1834,7 +1918,10 @@ function SettingsView({
             <div>
               <span>M{selectedPresetIndex + 1}</span>
               <small>
-                {formatTemp(presetTemps[selectedPresetIndex])}{' '}
+                {formatPresetTemp(
+                  presetTemps[selectedPresetIndex],
+                  presetEnabled[selectedPresetIndex] ?? true
+                )}{' '}
                 {presetEnabled[selectedPresetIndex] ? 'enabled' : 'disabled'}
               </small>
             </div>
@@ -1881,14 +1968,14 @@ function PresetTemperatureEditor({
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
-  onPresetSlotChange: (presetIndex: number) => void
-  onPresetTempChange: (nextTempC: number) => void
-  onPresetEnabledChange: (nextEnabled: boolean) => void
+  onPresetSlotChange: (presetIndex: number) => void | Promise<void>
+  onPresetTempChange: (nextTempC: number) => void | Promise<void>
+  onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
 }) {
   const selectedTemp = presetTemps[selectedPresetIndex] ?? PRESET_TEMPS_C[selectedPresetIndex]
   const selectedEnabled = presetEnabled[selectedPresetIndex] ?? true
   const [draftTemp, setDraftTemp] = useState(selectedTemp)
-  const draftIsDirty = clampTargetTemp(draftTemp) !== selectedTemp
+  const draftIsDirty = selectedEnabled && clampTargetTemp(draftTemp) !== selectedTemp
 
   useEffect(() => {
     setDraftTemp(selectedTemp)
@@ -1902,7 +1989,7 @@ function PresetTemperatureEditor({
     }
 
     const timer = window.setTimeout(() => {
-      onPresetTempChange(clampedDraftTemp)
+      void onPresetTempChange(clampedDraftTemp)
     }, PRESET_COMMIT_DEBOUNCE_MS)
 
     return () => window.clearTimeout(timer)
@@ -1928,11 +2015,11 @@ function PresetTemperatureEditor({
                 ' '
               )}
               aria-pressed={isSelected}
-              aria-label={`${slotId} ${formatTemp(tempC)} ${isEnabled ? 'enabled' : 'disabled'}`}
-              onClick={() => onPresetSlotChange(index)}
+              aria-label={`${slotId} ${formatPresetTemp(tempC, isEnabled)} ${isEnabled ? 'enabled' : 'disabled'}`}
+              onClick={() => void onPresetSlotChange(index)}
             >
               <strong>{slotId}</strong>
-              <span>{formatTemp(tempC)}</span>
+              <span>{formatPresetTemp(tempC, isEnabled)}</span>
               {!isEnabled ? <small>OFF</small> : null}
             </button>
           )
@@ -1944,9 +2031,9 @@ function PresetTemperatureEditor({
           <p className="sr-only">Selected slot</p>
           <strong>
             M{selectedPresetIndex + 1}
-            <span>{formatTemp(selectedTemp)}</span>
+            <span>{formatPresetTemp(selectedTemp, selectedEnabled)}</span>
           </strong>
-          <small>{draftIsDirty ? 'Saving...' : 'Autosaved'}</small>
+          <small>{selectedEnabled ? (draftIsDirty ? 'Saving...' : 'Autosaved') : 'Disabled'}</small>
         </div>
         <TargetTempControl
           label="Preset temp"
@@ -1954,6 +2041,7 @@ function PresetTemperatureEditor({
           inputId="preset-temperature"
           inputName="presetTemperature"
           value={draftTemp}
+          disabled={!selectedEnabled}
           onChange={handleDraftTempChange}
         />
         <div className="industrial-preset-switch">
@@ -1968,7 +2056,7 @@ function PresetTemperatureEditor({
               size="industrial"
               className="industrial-preset-switch__control"
               aria-label={`Preset M${selectedPresetIndex + 1}`}
-              onCheckedChange={onPresetEnabledChange}
+              onCheckedChange={(checked) => void onPresetEnabledChange(checked)}
             />
             <span aria-hidden="true">ON</span>
           </span>

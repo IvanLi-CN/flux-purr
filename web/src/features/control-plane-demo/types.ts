@@ -17,6 +17,8 @@ export interface DeviceTarget {
   boardTempC: number
   currentTempC: number
   targetTempC: number
+  selectedPresetIndex?: number
+  presetsC?: Array<number | null>
   voltageMv: number
   currentMa: number
   pdRequestMv: number

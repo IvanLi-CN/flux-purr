@@ -1,4 +1,4 @@
-export const CONTROL_PLANE_API_VERSION = '2026-05-23'
+export const CONTROL_PLANE_API_VERSION = '2026-05-29'
 export const USB_PROTOCOL_VERSION = 'flux-purr.usb.v1'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock'
@@ -40,6 +40,8 @@ export interface ControlPlaneStatus {
   uptimeSeconds: number
   currentTempC: number
   targetTempC: number
+  selectedPresetSlot?: number
+  presetsC?: Array<number | null>
   heaterEnabled: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
@@ -119,6 +121,8 @@ export interface WifiConfigRequest {
 export interface RuntimeConfigRequest {
   leaseId: string
   targetTempC?: number
+  selectedPresetSlot?: number
+  presetsC?: Array<number | null>
   activeCoolingEnabled?: boolean
   heaterEnabled?: boolean
 }
@@ -193,6 +197,8 @@ export interface UsbRuntimeConfigFrame {
   type: 'runtime_config'
   requestId: string
   targetTempC?: number
+  selectedPresetSlot?: number
+  presetsC?: Array<number | null>
   activeCoolingEnabled?: boolean
   heaterEnabled?: boolean
 }
