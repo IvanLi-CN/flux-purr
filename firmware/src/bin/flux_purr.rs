@@ -2458,8 +2458,10 @@ async fn main(_spawner: Spawner) {
     let inputs = FrontPanelInputs {
         center: Input::new(peripherals.GPIO0, input_cfg),
         right: Input::new(peripherals.GPIO16, input_cfg),
-        down: Input::new(peripherals.GPIO18, input_cfg),
-        left: Input::new(peripherals.GPIO17, input_cfg),
+        // The calibrated logical key map swaps raw DOWN/LEFT, so keep the raw
+        // input binding on the verified GPIO order instead of the board labels.
+        down: Input::new(peripherals.GPIO17, input_cfg),
+        left: Input::new(peripherals.GPIO18, input_cfg),
         up: Input::new(peripherals.GPIO21, input_cfg),
     };
 

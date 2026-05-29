@@ -268,6 +268,7 @@ None
 ### Hardware verification
 
 - `esp32s3_frontpanel` 已完成 `Key Test` 真机校准，`left/down` 映射对调后确认无误。
+- 固件运行时按校准后的 raw 输入绑定读取 `GPIO17` 为 raw `Down`、`GPIO18` 为 raw `Left`，再由默认 `FrontPanelKeyMap` 映射为 logical `Left` / `Down`。
 - 真机 `App` runtime 已验证 `Dashboard / Menu / Preset Temp / Active Cooling` 的输入与导航联动路径；heater/fan 真相源与运行态保护由 `#q2aw6` 承接。
 - `Preset Temp` 页面已在真机确认：`M1-M10` 默认预设值为 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`；任一槽位即使被降到灰色 `---`，仍可重新调回有效值。
 
