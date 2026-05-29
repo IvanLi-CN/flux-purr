@@ -143,13 +143,9 @@ impl ControlPlaneStatus {
         let fan_display_state = if !memory.active_cooling_enabled {
             FanDisplayState::Off
         } else if status.fan_enabled {
-            if status.fan_pwm_permille <= crate::FAN_MID_PWM_PERMILLE {
-                FanDisplayState::Run
-            } else {
-                FanDisplayState::Auto
-            }
+            FanDisplayState::Run
         } else {
-            FanDisplayState::Off
+            FanDisplayState::Auto
         };
 
         Self {
@@ -801,7 +797,18 @@ mod tests {
         status.fan_pwm_permille = FanCommand::from_phase(FanPhase::Stop).pwm_permille;
         let adapted =
             ControlPlaneStatus::from_device_status(status, &memory, 0, NetworkSummary::default());
-        assert_eq!(adapted.fan_display_state, FanDisplayState::Off);
+        assert_eq!(adapted.fan_display_state, FanDisplayState::Auto);
+
+        let mut running_fan = snapshot_at(120, 0);
+        running_fan.fan_enabled = true;
+        running_fan.fan_pwm_permille = crate::FAN_LOW_PWM_PERMILLE;
+        let adapted = ControlPlaneStatus::from_device_status(
+            running_fan,
+            &memory,
+            0,
+            NetworkSummary::default(),
+        );
+        assert_eq!(adapted.fan_display_state, FanDisplayState::Run);
 
         let mut safety_fan = snapshot_at(120, 0);
         safety_fan.fan_enabled = true;
