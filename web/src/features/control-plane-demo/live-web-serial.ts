@@ -63,7 +63,7 @@ export function useLiveWebSerialScenario(
           tone,
         },
         ...current,
-      ].slice(0, 24)
+      ].slice(0, 1_000)
     )
   }, [])
 

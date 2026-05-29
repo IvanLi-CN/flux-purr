@@ -33,11 +33,13 @@ const meta = {
 
 export default meta
 type Story = StoryObj<typeof meta>
+const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
 
 export const LiveWebSerialAddDevice: Story = {
   name: 'Live / Web Serial Add Device',
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
+    webSerialRuntimeWrites.length = 0
 
     await step('no live target starts on the device chooser', async () => {
       await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
@@ -74,17 +76,44 @@ export const LiveWebSerialAddDevice: Story = {
       }
     )
 
+    await step('Dashboard target stepper advances immediately across rapid clicks', async () => {
+      const increase = await canvas.findByRole('button', { name: 'Increase target temperature' })
+      await userEvent.click(increase)
+      await userEvent.click(increase)
+      await userEvent.click(increase)
+
+      await waitFor(() => {
+        expect(
+          canvas.getByRole('spinbutton', { name: 'Dashboard target temperature' })
+        ).toHaveValue(45)
+      })
+      await waitFor(() => {
+        expect(
+          webSerialRuntimeWrites.filter((request) => request.targetTempC != null)
+        ).toHaveLength(1)
+      })
+      expect(webSerialRuntimeWrites.at(-1)?.targetTempC).toBe(45)
+    })
+
     await step('global log remains expanded after switching to Settings', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: /Settings/ }))
 
       await expect(await canvas.findByRole('heading', { name: 'Heat policy' })).toBeVisible()
       await expect(await canvas.findByRole('heading', { name: 'Runtime trace' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'All' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Ok' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: 'Ok' }))
+      await expect(await canvas.findByRole('button', { name: 'Ok' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      )
+      await userEvent.click(await canvas.findByRole('button', { name: 'All' }))
       await expect(
         await canvas.findByText(
           'flux-purr-s3-001 USB JSONL probe accepted: get_identity / get_network / get_status'
         )
       ).toBeVisible()
-      await expect(canvas.queryByText(/\d+ frames/)).not.toBeInTheDocument()
+      await expect(await canvas.findByText(/\d+ \/ \d+ frames/)).toBeVisible()
     })
 
     await step(
@@ -217,6 +246,7 @@ class FakeWebSerialClient {
   }
 
   configureRuntime(request: DirectRuntimeConfigRequest) {
+    webSerialRuntimeWrites.push(request)
     this.currentStatus = {
       ...this.currentStatus,
       ...request,

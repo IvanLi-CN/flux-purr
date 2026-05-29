@@ -72,6 +72,7 @@ export interface EventLogEntry {
   source: string
   message: string
   tone: 'info' | 'success' | 'warning' | 'danger'
+  detail?: string
 }
 
 export interface Workstream {

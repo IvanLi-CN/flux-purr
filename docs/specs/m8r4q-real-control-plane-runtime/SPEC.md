@@ -57,7 +57,7 @@
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
-- logs、trace、events 必须有固定上限。
+- logs、trace、events 必须有固定上限；`devd` native USB JSONL TX/RX 必须作为 redacted `transport` events 进入 Runtime trace，保留 request ID、frame type 与 payload，WiFi password 等 secret 只能显示为 redacted。
 - firmware artifact verify 必须校验 file existence、size 和 sha256；real flash 必须先通过 dry-run。
 - devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
@@ -109,7 +109,7 @@
 - Given devd mock target，When 创建 lease 并 heartbeat，Then lease 未过期前 mutating endpoint 成功，过期后返回 conflict/expired error。
 - Given artifact hash 不匹配，When 调用 verify 或 flash dry-run，Then 操作被阻断且 error 不泄露无关 host path。
 - Given Web Update 页，When 运行 dry-check，Then 浏览器必须调用 devd artifact catalog/verify endpoint，并展示 daemon 返回的校验结果。
-- Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见。
+- Given Web app，When 打开真实控制面页面，Then nominal、devd unavailable、lease conflict、monitor trace、firmware blocked/warning 状态都可见，Runtime trace 支持按 info/success/warning/danger 等级过滤。
 - Given 支持 Web Serial 的浏览器，When operator 在目标下拉底部选择 `Add device`、进入 Add device 页面选择 Web Serial 并选择 ESP32-S3 端口，Then Web app 通过 USB JSONL 读取 identity/network/status，并把目标温度、fan policy 与 heater hold 写为 `runtime_config`。
 - Given Web Settings 与硬件前面板都显示 preset 设置界面，When operator 在 Web 选择 preset slot、修改 preset 温度或切换 enabled，Then firmware 通过 `runtime_config` 更新 `MemoryConfig` 与 `FrontPanelUiState`，前面板界面及时重绘，Web 从返回 status 或下一轮 polling 看到相同 `selectedPresetSlot` / `presetsC`。
 - Given Web Settings 与硬件前面板都显示 preset 设置界面，When operator 在硬件侧切换 slot、调整温度或禁用 preset，Then firmware status 反映新的 `selectedPresetSlot` / `presetsC`，Web live Settings 在下一轮 polling 内更新回显，不再显示前端硬编码 preset。

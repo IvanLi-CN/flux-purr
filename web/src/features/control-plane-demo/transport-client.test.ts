@@ -242,6 +242,31 @@ describe('control-plane transport client', () => {
       payload: { status: { targetTempC: null, heaterEnabled: true } },
     })
     expect(partialRuntimeEntry.message).toBe('runtime config applied: heater on')
+
+    const transportEntry = devdEventToLogEntry({
+      id: 'event-5',
+      timestamp: '12349',
+      kind: 'transport',
+      message: 'transport frame',
+      payload: {
+        direction: 'tx',
+        transport: 'usb_jsonl',
+        frameType: 'runtime_config',
+        requestId: 'req-runtime',
+        frame: {
+          type: 'runtime_config',
+          requestId: 'req-runtime',
+          targetTempC: 145,
+          activeCoolingEnabled: true,
+        },
+      },
+    })
+    expect(transportEntry).toMatchObject({
+      source: 'transport',
+      tone: 'info',
+      message: 'transport frame: TX / usb_jsonl / runtime_config / req-runtime',
+    })
+    expect(transportEntry.detail).toContain('"targetTempC": 145')
   })
 
   it('surfaces API error envelopes with retry metadata', async () => {

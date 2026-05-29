@@ -76,7 +76,26 @@ export interface DevdDeviceRecord {
   identity: Identity
   network: NetworkSummary
   status: ControlPlaneStatus
+  logs?: DevdLogEntry[]
+  trace?: DevdTraceEntry[]
   events?: DevdEvent[]
+}
+
+export interface DevdLogEntry {
+  id: string
+  timestamp: string
+  level: string
+  message: string
+}
+
+export interface DevdTraceEntry {
+  id: string
+  timestamp: string
+  direction: string
+  frameType: string
+  requestId?: string | null
+  summary: string
+  payload: unknown
 }
 
 export interface DevdEvent {
@@ -95,6 +114,11 @@ export interface DevdEvent {
         passwordPresent?: boolean
         artifactId?: string
         leaseId?: string
+        direction?: string
+        transport?: string
+        frameType?: string
+        requestId?: string
+        frame?: unknown
       })
     | null
 }

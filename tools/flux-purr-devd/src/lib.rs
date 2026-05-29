@@ -6,7 +6,10 @@ use std::{
     io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -46,6 +49,8 @@ const LOCK_EX: i32 = 2;
 const LOCK_NB: i32 = 4;
 #[cfg(unix)]
 const LOCK_UN: i32 = 8;
+
+static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(unix)]
 unsafe extern "C" {
@@ -1197,7 +1202,7 @@ where
         op,
     })
     .map_err(|_| HttpError::internal("failed to encode USB request"))?;
-    let result = serial_exchange(state, port_path, request_id, request, true).await?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
     extract_usb_payload(result, payload_key)
 }
 
@@ -1218,7 +1223,7 @@ async fn serial_wifi_config(
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
-    serial_exchange(state, port_path, request_id, request, true).await
+    serial_exchange(state, &target.id, port_path, request_id, request, true).await
 }
 
 async fn serial_runtime_config(
@@ -1238,30 +1243,66 @@ async fn serial_runtime_config(
         heater_enabled: payload.heater_enabled,
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
-    let result = serial_exchange(state, port_path, request_id, request, true).await?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
     extract_usb_payload(result, "status")
 }
 
 async fn serial_exchange(
     state: &AppState,
+    device_id: &str,
     port_path: String,
     request_id: String,
     request: String,
     retry_on_silence: bool,
 ) -> Result<Value, HttpError> {
+    record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
     let _serial_rpc = state.serial_rpc.lock().await;
     let serial_sessions = state.serial_sessions.clone();
-    tokio::task::spawn_blocking(move || {
+    let worker_request_id = request_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
         serial_exchange_blocking(
             &serial_sessions,
             &port_path,
-            &request_id,
+            &worker_request_id,
             &request,
             retry_on_silence,
         )
     })
     .await
-    .map_err(|_| HttpError::internal("serial worker failed"))?
+    .map_err(|_| HttpError::internal("serial worker failed"))?;
+
+    match &result {
+        Ok(payload) => record_transport_event(
+            state,
+            device_id,
+            "rx",
+            "usb_jsonl",
+            &request_id,
+            &serde_json::to_string(&json!({
+                "type": "response",
+                "requestId": request_id,
+                "ok": true,
+                "result": payload,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+        ),
+        Err(error) => record_transport_event(
+            state,
+            device_id,
+            "rx",
+            "usb_jsonl",
+            &request_id,
+            &serde_json::to_string(&json!({
+                "type": "response",
+                "requestId": request_id,
+                "ok": false,
+                "error": error.error,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+        ),
+    }
+
+    result
 }
 
 fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
@@ -2117,6 +2158,48 @@ fn emit_runtime_config_event(
     ));
 }
 
+fn record_transport_event(
+    state: &AppState,
+    device_id: &str,
+    direction: &str,
+    transport: &str,
+    request_id: &str,
+    frame_json: &str,
+) {
+    let frame = serde_json::from_str::<Value>(frame_json)
+        .map(redact_transport_frame)
+        .unwrap_or_else(|_| json!({ "raw": frame_json }));
+    let frame_type = frame
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("frame")
+        .to_string();
+    state.emit(event(
+        device_id,
+        "transport",
+        "transport frame",
+        json!({
+            "direction": direction,
+            "transport": transport,
+            "requestId": request_id,
+            "frameType": frame_type,
+            "frame": frame,
+        }),
+    ));
+}
+
+fn redact_transport_frame(mut frame: Value) -> Value {
+    if let Some(object) = frame.as_object_mut()
+        && object.get("password").and_then(Value::as_str).is_some()
+    {
+        object.insert(
+            "password".to_string(),
+            Value::String("<redacted>".to_string()),
+        );
+    }
+    frame
+}
+
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
     if values.len() >= limit {
         values.pop_front();
@@ -2126,7 +2209,11 @@ fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
 
 fn event(device_id: &str, kind: &str, message: &str, payload: Value) -> DevdEvent {
     DevdEvent {
-        id: format!("event-{}", now_millis()),
+        id: format!(
+            "event-{}-{}",
+            now_millis(),
+            EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ),
         timestamp: timestamp(),
         device_id: Some(device_id.to_string()),
         kind: kind.to_string(),
@@ -2229,6 +2316,54 @@ mod tests {
         push_bounded(&mut values, 2, 2);
         push_bounded(&mut values, 3, 2);
         assert_eq!(values.into_iter().collect::<Vec<_>>(), vec![2, 3]);
+    }
+
+    #[test]
+    fn event_ids_are_unique_inside_same_millisecond_window() {
+        let first = event(
+            "mock-fp-lab-01",
+            "runtime",
+            "runtime config applied",
+            json!({}),
+        );
+        let second = event(
+            "mock-fp-lab-01",
+            "runtime",
+            "runtime config applied",
+            json!({}),
+        );
+
+        assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn transport_events_preserve_frame_data_and_redact_passwords() {
+        let state = AppState::test();
+        record_transport_event(
+            &state,
+            "mock-fp-lab-01",
+            "tx",
+            "usb_jsonl",
+            "req-1",
+            r#"{"type":"wifi_config","requestId":"req-1","ssid":"FluxPurr-Lab","password":"secret-pass"}"#,
+        );
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("mock-fp-lab-01").unwrap();
+        let transport_event = device
+            .events
+            .iter()
+            .find(|event| event.kind == "transport")
+            .unwrap();
+
+        assert_eq!(transport_event.payload["direction"], "tx");
+        assert_eq!(transport_event.payload["frame"]["ssid"], "FluxPurr-Lab");
+        assert_eq!(transport_event.payload["frame"]["password"], "<redacted>");
+        assert!(
+            !serde_json::to_string(&transport_event.payload)
+                .unwrap()
+                .contains("secret-pass")
+        );
     }
 
     #[test]

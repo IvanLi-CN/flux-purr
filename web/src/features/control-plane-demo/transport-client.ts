@@ -270,6 +270,7 @@ export function devdEventToLogEntry(event: DevdEvent): EventLogEntry {
     source: event.kind,
     message: detail ? `${event.message}: ${detail}` : event.message,
     tone: devdEventTone(event),
+    detail: devdEventFrameDetail(event),
   }
 }
 
@@ -298,10 +299,39 @@ function devdEventDetail(event: DevdEvent) {
   if (event.kind === 'lease') {
     return safeString(event.payload?.leaseId)
   }
+  if (event.kind === 'transport') {
+    return [
+      safeString(event.payload?.direction)?.toUpperCase(),
+      safeString(event.payload?.transport),
+      safeString(event.payload?.frameType),
+      safeString(event.payload?.requestId),
+    ]
+      .filter(Boolean)
+      .join(' / ')
+  }
 
   return [safeString(event.payload?.stage), safeString(event.payload?.code)]
     .filter(Boolean)
     .join(' / ')
+}
+
+function devdEventFrameDetail(event: DevdEvent) {
+  if (event.kind !== 'transport') {
+    return undefined
+  }
+  const frame = event.payload?.frame
+  if (frame == null) {
+    return undefined
+  }
+  return stableStringify(frame)
+}
+
+function stableStringify(value: unknown) {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
 }
 
 function safeString(value: unknown) {
@@ -345,6 +375,9 @@ function boolLabel(label: string, value: unknown) {
 function devdEventTone(event: DevdEvent): EventLogEntry['tone'] {
   if (event.kind === 'serial') {
     return 'danger'
+  }
+  if (event.kind === 'transport') {
+    return event.payload?.direction === 'rx' ? 'success' : 'info'
   }
   if (event.kind === 'flash' && event.message.toLowerCase().includes('failed')) {
     return 'danger'

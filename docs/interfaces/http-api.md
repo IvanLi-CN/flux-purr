@@ -214,7 +214,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 
 `POST /api/v1/devices/:id/connect?lease_id=...` and `POST /api/v1/devices/:id/disconnect?lease_id=...` return the updated daemon-local `DeviceRecord`.
 
-`GET /api/v1/devices/:id/events` returns `text/event-stream`. The stream first replays that device's bounded event backlog, then continues with live events. Each SSE event name matches the `kind` field (`serial`, `lease`, `wifi`, `runtime`, `flash`, etc.) and each `data` frame is a `DevdEvent` JSON object. Events are scoped to the requested device ID.
+`GET /api/v1/devices/:id/events` returns `text/event-stream`. The stream first replays that device's bounded event backlog, then continues with live events. Each SSE event name matches the `kind` field (`serial`, `lease`, `wifi`, `runtime`, `flash`, `transport`, etc.) and each `data` frame is a `DevdEvent` JSON object. Events are scoped to the requested device ID. Native USB JSONL exchanges emit paired `transport` events with direction, transport, request ID, frame type, and a redacted frame payload so the Web Runtime trace can show complete TX/RX data without leaking WiFi passwords.
 
 `PUT /api/v1/devices/:id/runtime` body:
 

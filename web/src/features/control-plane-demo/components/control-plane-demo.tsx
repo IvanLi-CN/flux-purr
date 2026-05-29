@@ -52,6 +52,7 @@ interface ControlPlaneDemoProps {
 type ConsoleView = 'dashboard' | 'settings' | 'update' | 'add-device'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
+type LogFilter = 'all' | EventLogEntry['tone']
 
 interface ActionFeedback {
   title: string
@@ -62,6 +63,13 @@ interface ActionFeedback {
 const LOG_FEED_SIZE = 1000
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
+const LOG_FILTER_OPTIONS: Array<{ value: LogFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'info', label: 'Info' },
+  { value: 'success', label: 'Ok' },
+  { value: 'warning', label: 'Warn' },
+  { value: 'danger', label: 'Error' },
+]
 const TARGET_TEMP_MIN = 0
 const TARGET_TEMP_MAX = 400
 const TARGET_TEMP_STEP = 5
@@ -238,6 +246,8 @@ export function ControlPlaneDemo({
   })
   const flashCompletionEmittedRef = useRef(false)
   const actionClockRef = useRef(LOG_FEED_START_SECONDS + 60)
+  const targetTempCommitTimersRef = useRef<Record<string, number>>({})
+  const targetTempCommitVersionRef = useRef<Record<string, number>>({})
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
   const [feedback, setFeedback] = useState<ActionFeedback>({
     title: allowDemoControls ? 'Runtime synced' : 'No live target',
@@ -357,6 +367,14 @@ export function ControlPlaneDemo({
   }, [activeScenario.devices])
 
   useEffect(() => {
+    return () => {
+      for (const timer of Object.values(targetTempCommitTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
     setFanPolicyByDevice((current) => {
       let next = current
       for (const device of activeScenario.devices) {
@@ -384,9 +402,7 @@ export function ControlPlaneDemo({
     const currentTempC = liveRuntimeDevice
       ? selectedDevice.currentTempC
       : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
-    const targetTempC = liveRuntimeDevice
-      ? selectedDevice.targetTempC
-      : (targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC)
+    const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
     const fanState = liveRuntimeDevice
       ? selectedDevice.fanState
       : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
@@ -745,21 +761,38 @@ export function ControlPlaneDemo({
     return connected
   }
 
-  const handleTargetTempChange = async (nextTargetTemp: number) => {
+  const handleTargetTempChange = (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
-    const liveUpdated = await configureLiveRuntime(
-      { targetTempC: clampedTarget },
-      'target temperature update was not accepted by devd'
-    )
-    if (visibleDeviceIsLive && !liveUpdated) {
-      return
+    const deviceId = visibleDevice.id
+    setTargetTempByDevice((current) => ({
+      ...current,
+      [deviceId]: clampedTarget,
+    }))
+
+    if (visibleDeviceIsLive) {
+      const nextVersion = (targetTempCommitVersionRef.current[deviceId] ?? 0) + 1
+      targetTempCommitVersionRef.current[deviceId] = nextVersion
+      const existingTimer = targetTempCommitTimersRef.current[deviceId]
+      if (existingTimer) {
+        window.clearTimeout(existingTimer)
+      }
+      targetTempCommitTimersRef.current[deviceId] = window.setTimeout(async () => {
+        delete targetTempCommitTimersRef.current[deviceId]
+        const liveUpdated = await configureLiveRuntime(
+          { targetTempC: clampedTarget },
+          'target temperature update was not accepted by devd'
+        )
+        if (liveUpdated || targetTempCommitVersionRef.current[deviceId] !== nextVersion) {
+          return
+        }
+        setTargetTempByDevice((current) => {
+          const next = { ...current }
+          delete next[deviceId]
+          return next
+        })
+      }, 180)
     }
-    if (!visibleDeviceIsLive) {
-      setTargetTempByDevice((current) => ({
-        ...current,
-        [visibleDevice.id]: clampedTarget,
-      }))
-    }
+
     setFeedback({
       title: 'Target updated',
       detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
@@ -2245,18 +2278,23 @@ function UpdateView({
 function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
   const [followTail, setFollowTail] = useState(false)
+  const [logFilter, setLogFilter] = useState<LogFilter>('all')
+  const filteredEvents = useMemo(
+    () => (logFilter === 'all' ? events : events.filter((event) => event.tone === logFilter)),
+    [events, logFilter]
+  )
   const rowVirtualizer = useVirtualizer({
-    count: events.length,
+    count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
-    estimateSize: () => 72,
+    estimateSize: () => 112,
     overscan: 8,
   })
 
   useLayoutEffect(() => {
     if (followTail) {
-      rowVirtualizer.scrollToIndex(events.length - 1, { align: 'end' })
+      rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
     }
-  }, [events.length, followTail, rowVirtualizer])
+  }, [filteredEvents.length, followTail, rowVirtualizer])
 
   const handleLogScroll = () => {
     const scrollElement = scrollableNodeRef.current
@@ -2279,7 +2317,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
 
       if (next) {
         window.requestAnimationFrame(() => {
-          rowVirtualizer.scrollToIndex(events.length - 1, { align: 'end' })
+          rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
         })
       }
 
@@ -2296,11 +2334,25 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
           <p className="industrial-label text-[#a8b2d1]">Global log</p>
           <h2>Runtime trace</h2>
         </div>
+        <fieldset className="industrial-log-filters">
+          <legend className="sr-only">Log level filter</legend>
+          {LOG_FILTER_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={option.value === logFilter ? 'is-selected' : ''}
+              aria-pressed={option.value === logFilter}
+              onClick={() => setLogFilter(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </fieldset>
       </div>
       <div className="industrial-log-panel__summary">
-        <span>{events[0]?.time}</span>
-        <strong>{events[0]?.source ?? 'trace'}</strong>
-        <p>{events[0]?.message ?? 'No trace frames'}</p>
+        <span>{filteredEvents[0]?.time}</span>
+        <strong>{filteredEvents[0]?.source ?? 'trace'}</strong>
+        <p>{filteredEvents[0]?.message ?? 'No trace frames'}</p>
       </div>
       <SimpleBar
         autoHide
@@ -2322,12 +2374,15 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
           <ToggleRight size={16} aria-hidden="true" />
           {followTail ? 'Following tail' : 'Follow tail'}
         </button>
+        <div className="industrial-log-count" aria-live="polite">
+          {filteredEvents.length} / {events.length} frames
+        </div>
         <div
           className="industrial-log-virtual-space"
           style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
         >
           {virtualItems.map((virtualItem) => {
-            const event = events[virtualItem.index]
+            const event = filteredEvents[virtualItem.index]
 
             if (!event) {
               return null
@@ -2344,7 +2399,10 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
               >
                 <span>{event.time}</span>
                 <strong>{event.source}</strong>
-                <p>{event.message}</p>
+                <p>
+                  {event.message}
+                  {event.detail ? <code>{event.detail}</code> : null}
+                </p>
               </div>
             )
           })}
