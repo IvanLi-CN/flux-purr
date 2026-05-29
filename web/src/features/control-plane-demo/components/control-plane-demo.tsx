@@ -434,6 +434,7 @@ export function ControlPlaneDemo({
     : (selectedPresetByDevice[visibleDevice.id] ?? 3)
   const visiblePresetTemps = presetTempsFromValues(visiblePresetValues)
   const visiblePresetEnabled = presetEnabledFromValues(visiblePresetValues)
+  const visibleFanPolicy = fanPolicyByDevice[visibleDevice.id] ?? fanPolicyFromDevice(visibleDevice)
   const selectedArtifact = useMemo(
     () =>
       activeScenario.artifacts.find(
@@ -775,12 +776,10 @@ export function ControlPlaneDemo({
     if (visibleDeviceIsLive && !liveUpdated) {
       return
     }
-    if (!visibleDeviceIsLive) {
-      setFanPolicyByDevice((current) => ({
-        ...current,
-        [visibleDevice.id]: fanState,
-      }))
-    }
+    setFanPolicyByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: fanState,
+    }))
     setFeedback({
       title: 'Fan policy updated',
       detail: `${visibleDevice.alias} fan policy is now ${fanState}.`,
@@ -1142,6 +1141,7 @@ export function ControlPlaneDemo({
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
+                fanPolicyValue={visibleFanPolicy}
                 flashPhases={visibleFlashPhases}
                 artifacts={activeScenario.artifacts}
                 artifact={selectedArtifact}
@@ -1330,6 +1330,10 @@ function presetValuesFromEditorState(presetTemps: number[], presetEnabled: boole
   )
 }
 
+function fanPolicyFromDevice(device: DeviceTarget): DeviceTarget['fanState'] {
+  return device.activeCoolingEnabled ? 'AUTO' : 'OFF'
+}
+
 function formatTemp(value: number) {
   if (value < 0) {
     return 'N/A'
@@ -1440,6 +1444,7 @@ function ViewPanel({
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
+  fanPolicyValue,
   flashPhases,
   artifacts,
   artifact,
@@ -1467,6 +1472,7 @@ function ViewPanel({
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
+  fanPolicyValue: DeviceTarget['fanState']
   flashPhases: WorkflowPhase[]
   artifacts: FirmwareArtifact[]
   artifact?: FirmwareArtifact
@@ -1513,6 +1519,7 @@ function ViewPanel({
     return (
       <SettingsView
         device={device}
+        fanPolicyValue={fanPolicyValue}
         selectedPresetIndex={selectedPresetIndex}
         presetTemps={presetTemps}
         presetEnabled={presetEnabled}
@@ -1886,6 +1893,7 @@ function CapabilityStrip({ device }: { device: DeviceTarget }) {
 
 function SettingsView({
   device,
+  fanPolicyValue,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
@@ -1896,6 +1904,7 @@ function SettingsView({
   onFanPolicyChange,
 }: {
   device: DeviceTarget
+  fanPolicyValue: DeviceTarget['fanState']
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -1945,7 +1954,7 @@ function SettingsView({
           <div className="industrial-settings-grid industrial-settings-grid--controls">
             <SegmentedSetting
               label="Fan policy"
-              value={device.fanState}
+              value={fanPolicyValue}
               onChange={onFanPolicyChange}
               hideLabel
             />
