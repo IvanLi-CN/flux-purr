@@ -27,6 +27,7 @@
 - Web app 通过 `demo=true|false` URL 参数隔离 demo 和 live 版本，并把最近一次显式 URL 选择写入 browser storage。Demo 版本禁用 `devd` 与 Web Serial，不发真实后端请求；Live 版本使用独立 live scenario，禁用 degraded demo controls，并过滤 `devd` mock records，只显示 native serial 或 browser Web Serial live target。
 - Web app 在 live 模式没有选中真实目标时，把 Dashboard、Settings 与 Update 的主内容替换为全宽设备选择页；known devices 只显示持久 live target，不显示浏览器 Web Serial 临时直连 target；空设备提示使用轻量文本而不是卡片容器；右侧全局日志列和选择页分区标题在该选择流中隐藏。
 - 设备选择页复用 Add device 的 WiFi、Web Serial 与 Bridge 三种新增入口，但把三张卡片固定在同一行；点击快捷新增入口会先切入 Add device 页面，再触发对应新增动作。WiFi 与 Bridge 保持 pending target 语义，Web Serial 保持浏览器 `requestPort()` 用户动作语义，连接成功后回到 Dashboard。
+- Web Serial 连接状态会在组件层同步回目标选择器：当当前选择仍是无目标或 pending target 时，连接成功的 Web Serial device 会成为 selected target；已连接状态下再次选择 Web Serial 也会回到该真实 device，避免 runtime 面板停留在 pending Bridge。
 - Web Serial client tests 使用 fake browser serial port 覆盖 `get_identity` / `get_network` / `get_status` 探测、直连 target 映射、`runtime_config` 写入与 status payload 解析。
 - Storybook 覆盖完整控制台 live 入口，包括无真实目标选择页、Web Serial 快捷连接回到 Dashboard、known device 选择、WiFi/Bridge 快捷新增进入 Add device 页面并触发 pending 动作，以及无设备/Add device 状态隐藏全局日志列。
 - Web Serial browser-client verification covers static Web checks, typecheck, production build, unit tests, Storybook build, and whitespace checks. Hardware/browser smoke for a real user-selected Web Serial port remains pending an operator-approved browser session and authorized port selection.

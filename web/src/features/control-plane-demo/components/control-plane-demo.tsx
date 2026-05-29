@@ -295,6 +295,22 @@ export function ControlPlaneDemo({
   }, [activeScenario.selectedDeviceId, deviceOptions, scenario.selectedDeviceId, selectedDeviceId])
 
   useEffect(() => {
+    if (webSerial.state !== 'connected' || !webSerial.deviceId) {
+      return
+    }
+
+    const currentSelection = deviceOptions.find((device) => device.id === selectedDeviceId)
+    const shouldAdoptWebSerialTarget =
+      !currentSelection ||
+      isNoLiveTargetDevice(currentSelection) ||
+      isPendingDeviceChoice(currentSelection)
+
+    if (shouldAdoptWebSerialTarget && selectedDeviceId !== webSerial.deviceId) {
+      setSelectedDeviceId(webSerial.deviceId)
+    }
+  }, [deviceOptions, selectedDeviceId, webSerial.deviceId, webSerial.state])
+
+  useEffect(() => {
     const nextSelectedDevice = activeScenario.devices.find(
       (device) => device.id === activeScenario.selectedDeviceId
     )
@@ -638,6 +654,10 @@ export function ControlPlaneDemo({
 
     if (kind === 'web-serial' && !allowDemoControls) {
       if (webSerial.state === 'connected') {
+        if (webSerial.deviceId) {
+          setSelectedDeviceId(webSerial.deviceId)
+          setActiveView('dashboard')
+        }
         setFeedback({
           title: 'Web Serial already connected',
           detail: 'The browser Web Serial target is already listed in the target selector.',
@@ -1224,6 +1244,10 @@ function isNoLiveTargetDevice(device: DeviceTarget) {
 
 function isKnownDeviceChoice(device: DeviceTarget) {
   return !isNoLiveTargetDevice(device) && !isDirectWebSerialDevice(device)
+}
+
+function isPendingDeviceChoice(device: DeviceTarget) {
+  return device.id.startsWith('pending-')
 }
 
 function formatTemp(value: number) {

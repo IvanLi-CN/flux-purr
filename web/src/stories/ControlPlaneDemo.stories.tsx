@@ -160,6 +160,20 @@ export const LiveQuickAddBridgeDevice: Story = {
       ).toBeVisible()
       await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
     })
+
+    await step(
+      'connecting Web Serial from the pending Bridge flow selects the hardware target',
+      async () => {
+        await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+        })
+        await expect(await canvas.findByText('flux-purr-s3-001 / SERIAL')).toBeVisible()
+        await expect(canvas.queryByText('Native bridge / BRIDGE')).not.toBeInTheDocument()
+        await expect(await canvas.findByText('Web Serial connected')).toBeVisible()
+      }
+    )
   },
 }
 
