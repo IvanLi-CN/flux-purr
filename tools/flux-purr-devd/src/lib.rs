@@ -16,7 +16,7 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, Query, State},
-    http::{Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode},
     response::{
         IntoResponse, Response,
         sse::{Event, Sse},
@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{process::Command, sync::broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
@@ -704,13 +704,51 @@ pub fn app(state: AppState) -> Router {
     if state.config.allow_dev_cors {
         router = router.layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(AllowOrigin::predicate(|origin, _| {
+                    is_allowed_dev_origin(origin)
+                }))
                 .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
                 .allow_headers(Any),
         );
     }
 
     router
+}
+
+fn is_allowed_dev_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    if authority.contains(['/', '?', '#', '@']) {
+        return false;
+    }
+    is_loopback_origin_authority(authority)
+}
+
+fn is_loopback_origin_authority(authority: &str) -> bool {
+    if let Some(rest) = authority.strip_prefix("localhost") {
+        return has_optional_port(rest);
+    }
+    if let Some(rest) = authority.strip_prefix("127.0.0.1") {
+        return has_optional_port(rest);
+    }
+    if let Some(rest) = authority.strip_prefix("[::1]") {
+        return has_optional_port(rest);
+    }
+    false
+}
+
+fn has_optional_port(rest: &str) -> bool {
+    rest.is_empty()
+        || rest.strip_prefix(':').is_some_and(|port| {
+            !port.is_empty() && port.chars().all(|value| value.is_ascii_digit())
+        })
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
@@ -2276,6 +2314,33 @@ fn sanitize_io_error(error: io::Error) -> HttpError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn dev_cors_origin_guard_allows_only_local_development_origins() {
+        for origin in [
+            "http://localhost:43690",
+            "http://127.0.0.1:43690",
+            "http://[::1]:43690",
+            "https://localhost:43690",
+        ] {
+            assert!(
+                is_allowed_dev_origin(&origin.parse::<HeaderValue>().unwrap()),
+                "{origin} should be allowed"
+            );
+        }
+
+        for origin in [
+            "https://example.com",
+            "http://localhost.evil.test:43690",
+            "http://127.0.0.1.evil.test:43690",
+            "file://localhost/console.html",
+        ] {
+            assert!(
+                !is_allowed_dev_origin(&origin.parse::<HeaderValue>().unwrap()),
+                "{origin} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn lease_conflict_and_expiry_are_enforced() {

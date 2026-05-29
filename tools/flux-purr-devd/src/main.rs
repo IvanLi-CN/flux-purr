@@ -74,7 +74,9 @@ mod tests {
 
     #[test]
     fn default_dev_cors_is_enabled_for_loopback_binds() {
-        assert!(default_dev_cors_for_bind("127.0.0.1:30080".parse().unwrap()));
+        assert!(default_dev_cors_for_bind(
+            "127.0.0.1:30080".parse().unwrap()
+        ));
         assert!(default_dev_cors_for_bind("[::1]:30080".parse().unwrap()));
     }
 
