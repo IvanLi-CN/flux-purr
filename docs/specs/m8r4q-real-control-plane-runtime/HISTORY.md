@@ -53,4 +53,4 @@
 ## 2026-05-29
 
 - 决策：live 模式未选中真实目标时，不再展示 Dashboard、Settings、Update 或右侧全局日志列，而是展示全宽设备选择页，避免无目标状态混入空运行面板或 demo trace。
-- 设备选择页按 known devices 网格、分隔线、单行 WiFi/Web Serial/Bridge 新增卡片组织；快捷新增入口先进入 Add device 页面再触发对应新增动作。
+- 设备选择页按 known devices 网格、分隔线、单行 WiFi/Web Serial/Bridge 新增卡片组织，不显示额外分区标题；快捷新增入口先进入 Add device 页面再触发对应新增动作。

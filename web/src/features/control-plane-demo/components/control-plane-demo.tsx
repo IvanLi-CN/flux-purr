@@ -1462,8 +1462,7 @@ function DeviceSelectionView({
   return (
     <div className="industrial-view-panel industrial-device-select-view">
       <PanelHeader kicker="Device" title="Choose target" />
-      <section className="industrial-device-select-section">
-        <h3 className="industrial-section-title">Known devices</h3>
+      <section className="industrial-device-select-section" aria-label="Known devices">
         {knownDevices.length > 0 ? (
           <div className="industrial-known-device-grid">
             {knownDevices.map((device) => (
@@ -1492,8 +1491,7 @@ function DeviceSelectionView({
 
       <hr className="industrial-device-select-divider" />
 
-      <section className="industrial-device-select-section">
-        <h3 className="industrial-section-title">Add device</h3>
+      <section className="industrial-device-select-section" aria-label="Add device">
         <AddDeviceChoices
           allowDemoControls={allowDemoControls}
           webSerial={webSerial}
