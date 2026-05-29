@@ -25,7 +25,7 @@
 - Web app 支持 browser Web Serial 直连：目标下拉底部只提供一个 `Add device` 选项，选择后进入单独 Add device 页面；该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型，其中 Web Serial 在 live 模式调用 `navigator.serial.requestPort()`，打开后按 USB JSONL 顺序读取 identity、network、status，并把 Dashboard target temperature、Settings fan policy 与 Dashboard heater hold 写成 `runtime_config`。直连 target 标记为 `transport=serial` / `baseUrl=webserial://selected`，只暴露 runtime/status/monitor 能力，不暴露 artifact verify、dry-run 或 real flash。
 - Add device 页面中的 WiFi 与 Bridge 类型会加入明确的 pending target，用 `transport=wifi` / `transport=bridge` 与 offline 状态表达待绑定入口，不读取 mock telemetry，也不声明真实硬件已经连接。
 - Web app 通过 `demo=true|false` URL 参数隔离 demo 和 live 版本，并把最近一次显式 URL 选择写入 browser storage。Demo 版本禁用 `devd` 与 Web Serial，不发真实后端请求；Live 版本使用独立 live scenario，禁用 degraded demo controls，并过滤 `devd` mock records，只显示 native serial 或 browser Web Serial live target。
-- Web app 在 live 模式没有选中真实目标时，把 Dashboard、Settings 与 Update 的主内容替换为全宽设备选择页；known devices 只显示持久 live target，不显示浏览器 Web Serial 临时直连 target；右侧全局日志列和选择页分区标题在该选择流中隐藏。
+- Web app 在 live 模式没有选中真实目标时，把 Dashboard、Settings 与 Update 的主内容替换为全宽设备选择页；known devices 只显示持久 live target，不显示浏览器 Web Serial 临时直连 target；空设备提示使用轻量文本而不是卡片容器；右侧全局日志列和选择页分区标题在该选择流中隐藏。
 - 设备选择页复用 Add device 的 WiFi、Web Serial 与 Bridge 三种新增入口，但把三张卡片固定在同一行；点击快捷新增入口会先切入 Add device 页面，再触发对应新增动作。WiFi 与 Bridge 保持 pending target 语义，Web Serial 保持浏览器 `requestPort()` 用户动作语义，连接成功后回到 Dashboard。
 - Web Serial client tests 使用 fake browser serial port 覆盖 `get_identity` / `get_network` / `get_status` 探测、直连 target 映射、`runtime_config` 写入与 status payload 解析。
 - Storybook 覆盖完整控制台 live 入口，包括无真实目标选择页、Web Serial 快捷连接回到 Dashboard、known device 选择、WiFi/Bridge 快捷新增进入 Add device 页面并触发 pending 动作，以及无设备/Add device 状态隐藏全局日志列。
