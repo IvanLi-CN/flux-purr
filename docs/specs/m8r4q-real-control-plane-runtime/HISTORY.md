@@ -57,6 +57,7 @@
 - `devd` bounded events 的 ID 加入单调序列，避免同一毫秒内多条 transport/runtime event 被前端去重吞掉；native USB JSONL TX/RX 作为 redacted `transport` events 进入 Runtime trace。
 - Runtime trace 增加 all/info/success/warning/danger 等级筛选，并能展开显示 redacted transport frame payload，保留完整 request ID、frame type 与 TX/RX 数据。
 - Web Dashboard 将 `currentMa` 显示为 PD contract 卡片内的电流能力，避免在 Runtime 小条中被误读为实时负载电流。
+- Web Settings 的 fan policy 只暴露 firmware runtime contract 可写的 OFF/AUTO 冷却策略；RUN 保持为固件回报的风扇运行显示状态，不作为可写策略。
 - 设备选择页按 known devices 网格、分隔线、单行 WiFi/Web Serial/Bridge 新增卡片组织；空设备提示不做成卡片，不显示额外分区标题；快捷新增入口先进入 Add device 页面再触发对应新增动作。
 - 修复 pending Bridge/WiFi target 与 Web Serial 连接状态的选择同步：Web Serial 连接成功后必须选中真实 browser Web Serial target，不能继续显示 pending Bridge runtime。
 - 将 preset 设置纳入真实 runtime contract：status 回传 `selectedPresetSlot` 与 `presetsC`，`runtime_config` 可写当前 slot 与完整 preset array；Web live Settings 以设备 status 为事实源，硬件前面板和 Web 同时显示 preset 设置界面时可通过写入 response 与轮询互相回显。

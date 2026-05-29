@@ -58,7 +58,7 @@
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
 - logs、trace、events 必须有固定上限；`devd` native USB JSONL TX/RX 必须作为 redacted `transport` events 进入 Runtime trace，保留 request ID、frame type 与 payload，WiFi password 等 secret 只能显示为 redacted。
-- firmware artifact verify 必须校验 file existence、size 和 sha256；real flash 必须先通过 dry-run。
+- firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；real flash 必须先通过 dry-run。
 - devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
 - Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。

@@ -5,7 +5,7 @@ use std::{
     fs::{self, File},
     io::{self, Read},
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
@@ -1900,7 +1900,7 @@ pub fn verify_artifact(
 ) -> io::Result<ArtifactVerifyResult> {
     let mut files = Vec::new();
     for file in &artifact.files {
-        let path = resolve_artifact_path(root, &file.path);
+        let path = resolve_verified_artifact_path(root, &file.path)?;
         let bytes = fs::read(&path)?;
         let size = bytes.len() as u64;
         let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
@@ -1995,6 +1995,34 @@ fn resolve_artifact_path(root: Option<&Path>, path: &str) -> PathBuf {
     } else {
         path
     }
+}
+
+fn resolve_verified_artifact_path(root: Option<&Path>, path: &str) -> io::Result<PathBuf> {
+    let relative = PathBuf::from(path);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::Prefix(_) | Component::RootDir
+            )
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "artifact paths must stay inside the configured artifact root",
+        ));
+    }
+
+    let base = fs::canonicalize(root.unwrap_or_else(|| Path::new(".")))?;
+    let candidate = fs::canonicalize(base.join(relative))?;
+    if !candidate.starts_with(&base) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "artifact path must stay inside the configured artifact root",
+        ));
+    }
+
+    Ok(candidate)
 }
 
 async fn run_espflash(
@@ -2540,6 +2568,36 @@ mod tests {
         let result = verify_artifact(&artifact, Some(dir.path())).unwrap();
         assert!(!result.verified);
         assert!(!result.files[0].ok);
+    }
+
+    #[test]
+    fn artifact_verify_rejects_paths_outside_artifact_root() {
+        let dir = tempdir().unwrap();
+        let artifact = FirmwareArtifact {
+            artifact_id: "escaped-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "debug".to_string(),
+            features: vec!["web_serial".to_string()],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "app".to_string(),
+                path: "../firmware.bin".to_string(),
+                sha256: "sha256:bad".to_string(),
+                size: 9,
+                flash_address: Some(0x10000),
+            }],
+        };
+        let parent_escape = verify_artifact(&artifact, Some(dir.path())).unwrap_err();
+        assert_eq!(parent_escape.kind(), io::ErrorKind::PermissionDenied);
+
+        let mut absolute_artifact = artifact;
+        absolute_artifact.files[0].path = "/etc/hosts".to_string();
+        let absolute_escape = verify_artifact(&absolute_artifact, Some(dir.path())).unwrap_err();
+        assert_eq!(absolute_escape.kind(), io::ErrorKind::PermissionDenied);
     }
 
     #[test]

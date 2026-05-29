@@ -367,6 +367,25 @@ export function ControlPlaneDemo({
   }, [activeScenario.devices])
 
   useEffect(() => {
+    setSelectedPresetByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        if (
+          !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
+          current[device.id] !== clampPresetIndex(device.selectedPresetIndex)
+        ) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
+  useEffect(() => {
     return () => {
       for (const timer of Object.values(targetTempCommitTimersRef.current)) {
         window.clearTimeout(timer)
@@ -446,7 +465,8 @@ export function ControlPlaneDemo({
           presetEnabledByDevice[visibleDevice.id] ?? PRESET_ENABLED
         )
   const selectedPresetIndex = visibleDeviceIsLive
-    ? clampPresetIndex(visibleDevice.selectedPresetIndex)
+    ? (selectedPresetByDevice[visibleDevice.id] ??
+      clampPresetIndex(visibleDevice.selectedPresetIndex))
     : (selectedPresetByDevice[visibleDevice.id] ?? 3)
   const visiblePresetTemps = presetTempsFromValues(visiblePresetValues)
   const visiblePresetEnabled = presetEnabledFromValues(visiblePresetValues)
@@ -802,6 +822,9 @@ export function ControlPlaneDemo({
   }
 
   const handleFanPolicyChange = async (fanState: DeviceTarget['fanState']) => {
+    if (fanState === 'RUN') {
+      return
+    }
     const liveUpdated = await configureLiveRuntime(
       { activeCoolingEnabled: fanState !== 'OFF' },
       'fan policy update was not accepted by devd'
@@ -823,15 +846,18 @@ export function ControlPlaneDemo({
 
   const handlePresetSlotChange = async (presetIndex: number) => {
     const presetIsEnabled = visiblePresetEnabled[presetIndex] ?? true
+    setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
     const liveUpdated = await configureLiveRuntime(
       { selectedPresetSlot: presetIndex },
       'preset slot update was not accepted by devd'
     )
     if (visibleDeviceIsLive && !liveUpdated) {
+      setSelectedPresetByDevice((current) => {
+        const next = { ...current }
+        delete next[visibleDevice.id]
+        return next
+      })
       return
-    }
-    if (!visibleDeviceIsLive) {
-      setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
     }
     setFeedback({
       title: `Preset M${presetIndex + 1} selected`,
@@ -2460,7 +2486,7 @@ function SegmentedSetting({
   onChange: (fanState: DeviceTarget['fanState']) => void
   hideLabel?: boolean
 }) {
-  const options: DeviceTarget['fanState'][] = ['OFF', 'AUTO', 'RUN']
+  const options: Array<Exclude<DeviceTarget['fanState'], 'RUN'>> = ['OFF', 'AUTO']
 
   return (
     <fieldset className="industrial-setting-control industrial-segmented-setting">

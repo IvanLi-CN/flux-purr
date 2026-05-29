@@ -136,12 +136,12 @@ export const LiveWebSerialAddDevice: Story = {
     )
 
     await step('Settings fan policy keeps the acknowledged operator selection', async () => {
-      await userEvent.click(await canvas.findByRole('button', { name: 'RUN' }))
+      await userEvent.click(await canvas.findByRole('button', { name: 'OFF' }))
 
       await waitFor(() => {
-        expect(canvas.getByRole('button', { name: 'RUN' })).toHaveAttribute('aria-pressed', 'true')
+        expect(canvas.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'true')
       })
-      await expect(await canvas.findByText('flux-purr-s3-001 fan policy is now RUN.')).toBeVisible()
+      await expect(await canvas.findByText('flux-purr-s3-001 fan policy is now OFF.')).toBeVisible()
     })
   },
 }
