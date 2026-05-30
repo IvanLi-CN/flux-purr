@@ -1,0 +1,24 @@
+{
+  "channel_label": "channel:stable",
+  "components": {
+    "firmware": {
+      "effective_version": "0.5.0",
+      "tag": "fw/v0.5.0"
+    },
+    "web": {
+      "effective_version": "0.5.0",
+      "tag": "web/v0.5.0"
+    }
+  },
+  "pr_head_sha": "210654da3bdd753f355603273b1041996e3be768",
+  "pr_number": 31,
+  "pr_title": "feat(devd): add control plane daemon foundation",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "9f813f73cef31f4700ed2aa1a4332fcbae4aa1f6",
+  "type_label": "type:minor"
+}
