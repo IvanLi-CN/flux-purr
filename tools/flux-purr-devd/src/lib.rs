@@ -2280,15 +2280,32 @@ fn record_transport_event(
 }
 
 fn redact_transport_frame(mut frame: Value) -> Value {
-    if let Some(object) = frame.as_object_mut()
-        && object.get("password").and_then(Value::as_str).is_some()
-    {
-        object.insert(
-            "password".to_string(),
-            Value::String("<redacted>".to_string()),
-        );
-    }
+    redact_transport_secrets(&mut frame);
     frame
+}
+
+fn redact_transport_secrets(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if is_transport_secret_key(key) && !value.is_null() {
+                    *value = Value::String("<redacted>".to_string());
+                } else {
+                    redact_transport_secrets(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_transport_secrets(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_transport_secret_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("psk")
 }
 
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
@@ -2482,6 +2499,39 @@ mod tests {
                 .unwrap()
                 .contains("secret-pass")
         );
+    }
+
+    #[test]
+    fn transport_events_redact_nested_passwords() {
+        let state = AppState::test();
+        record_transport_event(
+            &state,
+            "mock-fp-lab-01",
+            "rx",
+            "usb_jsonl",
+            "req-1",
+            r#"{"type":"response","requestId":"req-1","ok":true,"result":{"wifi":{"ssid":"FluxPurr-Lab","password":"secret-pass","credentials":[{"psk":"nested-psk"}]}}}"#,
+        );
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("mock-fp-lab-01").unwrap();
+        let transport_event = device
+            .events
+            .iter()
+            .find(|event| event.kind == "transport")
+            .unwrap();
+
+        assert_eq!(
+            transport_event.payload["frame"]["result"]["wifi"]["password"],
+            "<redacted>"
+        );
+        assert_eq!(
+            transport_event.payload["frame"]["result"]["wifi"]["credentials"][0]["psk"],
+            "<redacted>"
+        );
+        let encoded = serde_json::to_string(&transport_event.payload).unwrap();
+        assert!(!encoded.contains("secret-pass"));
+        assert!(!encoded.contains("nested-psk"));
     }
 
     #[test]
