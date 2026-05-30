@@ -37,6 +37,14 @@ jobs:
       - name: Firmware clippy
         run: bash scripts/check-firmware-clippy.sh
 
+      - name: Setup Xtensa toolchain
+        uses: esp-rs/xtensa-toolchain@v1.6.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          buildtargets: esp32s3
+          default: false
+
       - name: Firmware build
         run: bash scripts/check-firmware-build.sh
 
