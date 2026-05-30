@@ -9,6 +9,7 @@
     "check:firmware:fmt": "bash scripts/check-firmware-fmt.sh",
     "check:firmware:clippy": "bash scripts/check-firmware-clippy.sh",
     "check:firmware:build": "bash scripts/check-firmware-build.sh",
+    "check:devd": "bash scripts/check-devd.sh",
     "check:web": "bash scripts/check-web-check.sh",
     "check:web:build": "bash scripts/check-web-build.sh",
     "check:storybook": "bash scripts/check-storybook-build.sh",
