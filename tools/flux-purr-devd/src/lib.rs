@@ -1261,7 +1261,7 @@ async fn serial_wifi_config(
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
-    serial_exchange(state, &target.id, port_path, request_id, request, true).await
+    serial_exchange(state, &target.id, port_path, request_id, request, false).await
 }
 
 async fn serial_runtime_config(
@@ -1281,7 +1281,7 @@ async fn serial_runtime_config(
         heater_enabled: payload.heater_enabled,
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, false).await?;
     extract_usb_payload(result, "status")
 }
 
