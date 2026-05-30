@@ -1690,14 +1690,18 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
     let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
         return Ok(None);
     };
-    if frame.frame_type != "response" || frame.request_id.as_deref() != Some(request_id) {
+    if frame.request_id.as_deref() != Some(request_id) {
         return Ok(None);
     }
-    if frame.ok == Some(true) {
-        return Ok(Some(frame.result.unwrap_or(Value::Null)));
+    match frame.frame_type.as_str() {
+        "response" if frame.ok == Some(true) => Ok(Some(frame.result.unwrap_or(Value::Null))),
+        "response" | "error" => Err(usb_frame_error(frame)),
+        _ => Ok(None),
     }
+}
 
-    Err(HttpError {
+fn usb_frame_error(frame: UsbResponseWire) -> HttpError {
+    HttpError {
         status: StatusCode::BAD_GATEWAY,
         error: frame.error.unwrap_or_else(|| ApiError {
             code: "usb_error".to_string(),
@@ -1705,7 +1709,7 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
             retryable: true,
             details: None,
         }),
-    })
+    }
 }
 
 fn serial_io_http_error(error: io::Error) -> HttpError {
@@ -3168,6 +3172,19 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::BAD_GATEWAY);
         assert_eq!(error.error.code, "bad_op");
+        assert!(!error.error.retryable);
+    }
+
+    #[test]
+    fn usb_response_decoder_maps_documented_error_frames() {
+        let error = decode_usb_response_line(
+            br#"{"type":"error","requestId":"req-1","error":{"code":"bad_frame","message":"Malformed JSONL frame.","retryable":false}}"#,
+            "req-1",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.error.code, "bad_frame");
         assert!(!error.error.retryable);
     }
 
