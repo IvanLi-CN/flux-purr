@@ -1839,7 +1839,9 @@ async fn flash_device(
         "real flash started",
         json!({ "artifactId": artifact_id, "dryRun": false }),
     ));
+    let _serial_rpc = state.serial_rpc.clone().lock_owned().await;
     release_cached_serial_session(&state, &port_path)?;
+    let _serial_lock = reserve_serial_port_for_flash(&port_path)?;
     if let Err(error) = run_espflash(
         &payload.artifact,
         state.config.artifact_root.as_deref(),
@@ -1873,6 +1875,10 @@ async fn flash_device(
         status: "completed".to_string(),
         message: "espflash command completed.".to_string(),
     }))
+}
+
+fn reserve_serial_port_for_flash(port_path: &str) -> Result<SerialPortProcessLock, HttpError> {
+    SerialPortProcessLock::acquire(port_path, Instant::now() + SERIAL_RPC_TIMEOUT)
 }
 
 pub fn scan_serial_devices(serial_port: Option<&Path>) -> Vec<DeviceRecord> {
@@ -3183,6 +3189,26 @@ mod tests {
         let sessions = state.serial_sessions.lock().unwrap();
         assert!(!sessions.contains_key("/dev/cu.usbmodem-target"));
         assert!(sessions.contains_key("/dev/cu.usbmodem-other"));
+    }
+
+    #[test]
+    fn flash_port_reservation_uses_process_lock() {
+        let port_path = format!("/dev/cu.usbmodem-flash-test-{}", now_millis());
+        let _reservation = reserve_serial_port_for_flash(&port_path).unwrap();
+
+        #[cfg(unix)]
+        {
+            let second = SerialPortProcessLock::acquire(
+                &port_path,
+                Instant::now() + Duration::from_millis(1),
+            );
+            let error = match second {
+                Ok(_) => panic!("second serial lock acquisition should time out"),
+                Err(error) => error,
+            };
+            assert_eq!(error.status, StatusCode::GATEWAY_TIMEOUT);
+            assert_eq!(error.error.code, "serial_lock_timeout");
+        }
     }
 
     #[test]
