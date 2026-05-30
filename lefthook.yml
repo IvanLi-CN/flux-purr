@@ -37,6 +37,8 @@ pre-push:
       run: bash scripts/check-firmware-build.sh
     web_build:
       run: bash scripts/check-web-build.sh
+    devd:
+      run: bash scripts/check-devd.sh
     storybook_build:
       run: bash scripts/check-storybook-build.sh
     web_e2e_optional:
