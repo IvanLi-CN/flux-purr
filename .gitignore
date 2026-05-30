@@ -24,6 +24,8 @@ Cargo.lock
 .env.*
 !.env.example
 .mcu-agentd/
+
+# Local screenshots and scratch artifacts
 .tmp/
 
 # Python cache
