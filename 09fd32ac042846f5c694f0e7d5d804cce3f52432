@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "components": {},
+  "pr_head_sha": "72551e3e35758ba9923eaaa66f03c95a4fab5b35",
+  "pr_number": 30,
+  "pr_title": "chore: ignore local temp artifacts",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "09fd32ac042846f5c694f0e7d5d804cce3f52432",
+  "type_label": "type:skip"
+}
