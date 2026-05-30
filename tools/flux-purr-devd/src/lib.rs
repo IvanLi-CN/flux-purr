@@ -1395,7 +1395,7 @@ fn serial_exchange_blocking(
     let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
     let mut session = take_or_open_serial_session(&mut serial_sessions, port_path, deadline)?;
-    write_serial_request(&mut *session.port, request)?;
+    session = write_initial_serial_request(port_path, deadline, session, request)?;
 
     let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
     let mut read_buf = [0_u8; 256];
@@ -1502,6 +1502,24 @@ fn store_serial_session(
     session: SerialSession,
 ) {
     serial_sessions.insert(port_path.to_string(), session);
+}
+
+fn write_initial_serial_request(
+    port_path: &str,
+    deadline: Instant,
+    mut session: SerialSession,
+    request: &str,
+) -> Result<SerialSession, HttpError> {
+    match write_serial_request_io(&mut *session.port, request) {
+        Ok(()) => Ok(session),
+        Err(error) if is_recoverable_serial_io_error(&error) => {
+            drop(session);
+            let mut reopened = reopen_serial_session(port_path, deadline)?;
+            write_serial_request(&mut *reopened.port, request)?;
+            Ok(reopened)
+        }
+        Err(error) => Err(serial_io_http_error(error)),
+    }
 }
 
 fn release_cached_serial_session(state: &AppState, port_path: &str) -> Result<(), HttpError> {
@@ -1638,10 +1656,13 @@ fn write_serial_request(
     port: &mut dyn serialport::SerialPort,
     request: &str,
 ) -> Result<(), HttpError> {
+    write_serial_request_io(port, request).map_err(serial_io_http_error)
+}
+
+fn write_serial_request_io(port: &mut dyn serialport::SerialPort, request: &str) -> io::Result<()> {
     port.write_all(request.as_bytes())
         .and_then(|_| port.write_all(b"\n"))
         .and_then(|_| port.flush())
-        .map_err(serial_io_http_error)
 }
 
 fn maybe_retry_silent_serial_request(
