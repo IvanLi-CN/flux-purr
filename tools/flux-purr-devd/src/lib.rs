@@ -135,6 +135,7 @@ struct DevdState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DryRunApproval {
+    lease_id: String,
     artifact_id: String,
     manifest_fingerprint: String,
 }
@@ -579,6 +580,7 @@ pub struct ArtifactVerifyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactFileResult {
+    pub path: String,
     pub kind: String,
     pub sha256: String,
     pub size: u64,
@@ -1727,7 +1729,7 @@ async fn flash_device(
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
     let artifact_id = payload.artifact.artifact_id.clone();
-    let approval = dry_run_approval(&payload.artifact);
+    let approval = dry_run_approval(&payload.lease_id, &payload.artifact);
     let port_path = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -1950,10 +1952,11 @@ fn serial_device_record(
     device
 }
 
-fn dry_run_approval(artifact: &FirmwareArtifact) -> DryRunApproval {
+fn dry_run_approval(lease_id: &str, artifact: &FirmwareArtifact) -> DryRunApproval {
     let manifest = serde_json::to_vec(artifact)
         .expect("FirmwareArtifact serialization should not fail for in-memory manifest data");
     DryRunApproval {
+        lease_id: lease_id.to_string(),
         artifact_id: artifact.artifact_id.clone(),
         manifest_fingerprint: format!("sha256:{:x}", Sha256::digest(manifest)),
     }
@@ -1971,6 +1974,7 @@ pub fn verify_artifact(
         let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
         let ok = size == file.size && digest == file.sha256;
         files.push(ArtifactFileResult {
+            path: file.path.clone(),
             kind: file.kind.clone(),
             sha256: digest,
             size,
@@ -2678,6 +2682,7 @@ mod tests {
 
         let result = verify_artifact(&artifact, Some(dir.path())).unwrap();
         assert!(result.verified);
+        assert_eq!(result.files[0].path, "firmware.bin");
         assert_eq!(result.files[0].sha256, digest);
     }
 
@@ -3022,7 +3027,7 @@ mod tests {
             let mut inner = state.lock().unwrap();
             inner.devices.insert(native.id.clone(), native);
         }
-        let lease = state.lease_device("serial-test").unwrap();
+        let mut lease = state.lease_device("serial-test").unwrap();
 
         let without_dry_run = flash_device(
             State(state.clone()),
@@ -3084,6 +3089,38 @@ mod tests {
         .unwrap_err();
         assert_eq!(changed_manifest.status, StatusCode::FORBIDDEN);
         assert_eq!(changed_manifest.error.code, "dry_run_required");
+
+        let _ = delete_lease(State(state.clone()), AxumPath(lease.lease_id.clone()))
+            .await
+            .unwrap();
+        lease = state.lease_device("serial-test").unwrap();
+        let new_lease_without_dry_run = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: artifact.clone(),
+                dry_run: false,
+                confirm: Some("FLASH".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(new_lease_without_dry_run.status, StatusCode::FORBIDDEN);
+        assert_eq!(new_lease_without_dry_run.error.code, "dry_run_required");
+
+        let _ = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: artifact.clone(),
+                dry_run: true,
+                confirm: None,
+            }),
+        )
+        .await
+        .unwrap();
 
         let without_confirm = flash_device(
             State(state.clone()),

@@ -1050,6 +1050,7 @@ def summarize_verify(verify: dict[str, Any]) -> dict[str, Any]:
         "verified": verify.get("verified"),
         "files": [
             {
+                "path": file.get("path"),
                 "kind": file.get("kind"),
                 "ok": file.get("ok"),
                 "size": file.get("size"),
