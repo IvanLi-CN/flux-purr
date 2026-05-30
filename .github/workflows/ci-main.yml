@@ -61,7 +61,7 @@ jobs:
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_snapshot.py .github/scripts/check-quality-gates.py
+          python3 -m py_compile .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py
           bash .github/scripts/test-release-labels.sh
           bash .github/scripts/test-version-scripts.sh
 

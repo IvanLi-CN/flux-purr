@@ -6,23 +6,18 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT
 
 run_compute() {
-  local component="$1"
-  local level="$2"
-  local channel="$3"
-  local env_file="${tmp_dir}/${component}-${level}-${channel}.env"
+  local level="$1"
+  local channel="$2"
+  local env_file="${tmp_dir}/product-${level}-${channel}.env"
   GITHUB_ENV="${env_file}" RELEASE_LEVEL="${level}" RELEASE_CHANNEL="${channel}" \
-    bash "${root_dir}/.github/scripts/compute-version-${component}.sh" >/dev/null
+    bash "${root_dir}/.github/scripts/compute-version-product.sh" >/dev/null
   cat "${env_file}"
 }
 
-web_stable="$(run_compute web patch stable)"
-fw_stable="$(run_compute fw patch stable)"
-web_rc="$(run_compute web minor rc)"
-fw_rc="$(run_compute fw major rc)"
+product_stable="$(run_compute patch stable)"
+product_rc="$(run_compute minor rc)"
 
-grep -Eq '^WEB_TAG=web/v[0-9]+\.[0-9]+\.[0-9]+$' <<<"${web_stable}"
-grep -Eq '^FW_TAG=fw/v[0-9]+\.[0-9]+\.[0-9]+$' <<<"${fw_stable}"
-grep -Eq '^WEB_TAG=web/v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9a-f]{7}$' <<<"${web_rc}"
-grep -Eq '^FW_TAG=fw/v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9a-f]{7}$' <<<"${fw_rc}"
+grep -Eq '^PRODUCT_TAG=v[0-9]+\.[0-9]+\.[0-9]+$' <<<"${product_stable}"
+grep -Eq '^PRODUCT_TAG=v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9a-f]{7}$' <<<"${product_rc}"
 
 echo "Version script tests passed."

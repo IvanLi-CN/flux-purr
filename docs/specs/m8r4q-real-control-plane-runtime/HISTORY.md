@@ -61,3 +61,12 @@
 - 设备选择页按 known devices 网格、分隔线、单行 WiFi/Web Serial/Bridge 新增卡片组织；空设备提示不做成卡片，不显示额外分区标题；快捷新增入口先进入 Add device 页面再触发对应新增动作。
 - 修复 pending Bridge/WiFi target 与 Web Serial 连接状态的选择同步：Web Serial 连接成功后必须选中真实 browser Web Serial target，不能继续显示 pending Bridge runtime。
 - 将 preset 设置纳入真实 runtime contract：status 回传 `selectedPresetSlot` 与 `presetsC`，`runtime_config` 可写当前 slot 与完整 preset array；Web live Settings 以设备 status 为事实源，硬件前面板和 Web 同时显示 preset 设置界面时可通过写入 response 与轮询互相回显。
+
+## 2026-05-30
+
+- 决策：命令行正规控制面是 released `flux-purr` CLI，经 `flux-purr-devd` 操作 USB/flash/monitor 主机特权能力；浏览器 Web Serial 保留为浏览器访问硬件的正规路径。
+- `flux-purr-devd` 启动形态收敛为 `serve` 子命令，默认 `127.0.0.1:30080`，保留环境变量兼容，并在无显式 serial port 时读取用户级默认 USB port。
+- `flux-purr` CLI 覆盖 devices/identity/status/runtime/wifi/flash/monitor/hardware/usb-port，自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出。
+- 用户级硬件记忆和默认 USB port 写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；运行中的 daemon 不因配置文件变化自动切换端口。
+- 发布收敛为单一 product tag `vX.Y.Z`；Web、firmware、host-tools 和 release manifest 挂同一 GitHub Release，manifest 的组件指纹决定是否需要升级。
+- Repo 级 user/developer operation skills 固化 released CLI/devd、Web Serial、开发 HIL、端口授权和 release manifest 边界。

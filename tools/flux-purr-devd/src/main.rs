@@ -1,16 +1,61 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
-use flux_purr_devd::{AppConfig, AppState, DEFAULT_SERIAL_PORT, app};
+use clap::{Args, Parser, Subcommand};
+use flux_purr_devd::{
+    AppConfig, AppState, DEFAULT_SERIAL_PORT, app, read_default_serial_port_from_user_config,
+};
 use tokio::net::TcpListener;
+
+#[derive(Debug, Parser)]
+#[command(name = "flux-purr-devd")]
+#[command(about = "Flux Purr local USB/devd bridge")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+    #[arg(long = "artifact-root")]
+    artifact_root: Option<PathBuf>,
+    #[arg(long = "serial-port")]
+    serial_port: Option<PathBuf>,
+    #[arg(long = "allow-dev-cors")]
+    allow_dev_cors: bool,
+    #[arg(long = "no-dev-cors")]
+    no_dev_cors: bool,
+    #[arg(long = "allow-real-flash")]
+    allow_real_flash: bool,
+}
+
+impl Default for ServeArgs {
+    fn default() -> Self {
+        Self {
+            bind: None,
+            artifact_root: None,
+            serial_port: None,
+            allow_dev_cors: false,
+            no_dev_cors: false,
+            allow_real_flash: false,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
-    if env::args().any(|arg| arg == "-h" || arg == "--help") {
-        print_help();
-        return;
-    }
-
-    let config = parse_config();
+    let cli = Cli::parse();
+    let args = match cli.command {
+        Some(Command::Serve(args)) => args,
+        None => ServeArgs::default(),
+    };
+    let config = parse_config(args);
     let listener = TcpListener::bind(config.bind)
         .await
         .expect("failed to bind flux-purr-devd listener");
@@ -25,35 +70,42 @@ async fn main() {
         .expect("flux-purr-devd server failed");
 }
 
-fn print_help() {
-    println!(
-        "flux-purr-devd\n\n\
-         Environment:\n\
-           FLUX_PURR_DEVD_BIND=127.0.0.1:30080\n\
-           FLUX_PURR_DEVD_ARTIFACT_ROOT=<path>\n\
-           FLUX_PURR_DEVD_SERIAL_PORT=/dev/cu.usbmodem21221401\n\
-           FLUX_PURR_DEVD_DEV_CORS=0|1 (default: enabled for loopback binds)\n\
-           FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1"
-    );
-}
-
-fn parse_config() -> AppConfig {
-    let bind = env::var("FLUX_PURR_DEVD_BIND")
-        .ok()
-        .and_then(|value| value.parse::<SocketAddr>().ok())
+fn parse_config(args: ServeArgs) -> AppConfig {
+    let bind = args
+        .bind
+        .or_else(|| {
+            env::var("FLUX_PURR_DEVD_BIND")
+                .ok()
+                .and_then(|value| value.parse::<SocketAddr>().ok())
+        })
         .unwrap_or_else(|| "127.0.0.1:30080".parse().unwrap());
-    let artifact_root = env::var("FLUX_PURR_DEVD_ARTIFACT_ROOT")
-        .ok()
-        .map(PathBuf::from);
-    let allow_dev_cors = env::var("FLUX_PURR_DEVD_DEV_CORS")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or_else(|_| default_dev_cors_for_bind(bind));
-    let allow_real_flash = env::var("FLUX_PURR_DEVD_ALLOW_REAL_FLASH")
-        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    let serial_port = Some(PathBuf::from(
-        env::var("FLUX_PURR_DEVD_SERIAL_PORT").unwrap_or_else(|_| DEFAULT_SERIAL_PORT.to_string()),
-    ));
+    let artifact_root = args.artifact_root.or_else(|| {
+        env::var("FLUX_PURR_DEVD_ARTIFACT_ROOT")
+            .ok()
+            .map(PathBuf::from)
+    });
+    let allow_dev_cors = if args.no_dev_cors {
+        false
+    } else if args.allow_dev_cors {
+        true
+    } else {
+        env::var("FLUX_PURR_DEVD_DEV_CORS")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or_else(|_| default_dev_cors_for_bind(bind))
+    };
+    let allow_real_flash = args.allow_real_flash
+        || env::var("FLUX_PURR_DEVD_ALLOW_REAL_FLASH")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+    let serial_port = args
+        .serial_port
+        .or_else(|| {
+            env::var("FLUX_PURR_DEVD_SERIAL_PORT")
+                .ok()
+                .map(PathBuf::from)
+        })
+        .or_else(read_default_serial_port_from_user_config)
+        .or_else(|| Some(PathBuf::from(DEFAULT_SERIAL_PORT)));
 
     AppConfig {
         bind,

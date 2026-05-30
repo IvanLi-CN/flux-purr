@@ -3,8 +3,7 @@ name: Notify failed release
 on:
   workflow_run:
     workflows:
-      - Release Web
-      - Release Firmware
+      - Release Product
     types:
       - completed
     branches:

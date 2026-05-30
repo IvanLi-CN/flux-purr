@@ -1,0 +1,292 @@
+name: Release Product
+
+on:
+  workflow_run:
+    workflows:
+      - CI Main
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA on main to release or backfill"
+        required: true
+        type: string
+
+concurrency:
+  group: release-product-${{ github.event.workflow_run.head_sha || inputs.commit_sha || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_SNAPSHOT_NOTES_REF: refs/notes/release-snapshots
+
+jobs:
+  release-meta:
+    name: Release Product Meta
+    runs-on: ubuntu-latest
+    outputs:
+      target_sha: ${{ steps.target.outputs.target_sha }}
+      enabled: ${{ steps.snapshot.outputs.release_enabled }}
+      channel: ${{ steps.snapshot.outputs.release_channel }}
+      effective_version: ${{ steps.snapshot.outputs.product_effective_version }}
+      tag: ${{ steps.snapshot.outputs.product_tag }}
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve target commit
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            target_sha="${{ inputs.commit_sha }}"
+          else
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "target_sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "${{ github.event.workflow_run.event }}" != "push" ]; then
+              echo "target_sha=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            target_sha="${{ github.event.workflow_run.head_sha }}"
+          fi
+          if [[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid target SHA: ${target_sha}" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          git cat-file -e "${target_sha}^{commit}"
+          if ! git merge-base --is-ancestor "${target_sha}" origin/main; then
+            echo "Commit ${target_sha} is not contained in origin/main" >&2
+            exit 1
+          fi
+          echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Load release snapshot
+        if: steps.target.outputs.target_sha != ''
+        id: snapshot
+        env:
+          TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+        run: |
+          python3 .github/scripts/release_snapshot.py export \
+            --target-sha "${TARGET_SHA}" \
+            --notes-ref "${RELEASE_SNAPSHOT_NOTES_REF}" \
+            --github-output "$GITHUB_OUTPUT"
+
+  web:
+    name: Release Product Web Asset
+    runs-on: ubuntu-latest
+    needs: [release-meta]
+    if: needs.release-meta.outputs.enabled == 'true'
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-meta.outputs.target_sha }}
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install dependencies
+        run: bun install --cwd web --frozen-lockfile
+
+      - name: Build web
+        run: bun run --cwd web build
+
+      - name: Package web artifact
+        env:
+          PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+        run: tar -czf "flux-purr-web-v${PRODUCT_EFFECTIVE_VERSION}.tar.gz" -C web/dist .
+
+      - name: Upload web asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-web
+          path: flux-purr-web-v*.tar.gz
+
+  firmware:
+    name: Release Product Firmware Asset
+    runs-on: ubuntu-latest
+    needs: [release-meta]
+    if: needs.release-meta.outputs.enabled == 'true'
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-meta.outputs.target_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+
+      - name: Setup Xtensa toolchain
+        uses: esp-rs/xtensa-toolchain@v1.6.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          buildtargets: esp32s3
+          default: false
+
+      - name: Build ESP32-S3 firmware
+        run: cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
+
+      - name: Package firmware artifact
+        env:
+          PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          FW_RELEASE_DIR: firmware/target/xtensa-esp32s3-none-elf/release
+        run: tar -czf "flux-purr-firmware-v${PRODUCT_EFFECTIVE_VERSION}.tar.gz" -C "${FW_RELEASE_DIR}" .
+
+      - name: Upload firmware asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-firmware
+          path: flux-purr-firmware-v*.tar.gz
+
+  host-tools:
+    name: Release Product Host Tools
+    runs-on: ${{ matrix.os }}
+    needs: [release-meta]
+    if: needs.release-meta.outputs.enabled == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            archive: tar
+          - os: macos-14
+            platform: macos-arm64
+            archive: tar
+          - os: windows-latest
+            platform: windows-x64
+            archive: zip
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-meta.outputs.target_sha }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+
+      - name: Build host tools
+        run: cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bins
+
+      - name: Package host tools
+        shell: bash
+        env:
+          PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          mkdir -p package/bin
+          if [ "${ARCHIVE}" = "zip" ]; then
+            cp target/release/flux-purr.exe package/bin/
+            cp target/release/flux-purr-devd.exe package/bin/
+            powershell -NoProfile -Command "Compress-Archive -Path package/* -DestinationPath flux-purr-host-tools-${PLATFORM}-v${PRODUCT_EFFECTIVE_VERSION}.zip"
+          else
+            cp target/release/flux-purr package/bin/
+            cp target/release/flux-purr-devd package/bin/
+            tar -czf "flux-purr-host-tools-${PLATFORM}-v${PRODUCT_EFFECTIVE_VERSION}.tar.gz" -C package .
+          fi
+
+      - name: Upload host tools asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-host-tools-${{ matrix.platform }}
+          path: |
+            flux-purr-host-tools-*.tar.gz
+            flux-purr-host-tools-*.zip
+
+  publish:
+    name: Release Product Publish
+    runs-on: ubuntu-latest
+    needs: [release-meta, web, firmware, host-tools]
+    if: needs.release-meta.outputs.enabled == 'true'
+    steps:
+      - name: Checkout target
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.release-meta.outputs.target_sha }}
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-assets
+
+      - name: Prepare release assets and manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          PRODUCT_TAG: ${{ needs.release-meta.outputs.tag }}
+          TARGET_SHA: ${{ needs.release-meta.outputs.target_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets previous-manifest
+          find downloaded-assets -maxdepth 3 -type f -print -exec cp {} release-assets/ \;
+
+          previous_tag="$(gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // ""' || true)"
+          previous_arg=()
+          if [ -n "${previous_tag}" ]; then
+            gh release download "${previous_tag}" --pattern 'flux-purr-release-manifest-*.json' --dir previous-manifest --clobber || true
+            previous_file="$(find previous-manifest -type f -name 'flux-purr-release-manifest-*.json' | head -n1 || true)"
+            if [ -n "${previous_file}" ]; then
+              previous_arg=(--previous-manifest "${previous_file}")
+            fi
+          fi
+
+          web_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"web","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-web-*.tar.gz")]}))')"
+          firmware_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"protocolVersions":["flux-purr.usb.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-firmware-*.tar.gz")]}))')"
+          host_tools_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"protocolVersions":["flux-purr.devd-http.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-host-tools-*")]}))')"
+
+          manifest_name="flux-purr-release-manifest-${PRODUCT_TAG}.json"
+          python3 .github/scripts/product_release_manifest.py \
+            --version "${PRODUCT_EFFECTIVE_VERSION}" \
+            --tag "${PRODUCT_TAG}" \
+            --source-sha "${TARGET_SHA}" \
+            --asset-root release-assets \
+            "${previous_arg[@]}" \
+            --component "${web_component}" \
+            --component "${firmware_component}" \
+            --component "${host_tools_component}" \
+            --output "release-assets/${manifest_name}"
+
+      - name: Create and push product tag
+        env:
+          PRODUCT_TAG: ${{ needs.release-meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/${PRODUCT_TAG}" >/dev/null; then
+            echo "Tag ${PRODUCT_TAG} already exists; skip"
+          else
+            git tag -a "${PRODUCT_TAG}" -m "${PRODUCT_TAG}"
+            git push origin "${PRODUCT_TAG}"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-meta.outputs.tag }}
+          name: ${{ needs.release-meta.outputs.tag }}
+          prerelease: ${{ needs.release-meta.outputs.channel == 'rc' }}
+          generate_release_notes: true
+          files: release-assets/*

@@ -2,6 +2,7 @@
 use std::os::fd::AsRawFd;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    env,
     fs::{self, File},
     io::{self, Read},
     net::SocketAddr,
@@ -36,6 +37,9 @@ pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
+pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
+const USER_CONFIG_FILE: &str = "config.json";
+const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
@@ -64,6 +68,94 @@ pub struct AppConfig {
     pub allow_dev_cors: bool,
     pub allow_real_flash: bool,
     pub serial_port: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UserConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_devd_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_serial_port: Option<String>,
+}
+
+pub fn user_config_dir() -> io::Result<PathBuf> {
+    if let Some(home) = env::var_os("FLUX_PURR_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home));
+    }
+
+    match env::consts::OS {
+        "macos" => env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| {
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Flux Purr")
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set")),
+        "windows" => env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|appdata| appdata.join("Flux Purr"))
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".config").join("flux-purr"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "APPDATA or USERPROFILE is not set")
+            }),
+        _ => env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .map(|xdg| xdg.join("flux-purr"))
+            .or_else(|| {
+                env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".config").join("flux-purr"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "XDG_CONFIG_HOME or HOME is not set",
+                )
+            }),
+    }
+}
+
+pub fn user_config_path() -> io::Result<PathBuf> {
+    Ok(user_config_dir()?.join(USER_CONFIG_FILE))
+}
+
+pub fn hardware_registry_path() -> io::Result<PathBuf> {
+    Ok(user_config_dir()?.join(HARDWARE_REGISTRY_FILE))
+}
+
+pub fn read_user_config() -> io::Result<UserConfig> {
+    let path = user_config_path()?;
+    if !path.exists() {
+        return Ok(UserConfig::default());
+    }
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(UserConfig::default());
+    }
+    serde_json::from_str(&content)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub fn write_user_config(config: &UserConfig) -> io::Result<()> {
+    let path = user_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(config)?)
+}
+
+pub fn read_default_serial_port_from_user_config() -> Option<PathBuf> {
+    read_user_config()
+        .ok()
+        .and_then(|config| config.default_serial_port)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 impl Default for AppConfig {
@@ -1820,7 +1912,8 @@ async fn flash_device(
         "real flash started",
         json!({ "artifactId": artifact_id, "dryRun": false }),
     ));
-    if let Err(error) = run_espflash(
+    if let Err(error) = run_espflash_with_exclusive_serial(
+        &state,
         &payload.artifact,
         state.config.artifact_root.as_deref(),
         &port_path,
@@ -2080,6 +2173,26 @@ async fn run_espflash(
     } else {
         Err(HttpError::internal("espflash returned a non-zero status."))
     }
+}
+
+async fn run_espflash_with_exclusive_serial(
+    state: &AppState,
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+) -> Result<(), HttpError> {
+    let _serial_rpc = state.serial_rpc.lock().await;
+    drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    run_espflash(artifact, root, port_path).await
+}
+
+fn drop_cached_serial_session(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_path: &str,
+) -> Result<(), HttpError> {
+    let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    serial_sessions.remove(port_path);
+    Ok(())
 }
 
 fn build_espflash_args(

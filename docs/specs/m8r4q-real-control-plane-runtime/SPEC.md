@@ -15,6 +15,8 @@
 - 定义 Web、firmware 与 `devd` 共享的 identity、network、status、USB JSONL、devd HTTP、firmware artifact 与 error envelope。
 - firmware 提供 feature-gated `web_serial` contract adapter，复用现有热控 runtime 和 EEPROM WiFi 字段；direct `net_http` 只有在固件 HTTP server 落地后才可声明。
 - `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
+- `flux-purr` 作为 released CLI，通过 `devd` 执行命令行硬件控制、用户级硬件记忆、USB 端口配置、artifact dry-run 与 guarded real flash。
+- Release 使用单一产品 tag `vX.Y.Z`，Web、firmware 与 host-tools 资产挂同一 Release，并通过 release manifest 的组件指纹避免无效升级。
 - Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock、browser Web Serial 与 devd contract，并对危险操作做 capability gate。
 - 无真机时必须能用 host tests、mock serial 和 devd dry-run 验证主要契约。
 
@@ -31,6 +33,7 @@
 
 - `firmware/src/control_plane.rs` 及 feature flags。
 - `tools/flux-purr-devd/**` native daemon。
+- `tools/flux-purr-devd/src/bin/flux-purr.rs` user CLI。
 - `web/src/features/control-plane-demo/contracts.ts`、browser Web Serial client 与 transport client。
 - `docs/interfaces/http-api.md` 当前 HTTP/devd/USB contract。
 
@@ -55,7 +58,12 @@
 - Web Serial 连接成功后，如果当前选中的是无目标或 WiFi/Web Serial/Bridge pending target，Web app 必须切换到真实 Web Serial target，不得继续显示 pending Bridge/WiFi runtime。
 - Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
+- devd 必须以 `serve` 子命令启动，默认 bind `127.0.0.1:30080`，并保留环境变量兼容；flags 必须能覆盖 bind、serial port、artifact root、dev CORS 和 real flash。
+- devd 必须在没有显式 `--serial-port` 或 `FLUX_PURR_DEVD_SERIAL_PORT` 时读取用户级默认 USB port；运行中变更默认 USB port 不得静默切换当前 daemon。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
+- `flux-purr` CLI 必须为 status/runtime/wifi/flash/monitor 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。
+- `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；HTTP/LAN/mDNS 只能作为未来 transport 预留，不得伪装为当前能力。
+- `flux-purr usb-port set` 必须写用户配置，并明确需要重启运行中的 `devd`。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
 - logs、trace、events 必须有固定上限；`devd` native USB JSONL TX/RX 必须作为 redacted `transport` events 进入 Runtime trace，保留 request ID、frame type 与 payload，WiFi password 等 secret 只能显示为 redacted。
 - firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；real flash 必须先通过 dry-run。
@@ -64,6 +72,8 @@
 - Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
 - `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
 - `demo=false` 必须使用独立 live scenario，不得混入 demo fixture、degraded demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。
+- Product release workflow 必须产出单一 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>` tag，不得继续创建新的 `web/v...` 或 `fw/v...` tag。
+- Product release manifest 必须记录 Web、firmware、host-tools 组件的 `sha256`、`contentSha256`、`sourceSha`、`protocolVersions`、`changedSincePrevious` 与 `updateReason`。
 
 ### SHOULD
 
@@ -86,6 +96,24 @@
 - `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file kind、path、size、sha256 与可选 flash address；本地 ESP32-S3 release ELF 必须作为 `elf` artifact 走 `espflash flash`。
 - `POST /api/v1/artifacts/verify`：校验 catalog/artifact 文件。
 - `POST /api/v1/devices/:id/flash`：`dry_run=true` 只校验；`dry_run=false` 必须先有同 artifact 的通过记录。
+
+### CLI
+
+- `flux-purr devices`：列出 `devd` 当前可见设备。
+- `flux-purr identity --device <id>|--hardware <saved-id>`：通过 leased identity endpoint 读取设备身份。
+- `flux-purr status --device <id>|--hardware <saved-id>`：通过 leased status endpoint 读取状态。
+- `flux-purr runtime get|set`：读取或部分更新目标温度、preset、主动散热与 heater hold。
+- `flux-purr wifi set|clear`：通过 leased WiFi endpoint 写入或清除 WiFi 配置，输出必须 redaction password。
+- `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。
+- `flux-purr monitor`：读取 bounded event backlog，不拥有长期未释放 lease。
+- `flux-purr hardware available|recent|list|save|forget|path`：管理用户级 USB 硬件记忆。
+- `flux-purr usb-port show|set`：查看或保存默认 USB serial port。
+
+### Release manifest
+
+- Product release tag 是 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>`。
+- Release assets 包含 Web bundle、firmware bundle、host-tools bundle 和 `flux-purr-release-manifest-<tag>.json`。
+- `changedSincePrevious=false` 的组件不得被推荐为必需升级项。
 
 ### USB JSONL
 
@@ -116,7 +144,11 @@
 - Given live 模式没有选中真实目标，When 打开 Dashboard、Settings 或 Update，Then 主工作区仍显示全宽设备选择页，不显示 Dashboard/Settings/Update 内容，不显示右侧全局日志列；WiFi、Web Serial 与 Bridge 三种新增卡片保持同一行，点击任一新增卡片进入 Add device 页面并触发对应新增动作。
 - Given Add device 页面当前选中 pending Bridge，When operator 点击 Web Serial 并连接成功，Then 目标选择器显示真实 Web Serial target，Dashboard 显示真实 runtime，而不是继续显示 `Native bridge / BRIDGE`。
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
-- Given PR 收敛，When checks 完成，Then firmware、devd、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
+- Given CLI 指向 `devd` mock target，When 执行 devices/status/runtime/wifi/flash dry-run/monitor，Then CLI 自动 lease、输出可读 human 文本或 `--json`，且 secret 被 redaction。
+- Given 用户保存默认 USB port，When 重启 `flux-purr-devd serve` 且未显式传入 serial port，Then daemon 只扫描该用户配置 port。
+- Given product release 发布，When 查看 release assets，Then Web、firmware、host-tools 与 release manifest 同挂一个 `vX.Y.Z` Release；manifest 可区分 unchanged component。
+- Given PR 收敛，When checks 完成，Then firmware、devd/CLI、release policy、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
+- Given HIL 验收，When 主人提供并授权确切 USB 端口，Then 通过 `flux-purr` CLI 经 `devd` 证明 identity/status、runtime write/readback/restore、artifact verify/dry-run、real flash、重启后 identity/status/events；未授权端口时不得创建 ready PR。
 
 ## 非功能性验收 / 质量门槛
 
@@ -124,6 +156,8 @@
 - `cargo clippy --manifest-path firmware/Cargo.toml --all-targets -- -D warnings`
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo test --manifest-path tools/flux-purr-devd/Cargo.toml`
+- `bash .github/scripts/test-release-labels.sh`
+- `bash .github/scripts/test-version-scripts.sh`
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web build`

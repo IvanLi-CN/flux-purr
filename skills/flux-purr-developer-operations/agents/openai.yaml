@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flux Purr Developer Operations"
+  short_description: "Run Flux Purr developer HIL flows."
+  default_prompt: "Use this skill for Flux Purr source-level devd, CLI, release, and HIL workflows."

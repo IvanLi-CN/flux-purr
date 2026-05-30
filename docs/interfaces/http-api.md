@@ -182,7 +182,9 @@ Those unsupported operations require Native `devd` HTTP capability gates.
 ## Native `devd` HTTP
 
 Base URL: `http://127.0.0.1:<port>`. Default bind is `127.0.0.1:30080`; loopback binds enable development CORS for local `localhost` / loopback origins so the Vite console can call the daemon from its own local port.
-Native serial discovery is constrained to the configured authorized port. The project default is `/dev/cu.usbmodem21221401`; if that path is absent, `devd` must not expose another native serial device.
+Start the daemon with `flux-purr-devd serve`. Flags override environment variables; `--serial-port` and `FLUX_PURR_DEVD_SERIAL_PORT` override the user default USB port saved by `flux-purr usb-port set`. If no configured port is present, the project fallback is `/dev/cu.usbmodem21221401`.
+
+Native serial discovery is constrained to the configured authorized port. If that path is absent, `devd` must not expose another native serial device.
 
 - `GET /health`
 - `GET /api/v1/devices`
@@ -290,6 +292,63 @@ Successful response:
 ```
 
 Web Update dry-check uses the catalog plus verify endpoint. Browser CORS preflight for development must allow `Content-Type` so JSON `POST /api/v1/artifacts/verify` works from Vite.
+
+## User CLI
+
+The released command-line control surface is `flux-purr`. It talks to `flux-purr-devd`, creates a device lease, heartbeats it during long operations, releases it before exit, and supports `--json` for machine-readable output.
+
+Core commands:
+
+- `flux-purr devices`
+- `flux-purr identity --device <id>` or `--hardware <saved-id>`
+- `flux-purr status --device <id>` or `--hardware <saved-id>`
+- `flux-purr runtime get|set --device <id> ...`
+- `flux-purr wifi set|clear --device <id> ...`
+- `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
+- `flux-purr monitor --device <id>`
+- `flux-purr hardware available|recent|list|save|forget|path`
+- `flux-purr usb-port show|set <port>`
+
+`hardware` stores only current USB targets. LAN HTTP, mDNS, and desktop app discovery are reserved for future transports and must not be presented as current CLI capability.
+
+`usb-port set` writes user configuration in the OS config directory, or under `FLUX_PURR_HOME` when set. A running daemon reads the default port only during startup, so it must be restarted after the default USB port changes.
+
+## Product Release Manifest
+
+Flux Purr releases use one product tag: `vX.Y.Z` for stable releases and `vX.Y.Z-rc.<sha7>` for RC releases. Web, firmware, and host-tools assets attach to the same GitHub Release.
+
+Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "product": "flux-purr",
+  "version": "0.2.0",
+  "tag": "v0.2.0",
+  "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
+  "components": [
+    {
+      "id": "firmware",
+      "version": "0.2.0",
+      "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
+      "protocolVersions": ["flux-purr.usb.v1"],
+      "assets": [
+        {
+          "name": "flux-purr-firmware-v0.2.0.tar.gz",
+          "path": "flux-purr-firmware-v0.2.0.tar.gz",
+          "size": 741452,
+          "sha256": "..."
+        }
+      ],
+      "contentSha256": "...",
+      "changedSincePrevious": true,
+      "updateReason": "content_changed"
+    }
+  ]
+}
+```
+
+Update UX and CLI guidance must use `changedSincePrevious`, `contentSha256`, and `updateReason` to avoid asking users to upgrade unchanged components.
 
 ## USB CDC JSONL
 

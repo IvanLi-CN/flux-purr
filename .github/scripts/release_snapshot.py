@@ -15,7 +15,7 @@ SCHEMA_VERSION = 1
 DEFAULT_NOTES_REF = "refs/notes/release-snapshots"
 VALID_TYPES = {"type:patch", "type:minor", "type:major", "type:docs", "type:skip"}
 VALID_CHANNELS = {"channel:stable", "channel:rc"}
-STABLE_TAG_RE = re.compile(r"^(.+)/v([0-9]+)\.([0-9]+)\.([0-9]+)$")
+STABLE_TAG_RE = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
 INTENT_MARKER = "<!-- flux-purr-release-intent:v1 -->"
 
 
@@ -109,19 +109,14 @@ def validate_snapshot(payload: Any, target_sha: str) -> dict[str, Any]:
     if payload["release_enabled"] and payload.get("release_level") not in {"patch", "minor", "major"}:
         raise SnapshotError("Release snapshot must include patch/minor/major release_level")
     if payload["release_enabled"]:
-        components = payload.get("components")
-        if not isinstance(components, dict):
-            raise SnapshotError("Release snapshot must include components when release_enabled=true")
-        for component in ("web", "firmware"):
-            detail = components.get(component)
-            if not isinstance(detail, dict):
-                raise SnapshotError(f"Release snapshot missing component {component}")
-            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(detail.get("effective_version", ""))):
-                raise SnapshotError(f"Release snapshot component {component} has invalid effective_version")
-            expected_prefix = "web" if component == "web" else "fw"
-            tag = str(detail.get("tag", ""))
-            if not tag.startswith(f"{expected_prefix}/v"):
-                raise SnapshotError(f"Release snapshot component {component} has invalid tag")
+        product = payload.get("product")
+        if not isinstance(product, dict):
+            raise SnapshotError("Release snapshot must include product when release_enabled=true")
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(product.get("effective_version", ""))):
+            raise SnapshotError("Release snapshot product has invalid effective_version")
+        tag = str(product.get("tag", ""))
+        if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9a-f]{7})?", tag):
+            raise SnapshotError("Release snapshot product has invalid tag")
     if not payload["release_enabled"] and payload.get("release_level") not in {"", None}:
         raise SnapshotError("Non-release snapshot must not include release_level")
     return payload
@@ -177,24 +172,17 @@ def bump_version(version: tuple[int, int, int], level: str) -> tuple[int, int, i
     raise SnapshotError(f"Unsupported release level: {level}")
 
 
-def manifest_version(component: str) -> str:
+def manifest_version() -> str:
     root = Path(git_output("rev-parse", "--show-toplevel"))
-    if component == "web":
-        payload = json.loads((root / "web/package.json").read_text(encoding="utf-8"))
-        version = payload.get("version")
-    elif component == "firmware":
-        text = (root / "firmware/Cargo.toml").read_text(encoding="utf-8")
-        match = re.search(r'(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"', text)
-        version = match.group(1) if match else None
-    else:
-        raise SnapshotError(f"Unknown component: {component}")
+    payload = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    version = payload.get("version")
     if not isinstance(version, str):
-        raise SnapshotError(f"Failed to read {component} manifest version")
+        raise SnapshotError("Failed to read product manifest version")
     parse_version(version)
     return version
 
 
-def pending_stable_versions(notes_ref: str, target_sha: str, component: str) -> list[tuple[int, int, int]]:
+def pending_stable_versions(notes_ref: str, target_sha: str) -> list[tuple[int, int, int]]:
     result = run_git("rev-list", "--first-parent", "--reverse", target_sha)
     versions: list[tuple[int, int, int]] = []
     for sha in result.stdout.splitlines():
@@ -203,8 +191,8 @@ def pending_stable_versions(notes_ref: str, target_sha: str, component: str) -> 
         payload = read_snapshot(notes_ref, sha)
         if not payload or not payload["release_enabled"] or payload["release_channel"] != "stable":
             continue
-        detail = payload.get("components", {}).get(component, {})
-        effective = detail.get("effective_version")
+        product = payload.get("product", {})
+        effective = product.get("effective_version") if isinstance(product, dict) else None
         if isinstance(effective, str):
             versions.append(parse_version(effective))
     return versions
@@ -223,42 +211,38 @@ def missing_snapshot_targets(notes_ref: str, target_sha: str) -> list[str]:
 
 
 def max_stable_version(
-    prefix: str,
     fallback: str,
     target_sha: str,
     pending_versions: list[tuple[int, int, int]],
 ) -> tuple[int, int, int]:
     versions = [parse_version(fallback)]
     versions.extend(pending_versions)
-    for tag in git_output("tag", "--list", f"{prefix}/v[0-9]*.[0-9]*.[0-9]*").splitlines():
+    for tag in git_output("tag", "--list", "v[0-9]*.[0-9]*.[0-9]*").splitlines():
         match = STABLE_TAG_RE.fullmatch(tag)
-        if match and match.group(1) == prefix:
+        if match:
             tag_sha = git_output("rev-list", "-n", "1", tag)
             if run_git("merge-base", "--is-ancestor", tag_sha, target_sha, check=False).returncode != 0:
                 continue
-            versions.append(tuple(int(part) for part in match.groups()[1:]))
+            versions.append(tuple(int(part) for part in match.groups()))
     return max(versions)
 
 
-def compute_component(
-    prefix: str,
-    component: str,
+def compute_product(
     level: str,
     channel: str,
     target_sha: str,
     notes_ref: str,
 ) -> dict[str, str]:
     base = max_stable_version(
-        prefix,
-        manifest_version(component),
+        manifest_version(),
         target_sha,
-        pending_stable_versions(notes_ref, target_sha, component),
+        pending_stable_versions(notes_ref, target_sha),
     )
     effective = render_version(bump_version(base, level))
     if channel == "rc":
-        tag = f"{prefix}/v{effective}-rc.{target_sha[:7]}"
+        tag = f"v{effective}-rc.{target_sha[:7]}"
     else:
-        tag = f"{prefix}/v{effective}"
+        tag = f"v{effective}"
     return {"effective_version": effective, "tag": tag}
 
 
@@ -393,13 +377,10 @@ def build_snapshot(api_root: str, token: str, repository: str, target_sha: str, 
 
     release_enabled, level, reason = release_fields(type_label, channel_label)
     channel = channel_label.split(":", 1)[1]
-    components: dict[str, dict[str, str]] = {}
+    product: dict[str, str] = {}
     if release_enabled:
         run_git("fetch", "--tags", "origin")
-        components = {
-            "web": compute_component("web", "web", level, channel, target_sha, notes_ref),
-            "firmware": compute_component("fw", "firmware", level, channel, target_sha, notes_ref),
-        }
+        product = compute_product(level, channel, target_sha, notes_ref)
     return {
         "schema_version": SCHEMA_VERSION,
         "target_sha": target_sha,
@@ -413,7 +394,7 @@ def build_snapshot(api_root: str, token: str, repository: str, target_sha: str, 
         "release_level": level,
         "release_channel": channel,
         "release_reason": f"frozen_{reason}",
-        "components": components,
+        "product": product,
     }
 
 
@@ -428,11 +409,9 @@ def write_outputs(payload: dict[str, Any], output_path: str) -> None:
         "pr_number": str(payload.get("pr_number") or ""),
         "pr_title": payload.get("pr_title") or "",
     }
-    components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
-    for component, prefix in (("web", "web"), ("firmware", "fw")):
-        detail = components.get(component) if isinstance(components.get(component), dict) else {}
-        lines[f"{prefix}_effective_version"] = detail.get("effective_version", "")
-        lines[f"{prefix}_tag"] = detail.get("tag", "")
+    product = payload.get("product") if isinstance(payload.get("product"), dict) else {}
+    lines["product_effective_version"] = product.get("effective_version", "")
+    lines["product_tag"] = product.get("tag", "")
     target = Path(output_path) if output_path else None
     text = "".join(f"{key}={value}\n" for key, value in lines.items())
     if target:

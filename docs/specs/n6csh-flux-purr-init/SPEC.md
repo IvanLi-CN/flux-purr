@@ -20,7 +20,7 @@
 - 固件按 ESP32-S3 默认落地 no-std 基线，并预留 C3 切换位。
 - Web 侧落地 React + Vite + Bun + Biome + shadcn/ui + Storybook + Playwright。
 - 建立本地与 CI 一致的质量门禁：`pre-commit`、`commit-msg`、`pre-push`。
-- 落地 label gate + release intent + 分域 tag（`fw/v*`、`web/v*`）脚本与工作流。
+- 落地 label gate + release intent + product tag 发布脚本与工作流。
 - 在仓库内安装 UI UX Pro Max，并补齐可执行使用指引。
 
 ### Non-goals

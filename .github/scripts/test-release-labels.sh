@@ -73,12 +73,12 @@ original_git_output = module.git_output
 original_run_git = module.run_git
 try:
     tag_commits = {
-        "web/v1.0.0": "past",
-        "web/v9.0.0": "future",
+        "v1.0.0": "past",
+        "v9.0.0": "future",
     }
 
     def fake_git_output(*args):
-        if args == ("tag", "--list", "web/v[0-9]*.[0-9]*.[0-9]*"):
+        if args == ("tag", "--list", "v[0-9]*.[0-9]*.[0-9]*"):
             return "\n".join(tag_commits)
         if args[:3] == ("rev-list", "-n", "1"):
             return tag_commits[args[3]]
@@ -93,7 +93,7 @@ try:
 
     module.git_output = fake_git_output
     module.run_git = fake_run_git
-    assert module.max_stable_version("web", "0.1.0", "target", []) == (1, 0, 0)
+    assert module.max_stable_version("0.1.0", "target", []) == (1, 0, 0)
 finally:
     module.git_output = original_git_output
     module.run_git = original_run_git
@@ -199,6 +199,39 @@ finally:
     module.github_json = original_github_json
     module.load_frozen_intent = original_load_frozen_intent
     module.parent_has_frozen_intent_gate = original_parent_has_frozen_intent_gate
+
+manifest_path = Path(".github/scripts/product_release_manifest.py")
+manifest_spec = importlib.util.spec_from_file_location("product_release_manifest", manifest_path)
+manifest_module = importlib.util.module_from_spec(manifest_spec)
+assert manifest_spec.loader is not None
+manifest_spec.loader.exec_module(manifest_module)
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    asset = root / "web.tar.gz"
+    asset.write_bytes(b"web")
+    component = json.dumps({
+        "id": "web",
+        "version": "0.2.0",
+        "protocolVersions": ["flux-purr.http.v1"],
+        "assets": ["web.tar.gz"],
+    })
+    args = argparse.Namespace(
+        version="0.2.0",
+        tag="v0.2.0",
+        source_sha="c" * 40,
+        asset_root=str(root),
+        previous_manifest=None,
+        component=[component],
+        output=str(root / "manifest.json"),
+    )
+    manifest = manifest_module.build_manifest(args)
+    assert manifest["components"][0]["changedSincePrevious"] is True
+    previous = root / "previous.json"
+    previous.write_text(json.dumps(manifest), encoding="utf-8")
+    args.previous_manifest = str(previous)
+    unchanged = manifest_module.build_manifest(args)
+    assert unchanged["components"][0]["changedSincePrevious"] is False
 PY
 
 echo "Release label tests passed."

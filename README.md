@@ -6,12 +6,15 @@ Flux Purr is a device mono-repo for an embedded firmware + React control console
 
 `tools/flux-purr-devd` is the localhost native daemon for browser-to-device workflows that cannot be handled safely by Web UI alone: USB/serial discovery, exclusive leases, bounded monitor events, WiFi provisioning bridge, firmware artifact dry-run, and guarded `espflash` execution.
 
-Default bind is `127.0.0.1:30080`, and loopback binds enable development CORS for local `localhost` / loopback origins so the Vite console can reach the daemon from its own local port. Real flashing stays disabled unless `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` is set; dry-run verification is available without hardware.
+The daemon is started with `flux-purr-devd serve`. Default bind is `127.0.0.1:30080`, and loopback binds enable development CORS for local `localhost` / loopback origins so the Vite console can reach the daemon from its own local port. Real flashing stays disabled unless `--allow-real-flash` or `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` is set; dry-run verification is available without hardware.
+
+The user-facing command-line entry point is `flux-purr`. It talks to `flux-purr-devd`, creates and heartbeats device leases automatically, and covers `devices`, `status`, `runtime`, `wifi`, `flash`, `monitor`, `hardware`, and `usb-port` commands. User hardware memory and the default USB port live in the OS user config directory; `FLUX_PURR_HOME` overrides that location. `flux-purr usb-port set <port>` updates the remembered default for future daemon starts.
 
 ## Repository layout
 
 - `firmware/` - Rust `no_std` firmware domain crate (ESP32-S3 first)
 - `web/` - React + Vite + shadcn/ui + Storybook console
+- `tools/flux-purr-devd/` - native `flux-purr` CLI and `flux-purr-devd` daemon
 - `docs/specs/` - executable specs and acceptance contracts
 - `docs/research/` - upstream research baselines for hardware/firmware derivative work
 - `docs/hardware/` - board-level pin map and power-chain baselines
@@ -49,9 +52,11 @@ PRs targeting `main` must carry exactly one release type label and exactly one r
 - Type: `type:patch`, `type:minor`, `type:major`, `type:docs`, or `type:skip`
 - Channel: `channel:stable` or `channel:rc`
 
-`type:patch`, `type:minor`, and `type:major` publish both Web and Firmware after `CI Main` succeeds on the merged commit. `type:docs` and `type:skip` intentionally skip both release workflows. Stable releases use `web/vX.Y.Z` and `fw/vX.Y.Z`; RC releases use `web/vX.Y.Z-rc.<sha7>` and `fw/vX.Y.Z-rc.<sha7>`.
+`type:patch`, `type:minor`, and `type:major` publish one product release after `CI Main` succeeds on the merged commit. `type:docs` and `type:skip` intentionally skip the release workflow. Stable releases use `vX.Y.Z`; RC releases use `vX.Y.Z-rc.<sha7>`.
 
-`Label Gate` records the validated release intent against the PR head SHA before merge. After `CI Main` succeeds, release intent is frozen on `main` in git notes under `refs/notes/release-snapshots`; main release jobs read only that snapshot, not mutable post-merge PR labels. Manual release backfill uses the `Release Web` or `Release Firmware` workflow with an explicit `main` commit SHA and reads the existing snapshot for that commit.
+`Label Gate` records the validated release intent against the PR head SHA before merge. After `CI Main` succeeds, release intent is frozen on `main` in git notes under `refs/notes/release-snapshots`; the product release job reads only that snapshot, not mutable post-merge PR labels. Manual release backfill uses the `Release Product` workflow with an explicit `main` commit SHA and reads the existing snapshot for that commit.
+
+Each product release attaches Web, Firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
 
 The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require PRs, require signed commits, disallow force pushes/deletions, and require these checks before merge:
 

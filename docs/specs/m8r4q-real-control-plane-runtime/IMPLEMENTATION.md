@@ -4,15 +4,18 @@
 
 ## Current Status
 
-- Implementation: Web + browser Web Serial + devd + USB JSONL hardware loop covers identity, network, status, runtime mutation, artifact dry-run, and monitor events; direct HTTP remains future work
+- Implementation: Web + browser Web Serial + devd + CLI + USB JSONL hardware loop covers identity, network, status, runtime mutation, artifact dry-run, and monitor events; direct HTTP remains future work
 - Lifecycle: active
-- Catalog note: Web + firmware + native devd real transport contract
+- Catalog note: Web + firmware + native devd/CLI real transport contract
 
 ## Coverage / rollout summary
 
 - 共享领域契约由 firmware、devd 与 Web 各自的 typed adapter 实现。
 - firmware v1 先交付 host-testable status adapter、USB JSONL parser/encoder、WiFi redaction、runtime config 与 feature flags。
 - `tools/flux-purr-devd` 提供 localhost daemon、授权端口 serial discovery、lease、bounded events、USB identity/network/status/WiFi/runtime bridge、artifact verify、dry-run 与 flash command boundary。
+- `flux-purr-devd serve` 是 daemon 启动入口；flags 可覆盖 bind、artifact root、serial port、dev CORS 与 real flash，并保留 `FLUX_PURR_DEVD_*` 环境变量兼容。未显式指定 serial port 时，daemon 读取用户级默认 USB port，再回退到项目默认授权端口。
+- `flux-purr` 是 released CLI 入口；`devices/identity/status/runtime/wifi/flash/monitor` 经 `devd` 自动创建、heartbeat 和释放 lease，`hardware` 管理用户级 USB hardware registry，`usb-port` 管理默认 USB port，所有命令支持 human 输出与 `--json` 输出。
+- 用户级配置使用 OS config directory，`FLUX_PURR_HOME` 可覆盖。`usb-port set` 只影响后续 daemon 启动，不会让运行中的 `devd` 静默切换端口。
 - `devd` 对 native serial RPC 使用 daemon-local 串行化访问，并为每个授权 port 保留持久 serial session；Web 对 devd identity/network/status 探测顺序读取，避免多个 HTTP 请求同时抢占或反复打开同一个 USB CDC 端口。
 - `devd` USB serial exchange 会在单次 RPC 总超时内重试 firmware 返回的可重试 `startup_busy`；对只读 identity/network/status 请求，还会在无响应时做 bounded resend，覆盖设备刚 reset 后 USB/JTAG 尚未初始化或第一条请求被启动窗口吞掉的情况。WiFi/runtime 写命令不做静默重发，只在 firmware 明确返回 `startup_busy` 时重试。
 - `devd` 会在 native serial RPC 失败时把设备标记为 `connection=error`，把网络态标记为 `timeout` 或 `error`，并在设备事件里记录失败 stage 与错误 code。
@@ -49,12 +52,13 @@
 - `scripts/devd-hardware-smoke.py` 提供可重复的 live `devd` smoke：默认检查授权端口 native discovery、lease、identity/network/status 读取、artifact catalog/verify/flash dry-run、runtime 写回响应和读回状态一致性，以及 lease/WiFi/runtime/flash bounded event 证据，并通过 `/api/v1/devices/:id/events` SSE backlog 证明 monitor event stream 可读到当前 lease event；输出为机器可读 JSON。脚本会在长 smoke 阶段之间 heartbeat 当前 lease，避免 artifact、WiFi 或 runtime 读回步骤误用过期 lease。显式 `--device-id mock-fp-lab-01 --allow-mock-device` 只验证 localhost HTTP contract，不可视为硬件验证。WiFi provisioning 只有显式传入 SSID 时才执行，runtime 变更证明需显式传入 `--exercise-runtime-mutation`，WiFi clear 证明需显式传入 `--exercise-wifi-clear` 并会恢复提供的 WiFi 配置，真实烧录证明需同时传入 `--exercise-real-flash --real-flash-confirm FLASH` 且 `devd` 必须已启用真实烧录。
 - native serial RPC 会为授权 USB Serial/JTAG port 获取 port-scoped process lock，并把该 lock 与打开的 serial fd 一起保存在 daemon-local session map 中。正常 polling 会复用同一 fd；只有 recoverable I/O error 才丢弃 session 并等待 port 重新出现。等待跨进程锁超过当前 RPC timeout 时返回 retryable `serial_lock_timeout`，避免浏览器预览、旧 daemon 或 smoke 同时打同一授权端口。
 - 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease、identity/network/status、WiFi provisioning set/clear event redaction、artifact verify、dry-run guard、runtime mutation/readback/restore、`mcu-agentd` flash、direct USB JSONL `hello` / `get_identity` / `wifi_config clear` / `get_network` 与 lease event stream。当前授权端口在线时，Web -> `devd` -> USB JSONL -> firmware 的真实硬件控制链路可用。
-- `devd` real flash path 绑定 lease 对应 native serial port；本地 ESP32-S3 release ELF 通过 `espflash flash --after hard-reset` 写入，只有 raw app binary artifact 才允许 `espflash write-bin` + explicit flash address；空 artifact 不再被 dry-run 视为通过。
+- `devd` real flash path 绑定 lease 对应 native serial port；本地 ESP32-S3 release ELF 通过 `espflash flash --after hard-reset` 写入，只有 raw app binary artifact 才允许 `espflash write-bin` + explicit flash address；空 artifact 不再被 dry-run 视为通过。执行 `espflash` 前，daemon 会在 serial RPC 互斥锁内释放该端口的缓存 serial session，避免 daemon 自身持有 USB fd 导致真实烧录无法打开同一授权端口。
+- Release automation 已收敛到单一 product workflow：`Release Product` 从 release snapshot 计算 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>`，打包 Web、firmware 与跨平台 host-tools，并生成 `flux-purr-release-manifest-<tag>.json`。Manifest 为每个组件记录 asset `sha256`、`contentSha256`、`sourceSha`、`protocolVersions`、`changedSincePrevious` 与 `updateReason`。
+- Repo 级 `skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 固化普通用户 released-tool 路径、开发/HIL 路径、端口授权纪律和 product release manifest 规则。
 
 ## Remaining Gaps
 
 - PR 号在 PR 创建后回填。
-- 真实 flash 仍需授权端口在线、明确允许真实写入、并完成 dry-run 后复验。
 - Web Update 已能加载 `devd` catalog 并通过 `POST /api/v1/artifacts/verify` 执行 dry-check；真实 flash 仍需授权端口在线并显式允许真实写入后复验。
 - Direct firmware HTTP / `net_http` server 尚未实现；当前真实硬件 runtime 控制路径可走 browser Web Serial -> USB JSONL 或 Web -> `devd` -> USB JSONL。Firmware artifact verify、dry-run 与 real flash 仍必须走 `devd`。
 - macOS 打开 ESP32-S3 USB Serial/JTAG port 时仍可能触发一次设备 reset；`devd` 的稳定性契约是避免 Web/devd polling 期间反复 open/close 造成持续重启。
@@ -103,6 +107,7 @@
 - Persistent serial session validation: lease-managed CORS `devd` `127.0.0.1:41270` and Vite `127.0.0.1:41271` used `FLUX_PURR_DEVD_SERIAL_PORT=/dev/cu.usbmodem21221401` with one browser tab. Direct API polling over the reused session read identity/network/status for 12 cycles; the initial open observed `uptimeSeconds=0`, then uptime increased monotonically to `56` with `heaterEnabled=false`, `heaterOutputPercent=0`, and WiFi `state=disabled`. With the browser page active and `LEASE ACTIVE`, daemon state observed browser polling increase uptime from `147` to `206` without reset. A safe runtime write through the active lease returned `targetTempC=30`, `heaterEnabled=false`, `heaterOutputPercent=0`, and `network.state=disabled`; follow-up browser-poll state increased uptime from `280` to `304` without reset. Chrome DevTools network evidence showed heartbeat, identity, network, and status requests returning 200 after the transient 409 conflicts caused by earlier API validation leases expired.
 - Runtime target UI echo validation: with lease-managed CORS `devd` `127.0.0.1:41270` and Vite `127.0.0.1:41271`, Chrome DevTools clicked the Dashboard target increase control. The UI immediately displayed `50℃` after the confirmed `PUT /runtime` response, Runtime trace showed `runtime config applied: target 50C / cooling on / heater off`, and daemon state readback reported `targetTempC=50`, `heaterEnabled=false`, `heaterOutputPercent=0`, `mode=idle`.
 - Fan policy UI echo validation: Chrome DevTools opened Settings and clicked `RUN`; the segmented control immediately showed `RUN` pressed and feedback text matched the selected policy. Daemon state readback kept `activeCoolingEnabled=true`, `heaterEnabled=false`, `heaterOutputPercent=0`; firmware status still reported `fanDisplayState=OFF`, reflecting actual fan display state rather than the operator policy echo.
+- Current CLI-through-devd real flash HIL: lease-managed `flux-purr-devd serve` on `127.0.0.1:30080` used authorized port `/dev/cu.usbmodem21221401` with `--allow-real-flash`. `flux-purr identity` returned device `flux-purr-s3-001` and protocol `flux-purr.usb.v1`; `flux-purr status` returned `mode=idle`, `targetTempC=95`, `heaterEnabled=false`, WiFi `state=disabled`, and `pdContractMv=12000`. The local ESP32-S3 release artifact `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr` had SHA-256 `5ec05196bf202139deced24f6aaf0fdb63d110ae85e406c88229e6c90ec9e332`; `flux-purr flash --artifact-id local-esp32s3-release` dry-run passed, and `flux-purr flash --artifact-id local-esp32s3-release --no-dry-run --confirm FLASH` completed through `espflash`, which identified chip `esp32s3`, MAC `d0:cf:13:08:a1:48`, flash size `4MB`, and app size `510,960/4,128,768 bytes`. Post-flash verification on the same authorized port returned `flux-purr-s3-001` identity, `heaterEnabled=false`, `targetTempC=95`, `uptimeSeconds=5`, and monitor events for `artifact dry-run passed`, `real flash started`, `real flash completed`, post-flash identity, and post-flash status.
 
 ## References
 

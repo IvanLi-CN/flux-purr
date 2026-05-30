@@ -813,8 +813,10 @@ mod tests {
         let mut safety_fan = snapshot_at(120, 0);
         safety_fan.fan_enabled = true;
         safety_fan.fan_pwm_permille = crate::FAN_MID_PWM_PERMILLE;
-        let mut cooling_disabled = MemoryConfig::default();
-        cooling_disabled.active_cooling_enabled = false;
+        let cooling_disabled = MemoryConfig {
+            active_cooling_enabled: false,
+            ..MemoryConfig::default()
+        };
         let adapted = ControlPlaneStatus::from_device_status(
             safety_fan,
             &cooling_disabled,
