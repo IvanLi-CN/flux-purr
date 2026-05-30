@@ -2111,7 +2111,6 @@ fn build_espflash_args(
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
-            "-S".to_string(),
             path.to_string_lossy().into_owned(),
         ]);
     }
@@ -2135,7 +2134,6 @@ fn build_espflash_args(
         "--non-interactive".to_string(),
         "--after".to_string(),
         "hard-reset".to_string(),
-        "-S".to_string(),
         flash_address.to_string(),
         path.to_string_lossy().into_owned(),
     ])
@@ -2747,7 +2745,6 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
-        assert!(args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
         assert!(!args.contains(&"65536".to_string()));
     }
@@ -2786,7 +2783,14 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
-        assert!(args.contains(&DEFAULT_APP_FLASH_ADDRESS.to_string()));
+        assert_eq!(
+            args.iter()
+                .position(|arg| arg == &DEFAULT_APP_FLASH_ADDRESS.to_string())
+                .map(|index| index + 1)
+                .and_then(|index| args.get(index))
+                .map(|arg| arg.ends_with("firmware.bin")),
+            Some(true)
+        );
         assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
     }
 
