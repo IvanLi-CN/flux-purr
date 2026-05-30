@@ -129,8 +129,14 @@ impl AppState {
 struct DevdState {
     devices: HashMap<String, DeviceRecord>,
     leases: HashMap<String, WebLease>,
-    dry_run_passes: HashMap<String, String>,
+    dry_run_passes: HashMap<String, DryRunApproval>,
     sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DryRunApproval {
+    artifact_id: String,
+    manifest_fingerprint: String,
 }
 
 impl DevdState {
@@ -1717,6 +1723,7 @@ async fn flash_device(
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
     let artifact_id = payload.artifact.artifact_id.clone();
+    let approval = dry_run_approval(&payload.artifact);
     let port_path = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -1757,7 +1764,7 @@ async fn flash_device(
         let mut state_lock = state.lock()?;
         state_lock
             .dry_run_passes
-            .insert(device_id.clone(), artifact_id.clone());
+            .insert(device_id.clone(), approval);
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.selected_artifact_id = Some(artifact_id.clone());
         }
@@ -1779,7 +1786,7 @@ async fn flash_device(
     {
         let state_lock = state.lock()?;
         let prior = state_lock.dry_run_passes.get(&device_id);
-        if prior != Some(&artifact_id) {
+        if prior != Some(&approval) {
             drop(state_lock);
             state.emit(event(
                 &device_id,
@@ -1937,6 +1944,15 @@ fn serial_device_record(
         "flash".to_string(),
     ];
     device
+}
+
+fn dry_run_approval(artifact: &FirmwareArtifact) -> DryRunApproval {
+    let manifest = serde_json::to_vec(artifact)
+        .expect("FirmwareArtifact serialization should not fail for in-memory manifest data");
+    DryRunApproval {
+        artifact_id: artifact.artifact_id.clone(),
+        manifest_fingerprint: format!("sha256:{:x}", Sha256::digest(manifest)),
+    }
 }
 
 pub fn verify_artifact(
@@ -2997,6 +3013,23 @@ mod tests {
                     && event.payload["artifactId"] == "test-artifact"
             }));
         }
+
+        let changed_artifact =
+            test_artifact_with_file(dir.path(), "firmware-v2.bin", b"firmware-image-v2");
+        let changed_manifest = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: changed_artifact,
+                dry_run: false,
+                confirm: Some("FLASH".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(changed_manifest.status, StatusCode::FORBIDDEN);
+        assert_eq!(changed_manifest.error.code, "dry_run_required");
 
         let without_confirm = flash_device(
             State(state.clone()),
