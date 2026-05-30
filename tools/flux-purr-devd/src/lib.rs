@@ -221,8 +221,14 @@ impl AppState {
 struct DevdState {
     devices: HashMap<String, DeviceRecord>,
     leases: HashMap<String, WebLease>,
-    dry_run_passes: HashMap<String, String>,
+    dry_run_passes: HashMap<String, FlashDryRunApproval>,
     sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlashDryRunApproval {
+    lease_id: String,
+    artifact_fingerprint: String,
 }
 
 impl DevdState {
@@ -1803,6 +1809,7 @@ async fn flash_device(
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
     let artifact_id = payload.artifact.artifact_id.clone();
+    let dry_run_approval = flash_dry_run_approval(&payload)?;
     let port_path = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -1843,7 +1850,7 @@ async fn flash_device(
         let mut state_lock = state.lock()?;
         state_lock
             .dry_run_passes
-            .insert(device_id.clone(), artifact_id.clone());
+            .insert(device_id.clone(), dry_run_approval.clone());
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.selected_artifact_id = Some(artifact_id.clone());
         }
@@ -1865,7 +1872,7 @@ async fn flash_device(
     {
         let state_lock = state.lock()?;
         let prior = state_lock.dry_run_passes.get(&device_id);
-        if prior != Some(&artifact_id) {
+        if prior != Some(&dry_run_approval) {
             drop(state_lock);
             state.emit(event(
                 &device_id,
@@ -1875,7 +1882,7 @@ async fn flash_device(
             ));
             return Err(HttpError::forbidden(
                 "dry_run_required",
-                "Real flash requires a successful dry-run for the same artifact.",
+                "Real flash requires a successful dry-run for the same lease and artifact manifest.",
             ));
         }
     }
@@ -2368,15 +2375,45 @@ fn record_transport_event(
 }
 
 fn redact_transport_frame(mut frame: Value) -> Value {
-    if let Some(object) = frame.as_object_mut()
-        && object.get("password").and_then(Value::as_str).is_some()
-    {
-        object.insert(
-            "password".to_string(),
-            Value::String("<redacted>".to_string()),
-        );
-    }
+    redact_sensitive_fields(&mut frame);
     frame
+}
+
+fn redact_sensitive_fields(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, field) in object.iter_mut() {
+                if is_sensitive_field_key(key) {
+                    *field = Value::String("<redacted>".to_string());
+                } else {
+                    redact_sensitive_fields(field);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for field in values {
+                redact_sensitive_fields(field);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_field_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("psk")
+}
+
+fn flash_dry_run_approval(payload: &FlashRequest) -> Result<FlashDryRunApproval, HttpError> {
+    Ok(FlashDryRunApproval {
+        lease_id: payload.lease_id.clone(),
+        artifact_fingerprint: artifact_fingerprint(&payload.artifact)?,
+    })
+}
+
+fn artifact_fingerprint(artifact: &FirmwareArtifact) -> Result<String, HttpError> {
+    let bytes = serde_json::to_vec(artifact)
+        .map_err(|_| HttpError::internal("Failed to fingerprint firmware artifact."))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
@@ -2551,7 +2588,7 @@ mod tests {
             "tx",
             "usb_jsonl",
             "req-1",
-            r#"{"type":"wifi_config","requestId":"req-1","ssid":"FluxPurr-Lab","password":"secret-pass"}"#,
+            r#"{"type":"wifi_config","requestId":"req-1","ssid":"FluxPurr-Lab","password":"secret-pass","result":{"wifi":{"psk":"nested-secret"}}}"#,
         );
 
         let inner = state.lock().unwrap();
@@ -2565,10 +2602,19 @@ mod tests {
         assert_eq!(transport_event.payload["direction"], "tx");
         assert_eq!(transport_event.payload["frame"]["ssid"], "FluxPurr-Lab");
         assert_eq!(transport_event.payload["frame"]["password"], "<redacted>");
+        assert_eq!(
+            transport_event.payload["frame"]["result"]["wifi"]["psk"],
+            "<redacted>"
+        );
         assert!(
             !serde_json::to_string(&transport_event.payload)
                 .unwrap()
                 .contains("secret-pass")
+        );
+        assert!(
+            !serde_json::to_string(&transport_event.payload)
+                .unwrap()
+                .contains("nested-secret")
         );
     }
 
@@ -3099,6 +3145,23 @@ mod tests {
                     && event.payload["artifactId"] == "test-artifact"
             }));
         }
+
+        let changed_artifact =
+            test_artifact_with_file(dir.path(), "firmware-v2.bin", b"firmware-image-v2");
+        let changed_without_dry_run = flash_device(
+            State(state.clone()),
+            AxumPath("serial-test".to_string()),
+            Json(FlashRequest {
+                lease_id: lease.lease_id.clone(),
+                artifact: changed_artifact,
+                dry_run: false,
+                confirm: Some("FLASH".to_string()),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(changed_without_dry_run.status, StatusCode::FORBIDDEN);
+        assert_eq!(changed_without_dry_run.error.code, "dry_run_required");
 
         let without_confirm = flash_device(
             State(state.clone()),

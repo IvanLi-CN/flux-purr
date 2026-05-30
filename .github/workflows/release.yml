@@ -140,7 +140,7 @@ jobs:
           default: false
 
       - name: Build ESP32-S3 firmware
-        run: cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
+        run: bash scripts/check-firmware-build.sh
 
       - name: Package firmware artifact
         env:
