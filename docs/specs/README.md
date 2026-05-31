@@ -74,6 +74,7 @@
 | q2aw6 | Flux Purr 正式 PID 加热闭环与前面板运行态同步 | 已完成 | `q2aw6-heater-pid-frontpanel-runtime/SPEC.md` | 2026-04-21 | PR #11 |
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
 | kht7p | Flux Purr 7.0cm 3.2Ω 加热板变体 | 已完成 | `kht7p-heater-7p0-3p2-variant/SPEC.md` | 2026-05-31 | `heater-7p0-3p2` Gerber archived |
+| 3dczp | Flux Purr 5.6cm 外壳模型归档 | active | `3dczp-enclosure-5p6cm-models/SPEC.md` | 2026-05-31 | Print-ready STL assets tracked through Git LFS |
 | 35bta | Flux Purr EEPROM 记忆配置 | 已完成 | `35bta-eeprom-memory-config/SPEC.md` | 2026-04-27 | M24C64-backed target/preset/cooling/Wi-Fi persistence |
 | r9k3m | Flux Purr PR 标签发布与主分支保护 | 已完成 | `r9k3m-pr-label-release-protection/SPEC.md` | 2026-04-27 | Label-driven release intent, immutable mainline snapshots, and quality-gates declaration |
 | hhwq8 | Flux Purr 热控 Bench Web Demo | active | `hhwq8-web-control-plane-demo/SPEC.md` | 2026-05-23 | Industrial mock thermal bench tool for the #27 control-plane architecture |

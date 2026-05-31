@@ -1,0 +1,71 @@
+[
+  {
+    "file": "/Users/ivan/.codex/worktrees/096f/flux-purr/docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-bottom.stl",
+    "dimensions": [
+      50.900001525878906,
+      54.268310546875,
+      9.586557388305664
+    ],
+    "vertices": 1531,
+    "edges": 4599,
+    "faces": 3066,
+    "checks": {
+      "Non-manifold Edges": "0",
+      "Bad Contiguous Edges": "0",
+      "Intersect Faces": "0",
+      "Shells": "1",
+      "Zero Faces": "0",
+      "Zero Edges": "0",
+      "Non-flat Faces": "0",
+      "Thin Faces": "0",
+      "Sharp Edges": "0",
+      "Overhang Faces": "146"
+    }
+  },
+  {
+    "file": "/Users/ivan/.codex/worktrees/096f/flux-purr/docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-inner-frame.stl",
+    "dimensions": [
+      56.0,
+      63.01813507080078,
+      15.0
+    ],
+    "vertices": 720718,
+    "edges": 2162190,
+    "faces": 1441460,
+    "checks": {
+      "Non-manifold Edges": "0",
+      "Bad Contiguous Edges": "0",
+      "Intersect Faces": "0",
+      "Shells": "1",
+      "Zero Faces": "0",
+      "Zero Edges": "0",
+      "Non-flat Faces": "0",
+      "Thin Faces": "0",
+      "Sharp Edges": "0",
+      "Overhang Faces": "243515"
+    }
+  },
+  {
+    "file": "/Users/ivan/.codex/worktrees/096f/flux-purr/docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-joystick.stl",
+    "dimensions": [
+      7.0,
+      6.988230228424072,
+      3.5
+    ],
+    "vertices": 1048,
+    "edges": 3138,
+    "faces": 2092,
+    "checks": {
+      "Non-manifold Edges": "0",
+      "Bad Contiguous Edges": "0",
+      "Intersect Faces": "0",
+      "Shells": "1",
+      "Zero Faces": "0",
+      "Zero Edges": "0",
+      "Non-flat Faces": "0",
+      "Thin Faces": "0",
+      "Sharp Edges": "0",
+      "Overhang Faces": "832"
+    }
+  }
+]
