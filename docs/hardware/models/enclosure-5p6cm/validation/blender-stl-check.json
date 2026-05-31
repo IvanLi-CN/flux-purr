@@ -1,6 +1,6 @@
 [
   {
-    "file": "/Users/ivan/.codex/worktrees/096f/flux-purr/docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-bottom.stl",
+    "file": "docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-bottom.stl",
     "dimensions": [
       50.900001525878906,
       54.268310546875,
@@ -23,7 +23,7 @@
     }
   },
   {
-    "file": "/Users/ivan/.codex/worktrees/096f/flux-purr/docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-inner-frame.stl",
+    "file": "docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-inner-frame.stl",
     "dimensions": [
       56.0,
       63.01813507080078,
@@ -46,7 +46,7 @@
     }
   },
   {
-    "file": "/Users/ivan/.codex/worktrees/096f/flux-purr/docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-joystick.stl",
+    "file": "docs/hardware/models/enclosure-5p6cm/flux-purr-enclosure-5p6cm-joystick.stl",
     "dimensions": [
       7.0,
       6.988230228424072,
