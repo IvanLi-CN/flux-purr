@@ -1,133 +1,384 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
-import {
-  ControlPlaneDemo,
-  ControlPlaneDemoGallery,
-  degradedControlPlaneScenario,
-} from '@/features/control-plane-demo'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { ControlPlaneDemo } from '@/features/control-plane-demo/components/control-plane-demo'
+import type {
+  ControlPlaneStatus,
+  DirectRuntimeConfigRequest,
+  Identity,
+  NetworkSummary,
+} from '@/features/control-plane-demo/contracts'
+import { liveControlPlaneScenario } from '@/features/control-plane-demo/live-scenario'
+import type { ControlPlaneScenario } from '@/features/control-plane-demo/types'
+import type { WebSerialControlPlaneClient } from '@/features/control-plane-demo/web-serial'
 
 const meta = {
-  title: 'Pages/ControlPlaneDemo',
+  title: 'App/ControlPlaneDemo',
   component: ControlPlaneDemo,
-  tags: ['autodocs'],
   parameters: {
     layout: 'fullscreen',
-    docs: {
-      description: {
-        component:
-          'Fixed-height industrial skeuomorphic bench console with Dashboard, Settings, Update, and a desktop global log panel. It uses mock data only and does not connect to hardware.',
-      },
+  },
+  args: {
+    scenario: liveControlPlaneScenario,
+    initialView: 'dashboard',
+    allowDemoControls: false,
+    devd: {
+      enabled: false,
     },
-    a11y: {
-      test: 'error',
+    webSerial: {
+      enabled: true,
+      clientFactory: () => new FakeWebSerialClient() as unknown as WebSerialControlPlaneClient,
     },
   },
 } satisfies Meta<typeof ControlPlaneDemo>
 
 export default meta
 type Story = StoryObj<typeof meta>
+const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
 
-export const Default: Story = {}
+export const LiveWebSerialAddDevice: Story = {
+  name: 'Live / Web Serial Add Device',
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    webSerialRuntimeWrites.length = 0
 
-export const DegradedTransport: Story = {
+    await step('no live target starts on the device chooser', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+      await expect(await canvas.findByText('No known devices')).toBeVisible()
+      await expect(await canvas.findByRole('separator')).toBeVisible()
+      const addDeviceButtons = ['WiFi', 'Web Serial', 'Bridge'].map((name) =>
+        canvas.getByRole('button', { name: new RegExp(name) })
+      )
+      const addDeviceRows = new Set(
+        addDeviceButtons.map((button) => Math.round(button.getBoundingClientRect().top))
+      )
+      expect(addDeviceButtons).toHaveLength(3)
+      expect(addDeviceRows.size).toBe(1)
+      await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
+      await expect(canvas.queryByText('1000 frames')).not.toBeInTheDocument()
+    })
+
+    await step(
+      'successful Web Serial connect returns to Dashboard with real log entries',
+      async () => {
+        await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+        })
+        await expect(await canvas.findByText('flux-purr-s3-001 / SERIAL')).toBeVisible()
+        await expect(await canvas.findByText('Web Serial connected')).toBeVisible()
+        await expect(
+          await canvas.findByText(
+            'flux-purr-s3-001 USB JSONL probe accepted: get_identity / get_network / get_status'
+          )
+        ).toBeVisible()
+        await expect(canvas.queryByText('1000 frames')).not.toBeInTheDocument()
+      }
+    )
+
+    await step('Dashboard target stepper advances immediately across rapid clicks', async () => {
+      const increase = await canvas.findByRole('button', { name: 'Increase target temperature' })
+      await userEvent.click(increase)
+      await userEvent.click(increase)
+      await userEvent.click(increase)
+
+      await waitFor(() => {
+        expect(
+          canvas.getByRole('spinbutton', { name: 'Dashboard target temperature' })
+        ).toHaveValue(45)
+      })
+      await waitFor(() => {
+        expect(
+          webSerialRuntimeWrites.filter((request) => request.targetTempC != null)
+        ).toHaveLength(1)
+      })
+      expect(webSerialRuntimeWrites.at(-1)?.targetTempC).toBe(45)
+    })
+
+    await step('global log remains expanded after switching to Settings', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Settings/ }))
+
+      await expect(await canvas.findByRole('heading', { name: 'Heat policy' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'Runtime trace' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'All' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Ok' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: 'Ok' }))
+      await expect(await canvas.findByRole('button', { name: 'Ok' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      )
+      await userEvent.click(await canvas.findByRole('button', { name: 'All' }))
+      await expect(
+        await canvas.findByText(
+          'flux-purr-s3-001 USB JSONL probe accepted: get_identity / get_network / get_status'
+        )
+      ).toBeVisible()
+      await expect(await canvas.findByText(/\d+ \/ \d+ frames/)).toBeVisible()
+    })
+
+    await step(
+      'Settings preset edits write through Web Serial and re-render from status',
+      async () => {
+        await userEvent.click(await canvas.findByRole('button', { name: /M5 180℃ enabled/ }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('button', { name: /M5 180℃ enabled/ })).toHaveAttribute(
+            'aria-pressed',
+            'true'
+          )
+        })
+        await userEvent.click(await canvas.findByRole('switch', { name: 'Preset M5' }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('button', { name: /M5 --- disabled/ })).toBeVisible()
+        })
+      }
+    )
+
+    await step('Settings fan policy keeps the acknowledged operator selection', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: 'OFF' }))
+
+      await waitFor(() => {
+        expect(canvas.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'true')
+      })
+      await expect(await canvas.findByText('flux-purr-s3-001 fan policy is now OFF.')).toBeVisible()
+    })
+  },
+}
+
+export const LiveKnownDeviceSelection: Story = {
+  name: 'Live / Known Device Selection',
   args: {
-    scenario: degradedControlPlaneScenario,
+    scenario: createKnownDeviceSelectionScenario(),
+    initialView: 'dashboard',
   },
-}
-
-export const SettingsReview: Story = {
-  args: {
-    initialView: 'settings',
-  },
-}
-
-export const UpdateReview: Story = {
-  args: {
-    initialView: 'update',
-  },
-}
-
-export const DocsGallery: Story = {
-  name: 'Docs / Gallery',
-  parameters: {
-    a11y: {
-      test: 'todo',
-    },
-  },
-  render: () => <ControlPlaneDemoGallery />,
-}
-
-export const MobileReview: Story = {
-  parameters: {
-    viewport: {
-      defaultViewport: 'mobile1',
-    },
-  },
-  render: () => (
-    <div style={{ maxWidth: 390 }}>
-      <ControlPlaneDemo />
-    </div>
-  ),
-}
-
-export const InteractionSmoke: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
 
-    const targetSelect = canvas.getByRole('combobox', { name: /target/i })
-    await userEvent.selectOptions(targetSelect, 'fp-kit-02')
-    await expect(targetSelect).toHaveValue('fp-kit-02')
-    await expect(canvas.getAllByText('SERIAL').length).toBeGreaterThan(0)
-    await userEvent.click(canvas.getByRole('button', { name: /increase target temperature/i }))
-    await expect(canvas.getByLabelText('Dashboard target temperature')).toHaveValue(265)
-    await expect(canvas.getByText('Target updated')).toBeInTheDocument()
+    await step('known devices are shown while browser-only serial targets are hidden', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+      await expect(
+        await canvas.findByRole('button', { name: /Authorized USB target/ })
+      ).toBeVisible()
+      await expect(canvas.queryByRole('button', { name: /Browser Direct/ })).not.toBeInTheDocument()
+      await expect(await canvas.findByRole('separator')).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: /WiFi/ })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: /Web Serial/ })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: /Bridge/ })).toBeVisible()
+      const addDeviceRows = new Set(
+        ['WiFi', 'Web Serial', 'Bridge'].map((name) =>
+          Math.round(
+            canvas.getByRole('button', { name: new RegExp(name) }).getBoundingClientRect().top
+          )
+        )
+      )
+      expect(addDeviceRows.size).toBe(1)
+      await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
+    })
 
-    await userEvent.click(canvas.getByRole('button', { name: /settings/i }))
-    await expect(canvas.getByText('Heat policy')).toBeInTheDocument()
-    await expect(canvas.getByText('265℃')).toBeInTheDocument()
-    await expect(canvas.getByText('Preset temperatures')).toBeInTheDocument()
-    await userEvent.click(canvas.getByRole('button', { name: /M3 120℃ disabled/i }))
-    await expect(canvas.queryByRole('button', { name: /use as target/i })).not.toBeInTheDocument()
-    const presetSwitch = canvas.getByRole('switch', { name: /preset M3/i })
-    await expect(presetSwitch).toHaveAttribute('aria-checked', 'false')
-    await userEvent.click(presetSwitch)
-    await expect(presetSwitch).toHaveAttribute('aria-checked', 'true')
-    await expect(canvas.queryByRole('button', { name: /use as target/i })).not.toBeInTheDocument()
-    await expect(canvas.getByText('Preset M3 enabled')).toBeInTheDocument()
-    await userEvent.click(canvas.getByRole('button', { name: /M8/i }))
-    await expect(canvas.getByLabelText('Preset temperature')).toHaveValue(220)
-    await userEvent.click(canvas.getByRole('button', { name: /increase target temperature/i }))
-    await expect(canvas.getByLabelText('Preset temperature')).toHaveValue(225)
-    await expect(await canvas.findByText('Preset M8 updated')).toBeInTheDocument()
-    await expect(canvas.queryByRole('button', { name: /use as target/i })).not.toBeInTheDocument()
-    await expect(canvas.getByRole('button', { name: 'RUN' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    )
-    await userEvent.click(canvas.getByRole('button', { name: 'OFF' }))
-    await expect(canvas.getByRole('button', { name: 'OFF' })).toHaveAttribute(
-      'aria-pressed',
-      'true'
-    )
-    await expect(canvas.getByText('Fan policy updated')).toBeInTheDocument()
-
-    await userEvent.click(canvas.getByRole('button', { name: /update/i }))
-    await expect(canvas.getByText('Firmware check')).toBeInTheDocument()
-    await expect(canvas.getByText('Ready to check')).toBeInTheDocument()
-    const artifactSelect = canvas.getByRole('combobox', { name: /firmware artifact/i })
-    await userEvent.selectOptions(artifactSelect, 'c3-legacy')
-    await expect(canvas.getByText('Not compatible')).toBeInTheDocument()
-    await expect(canvas.getByRole('button', { name: /run dry-check/i })).toBeDisabled()
-    await userEvent.selectOptions(artifactSelect, 'wifi-http-rc')
-    await expect(canvas.getByText('Check recommended')).toBeInTheDocument()
-    await userEvent.click(canvas.getByRole('button', { name: /run dry-check/i }))
-    await expect(canvas.getByRole('button', { name: /checking/i })).toBeDisabled()
-    await expect(
-      await canvas.findByText('Check passed', undefined, { timeout: 5000 })
-    ).toBeInTheDocument()
-    await expect(canvas.getByRole('button', { name: /run again/i })).toBeEnabled()
-
-    await userEvent.click(canvas.getByRole('button', { name: /degrade/i }))
-    await expect(canvas.getByText('CHECK')).toBeInTheDocument()
+    await step('selecting a known device opens its runtime surface', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Authorized USB target/ }))
+      await expect(await canvas.findByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await waitFor(() => {
+        expect(canvas.getAllByText('Authorized USB target selected').length).toBeGreaterThan(0)
+      })
+    })
   },
+}
+
+export const LiveQuickAddDevice: Story = {
+  name: 'Live / Quick Add Device',
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('quick add WiFi switches into the add flow and triggers the action', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
+
+      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
+      await expect(await canvas.findByText('WiFi target added')).toBeVisible()
+      await expect(await canvas.findByText(/WiFi handoff is pending/)).toBeVisible()
+      await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
+    })
+  },
+}
+
+export const LiveQuickAddBridgeDevice: Story = {
+  name: 'Live / Quick Add Bridge Device',
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('quick add Bridge switches into the add flow and triggers the action', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Bridge/ }))
+
+      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
+      await expect(await canvas.findByText('Native bridge added')).toBeVisible()
+      await expect(
+        await canvas.findByText(/native bridge target before runtime control/)
+      ).toBeVisible()
+      await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
+    })
+
+    await step(
+      'connecting Web Serial from the pending Bridge flow selects the hardware target',
+      async () => {
+        await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+
+        await waitFor(() => {
+          expect(canvas.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+        })
+        await expect(await canvas.findByText('flux-purr-s3-001 / SERIAL')).toBeVisible()
+        await expect(canvas.queryByText('Native bridge / BRIDGE')).not.toBeInTheDocument()
+        await expect(await canvas.findByText('Web Serial connected')).toBeVisible()
+      }
+    )
+  },
+}
+
+class FakeWebSerialClient {
+  private currentStatus: ControlPlaneStatus = status
+
+  connect() {
+    return Promise.resolve({ ...webSerialProbe, status: this.currentStatus })
+  }
+
+  probe() {
+    return Promise.resolve({ ...webSerialProbe, status: this.currentStatus })
+  }
+
+  configureRuntime(request: DirectRuntimeConfigRequest) {
+    webSerialRuntimeWrites.push(request)
+    this.currentStatus = {
+      ...this.currentStatus,
+      ...request,
+      targetTempC:
+        request.targetTempC ??
+        request.presetsC?.[
+          request.selectedPresetSlot ?? this.currentStatus.selectedPresetSlot ?? 0
+        ] ??
+        this.currentStatus.targetTempC,
+      heaterOutputPercent:
+        request.heaterEnabled === false ? 0 : this.currentStatus.heaterOutputPercent,
+      fanDisplayState:
+        request.activeCoolingEnabled === false ? 'OFF' : this.currentStatus.fanDisplayState,
+    }
+    return Promise.resolve(this.currentStatus satisfies ControlPlaneStatus)
+  }
+
+  disconnect() {
+    return Promise.resolve()
+  }
+}
+
+const identity = {
+  deviceId: 'flux-purr-s3-001',
+  firmwareVersion: '0.1.0',
+  buildId: 'story-build',
+  gitSha: 'story',
+  board: 'esp32-s3',
+  apiVersion: '2026-05-29',
+  protocolVersion: 'flux-purr.usb.v1',
+  hostname: 'flux-purr-s3-001',
+  capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
+} satisfies Identity
+
+const network = {
+  state: 'idle',
+  ssid: null,
+  ip: null,
+  gateway: null,
+  dns: [],
+  wifiRssi: null,
+  lastError: null,
+} satisfies NetworkSummary
+
+const status = {
+  mode: 'sampling',
+  uptimeSeconds: 44,
+  currentTempC: 20.3,
+  targetTempC: 30,
+  selectedPresetSlot: 3,
+  presetsC: [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
+  heaterEnabled: false,
+  heaterOutputPercent: 0,
+  activeCoolingEnabled: true,
+  fanDisplayState: 'AUTO',
+  fanEnabled: false,
+  fanPwmPermille: 0,
+  voltageMv: 12_000,
+  currentMa: 0,
+  boardTempCenti: 2860,
+  pdRequestMv: 20_000,
+  pdContractMv: 12_000,
+  pdState: 'ready',
+  frontpanelKey: null,
+  network,
+} satisfies ControlPlaneStatus
+
+const webSerialProbe = {
+  identity,
+  network,
+  status,
+}
+
+function createKnownDeviceSelectionScenario() {
+  return {
+    ...liveControlPlaneScenario,
+    selectedDeviceId: 'live-no-target',
+    devices: [
+      liveControlPlaneScenario.devices[0],
+      {
+        id: 'serial-authorized-usb',
+        alias: 'Authorized USB target',
+        location: '/dev/cu.usbmodem21221401',
+        transport: 'devd',
+        severity: 'nominal',
+        baseUrl: 'devd://serial-authorized-usb',
+        firmware: '0.1.0',
+        buildId: 'story-devd',
+        uptime: '00:00:44',
+        boardTempC: 28.6,
+        currentTempC: 20.3,
+        targetTempC: 30,
+        voltageMv: 12_000,
+        currentMa: 0,
+        pdRequestMv: 20_000,
+        pdContractMv: 12_000,
+        pdState: 'ready',
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanState: 'AUTO',
+        wifiRssi: null,
+        capabilities: ['identity', 'status', 'monitor'],
+        networkState: 'idle',
+        leaseState: 'active',
+        leaseId: 'story-lease',
+      },
+      {
+        id: 'web-serial-browser-direct',
+        alias: 'Browser Direct',
+        location: 'Browser Web Serial',
+        transport: 'serial',
+        severity: 'nominal',
+        baseUrl: 'webserial://selected',
+        firmware: '0.1.0',
+        buildId: 'story-serial',
+        uptime: '00:00:44',
+        boardTempC: 28.6,
+        currentTempC: 20.3,
+        targetTempC: 30,
+        voltageMv: 12_000,
+        currentMa: 0,
+        pdRequestMv: 20_000,
+        pdContractMv: 12_000,
+        pdState: 'ready',
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanState: 'AUTO',
+        wifiRssi: null,
+        capabilities: ['identity', 'status', 'monitor', 'usb_jsonl'],
+        networkState: 'idle',
+        leaseState: 'active',
+      },
+    ],
+  } satisfies ControlPlaneScenario
 }

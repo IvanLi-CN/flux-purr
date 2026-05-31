@@ -4,17 +4,17 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 git fetch --tags --force >/dev/null 2>&1 || true
 
-pkg_json="${root_dir}/web/package.json"
+pkg_json="${root_dir}/package.json"
 manifest_version="$(grep -m1 '"version"' "$pkg_json" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
 
 if [[ -z "${manifest_version:-}" ]]; then
-  echo "Failed to parse web version from ${pkg_json}" >&2
+  echo "Failed to parse product version from ${pkg_json}" >&2
   exit 1
 fi
 
 base_version="$(
   {
-    git tag --list 'web/v[0-9]*.[0-9]*.[0-9]*' | sed -E 's#^web/v([0-9]+)\.([0-9]+)\.([0-9]+)$#\1 \2 \3#'
+    git tag --list 'v[0-9]*.[0-9]*.[0-9]*' | sed -E 's#^v([0-9]+)\.([0-9]+)\.([0-9]+)$#\1 \2 \3#'
     printf '%s\n' "${manifest_version}" | sed -E 's#^([0-9]+)\.([0-9]+)\.([0-9]+)$#\1 \2 \3#'
   } | awk 'NF == 3 { printf "%010d %010d %010d %d.%d.%d\n", $1, $2, $3, $1, $2, $3 }' | sort | tail -n1 | awk '{ print $4 }'
 )"
@@ -55,11 +55,11 @@ if [[ "${release_channel}" == "rc" ]]; then
   else
     short_sha="local000"
   fi
-  tag="web/v${effective}-rc.${short_sha}"
+  tag="v${effective}-rc.${short_sha}"
 else
-  tag="web/v${effective}"
+  tag="v${effective}"
 fi
 
-echo "WEB_EFFECTIVE_VERSION=${effective}" >> "${GITHUB_ENV:-/dev/stdout}"
-echo "WEB_TAG=${tag}" >> "${GITHUB_ENV:-/dev/stdout}"
-echo "Computed WEB_TAG=${tag} (base ${base_version}, level ${release_level}, channel ${release_channel})"
+echo "PRODUCT_EFFECTIVE_VERSION=${effective}" >> "${GITHUB_ENV:-/dev/stdout}"
+echo "PRODUCT_TAG=${tag}" >> "${GITHUB_ENV:-/dev/stdout}"
+echo "Computed PRODUCT_TAG=${tag} (base ${base_version}, level ${release_level}, channel ${release_channel})"

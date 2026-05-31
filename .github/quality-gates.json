@@ -49,14 +49,15 @@
   ],
   "expected_release_workflows": [
     {
-      "workflow": "Release Web",
-      "path": ".github/workflows/release-web.yml",
-      "jobs": ["Release Web Meta", "Release Web Package"]
-    },
-    {
-      "workflow": "Release Firmware",
-      "path": ".github/workflows/release-firmware.yml",
-      "jobs": ["Release Firmware Meta", "Release Firmware Package"]
+      "workflow": "Release Product",
+      "path": ".github/workflows/release.yml",
+      "jobs": [
+        "Release Product Meta",
+        "Release Product Web Asset",
+        "Release Product Firmware Asset",
+        "Release Product Host Tools",
+        "Release Product Publish"
+      ]
     }
   ]
 }

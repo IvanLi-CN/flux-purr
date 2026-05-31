@@ -12,8 +12,14 @@ path = "src/lib.rs"
 name = "flux-purr-devd"
 path = "src/main.rs"
 
+[[bin]]
+name = "flux-purr"
+path = "src/bin/flux-purr.rs"
+
 [dependencies]
 axum = { version = "0.8.4", features = ["json"] }
+clap = { version = "4.5.53", features = ["derive"] }
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serialport = "4.8.1"

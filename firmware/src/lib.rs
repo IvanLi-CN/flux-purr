@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod board;
 pub mod buzzer;
+pub mod control_plane;
 pub mod display;
 pub mod frontpanel;
 pub mod memory;
@@ -79,6 +80,7 @@ pub struct DeviceStatus {
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdState,
+    pub heater_output_percent: u8,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
     pub frontpanel_key: Option<frontpanel::FrontPanelKey>,
@@ -207,6 +209,7 @@ fn snapshot_at(tick: u32, uptime_secs: u32) -> DeviceStatus {
         } else {
             PdState::Ready
         },
+        heater_output_percent: if fallback { 0 } else { (tick % 70) as u8 },
         fan_enabled: fan_command.enabled,
         fan_pwm_permille: fan_command.pwm_permille,
         frontpanel_key: if tick.is_multiple_of(10) {

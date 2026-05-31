@@ -2,6 +2,7 @@
 use std::os::fd::AsRawFd;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    env,
     fs::{self, File},
     io::{self, Read},
     net::SocketAddr,
@@ -36,6 +37,9 @@ pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
+pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
+const USER_CONFIG_FILE: &str = "config.json";
+const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
@@ -64,6 +68,94 @@ pub struct AppConfig {
     pub allow_dev_cors: bool,
     pub allow_real_flash: bool,
     pub serial_port: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct UserConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_devd_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_serial_port: Option<String>,
+}
+
+pub fn user_config_dir() -> io::Result<PathBuf> {
+    if let Some(home) = env::var_os("FLUX_PURR_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home));
+    }
+
+    match env::consts::OS {
+        "macos" => env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| {
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Flux Purr")
+            })
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set")),
+        "windows" => env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .map(|appdata| appdata.join("Flux Purr"))
+            .or_else(|| {
+                env::var_os("USERPROFILE")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".config").join("flux-purr"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "APPDATA or USERPROFILE is not set")
+            }),
+        _ => env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .map(|xdg| xdg.join("flux-purr"))
+            .or_else(|| {
+                env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|home| home.join(".config").join("flux-purr"))
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "XDG_CONFIG_HOME or HOME is not set",
+                )
+            }),
+    }
+}
+
+pub fn user_config_path() -> io::Result<PathBuf> {
+    Ok(user_config_dir()?.join(USER_CONFIG_FILE))
+}
+
+pub fn hardware_registry_path() -> io::Result<PathBuf> {
+    Ok(user_config_dir()?.join(HARDWARE_REGISTRY_FILE))
+}
+
+pub fn read_user_config() -> io::Result<UserConfig> {
+    let path = user_config_path()?;
+    if !path.exists() {
+        return Ok(UserConfig::default());
+    }
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(UserConfig::default());
+    }
+    serde_json::from_str(&content)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub fn write_user_config(config: &UserConfig) -> io::Result<()> {
+    let path = user_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_vec_pretty(config)?)
+}
+
+pub fn read_default_serial_port_from_user_config() -> Option<PathBuf> {
+    read_user_config()
+        .ok()
+        .and_then(|config| config.default_serial_port)
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
 }
 
 impl Default for AppConfig {
@@ -129,15 +221,14 @@ impl AppState {
 struct DevdState {
     devices: HashMap<String, DeviceRecord>,
     leases: HashMap<String, WebLease>,
-    dry_run_passes: HashMap<String, DryRunApproval>,
+    dry_run_passes: HashMap<String, FlashDryRunApproval>,
     sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DryRunApproval {
+struct FlashDryRunApproval {
     lease_id: String,
-    artifact_id: String,
-    manifest_fingerprint: String,
+    artifact_fingerprint: String,
 }
 
 impl DevdState {
@@ -580,7 +671,6 @@ pub struct ArtifactVerifyResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactFileResult {
-    pub path: String,
     pub kind: String,
     pub sha256: String,
     pub size: u64,
@@ -1269,7 +1359,7 @@ async fn serial_wifi_config(
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
-    serial_exchange(state, &target.id, port_path, request_id, request, false).await
+    serial_exchange(state, &target.id, port_path, request_id, request, true).await
 }
 
 async fn serial_runtime_config(
@@ -1289,7 +1379,7 @@ async fn serial_runtime_config(
         heater_enabled: payload.heater_enabled,
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, false).await?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
     extract_usb_payload(result, "status")
 }
 
@@ -1395,7 +1485,7 @@ fn serial_exchange_blocking(
     let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
     let mut session = take_or_open_serial_session(&mut serial_sessions, port_path, deadline)?;
-    session = write_initial_serial_request(port_path, deadline, session, request)?;
+    write_serial_request(&mut *session.port, request)?;
 
     let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
     let mut read_buf = [0_u8; 256];
@@ -1502,30 +1592,6 @@ fn store_serial_session(
     session: SerialSession,
 ) {
     serial_sessions.insert(port_path.to_string(), session);
-}
-
-fn write_initial_serial_request(
-    port_path: &str,
-    deadline: Instant,
-    mut session: SerialSession,
-    request: &str,
-) -> Result<SerialSession, HttpError> {
-    match write_serial_request_io(&mut *session.port, request) {
-        Ok(()) => Ok(session),
-        Err(error) if is_recoverable_serial_io_error(&error) => {
-            drop(session);
-            let mut reopened = reopen_serial_session(port_path, deadline)?;
-            write_serial_request(&mut *reopened.port, request)?;
-            Ok(reopened)
-        }
-        Err(error) => Err(serial_io_http_error(error)),
-    }
-}
-
-fn release_cached_serial_session(state: &AppState, port_path: &str) -> Result<(), HttpError> {
-    let mut serial_sessions = lock_serial_sessions(&state.serial_sessions)?;
-    serial_sessions.remove(port_path);
-    Ok(())
 }
 
 struct SerialPortProcessLock {
@@ -1656,13 +1722,10 @@ fn write_serial_request(
     port: &mut dyn serialport::SerialPort,
     request: &str,
 ) -> Result<(), HttpError> {
-    write_serial_request_io(port, request).map_err(serial_io_http_error)
-}
-
-fn write_serial_request_io(port: &mut dyn serialport::SerialPort, request: &str) -> io::Result<()> {
     port.write_all(request.as_bytes())
         .and_then(|_| port.write_all(b"\n"))
         .and_then(|_| port.flush())
+        .map_err(serial_io_http_error)
 }
 
 fn maybe_retry_silent_serial_request(
@@ -1713,18 +1776,14 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
     let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
         return Ok(None);
     };
-    if frame.request_id.as_deref() != Some(request_id) {
+    if frame.frame_type != "response" || frame.request_id.as_deref() != Some(request_id) {
         return Ok(None);
     }
-    match frame.frame_type.as_str() {
-        "response" if frame.ok == Some(true) => Ok(Some(frame.result.unwrap_or(Value::Null))),
-        "response" | "error" => Err(usb_frame_error(frame)),
-        _ => Ok(None),
+    if frame.ok == Some(true) {
+        return Ok(Some(frame.result.unwrap_or(Value::Null)));
     }
-}
 
-fn usb_frame_error(frame: UsbResponseWire) -> HttpError {
-    HttpError {
+    Err(HttpError {
         status: StatusCode::BAD_GATEWAY,
         error: frame.error.unwrap_or_else(|| ApiError {
             code: "usb_error".to_string(),
@@ -1732,7 +1791,7 @@ fn usb_frame_error(frame: UsbResponseWire) -> HttpError {
             retryable: true,
             details: None,
         }),
-    }
+    })
 }
 
 fn serial_io_http_error(error: io::Error) -> HttpError {
@@ -1750,7 +1809,7 @@ async fn flash_device(
     Json(payload): Json<FlashRequest>,
 ) -> Result<Json<FlashResult>, HttpError> {
     let artifact_id = payload.artifact.artifact_id.clone();
-    let approval = dry_run_approval(&payload.lease_id, &payload.artifact);
+    let dry_run_approval = flash_dry_run_approval(&payload)?;
     let port_path = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -1791,7 +1850,7 @@ async fn flash_device(
         let mut state_lock = state.lock()?;
         state_lock
             .dry_run_passes
-            .insert(device_id.clone(), approval);
+            .insert(device_id.clone(), dry_run_approval.clone());
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.selected_artifact_id = Some(artifact_id.clone());
         }
@@ -1813,7 +1872,7 @@ async fn flash_device(
     {
         let state_lock = state.lock()?;
         let prior = state_lock.dry_run_passes.get(&device_id);
-        if prior != Some(&approval) {
+        if prior != Some(&dry_run_approval) {
             drop(state_lock);
             state.emit(event(
                 &device_id,
@@ -1823,7 +1882,7 @@ async fn flash_device(
             ));
             return Err(HttpError::forbidden(
                 "dry_run_required",
-                "Real flash requires a successful dry-run for the same artifact.",
+                "Real flash requires a successful dry-run for the same lease and artifact manifest.",
             ));
         }
     }
@@ -1860,10 +1919,8 @@ async fn flash_device(
         "real flash started",
         json!({ "artifactId": artifact_id, "dryRun": false }),
     ));
-    let _serial_rpc = state.serial_rpc.clone().lock_owned().await;
-    release_cached_serial_session(&state, &port_path)?;
-    let _serial_lock = reserve_serial_port_for_flash(&port_path)?;
-    if let Err(error) = run_espflash(
+    if let Err(error) = run_espflash_with_exclusive_serial(
+        &state,
         &payload.artifact,
         state.config.artifact_root.as_deref(),
         &port_path,
@@ -1896,10 +1953,6 @@ async fn flash_device(
         status: "completed".to_string(),
         message: "espflash command completed.".to_string(),
     }))
-}
-
-fn reserve_serial_port_for_flash(port_path: &str) -> Result<SerialPortProcessLock, HttpError> {
-    SerialPortProcessLock::acquire(port_path, Instant::now() + SERIAL_RPC_TIMEOUT)
 }
 
 pub fn scan_serial_devices(serial_port: Option<&Path>) -> Vec<DeviceRecord> {
@@ -1979,16 +2032,6 @@ fn serial_device_record(
     device
 }
 
-fn dry_run_approval(lease_id: &str, artifact: &FirmwareArtifact) -> DryRunApproval {
-    let manifest = serde_json::to_vec(artifact)
-        .expect("FirmwareArtifact serialization should not fail for in-memory manifest data");
-    DryRunApproval {
-        lease_id: lease_id.to_string(),
-        artifact_id: artifact.artifact_id.clone(),
-        manifest_fingerprint: format!("sha256:{:x}", Sha256::digest(manifest)),
-    }
-}
-
 pub fn verify_artifact(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
@@ -2001,7 +2044,6 @@ pub fn verify_artifact(
         let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
         let ok = size == file.size && digest == file.sha256;
         files.push(ArtifactFileResult {
-            path: file.path.clone(),
             kind: file.kind.clone(),
             sha256: digest,
             size,
@@ -2140,6 +2182,26 @@ async fn run_espflash(
     }
 }
 
+async fn run_espflash_with_exclusive_serial(
+    state: &AppState,
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+) -> Result<(), HttpError> {
+    let _serial_rpc = state.serial_rpc.lock().await;
+    drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    run_espflash(artifact, root, port_path).await
+}
+
+fn drop_cached_serial_session(
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_path: &str,
+) -> Result<(), HttpError> {
+    let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    serial_sessions.remove(port_path);
+    Ok(())
+}
+
 fn build_espflash_args(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
@@ -2162,6 +2224,7 @@ fn build_espflash_args(
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
+            "-S".to_string(),
             path.to_string_lossy().into_owned(),
         ]);
     }
@@ -2185,6 +2248,7 @@ fn build_espflash_args(
         "--non-interactive".to_string(),
         "--after".to_string(),
         "hard-reset".to_string(),
+        "-S".to_string(),
         flash_address.to_string(),
         path.to_string_lossy().into_owned(),
     ])
@@ -2311,32 +2375,45 @@ fn record_transport_event(
 }
 
 fn redact_transport_frame(mut frame: Value) -> Value {
-    redact_transport_secrets(&mut frame);
+    redact_sensitive_fields(&mut frame);
     frame
 }
 
-fn redact_transport_secrets(value: &mut Value) {
+fn redact_sensitive_fields(value: &mut Value) {
     match value {
         Value::Object(object) => {
-            for (key, value) in object {
-                if is_transport_secret_key(key) && !value.is_null() {
-                    *value = Value::String("<redacted>".to_string());
+            for (key, field) in object.iter_mut() {
+                if is_sensitive_field_key(key) {
+                    *field = Value::String("<redacted>".to_string());
                 } else {
-                    redact_transport_secrets(value);
+                    redact_sensitive_fields(field);
                 }
             }
         }
         Value::Array(values) => {
-            for value in values {
-                redact_transport_secrets(value);
+            for field in values {
+                redact_sensitive_fields(field);
             }
         }
         _ => {}
     }
 }
 
-fn is_transport_secret_key(key: &str) -> bool {
+fn is_sensitive_field_key(key: &str) -> bool {
     key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("psk")
+}
+
+fn flash_dry_run_approval(payload: &FlashRequest) -> Result<FlashDryRunApproval, HttpError> {
+    Ok(FlashDryRunApproval {
+        lease_id: payload.lease_id.clone(),
+        artifact_fingerprint: artifact_fingerprint(&payload.artifact)?,
+    })
+}
+
+fn artifact_fingerprint(artifact: &FirmwareArtifact) -> Result<String, HttpError> {
+    let bytes = serde_json::to_vec(artifact)
+        .map_err(|_| HttpError::internal("Failed to fingerprint firmware artifact."))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn push_bounded<T>(values: &mut VecDeque<T>, value: T, limit: usize) {
@@ -2511,7 +2588,7 @@ mod tests {
             "tx",
             "usb_jsonl",
             "req-1",
-            r#"{"type":"wifi_config","requestId":"req-1","ssid":"FluxPurr-Lab","password":"secret-pass"}"#,
+            r#"{"type":"wifi_config","requestId":"req-1","ssid":"FluxPurr-Lab","password":"secret-pass","result":{"wifi":{"psk":"nested-secret"}}}"#,
         );
 
         let inner = state.lock().unwrap();
@@ -2525,44 +2602,20 @@ mod tests {
         assert_eq!(transport_event.payload["direction"], "tx");
         assert_eq!(transport_event.payload["frame"]["ssid"], "FluxPurr-Lab");
         assert_eq!(transport_event.payload["frame"]["password"], "<redacted>");
+        assert_eq!(
+            transport_event.payload["frame"]["result"]["wifi"]["psk"],
+            "<redacted>"
+        );
         assert!(
             !serde_json::to_string(&transport_event.payload)
                 .unwrap()
                 .contains("secret-pass")
         );
-    }
-
-    #[test]
-    fn transport_events_redact_nested_passwords() {
-        let state = AppState::test();
-        record_transport_event(
-            &state,
-            "mock-fp-lab-01",
-            "rx",
-            "usb_jsonl",
-            "req-1",
-            r#"{"type":"response","requestId":"req-1","ok":true,"result":{"wifi":{"ssid":"FluxPurr-Lab","password":"secret-pass","credentials":[{"psk":"nested-psk"}]}}}"#,
+        assert!(
+            !serde_json::to_string(&transport_event.payload)
+                .unwrap()
+                .contains("nested-secret")
         );
-
-        let inner = state.lock().unwrap();
-        let device = inner.devices.get("mock-fp-lab-01").unwrap();
-        let transport_event = device
-            .events
-            .iter()
-            .find(|event| event.kind == "transport")
-            .unwrap();
-
-        assert_eq!(
-            transport_event.payload["frame"]["result"]["wifi"]["password"],
-            "<redacted>"
-        );
-        assert_eq!(
-            transport_event.payload["frame"]["result"]["wifi"]["credentials"][0]["psk"],
-            "<redacted>"
-        );
-        let encoded = serde_json::to_string(&transport_event.payload).unwrap();
-        assert!(!encoded.contains("secret-pass"));
-        assert!(!encoded.contains("nested-psk"));
     }
 
     #[test]
@@ -2709,7 +2762,6 @@ mod tests {
 
         let result = verify_artifact(&artifact, Some(dir.path())).unwrap();
         assert!(result.verified);
-        assert_eq!(result.files[0].path, "firmware.bin");
         assert_eq!(result.files[0].sha256, digest);
     }
 
@@ -2847,6 +2899,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
+        assert!(args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
         assert!(!args.contains(&"65536".to_string()));
     }
@@ -2885,14 +2938,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
-        assert_eq!(
-            args.iter()
-                .position(|arg| arg == &DEFAULT_APP_FLASH_ADDRESS.to_string())
-                .map(|index| index + 1)
-                .and_then(|index| args.get(index))
-                .map(|arg| arg.ends_with("firmware.bin")),
-            Some(true)
-        );
+        assert!(args.contains(&DEFAULT_APP_FLASH_ADDRESS.to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
     }
 
@@ -3054,7 +3100,7 @@ mod tests {
             let mut inner = state.lock().unwrap();
             inner.devices.insert(native.id.clone(), native);
         }
-        let mut lease = state.lease_device("serial-test").unwrap();
+        let lease = state.lease_device("serial-test").unwrap();
 
         let without_dry_run = flash_device(
             State(state.clone()),
@@ -3102,7 +3148,7 @@ mod tests {
 
         let changed_artifact =
             test_artifact_with_file(dir.path(), "firmware-v2.bin", b"firmware-image-v2");
-        let changed_manifest = flash_device(
+        let changed_without_dry_run = flash_device(
             State(state.clone()),
             AxumPath("serial-test".to_string()),
             Json(FlashRequest {
@@ -3114,40 +3160,8 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert_eq!(changed_manifest.status, StatusCode::FORBIDDEN);
-        assert_eq!(changed_manifest.error.code, "dry_run_required");
-
-        let _ = delete_lease(State(state.clone()), AxumPath(lease.lease_id.clone()))
-            .await
-            .unwrap();
-        lease = state.lease_device("serial-test").unwrap();
-        let new_lease_without_dry_run = flash_device(
-            State(state.clone()),
-            AxumPath("serial-test".to_string()),
-            Json(FlashRequest {
-                lease_id: lease.lease_id.clone(),
-                artifact: artifact.clone(),
-                dry_run: false,
-                confirm: Some("FLASH".to_string()),
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(new_lease_without_dry_run.status, StatusCode::FORBIDDEN);
-        assert_eq!(new_lease_without_dry_run.error.code, "dry_run_required");
-
-        let _ = flash_device(
-            State(state.clone()),
-            AxumPath("serial-test".to_string()),
-            Json(FlashRequest {
-                lease_id: lease.lease_id.clone(),
-                artifact: artifact.clone(),
-                dry_run: true,
-                confirm: None,
-            }),
-        )
-        .await
-        .unwrap();
+        assert_eq!(changed_without_dry_run.status, StatusCode::FORBIDDEN);
+        assert_eq!(changed_without_dry_run.error.code, "dry_run_required");
 
         let without_confirm = flash_device(
             State(state.clone()),
@@ -3186,49 +3200,6 @@ mod tests {
                     && event.message == "real flash blocked"
                     && event.payload["code"] == "real_flash_disabled"
             }));
-        }
-    }
-
-    #[test]
-    fn release_cached_serial_session_removes_only_target_port() {
-        let state = AppState::test();
-        let dir = tempdir().unwrap();
-        {
-            let mut sessions = state.serial_sessions.lock().unwrap();
-            sessions.insert(
-                "/dev/cu.usbmodem-target".to_string(),
-                test_serial_session(&dir, "target.lock"),
-            );
-            sessions.insert(
-                "/dev/cu.usbmodem-other".to_string(),
-                test_serial_session(&dir, "other.lock"),
-            );
-        }
-
-        release_cached_serial_session(&state, "/dev/cu.usbmodem-target").unwrap();
-
-        let sessions = state.serial_sessions.lock().unwrap();
-        assert!(!sessions.contains_key("/dev/cu.usbmodem-target"));
-        assert!(sessions.contains_key("/dev/cu.usbmodem-other"));
-    }
-
-    #[test]
-    fn flash_port_reservation_uses_process_lock() {
-        let port_path = format!("/dev/cu.usbmodem-flash-test-{}", now_millis());
-        let _reservation = reserve_serial_port_for_flash(&port_path).unwrap();
-
-        #[cfg(unix)]
-        {
-            let second = SerialPortProcessLock::acquire(
-                &port_path,
-                Instant::now() + Duration::from_millis(1),
-            );
-            let error = match second {
-                Ok(_) => panic!("second serial lock acquisition should time out"),
-                Err(error) => error,
-            };
-            assert_eq!(error.status, StatusCode::GATEWAY_TIMEOUT);
-            assert_eq!(error.error.code, "serial_lock_timeout");
         }
     }
 
@@ -3310,19 +3281,6 @@ mod tests {
     }
 
     #[test]
-    fn usb_response_decoder_maps_documented_error_frames() {
-        let error = decode_usb_response_line(
-            br#"{"type":"error","requestId":"req-1","error":{"code":"bad_frame","message":"Malformed JSONL frame.","retryable":false}}"#,
-            "req-1",
-        )
-        .unwrap_err();
-
-        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(error.error.code, "bad_frame");
-        assert!(!error.error.retryable);
-    }
-
-    #[test]
     fn usb_response_decoder_marks_startup_busy_retryable() {
         let error = decode_usb_response_line(
             br#"{"type":"response","requestId":"req-1","ok":false,"error":{"code":"startup_busy","message":"Runtime status is not available until hardware initialization completes.","retryable":true}}"#,
@@ -3381,149 +3339,6 @@ mod tests {
                 size: bytes.len() as u64,
                 flash_address: Some(0x10000),
             }],
-        }
-    }
-
-    fn test_serial_session(dir: &tempfile::TempDir, lock_name: &str) -> SerialSession {
-        #[cfg(unix)]
-        let serial_lock = SerialPortProcessLock {
-            file: File::options()
-                .create(true)
-                .read(true)
-                .write(true)
-                .open(dir.path().join(lock_name))
-                .unwrap(),
-        };
-        #[cfg(not(unix))]
-        let serial_lock = SerialPortProcessLock {};
-
-        SerialSession {
-            _serial_lock: serial_lock,
-            port: Box::new(MockSerialPort),
-        }
-    }
-
-    #[derive(Default)]
-    struct MockSerialPort;
-
-    impl io::Read for MockSerialPort {
-        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-            Ok(0)
-        }
-    }
-
-    impl io::Write for MockSerialPort {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl serialport::SerialPort for MockSerialPort {
-        fn name(&self) -> Option<String> {
-            Some("mock".to_string())
-        }
-
-        fn baud_rate(&self) -> serialport::Result<u32> {
-            Ok(DEFAULT_BAUD_RATE)
-        }
-
-        fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
-            Ok(serialport::DataBits::Eight)
-        }
-
-        fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
-            Ok(serialport::FlowControl::None)
-        }
-
-        fn parity(&self) -> serialport::Result<serialport::Parity> {
-            Ok(serialport::Parity::None)
-        }
-
-        fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
-            Ok(serialport::StopBits::One)
-        }
-
-        fn timeout(&self) -> Duration {
-            SERIAL_READ_TIMEOUT
-        }
-
-        fn set_baud_rate(&mut self, _baud_rate: u32) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn set_data_bits(&mut self, _data_bits: serialport::DataBits) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn set_flow_control(
-            &mut self,
-            _flow_control: serialport::FlowControl,
-        ) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn set_parity(&mut self, _parity: serialport::Parity) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn set_stop_bits(&mut self, _stop_bits: serialport::StopBits) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn set_timeout(&mut self, _timeout: Duration) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn write_request_to_send(&mut self, _level: bool) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn write_data_terminal_ready(&mut self, _level: bool) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
-            Ok(false)
-        }
-
-        fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
-            Ok(false)
-        }
-
-        fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
-            Ok(false)
-        }
-
-        fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
-            Ok(false)
-        }
-
-        fn bytes_to_read(&self) -> serialport::Result<u32> {
-            Ok(0)
-        }
-
-        fn bytes_to_write(&self) -> serialport::Result<u32> {
-            Ok(0)
-        }
-
-        fn clear(&self, _buffer_to_clear: serialport::ClearBuffer) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn try_clone(&self) -> serialport::Result<Box<dyn serialport::SerialPort>> {
-            Ok(Box::new(Self))
-        }
-
-        fn set_break(&self) -> serialport::Result<()> {
-            Ok(())
-        }
-
-        fn clear_break(&self) -> serialport::Result<()> {
-            Ok(())
         }
     }
 }

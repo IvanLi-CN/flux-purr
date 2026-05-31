@@ -6,7 +6,6 @@ import {
   Minus,
   Plus,
   Power,
-  RefreshCw,
   SlidersHorizontal,
   ToggleRight,
   Upload,
@@ -14,8 +13,23 @@ import {
 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import SimpleBar from 'simplebar-react'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectSeparator,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
+import {
+  type LiveWebSerialControls,
+  type LiveWebSerialOptions,
+  useLiveWebSerialScenario,
+} from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
+import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
 import type {
   ControlPlaneScenario,
   DeviceSeverity,
@@ -25,14 +39,20 @@ import type {
   TransportKind,
   WorkflowPhase,
 } from '../types'
+import { isDirectWebSerialDevice } from '../web-serial'
 
 interface ControlPlaneDemoProps {
   scenario?: ControlPlaneScenario
   initialView?: ConsoleView
+  devd?: LiveDevdOptions
+  webSerial?: LiveWebSerialOptions
+  allowDemoControls?: boolean
 }
 
-type ConsoleView = 'dashboard' | 'settings' | 'update'
-type FlashRunStatus = 'idle' | 'running' | 'passed'
+type ConsoleView = 'dashboard' | 'settings' | 'update' | 'add-device'
+type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
+type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
+type LogFilter = 'all' | EventLogEntry['tone']
 
 interface ActionFeedback {
   title: string
@@ -43,13 +63,23 @@ interface ActionFeedback {
 const LOG_FEED_SIZE = 1000
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
-const TARGET_TEMP_MIN = 30
-const TARGET_TEMP_MAX = 380
+const LOG_FILTER_OPTIONS: Array<{ value: LogFilter; label: string }> = [
+  { value: 'all', label: 'All' },
+  { value: 'info', label: 'Info' },
+  { value: 'success', label: 'Ok' },
+  { value: 'warning', label: 'Warn' },
+  { value: 'danger', label: 'Error' },
+]
+const TARGET_TEMP_MIN = 0
+const TARGET_TEMP_MAX = 400
 const TARGET_TEMP_STEP = 5
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
-const PRESET_ENABLED = [true, true, false, true, true, true, true, true, true, false]
+const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
+const PRESET_ENABLED = PRESETS_C.map((preset) => preset != null)
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
+const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
+const ADD_DEVICE_VALUE = '__add_device__'
 
 const severityLabels: Record<DeviceSeverity, string> = {
   nominal: 'READY',
@@ -62,7 +92,33 @@ const transportLabels: Record<TransportKind, string> = {
   serial: 'SERIAL',
   devd: 'DEVD',
   mock: 'MOCK',
+  wifi: 'WIFI',
+  bridge: 'BRIDGE',
 }
+
+const addDeviceOptions: Array<{
+  kind: AddDeviceKind
+  label: string
+  detail: string
+}> = [
+  {
+    kind: 'wifi',
+    label: 'WiFi',
+    detail: 'Bind a future station address without marking hardware online.',
+  },
+  {
+    kind: 'web-serial',
+    label: 'Web Serial',
+    detail: 'Open a browser USB serial port and probe identity, network, and status.',
+  },
+  {
+    kind: 'bridge',
+    label: 'Bridge',
+    detail: 'Prepare a native devd bridge target for local hardware control.',
+  },
+]
+
+const NO_LIVE_TARGET_ID = 'live-no-target'
 
 const consoleViews: Array<{
   id: ConsoleView
@@ -90,13 +146,87 @@ const consoleViews: Array<{
   },
 ]
 
+function pendingDeviceId(kind: AddDeviceKind) {
+  return `pending-${kind}-target`
+}
+
+function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
+  const common = {
+    id: pendingDeviceId(kind),
+    severity: 'offline' as const,
+    firmware: 'pending',
+    buildId: 'pending',
+    uptime: 'pending',
+    boardTempC: 0,
+    currentTempC: 0,
+    targetTempC: TARGET_TEMP_MIN,
+    voltageMv: 0,
+    currentMa: 0,
+    pdRequestMv: 0,
+    pdContractMv: 0,
+    pdState: 'fault' as const,
+    heaterOutputPercent: 0,
+    activeCoolingEnabled: false,
+    fanState: 'OFF' as const,
+    wifiRssi: null,
+    capabilities: [],
+    leaseState: 'none' as const,
+  }
+
+  if (kind === 'wifi') {
+    return {
+      ...common,
+      alias: 'WiFi target',
+      location: 'Awaiting WiFi handoff',
+      transport: 'wifi',
+      baseUrl: 'wifi://pending',
+      networkState: 'idle',
+      transportIssue: 'WiFi handoff is pending; no live station address is bound yet.',
+    }
+  }
+
+  if (kind === 'bridge') {
+    return {
+      ...common,
+      alias: 'Native bridge',
+      location: 'Awaiting devd bridge',
+      transport: 'bridge',
+      baseUrl: 'bridge://pending',
+      networkState: 'disabled',
+      transportIssue: 'Start or select a native bridge target before runtime control.',
+    }
+  }
+
+  return {
+    ...common,
+    alias: 'Web Serial target',
+    location: 'Awaiting browser port',
+    transport: 'serial',
+    baseUrl: 'webserial://pending',
+    networkState: 'disabled',
+    transportIssue: 'Open this in live mode to select a browser Web Serial port.',
+  }
+}
+
 export function ControlPlaneDemo({
   scenario = controlPlaneScenario,
   initialView = 'dashboard',
+  devd,
+  webSerial: webSerialOptions,
+  allowDemoControls = true,
 }: ControlPlaneDemoProps) {
+  const liveDevdScenario = useLiveDevdScenario(scenario, devd)
+  const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(
+    liveDevdScenario,
+    webSerialOptions
+  )
+  const controlClient = useMemo(
+    () => devd?.httpClient ?? createControlPlaneHttpClient(),
+    [devd?.httpClient]
+  )
+  const devdBaseUrl = devd?.devdBaseUrl ?? defaultDevdBaseUrl()
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
   const [activeView, setActiveView] = useState<ConsoleView>(initialView)
-  const [showDegraded, setShowDegraded] = useState(false)
   const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
@@ -108,22 +238,41 @@ export function ControlPlaneDemo({
   const [currentTempByDevice, setCurrentTempByDevice] = useState<Record<string, number>>({})
   const [heaterHeldByDevice, setHeaterHeldByDevice] = useState<Record<string, boolean>>({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
+  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>([])
+  const pendingDeviceModeRef = useRef(allowDemoControls)
   const [flashRun, setFlashRun] = useState<{ status: FlashRunStatus; progress: number }>({
     status: 'idle',
     progress: 0,
   })
   const flashCompletionEmittedRef = useRef(false)
   const actionClockRef = useRef(LOG_FEED_START_SECONDS + 60)
+  const targetTempCommitTimersRef = useRef<Record<string, number>>({})
+  const targetTempCommitVersionRef = useRef<Record<string, number>>({})
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
   const [feedback, setFeedback] = useState<ActionFeedback>({
-    title: 'Runtime synced',
-    detail: 'Thermal state is sampled from the mock device contract.',
+    title: allowDemoControls ? 'Runtime synced' : 'No live target',
+    detail: allowDemoControls
+      ? 'Thermal state is sampled from the mock device contract.'
+      : 'Connect a browser Web Serial port to load live hardware state.',
     tone: 'info',
   })
-  const activeScenario = showDegraded ? degradedControlPlaneScenario : scenario
+  const activeScenario = liveScenario
+  const deviceOptions = useMemo(
+    () => [...activeScenario.devices, ...pendingDevices],
+    [activeScenario.devices, pendingDevices]
+  )
 
   useEffect(() => {
-    if (activeScenario.events.length < 2) {
+    if (pendingDeviceModeRef.current === allowDemoControls) {
+      return
+    }
+
+    pendingDeviceModeRef.current = allowDemoControls
+    setPendingDevices([])
+  }, [allowDemoControls])
+
+  useEffect(() => {
+    if (!allowDemoControls || activeScenario.events.length < 2) {
       return
     }
 
@@ -132,40 +281,172 @@ export function ControlPlaneDemo({
     }, 2200)
 
     return () => window.clearInterval(timer)
-  }, [activeScenario.events.length])
+  }, [activeScenario.events.length, allowDemoControls])
 
   const selectedDevice = useMemo(
     () =>
-      activeScenario.devices.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions[0] ??
       activeScenario.devices[0],
-    [activeScenario.devices, selectedDeviceId]
+    [activeScenario.devices, deviceOptions, selectedDeviceId]
   )
+
+  useEffect(() => {
+    if (!deviceOptions.some((device) => device.id === selectedDeviceId)) {
+      setSelectedDeviceId(activeScenario.selectedDeviceId)
+      return
+    }
+
+    if (
+      selectedDeviceId === scenario.selectedDeviceId &&
+      activeScenario.selectedDeviceId !== scenario.selectedDeviceId
+    ) {
+      setSelectedDeviceId(activeScenario.selectedDeviceId)
+    }
+  }, [activeScenario.selectedDeviceId, deviceOptions, scenario.selectedDeviceId, selectedDeviceId])
+
+  useEffect(() => {
+    if (webSerial.state !== 'connected' || !webSerial.deviceId) {
+      return
+    }
+
+    const currentSelection = deviceOptions.find((device) => device.id === selectedDeviceId)
+    const shouldAdoptWebSerialTarget =
+      !currentSelection ||
+      isNoLiveTargetDevice(currentSelection) ||
+      isPendingDeviceChoice(currentSelection)
+
+    if (shouldAdoptWebSerialTarget && selectedDeviceId !== webSerial.deviceId) {
+      setSelectedDeviceId(webSerial.deviceId)
+    }
+  }, [deviceOptions, selectedDeviceId, webSerial.deviceId, webSerial.state])
+
+  useEffect(() => {
+    const nextSelectedDevice = activeScenario.devices.find(
+      (device) => device.id === activeScenario.selectedDeviceId
+    )
+    if (
+      nextSelectedDevice?.transport === 'devd' &&
+      feedback.detail === 'Thermal state is sampled from the mock device contract.'
+    ) {
+      setFeedback({
+        title: 'Runtime synced',
+        detail: 'Thermal state is sampled from live devd firmware status.',
+        tone: 'info',
+      })
+    }
+  }, [activeScenario.devices, activeScenario.selectedDeviceId, feedback.detail])
+
+  useEffect(() => {
+    if (webSerial.state === 'error' && webSerial.error) {
+      setFeedback({
+        title: 'Web Serial unavailable',
+        detail: webSerial.error,
+        tone: 'warning',
+      })
+    }
+  }, [webSerial.error, webSerial.state])
+
+  useEffect(() => {
+    setTargetTempByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        if (
+          !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
+          current[device.id] !== device.targetTempC
+        ) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
+  useEffect(() => {
+    setSelectedPresetByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        if (
+          !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
+          current[device.id] !== clampPresetIndex(device.selectedPresetIndex)
+        ) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(targetTempCommitTimersRef.current)) {
+        window.clearTimeout(timer)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    setFanPolicyByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        if (
+          !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
+          current[device.id] !== device.fanState
+        ) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
 
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
       return activeScenario.devices[0]
     }
 
+    const liveRuntimeDevice = isLiveRuntimeDevice(selectedDevice)
+    const currentTempC = liveRuntimeDevice
+      ? selectedDevice.currentTempC
+      : (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)
+    const targetTempC = targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC
+    const fanState = liveRuntimeDevice
+      ? selectedDevice.fanState
+      : (fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState)
+    const heaterOutputPercent =
+      selectedDevice.severity === 'offline'
+        ? selectedDevice.heaterOutputPercent
+        : liveRuntimeDevice
+          ? selectedDevice.heaterOutputPercent
+          : Math.min(
+              100,
+              Math.max(
+                0,
+                selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
+              )
+            )
+
     return {
       ...selectedDevice,
-      currentTempC: currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC,
-      targetTempC: targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC,
-      fanState: fanPolicyByDevice[selectedDevice.id] ?? selectedDevice.fanState,
+      currentTempC,
+      targetTempC,
+      fanState,
       activeCoolingEnabled: selectedDevice.activeCoolingEnabled,
-      heaterOutputPercent: heaterHeldByDevice[selectedDevice.id]
-        ? 0
-        : Math.min(
-            100,
-            Math.max(
-              0,
-              selectedDevice.heaterOutputPercent +
-                Math.round(
-                  ((targetTempByDevice[selectedDevice.id] ?? selectedDevice.targetTempC) -
-                    (currentTempByDevice[selectedDevice.id] ?? selectedDevice.currentTempC)) /
-                    8
-                )
-            )
-          ),
+      heaterOutputPercent: heaterHeldByDevice[selectedDevice.id] ? 0 : heaterOutputPercent,
+      wifiRssi: selectedDevice.wifiRssi,
+      networkState: selectedDevice.networkState,
     }
   }, [
     activeScenario.devices,
@@ -175,9 +456,21 @@ export function ControlPlaneDemo({
     selectedDevice,
     targetTempByDevice,
   ])
-  const selectedPresetIndex = selectedPresetByDevice[visibleDevice.id] ?? 3
-  const visiblePresetTemps = presetTempsByDevice[visibleDevice.id] ?? PRESET_TEMPS_C
-  const visiblePresetEnabled = presetEnabledByDevice[visibleDevice.id] ?? PRESET_ENABLED
+  const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
+  const visiblePresetValues =
+    visibleDeviceIsLive && visibleDevice.presetsC
+      ? normalizePresets(visibleDevice.presetsC)
+      : presetValuesFromEditorState(
+          presetTempsByDevice[visibleDevice.id] ?? PRESET_TEMPS_C,
+          presetEnabledByDevice[visibleDevice.id] ?? PRESET_ENABLED
+        )
+  const selectedPresetIndex = visibleDeviceIsLive
+    ? (selectedPresetByDevice[visibleDevice.id] ??
+      clampPresetIndex(visibleDevice.selectedPresetIndex))
+    : (selectedPresetByDevice[visibleDevice.id] ?? 3)
+  const visiblePresetTemps = presetTempsFromValues(visiblePresetValues)
+  const visiblePresetEnabled = presetEnabledFromValues(visiblePresetValues)
+  const visibleFanPolicy = fanPolicyByDevice[visibleDevice.id] ?? fanPolicyFromDevice(visibleDevice)
   const selectedArtifact = useMemo(
     () =>
       activeScenario.artifacts.find(
@@ -189,13 +482,23 @@ export function ControlPlaneDemo({
     () => createFlashPhases(activeScenario.flashPhases, selectedArtifact, visibleDevice, flashRun),
     [activeScenario.flashPhases, flashRun, selectedArtifact, visibleDevice]
   )
-  const liveEvents = useMemo(
-    () => createLiveEventFeed(activeScenario.events, streamTick),
-    [activeScenario.events, streamTick]
+  const knownDevices = useMemo(
+    () => deviceOptions.filter((device) => isKnownDeviceChoice(device)),
+    [deviceOptions]
+  )
+  const isDeviceSelectionRequired = isNoLiveTargetDevice(visibleDevice)
+  const showDeviceSelection = isDeviceSelectionRequired && activeView !== 'add-device'
+  const isDeviceAddFlowActive = isDeviceSelectionRequired || activeView === 'add-device'
+  const scenarioEvents = useMemo(
+    () =>
+      allowDemoControls
+        ? createDemoEventFeed(activeScenario.events, streamTick)
+        : activeScenario.events,
+    [activeScenario.events, allowDemoControls, streamTick]
   )
   const visibleEvents = useMemo(
-    () => [...actionEvents, ...liveEvents].slice(0, LOG_FEED_SIZE),
-    [actionEvents, liveEvents]
+    () => [...actionEvents, ...scenarioEvents].slice(0, LOG_FEED_SIZE),
+    [actionEvents, scenarioEvents]
   )
 
   const emitEvent = useCallback(
@@ -216,10 +519,72 @@ export function ControlPlaneDemo({
     []
   )
 
+  const configureLiveRuntime = useCallback(
+    async (
+      patch: {
+        targetTempC?: number
+        selectedPresetSlot?: number
+        presetsC?: Array<number | null>
+        activeCoolingEnabled?: boolean
+        heaterEnabled?: boolean
+      },
+      failureMessage: string
+    ) => {
+      const blockedReason = deviceControlBlockReason(visibleDevice)
+      if (blockedReason) {
+        setFeedback({
+          title: 'Runtime update blocked',
+          detail: blockedReason,
+          tone: 'warning',
+        })
+        emitEvent('devd', 'runtime update blocked by transport state', 'warning')
+        return false
+      }
+
+      if (isDirectWebSerialDevice(visibleDevice)) {
+        const updated = await webSerial.configureRuntime(patch)
+        if (!updated) {
+          setFeedback({
+            title: 'Runtime update failed',
+            detail: webSerial.error ?? failureMessage,
+            tone: 'warning',
+          })
+          emitEvent('webserial', failureMessage, 'warning')
+        }
+        return updated
+      }
+
+      if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
+        return false
+      }
+
+      try {
+        await controlClient.configureRuntime(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+          ...patch,
+        })
+        return true
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : failureMessage
+        setFeedback({
+          title: 'Runtime update failed',
+          detail,
+          tone: 'warning',
+        })
+        emitEvent('devd', failureMessage, 'warning')
+        return false
+      }
+    },
+    [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
+  )
+
   useEffect(() => {
     const timer = window.setInterval(() => {
       setCurrentTempByDevice((current) => {
         if (!selectedDevice || visibleDevice.severity === 'offline') {
+          return current
+        }
+        if (selectedDevice.transport === 'devd' || isDirectWebSerialDevice(selectedDevice)) {
           return current
         }
 
@@ -259,17 +624,20 @@ export function ControlPlaneDemo({
   ])
 
   useEffect(() => {
-    if (flashRun.status !== 'running') {
+    if (flashRun.status !== 'running' && flashRun.status !== 'flashing') {
       return
     }
 
     const timer = window.setInterval(() => {
       setFlashRun((current) => {
-        if (current.status !== 'running') {
+        if (current.status !== 'running' && current.status !== 'flashing') {
           return current
         }
 
-        return { ...current, progress: Math.min(100, current.progress + 14) }
+        return {
+          ...current,
+          progress: Math.min(current.status === 'flashing' ? 92 : 100, current.progress + 14),
+        }
       })
     }, 420)
 
@@ -296,7 +664,19 @@ export function ControlPlaneDemo({
   }, [emitEvent, flashRun.progress, flashRun.status, selectedArtifact?.version])
 
   const handleDeviceChange = (deviceId: string) => {
-    const nextDevice = activeScenario.devices.find((device) => device.id === deviceId)
+    if (deviceId === ADD_DEVICE_VALUE) {
+      setActiveView('add-device')
+      setFlashRun({ status: 'idle', progress: 0 })
+      flashCompletionEmittedRef.current = false
+      setFeedback({
+        title: 'Add device',
+        detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
+        tone: 'info',
+      })
+      return
+    }
+
+    const nextDevice = deviceOptions.find((device) => device.id === deviceId)
 
     setSelectedDeviceId(deviceId)
     setFlashRun({ status: 'idle', progress: 0 })
@@ -318,27 +698,121 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handleToggleDegraded = () => {
-    const nextDegraded = !showDegraded
-    setShowDegraded(nextDegraded)
+  const handleAddDevice = async (
+    kind: AddDeviceKind,
+    { showPendingDashboard = true }: { showPendingDashboard?: boolean } = {}
+  ) => {
     setFlashRun({ status: 'idle', progress: 0 })
     flashCompletionEmittedRef.current = false
-    setActionEvents([])
+
+    if (kind === 'web-serial' && !allowDemoControls) {
+      if (webSerial.state === 'connected') {
+        if (webSerial.deviceId) {
+          setSelectedDeviceId(webSerial.deviceId)
+          setActiveView('dashboard')
+        }
+        setFeedback({
+          title: 'Web Serial already connected',
+          detail: 'The browser Web Serial target is already listed in the target selector.',
+          tone: 'info',
+        })
+        emitEvent('webserial', 'browser Web Serial target already connected', 'info')
+        return
+      }
+
+      const connected = await handleWebSerialConnect()
+      if (connected) {
+        setActiveView('dashboard')
+      }
+      return
+    }
+
+    const nextDevice = createPendingDevice(kind)
+    setPendingDevices((current) =>
+      current.some((device) => device.id === nextDevice.id) ? current : [...current, nextDevice]
+    )
+    setSelectedDeviceId(nextDevice.id)
+    setActiveView(showPendingDashboard ? 'dashboard' : 'add-device')
     setFeedback({
-      title: nextDegraded ? 'Degraded mock enabled' : 'Nominal mock restored',
-      detail: nextDegraded
-        ? 'Transport warnings and blocked checks are now visible.'
-        : 'Runtime state returned to the nominal fixture.',
-      tone: nextDegraded ? 'warning' : 'success',
+      title: `${nextDevice.alias} added`,
+      detail:
+        nextDevice.transportIssue ?? `${transportLabels[nextDevice.transport]} target pending.`,
+      tone: 'warning',
     })
+    emitEvent('target', `${nextDevice.alias} added from target selector`, 'warning')
+  }
+
+  const handleQuickAddDevice = async (kind: AddDeviceKind) => {
+    setActiveView('add-device')
+    await handleAddDevice(kind, { showPendingDashboard: false })
+  }
+
+  async function handleWebSerialConnect() {
+    if (webSerial.state === 'connected') {
+      await webSerial.disconnect()
+      setFeedback({
+        title: 'Web Serial disconnected',
+        detail: 'Browser direct USB control is closed.',
+        tone: 'info',
+      })
+      emitEvent('webserial', 'browser direct USB control disconnected', 'info')
+      return false
+    }
+
+    const connected = await webSerial.connect()
+    setFeedback(
+      connected
+        ? {
+            title: 'Web Serial connected',
+            detail: 'Browser direct USB JSONL control is active.',
+            tone: 'success',
+          }
+        : {
+            title: 'Web Serial unavailable',
+            detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+            tone: 'warning',
+          }
+    )
+    emitEvent(
+      'webserial',
+      connected ? 'browser direct USB control connected' : 'browser direct USB control failed',
+      connected ? 'success' : 'warning'
+    )
+    return connected
   }
 
   const handleTargetTempChange = (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
+    const deviceId = visibleDevice.id
     setTargetTempByDevice((current) => ({
       ...current,
-      [visibleDevice.id]: clampedTarget,
+      [deviceId]: clampedTarget,
     }))
+
+    if (visibleDeviceIsLive) {
+      const nextVersion = (targetTempCommitVersionRef.current[deviceId] ?? 0) + 1
+      targetTempCommitVersionRef.current[deviceId] = nextVersion
+      const existingTimer = targetTempCommitTimersRef.current[deviceId]
+      if (existingTimer) {
+        window.clearTimeout(existingTimer)
+      }
+      targetTempCommitTimersRef.current[deviceId] = window.setTimeout(async () => {
+        delete targetTempCommitTimersRef.current[deviceId]
+        const liveUpdated = await configureLiveRuntime(
+          { targetTempC: clampedTarget },
+          'target temperature update was not accepted by devd'
+        )
+        if (liveUpdated || targetTempCommitVersionRef.current[deviceId] !== nextVersion) {
+          return
+        }
+        setTargetTempByDevice((current) => {
+          const next = { ...current }
+          delete next[deviceId]
+          return next
+        })
+      }, 180)
+    }
+
     setFeedback({
       title: 'Target updated',
       detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
@@ -347,8 +821,21 @@ export function ControlPlaneDemo({
     emitEvent('thermal', `target temperature updated to ${formatTemp(clampedTarget)}`, 'success')
   }
 
-  const handleFanPolicyChange = (fanState: DeviceTarget['fanState']) => {
-    setFanPolicyByDevice((current) => ({ ...current, [visibleDevice.id]: fanState }))
+  const handleFanPolicyChange = async (fanState: DeviceTarget['fanState']) => {
+    if (fanState === 'RUN') {
+      return
+    }
+    const liveUpdated = await configureLiveRuntime(
+      { activeCoolingEnabled: fanState !== 'OFF' },
+      'fan policy update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    setFanPolicyByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: fanState,
+    }))
     setFeedback({
       title: 'Fan policy updated',
       detail: `${visibleDevice.alias} fan policy is now ${fanState}.`,
@@ -357,27 +844,56 @@ export function ControlPlaneDemo({
     emitEvent('cooling', `fan policy updated to ${fanState}`, 'info')
   }
 
-  const handlePresetSlotChange = (presetIndex: number) => {
+  const handlePresetSlotChange = async (presetIndex: number) => {
     const presetIsEnabled = visiblePresetEnabled[presetIndex] ?? true
     setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
+    const liveUpdated = await configureLiveRuntime(
+      { selectedPresetSlot: presetIndex },
+      'preset slot update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      setSelectedPresetByDevice((current) => {
+        const next = { ...current }
+        delete next[visibleDevice.id]
+        return next
+      })
+      return
+    }
     setFeedback({
       title: `Preset M${presetIndex + 1} selected`,
       detail: presetIsEnabled
         ? `${formatTemp(visiblePresetTemps[presetIndex])} is ready for ${visibleDevice.alias}.`
-        : `${formatTemp(visiblePresetTemps[presetIndex])} is stored but disabled.`,
+        : `Preset M${presetIndex + 1} is disabled.`,
       tone: presetIsEnabled ? 'info' : 'warning',
     })
     emitEvent('preset', `selected M${presetIndex + 1}`, 'info')
   }
 
-  const handlePresetTempChange = (nextTempC: number) => {
+  const handlePresetTempChange = async (nextTempC: number) => {
     const clampedTemp = clampTargetTemp(nextTempC)
-    setPresetTempsByDevice((current) => {
-      const nextTemps = [...(current[visibleDevice.id] ?? PRESET_TEMPS_C)]
-      nextTemps[selectedPresetIndex] = clampedTemp
+    const nextPresetValues = [...visiblePresetValues]
+    nextPresetValues[selectedPresetIndex] = clampedTemp
+    const liveUpdated = await configureLiveRuntime(
+      { selectedPresetSlot: selectedPresetIndex, presetsC: nextPresetValues },
+      'preset temperature update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setPresetTempsByDevice((current) => {
+        const nextTemps = [...(current[visibleDevice.id] ?? PRESET_TEMPS_C)]
+        nextTemps[selectedPresetIndex] = clampedTemp
 
-      return { ...current, [visibleDevice.id]: nextTemps }
-    })
+        return { ...current, [visibleDevice.id]: nextTemps }
+      })
+      setPresetEnabledByDevice((current) => {
+        const nextEnabledState = [...(current[visibleDevice.id] ?? PRESET_ENABLED)]
+        nextEnabledState[selectedPresetIndex] = true
+
+        return { ...current, [visibleDevice.id]: nextEnabledState }
+      })
+    }
     setFeedback({
       title: `Preset M${selectedPresetIndex + 1} updated`,
       detail: `Preset temperature is now ${formatTemp(clampedTemp)}.`,
@@ -390,18 +906,31 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handlePresetEnabledChange = (nextEnabled: boolean) => {
-    setPresetEnabledByDevice((current) => {
-      const nextEnabledState = [...(current[visibleDevice.id] ?? PRESET_ENABLED)]
-      nextEnabledState[selectedPresetIndex] = nextEnabled
+  const handlePresetEnabledChange = async (nextEnabled: boolean) => {
+    const nextPresetValues = [...visiblePresetValues]
+    nextPresetValues[selectedPresetIndex] = nextEnabled
+      ? visiblePresetTemps[selectedPresetIndex]
+      : null
+    const liveUpdated = await configureLiveRuntime(
+      { selectedPresetSlot: selectedPresetIndex, presetsC: nextPresetValues },
+      'preset enabled update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setPresetEnabledByDevice((current) => {
+        const nextEnabledState = [...(current[visibleDevice.id] ?? PRESET_ENABLED)]
+        nextEnabledState[selectedPresetIndex] = nextEnabled
 
-      return { ...current, [visibleDevice.id]: nextEnabledState }
-    })
+        return { ...current, [visibleDevice.id]: nextEnabledState }
+      })
+    }
     setFeedback({
       title: `Preset M${selectedPresetIndex + 1} ${nextEnabled ? 'enabled' : 'disabled'}`,
       detail: nextEnabled
         ? `${formatTemp(visiblePresetTemps[selectedPresetIndex])} can be used as a live target.`
-        : 'This preset stays stored but is hidden from quick target use.',
+        : 'This preset is hidden from quick target use.',
       tone: nextEnabled ? 'success' : 'warning',
     })
     emitEvent(
@@ -411,9 +940,19 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handleHeaterHoldToggle = () => {
+  const handleHeaterHoldToggle = async () => {
     const nextHeld = !heaterHeldByDevice[visibleDevice.id]
-    setHeaterHeldByDevice((current) => ({ ...current, [visibleDevice.id]: nextHeld }))
+    const liveUpdated = await configureLiveRuntime(
+      { heaterEnabled: !nextHeld },
+      'heater hold update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    setHeaterHeldByDevice((current) => ({
+      ...current,
+      ...(visibleDeviceIsLive ? {} : { [visibleDevice.id]: nextHeld }),
+    }))
     setFeedback({
       title: nextHeld ? 'Heater held' : 'Heater resumed',
       detail: nextHeld
@@ -428,7 +967,7 @@ export function ControlPlaneDemo({
     )
   }
 
-  const handleStartDryRun = () => {
+  const handleStartDryRun = async () => {
     if (
       visibleDevice.severity === 'offline' ||
       selectedArtifact?.compatibility === 'blocked' ||
@@ -446,6 +985,22 @@ export function ControlPlaneDemo({
       return
     }
 
+    if (
+      visibleDevice.transport === 'devd' &&
+      (!visibleDevice.leaseId ||
+        !devdBaseUrl ||
+        visibleDevice.leaseState === 'conflict' ||
+        visibleDevice.leaseState === 'expired')
+    ) {
+      setFeedback({
+        title: 'Dry-run lease required',
+        detail: 'Firmware recovery requires an active devd lease for the native target.',
+        tone: 'warning',
+      })
+      emitEvent('flash', 'dry-check blocked: missing devd lease', 'warning')
+      return
+    }
+
     flashCompletionEmittedRef.current = false
     setFlashRun({ status: 'running', progress: 0 })
     setFeedback({
@@ -454,6 +1009,107 @@ export function ControlPlaneDemo({
       tone: selectedArtifact.compatibility === 'warning' ? 'warning' : 'info',
     })
     emitEvent('flash', `${selectedArtifact.version} dry-check started`, 'info')
+
+    if (!devdBaseUrl || !selectedArtifact.files?.length) {
+      return
+    }
+
+    try {
+      const result = await controlClient.verifyArtifact(
+        devdBaseUrl,
+        artifactToManifest(selectedArtifact)
+      )
+      if (!result.verified) {
+        setFlashRun({ status: 'idle', progress: 0 })
+        setFeedback({
+          title: 'Dry-run failed',
+          detail: `${selectedArtifact.version} failed local file verification.`,
+          tone: 'warning',
+        })
+        emitEvent('flash', `${selectedArtifact.version} verification failed`, 'warning')
+        return
+      }
+
+      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId) {
+        const dryRun = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+          artifact: artifactToManifest(selectedArtifact),
+          dryRun: true,
+        })
+        emitEvent('flash', `${dryRun.artifactId} dry-run registered by devd`, 'success')
+      }
+
+      flashCompletionEmittedRef.current = true
+      setFlashRun({ status: 'passed', progress: 100 })
+      setFeedback({
+        title: 'Dry-run passed',
+        detail: `${selectedArtifact.version} verified ${result.files.length} local file${result.files.length === 1 ? '' : 's'}.`,
+        tone: 'success',
+      })
+      emitEvent('flash', `${selectedArtifact.version} verified by devd`, 'success')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Artifact verification failed.'
+      setFlashRun({ status: 'idle', progress: 0 })
+      setFeedback({
+        title: 'Dry-run failed',
+        detail,
+        tone: 'warning',
+      })
+      emitEvent('flash', 'devd artifact verification failed', 'warning')
+    }
+  }
+
+  const handleStartFlash = async () => {
+    if (
+      !selectedArtifact ||
+      selectedArtifact.compatibility === 'blocked' ||
+      visibleDevice.transport !== 'devd' ||
+      !visibleDevice.leaseId ||
+      !devdBaseUrl ||
+      flashRun.status !== 'passed'
+    ) {
+      setFeedback({
+        title: 'Flash unavailable',
+        detail:
+          'Real flash requires a devd target, active lease, compatible artifact, and passed dry-run.',
+        tone: 'warning',
+      })
+      emitEvent('flash', 'real flash blocked before start', 'warning')
+      return
+    }
+
+    setFlashRun({ status: 'flashing', progress: 8 })
+    setFeedback({
+      title: 'Flash started',
+      detail: `${selectedArtifact.version} is being written by devd.`,
+      tone: 'warning',
+    })
+    emitEvent('flash', `${selectedArtifact.version} flash command submitted`, 'warning')
+
+    try {
+      const result = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
+        leaseId: visibleDevice.leaseId,
+        artifact: artifactToManifest(selectedArtifact),
+        dryRun: false,
+        confirm: 'FLASH',
+      })
+      setFlashRun({ status: 'flashed', progress: 100 })
+      setFeedback({
+        title: 'Flash completed',
+        detail: result.message,
+        tone: 'success',
+      })
+      emitEvent('flash', `${result.artifactId} flashed by devd`, 'success')
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Real flash failed.'
+      setFlashRun({ status: 'passed', progress: 100 })
+      setFeedback({
+        title: 'Flash blocked',
+        detail,
+        tone: 'warning',
+      })
+      emitEvent('flash', 'devd real flash failed or was blocked', 'warning')
+    }
   }
 
   const handleArtifactChange = (artifactId: string) => {
@@ -498,11 +1154,9 @@ export function ControlPlaneDemo({
             </div>
 
             <DeviceToolbar
-              devices={activeScenario.devices}
+              devices={deviceOptions}
               device={visibleDevice}
-              showDegraded={showDegraded}
               onDeviceChange={handleDeviceChange}
-              onToggleDegraded={handleToggleDegraded}
             />
           </header>
 
@@ -528,14 +1182,25 @@ export function ControlPlaneDemo({
             })}
           </nav>
 
-          <div className="industrial-console__workspace">
+          <div
+            className={
+              isDeviceAddFlowActive
+                ? 'industrial-console__workspace industrial-console__workspace--selection'
+                : 'industrial-console__workspace'
+            }
+          >
             <section className="industrial-panel industrial-console__main">
               <ViewPanel
                 view={activeView}
                 device={visibleDevice}
+                showDeviceSelection={showDeviceSelection}
+                knownDevices={knownDevices}
+                allowDemoControls={allowDemoControls}
+                webSerial={webSerial}
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
+                fanPolicyValue={visibleFanPolicy}
                 flashPhases={visibleFlashPhases}
                 artifacts={activeScenario.artifacts}
                 artifact={selectedArtifact}
@@ -548,15 +1213,15 @@ export function ControlPlaneDemo({
                 onFanPolicyChange={handleFanPolicyChange}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onArtifactChange={handleArtifactChange}
+                onDeviceSelect={handleDeviceChange}
+                onQuickAddDevice={handleQuickAddDevice}
+                onAddDevice={handleAddDevice}
                 onStartDryRun={handleStartDryRun}
+                onStartFlash={handleStartFlash}
               />
             </section>
 
-            <GlobalLogPanel
-              events={visibleEvents}
-              quiet={activeView !== 'dashboard'}
-              currentView={activeView}
-            />
+            {isDeviceAddFlowActive ? null : <GlobalLogPanel events={visibleEvents} />}
           </div>
         </section>
       </div>
@@ -564,7 +1229,7 @@ export function ControlPlaneDemo({
   )
 }
 
-function createLiveEventFeed(events: EventLogEntry[], tick: number) {
+function createDemoEventFeed(events: EventLogEntry[], tick: number) {
   if (events.length === 0) {
     return []
   }
@@ -599,7 +1264,14 @@ function createFlashPhases(
   device: DeviceTarget,
   flashRun: { status: FlashRunStatus; progress: number }
 ) {
-  const blocked = !artifact || artifact.compatibility === 'blocked' || device.severity === 'offline'
+  const missingFlashCapability = !device.capabilities.includes('flash')
+  const leaseBlocked = device.leaseState === 'conflict' || device.leaseState === 'expired'
+  const blocked =
+    !artifact ||
+    artifact.compatibility === 'blocked' ||
+    device.severity === 'offline' ||
+    missingFlashCapability ||
+    leaseBlocked
   const warning = artifact?.compatibility === 'warning' || device.severity === 'warning'
 
   if (blocked) {
@@ -611,7 +1283,11 @@ function createFlashPhases(
         index === 2
           ? device.severity === 'offline'
             ? 'Target is offline.'
-            : 'Selected artifact does not match this device.'
+            : leaseBlocked
+              ? 'USB lease is not available for this target.'
+              : missingFlashCapability
+                ? 'Active transport does not expose flash capability.'
+                : 'Selected artifact does not match this device.'
           : phase.detail,
     }))
   }
@@ -656,12 +1332,77 @@ function dryRunPhaseState(index: number, progress: number): WorkflowPhase['state
   return index < 3 ? 'done' : 'active'
 }
 
+function deviceControlBlockReason(device: DeviceTarget) {
+  if (device.severity === 'offline') {
+    return 'Target is offline.'
+  }
+
+  const networkState = device.networkState
+  if (networkState && BLOCKED_NETWORK_STATES.has(networkState)) {
+    return device.transportIssue ?? 'Device control is blocked until the transport recovers.'
+  }
+
+  return null
+}
+
+function isNoLiveTargetDevice(device: DeviceTarget) {
+  return device.id === NO_LIVE_TARGET_ID
+}
+
+function isKnownDeviceChoice(device: DeviceTarget) {
+  return !isNoLiveTargetDevice(device) && !isDirectWebSerialDevice(device)
+}
+
+function isPendingDeviceChoice(device: DeviceTarget) {
+  return device.id.startsWith('pending-')
+}
+
+function isLiveRuntimeDevice(device: Pick<DeviceTarget, 'transport' | 'baseUrl'>) {
+  return device.transport === 'devd' || isDirectWebSerialDevice(device)
+}
+
+function clampPresetIndex(value: number | undefined) {
+  if (!Number.isFinite(value)) {
+    return 3
+  }
+  return Math.min(PRESET_SLOT_IDS.length - 1, Math.max(0, Math.trunc(value ?? 3)))
+}
+
+function normalizePresets(presets: Array<number | null> | undefined) {
+  if (!presets || presets.length !== PRESET_SLOT_IDS.length) {
+    return PRESETS_C
+  }
+  return presets.map((preset) => (typeof preset === 'number' ? clampTargetTemp(preset) : null))
+}
+
+function presetTempsFromValues(presets: Array<number | null>) {
+  return presets.map((preset, index) => preset ?? PRESET_TEMPS_C[index] ?? TARGET_TEMP_MIN)
+}
+
+function presetEnabledFromValues(presets: Array<number | null>) {
+  return presets.map((preset) => preset != null)
+}
+
+function presetValuesFromEditorState(presetTemps: number[], presetEnabled: boolean[]) {
+  return PRESET_SLOT_IDS.map((_, index) =>
+    presetEnabled[index] ? (presetTemps[index] ?? PRESET_TEMPS_C[index] ?? TARGET_TEMP_MIN) : null
+  )
+}
+
+function fanPolicyFromDevice(device: DeviceTarget): DeviceTarget['fanState'] {
+  return device.activeCoolingEnabled ? 'AUTO' : 'OFF'
+}
+
 function formatTemp(value: number) {
-  if (value <= 0) {
+  if (value < 0) {
     return 'N/A'
   }
 
   return `${formatTempNumber(value)}℃`
+}
+
+function formatPresetTemp(value: number, enabled: boolean) {
+  return enabled ? `${formatTempNumber(value)}℃` : '---'
 }
 
 function formatTempNumber(value: number) {
@@ -678,6 +1419,21 @@ function formatVolts(millivolts: number) {
   }
 
   return `${(millivolts / 1000).toFixed(millivolts % 1000 === 0 ? 0 : 1)}V`
+}
+
+function formatAmps(milliamps: number) {
+  if (milliamps <= 0) {
+    return 'N/A'
+  }
+
+  return `${(milliamps / 1000).toFixed(1)}A`
+}
+
+function formatPdContract(millivolts: number, milliamps: number) {
+  const volts = formatVolts(millivolts)
+  const amps = formatAmps(milliamps)
+
+  return amps === 'N/A' ? volts : `${volts} / ${amps}`
 }
 
 function pdStateLabel(state: DeviceTarget['pdState']) {
@@ -708,52 +1464,46 @@ function temperatureBand(tempC: number) {
   return 'cool'
 }
 
-function DeviceToolbar({
+export function DeviceToolbar({
   devices,
   device,
-  showDegraded,
   onDeviceChange,
-  onToggleDegraded,
 }: {
   devices: DeviceTarget[]
   device: DeviceTarget
-  showDegraded: boolean
   onDeviceChange: (deviceId: string) => void
-  onToggleDegraded: () => void
 }) {
   return (
     <section className="industrial-status-strip" aria-label="Current target">
       <div className="industrial-target-picker">
-        <label htmlFor="control-plane-target" className="sr-only">
-          Target
-        </label>
-        <select
-          id="control-plane-target"
-          name="controlPlaneTarget"
-          className="industrial-device-select"
-          value={device.id}
-          onChange={(event) => onDeviceChange(event.target.value)}
-        >
-          {devices.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.alias} / {transportLabels[item.transport]}
-            </option>
-          ))}
-        </select>
+        <Select value={device.id} onValueChange={onDeviceChange}>
+          <SelectTrigger
+            aria-label="Target"
+            className="industrial-device-select industrial-radix-select"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent className="industrial-select-content">
+            {devices.map((item) => (
+              <SelectItem key={item.id} value={item.id} className="industrial-select-item">
+                {item.alias} / {transportLabels[item.transport]}
+              </SelectItem>
+            ))}
+            <SelectSeparator className="industrial-select-separator" />
+            <SelectItem
+              value={ADD_DEVICE_VALUE}
+              className="industrial-select-item industrial-select-item--add"
+            >
+              Add device
+            </SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <StatusDatum label="Transport" value={transportLabels[device.transport]} />
+      <StatusDatum label="Lease" value={device.leaseState?.toUpperCase() ?? 'N/A'} />
       <StatusDatum label="Plate" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
-
-      <button
-        type="button"
-        className="industrial-button industrial-button--secondary industrial-status-strip__button"
-        onClick={onToggleDegraded}
-      >
-        <RefreshCw size={16} aria-hidden="true" />
-        {showDegraded ? 'Nominal' : 'Degrade'}
-      </button>
     </section>
   )
 }
@@ -761,9 +1511,14 @@ function DeviceToolbar({
 function ViewPanel({
   view,
   device,
+  showDeviceSelection,
+  knownDevices,
+  allowDemoControls,
+  webSerial,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
+  fanPolicyValue,
   flashPhases,
   artifacts,
   artifact,
@@ -776,31 +1531,69 @@ function ViewPanel({
   onFanPolicyChange,
   onHeaterHoldToggle,
   onArtifactChange,
+  onDeviceSelect,
+  onQuickAddDevice,
+  onAddDevice,
   onStartDryRun,
+  onStartFlash,
 }: {
   view: ConsoleView
   device: DeviceTarget
+  showDeviceSelection: boolean
+  knownDevices: DeviceTarget[]
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
+  fanPolicyValue: DeviceTarget['fanState']
   flashPhases: WorkflowPhase[]
   artifacts: FirmwareArtifact[]
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
   flashRun: { status: FlashRunStatus; progress: number }
   onTargetTempChange: (nextTargetTemp: number) => void
-  onPresetSlotChange: (presetIndex: number) => void
-  onPresetTempChange: (nextTempC: number) => void
-  onPresetEnabledChange: (nextEnabled: boolean) => void
+  onPresetSlotChange: (presetIndex: number) => void | Promise<void>
+  onPresetTempChange: (nextTempC: number) => void | Promise<void>
+  onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
   onHeaterHoldToggle: () => void
   onArtifactChange: (artifactId: string) => void
+  onDeviceSelect: (deviceId: string) => void
+  onQuickAddDevice: (kind: AddDeviceKind) => void
+  onAddDevice: (kind: AddDeviceKind) => void
   onStartDryRun: () => void
+  onStartFlash: () => void
 }) {
+  if (showDeviceSelection) {
+    return (
+      <DeviceSelectionView
+        knownDevices={knownDevices}
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        feedback={feedback}
+        onDeviceSelect={onDeviceSelect}
+        onAddDevice={onQuickAddDevice}
+      />
+    )
+  }
+
+  if (view === 'add-device') {
+    return (
+      <AddDeviceView
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        feedback={feedback}
+        onAddDevice={onAddDevice}
+      />
+    )
+  }
+
   if (view === 'settings') {
     return (
       <SettingsView
         device={device}
+        fanPolicyValue={fanPolicyValue}
         selectedPresetIndex={selectedPresetIndex}
         presetTemps={presetTemps}
         presetEnabled={presetEnabled}
@@ -824,6 +1617,7 @@ function ViewPanel({
         flashRun={flashRun}
         onArtifactChange={onArtifactChange}
         onStartDryRun={onStartDryRun}
+        onStartFlash={onStartFlash}
       />
     )
   }
@@ -836,6 +1630,135 @@ function ViewPanel({
       onTargetTempChange={onTargetTempChange}
       onHeaterHoldToggle={onHeaterHoldToggle}
     />
+  )
+}
+
+function DeviceSelectionView({
+  knownDevices,
+  allowDemoControls,
+  webSerial,
+  feedback,
+  onDeviceSelect,
+  onAddDevice,
+}: {
+  knownDevices: DeviceTarget[]
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  feedback: ActionFeedback
+  onDeviceSelect: (deviceId: string) => void
+  onAddDevice: (kind: AddDeviceKind) => void
+}) {
+  return (
+    <div className="industrial-view-panel industrial-device-select-view">
+      <PanelHeader kicker="Device" title="Choose target" />
+      <section className="industrial-device-select-section" aria-label="Known devices">
+        {knownDevices.length > 0 ? (
+          <div className="industrial-known-device-grid">
+            {knownDevices.map((device) => (
+              <button
+                key={device.id}
+                type="button"
+                className="industrial-known-device-card"
+                onClick={() => onDeviceSelect(device.id)}
+              >
+                <span>
+                  <strong>{device.alias}</strong>
+                  <small>{device.location}</small>
+                </span>
+                <em>{transportLabels[device.transport]}</em>
+                <b>{severityLabels[device.severity]}</b>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="industrial-empty-device-grid">
+            <strong>No known devices</strong>
+            <span>Connect a new target from one of the options below.</span>
+          </div>
+        )}
+      </section>
+
+      <hr className="industrial-device-select-divider" />
+
+      <section className="industrial-device-select-section" aria-label="Add device">
+        <AddDeviceChoices
+          allowDemoControls={allowDemoControls}
+          webSerial={webSerial}
+          onAddDevice={onAddDevice}
+        />
+      </section>
+
+      <ActionFeedbackPanel feedback={feedback} />
+    </div>
+  )
+}
+
+function AddDeviceView({
+  allowDemoControls,
+  webSerial,
+  feedback,
+  onAddDevice,
+}: {
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  feedback: ActionFeedback
+  onAddDevice: (kind: AddDeviceKind) => void
+}) {
+  return (
+    <div className="industrial-view-panel">
+      <PanelHeader kicker="Add device" title="Choose connection" />
+      <AddDeviceChoices
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        onAddDevice={onAddDevice}
+      />
+      <ActionFeedbackPanel feedback={feedback} />
+    </div>
+  )
+}
+
+function AddDeviceChoices({
+  allowDemoControls,
+  webSerial,
+  onAddDevice,
+}: {
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  onAddDevice: (kind: AddDeviceKind) => void
+}) {
+  const webSerialDisabled =
+    !allowDemoControls &&
+    (webSerial.state === 'unsupported' ||
+      webSerial.state === 'connecting' ||
+      webSerial.state === 'connected')
+
+  return (
+    <div className="industrial-add-device-grid">
+      {addDeviceOptions.map((item) => {
+        const disabled = item.kind === 'web-serial' && webSerialDisabled
+        const label =
+          item.kind === 'web-serial' && webSerial.state === 'connecting'
+            ? 'Web Serial (connecting)'
+            : item.kind === 'web-serial' && webSerial.state === 'connected'
+              ? 'Web Serial connected'
+              : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
+                ? 'Web Serial unavailable'
+                : item.label
+
+        return (
+          <button
+            key={item.kind}
+            type="button"
+            className="industrial-add-device-option"
+            disabled={disabled}
+            onClick={() => onAddDevice(item.kind)}
+          >
+            <span>{label}</span>
+            <small>{item.detail}</small>
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
@@ -885,7 +1808,7 @@ function DashboardView({
         <div className="industrial-signal-stack">
           <StatusCard
             label="PD contract"
-            value={formatVolts(device.pdContractMv)}
+            value={formatPdContract(device.pdContractMv, device.currentMa)}
             detail={`${formatVolts(device.pdRequestMv)} requested / ${pdStateLabel(device.pdState)}`}
           />
           <StatusCard
@@ -905,6 +1828,7 @@ function DashboardView({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
+          disabled={device.severity === 'offline'}
           onClick={onHeaterHoldToggle}
         >
           <Power size={16} aria-hidden="true" />
@@ -912,6 +1836,7 @@ function DashboardView({
         </button>
         <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
       </div>
+      <CapabilityStrip device={device} />
       <ActionFeedbackPanel feedback={feedback} />
     </div>
   )
@@ -1005,10 +1930,6 @@ function RuntimeMiniStatus({
         <strong>{heaterState}</strong>
       </div>
       <span>
-        <Zap size={14} aria-hidden="true" />
-        {device.currentMa}mA
-      </span>
-      <span>
         <Fan size={14} aria-hidden="true" />
         {device.fanState}
       </span>
@@ -1017,8 +1938,32 @@ function RuntimeMiniStatus({
   )
 }
 
+function CapabilityStrip({ device }: { device: DeviceTarget }) {
+  const capabilities = [
+    ['status', 'Status'],
+    ['monitor', 'Monitor'],
+    ['flash', 'Flash'],
+  ] as const
+
+  return (
+    <section className="industrial-capability-strip" aria-label="Transport capabilities">
+      {capabilities.map(([capability, label]) => (
+        <span
+          key={capability}
+          className={device.capabilities.includes(capability) ? 'is-enabled' : 'is-disabled'}
+        >
+          {label}
+        </span>
+      ))}
+      <strong>{device.networkState ?? 'unknown'}</strong>
+      {device.transportIssue ? <em>{device.transportIssue}</em> : null}
+    </section>
+  )
+}
+
 function SettingsView({
   device,
+  fanPolicyValue,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
@@ -1029,13 +1974,14 @@ function SettingsView({
   onFanPolicyChange,
 }: {
   device: DeviceTarget
+  fanPolicyValue: DeviceTarget['fanState']
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
   feedback: ActionFeedback
-  onPresetSlotChange: (presetIndex: number) => void
-  onPresetTempChange: (nextTempC: number) => void
-  onPresetEnabledChange: (nextEnabled: boolean) => void
+  onPresetSlotChange: (presetIndex: number) => void | Promise<void>
+  onPresetTempChange: (nextTempC: number) => void | Promise<void>
+  onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
 }) {
   return (
@@ -1051,7 +1997,10 @@ function SettingsView({
             <div>
               <span>M{selectedPresetIndex + 1}</span>
               <small>
-                {formatTemp(presetTemps[selectedPresetIndex])}{' '}
+                {formatPresetTemp(
+                  presetTemps[selectedPresetIndex],
+                  presetEnabled[selectedPresetIndex] ?? true
+                )}{' '}
                 {presetEnabled[selectedPresetIndex] ? 'enabled' : 'disabled'}
               </small>
             </div>
@@ -1075,7 +2024,7 @@ function SettingsView({
           <div className="industrial-settings-grid industrial-settings-grid--controls">
             <SegmentedSetting
               label="Fan policy"
-              value={device.fanState}
+              value={fanPolicyValue}
               onChange={onFanPolicyChange}
               hideLabel
             />
@@ -1098,14 +2047,14 @@ function PresetTemperatureEditor({
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
-  onPresetSlotChange: (presetIndex: number) => void
-  onPresetTempChange: (nextTempC: number) => void
-  onPresetEnabledChange: (nextEnabled: boolean) => void
+  onPresetSlotChange: (presetIndex: number) => void | Promise<void>
+  onPresetTempChange: (nextTempC: number) => void | Promise<void>
+  onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
 }) {
   const selectedTemp = presetTemps[selectedPresetIndex] ?? PRESET_TEMPS_C[selectedPresetIndex]
   const selectedEnabled = presetEnabled[selectedPresetIndex] ?? true
   const [draftTemp, setDraftTemp] = useState(selectedTemp)
-  const draftIsDirty = clampTargetTemp(draftTemp) !== selectedTemp
+  const draftIsDirty = selectedEnabled && clampTargetTemp(draftTemp) !== selectedTemp
 
   useEffect(() => {
     setDraftTemp(selectedTemp)
@@ -1119,7 +2068,7 @@ function PresetTemperatureEditor({
     }
 
     const timer = window.setTimeout(() => {
-      onPresetTempChange(clampedDraftTemp)
+      void onPresetTempChange(clampedDraftTemp)
     }, PRESET_COMMIT_DEBOUNCE_MS)
 
     return () => window.clearTimeout(timer)
@@ -1145,11 +2094,11 @@ function PresetTemperatureEditor({
                 ' '
               )}
               aria-pressed={isSelected}
-              aria-label={`${slotId} ${formatTemp(tempC)} ${isEnabled ? 'enabled' : 'disabled'}`}
-              onClick={() => onPresetSlotChange(index)}
+              aria-label={`${slotId} ${formatPresetTemp(tempC, isEnabled)} ${isEnabled ? 'enabled' : 'disabled'}`}
+              onClick={() => void onPresetSlotChange(index)}
             >
               <strong>{slotId}</strong>
-              <span>{formatTemp(tempC)}</span>
+              <span>{formatPresetTemp(tempC, isEnabled)}</span>
               {!isEnabled ? <small>OFF</small> : null}
             </button>
           )
@@ -1161,9 +2110,9 @@ function PresetTemperatureEditor({
           <p className="sr-only">Selected slot</p>
           <strong>
             M{selectedPresetIndex + 1}
-            <span>{formatTemp(selectedTemp)}</span>
+            <span>{formatPresetTemp(selectedTemp, selectedEnabled)}</span>
           </strong>
-          <small>{draftIsDirty ? 'Saving...' : 'Autosaved'}</small>
+          <small>{selectedEnabled ? (draftIsDirty ? 'Saving...' : 'Autosaved') : 'Disabled'}</small>
         </div>
         <TargetTempControl
           label="Preset temp"
@@ -1171,6 +2120,7 @@ function PresetTemperatureEditor({
           inputId="preset-temperature"
           inputName="presetTemperature"
           value={draftTemp}
+          disabled={!selectedEnabled}
           onChange={handleDraftTempChange}
         />
         <div className="industrial-preset-switch">
@@ -1185,7 +2135,7 @@ function PresetTemperatureEditor({
               size="industrial"
               className="industrial-preset-switch__control"
               aria-label={`Preset M${selectedPresetIndex + 1}`}
-              onCheckedChange={onPresetEnabledChange}
+              onCheckedChange={(checked) => void onPresetEnabledChange(checked)}
             />
             <span aria-hidden="true">ON</span>
           </span>
@@ -1204,6 +2154,7 @@ function UpdateView({
   flashRun,
   onArtifactChange,
   onStartDryRun,
+  onStartFlash,
 }: {
   device: DeviceTarget
   artifacts: FirmwareArtifact[]
@@ -1213,13 +2164,25 @@ function UpdateView({
   flashRun: { status: FlashRunStatus; progress: number }
   onArtifactChange: (artifactId: string) => void
   onStartDryRun: () => void
+  onStartFlash: () => void
 }) {
   const blockedPhase = flashPhases.find((phase) => phase.state === 'blocked')
   const activePhase = flashPhases.find((phase) => phase.state === 'active') ?? flashPhases[0]
   const currentProgress =
     flashRun.status === 'idle' ? (artifact?.progressPercent ?? 0) : flashRun.progress
   const isBlocked =
-    device.severity === 'offline' || artifact?.compatibility === 'blocked' || Boolean(blockedPhase)
+    device.severity === 'offline' ||
+    artifact?.compatibility === 'blocked' ||
+    Boolean(blockedPhase) ||
+    !device.capabilities.includes('flash') ||
+    device.leaseState === 'conflict' ||
+    device.leaseState === 'expired'
+  const isBusy = flashRun.status === 'running' || flashRun.status === 'flashing'
+  const canFlash =
+    flashRun.status === 'passed' &&
+    device.transport === 'devd' &&
+    !isBlocked &&
+    Boolean(device.leaseId)
   const verdict = isBlocked
     ? {
         tone: 'danger',
@@ -1227,25 +2190,46 @@ function UpdateView({
         detail:
           device.severity === 'offline'
             ? 'Target is offline.'
-            : (blockedPhase?.detail ?? 'Selected firmware does not match this target.'),
+            : device.leaseState === 'conflict'
+              ? 'Another client owns the USB lease.'
+              : !device.capabilities.includes('flash')
+                ? 'This transport does not expose flash capability.'
+                : (blockedPhase?.detail ?? 'Selected firmware does not match this target.'),
       }
-    : flashRun.status === 'passed'
+    : flashRun.status === 'flashed'
       ? {
           tone: 'safe',
-          title: 'Check passed',
-          detail: `${artifact?.version ?? 'Artifact'} matches the dry-check contract.`,
+          title: 'Flash complete',
+          detail: `${artifact?.version ?? 'Artifact'} was written by devd.`,
         }
-      : artifact?.compatibility === 'warning'
+      : flashRun.status === 'flashing'
         ? {
             tone: 'warning',
-            title: 'Check recommended',
-            detail: `${artifact.version} can be checked, but the profile differs from the active runtime.`,
+            title: 'Writing firmware',
+            detail: `${artifact?.version ?? 'Artifact'} is being written by devd.`,
           }
-        : {
-            tone: 'safe',
-            title: 'Ready to check',
-            detail: `${activePhase?.label ?? 'Dry-run'} can run without changing firmware.`,
-          }
+        : flashRun.status === 'passed'
+          ? {
+              tone: 'safe',
+              title: 'Check passed',
+              detail: `${artifact?.version ?? 'Artifact'} is verified and ready for guarded flash.`,
+            }
+          : artifact?.compatibility === 'warning'
+            ? {
+                tone: 'warning',
+                title: 'Check recommended',
+                detail: `${artifact.version} can be checked, but the profile differs from the active runtime.`,
+              }
+            : {
+                tone: 'safe',
+                title: 'Ready to check',
+                detail: `${activePhase?.label ?? 'Dry-run'} can run without changing firmware.`,
+              }
+
+  const recoveryNote =
+    deviceControlBlockReason(device) && !isBlocked
+      ? 'Serial control is degraded; firmware recovery remains available through devd flash.'
+      : null
 
   return (
     <div className="industrial-view-panel">
@@ -1261,21 +2245,25 @@ function UpdateView({
       <div className="industrial-update-grid">
         <div className="industrial-artifact industrial-artifact--compact">
           <p className="industrial-label">Artifact</p>
-          <select
-            className="industrial-artifact-select"
-            value={artifact?.id ?? ''}
-            aria-label="Firmware artifact"
-            disabled={flashRun.status === 'running'}
-            onChange={(event) => onArtifactChange(event.currentTarget.value)}
-          >
-            {artifacts.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.version} · {item.profile}
-              </option>
-            ))}
-          </select>
+          <Select value={artifact?.id} onValueChange={onArtifactChange}>
+            <SelectTrigger
+              aria-label="Firmware artifact"
+              className="industrial-artifact-select industrial-radix-select"
+              disabled={isBusy || artifacts.length === 0}
+            >
+              <SelectValue placeholder="No firmware artifact" />
+            </SelectTrigger>
+            <SelectContent className="industrial-select-content">
+              {artifacts.map((item) => (
+                <SelectItem key={item.id} value={item.id} className="industrial-select-item">
+                  {item.version} · {item.profile}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <p className="industrial-mono text-xs">
-            {artifact?.target ?? 'target unknown'} · {artifact?.hash ?? 'hash unavailable'}
+            {artifact?.target ?? 'target unknown'} · {artifact?.protocol ?? 'protocol unknown'} ·{' '}
+            {artifact?.hash ?? 'hash unavailable'}
           </p>
           <div
             className="industrial-progress"
@@ -1294,19 +2282,29 @@ function UpdateView({
         </div>
         <CompactPhase label="Dry-run" phases={flashPhases} />
       </div>
+      {recoveryNote ? <p className="industrial-mono text-xs">{recoveryNote}</p> : null}
       <div className="industrial-command-row">
         <button
           type="button"
           className="industrial-button industrial-button--primary"
-          disabled={flashRun.status === 'running' || isBlocked}
+          disabled={isBusy || isBlocked}
           onClick={onStartDryRun}
         >
           <Upload size={16} aria-hidden="true" />
-          {flashRun.status === 'running'
-            ? 'Checking'
-            : flashRun.status === 'passed'
-              ? 'Run again'
-              : 'Run dry-check'}
+          {flashRun.status === 'running' ? 'Checking' : 'Run dry-check'}
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={!canFlash || isBusy}
+          onClick={onStartFlash}
+        >
+          <Zap size={16} aria-hidden="true" />
+          {flashRun.status === 'flashing'
+            ? 'Flashing'
+            : flashRun.status === 'flashed'
+              ? 'Flashed'
+              : 'Flash'}
         </button>
       </div>
       <ActionFeedbackPanel feedback={feedback} />
@@ -1314,29 +2312,26 @@ function UpdateView({
   )
 }
 
-function GlobalLogPanel({
-  events,
-  quiet = false,
-  currentView = 'dashboard',
-}: {
-  events: EventLogEntry[]
-  quiet?: boolean
-  currentView?: ConsoleView
-}) {
+function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
   const [followTail, setFollowTail] = useState(false)
+  const [logFilter, setLogFilter] = useState<LogFilter>('all')
+  const filteredEvents = useMemo(
+    () => (logFilter === 'all' ? events : events.filter((event) => event.tone === logFilter)),
+    [events, logFilter]
+  )
   const rowVirtualizer = useVirtualizer({
-    count: events.length,
+    count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
-    estimateSize: () => 72,
+    estimateSize: () => 112,
     overscan: 8,
   })
 
   useLayoutEffect(() => {
     if (followTail) {
-      rowVirtualizer.scrollToIndex(events.length - 1, { align: 'end' })
+      rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
     }
-  }, [events.length, followTail, rowVirtualizer])
+  }, [filteredEvents.length, followTail, rowVirtualizer])
 
   const handleLogScroll = () => {
     const scrollElement = scrollableNodeRef.current
@@ -1359,7 +2354,7 @@ function GlobalLogPanel({
 
       if (next) {
         window.requestAnimationFrame(() => {
-          rowVirtualizer.scrollToIndex(events.length - 1, { align: 'end' })
+          rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
         })
       }
 
@@ -1368,36 +2363,33 @@ function GlobalLogPanel({
   }
 
   const virtualItems = rowVirtualizer.getVirtualItems()
-  const latestEvent = events[0]
 
   return (
-    <aside
-      className={
-        quiet
-          ? 'industrial-panel industrial-log-panel is-quiet'
-          : 'industrial-panel industrial-log-panel'
-      }
-      aria-label="Global log"
-    >
-      {quiet ? (
-        <div className="industrial-log-quiet-card">
-          <p className="industrial-label">Trace</p>
-          <strong>{events.length} frames</strong>
-          <span>
-            {currentView === 'settings' ? 'Settings' : 'Update'} · {latestEvent?.time ?? '--:--:--'}
-          </span>
-        </div>
-      ) : null}
+    <aside className="industrial-panel industrial-log-panel" aria-label="Global log">
       <div className="industrial-log-panel__header">
         <div>
           <p className="industrial-label text-[#a8b2d1]">Global log</p>
           <h2>Runtime trace</h2>
         </div>
+        <fieldset className="industrial-log-filters">
+          <legend className="sr-only">Log level filter</legend>
+          {LOG_FILTER_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={option.value === logFilter ? 'is-selected' : ''}
+              aria-pressed={option.value === logFilter}
+              onClick={() => setLogFilter(option.value)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </fieldset>
       </div>
       <div className="industrial-log-panel__summary">
-        <span>{events[0]?.time}</span>
-        <strong>{events[0]?.source ?? 'trace'}</strong>
-        <p>{events[0]?.message ?? 'No trace frames'}</p>
+        <span>{filteredEvents[0]?.time}</span>
+        <strong>{filteredEvents[0]?.source ?? 'trace'}</strong>
+        <p>{filteredEvents[0]?.message ?? 'No trace frames'}</p>
       </div>
       <SimpleBar
         autoHide
@@ -1419,12 +2411,15 @@ function GlobalLogPanel({
           <ToggleRight size={16} aria-hidden="true" />
           {followTail ? 'Following tail' : 'Follow tail'}
         </button>
+        <div className="industrial-log-count" aria-live="polite">
+          {filteredEvents.length} / {events.length} frames
+        </div>
         <div
           className="industrial-log-virtual-space"
           style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
         >
           {virtualItems.map((virtualItem) => {
-            const event = events[virtualItem.index]
+            const event = filteredEvents[virtualItem.index]
 
             if (!event) {
               return null
@@ -1441,7 +2436,10 @@ function GlobalLogPanel({
               >
                 <span>{event.time}</span>
                 <strong>{event.source}</strong>
-                <p>{event.message}</p>
+                <p>
+                  {event.message}
+                  {event.detail ? <code>{event.detail}</code> : null}
+                </p>
               </div>
             )
           })}
@@ -1488,7 +2486,7 @@ function SegmentedSetting({
   onChange: (fanState: DeviceTarget['fanState']) => void
   hideLabel?: boolean
 }) {
-  const options: DeviceTarget['fanState'][] = ['OFF', 'AUTO', 'RUN']
+  const options: Array<Exclude<DeviceTarget['fanState'], 'RUN'>> = ['OFF', 'AUTO']
 
   return (
     <fieldset className="industrial-setting-control industrial-segmented-setting">
@@ -1562,15 +2560,6 @@ function PanelHeader({ kicker, title }: { kicker: string; title: string }) {
         <h2>{title}</h2>
       </div>
     </header>
-  )
-}
-
-export function ControlPlaneDemoGallery() {
-  return (
-    <div className="grid gap-8 bg-[var(--industrial-bg)] p-6">
-      <ControlPlaneDemo />
-      <ControlPlaneDemo scenario={degradedControlPlaneScenario} />
-    </div>
   )
 }
 

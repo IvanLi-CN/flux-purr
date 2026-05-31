@@ -8,20 +8,20 @@
 
 ## 背景 / 问题陈述
 
-Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失败通知，但发布触发仍由 `push` 到 `main` 后即时读取 PR 标签决定，缺少主线验证后的不可变发布意图快照。主分支保护所需的检查项也没有 repo-local 声明，GitHub UI 配置与仓库配置容易漂移。
+Flux Purr 使用 PR label gate、product release workflow 和 release 失败通知。发布触发由 `CI Main` 成功后的不可变 release snapshot 决定，避免 `push` 到 `main` 后重新读取可变 PR 标签。主分支保护所需的检查项由 repo-local 声明约束，避免 GitHub UI 配置与仓库配置漂移。
 
 ## 目标 / 非目标
 
 ### Goals
 
 - PR 合入前必须具备确定的发布标签意图。
-- `main` 上每个 pushed SHA 完成非抢占式 CI 验证后，才允许 Web/Firmware 发布 workflow 执行。
+- `main` 上每个 pushed SHA 完成非抢占式 CI 验证后，才允许 product release workflow 执行。
 - 发布 workflow 从不可变快照读取发布意图，而不是重新猜测可变 PR 标签。
 - 仓库声明主分支保护、签名提交和 required checks 的期望状态。
 
 ### Non-goals
 
-- 不改变 Web 与 Firmware 当前产物类型。
+- 不改变 PR 标签作为发布意图的输入模型。
 - 不把 release 失败 Telegram 告警替换为新的通知系统。
 - 不在代码中绕过 GitHub 原生 branch protection；仓库 owner 创建的 PR 不要求额外 approval。
 
@@ -30,7 +30,7 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 ### In scope
 
 - `type:*` 与 `channel:*` PR 标签规则。
-- `CI PR`、`CI Main`、`Release Web`、`Release Firmware` 的触发关系。
+- `CI PR`、`CI Main`、`Release Product` 的触发关系。
 - `refs/notes/release-snapshots` 中的 release snapshot。
 - `.github/quality-gates.json` 作为分支保护声明。
 - README 中的人类操作说明。
@@ -48,16 +48,16 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 - 每个 PR 必须恰好有一个 `type:*` 标签：`type:patch`、`type:minor`、`type:major`、`type:docs`、`type:skip`。
 - 每个 PR 必须恰好有一个 `channel:*` 标签：`channel:stable`、`channel:rc`。
 - 未知、缺失或重复的 release intent 标签必须让 label gate 失败。
-- `type:docs` 与 `type:skip` 必须禁止 Web 和 Firmware 发布。
-- `type:patch|minor|major` 必须同时驱动 Web 和 Firmware 发布。
+- `type:docs` 与 `type:skip` 必须禁止 product release 发布。
+- `type:patch|minor|major` 必须驱动单一 product release 发布。
 - 发布 workflow 必须只在 `CI Main` 成功后或显式手动 backfill 时读取 release snapshot。
 - 主分支 required checks 必须至少包含 `Validate PR labels`、`Firmware checks`、`Web checks`。
 
 ### SHOULD
 
-- 版本计算优先基于已有同类稳定 tag 的最大 semver，再应用 PR 标签中的 bump level。
-- Stable tag 使用 `web/vX.Y.Z` 与 `fw/vX.Y.Z`。
-- RC tag 使用 `web/vX.Y.Z-rc.<sha7>` 与 `fw/vX.Y.Z-rc.<sha7>`。
+- 版本计算优先基于已有 product 稳定 tag 的最大 semver，再应用 PR 标签中的 bump level。
+- Stable tag 使用 `vX.Y.Z`。
+- RC tag 使用 `vX.Y.Z-rc.<sha7>`。
 - Release snapshot 写入应保持幂等，已有 snapshot 不应被后续 PR 标签变更覆盖。
 
 ## 功能与行为规格（Functional / Behavior Spec）
@@ -70,7 +70,7 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 - 合入 `main` 后，`CI Main` 以目标 SHA 隔离并以非抢占方式重新运行 firmware 和 web 检查。
 - Release workflow 以目标 commit 作为并发隔离键，避免不同 `main` commit 的 pending release run 互相替换。
 - `CI Main` 通过后，`Release Snapshot` 根据合入 commit 关联的唯一 PR 读取对应 PR head SHA 的冻结 marker，并把发布意图写入 git notes。
-- `Release Web` 与 `Release Firmware` 由 push 事件产生且成功的 `CI Main` 触发，读取对应 commit 的 snapshot 后决定发布或跳过。
+- `Release Product` 由 push 事件产生且成功的 `CI Main` 触发，读取对应 commit 的 snapshot 后决定发布或跳过。
 - 手动 backfill 必须显式提供 `main` 上的 commit SHA，并读取已有 snapshot。
 
 ### Edge cases / errors
@@ -98,7 +98,7 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 - Given 一个含 `type:patch` + `channel:stable` 的 PR event，When 执行 label gate，Then 检查通过。
 - Given 缺失、重复或未知 release intent 标签，When 执行 label gate，Then 检查失败。
 - Given `type:docs` 或 `type:skip`，When 导出 release snapshot，Then `release_enabled=false`。
-- Given `Release Web` 或 `Release Firmware` 被 `workflow_run` 触发，When 对应 `CI Main` 失败，Then release job 不发布。
+- Given `Release Product` 被 `workflow_run` 触发，When 对应 `CI Main` 失败，Then release job 不发布。
 - Given `.github/quality-gates.json`，When 执行质量门禁校验，Then required checks 能映射到 repo-local workflow job。
 
 ## 非功能性验收 / 质量门槛
@@ -127,4 +127,4 @@ Flux Purr 已具备 PR label gate、Web/Firmware 发布 workflow 和 release 失
 ## 假设
 
 - `main` 是默认保护分支。
-- 维护者希望 Web 与 Firmware 对同一个 release intent 同步发布或同步跳过。
+- 维护者希望 Web、Firmware 与 host-tools 对同一个 release intent 同步挂到单一 product Release。

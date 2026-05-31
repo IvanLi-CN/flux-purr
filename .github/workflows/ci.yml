@@ -36,6 +36,14 @@ jobs:
       - name: Firmware clippy
         run: bash scripts/check-firmware-clippy.sh
 
+      - name: Setup Xtensa toolchain
+        uses: esp-rs/xtensa-toolchain@v1.6.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          buildtargets: esp32s3
+          default: false
+
       - name: Firmware build
         run: bash scripts/check-firmware-build.sh
 
@@ -60,7 +68,7 @@ jobs:
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_snapshot.py .github/scripts/check-quality-gates.py
+          python3 -m py_compile .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py
           bash .github/scripts/test-release-labels.sh
           bash .github/scripts/test-version-scripts.sh
 

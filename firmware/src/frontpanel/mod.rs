@@ -1412,6 +1412,20 @@ mod tests {
     }
 
     #[test]
+    fn default_key_map_keeps_calibrated_left_down_swap() {
+        let key_map = FrontPanelKeyMap::default();
+
+        assert_eq!(
+            key_map.logical_from_raw(RawFrontPanelKey::Down),
+            FrontPanelKey::Left
+        );
+        assert_eq!(
+            key_map.logical_from_raw(RawFrontPanelKey::Left),
+            FrontPanelKey::Down
+        );
+    }
+
+    #[test]
     fn dashboard_center_short_toggles_heater_and_double_press_toggles_cooling_policy() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
 

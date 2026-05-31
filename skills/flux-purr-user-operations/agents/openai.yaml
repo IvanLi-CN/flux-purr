@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flux Purr User Operations"
+  short_description: "Operate released Flux Purr hardware."
+  default_prompt: "Use this skill to operate Flux Purr hardware through released CLI/devd or browser Web Serial."

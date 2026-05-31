@@ -1,0 +1,78 @@
+import type { ControlPlaneScenario } from './types'
+
+export const liveControlPlaneScenario: ControlPlaneScenario = {
+  name: 'Live hardware',
+  headline: 'Flux Purr live link',
+  subhead: 'Direct hardware control requires an explicit browser Web Serial connection.',
+  selectedDeviceId: 'live-no-target',
+  devices: [
+    {
+      id: 'live-no-target',
+      alias: 'No live target',
+      location: 'Add Web Serial',
+      transport: 'serial',
+      severity: 'offline',
+      baseUrl: 'webserial://pending',
+      firmware: 'unknown',
+      buildId: 'unknown',
+      uptime: 'disconnected',
+      boardTempC: 0,
+      currentTempC: 0,
+      targetTempC: 30,
+      voltageMv: 0,
+      currentMa: 0,
+      pdRequestMv: 0,
+      pdContractMv: 0,
+      pdState: 'fault',
+      heaterOutputPercent: 0,
+      activeCoolingEnabled: false,
+      fanState: 'OFF',
+      wifiRssi: null,
+      networkState: 'disabled',
+      leaseState: 'none',
+      transportIssue: 'No browser Web Serial port is connected.',
+      capabilities: [],
+    },
+  ],
+  metrics: [
+    {
+      label: 'Bound targets',
+      value: '00',
+      detail: 'no live device connected',
+      tone: 'warning',
+    },
+    {
+      label: 'USB link',
+      value: 'Open',
+      detail: 'operator selects the port',
+      tone: 'accent',
+    },
+    {
+      label: 'Flash gate',
+      value: 'Off',
+      detail: 'direct serial runtime only',
+      tone: 'neutral',
+    },
+    {
+      label: 'Trace buffer',
+      value: '00',
+      detail: 'waiting for live frames',
+      tone: 'neutral',
+    },
+  ],
+  wifiPhases: [],
+  flashPhases: [
+    {
+      label: 'Live target',
+      detail: 'Connect a browser Web Serial port before any runtime control.',
+      state: 'blocked',
+    },
+    {
+      label: 'Runtime only',
+      detail: 'Direct serial does not expose firmware flash operations.',
+      state: 'pending',
+    },
+  ],
+  artifacts: [],
+  events: [],
+}

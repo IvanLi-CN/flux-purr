@@ -1,6 +1,6 @@
 import type { LucideIcon } from 'lucide-react'
 
-export type TransportKind = 'http' | 'serial' | 'devd' | 'mock'
+export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
 export type DeviceSeverity = 'nominal' | 'warning' | 'offline'
 export type WorkstreamId = 'fleet' | 'connect' | 'overview' | 'wifi' | 'firmware' | 'monitor'
 
@@ -17,6 +17,8 @@ export interface DeviceTarget {
   boardTempC: number
   currentTempC: number
   targetTempC: number
+  selectedPresetIndex?: number
+  presetsC?: Array<number | null>
   voltageMv: number
   currentMa: number
   pdRequestMv: number
@@ -27,6 +29,10 @@ export interface DeviceTarget {
   fanState: 'OFF' | 'AUTO' | 'RUN'
   wifiRssi: number | null
   capabilities: string[]
+  networkState?: 'disabled' | 'idle' | 'saving' | 'connecting' | 'connected' | 'error' | 'timeout'
+  leaseState?: 'none' | 'active' | 'conflict' | 'expired'
+  leaseId?: string
+  transportIssue?: string
 }
 
 export interface ControlPlaneMetric {
@@ -50,6 +56,15 @@ export interface FirmwareArtifact {
   compatibility: 'match' | 'warning' | 'blocked'
   hash: string
   progressPercent: number
+  protocol?: string
+  features?: string[]
+  files?: Array<{
+    kind: string
+    path: string
+    sha256: string
+    size: number
+    flashAddress?: number | null
+  }>
 }
 
 export interface EventLogEntry {
@@ -57,6 +72,7 @@ export interface EventLogEntry {
   source: string
   message: string
   tone: 'info' | 'success' | 'warning' | 'danger'
+  detail?: string
 }
 
 export interface Workstream {
