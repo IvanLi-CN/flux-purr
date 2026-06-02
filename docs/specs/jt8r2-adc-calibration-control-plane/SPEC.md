@@ -178,7 +178,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration manual fit state](./assets/calibration-manual-fit.trimmed.png)
 
-`assets/calibration-layout-polish.trimmed.png` shows the flagship layout pass on the calibration header zone: the left rail is now a stable three-card status summary for live RTD, live VIN, and draft-package readiness, while package actions, heater gating, and latest feedback are grouped into a dedicated control block on the right.
+`assets/calibration-layout-polish.trimmed.png` shows the final calibration header layout: a compact four-cell status bar for live RTD, live VIN, draft package readiness, and apply state, followed by a single-row command bar for Apply, Export, and Import without explanatory copy.
 
 ![Calibration layout polish state](./assets/calibration-layout-polish.trimmed.png)
 

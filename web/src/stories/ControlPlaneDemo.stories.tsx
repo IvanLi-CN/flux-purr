@@ -117,7 +117,11 @@ export const DemoCalibrationApplyBlocked: Story = {
   args: {
     scenario: {
       ...controlPlaneScenario,
-      selectedDeviceId: 'fp-kit-02',
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? { ...device, heaterEnabled: true, heaterOutputPercent: 0 }
+          : device
+      ),
     },
     initialView: 'calibration',
     allowDemoControls: true,
@@ -131,7 +135,7 @@ export const DemoCalibrationApplyBlocked: Story = {
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
 
-    await step('heater output blocks calibration apply', async () => {
+    await step('heater enabled blocks calibration apply before output rises', async () => {
       await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: 'Apply calibration' })).toBeDisabled()
       await expect(
@@ -630,6 +634,7 @@ function createKnownDeviceSelectionScenario() {
         ppsCapabilityMaxMv: 21_000,
         ppsCapabilityMaxMa: 3_000,
         manualPpsError: null,
+        heaterEnabled: false,
         heaterOutputPercent: 0,
         activeCoolingEnabled: true,
         fanState: 'AUTO',
@@ -664,6 +669,7 @@ function createKnownDeviceSelectionScenario() {
         ppsCapabilityMaxMv: 21_000,
         ppsCapabilityMaxMa: 3_000,
         manualPpsError: null,
+        heaterEnabled: false,
         heaterOutputPercent: 0,
         activeCoolingEnabled: true,
         fanState: 'AUTO',

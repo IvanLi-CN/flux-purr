@@ -185,6 +185,7 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     pdRequestMv: 0,
     pdContractMv: 0,
     pdState: 'fault' as const,
+    heaterEnabled: false,
     heaterOutputPercent: 0,
     manualPpsEnabled: false,
     manualPpsMv: null,
@@ -488,6 +489,7 @@ export function ControlPlaneDemo({
       targetTempC,
       fanState,
       activeCoolingEnabled: selectedDevice.activeCoolingEnabled,
+      heaterEnabled: heaterHeldByDevice[selectedDevice.id] ? false : selectedDevice.heaterEnabled,
       heaterOutputPercent: heaterHeldByDevice[selectedDevice.id] ? 0 : heaterOutputPercent,
       manualPpsEnabled,
       manualPpsMv,
@@ -1400,7 +1402,7 @@ export function ControlPlaneDemo({
   }
 
   const handleCalibrationApply = async () => {
-    if (visibleDevice.heaterOutputPercent !== 0 || visibleDevice.heaterOutputPercent > 0) {
+    if (visibleDevice.heaterEnabled || visibleDevice.heaterOutputPercent !== 0) {
       setFeedback({
         title: 'Apply blocked',
         detail: 'Turn the heater off before applying ADC calibration.',
@@ -2870,7 +2872,7 @@ function CalibrationView({
   onApply: () => void | Promise<void>
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const applyBlocked = device.heaterOutputPercent > 0
+  const applyBlocked = device.heaterEnabled || device.heaterOutputPercent !== 0
   const exportCalibration = () => {
     const blob = new Blob([JSON.stringify(calibration, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
