@@ -4054,15 +4054,19 @@
 
   .industrial-calibration-topbar {
     display: grid;
-    gap: 0.8rem;
+    gap: 0.62rem;
     align-items: start;
   }
 
   .industrial-calibration-summary {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.65rem;
+    gap: 0.52rem;
     min-width: 0;
+  }
+
+  .industrial-calibration-summary--topbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .industrial-calibration-summary-card {
@@ -4125,15 +4129,11 @@
     color: rgba(74, 85, 104, 0.82);
   }
 
-  .industrial-calibration-control-stack {
+  .industrial-calibration-command-bar {
     display: grid;
-    gap: 0.55rem;
-    min-width: 0;
-  }
-
-  .industrial-calibration-package {
-    display: grid;
-    gap: 0.72rem;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.44rem;
+    align-items: stretch;
     min-width: 0;
     border: 1px solid rgba(80, 67, 58, 0.14);
     border-radius: 14px;
@@ -4141,56 +4141,11 @@
     box-shadow:
       inset 3px 3px 6px rgba(186, 190, 204, 0.48),
       inset -3px -3px 6px rgba(255, 255, 255, 0.76);
-    padding: 0.72rem;
+    padding: 0.56rem;
   }
 
-  .industrial-calibration-package__header {
-    display: flex;
-    align-items: start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    min-width: 0;
-  }
-
-  .industrial-calibration-package__status {
-    display: grid;
-    gap: 0.24rem;
-    min-width: 0;
-  }
-
-  .industrial-calibration-package__stamp {
-    flex: 0 0 auto;
-    align-self: start;
-    border: 1px solid rgba(80, 67, 58, 0.16);
-    border-radius: 999px;
-    background: rgba(248, 249, 251, 0.74);
-    padding: 0.34rem 0.58rem;
-    color: var(--industrial-muted-text);
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
-    font-weight: 850;
-    line-height: 1;
-    text-transform: uppercase;
-  }
-
-  .industrial-calibration-package__stamp.is-ready {
-    border-color: rgba(51, 121, 84, 0.24);
-    color: #1f6b4a;
-  }
-
-  .industrial-calibration-package__stamp.is-blocked {
-    border-color: rgba(199, 93, 44, 0.28);
-    color: #8f3c16;
-  }
-
-  .industrial-calibration-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.48rem;
-    min-width: 0;
-  }
-
-  .industrial-calibration-actions .industrial-button,
+  .industrial-calibration-command-bar__apply,
+  .industrial-calibration-command-bar__action,
   .industrial-calibration-capture-row .industrial-button,
   .industrial-calibration-manual-fit .industrial-button,
   .industrial-calibration-samples .industrial-button {
@@ -4201,15 +4156,12 @@
     letter-spacing: 0.035em;
   }
 
-  .industrial-calibration-actions .industrial-button {
+  .industrial-calibration-command-bar__apply,
+  .industrial-calibration-command-bar__action {
     width: 100%;
   }
 
-  .industrial-calibration-actions .industrial-button:first-child {
-    grid-column: 1 / -1;
-  }
-
-  .industrial-calibration-actions .industrial-button:disabled {
+  .industrial-calibration-command-bar__apply:disabled {
     border-color: rgba(80, 67, 58, 0.12);
     background: rgba(219, 224, 232, 0.72);
     color: rgba(74, 85, 104, 0.72);
@@ -4542,8 +4494,8 @@
   }
 
   @media (min-width: 960px) {
-    .industrial-calibration-topbar {
-      grid-template-columns: minmax(0, 1.3fr) minmax(20rem, 0.92fr);
+    .industrial-calibration-topbar > .industrial-action-feedback--compact {
+      grid-column: 1 / -1;
     }
 
     .industrial-calibration-grid {
@@ -4553,17 +4505,12 @@
 
   @media (max-width: 720px) {
     .industrial-calibration-summary,
-    .industrial-calibration-package,
-    .industrial-calibration-actions,
+    .industrial-calibration-summary--topbar,
+    .industrial-calibration-command-bar,
     .industrial-calibration-manual-fit,
     .industrial-calibration-capture-row,
     .industrial-calibration-samples tr {
       grid-template-columns: minmax(0, 1fr);
-    }
-
-    .industrial-calibration-package__header {
-      flex-direction: column;
-      align-items: start;
     }
 
     .industrial-calibration-samples {
