@@ -95,12 +95,13 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-28v --bin flux-purr --release
 ```
 
-Power design notes for the current board revision are frozen in:
+Current hardware design notes and manufacturing support assets are frozen in:
 
 - [docs/hardware/tps62933-dual-rail-power-design.md](docs/hardware/tps62933-dual-rail-power-design.md)
 - [docs/hardware/heater-power-switch-design.md](docs/hardware/heater-power-switch-design.md)
 - [docs/hardware/heater-plate-design.md](docs/hardware/heater-plate-design.md)
 - [docs/hardware/fan-pcb-variants.md](docs/hardware/fan-pcb-variants.md)
+- [docs/hardware/enclosure-5p6cm.md](docs/hardware/enclosure-5p6cm.md)
 
 The fan rail is maintained as two sibling PCB variants that keep the same firmware-facing GPIO and status contract:
 
