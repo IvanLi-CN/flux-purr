@@ -174,6 +174,10 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration dense scroll state](./assets/calibration-dense-scroll.trimmed.png)
 
+`assets/calibration-manual-fit.trimmed.png` shows RTD ADC and VIN ADC draft gain/offset edited directly through the channel panels, with each manual draft fit represented as an `8/8` custom sample package before Apply.
+
+![Calibration manual fit state](./assets/calibration-manual-fit.trimmed.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。

@@ -1360,6 +1360,32 @@ export function ControlPlaneDemo({
     }
   }
 
+  const handleCalibrationManualFit = async (
+    channel: CalibrationChannel,
+    gain: number,
+    offsetMv: number
+  ) => {
+    try {
+      const calibrationPackage = calibrationPackageWithManualFit(
+        visibleCalibration.draft,
+        channel,
+        gain,
+        offsetMv
+      )
+      await updateCalibrationDraft({ op: 'import', package: calibrationPackage })
+      setFeedback({
+        title: 'Calibration draft updated',
+        detail: `${channelLabel(channel)} draft fit set to ${gain.toFixed(5)}x / ${offsetMv.toFixed(
+          1
+        )}mV.`,
+        tone: 'success',
+      })
+      emitEvent('calibration', `${channelLabel(channel)} manual fit updated`, 'success')
+    } catch (error) {
+      setFeedback({ title: 'Calibration failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
   const handleCalibrationImport = async (calibrationPackage: CalibrationPackage) => {
     try {
       await updateCalibrationDraft({ op: 'import', package: calibrationPackage })
@@ -1496,6 +1522,7 @@ export function ControlPlaneDemo({
                 onCalibrationCapture={handleCalibrationCapture}
                 onCalibrationDelete={handleCalibrationDelete}
                 onCalibrationClear={handleCalibrationClear}
+                onCalibrationManualFit={handleCalibrationManualFit}
                 onCalibrationImport={handleCalibrationImport}
                 onCalibrationApply={handleCalibrationApply}
                 onDeviceSelect={handleDeviceChange}
@@ -1743,6 +1770,57 @@ function applyLocalCalibrationRequest(
     draft: normalized,
     draftFit: createCalibrationFits(normalized),
   }
+}
+
+function calibrationPackageWithManualFit(
+  currentDraft: CalibrationPackage,
+  channel: CalibrationChannel,
+  gain: number,
+  offsetMv: number
+): CalibrationPackage {
+  const samples = manualFitSamples(gain, offsetMv)
+  const next = cloneCalibrationPackage(currentDraft)
+  if (channel === 'rtd_adc') {
+    next.rtdAdc = samples
+  } else {
+    next.vinAdc = samples
+  }
+  return next
+}
+
+function manualFitSamples(gain: number, offsetMv: number): CalibrationPackage['rtdAdc'] {
+  if (!Number.isFinite(gain) || gain <= 0 || !Number.isFinite(offsetMv)) {
+    throw new Error('Manual calibration fit requires a positive gain and finite offset.')
+  }
+
+  const low = Math.max(0, Math.ceil(offsetMv < 0 ? (-offsetMv + 1) / gain : 0))
+  const high = Math.min(65_535, Math.floor((65_535 - offsetMv) / gain))
+  if (high <= low) {
+    throw new Error('Manual calibration fit is outside the ADC millivolt range.')
+  }
+
+  const points = Array.from({ length: 8 }, (_, index) => {
+    const observedMv = Math.round(low + ((high - low) * index) / 7)
+    return {
+      observedMv,
+      expectedMv: Math.round(gain * observedMv + offsetMv),
+    }
+  })
+
+  if (
+    high > 65_535 ||
+    points.some(
+      (sample) =>
+        sample.observedMv < 0 ||
+        sample.observedMv > 65_535 ||
+        sample.expectedMv < 0 ||
+        sample.expectedMv > 65_535
+    )
+  ) {
+    throw new Error('Manual calibration fit is outside the ADC millivolt range.')
+  }
+
+  return points
 }
 
 function normalizeCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
@@ -2038,6 +2116,7 @@ function ViewPanel({
   onCalibrationCapture,
   onCalibrationDelete,
   onCalibrationClear,
+  onCalibrationManualFit,
   onCalibrationImport,
   onCalibrationApply,
 }: {
@@ -2076,6 +2155,11 @@ function ViewPanel({
   onCalibrationCapture: (channel: CalibrationChannel) => void | Promise<void>
   onCalibrationDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onCalibrationClear: (channel: CalibrationChannel) => void | Promise<void>
+  onCalibrationManualFit: (
+    channel: CalibrationChannel,
+    gain: number,
+    offsetMv: number
+  ) => void | Promise<void>
   onCalibrationImport: (calibrationPackage: CalibrationPackage) => void | Promise<void>
   onCalibrationApply: () => void | Promise<void>
 }) {
@@ -2147,6 +2231,7 @@ function ViewPanel({
         onCapture={onCalibrationCapture}
         onDelete={onCalibrationDelete}
         onClear={onCalibrationClear}
+        onManualFit={onCalibrationManualFit}
         onImport={onCalibrationImport}
         onApply={onCalibrationApply}
       />
@@ -2768,6 +2853,7 @@ function CalibrationView({
   onCapture,
   onDelete,
   onClear,
+  onManualFit,
   onImport,
   onApply,
 }: {
@@ -2779,6 +2865,7 @@ function CalibrationView({
   onCapture: (channel: CalibrationChannel) => void | Promise<void>
   onDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onClear: (channel: CalibrationChannel) => void | Promise<void>
+  onManualFit: (channel: CalibrationChannel, gain: number, offsetMv: number) => void | Promise<void>
   onImport: (calibrationPackage: CalibrationPackage) => void | Promise<void>
   onApply: () => void | Promise<void>
 }) {
@@ -2887,6 +2974,7 @@ function CalibrationView({
             onCapture={() => onCapture('rtd_adc')}
             onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
             onClear={() => onClear('rtd_adc')}
+            onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
           />
 
           <CalibrationChannelPanel
@@ -2902,6 +2990,7 @@ function CalibrationView({
             onCapture={() => onCapture('vin_adc')}
             onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
             onClear={() => onClear('vin_adc')}
+            onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
           />
         </div>
       </div>
@@ -2921,6 +3010,7 @@ function CalibrationChannelPanel({
   onCapture,
   onDelete,
   onClear,
+  onManualFit,
 }: {
   channel: CalibrationChannel
   title: string
@@ -2934,7 +3024,10 @@ function CalibrationChannelPanel({
   onCapture: () => void | Promise<void>
   onDelete: (sampleIndex: number) => void | Promise<void>
   onClear: () => void | Promise<void>
+  onManualFit: (gain: number, offsetMv: number) => void | Promise<void>
 }) {
+  const [manualGain, setManualGain] = useState(() => draftFit.gain.toFixed(5))
+  const [manualOffsetMv, setManualOffsetMv] = useState(() => draftFit.offsetMv.toFixed(1))
   const sampleCount = samples.filter(Boolean).length
   const sampleKeys = calibrationSampleKeys(samples)
   const populatedSamples = samples
@@ -2942,6 +3035,17 @@ function CalibrationChannelPanel({
     .filter((sample): sample is { observedMv: number; expectedMv: number; index: number } =>
       Boolean(sample)
     )
+  useEffect(() => {
+    setManualGain(draftFit.gain.toFixed(5))
+    setManualOffsetMv(draftFit.offsetMv.toFixed(1))
+  }, [draftFit.gain, draftFit.offsetMv])
+  const parsedManualGain = Number(manualGain)
+  const parsedManualOffsetMv = Number(manualOffsetMv)
+  const manualFitInvalid =
+    !Number.isFinite(parsedManualGain) ||
+    parsedManualGain <= 0 ||
+    !Number.isFinite(parsedManualOffsetMv)
+
   return (
     <section className="industrial-calibration-channel">
       <div className="industrial-calibration-channel__header">
@@ -2977,6 +3081,43 @@ function CalibrationChannelPanel({
           </tr>
         </tbody>
       </table>
+
+      <div className="industrial-calibration-manual-fit">
+        <label>
+          <span>Draft gain</span>
+          <span className="industrial-calibration-input">
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.00001"
+              value={manualGain}
+              onChange={(event) => setManualGain(event.currentTarget.value)}
+            />
+            <small>x</small>
+          </span>
+        </label>
+        <label>
+          <span>Draft offset</span>
+          <span className="industrial-calibration-input">
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.1"
+              value={manualOffsetMv}
+              onChange={(event) => setManualOffsetMv(event.currentTarget.value)}
+            />
+            <small>mV</small>
+          </span>
+        </label>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={manualFitInvalid}
+          onClick={() => onManualFit(parsedManualGain, parsedManualOffsetMv)}
+        >
+          Set draft fit
+        </button>
+      </div>
 
       <div className="industrial-calibration-capture-row">
         <label>

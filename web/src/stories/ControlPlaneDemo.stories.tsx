@@ -141,6 +141,56 @@ export const DemoCalibrationApplyBlocked: Story = {
   },
 }
 
+export const DemoCalibrationManualFit: Story = {
+  name: 'Demo / Calibration manual fit',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? { ...device, heaterOutputPercent: 0 }
+          : device
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('manual fit controls update both draft channels', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+
+      const gainInputs = await canvas.findAllByRole('spinbutton', { name: /Draft gain/ })
+      const offsetInputs = await canvas.findAllByRole('spinbutton', { name: /Draft offset/ })
+      const setFitButtons = await canvas.findAllByRole('button', { name: 'Set draft fit' })
+
+      await userEvent.clear(gainInputs[0])
+      await userEvent.type(gainInputs[0], '1.01234')
+      await userEvent.clear(offsetInputs[0])
+      await userEvent.type(offsetInputs[0], '12.3')
+      await userEvent.click(setFitButtons[0])
+
+      await userEvent.clear(gainInputs[1])
+      await userEvent.type(gainInputs[1], '0.98047')
+      await userEvent.clear(offsetInputs[1])
+      await userEvent.type(offsetInputs[1], '149.8')
+      await userEvent.click(setFitButtons[1])
+
+      await waitFor(() => {
+        expect(canvas.getAllByText('8/8 samples')).toHaveLength(2)
+      })
+      await expect(await canvas.findByText(/VIN ADC draft fit set/)).toBeVisible()
+    })
+  },
+}
+
 export const DemoCalibrationDenseLists: Story = {
   name: 'Demo / Calibration dense lists',
   args: {
