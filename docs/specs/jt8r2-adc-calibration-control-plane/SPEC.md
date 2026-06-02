@@ -178,6 +178,10 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration manual fit state](./assets/calibration-manual-fit.trimmed.png)
 
+`assets/calibration-layout-polish.trimmed.png` shows the flagship layout pass on the calibration header zone: the left rail is now a stable three-card status summary for live RTD, live VIN, and draft-package readiness, while package actions, heater gating, and latest feedback are grouped into a dedicated control block on the right.
+
+![Calibration layout polish state](./assets/calibration-layout-polish.trimmed.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。

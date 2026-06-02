@@ -2896,70 +2896,96 @@ function CalibrationView({
   const rtdSampleCount = calibration.draft.rtdAdc.filter(Boolean).length
   const vinSampleCount = calibration.draft.vinAdc.filter(Boolean).length
   const draftSampleCount = rtdSampleCount + vinSampleCount
+  const draftPackageDetail =
+    draftSampleCount === 0
+      ? 'No draft samples loaded'
+      : draftSampleCount === 16
+        ? 'Both channels fully populated'
+        : `${rtdSampleCount}/8 RTD, ${vinSampleCount}/8 VIN`
   return (
     <div className="industrial-view-panel">
       <PanelHeader kicker="Calibration" title="ADC trim" />
       <div className="industrial-calibration-workbench">
         <section className="industrial-calibration-topbar" aria-label="Calibration package">
-          <div className="industrial-calibration-readout">
-            <div>
-              <span>{formatTemp(device.currentTempC)}</span>
-              <small>Calibrated RTD</small>
-            </div>
-            <div>
-              <span>{formatVolts(device.voltageMv)}</span>
-              <small>Calibrated VIN</small>
-            </div>
-          </div>
-          <div className="industrial-calibration-package">
-            <div className="industrial-calibration-package__status">
-              <h3 className="industrial-section-title">Package</h3>
-              <span>{draftSampleCount}/16 draft samples</span>
-              <small>{applyBlocked ? 'Heater active' : 'Heater idle'}</small>
-            </div>
-            <div className="industrial-calibration-actions">
-              <button
-                type="button"
-                className="industrial-button industrial-button--primary"
-                disabled={applyBlocked}
-                onClick={onApply}
-              >
-                <CheckCircle2 size={15} aria-hidden="true" />
-                Apply calibration
-              </button>
-              <button
-                type="button"
-                className="industrial-button industrial-button--secondary"
-                onClick={exportCalibration}
-              >
-                <Download size={15} aria-hidden="true" />
-                Export JSON
-              </button>
-              <button
-                type="button"
-                className="industrial-button industrial-button--secondary"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Upload size={15} aria-hidden="true" />
-                Import JSON
-              </button>
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/json,.json"
-              hidden
-              onChange={(event) => void importFile(event.currentTarget.files?.[0] ?? null)}
+          <div className="industrial-calibration-summary">
+            <CalibrationSummaryCard
+              label="Live RTD"
+              value={formatTemp(device.currentTempC)}
+              detail={`${calibrationFitMode(calibration.activeFit.rtdAdc)} fit`}
             />
-            {applyBlocked ? (
-              <p className="industrial-calibration-warning">
-                <AlertTriangle size={14} aria-hidden="true" />
-                <span>Apply is blocked while heater output is active.</span>
-              </p>
-            ) : null}
+            <CalibrationSummaryCard
+              label="Live VIN"
+              value={formatVolts(device.voltageMv)}
+              detail={`${calibrationFitMode(calibration.activeFit.vinAdc)} fit`}
+            />
+            <CalibrationSummaryCard
+              label="Draft package"
+              value={`${draftSampleCount}/16`}
+              detail={draftPackageDetail}
+              tone={draftSampleCount === 0 ? 'muted' : 'accent'}
+            />
+          </div>
+          <div className="industrial-calibration-control-stack">
+            <div className="industrial-calibration-package">
+              <div className="industrial-calibration-package__header">
+                <div className="industrial-calibration-package__status">
+                  <h3 className="industrial-section-title">Calibration package</h3>
+                  <small>
+                    {applyBlocked
+                      ? 'Apply is paused until heater output returns to idle.'
+                      : 'Apply promotes the current draft package to active calibration.'}
+                  </small>
+                </div>
+                <span
+                  className={`industrial-calibration-package__stamp ${applyBlocked ? 'is-blocked' : 'is-ready'}`}
+                >
+                  {applyBlocked ? 'Heater active' : 'Heater idle'}
+                </span>
+              </div>
+              <div className="industrial-calibration-actions">
+                <button
+                  type="button"
+                  className="industrial-button industrial-button--primary"
+                  disabled={applyBlocked}
+                  onClick={onApply}
+                >
+                  <CheckCircle2 size={15} aria-hidden="true" />
+                  Apply calibration
+                </button>
+                <button
+                  type="button"
+                  className="industrial-button industrial-button--secondary"
+                  onClick={exportCalibration}
+                >
+                  <Download size={15} aria-hidden="true" />
+                  Export JSON
+                </button>
+                <button
+                  type="button"
+                  className="industrial-button industrial-button--secondary"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Upload size={15} aria-hidden="true" />
+                  Import JSON
+                </button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={(event) => void importFile(event.currentTarget.files?.[0] ?? null)}
+              />
+              {applyBlocked ? (
+                <p className="industrial-calibration-warning">
+                  <AlertTriangle size={14} aria-hidden="true" />
+                  <span>Apply is blocked while heater output is active.</span>
+                </p>
+              ) : null}
+            </div>
+            <ActionFeedbackPanel feedback={feedback} compact />
           </div>
         </section>
-        <ActionFeedbackPanel feedback={feedback} compact />
         <div className="industrial-calibration-grid">
           <CalibrationChannelPanel
             channel="rtd_adc"
@@ -3693,6 +3719,26 @@ function ActionFeedbackPanel({
       <p className="industrial-label">Last action</p>
       <strong>{feedback.title}</strong>
       <span>{feedback.detail}</span>
+    </div>
+  )
+}
+
+function CalibrationSummaryCard({
+  label,
+  value,
+  detail,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  detail: string
+  tone?: 'default' | 'accent' | 'muted'
+}) {
+  return (
+    <div className={`industrial-calibration-summary-card is-${tone}`}>
+      <p className="industrial-label">{label}</p>
+      <strong>{value}</strong>
+      <span>{detail}</span>
     </div>
   )
 }
