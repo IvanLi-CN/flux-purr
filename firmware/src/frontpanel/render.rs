@@ -232,6 +232,7 @@ fn bitmap_glyph(ch: char) -> &'static [&'static str; 5] {
         '/' => &["001", "001", "010", "100", "100"],
         '%' => &["101", "001", "010", "100", "101"],
         '+' => &["000", "010", "111", "010", "000"],
+        '*' => &["101", "010", "111", "010", "101"],
         '=' => &["000", "111", "000", "111", "000"],
         '°' => &["010", "101", "010", "000", "000"],
         '0' => &["111", "101", "101", "101", "111"],
@@ -738,6 +739,9 @@ fn draw_dashboard(
         draw_status_line(canvas, 7, "SET", &set_text, COLOR_WARNING);
     }
     draw_text_mid(canvas, "PPS", 80, 18, COLOR_CYAN);
+    if state.manual_pps_enabled {
+        draw_text_small(canvas, "*", 103, 15, COLOR_CYAN);
+    }
     let pps_numeric = pd_voltage_content_text(state.pd_contract_mv);
     draw_text_mid_right(canvas, &pps_numeric, 147, 18, COLOR_CYAN);
     draw_text_mid_right(canvas, "V", 154, 18, COLOR_CYAN);
@@ -998,5 +1002,10 @@ mod tests {
         assert_eq!(pd_voltage_content_text(12_000), "12.00");
         assert_eq!(pd_voltage_content_text(20_000), "20.00");
         assert_eq!(pd_voltage_content_text(20_080), "20.08");
+    }
+
+    #[test]
+    fn bitmap_font_supports_manual_pps_marker() {
+        assert_eq!(bitmap_glyph('*'), &["101", "010", "111", "010", "101"]);
     }
 }

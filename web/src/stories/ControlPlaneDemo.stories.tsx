@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, waitFor, within } from 'storybook/test'
+import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test'
 import { ControlPlaneDemo } from '@/features/control-plane-demo/components/control-plane-demo'
 import type {
   ControlPlaneStatus,
@@ -8,6 +8,7 @@ import type {
   NetworkSummary,
 } from '@/features/control-plane-demo/contracts'
 import { liveControlPlaneScenario } from '@/features/control-plane-demo/live-scenario'
+import { controlPlaneScenario } from '@/features/control-plane-demo/mock-data'
 import type { ControlPlaneScenario } from '@/features/control-plane-demo/types'
 import type { WebSerialControlPlaneClient } from '@/features/control-plane-demo/web-serial'
 
@@ -34,6 +35,28 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
+
+export const DemoManualPpsPanel: Story = {
+  name: 'Demo / Manual PPS panel',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      selectedDeviceId: 'fp-kit-02',
+    },
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: /Advanced PPS/ }))
+    await expect(await canvas.findByRole('slider', { name: 'Manual PPS voltage' })).toBeVisible()
+  },
+}
 
 export const LiveWebSerialAddDevice: Story = {
   name: 'Live / Web Serial Add Device',
@@ -93,6 +116,24 @@ export const LiveWebSerialAddDevice: Story = {
         ).toHaveLength(1)
       })
       expect(webSerialRuntimeWrites.at(-1)?.targetTempC).toBe(45)
+    })
+
+    await step('Dashboard advanced PPS override writes through Web Serial', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Advanced PPS/ }))
+      const slider = await canvas.findByRole('slider', { name: 'Manual PPS voltage' })
+      fireEvent.input(slider, { target: { value: '10400' } })
+      await userEvent.click(await canvas.findByRole('button', { name: 'Apply PPS' }))
+
+      await waitFor(() => {
+        expect(webSerialRuntimeWrites.at(-1)?.manualPpsEnabled).toBe(true)
+      })
+      expect(webSerialRuntimeWrites.at(-1)?.manualPpsMv).toBe(10_400)
+      expect(webSerialRuntimeWrites.at(-1)?.manualPpsMa).toBe(3_000)
+      await expect(await canvas.findByText(/Manual 10.4V \/ 3.00A/)).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: 'Clear' }))
+      await waitFor(() => {
+        expect(webSerialRuntimeWrites.at(-1)?.manualPpsEnabled).toBe(false)
+      })
     })
 
     await step('global log remains expanded after switching to Settings', async () => {
@@ -260,6 +301,23 @@ class FakeWebSerialClient {
         request.heaterEnabled === false ? 0 : this.currentStatus.heaterOutputPercent,
       fanDisplayState:
         request.activeCoolingEnabled === false ? 'OFF' : this.currentStatus.fanDisplayState,
+      manualPpsEnabled: request.manualPpsEnabled ?? this.currentStatus.manualPpsEnabled ?? false,
+      manualPpsMv:
+        request.manualPpsEnabled === false
+          ? null
+          : (request.manualPpsMv ?? this.currentStatus.manualPpsMv ?? null),
+      manualPpsMa:
+        request.manualPpsEnabled === false
+          ? null
+          : (request.manualPpsMa ?? this.currentStatus.manualPpsMa ?? null),
+      pdRequestMv:
+        request.manualPpsEnabled === true && request.manualPpsMv
+          ? request.manualPpsMv
+          : this.currentStatus.pdRequestMv,
+      pdContractMv:
+        request.manualPpsEnabled === true && request.manualPpsMv
+          ? request.manualPpsMv
+          : this.currentStatus.pdContractMv,
     }
     return Promise.resolve(this.currentStatus satisfies ControlPlaneStatus)
   }
@@ -310,6 +368,13 @@ const status = {
   pdRequestMv: 20_000,
   pdContractMv: 12_000,
   pdState: 'ready',
+  manualPpsEnabled: false,
+  manualPpsMv: null,
+  manualPpsMa: null,
+  ppsCapabilityMinMv: 5_000,
+  ppsCapabilityMaxMv: 21_000,
+  ppsCapabilityMaxMa: 3_000,
+  manualPpsError: null,
   frontpanelKey: null,
   network,
 } satisfies ControlPlaneStatus
@@ -344,6 +409,13 @@ function createKnownDeviceSelectionScenario() {
         pdRequestMv: 20_000,
         pdContractMv: 12_000,
         pdState: 'ready',
+        manualPpsEnabled: false,
+        manualPpsMv: null,
+        manualPpsMa: null,
+        ppsCapabilityMinMv: 5_000,
+        ppsCapabilityMaxMv: 21_000,
+        ppsCapabilityMaxMa: 3_000,
+        manualPpsError: null,
         heaterOutputPercent: 0,
         activeCoolingEnabled: true,
         fanState: 'AUTO',
@@ -371,6 +443,13 @@ function createKnownDeviceSelectionScenario() {
         pdRequestMv: 20_000,
         pdContractMv: 12_000,
         pdState: 'ready',
+        manualPpsEnabled: false,
+        manualPpsMv: null,
+        manualPpsMa: null,
+        ppsCapabilityMinMv: 5_000,
+        ppsCapabilityMaxMv: 21_000,
+        ppsCapabilityMaxMa: 3_000,
+        manualPpsError: null,
         heaterOutputPercent: 0,
         activeCoolingEnabled: true,
         fanState: 'AUTO',

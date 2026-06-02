@@ -54,6 +54,13 @@ export interface ControlPlaneStatus {
   pdRequestMv: number
   pdContractMv: number
   pdState: PdState
+  manualPpsEnabled?: boolean
+  manualPpsMv?: number | null
+  manualPpsMa?: number | null
+  ppsCapabilityMinMv?: number | null
+  ppsCapabilityMaxMv?: number | null
+  ppsCapabilityMaxMa?: number | null
+  manualPpsError?: string | null
   frontpanelKey?: 'center' | 'right' | 'down' | 'left' | 'up' | null
   network: NetworkSummary
 }
@@ -149,6 +156,9 @@ export interface RuntimeConfigRequest {
   presetsC?: Array<number | null>
   activeCoolingEnabled?: boolean
   heaterEnabled?: boolean
+  manualPpsEnabled?: boolean
+  manualPpsMv?: number
+  manualPpsMa?: number
 }
 
 export type DirectRuntimeConfigRequest = Omit<RuntimeConfigRequest, 'leaseId'>
@@ -225,4 +235,7 @@ export interface UsbRuntimeConfigFrame {
   presetsC?: Array<number | null>
   activeCoolingEnabled?: boolean
   heaterEnabled?: boolean
+  manualPpsEnabled?: boolean
+  manualPpsMv?: number
+  manualPpsMa?: number
 }

@@ -1033,6 +1033,147 @@ enum HeaterPowerBackend {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManualPpsError {
+    NoPpsCapability,
+    InvalidVoltage,
+    PdNotReady,
+    WriteFailed,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl ManualPpsError {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::NoPpsCapability => "manual_pps_no_capability",
+            Self::InvalidVoltage => "manual_pps_invalid_voltage",
+            Self::PdNotReady => "manual_pps_pd_not_ready",
+            Self::WriteFailed => "manual_pps_write_failed",
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::NoPpsCapability => "PPS capability is unavailable.",
+            Self::InvalidVoltage => {
+                "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
+            }
+            Self::PdNotReady => "PD contract is not ready for manual PPS.",
+            Self::WriteFailed => "Manual PPS write failed.",
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+struct ManualPpsState {
+    enabled: bool,
+    target_mv: Option<u16>,
+    target_ma: Option<u16>,
+    applied_mv: Option<u16>,
+    capability_min_mv: Option<u16>,
+    capability_max_mv: Option<u16>,
+    capability_max_ma: Option<u16>,
+    error: Option<ManualPpsError>,
+    automatic_restore_pending: bool,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+impl ManualPpsState {
+    fn from_capabilities(capabilities: Option<ch224q::AdjustablePowerCapabilities>) -> Self {
+        let mut state = Self::default();
+        if let Some(capabilities) = capabilities
+            && let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
+                capabilities.pps_min_mv,
+                capabilities.pps_max_mv,
+                capabilities.pps_max_ma,
+            )
+        {
+            let bounded_max_mv = max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
+            if min_mv <= bounded_max_mv && max_ma > 0 {
+                state.capability_min_mv = Some(min_mv);
+                state.capability_max_mv = Some(bounded_max_mv);
+                state.capability_max_ma = Some(max_ma);
+            }
+        }
+        state
+    }
+
+    fn validate_target(&self, target_mv: u16, target_ma: u16) -> Result<(), ManualPpsError> {
+        let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
+            self.capability_min_mv,
+            self.capability_max_mv,
+            self.capability_max_ma,
+        ) else {
+            return Err(ManualPpsError::NoPpsCapability);
+        };
+        if target_mv < min_mv
+            || target_mv > max_mv
+            || target_mv > ch224q::CH224Q_PPS_MAX_MV
+            || !target_mv.is_multiple_of(100)
+            || target_ma == 0
+            || target_ma > max_ma
+            || !target_ma.is_multiple_of(50)
+        {
+            return Err(ManualPpsError::InvalidVoltage);
+        }
+        Ok(())
+    }
+
+    fn enable(&mut self, target_mv: u16, target_ma: Option<u16>) -> Result<(), ManualPpsError> {
+        let target_ma = target_ma
+            .or(self.capability_max_ma)
+            .ok_or(ManualPpsError::NoPpsCapability)?;
+        self.validate_target(target_mv, target_ma)?;
+        self.enabled = true;
+        self.target_mv = Some(target_mv);
+        self.target_ma = Some(target_ma);
+        self.error = None;
+        self.automatic_restore_pending = false;
+        Ok(())
+    }
+
+    fn clear(&mut self) {
+        let had_override = self.enabled
+            || self.target_mv.is_some()
+            || self.target_ma.is_some()
+            || self.applied_mv.is_some();
+        self.enabled = false;
+        self.target_mv = None;
+        self.target_ma = None;
+        self.applied_mv = None;
+        self.error = None;
+        self.automatic_restore_pending |= had_override;
+    }
+
+    fn fail(&mut self, error: ManualPpsError) {
+        self.enabled = false;
+        self.target_mv = None;
+        self.target_ma = None;
+        self.applied_mv = None;
+        self.error = Some(error);
+        self.automatic_restore_pending = true;
+    }
+
+    fn consume_automatic_restore_pending(&mut self) -> bool {
+        let pending = self.automatic_restore_pending;
+        self.automatic_restore_pending = false;
+        pending
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn manual_pps_error_code(
+    error: ManualPpsError,
+) -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
+    let mut out = heapless::String::new();
+    let _ = out.push_str(error.code());
+    out
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl HeaterPowerBackend {
     const fn label(self) -> &'static str {
         match self {
@@ -1402,18 +1543,89 @@ async fn apply_heater_power_output<PWM>(
     ch224q_address: Address,
     heater_pwm: &mut PWM,
     backend: &mut HeaterPowerBackend,
+    manual_pps: &mut ManualPpsState,
+    pd_observation: Option<PdStatusObservation>,
     duty_percent: u8,
     last_physical_duty_percent: &mut u8,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
+    let manual_pps_active = manual_pps.enabled;
+    if manual_pps_active {
+        let target_mv = match manual_pps.target_mv {
+            Some(target_mv) => target_mv,
+            None => {
+                manual_pps.fail(ManualPpsError::InvalidVoltage);
+                return true;
+            }
+        };
+        let target_ma = manual_pps.target_ma.unwrap_or(0);
+        if !pd_observation.is_some_and(|observation| observation.status.pd_active) {
+            manual_pps.fail(ManualPpsError::PdNotReady);
+            let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+            let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
+            return true;
+        }
+        if manual_pps.applied_mv != Some(target_mv) {
+            if request_ch224q_adjustable_voltage(
+                i2c,
+                ch224q_address,
+                target_mv,
+                ch224q::AdjustableVoltageMode::Pps,
+                true,
+            )
+            .await
+            {
+                manual_pps.applied_mv = Some(target_mv);
+                info!(
+                    "manual pps override applied mv={=u16} ma={=u16}",
+                    target_mv, target_ma
+                );
+            } else {
+                manual_pps.fail(ManualPpsError::WriteFailed);
+                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+                let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
+                info!(
+                    "manual pps override cleared reason={=str}",
+                    ManualPpsError::WriteFailed.code()
+                );
+                return true;
+            }
+        }
+    }
+
+    if manual_pps.consume_automatic_restore_pending() {
+        match *backend {
+            HeaterPowerBackend::FixedPdPwmFallback { reason, .. } => {
+                *backend = HeaterPowerBackend::FixedPdPwmFallback {
+                    reason,
+                    fixed_request_confirmed: false,
+                };
+            }
+            HeaterPowerBackend::PpsMos {
+                adjustable_min_mv,
+                pps_max_mv,
+                adjustable_max_mv,
+                ..
+            } => {
+                *backend = HeaterPowerBackend::PpsMos {
+                    adjustable_min_mv,
+                    pps_max_mv,
+                    adjustable_max_mv,
+                    current_mode: None,
+                    current_request_mv: 0,
+                };
+            }
+        }
+    }
+
     match *backend {
         HeaterPowerBackend::FixedPdPwmFallback {
             reason,
             fixed_request_confirmed,
         } => {
-            if !fixed_request_confirmed {
+            if !fixed_request_confirmed && !manual_pps_active {
                 let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
                 if write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
                     *backend = HeaterPowerBackend::FixedPdPwmFallback {
@@ -1443,8 +1655,8 @@ where
             let request_mv =
                 heater_request_mv_from_percent(duty_percent, adjustable_min_mv, adjustable_max_mv);
             let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
-            let mode_changed = current_mode != Some(request_mode);
-            let voltage_changed = current_request_mv != request_mv;
+            let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
+            let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
             let gate_duty_percent = if duty_percent == 0 { 0 } else { 100 };
 
             if gate_duty_percent == 0 {
@@ -1612,6 +1824,7 @@ struct UsbRuntimeStatusContext {
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
     heater_power_backend: HeaterPowerBackend,
+    manual_pps: ManualPpsState,
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     last_raw_state: FrontPanelRawState,
@@ -1623,7 +1836,11 @@ fn usb_runtime_status(
     memory_config: &MemoryConfig,
     context: UsbRuntimeStatusContext,
 ) -> ControlPlaneStatus {
-    let pd_contract_mv = context.heater_power_backend.pd_contract_mv();
+    let pd_contract_mv = context
+        .manual_pps
+        .target_mv
+        .filter(|_| context.manual_pps.enabled)
+        .unwrap_or_else(|| context.heater_power_backend.pd_contract_mv());
     let pd_state = if context.current_rtd_fault.is_some() {
         PdState::Fault
     } else if context
@@ -1641,7 +1858,7 @@ fn usb_runtime_status(
         .first_pressed()
         .map(|raw_key| FrontPanelKeyMap::default().logical_from_raw(raw_key));
 
-    ControlPlaneStatus::from_device_status(
+    let mut status = ControlPlaneStatus::from_device_status(
         DeviceStatus {
             mode: if context.current_rtd_fault.is_some() {
                 DeviceMode::Fault
@@ -1658,7 +1875,11 @@ fn usb_runtime_status(
                     .unwrap_or(0),
             ),
             board_temp_centi: i32::from(ui_state.current_temp_deci_c) * 10,
-            pd_request_mv: DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+            pd_request_mv: context
+                .manual_pps
+                .target_mv
+                .filter(|_| context.manual_pps.enabled)
+                .unwrap_or_else(|| DEFAULT_PD_VOLTAGE_REQUEST.millivolts()),
             pd_contract_mv,
             pd_state,
             heater_output_percent: ui_state.heater_output_percent,
@@ -1669,7 +1890,15 @@ fn usb_runtime_status(
         memory_config,
         (context.elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
         network_from_memory(memory_config),
-    )
+    );
+    status.manual_pps_enabled = context.manual_pps.enabled;
+    status.manual_pps_mv = context.manual_pps.target_mv;
+    status.manual_pps_ma = context.manual_pps.target_ma;
+    status.pps_capability_min_mv = context.manual_pps.capability_min_mv;
+    status.pps_capability_max_mv = context.manual_pps.capability_max_mv;
+    status.pps_capability_max_ma = context.manual_pps.capability_max_ma;
+    status.manual_pps_error = context.manual_pps.error.map(manual_pps_error_code);
+    status
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -1678,18 +1907,54 @@ fn usb_runtime_config_response(
     config: RuntimeConfigCommand,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
-    context: UsbRuntimeStatusContext,
+    manual_pps: &mut ManualPpsState,
+    mut context: UsbRuntimeStatusContext,
 ) -> UsbFrame {
+    if let Err(error) = apply_manual_pps_config(&config, manual_pps) {
+        return UsbFrame::Response {
+            request_id,
+            ok: false,
+            result: None,
+            error: Some(ApiError::new(error.code(), error.message(), false)),
+        };
+    }
     config.apply_to(memory_config);
     apply_memory_config_to_ui(ui_state, memory_config);
     if let Some(heater_enabled) = config.heater_enabled {
         ui_state.heater_enabled = heater_enabled;
     }
+    ui_state.manual_pps_enabled = manual_pps.enabled;
+    context.manual_pps = *manual_pps;
 
     usb_response(
         request_id,
         UsbResponsePayload::Status(usb_runtime_status(ui_state, memory_config, context)),
     )
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn apply_manual_pps_config(
+    config: &RuntimeConfigCommand,
+    manual_pps: &mut ManualPpsState,
+) -> Result<(), ManualPpsError> {
+    if config.manual_pps_enabled == Some(false) {
+        manual_pps.clear();
+        return Ok(());
+    }
+
+    if config.manual_pps_enabled == Some(true)
+        || config.manual_pps_mv.is_some()
+        || config.manual_pps_ma.is_some()
+    {
+        let target_mv = config
+            .manual_pps_mv
+            .or(manual_pps.target_mv)
+            .ok_or(ManualPpsError::InvalidVoltage)?;
+        let target_ma = config.manual_pps_ma.or(manual_pps.target_ma);
+        manual_pps.enable(target_mv, target_ma)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2034,7 +2299,8 @@ fn handle_usb_control_line(
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
-    heater_power_backend: HeaterPowerBackend,
+    heater_power_backend: &mut HeaterPowerBackend,
+    manual_pps: &mut ManualPpsState,
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     last_raw_state: FrontPanelRawState,
@@ -2043,7 +2309,8 @@ fn handle_usb_control_line(
     let runtime_context = UsbRuntimeStatusContext {
         elapsed_ms,
         last_pd_observation,
-        heater_power_backend,
+        heater_power_backend: *heater_power_backend,
+        manual_pps: *manual_pps,
         fan_command,
         current_rtd_fault,
         last_raw_state,
@@ -2079,14 +2346,18 @@ fn handle_usb_control_line(
             )
         }
         Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
+            let previous_memory_config = memory_config.clone();
             let response = usb_runtime_config_response(
                 request_id,
                 config,
                 ui_state,
                 memory_config,
+                manual_pps,
                 runtime_context,
             );
-            *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            if *memory_config != previous_memory_config {
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            }
             needs_redraw = true;
             response
         }
@@ -2757,13 +3028,15 @@ async fn main(_spawner: Spawner) {
         .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes));
     match power_data_capabilities {
         Some(capabilities) => info!(
-            "ch224q power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16}",
+            "ch224q power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16} pps_max_ma={=u16}",
             capabilities.pps_covers_20v,
             capabilities.pps_min_mv.unwrap_or(0),
             capabilities.pps_max_mv.unwrap_or(0),
+            capabilities.pps_max_ma.unwrap_or(0),
         ),
         None => info!("ch224q power data read failed"),
     }
+    let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
     let mut heater_power_backend = select_heater_power_backend(
         power_data_capabilities,
         last_pd_observation.map(|status| status.status),
@@ -2868,6 +3141,8 @@ async fn main(_spawner: Spawner) {
         ch224q_address,
         &mut heater_pwm,
         &mut heater_power_backend,
+        &mut manual_pps_state,
+        last_pd_observation,
         0,
         &mut last_heater_duty,
     )
@@ -2952,7 +3227,8 @@ async fn main(_spawner: Spawner) {
                         &mut memory_commit_due_ms,
                         elapsed_ms,
                         last_pd_observation,
-                        heater_power_backend,
+                        &mut heater_power_backend,
+                        &mut manual_pps_state,
                         fan_command,
                         current_rtd_fault,
                         last_raw_state,
@@ -3257,6 +3533,8 @@ async fn main(_spawner: Spawner) {
                 ch224q_address,
                 &mut heater_pwm,
                 &mut heater_power_backend,
+                &mut manual_pps_state,
+                current_pd_observation,
                 pid_snapshot.duty_percent,
                 &mut last_heater_duty,
             )
@@ -3264,7 +3542,14 @@ async fn main(_spawner: Spawner) {
             {
                 needs_redraw = true;
             }
-            let next_pd_contract_mv = heater_power_backend.pd_contract_mv();
+            if ui_state.manual_pps_enabled != manual_pps_state.enabled {
+                ui_state.manual_pps_enabled = manual_pps_state.enabled;
+                needs_redraw = true;
+            }
+            let next_pd_contract_mv = manual_pps_state
+                .target_mv
+                .filter(|_| manual_pps_state.enabled)
+                .unwrap_or_else(|| heater_power_backend.pd_contract_mv());
             if ui_state.pd_contract_mv != next_pd_contract_mv {
                 ui_state.pd_contract_mv = next_pd_contract_mv;
                 needs_redraw = true;
@@ -3275,7 +3560,7 @@ async fn main(_spawner: Spawner) {
                 ui_state.target_temp_c,
                 latest_temp_c,
                 pid_snapshot.duty_percent,
-                heater_power_backend.pd_contract_mv(),
+                next_pd_contract_mv,
                 heater_power_backend.label(),
                 last_heater_duty,
                 pid_snapshot.error_c,
@@ -3341,6 +3626,8 @@ async fn main(_spawner: Spawner) {
                 ch224q_address,
                 &mut heater_pwm,
                 &mut heater_power_backend,
+                &mut manual_pps_state,
+                last_pd_observation,
                 0,
                 &mut last_heater_duty,
             )
@@ -3634,6 +3921,7 @@ mod tests {
             active_cooling_enabled: true,
             ..MemoryConfig::default()
         };
+        let mut manual_pps = ManualPpsState::default();
 
         let response = usb_runtime_config_response(
             request_id,
@@ -3643,9 +3931,13 @@ mod tests {
                 presets_c: None,
                 active_cooling_enabled: Some(false),
                 heater_enabled: Some(true),
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
             },
             &mut ui_state,
             &mut memory_config,
+            &mut manual_pps,
             UsbRuntimeStatusContext {
                 elapsed_ms: 12_000,
                 last_pd_observation: None,
@@ -3653,6 +3945,7 @@ mod tests {
                     reason: HeaterPowerBackendReason::NoPps20vCapability,
                     fixed_request_confirmed: true,
                 },
+                manual_pps: ManualPpsState::default(),
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
@@ -3676,6 +3969,137 @@ mod tests {
             }
             other => panic!("unexpected runtime config response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn manual_pps_config_validates_capability_and_updates_status_payload() {
+        let mut request_id = heapless::String::new();
+        request_id.push_str("manual-pps").unwrap();
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: false,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(24_000),
+                pps_max_ma: Some(3_000),
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        let context_manual_pps = manual_pps;
+        let response = usb_runtime_config_response(
+            request_id,
+            RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(true),
+                manual_pps_mv: Some(10_400),
+                manual_pps_ma: Some(2_500),
+            },
+            &mut ui_state,
+            &mut memory_config,
+            &mut manual_pps,
+            UsbRuntimeStatusContext {
+                elapsed_ms: 1_000,
+                last_pd_observation: None,
+                heater_power_backend: HeaterPowerBackend::PpsMos {
+                    adjustable_min_mv: 12_000,
+                    pps_max_mv: 21_000,
+                    adjustable_max_mv: 21_000,
+                    current_mode: None,
+                    current_request_mv: 12_000,
+                },
+                manual_pps: context_manual_pps,
+                fan_command: FanHardwareCommand::disabled(),
+                current_rtd_fault: None,
+                last_raw_state: FrontPanelRawState::default(),
+            },
+        );
+
+        match response {
+            UsbFrame::Response {
+                ok: true,
+                result: Some(UsbResponsePayload::Status(status)),
+                error: None,
+                ..
+            } => {
+                assert!(manual_pps.enabled);
+                assert!(ui_state.manual_pps_enabled);
+                assert!(status.manual_pps_enabled);
+                assert_eq!(status.manual_pps_mv, Some(10_400));
+                assert_eq!(status.manual_pps_ma, Some(2_500));
+                assert_eq!(status.pps_capability_min_mv, Some(5_000));
+                assert_eq!(status.pps_capability_max_mv, Some(21_000));
+                assert_eq!(status.pps_capability_max_ma, Some(3_000));
+                assert_eq!(status.pd_contract_mv, 10_400);
+                assert_eq!(status.pd_request_mv, 10_400);
+                assert_eq!(status.manual_pps_error, None);
+            }
+            other => panic!("unexpected manual PPS response: {other:?}"),
+        }
+
+        let error = apply_manual_pps_config(
+            &RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(true),
+                manual_pps_mv: Some(10_450),
+                manual_pps_ma: Some(2_500),
+            },
+            &mut manual_pps,
+        )
+        .unwrap_err();
+        assert_eq!(error, ManualPpsError::InvalidVoltage);
+
+        apply_manual_pps_config(
+            &RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(false),
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+            },
+            &mut manual_pps,
+        )
+        .unwrap();
+        assert!(!manual_pps.enabled);
+        assert_eq!(manual_pps.target_mv, None);
+        assert_eq!(manual_pps.target_ma, None);
+        assert!(manual_pps.consume_automatic_restore_pending());
+    }
+
+    #[test]
+    fn manual_pps_failure_clears_requested_current() {
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        manual_pps.enable(10_400, Some(2_500)).unwrap();
+        manual_pps.applied_mv = Some(10_400);
+        manual_pps.fail(ManualPpsError::WriteFailed);
+
+        assert!(!manual_pps.enabled);
+        assert_eq!(manual_pps.target_mv, None);
+        assert_eq!(manual_pps.target_ma, None);
+        assert_eq!(manual_pps.applied_mv, None);
+        assert_eq!(manual_pps.error, Some(ManualPpsError::WriteFailed));
+        assert!(manual_pps.consume_automatic_restore_pending());
     }
 
     #[test]
@@ -3813,6 +4237,7 @@ mod tests {
                 pps_covers_20v: true,
                 pps_min_mv: Some(3_300),
                 pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
                 avs_min_mv: Some(15_000),
                 avs_max_mv: Some(28_000),
             }),
@@ -3838,6 +4263,7 @@ mod tests {
                 pps_covers_20v: false,
                 pps_min_mv: Some(3_300),
                 pps_max_mv: Some(15_000),
+                pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
             }),
@@ -3859,6 +4285,7 @@ mod tests {
                 pps_covers_20v: true,
                 pps_min_mv: Some(3_300),
                 pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
                 avs_min_mv: Some(15_000),
                 avs_max_mv: Some(28_000),
             }),
@@ -3888,6 +4315,7 @@ mod tests {
                 pps_covers_20v: true,
                 pps_min_mv: Some(3_300),
                 pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
                 avs_min_mv: Some(15_000),
                 avs_max_mv: Some(24_000),
             }),
@@ -3920,6 +4348,7 @@ mod tests {
                 pps_covers_20v: true,
                 pps_min_mv: Some(3_300),
                 pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
             }),
@@ -3948,6 +4377,7 @@ mod tests {
                 pps_covers_20v: true,
                 pps_min_mv: Some(15_000),
                 pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
             }),

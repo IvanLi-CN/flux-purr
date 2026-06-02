@@ -168,7 +168,7 @@ export const DocsGallery: Story = {
             >
               {[
                 ['Theme', 'Dark embedded UI'],
-                ['Screen set', '12 preview states'],
+                ['Screen set', '13 preview states'],
                 ['Gestures', 'Short / Double / Long'],
               ].map(([label, value]) => (
                 <div
@@ -263,6 +263,12 @@ export const Dashboard: Story = {
 export const DashboardManual: Story = {
   args: {
     screen: frontPanelStoryStates.dashboardManual,
+  },
+}
+
+export const DashboardManualPps: Story = {
+  args: {
+    screen: frontPanelStoryStates.dashboardManualPps,
   },
 }
 

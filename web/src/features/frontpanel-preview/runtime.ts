@@ -44,6 +44,7 @@ export interface FrontPanelRuntimeState {
   activeCoolingEnabled: boolean
   activeCoolingCooldownEndsAtMs: number | null
   pdContractMv: number
+  manualPpsEnabled: boolean
   coolingDisabledLockLatched: boolean
   coolingDisabledLockArmed: boolean
   heaterLockReason: HeaterLockReason | null
@@ -343,6 +344,7 @@ export function createFrontPanelRuntimeState(
     activeCoolingEnabled: true,
     activeCoolingCooldownEndsAtMs: null,
     pdContractMv: DEFAULT_PD_CONTRACT_MV,
+    manualPpsEnabled: false,
     coolingDisabledLockLatched: false,
     coolingDisabledLockArmed: true,
     heaterLockReason: null,
@@ -570,6 +572,7 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
       fanRuntimeEnabled: state.fanRuntimeEnabled,
       fanDisplayState: state.fanDisplayState,
       pdContractMv: state.pdContractMv,
+      manualPpsEnabled: state.manualPpsEnabled,
       heaterLockReason: state.heaterLockReason,
       dashboardWarningVisible: state.dashboardWarningVisible,
       temperatureThresholdsC: frontPanelDefaultThresholdsC,

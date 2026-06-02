@@ -58,7 +58,7 @@
 
 - 逻辑分辨率固定为 `160×50`。
 - 主界面必须把温度作为第一视觉焦点，且在 1× 逻辑尺寸下仍能一眼识别。
-- 主界面必须同时显示：实时温度、设定温度、feature-selected 的 `PPS` 电压（默认 `20V`）与 `OFF/AUTO/RUN` 三态风扇显示。
+- 主界面必须同时显示：实时温度、设定温度、feature-selected 的 `PPS` 电压（默认 `20V`）与 `OFF/AUTO/RUN` 三态风扇显示；调试用手动 PPS 覆盖激活时，PPS 行标签显示为 `PPS*` 且保留电压数值。
 - 主界面暂不显示当前命中的 preset 标识，保持既有视觉基线不变。
 - `Preset Temp` 页面顶部必须显示 `M1 ~ M9` 预设槽位。
 - 预设槽位状态必须固定为：当前项=主题色、已启用=正常文本色、未启用=置灰。
@@ -119,7 +119,7 @@
 
 - `Dashboard`
   - 左侧为大温度区，显示当前实时温度。
-  - 右侧为紧凑状态栈，至少承载 `SET` / `PPS` / `FAN` 三行。
+  - 右侧为紧凑状态栈，至少承载 `SET` / `PPS` / `FAN` 三行；手动 PPS 覆盖激活时第二行标签为 `PPS*`。
   - 过温告警激活时，`SET` 行切换为 `WARN / OTEMP` 并闪烁；`FAN` 行仍保持 `OFF/AUTO/RUN` 三态显示。
   - 底部细条用于表达 heater 实际输出强度。
   - 不显示当前命中的 `MAN / Mx` 或其他 preset 标签。
@@ -165,6 +165,7 @@ None
 ## 验收标准（Acceptance Criteria）
 
 - Given `Dashboard` 画面，When 在 1× 逻辑尺寸审视屏幕，Then 目标温度仍是最显著元素，且 heater / fan 状态均可读。
+- Given `Dashboard` 画面且手动 PPS 覆盖激活，When 审视右侧状态栈，Then PPS 行必须显示 `PPS*` 标签并保留当前电压数值。
 - Given `Menu L1`，When 在同屏展示 4 个菜单项，Then 所有菜单项完整可见且选中项不与其他行混淆。
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
 - Given `Preset Temp` 页面，When 某个槽位显示为灰色 `---`，Then 该槽位仍可被选中与重新调整为有效值。
@@ -227,6 +228,10 @@ None
 #### Dashboard
 
 ![Front panel home](./assets/frontpanel-home.png)
+
+#### Dashboard Manual PPS
+
+![Front panel dashboard manual PPS](./assets/frontpanel-dashboard-manual-pps.png)
 
 #### Menu Level 1
 

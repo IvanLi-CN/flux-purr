@@ -29,6 +29,7 @@ export interface FrontPanelDashboardScreen extends FrontPanelBaseScreen {
   fanRuntimeEnabled: boolean
   fanDisplayState: FanDisplayState
   pdContractMv: number
+  manualPpsEnabled: boolean
   heaterLockReason: HeaterLockReason | null
   dashboardWarningVisible: boolean
   temperatureThresholdsC: readonly number[]

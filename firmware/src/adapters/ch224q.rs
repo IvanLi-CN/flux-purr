@@ -156,6 +156,7 @@ pub struct AdjustablePowerCapabilities {
     pub pps_covers_20v: bool,
     pub pps_min_mv: Option<u16>,
     pub pps_max_mv: Option<u16>,
+    pub pps_max_ma: Option<u16>,
     pub avs_min_mv: Option<u16>,
     pub avs_max_mv: Option<u16>,
 }
@@ -202,19 +203,24 @@ impl AdjustablePowerCapabilities {
             0 => {
                 let min_mv = pps_apdo_min_mv(raw);
                 let max_mv = pps_apdo_max_mv(raw);
-                if min_mv == 0 || max_mv == 0 || max_mv < min_mv {
+                let max_ma = pps_apdo_max_ma(raw);
+                if min_mv == 0 || max_mv == 0 || max_ma == 0 || max_mv < min_mv {
                     return;
                 }
 
-                capabilities.pps_min_mv = Some(match capabilities.pps_min_mv {
-                    Some(previous) => previous.min(min_mv),
-                    None => min_mv,
-                });
-                capabilities.pps_max_mv = Some(match capabilities.pps_max_mv {
-                    Some(previous) => previous.max(max_mv),
-                    None => max_mv,
-                });
                 capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
+                if pps_candidate_is_better(
+                    capabilities.pps_min_mv,
+                    capabilities.pps_max_mv,
+                    capabilities.pps_max_ma,
+                    min_mv,
+                    max_mv,
+                    max_ma,
+                ) {
+                    capabilities.pps_min_mv = Some(min_mv);
+                    capabilities.pps_max_mv = Some(max_mv);
+                    capabilities.pps_max_ma = Some(max_ma);
+                }
             }
             1 => {
                 let min_mv = epr_avs_apdo_min_mv(raw);
@@ -235,6 +241,33 @@ impl AdjustablePowerCapabilities {
             _ => {}
         }
     }
+}
+
+const fn pps_candidate_is_better(
+    previous_min_mv: Option<u16>,
+    previous_max_mv: Option<u16>,
+    previous_max_ma: Option<u16>,
+    candidate_min_mv: u16,
+    candidate_max_mv: u16,
+    candidate_max_ma: u16,
+) -> bool {
+    let (Some(previous_min_mv), Some(previous_max_mv), Some(previous_max_ma)) =
+        (previous_min_mv, previous_max_mv, previous_max_ma)
+    else {
+        return true;
+    };
+    let previous_covers_20v = previous_min_mv <= PPS_GATE_MV && previous_max_mv >= PPS_GATE_MV;
+    let candidate_covers_20v = candidate_min_mv <= PPS_GATE_MV && candidate_max_mv >= PPS_GATE_MV;
+    if candidate_covers_20v != previous_covers_20v {
+        return candidate_covers_20v;
+    }
+    if candidate_max_mv != previous_max_mv {
+        return candidate_max_mv > previous_max_mv;
+    }
+    if candidate_min_mv != previous_min_mv {
+        return candidate_min_mv < previous_min_mv;
+    }
+    candidate_max_ma > previous_max_ma
 }
 
 fn source_cap_pdo_window(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -274,6 +307,10 @@ const fn pps_apdo_min_mv(raw: u32) -> u16 {
 
 const fn pps_apdo_max_mv(raw: u32) -> u16 {
     (((raw >> 17) & 0xff) as u16) * 100
+}
+
+const fn pps_apdo_max_ma(raw: u32) -> u16 {
+    ((raw & 0x7f) as u16) * 50
 }
 
 const fn epr_avs_apdo_min_mv(raw: u32) -> u16 {
@@ -367,6 +404,7 @@ mod tests {
         assert!(capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
+        assert_eq!(capabilities.pps_max_ma, Some(3_000));
         assert_eq!(capabilities.avs_min_mv, None);
         assert_eq!(capabilities.avs_max_mv, None);
     }
@@ -386,6 +424,7 @@ mod tests {
         assert!(capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
+        assert_eq!(capabilities.pps_max_ma, Some(3_000));
     }
 
     #[test]
@@ -403,6 +442,7 @@ mod tests {
         assert!(!capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, None);
         assert_eq!(capabilities.pps_max_mv, None);
+        assert_eq!(capabilities.pps_max_ma, None);
     }
 
     #[test]
@@ -439,5 +479,22 @@ mod tests {
         assert!(!capabilities.pps_covers_20v);
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(15_000));
+        assert_eq!(capabilities.pps_max_ma, Some(3_000));
+    }
+
+    #[test]
+    fn keeps_pps_capability_fields_from_one_apdo() {
+        let low_current_wide_pps = (0b11_u32 << 30) | (210_u32 << 17) | (50_u32 << 8) | 20_u32;
+        let high_current_narrow_pps = (0b11_u32 << 30) | (110_u32 << 17) | (33_u32 << 8) | 100_u32;
+        let mut bytes = [0_u8; 8];
+        bytes[0..4].copy_from_slice(&low_current_wide_pps.to_le_bytes());
+        bytes[4..8].copy_from_slice(&high_current_narrow_pps.to_le_bytes());
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
+
+        assert!(capabilities.pps_covers_20v);
+        assert_eq!(capabilities.pps_min_mv, Some(5_000));
+        assert_eq!(capabilities.pps_max_mv, Some(21_000));
+        assert_eq!(capabilities.pps_max_ma, Some(1_000));
     }
 }
