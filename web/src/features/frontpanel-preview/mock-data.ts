@@ -36,6 +36,17 @@ export const frontPanelStoryStates = {
     fanRuntimeEnabled: true,
     fanDisplayState: 'run',
   }),
+  dashboardManualPps: screenFromState({
+    currentTempC: 181,
+    currentTempDeciC: 1813,
+    targetTempC: 220,
+    pdContractMv: 10_400,
+    manualPpsEnabled: true,
+    heaterEnabled: true,
+    heaterOutputPercent: 24,
+    fanRuntimeEnabled: false,
+    fanDisplayState: 'auto',
+  }),
   dashboardFanOff: screenFromState({
     currentTempC: 96,
     currentTempDeciC: 962,
@@ -109,6 +120,7 @@ export const frontPanelStoryStates = {
 export const frontPanelGalleryOrder: FrontPanelScreen[] = [
   frontPanelStoryStates.keyTestIdle,
   frontPanelStoryStates.dashboard,
+  frontPanelStoryStates.dashboardManualPps,
   frontPanelStoryStates.dashboardFanOff,
   frontPanelStoryStates.dashboardFanAuto,
   frontPanelStoryStates.dashboardFanRun,

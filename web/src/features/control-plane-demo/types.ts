@@ -24,6 +24,13 @@ export interface DeviceTarget {
   pdRequestMv: number
   pdContractMv: number
   pdState: 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
+  manualPpsEnabled?: boolean
+  manualPpsMv?: number | null
+  manualPpsMa?: number | null
+  ppsCapabilityMinMv?: number | null
+  ppsCapabilityMaxMv?: number | null
+  ppsCapabilityMaxMa?: number | null
+  manualPpsError?: string | null
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
   fanState: 'OFF' | 'AUTO' | 'RUN'

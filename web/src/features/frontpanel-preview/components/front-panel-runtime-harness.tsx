@@ -404,6 +404,10 @@ export function FrontPanelRuntimeHarness({
             <span className="text-slate-400">pdContractMv:</span> {state.pdContractMv}
           </div>
           <div>
+            <span className="text-slate-400">manualPpsEnabled:</span>{' '}
+            {String(state.manualPpsEnabled)}
+          </div>
+          <div>
             <span className="text-slate-400">keyTest:</span> {state.keyTest.rawKeyLabel} /{' '}
             {state.keyTest.logicalKeyLabel} / {state.keyTest.gestureLabel}
           </div>

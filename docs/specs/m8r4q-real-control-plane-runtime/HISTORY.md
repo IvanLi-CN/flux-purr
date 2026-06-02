@@ -1,5 +1,14 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-06-02
+
+- 授权端口 `/dev/cu.usbmodem21221401` 上完成手动 PPS 真机验证：新固件烧录后，`flux-purr pd pps set --volts 10.4 --amps 2.50` 回显 `manualPpsEnabled=true`、`manualPpsMv=10400`、`manualPpsMa=2500`、`pdContractMv=10400`，IsolaPurr `isolapurr-01-wifi` USB-C 外部遥测读到 `10425mV`；清除覆盖后回到自动控制与约 `12.03V`。
+
+## 2026-05-31
+
+- Runtime contract 扩展手动 PPS 调试覆盖：status 回传 manual/capability/error，runtime_config 可设置或清除非持久化 `manualPpsEnabled` / `manualPpsMv` / `manualPpsMa`。
+- `flux-purr pd pps set|clear`、devd HTTP bridge、browser Web Serial 与 Web Dashboard 高级 PPS 控制共用同一 runtime contract；无授权端口时 HIL 保持阻断。
+
 ## 2026-05-23
 
 - 创建真实控制面 topic spec，把 PR #27 solution 从架构建议提升为 Flux Purr 的可实现 contract。

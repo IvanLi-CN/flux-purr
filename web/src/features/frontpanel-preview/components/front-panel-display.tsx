@@ -387,6 +387,37 @@ function drawStatusLine(
   })
 }
 
+function drawPpsStatusLine(
+  ctx: CanvasRenderingContext2D,
+  y: number,
+  screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
+) {
+  drawBitmapText(ctx, 'PPS', 80, y, {
+    color: palette.cyan,
+    scale: 2,
+    letterSpacing: 1,
+  })
+  if (screen.manualPpsEnabled) {
+    drawBitmapText(ctx, '*', 103, y - 3, {
+      color: palette.cyan,
+      scale: 1,
+      letterSpacing: 0,
+    })
+  }
+  drawBitmapText(ctx, formatPdContractVolts(screen.pdContractMv), 147, y, {
+    color: palette.cyan,
+    scale: 2,
+    letterSpacing: 1,
+    align: 'right',
+  })
+  drawBitmapText(ctx, 'V', 154, y, {
+    color: palette.cyan,
+    scale: 2,
+    letterSpacing: 1,
+    align: 'right',
+  })
+}
+
 function drawDashboardScreen(
   ctx: CanvasRenderingContext2D,
   screen: Extract<FrontPanelScreen, { kind: 'dashboard' }>
@@ -420,7 +451,7 @@ function drawDashboardScreen(
   } else {
     drawStatusLine(ctx, 7, palette.warning, 'SET', `${screen.targetTempC}`)
   }
-  drawStatusLine(ctx, 18, palette.cyan, 'PPS', `${Math.round(screen.pdContractMv / 1000)}V`)
+  drawPpsStatusLine(ctx, 18, screen)
   drawStatusLine(ctx, 29, fanColor, 'FAN', screen.fanDisplayState.toUpperCase())
 
   fillRect(ctx, 4, 42, 152, 5, palette.panel)
@@ -438,6 +469,15 @@ function drawDashboardScreen(
       screen.heaterEnabled ? palette.accent : palette.disabled
     )
   }
+}
+
+function formatPdContractVolts(millivolts: number) {
+  const boundedMv = Math.max(0, Math.trunc(millivolts))
+  const whole = Math.trunc(boundedMv / 1000)
+  const fractional = Math.trunc((boundedMv % 1000) / 10)
+    .toString()
+    .padStart(2, '0')
+  return `${whole}.${fractional}`
 }
 
 function drawMenuScreen(
@@ -670,7 +710,9 @@ function ariaLabel(screen: FrontPanelScreen) {
     case 'key-test':
       return `front panel key test ${screen.gestureLabel}`
     case 'dashboard':
-      return `front panel dashboard ${screen.targetTempC} degrees`
+      return `front panel dashboard ${screen.targetTempC} degrees ${
+        screen.manualPpsEnabled ? 'manual PPS override' : 'automatic PPS'
+      }`
     case 'menu':
       return 'front panel menu'
     case 'preset-temp': {

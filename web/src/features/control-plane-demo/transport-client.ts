@@ -253,6 +253,13 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     pdRequestMv: record.status.pdRequestMv,
     pdContractMv: record.status.pdContractMv,
     pdState: record.status.pdState,
+    manualPpsEnabled: record.status.manualPpsEnabled ?? false,
+    manualPpsMv: record.status.manualPpsMv ?? null,
+    manualPpsMa: record.status.manualPpsMa ?? null,
+    ppsCapabilityMinMv: record.status.ppsCapabilityMinMv ?? null,
+    ppsCapabilityMaxMv: record.status.ppsCapabilityMaxMv ?? null,
+    ppsCapabilityMaxMa: record.status.ppsCapabilityMaxMa ?? null,
+    manualPpsError: record.status.manualPpsError ?? null,
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
     fanState: record.status.fanDisplayState,
@@ -287,6 +294,7 @@ function devdEventDetail(event: DevdEvent) {
       presetSlotLabel(status?.selectedPresetSlot),
       boolLabel('cooling', status?.activeCoolingEnabled),
       boolLabel('heater', status?.heaterEnabled),
+      manualPpsLabel(status?.manualPpsEnabled, status?.manualPpsMv, status?.manualPpsMa),
     ]
       .filter(Boolean)
       .join(' / ')
@@ -345,6 +353,20 @@ function safeNumber(value: unknown) {
 function targetTempLabel(value: unknown) {
   const targetTempC = safeNumber(value)
   return targetTempC === null ? null : `target ${targetTempC}C`
+}
+
+function manualPpsLabel(enabled: unknown, millivolts: unknown, milliamps: unknown) {
+  if (enabled !== true) {
+    return enabled === false ? 'manual PPS off' : null
+  }
+  const value = safeNumber(millivolts)
+  const amps = safeNumber(milliamps)
+  if (value === null) {
+    return 'manual PPS on'
+  }
+  return amps === null
+    ? `manual PPS ${(value / 1000).toFixed(1)}V`
+    : `manual PPS ${(value / 1000).toFixed(1)}V/${(amps / 1000).toFixed(2)}A`
 }
 
 function presetSlotLabel(value: unknown) {

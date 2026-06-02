@@ -1,6 +1,8 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
+  AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   Fan,
   Gauge,
   Minus,
@@ -73,6 +75,9 @@ const LOG_FILTER_OPTIONS: Array<{ value: LogFilter; label: string }> = [
 const TARGET_TEMP_MIN = 0
 const TARGET_TEMP_MAX = 400
 const TARGET_TEMP_STEP = 5
+const PPS_STEP_MV = 100
+const PPS_STEP_MA = 50
+const PPS_MAX_MV = 21_000
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
@@ -166,6 +171,13 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     pdContractMv: 0,
     pdState: 'fault' as const,
     heaterOutputPercent: 0,
+    manualPpsEnabled: false,
+    manualPpsMv: null,
+    manualPpsMa: null,
+    ppsCapabilityMinMv: null,
+    ppsCapabilityMaxMv: null,
+    ppsCapabilityMaxMa: null,
+    manualPpsError: null,
     activeCoolingEnabled: false,
     fanState: 'OFF' as const,
     wifiRssi: null,
@@ -237,6 +249,9 @@ export function ControlPlaneDemo({
   >({})
   const [currentTempByDevice, setCurrentTempByDevice] = useState<Record<string, number>>({})
   const [heaterHeldByDevice, setHeaterHeldByDevice] = useState<Record<string, boolean>>({})
+  const [manualPpsByDevice, setManualPpsByDevice] = useState<
+    Record<string, { enabled: boolean; mv: number | null; ma: number | null }>
+  >({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
   const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>([])
   const pendingDeviceModeRef = useRef(allowDemoControls)
@@ -437,6 +452,14 @@ export function ControlPlaneDemo({
                 selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
               )
             )
+    const manualPpsOverride = liveRuntimeDevice ? undefined : manualPpsByDevice[selectedDevice.id]
+    const manualPpsEnabled = manualPpsOverride?.enabled ?? selectedDevice.manualPpsEnabled ?? false
+    const manualPpsMv = manualPpsOverride
+      ? manualPpsOverride.mv
+      : (selectedDevice.manualPpsMv ?? null)
+    const manualPpsMa = manualPpsOverride
+      ? manualPpsOverride.ma
+      : (selectedDevice.manualPpsMa ?? null)
 
     return {
       ...selectedDevice,
@@ -445,6 +468,14 @@ export function ControlPlaneDemo({
       fanState,
       activeCoolingEnabled: selectedDevice.activeCoolingEnabled,
       heaterOutputPercent: heaterHeldByDevice[selectedDevice.id] ? 0 : heaterOutputPercent,
+      manualPpsEnabled,
+      manualPpsMv,
+      manualPpsMa,
+      pdRequestMv:
+        manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.pdRequestMv,
+      pdContractMv:
+        manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.pdContractMv,
+      voltageMv: manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.voltageMv,
       wifiRssi: selectedDevice.wifiRssi,
       networkState: selectedDevice.networkState,
     }
@@ -453,6 +484,7 @@ export function ControlPlaneDemo({
     currentTempByDevice,
     fanPolicyByDevice,
     heaterHeldByDevice,
+    manualPpsByDevice,
     selectedDevice,
     targetTempByDevice,
   ])
@@ -527,6 +559,9 @@ export function ControlPlaneDemo({
         presetsC?: Array<number | null>
         activeCoolingEnabled?: boolean
         heaterEnabled?: boolean
+        manualPpsEnabled?: boolean
+        manualPpsMv?: number
+        manualPpsMa?: number
       },
       failureMessage: string
     ) => {
@@ -842,6 +877,56 @@ export function ControlPlaneDemo({
       tone: fanState === 'OFF' ? 'warning' : 'success',
     })
     emitEvent('cooling', `fan policy updated to ${fanState}`, 'info')
+  }
+
+  const handleManualPpsApply = async (millivolts: number, milliamps: number) => {
+    const boundedMv = clampPpsMv(millivolts, visibleDevice)
+    const boundedMa = clampPpsMa(milliamps, visibleDevice)
+    const liveUpdated = await configureLiveRuntime(
+      { manualPpsEnabled: true, manualPpsMv: boundedMv, manualPpsMa: boundedMa },
+      'manual PPS update was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setManualPpsByDevice((current) => ({
+        ...current,
+        [visibleDevice.id]: { enabled: true, mv: boundedMv, ma: boundedMa },
+      }))
+    }
+    setFeedback({
+      title: 'Manual PPS applied',
+      detail: `${visibleDevice.alias} is requesting ${formatVolts(boundedMv)} / ${formatAmps(boundedMa)} from PPS.`,
+      tone: 'warning',
+    })
+    emitEvent(
+      'pd',
+      `manual PPS set to ${formatVolts(boundedMv)} / ${formatAmps(boundedMa)}`,
+      'warning'
+    )
+  }
+
+  const handleManualPpsClear = async () => {
+    const liveUpdated = await configureLiveRuntime(
+      { manualPpsEnabled: false },
+      'manual PPS clear was not accepted by devd'
+    )
+    if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (!visibleDeviceIsLive) {
+      setManualPpsByDevice((current) => ({
+        ...current,
+        [visibleDevice.id]: { enabled: false, mv: null, ma: null },
+      }))
+    }
+    setFeedback({
+      title: 'Manual PPS cleared',
+      detail: `${visibleDevice.alias} is back on automatic power control.`,
+      tone: 'success',
+    })
+    emitEvent('pd', 'manual PPS override cleared', 'success')
   }
 
   const handlePresetSlotChange = async (presetIndex: number) => {
@@ -1211,6 +1296,8 @@ export function ControlPlaneDemo({
                 onPresetTempChange={handlePresetTempChange}
                 onPresetEnabledChange={handlePresetEnabledChange}
                 onFanPolicyChange={handleFanPolicyChange}
+                onManualPpsApply={handleManualPpsApply}
+                onManualPpsClear={handleManualPpsClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onArtifactChange={handleArtifactChange}
                 onDeviceSelect={handleDeviceChange}
@@ -1413,6 +1500,43 @@ function clampTargetTemp(value: number) {
   return Math.min(TARGET_TEMP_MAX, Math.max(TARGET_TEMP_MIN, Math.round(value)))
 }
 
+function ppsCapabilityRange(device: DeviceTarget) {
+  const minMv = device.ppsCapabilityMinMv ?? 0
+  const maxMv = Math.min(device.ppsCapabilityMaxMv ?? 0, PPS_MAX_MV)
+  if (minMv <= 0 || maxMv < minMv) {
+    return null
+  }
+  return { minMv, maxMv }
+}
+
+function clampPpsMv(value: number, device: DeviceTarget) {
+  const range = ppsCapabilityRange(device)
+  const minMv = range?.minMv ?? PPS_STEP_MV
+  const maxMv = range?.maxMv ?? PPS_MAX_MV
+  const rounded = Math.round(value / PPS_STEP_MV) * PPS_STEP_MV
+  return Math.min(maxMv, Math.max(minMv, rounded))
+}
+
+function clampPpsMa(value: number, device: DeviceTarget) {
+  const maxMa = device.ppsCapabilityMaxMa ?? 3_000
+  const rounded = Math.round(value / PPS_STEP_MA) * PPS_STEP_MA
+  return Math.min(maxMa, Math.max(PPS_STEP_MA, rounded))
+}
+
+function defaultManualPpsMv(device: DeviceTarget) {
+  return clampPpsMv(
+    device.manualPpsMv ?? device.pdContractMv ?? device.ppsCapabilityMinMv ?? 12_000,
+    device
+  )
+}
+
+function defaultManualPpsMa(device: DeviceTarget) {
+  return clampPpsMa(
+    device.manualPpsMa ?? device.ppsCapabilityMaxMa ?? device.currentMa ?? 3_000,
+    device
+  )
+}
+
 function formatVolts(millivolts: number) {
   if (millivolts <= 0) {
     return 'N/A'
@@ -1425,8 +1549,7 @@ function formatAmps(milliamps: number) {
   if (milliamps <= 0) {
     return 'N/A'
   }
-
-  return `${(milliamps / 1000).toFixed(1)}A`
+  return `${(milliamps / 1000).toFixed(2)}A`
 }
 
 function formatPdContract(millivolts: number, milliamps: number) {
@@ -1529,6 +1652,8 @@ function ViewPanel({
   onPresetTempChange,
   onPresetEnabledChange,
   onFanPolicyChange,
+  onManualPpsApply,
+  onManualPpsClear,
   onHeaterHoldToggle,
   onArtifactChange,
   onDeviceSelect,
@@ -1557,6 +1682,8 @@ function ViewPanel({
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onManualPpsApply: (millivolts: number, milliamps: number) => void | Promise<void>
+  onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
   onArtifactChange: (artifactId: string) => void
   onDeviceSelect: (deviceId: string) => void
@@ -1628,6 +1755,8 @@ function ViewPanel({
       artifact={artifact}
       feedback={feedback}
       onTargetTempChange={onTargetTempChange}
+      onManualPpsApply={onManualPpsApply}
+      onManualPpsClear={onManualPpsClear}
       onHeaterHoldToggle={onHeaterHoldToggle}
     />
   )
@@ -1767,14 +1896,36 @@ function DashboardView({
   artifact,
   feedback,
   onTargetTempChange,
+  onManualPpsApply,
+  onManualPpsClear,
   onHeaterHoldToggle,
 }: {
   device: DeviceTarget
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
   onTargetTempChange: (nextTargetTemp: number) => void
+  onManualPpsApply: (millivolts: number, milliamps: number) => void | Promise<void>
+  onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
 }) {
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const manualPpsDefaultMv = defaultManualPpsMv(device)
+  const manualPpsDefaultMa = defaultManualPpsMa(device)
+  const [manualPpsDraftMv, setManualPpsDraftMv] = useState(() => manualPpsDefaultMv)
+  const [manualPpsDraftMa, setManualPpsDraftMa] = useState(() => manualPpsDefaultMa)
+  const [manualPpsDraftDirty, setManualPpsDraftDirty] = useState(false)
+  const manualPpsDeviceIdRef = useRef(device.id)
+  useEffect(() => {
+    const deviceChanged = manualPpsDeviceIdRef.current !== device.id
+    manualPpsDeviceIdRef.current = device.id
+    if (!deviceChanged && advancedOpen && manualPpsDraftDirty) {
+      return
+    }
+
+    setManualPpsDraftMv(manualPpsDefaultMv)
+    setManualPpsDraftMa(manualPpsDefaultMa)
+    setManualPpsDraftDirty(false)
+  }, [advancedOpen, device.id, manualPpsDefaultMa, manualPpsDefaultMv, manualPpsDraftDirty])
   const heaterState =
     device.severity === 'offline'
       ? 'offline'
@@ -1819,6 +1970,27 @@ function DashboardView({
         </div>
       </div>
 
+      <ManualPpsPanel
+        device={device}
+        open={advancedOpen}
+        valueMv={manualPpsDraftMv}
+        valueMa={manualPpsDraftMa}
+        onOpenChange={setAdvancedOpen}
+        onValueChange={(millivolts) => {
+          setManualPpsDraftMv(millivolts)
+          setManualPpsDraftDirty(true)
+        }}
+        onCurrentChange={(milliamps) => {
+          setManualPpsDraftMa(milliamps)
+          setManualPpsDraftDirty(true)
+        }}
+        onApply={() => onManualPpsApply(manualPpsDraftMv, manualPpsDraftMa)}
+        onClear={async () => {
+          await onManualPpsClear()
+          setManualPpsDraftDirty(false)
+        }}
+      />
+
       <div className="industrial-secondary-actions">
         <TargetTempControl
           value={device.targetTempC}
@@ -1839,6 +2011,153 @@ function DashboardView({
       <CapabilityStrip device={device} />
       <ActionFeedbackPanel feedback={feedback} />
     </div>
+  )
+}
+
+function ManualPpsPanel({
+  device,
+  open,
+  valueMv,
+  valueMa,
+  onOpenChange,
+  onValueChange,
+  onCurrentChange,
+  onApply,
+  onClear,
+}: {
+  device: DeviceTarget
+  open: boolean
+  valueMv: number
+  valueMa: number
+  onOpenChange: (open: boolean) => void
+  onValueChange: (millivolts: number) => void
+  onCurrentChange: (milliamps: number) => void
+  onApply: () => void | Promise<void>
+  onClear: () => void | Promise<void>
+}) {
+  const range = ppsCapabilityRange(device)
+  const maxMa = device.ppsCapabilityMaxMa ?? null
+  const disabled = device.severity === 'offline' || !range || maxMa == null
+  const clearDisabled = device.severity === 'offline' || !device.manualPpsEnabled
+  const capabilityText = range
+    ? `${formatVolts(range.minMv)}-${formatVolts(range.maxMv)} / ${maxMa ? formatAmps(maxMa) : 'current unknown'} source range`
+    : 'No PPS APDO reported'
+  const statusText = device.manualPpsEnabled
+    ? `Manual ${formatVolts(device.manualPpsMv ?? valueMv)} / ${formatAmps(device.manualPpsMa ?? valueMa)}`
+    : 'Automatic'
+  return (
+    <section className={open ? 'industrial-advanced is-open' : 'industrial-advanced'}>
+      <button
+        type="button"
+        className="industrial-advanced__toggle"
+        aria-expanded={open}
+        onClick={() => onOpenChange(!open)}
+      >
+        <span className="industrial-advanced__icon" aria-hidden="true">
+          <SlidersHorizontal size={16} />
+        </span>
+        <span className="industrial-advanced__summary">
+          <span>
+            <strong>Advanced PPS</strong>
+            <small>{capabilityText}</small>
+          </span>
+          <span
+            className={
+              device.manualPpsEnabled
+                ? 'industrial-advanced__state is-warning'
+                : 'industrial-advanced__state'
+            }
+          >
+            {statusText}
+          </span>
+        </span>
+        <ChevronDown className="industrial-advanced__chevron" size={16} aria-hidden="true" />
+      </button>
+
+      {open ? (
+        <div className="industrial-advanced__body">
+          <div className="industrial-pps-readout">
+            <p className="industrial-label">PPS debug</p>
+            <strong>
+              {formatVolts(valueMv)} / {formatAmps(valueMa)}
+            </strong>
+            <span>
+              {device.manualPpsEnabled ? 'Manual override armed' : 'Automatic control active'}
+            </span>
+          </div>
+          <div className="industrial-pps-control">
+            <label htmlFor="manual-pps-slider">
+              <span>Voltage request</span>
+              <strong>{formatVolts(valueMv)}</strong>
+            </label>
+            <input
+              id="manual-pps-slider"
+              type="range"
+              min={range?.minMv ?? PPS_STEP_MV}
+              max={range?.maxMv ?? PPS_MAX_MV}
+              step={PPS_STEP_MV}
+              value={valueMv}
+              disabled={disabled}
+              aria-label="Manual PPS voltage"
+              onChange={(event) => onValueChange(Number(event.currentTarget.value))}
+            />
+            <div className="industrial-pps-control__bounds">
+              <span>{range ? formatVolts(range.minMv) : 'No PPS APDO'}</span>
+              <span>{range ? formatVolts(range.maxMv) : 'Unavailable'}</span>
+            </div>
+          </div>
+          <div className="industrial-pps-control">
+            <label htmlFor="manual-pps-current-slider">
+              <span>Current request</span>
+              <strong>{formatAmps(valueMa)}</strong>
+            </label>
+            <input
+              id="manual-pps-current-slider"
+              type="range"
+              min={PPS_STEP_MA}
+              max={maxMa ?? 3_000}
+              step={PPS_STEP_MA}
+              value={valueMa}
+              disabled={disabled}
+              aria-label="Manual PPS current"
+              onChange={(event) => onCurrentChange(Number(event.currentTarget.value))}
+            />
+            <div className="industrial-pps-control__bounds">
+              <span>{formatAmps(PPS_STEP_MA)}</span>
+              <span>{maxMa ? formatAmps(maxMa) : 'Unavailable'}</span>
+            </div>
+          </div>
+          <div className="industrial-advanced__actions">
+            <button
+              type="button"
+              className="industrial-button industrial-button--secondary"
+              disabled={disabled}
+              onClick={onApply}
+            >
+              Apply PPS
+            </button>
+            <button
+              type="button"
+              className="industrial-button industrial-button--secondary"
+              disabled={clearDisabled}
+              onClick={onClear}
+            >
+              Clear
+            </button>
+          </div>
+          <p className="industrial-advanced__warning">
+            <AlertTriangle size={14} aria-hidden="true" />
+            <span>
+              Manual PPS pauses automatic voltage requests. Current is a requested value validated
+              against the advertised APDO capability.
+            </span>
+          </p>
+          {device.manualPpsError ? (
+            <p className="industrial-advanced__error">Last PPS error: {device.manualPpsError}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
   )
 }
 

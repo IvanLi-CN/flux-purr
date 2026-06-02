@@ -38,6 +38,7 @@ pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
+const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const USER_CONFIG_FILE: &str = "config.json";
 const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
@@ -383,9 +384,16 @@ impl DeviceRecord {
             voltage_mv: 20_010,
             current_ma: 840,
             board_temp_centi: 3_840,
-            pd_request_mv: 20_000,
-            pd_contract_mv: 20_000,
+            pd_request_mv: DEFAULT_PD_REQUEST_MV,
+            pd_contract_mv: DEFAULT_PD_REQUEST_MV,
             pd_state: "ready".to_string(),
+            manual_pps_enabled: false,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            pps_capability_min_mv: Some(5_000),
+            pps_capability_max_mv: Some(21_000),
+            pps_capability_max_ma: Some(3_000),
+            manual_pps_error: None,
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -484,6 +492,20 @@ pub struct ControlPlaneStatus {
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: String,
+    #[serde(default)]
+    pub manual_pps_enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_pps_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_pps_ma: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pps_capability_min_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pps_capability_max_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pps_capability_max_ma: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_pps_error: Option<String>,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
 }
@@ -550,6 +572,9 @@ pub struct RuntimeConfigRequest {
     pub presets_c: Option<Vec<Option<i16>>>,
     pub active_cooling_enabled: Option<bool>,
     pub heater_enabled: Option<bool>,
+    pub manual_pps_enabled: Option<bool>,
+    pub manual_pps_mv: Option<u16>,
+    pub manual_pps_ma: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -610,6 +635,12 @@ struct UsbRuntimeConfigWire<'a> {
     active_cooling_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     heater_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manual_pps_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manual_pps_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manual_pps_ma: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1246,6 +1277,8 @@ async fn configure_runtime(
         return Ok(Json(status));
     }
 
+    validate_manual_pps_request_against_status(&payload, &target.status)?;
+
     let mut state_lock = state.lock()?;
     let device = state_lock
         .devices
@@ -1275,6 +1308,35 @@ async fn configure_runtime(
             device.status.heater_output_percent = 0;
         }
     }
+    if payload.manual_pps_enabled == Some(false) {
+        device.status.manual_pps_enabled = false;
+        device.status.manual_pps_mv = None;
+        device.status.manual_pps_ma = None;
+        device.status.pd_request_mv = DEFAULT_PD_REQUEST_MV;
+        device.status.pd_contract_mv = DEFAULT_PD_REQUEST_MV;
+        device.status.voltage_mv = u32::from(DEFAULT_PD_REQUEST_MV);
+        device.status.manual_pps_error = None;
+    } else if payload.manual_pps_enabled == Some(true)
+        || payload.manual_pps_mv.is_some()
+        || payload.manual_pps_ma.is_some()
+    {
+        let manual_pps_mv = payload
+            .manual_pps_mv
+            .or(device.status.manual_pps_mv)
+            .expect("manual PPS voltage validated");
+        let manual_pps_ma = payload
+            .manual_pps_ma
+            .or(device.status.manual_pps_ma)
+            .or(device.status.pps_capability_max_ma)
+            .expect("manual PPS current validated");
+        device.status.manual_pps_enabled = true;
+        device.status.manual_pps_mv = Some(manual_pps_mv);
+        device.status.manual_pps_ma = Some(manual_pps_ma);
+        device.status.pd_request_mv = manual_pps_mv;
+        device.status.pd_contract_mv = manual_pps_mv;
+        device.status.voltage_mv = u32::from(manual_pps_mv);
+        device.status.manual_pps_error = None;
+    }
     let status = device.status.clone();
     drop(state_lock);
     emit_runtime_config_event(&state, &device_id, &payload, &status);
@@ -1299,6 +1361,76 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
         return Err(HttpError::bad_request(
             "invalid_presets",
             "presetsC must contain exactly 10 values.",
+        ));
+    }
+    if payload.manual_pps_mv.is_some_and(|millivolts| {
+        !millivolts.is_multiple_of(100) || millivolts > 21_000 || millivolts == 0
+    }) {
+        return Err(HttpError::bad_request(
+            "invalid_manual_pps",
+            "manualPpsMv must use 100mV steps and be no higher than 21000.",
+        ));
+    }
+    if payload
+        .manual_pps_ma
+        .is_some_and(|milliamps| !milliamps.is_multiple_of(50) || milliamps == 0)
+    {
+        return Err(HttpError::bad_request(
+            "invalid_manual_pps",
+            "manualPpsMa must use 50mA steps and be greater than 0.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_manual_pps_request_against_status(
+    payload: &RuntimeConfigRequest,
+    status: &ControlPlaneStatus,
+) -> Result<(), HttpError> {
+    if payload.manual_pps_enabled != Some(true)
+        && payload.manual_pps_mv.is_none()
+        && payload.manual_pps_ma.is_none()
+    {
+        return Ok(());
+    }
+
+    let manual_pps_mv = payload
+        .manual_pps_mv
+        .or(status.manual_pps_mv)
+        .ok_or_else(|| HttpError::bad_request("invalid_manual_pps", "manualPpsMv is required."))?;
+    let manual_pps_ma = payload
+        .manual_pps_ma
+        .or(status.manual_pps_ma)
+        .or(status.pps_capability_max_ma)
+        .ok_or_else(|| HttpError::bad_request("invalid_manual_pps", "manualPpsMa is required."))?;
+    validate_manual_pps_against_status(manual_pps_mv, manual_pps_ma, status)
+}
+
+fn validate_manual_pps_against_status(
+    millivolts: u16,
+    milliamps: u16,
+    status: &ControlPlaneStatus,
+) -> Result<(), HttpError> {
+    let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
+        status.pps_capability_min_mv,
+        status.pps_capability_max_mv,
+        status.pps_capability_max_ma,
+    ) else {
+        return Err(HttpError::bad_request(
+            "manual_pps_no_capability",
+            "PPS capability is unavailable.",
+        ));
+    };
+    if millivolts < min_mv || millivolts > max_mv {
+        return Err(HttpError::bad_request(
+            "manual_pps_out_of_range",
+            "manualPpsMv is outside the advertised PPS capability.",
+        ));
+    }
+    if milliamps > max_ma {
+        return Err(HttpError::bad_request(
+            "manual_pps_out_of_range",
+            "manualPpsMa is outside the advertised PPS capability.",
         ));
     }
     Ok(())
@@ -1377,6 +1509,9 @@ async fn serial_runtime_config(
         presets_c: payload.presets_c.as_ref(),
         active_cooling_enabled: payload.active_cooling_enabled,
         heater_enabled: payload.heater_enabled,
+        manual_pps_enabled: payload.manual_pps_enabled,
+        manual_pps_mv: payload.manual_pps_mv,
+        manual_pps_ma: payload.manual_pps_ma,
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
     let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
@@ -2332,6 +2467,9 @@ fn emit_runtime_config_event(
                 "presetsC": payload.presets_c,
                 "activeCoolingEnabled": payload.active_cooling_enabled,
                 "heaterEnabled": payload.heater_enabled,
+                "manualPpsEnabled": payload.manual_pps_enabled,
+                "manualPpsMv": payload.manual_pps_mv,
+                "manualPpsMa": payload.manual_pps_ma,
             },
             "status": {
                 "targetTempC": status.target_temp_c,
@@ -2339,6 +2477,9 @@ fn emit_runtime_config_event(
                 "presetsC": status.presets_c,
                 "activeCoolingEnabled": status.active_cooling_enabled,
                 "heaterEnabled": status.heater_enabled,
+                "manualPpsEnabled": status.manual_pps_enabled,
+                "manualPpsMv": status.manual_pps_mv,
+                "manualPpsMa": status.manual_pps_ma,
             },
         }),
     ));
@@ -2955,6 +3096,9 @@ mod tests {
                 presets_c: None,
                 active_cooling_enabled: None,
                 heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
             }),
         )
         .await
@@ -3047,43 +3191,120 @@ mod tests {
             State(state.clone()),
             AxumPath("mock-fp-lab-01".to_string()),
             Json(RuntimeConfigRequest {
-                lease_id: lease.lease_id,
+                lease_id: lease.lease_id.clone(),
                 target_temp_c: Some(231),
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: Some(false),
                 heater_enabled: Some(false),
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
             }),
         )
         .await
         .unwrap();
 
-        let inner = state.lock().unwrap();
-        let device = inner.devices.get("mock-fp-lab-01").unwrap();
-        let wifi_event = device
-            .events
-            .iter()
-            .find(|event| event.kind == "wifi" && event.message == "wifi config accepted")
-            .unwrap();
-        assert_eq!(wifi_event.payload["ssid"], "FluxPurr-Lab");
-        assert_eq!(wifi_event.payload["passwordPresent"], true);
-        assert!(
-            !serde_json::to_string(&wifi_event.payload)
-                .unwrap()
-                .contains("secret-pass")
-        );
+        {
+            let inner = state.lock().unwrap();
+            let device = inner.devices.get("mock-fp-lab-01").unwrap();
+            let wifi_event = device
+                .events
+                .iter()
+                .find(|event| event.kind == "wifi" && event.message == "wifi config accepted")
+                .unwrap();
+            assert_eq!(wifi_event.payload["ssid"], "FluxPurr-Lab");
+            assert_eq!(wifi_event.payload["passwordPresent"], true);
+            assert!(
+                !serde_json::to_string(&wifi_event.payload)
+                    .unwrap()
+                    .contains("secret-pass")
+            );
 
-        let runtime_event = device
-            .events
-            .iter()
-            .find(|event| event.kind == "runtime" && event.message == "runtime config applied")
-            .unwrap();
-        assert_eq!(runtime_event.payload["status"]["targetTempC"], 231);
-        assert_eq!(
-            runtime_event.payload["status"]["activeCoolingEnabled"],
-            false
-        );
-        assert_eq!(runtime_event.payload["status"]["heaterEnabled"], false);
+            let runtime_event = device
+                .events
+                .iter()
+                .find(|event| event.kind == "runtime" && event.message == "runtime config applied")
+                .unwrap();
+            assert_eq!(runtime_event.payload["status"]["targetTempC"], 231);
+            assert_eq!(
+                runtime_event.payload["status"]["activeCoolingEnabled"],
+                false
+            );
+            assert_eq!(runtime_event.payload["status"]["heaterEnabled"], false);
+        }
+
+        let invalid_manual = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: Some(199),
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(true),
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid_manual.error.code, "invalid_manual_pps");
+        {
+            let inner = state.lock().unwrap();
+            let device = inner.devices.get("mock-fp-lab-01").unwrap();
+            assert_eq!(device.status.target_temp_c, 231);
+            assert!(!device.status.manual_pps_enabled);
+        }
+
+        let manual_status = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(true),
+                manual_pps_mv: Some(10_400),
+                manual_pps_ma: Some(2_500),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(manual_status.manual_pps_enabled);
+        assert_eq!(manual_status.manual_pps_mv, Some(10_400));
+        assert_eq!(manual_status.manual_pps_ma, Some(2_500));
+        assert_eq!(manual_status.pd_contract_mv, 10_400);
+
+        let cleared_status = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(false),
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!cleared_status.manual_pps_enabled);
+        assert_eq!(cleared_status.manual_pps_mv, None);
+        assert_eq!(cleared_status.manual_pps_ma, None);
+        assert_eq!(cleared_status.pd_contract_mv, DEFAULT_PD_REQUEST_MV);
+        assert_eq!(cleared_status.voltage_mv, u32::from(DEFAULT_PD_REQUEST_MV));
     }
 
     #[tokio::test]

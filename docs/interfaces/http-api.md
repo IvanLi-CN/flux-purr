@@ -63,6 +63,13 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "pdRequestMv": 20000,
   "pdContractMv": 20000,
   "pdState": "ready",
+  "manualPpsEnabled": false,
+  "manualPpsMv": null,
+  "manualPpsMa": null,
+  "ppsCapabilityMinMv": 5000,
+  "ppsCapabilityMaxMv": 21000,
+  "ppsCapabilityMaxMa": 3000,
+  "manualPpsError": null,
   "frontpanelKey": null,
   "network": { "state": "connected", "wifiRssi": -54 }
 }
@@ -227,11 +234,14 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
   "selectedPresetSlot": 3,
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
-  "heaterEnabled": true
+  "heaterEnabled": true,
+  "manualPpsEnabled": true,
+  "manualPpsMv": 10400,
+  "manualPpsMa": 2500
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the advertised PPS capability, on a `100mV` step, `manualPpsMa` within the advertised APDO current capability, on a `50mA` step, and no higher than `21.0V`. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
 
 `GET /api/v1/artifacts` response:
 
@@ -303,6 +313,8 @@ Core commands:
 - `flux-purr identity --device <id>` or `--hardware <saved-id>`
 - `flux-purr status --device <id>` or `--hardware <saved-id>`
 - `flux-purr runtime get|set --device <id> ...`
+- `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
+- `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr wifi set|clear --device <id> ...`
 - `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
 - `flux-purr monitor --device <id>`
@@ -421,7 +433,10 @@ Responses must redact the password:
   "selectedPresetSlot": 3,
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
-  "heaterEnabled": true
+  "heaterEnabled": true,
+  "manualPpsEnabled": true,
+  "manualPpsMv": 10400,
+  "manualPpsMa": 2500
 }
 ```
 
@@ -438,7 +453,10 @@ The response returns the updated status:
       "selectedPresetSlot": 3,
       "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
       "activeCoolingEnabled": true,
-      "heaterEnabled": true
+      "heaterEnabled": true,
+      "manualPpsEnabled": true,
+      "manualPpsMv": 10400,
+      "manualPpsMa": 2500
     }
   }
 }

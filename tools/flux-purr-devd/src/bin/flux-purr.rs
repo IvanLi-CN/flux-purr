@@ -34,6 +34,10 @@ enum Command {
         #[command(subcommand)]
         command: RuntimeCommand,
     },
+    Pd {
+        #[command(subcommand)]
+        command: PdCommand,
+    },
     Wifi {
         #[command(subcommand)]
         command: WifiCommand,
@@ -62,6 +66,38 @@ struct TargetSelector {
 enum RuntimeCommand {
     Get(TargetSelector),
     Set(RuntimeSetArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum PdCommand {
+    Pps {
+        #[command(subcommand)]
+        command: PpsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PpsCommand {
+    #[command(about = "Set a manual PPS override. Avoid large changes while heating.")]
+    Set(PpsSetArgs),
+    #[command(about = "Clear the manual PPS override and return to automatic power control.")]
+    Clear(TargetSelector),
+}
+
+#[derive(Debug, Args)]
+struct PpsSetArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(
+        long = "volts",
+        help = "Manual PPS voltage in volts, using 0.1V steps."
+    )]
+    volts: String,
+    #[arg(
+        long = "amps",
+        help = "Manual PPS requested current in amps, using 0.05A steps."
+    )]
+    amps: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -251,6 +287,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let body = runtime_body(&client, &resolved, args).await?;
                 request_with_lease(&client, resolved, Method::PUT, "/runtime", Some(body)).await?
             }
+        },
+        Command::Pd { command } => match command {
+            PdCommand::Pps { command } => match command {
+                PpsCommand::Set(args) => {
+                    let millivolts = parse_pps_volts(&args.volts)?;
+                    let mut body = json!({
+                        "manualPpsEnabled": true,
+                        "manualPpsMv": millivolts,
+                    });
+                    if let Some(amps) = &args.amps {
+                        body["manualPpsMa"] = json!(parse_pps_amps(amps)?);
+                    }
+                    request_with_lease(
+                        &client,
+                        resolve_target(args.target.clone(), &cli.devd)?,
+                        Method::PUT,
+                        "/runtime",
+                        Some(body),
+                    )
+                    .await?
+                }
+                PpsCommand::Clear(selector) => {
+                    let body = json!({"manualPpsEnabled": false});
+                    request_with_lease(
+                        &client,
+                        resolve_target(selector, &cli.devd)?,
+                        Method::PUT,
+                        "/runtime",
+                        Some(body),
+                    )
+                    .await?
+                }
+            },
         },
         Command::Wifi { command } => match command {
             WifiCommand::Set(args) => {
@@ -479,6 +548,67 @@ async fn runtime_body(
         return Err("runtime set requires at least one field".into());
     }
     Ok(Value::Object(body))
+}
+
+fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return Err("PPS voltage must be a positive decimal value".into());
+    }
+
+    let (whole, fractional) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.len() > 1
+    {
+        return Err("PPS voltage must use at most one decimal place".into());
+    }
+
+    let whole_mv: u32 = whole.parse::<u32>()?.saturating_mul(1_000);
+    let fractional_mv = if fractional.is_empty() {
+        0
+    } else {
+        u32::from(fractional.as_bytes()[0] - b'0') * 100
+    };
+    let millivolts = whole_mv.saturating_add(fractional_mv);
+    if millivolts == 0 || millivolts > 21_000 {
+        return Err("PPS voltage must be greater than 0V and no higher than 21.0V".into());
+    }
+
+    Ok(millivolts as u16)
+}
+
+fn parse_pps_amps(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return Err("PPS current must be a positive decimal value".into());
+    }
+
+    let (whole, fractional) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.len() > 2
+    {
+        return Err("PPS current must use at most two decimal places".into());
+    }
+
+    let whole_ma: u32 = whole.parse::<u32>()?.saturating_mul(1_000);
+    let fractional_ma = match fractional.len() {
+        0 => 0,
+        1 => u32::from(fractional.as_bytes()[0] - b'0') * 100,
+        _ => {
+            u32::from(fractional.as_bytes()[0] - b'0') * 100
+                + u32::from(fractional.as_bytes()[1] - b'0') * 10
+        }
+    };
+    let milliamps = whole_ma.saturating_add(fractional_ma);
+    if milliamps == 0 || milliamps > u32::from(u16::MAX) || !milliamps.is_multiple_of(50) {
+        return Err("PPS current must be greater than 0A and use 0.05A steps".into());
+    }
+
+    Ok(milliamps as u16)
 }
 
 fn insert_if_some<T: Serialize>(
@@ -900,6 +1030,22 @@ mod tests {
         let redacted = redact_cli_sensitive(&payload);
         assert_eq!(redacted["wifi"]["password"], "<redacted>");
         assert_eq!(redacted["token"], "<redacted>");
+    }
+
+    #[test]
+    fn parses_pps_volts_as_100mv_steps() {
+        assert_eq!(parse_pps_volts("10.4").unwrap(), 10_400);
+        assert_eq!(parse_pps_volts("21").unwrap(), 21_000);
+        assert!(parse_pps_volts("10.45").is_err());
+        assert!(parse_pps_volts("21.1").is_err());
+    }
+
+    #[test]
+    fn parses_pps_amps_as_50ma_steps() {
+        assert_eq!(parse_pps_amps("2.5").unwrap(), 2_500);
+        assert_eq!(parse_pps_amps("3.00").unwrap(), 3_000);
+        assert!(parse_pps_amps("2.53").is_err());
+        assert!(parse_pps_amps("0").is_err());
     }
 
     #[test]

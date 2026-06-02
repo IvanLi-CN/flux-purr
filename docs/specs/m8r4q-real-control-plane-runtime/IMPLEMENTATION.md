@@ -15,6 +15,7 @@
 - `tools/flux-purr-devd` 提供 localhost daemon、授权端口 serial discovery、lease、bounded events、USB identity/network/status/WiFi/runtime bridge、artifact verify、dry-run 与 flash command boundary。
 - `flux-purr-devd serve` 是 daemon 启动入口；flags 可覆盖 bind、artifact root、serial port、dev CORS 与 real flash，并保留 `FLUX_PURR_DEVD_*` 环境变量兼容。未显式指定 serial port 时，daemon 读取用户级默认 USB port，再回退到项目默认授权端口。
 - `flux-purr` 是 released CLI 入口；`devices/identity/status/runtime/wifi/flash/monitor` 经 `devd` 自动创建、heartbeat 和释放 lease，`hardware` 管理用户级 USB hardware registry，`usb-port` 管理默认 USB port，所有命令支持 human 输出与 `--json` 输出。
+- `flux-purr pd pps set|clear` 是调试用手动 PPS 控制入口，经 `devd` lease 写入 runtime contract；CLI 只接受 `0.1V` 对齐且不高于 `21.0V` 的 `--volts`，并接受 `0.05A` 对齐的 `--amps` 请求电流。
 - 用户级配置使用 OS config directory，`FLUX_PURR_HOME` 可覆盖。`usb-port set` 只影响后续 daemon 启动，不会让运行中的 `devd` 静默切换端口。
 - `devd` 对 native serial RPC 使用 daemon-local 串行化访问，并为每个授权 port 保留持久 serial session；Web 对 devd identity/network/status 探测顺序读取，避免多个 HTTP 请求同时抢占或反复打开同一个 USB CDC 端口。
 - `devd` USB serial exchange 会在单次 RPC 总超时内重试 firmware 返回的可重试 `startup_busy`；对只读 identity/network/status 请求，还会在无响应时做 bounded resend，覆盖设备刚 reset 后 USB/JTAG 尚未初始化或第一条请求被启动窗口吞掉的情况。WiFi/runtime 写命令不做静默重发，只在 firmware 明确返回 `startup_busy` 时重试。
@@ -34,11 +35,13 @@
 - Web Serial 连接状态会在组件层同步回目标选择器：当当前选择仍是无目标或 pending target 时，连接成功的 Web Serial device 会成为 selected target；已连接状态下再次选择 Web Serial 也会回到该真实 device，避免 runtime 面板停留在 pending Bridge。
 - Web Serial client tests 使用 fake browser serial port 覆盖 `get_identity` / `get_network` / `get_status` 探测、直连 target 映射、`runtime_config` 写入与 status payload 解析。
 - Firmware status 现在回传 `selectedPresetSlot` 与 `presetsC`；`runtime_config` 可写 `selectedPresetSlot` 与完整 `presetsC[10]`，并在 preset 温度变化时把目标温度同步到选中 preset。Web live Settings 对 browser Web Serial 与 devd 设备不再用前端本地 preset 状态覆盖真实 status，而是以 firmware/devd status 为事实源；Web Serial 每 1 秒、devd 每 2 秒 polling，以便硬件前面板 preset 页面和 Web Settings 互相回显。
+- Firmware status 现在回传 `manualPpsEnabled`、`manualPpsMv`、`manualPpsMa`、`ppsCapabilityMinMv`、`ppsCapabilityMaxMv`、`ppsCapabilityMaxMa` 与 `manualPpsError`；`runtime_config` 可写 `manualPpsEnabled` / `manualPpsMv` / `manualPpsMa`，用于非持久化手动 PPS 调试覆盖。启用时 firmware 校验 PPS APDO capability、`100mV` 电压步进、`50mA` 请求电流步进与 `21.0V` 上限；CH224Q 只写 PPS 电压寄存器，`manualPpsMa` 不表示固件直接写入芯片电流限制。清除、PD 丢失或 CH224Q 写入失败后恢复自动控制路径。
 - `devd` runtime endpoint 会校验 `selectedPresetSlot` 与 `presetsC` 长度，native serial bridge 把 preset runtime fields 转成 USB JSONL camelCase frame；runtime success event 同步记录目标温度、preset slot、preset array、cooling 与 heater 安全摘要。
 - Storybook 覆盖完整控制台 live 入口，包括无真实目标选择页、Web Serial 快捷连接回到 Dashboard、Web Serial Settings preset 写回并从 status 回显、known device 选择、WiFi/Bridge 快捷新增进入 Add device 页面并触发 pending 动作，以及无设备/Add device 状态隐藏全局日志列。
 - Web Serial browser-client verification covers static Web checks, typecheck, production build, unit tests, Storybook build, and whitespace checks. Hardware/browser smoke for a real user-selected Web Serial port remains pending an operator-approved browser session and authorized port selection.
 - Web Playwright e2e 覆盖 Vite Web App 到 live `devd` HTTP contract 的浏览器路径：页面通过 `VITE_FLUX_PURR_DEVD_URL` 发现 native serial target、创建 active lease、展示 daemon artifact catalog；Update 页点击 dry-check 后向 `POST /api/v1/artifacts/verify` 与 `POST /api/v1/devices/:id/flash` 发出真实 browser fetch；runtime controls 会带 active lease 向 `PUT /api/v1/devices/:id/runtime` 发出真实 browser fetch，覆盖 target temperature、fan policy 与 heater hold。
 - Web runtime controls 对 live `devd` / Web Serial 设备以 firmware/devd status 为事实源，不再用前端本地覆盖阻挡硬件侧变化；Dashboard target stepper 先做本地即时回显，并在短窗口内合并连续点击后只向 live runtime 提交最后一个目标值；Web Serial 写入 response 会立即刷新 status，devd 路径通过 2 秒 polling 回读确认。Settings 的 fan policy segmented control 写入 `activeCoolingEnabled`，实际风扇显示仍以 status `fanDisplayState` 为准。
+- Web Dashboard Thermal runtime 下提供默认收起的高级 PPS 控制；展开后 slider 按 status capability 显示动态范围和 `0.1V` 步进，live `devd` active lease 与 browser Web Serial target 可写，demo/mock 仅模拟状态。
 - Web Dashboard 中 `currentMa` 作为 CH224Q/PD contract 电流能力展示在 PD contract 卡片内，不作为 Runtime 小条里的实时负载电流展示。
 - Settings fan policy 控制只提供 OFF/AUTO，因为当前 USB/runtime contract 只可写 `activeCoolingEnabled`；Dashboard 与 Runtime mini 继续显示固件回报的 `fanDisplayState`，其中 RUN 表示风扇当前实际运行。
 - Web live devd bridge 会通过 `GET /api/v1/devices/:id/events` 的 EventSource 消费 daemon SSE，同时保留 `/api/v1/devices` snapshot 里的 bounded events；两路事件按 event id 去重后映射进 Runtime trace。serial RPC 失败、lease create/release、WiFi/runtime success、flash 与 native USB JSONL transport TX/RX 等事件可在控制台 monitor 面板中可见。Runtime trace 显示 redacted frame payload，并提供 all/info/success/warning/danger 等级过滤；WiFi password 不进入 UI history。
@@ -66,6 +69,7 @@
 
 ## Hardware Smoke
 
+- Manual PPS hardware proof: release artifact SHA-256 `a8ad6e4198a9488e0f70c51d0abec261789a7ec9f2e043d39c1ef887e3099bad` was flashed through `mcu-agentd` to `esp32s3_frontpanel` on `/dev/cu.usbmodem21221401`; `flux-purr pd pps set --volts 10.4 --amps 2.50` returned `manualPpsEnabled=true`, `manualPpsMv=10400`, `manualPpsMa=2500`, and `pdContractMv=10400`; IsolaPurr `isolapurr-01-wifi` USB-C telemetry read `10425mV`, then returned to about `12.03V` after `flux-purr pd pps clear`.
 - Device selector: `/dev/cu.usbmodem21221401`
 - Build: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release`
 - Artifact: `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`

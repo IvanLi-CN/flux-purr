@@ -256,6 +256,7 @@ struct ParsedCliArgs {
     output_path: PathBuf,
     dashboard_temp_c: Option<i16>,
     pd_contract_mv: Option<u16>,
+    manual_pps_enabled: bool,
     palette_id: TemperaturePaletteId,
 }
 
@@ -275,6 +276,7 @@ where
     let mut output_path = None;
     let mut dashboard_temp_c = None;
     let mut pd_contract_mv = None;
+    let mut manual_pps_enabled = false;
     let mut palette_id = TemperaturePaletteId::Current;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -295,6 +297,9 @@ where
                     return Err(format!("invalid --pd-mv value '{}'", value));
                 };
                 pd_contract_mv = Some(parsed);
+            }
+            "--manual-pps" => {
+                manual_pps_enabled = true;
             }
             "--palette" => {
                 let Some(value) = args.next() else {
@@ -325,6 +330,7 @@ where
         output_path: output_path.unwrap_or_else(|| default_output_path(preset)),
         dashboard_temp_c,
         pd_contract_mv,
+        manual_pps_enabled,
         palette_id,
     })
 }
@@ -352,6 +358,7 @@ fn main() -> ExitCode {
         output_path,
         dashboard_temp_c,
         pd_contract_mv,
+        manual_pps_enabled,
         palette_id,
     } = match parse_cli_args(env::args().skip(1)) {
         Ok(parsed) => parsed,
@@ -367,6 +374,7 @@ fn main() -> ExitCode {
     if let Some(pd_contract_mv) = pd_contract_mv {
         state.pd_contract_mv = pd_contract_mv;
     }
+    state.manual_pps_enabled = manual_pps_enabled;
     render_frontpanel_ui_with_palette(&mut canvas, &state, temperature_palette(palette_id));
 
     let mut logical_bytes = [0_u8; DISPLAY_FRAMEBUFFER_BYTES];
@@ -434,6 +442,7 @@ mod tests {
                 output_path: default_output_path(PreviewPreset::DashboardTemp),
                 dashboard_temp_c: Some(25),
                 pd_contract_mv: None,
+                manual_pps_enabled: false,
                 palette_id: TemperaturePaletteId::Current,
             }
         );
@@ -447,6 +456,7 @@ mod tests {
             String::from("80"),
             String::from("--pd-mv"),
             String::from("28000"),
+            String::from("--manual-pps"),
             String::from("--palette"),
             String::from("c"),
             String::from("/tmp/custom.framebuffer.bin"),
@@ -460,6 +470,7 @@ mod tests {
                 output_path: PathBuf::from("/tmp/custom.framebuffer.bin"),
                 dashboard_temp_c: Some(80),
                 pd_contract_mv: Some(28_000),
+                manual_pps_enabled: true,
                 palette_id: TemperaturePaletteId::AuroraWhiteLow,
             }
         );

@@ -16,7 +16,7 @@ pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
 pub const CAPABILITY_COUNT_MAX: usize = 10;
-pub const USB_LINE_MAX_LEN: usize = 1024;
+pub const USB_LINE_MAX_LEN: usize = 1536;
 pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
@@ -128,6 +128,13 @@ pub struct ControlPlaneStatus {
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdStateWire,
+    pub manual_pps_enabled: bool,
+    pub manual_pps_mv: Option<u16>,
+    pub manual_pps_ma: Option<u16>,
+    pub pps_capability_min_mv: Option<u16>,
+    pub pps_capability_max_mv: Option<u16>,
+    pub pps_capability_max_ma: Option<u16>,
+    pub manual_pps_error: Option<String<ERROR_CODE_MAX_LEN>>,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
 }
@@ -167,6 +174,13 @@ impl ControlPlaneStatus {
             pd_request_mv: status.pd_request_mv,
             pd_contract_mv: status.pd_contract_mv,
             pd_state: status.pd_state.into(),
+            manual_pps_enabled: false,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            pps_capability_min_mv: None,
+            pps_capability_max_mv: None,
+            pps_capability_max_ma: None,
+            manual_pps_error: None,
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
         }
@@ -308,6 +322,9 @@ pub struct RuntimeConfigCommand {
     pub presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
     pub active_cooling_enabled: Option<bool>,
     pub heater_enabled: Option<bool>,
+    pub manual_pps_enabled: Option<bool>,
+    pub manual_pps_mv: Option<u16>,
+    pub manual_pps_ma: Option<u16>,
 }
 
 impl RuntimeConfigCommand {
@@ -397,6 +414,9 @@ struct UsbFrameWire {
     presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
     active_cooling_enabled: Option<bool>,
     heater_enabled: Option<bool>,
+    manual_pps_enabled: Option<bool>,
+    manual_pps_mv: Option<u16>,
+    manual_pps_ma: Option<u16>,
     ok: Option<bool>,
     result: Option<UsbResponsePayload>,
     error: Option<ApiError>,
@@ -438,6 +458,9 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     presets_c: value.presets_c,
                     active_cooling_enabled: value.active_cooling_enabled,
                     heater_enabled: value.heater_enabled,
+                    manual_pps_enabled: value.manual_pps_enabled,
+                    manual_pps_mv: value.manual_pps_mv,
+                    manual_pps_ma: value.manual_pps_ma,
                 },
             }),
             "response" => Ok(UsbFrame::Response {
@@ -481,6 +504,9 @@ impl From<&UsbFrame> for UsbFrameWire {
             presets_c: None,
             active_cooling_enabled: None,
             heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
             ok: None,
             result: None,
             error: None,
@@ -524,6 +550,9 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.presets_c = config.presets_c;
                 wire.active_cooling_enabled = config.active_cooling_enabled;
                 wire.heater_enabled = config.heater_enabled;
+                wire.manual_pps_enabled = config.manual_pps_enabled;
+                wire.manual_pps_mv = config.manual_pps_mv;
+                wire.manual_pps_ma = config.manual_pps_ma;
             }
             UsbFrame::Response {
                 request_id,
@@ -774,6 +803,8 @@ mod tests {
         let json = write_usb_frame(&frame, &mut out).unwrap();
 
         assert!(json.contains(r#""pdState":"fallback_5v""#));
+        assert!(json.contains(r#""manualPpsEnabled":false"#));
+        assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
         assert!(!json.contains("fallback5v"));
     }
 
@@ -853,6 +884,9 @@ mod tests {
             presets_c: None,
             active_cooling_enabled: Some(false),
             heater_enabled: Some(true),
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -881,6 +915,9 @@ mod tests {
             ]),
             active_cooling_enabled: None,
             heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -934,7 +971,7 @@ mod tests {
     #[test]
     fn parse_runtime_config_frame() {
         let frame = parse_usb_frame(
-            r#"{"type":"runtime_config","requestId":"req-003","targetTempC":230,"activeCoolingEnabled":false,"heaterEnabled":true}"#,
+            r#"{"type":"runtime_config","requestId":"req-003","targetTempC":230,"activeCoolingEnabled":false,"heaterEnabled":true,"manualPpsEnabled":true,"manualPpsMv":10400,"manualPpsMa":2500}"#,
         )
         .unwrap();
 
@@ -948,6 +985,9 @@ mod tests {
                     presets_c: None,
                     active_cooling_enabled: Some(false),
                     heater_enabled: Some(true),
+                    manual_pps_enabled: Some(true),
+                    manual_pps_mv: Some(10_400),
+                    manual_pps_ma: Some(2_500),
                 },
             }
         );
@@ -981,6 +1021,9 @@ mod tests {
                     ]),
                     active_cooling_enabled: None,
                     heater_enabled: None,
+                    manual_pps_enabled: None,
+                    manual_pps_mv: None,
+                    manual_pps_ma: None,
                 },
             }
         );
