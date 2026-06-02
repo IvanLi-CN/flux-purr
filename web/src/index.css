@@ -1275,6 +1275,7 @@
   .industrial-log-virtual-space {
     position: relative;
     min-height: 100%;
+    overflow-anchor: none;
   }
 
   @media (max-width: 759px) {
@@ -2623,6 +2624,7 @@
     left: 0;
     width: auto;
     align-items: center;
+    box-sizing: border-box;
   }
 
   .industrial-event.is-danger strong,
@@ -4348,13 +4350,27 @@
     padding-inline: 0.52rem;
   }
 
-  .industrial-calibration-samples {
-    display: grid;
+  .industrial-calibration-samples-scroll {
     min-width: 0;
-    overflow: hidden;
+    max-height: clamp(10.5rem, 25vh, 15.75rem);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border-spacing: 0;
     border: 1px solid rgba(80, 67, 58, 0.12);
     border-radius: 8px;
+  }
+
+  .industrial-calibration-samples-scroll:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 3px;
+  }
+
+  .industrial-calibration-samples {
+    display: grid;
+    min-width: 0;
+    width: 100%;
+    border-spacing: 0;
   }
 
   .industrial-calibration-samples thead,
@@ -4374,6 +4390,9 @@
   }
 
   .industrial-calibration-samples thead tr {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     border-top: 0;
     background: rgba(224, 229, 236, 0.68);
     color: var(--industrial-muted-text);
@@ -4446,6 +4465,10 @@
     .industrial-calibration-capture-row,
     .industrial-calibration-samples tr {
       grid-template-columns: minmax(0, 1fr);
+    }
+
+    .industrial-calibration-samples {
+      min-width: 0;
     }
 
     .industrial-calibration-samples .industrial-button {

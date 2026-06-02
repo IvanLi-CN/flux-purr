@@ -170,6 +170,10 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration apply blocked package state](./assets/calibration-apply-blocked-package.trimmed.png)
 
+`assets/calibration-dense-scroll.trimmed.png` shows the dense `16/16` draft-sample state at a `1596x900` Storybook canvas viewport, with RTD/VIN sample lists scrolled to their lower rows and long global-log entries rendered without row overlap.
+
+![Calibration dense scroll state](./assets/calibration-dense-scroll.trimmed.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。

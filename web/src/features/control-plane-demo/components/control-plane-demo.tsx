@@ -3009,38 +3009,43 @@ function CalibrationChannelPanel({
         </button>
       </div>
       {populatedSamples.length > 0 ? (
-        <table className="industrial-calibration-samples" aria-label={`${title} samples`}>
-          <thead>
-            <tr>
-              <th scope="col">Slot</th>
-              <th scope="col">Observed</th>
-              <th scope="col">Expected</th>
-              <th scope="col">Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {populatedSamples.map((sample) => (
-              <tr key={sampleKeys[sample.index]}>
-                <td>#{sample.index + 1}</td>
-                <td>
-                  <strong>{sample.observedMv}mV</strong>
-                </td>
-                <td>{sample.expectedMv}mV</td>
-                <td>
-                  <button
-                    type="button"
-                    className="industrial-button industrial-button--danger-quiet"
-                    aria-label={`Delete ${title} sample ${sample.index + 1}`}
-                    onClick={() => onDelete(sample.index)}
-                  >
-                    <Trash2 size={14} aria-hidden="true" />
-                    Delete
-                  </button>
-                </td>
+        <section
+          className="industrial-calibration-samples-scroll"
+          aria-label={`${title} sample list`}
+        >
+          <table className="industrial-calibration-samples" aria-label={`${title} samples`}>
+            <thead>
+              <tr>
+                <th scope="col">Slot</th>
+                <th scope="col">Observed</th>
+                <th scope="col">Expected</th>
+                <th scope="col">Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {populatedSamples.map((sample) => (
+                <tr key={sampleKeys[sample.index]}>
+                  <td>#{sample.index + 1}</td>
+                  <td>
+                    <strong>{sample.observedMv}mV</strong>
+                  </td>
+                  <td>{sample.expectedMv}mV</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="industrial-button industrial-button--danger-quiet"
+                      aria-label={`Delete ${title} sample ${sample.index + 1}`}
+                      onClick={() => onDelete(sample.index)}
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
       ) : (
         <p className="industrial-calibration-empty">
           <span>Capture with physical reference</span>
@@ -3339,6 +3344,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
     estimateSize: () => 112,
+    measureElement: (element) => element.getBoundingClientRect().height,
     overscan: 8,
   })
 
@@ -3443,9 +3449,10 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
             return (
               <div
                 key={virtualItem.key}
+                ref={rowVirtualizer.measureElement}
                 className={`industrial-event industrial-event--virtual is-${event.tone}`}
+                data-index={virtualItem.index}
                 style={{
-                  height: `${virtualItem.size}px`,
                   transform: `translateY(${virtualItem.start}px)`,
                 }}
               >
