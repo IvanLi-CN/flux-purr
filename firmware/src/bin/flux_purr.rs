@@ -1074,6 +1074,7 @@ struct ManualPpsState {
     capability_min_mv: Option<u16>,
     capability_max_mv: Option<u16>,
     capability_max_ma: Option<u16>,
+    capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     error: Option<ManualPpsError>,
     automatic_restore_pending: bool,
 }
@@ -1095,13 +1096,21 @@ impl ManualPpsState {
                 state.capability_min_mv = Some(min_mv);
                 state.capability_max_mv = Some(bounded_max_mv);
                 state.capability_max_ma = Some(max_ma);
+                state.capability_apdos = capabilities.pps_apdos;
+                if state.capability_apdos.iter().all(Option::is_none) {
+                    state.capability_apdos[0] = Some(ch224q::PpsApdo {
+                        min_mv,
+                        max_mv,
+                        max_ma,
+                    });
+                }
             }
         }
         state
     }
 
     fn validate_target(&self, target_mv: u16, target_ma: u16) -> Result<(), ManualPpsError> {
-        let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
+        let (Some(min_mv), Some(max_mv), Some(_max_ma)) = (
             self.capability_min_mv,
             self.capability_max_mv,
             self.capability_max_ma,
@@ -1113,12 +1122,19 @@ impl ManualPpsState {
             || target_mv > ch224q::CH224Q_PPS_MAX_MV
             || !target_mv.is_multiple_of(100)
             || target_ma == 0
-            || target_ma > max_ma
             || !target_ma.is_multiple_of(50)
+            || !self.has_matching_pps_apdo(target_mv, target_ma)
         {
             return Err(ManualPpsError::InvalidVoltage);
         }
         Ok(())
+    }
+
+    fn has_matching_pps_apdo(&self, target_mv: u16, target_ma: u16) -> bool {
+        self.capability_apdos.iter().flatten().any(|apdo| {
+            let max_mv = apdo.max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
+            target_mv >= apdo.min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
+        })
     }
 
     fn enable(&mut self, target_mv: u16, target_ma: Option<u16>) -> Result<(), ManualPpsError> {
@@ -3985,6 +4001,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
+                ..Default::default()
             }));
 
         let context_manual_pps = manual_pps;
@@ -4088,6 +4105,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
+                ..Default::default()
             }));
 
         manual_pps.enable(10_400, Some(2_500)).unwrap();
@@ -4100,6 +4118,42 @@ mod tests {
         assert_eq!(manual_pps.applied_mv, None);
         assert_eq!(manual_pps.error, Some(ManualPpsError::WriteFailed));
         assert!(manual_pps.consume_automatic_restore_pending());
+    }
+
+    #[test]
+    fn manual_pps_current_validation_uses_matching_apdo() {
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(1_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 1_000,
+                    }),
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 11_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        manual_pps.enable(10_400, Some(2_500)).unwrap();
+        assert_eq!(
+            manual_pps.enable(20_000, Some(2_500)).unwrap_err(),
+            ManualPpsError::InvalidVoltage
+        );
     }
 
     #[test]
@@ -4240,6 +4294,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: Some(15_000),
                 avs_max_mv: Some(28_000),
+                ..Default::default()
             }),
             Some(Status {
                 avs_exist: true,
@@ -4266,6 +4321,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
+                ..Default::default()
             }),
             Some(Status::default()),
         );
@@ -4288,6 +4344,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: Some(15_000),
                 avs_max_mv: Some(28_000),
+                ..Default::default()
             }),
             Some(Status::default()),
         );
@@ -4318,6 +4375,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: Some(15_000),
                 avs_max_mv: Some(24_000),
+                ..Default::default()
             }),
             Some(Status {
                 avs_exist: true,
@@ -4351,6 +4409,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
+                ..Default::default()
             }),
             Some(Status {
                 avs_exist: true,
@@ -4380,6 +4439,7 @@ mod tests {
                 pps_max_ma: Some(3_000),
                 avs_min_mv: None,
                 avs_max_mv: None,
+                ..Default::default()
             }),
             Some(Status::default()),
         );

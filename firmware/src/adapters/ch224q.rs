@@ -81,6 +81,7 @@ pub const PD_POWER_DATA_REGISTER_COUNT: usize = 0x30;
 pub const PPS_GATE_MV: u16 = 20_000;
 pub const CH224Q_PPS_MAX_MV: u16 = 21_000;
 pub const CH224Q_AVS_MAX_MV: u16 = 28_000;
+pub const MAX_PPS_APDOS: usize = 7;
 
 pub const fn voltage_request_payload(request: VoltageRequest) -> [u8; 2] {
     [VOLTAGE_CONTROL_REGISTER, request.control_register_value()]
@@ -151,12 +152,20 @@ pub const fn current_ma_from_register(value: u8) -> u16 {
     (value as u16) * 50
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PpsApdo {
+    pub min_mv: u16,
+    pub max_mv: u16,
+    pub max_ma: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AdjustablePowerCapabilities {
     pub pps_covers_20v: bool,
     pub pps_min_mv: Option<u16>,
     pub pps_max_mv: Option<u16>,
     pub pps_max_ma: Option<u16>,
+    pub pps_apdos: [Option<PpsApdo>; MAX_PPS_APDOS],
     pub avs_min_mv: Option<u16>,
     pub avs_max_mv: Option<u16>,
 }
@@ -208,6 +217,12 @@ impl AdjustablePowerCapabilities {
                     return;
                 }
 
+                let pps_apdo = PpsApdo {
+                    min_mv,
+                    max_mv,
+                    max_ma,
+                };
+                capabilities.push_pps_apdo(pps_apdo);
                 capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
                 if pps_candidate_is_better(
                     capabilities.pps_min_mv,
@@ -239,6 +254,15 @@ impl AdjustablePowerCapabilities {
                 });
             }
             _ => {}
+        }
+    }
+
+    fn push_pps_apdo(&mut self, pps_apdo: PpsApdo) {
+        for slot in &mut self.pps_apdos {
+            if slot.is_none() {
+                *slot = Some(pps_apdo);
+                return;
+            }
         }
     }
 }
@@ -405,6 +429,14 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
         assert_eq!(capabilities.pps_max_ma, Some(3_000));
+        assert_eq!(
+            capabilities.pps_apdos[0],
+            Some(PpsApdo {
+                min_mv: 3_300,
+                max_mv: 21_000,
+                max_ma: 3_000,
+            })
+        );
         assert_eq!(capabilities.avs_min_mv, None);
         assert_eq!(capabilities.avs_max_mv, None);
     }
@@ -496,5 +528,21 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(5_000));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
         assert_eq!(capabilities.pps_max_ma, Some(1_000));
+        assert_eq!(
+            capabilities.pps_apdos[0],
+            Some(PpsApdo {
+                min_mv: 5_000,
+                max_mv: 21_000,
+                max_ma: 1_000,
+            })
+        );
+        assert_eq!(
+            capabilities.pps_apdos[1],
+            Some(PpsApdo {
+                min_mv: 3_300,
+                max_mv: 11_000,
+                max_ma: 5_000,
+            })
+        );
     }
 }
