@@ -4,7 +4,11 @@ use serde::{Deserialize, Serialize};
 use crate::{
     DeviceMode, DeviceStatus, PdState,
     frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey},
-    memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
+    memory::{
+        ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationConfig,
+        AdcCalibrationSample, MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig,
+        adc_calibration_fit,
+    },
 };
 
 pub const CONTROL_PLANE_API_VERSION: &str = "2026-05-29";
@@ -16,7 +20,7 @@ pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
 pub const CAPABILITY_COUNT_MAX: usize = 10;
-pub const USB_LINE_MAX_LEN: usize = 1536;
+pub const USB_LINE_MAX_LEN: usize = 4096;
 pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
@@ -79,6 +83,7 @@ impl Identity {
         push_str(&mut capabilities, "identity");
         push_str(&mut capabilities, "status");
         push_str(&mut capabilities, "network");
+        push_str(&mut capabilities, "calibration");
         #[cfg(feature = "web_serial")]
         {
             push_str(&mut capabilities, "usb_jsonl");
@@ -353,6 +358,171 @@ impl RuntimeConfigCommand {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationChannelWire {
+    RtdAdc,
+    VinAdc,
+}
+
+impl CalibrationChannelWire {
+    pub const fn as_memory_channel(self) -> AdcCalibrationChannel {
+        match self {
+            Self::RtdAdc => AdcCalibrationChannel::Rtd,
+            Self::VinAdc => AdcCalibrationChannel::Vin,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationSampleWire {
+    pub observed_mv: u16,
+    pub expected_mv: u16,
+}
+
+impl From<AdcCalibrationSample> for CalibrationSampleWire {
+    fn from(value: AdcCalibrationSample) -> Self {
+        Self {
+            observed_mv: value.observed_mv,
+            expected_mv: value.expected_mv,
+        }
+    }
+}
+
+impl From<CalibrationSampleWire> for AdcCalibrationSample {
+    fn from(value: CalibrationSampleWire) -> Self {
+        Self {
+            observed_mv: value.observed_mv,
+            expected_mv: value.expected_mv,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationPackageWire {
+    pub rtd_adc: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
+    pub vin_adc: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationFitWire {
+    pub gain: f32,
+    pub offset_mv: f32,
+    pub custom_sample_count: usize,
+    pub default_sample_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationFitsWire {
+    pub rtd_adc: CalibrationFitWire,
+    pub vin_adc: CalibrationFitWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationStateWire {
+    pub active: CalibrationPackageWire,
+    pub draft: CalibrationPackageWire,
+    pub active_fit: CalibrationFitsWire,
+    pub draft_fit: CalibrationFitsWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationConfigOp {
+    Capture,
+    Delete,
+    Clear,
+    Import,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationConfigCommand {
+    pub op: CalibrationConfigOp,
+    pub channel: Option<CalibrationChannelWire>,
+    pub reference_temp_c: Option<f32>,
+    pub reference_vin_mv: Option<u32>,
+    pub observed_mv: Option<u16>,
+    pub expected_mv: Option<u16>,
+    pub sample_index: Option<usize>,
+    pub package: Option<CalibrationPackageWire>,
+}
+
+impl CalibrationPackageWire {
+    pub fn from_memory(config: &AdcCalibrationConfig) -> Self {
+        Self {
+            rtd_adc: samples_to_wire(config.rtd.samples),
+            vin_adc: samples_to_wire(config.vin.samples),
+        }
+    }
+
+    pub fn to_memory(self) -> AdcCalibrationConfig {
+        AdcCalibrationConfig {
+            rtd: crate::memory::AdcCalibrationChannelConfig {
+                samples: samples_from_wire(self.rtd_adc),
+            },
+            vin: crate::memory::AdcCalibrationChannelConfig {
+                samples: samples_from_wire(self.vin_adc),
+            },
+        }
+    }
+}
+
+pub fn calibration_state_from_memory(config: &MemoryConfig) -> CalibrationStateWire {
+    CalibrationStateWire {
+        active: CalibrationPackageWire::from_memory(&config.active_adc_calibration),
+        draft: CalibrationPackageWire::from_memory(&config.draft_adc_calibration),
+        active_fit: CalibrationFitsWire::from_memory(&config.active_adc_calibration),
+        draft_fit: CalibrationFitsWire::from_memory(&config.draft_adc_calibration),
+    }
+}
+
+impl CalibrationFitsWire {
+    fn from_memory(config: &AdcCalibrationConfig) -> Self {
+        Self {
+            rtd_adc: CalibrationFitWire::from_memory(config, AdcCalibrationChannel::Rtd),
+            vin_adc: CalibrationFitWire::from_memory(config, AdcCalibrationChannel::Vin),
+        }
+    }
+}
+
+impl CalibrationFitWire {
+    fn from_memory(config: &AdcCalibrationConfig, channel: AdcCalibrationChannel) -> Self {
+        let fit = adc_calibration_fit(config, channel);
+        Self {
+            gain: fit.gain,
+            offset_mv: fit.offset_mv,
+            custom_sample_count: fit.custom_sample_count,
+            default_sample_count: fit.default_sample_count,
+        }
+    }
+}
+
+fn samples_to_wire(
+    samples: [Option<AdcCalibrationSample>; ADC_CALIBRATION_MAX_SAMPLES],
+) -> [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES] {
+    let mut out = [None; ADC_CALIBRATION_MAX_SAMPLES];
+    for (index, sample) in samples.into_iter().enumerate() {
+        out[index] = sample.map(Into::into);
+    }
+    out
+}
+
+fn samples_from_wire(
+    samples: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
+) -> [Option<AdcCalibrationSample>; ADC_CALIBRATION_MAX_SAMPLES] {
+    let mut out = [None; ADC_CALIBRATION_MAX_SAMPLES];
+    for (index, sample) in samples.into_iter().enumerate() {
+        out[index] = sample.map(Into::into);
+    }
+    out
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsbFrame {
     Hello {
@@ -372,6 +542,13 @@ pub enum UsbFrame {
     RuntimeConfig {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: RuntimeConfigCommand,
+    },
+    CalibrationConfig {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        config: CalibrationConfigCommand,
+    },
+    CalibrationApply {
+        request_id: String<REQUEST_ID_MAX_LEN>,
     },
     Response {
         request_id: String<REQUEST_ID_MAX_LEN>,
@@ -396,7 +573,7 @@ pub enum UsbFrame {
 #[serde(rename_all = "camelCase")]
 struct UsbFrameWire {
     #[serde(rename = "type")]
-    frame_type: String<16>,
+    frame_type: String<24>,
     #[serde(rename = "protocolVersion")]
     protocol_version: Option<String<24>>,
     framing: Option<String<8>>,
@@ -417,6 +594,13 @@ struct UsbFrameWire {
     manual_pps_enabled: Option<bool>,
     manual_pps_mv: Option<u16>,
     manual_pps_ma: Option<u16>,
+    channel: Option<CalibrationChannelWire>,
+    reference_temp_c: Option<f32>,
+    reference_vin_mv: Option<u32>,
+    observed_mv: Option<u16>,
+    expected_mv: Option<u16>,
+    sample_index: Option<usize>,
+    package: Option<CalibrationPackageWire>,
     ok: Option<bool>,
     result: Option<UsbResponsePayload>,
     error: Option<ApiError>,
@@ -463,6 +647,22 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     manual_pps_ma: value.manual_pps_ma,
                 },
             }),
+            "calibration_config" => Ok(UsbFrame::CalibrationConfig {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: CalibrationConfigCommand {
+                    op: parse_calibration_config_op(value.op.as_deref())?,
+                    channel: value.channel,
+                    reference_temp_c: value.reference_temp_c,
+                    reference_vin_mv: value.reference_vin_mv,
+                    observed_mv: value.observed_mv,
+                    expected_mv: value.expected_mv,
+                    sample_index: value.sample_index,
+                    package: value.package,
+                },
+            }),
+            "calibration_apply" => Ok(UsbFrame::CalibrationApply {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+            }),
             "response" => Ok(UsbFrame::Response {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 ok: value.ok.ok_or(UsbFrameError::MalformedJson)?,
@@ -507,6 +707,13 @@ impl From<&UsbFrame> for UsbFrameWire {
             manual_pps_enabled: None,
             manual_pps_mv: None,
             manual_pps_ma: None,
+            channel: None,
+            reference_temp_c: None,
+            reference_vin_mv: None,
+            observed_mv: None,
+            expected_mv: None,
+            sample_index: None,
+            package: None,
             ok: None,
             result: None,
             error: None,
@@ -554,6 +761,22 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.manual_pps_mv = config.manual_pps_mv;
                 wire.manual_pps_ma = config.manual_pps_ma;
             }
+            UsbFrame::CalibrationConfig { request_id, config } => {
+                wire.frame_type = string("calibration_config");
+                wire.request_id = Some(request_id.clone());
+                wire.op = Some(string(config.op.as_str()));
+                wire.channel = config.channel;
+                wire.reference_temp_c = config.reference_temp_c;
+                wire.reference_vin_mv = config.reference_vin_mv;
+                wire.observed_mv = config.observed_mv;
+                wire.expected_mv = config.expected_mv;
+                wire.sample_index = config.sample_index;
+                wire.package = config.package;
+            }
+            UsbFrame::CalibrationApply { request_id } => {
+                wire.frame_type = string("calibration_apply");
+                wire.request_id = Some(request_id.clone());
+            }
             UsbFrame::Response {
                 request_id,
                 ok,
@@ -592,6 +815,7 @@ pub enum UsbRequestOp {
     GetIdentity,
     GetNetwork,
     GetStatus,
+    GetCalibration,
     SetLogLevel,
 }
 
@@ -601,7 +825,19 @@ impl UsbRequestOp {
             Self::GetIdentity => "get_identity",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
+            Self::GetCalibration => "get_calibration",
             Self::SetLogLevel => "set_log_level",
+        }
+    }
+}
+
+impl CalibrationConfigOp {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Capture => "capture",
+            Self::Delete => "delete",
+            Self::Clear => "clear",
+            Self::Import => "import",
         }
     }
 }
@@ -622,6 +858,7 @@ pub enum UsbResponsePayload {
     Network(NetworkSummary),
     Status(ControlPlaneStatus),
     Wifi(RedactedWifiConfig),
+    Calibration(CalibrationStateWire),
     Ack,
 }
 
@@ -717,6 +954,7 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_identity") => Ok(UsbRequestOp::GetIdentity),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
+        Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
         _ => Err(UsbFrameError::MalformedJson),
     }
@@ -726,6 +964,16 @@ fn parse_wifi_config_op(value: Option<&str>) -> Result<WifiConfigOp, UsbFrameErr
     match value {
         Some("set") => Ok(WifiConfigOp::Set),
         Some("clear") => Ok(WifiConfigOp::Clear),
+        _ => Err(UsbFrameError::MalformedJson),
+    }
+}
+
+fn parse_calibration_config_op(value: Option<&str>) -> Result<CalibrationConfigOp, UsbFrameError> {
+    match value {
+        Some("capture") => Ok(CalibrationConfigOp::Capture),
+        Some("delete") => Ok(CalibrationConfigOp::Delete),
+        Some("clear") => Ok(CalibrationConfigOp::Clear),
+        Some("import") => Ok(CalibrationConfigOp::Import),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -806,6 +1054,71 @@ mod tests {
         assert!(json.contains(r#""manualPpsEnabled":false"#));
         assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
         assert!(!json.contains("fallback5v"));
+    }
+
+    #[test]
+    fn parses_calibration_config_frame_type() {
+        let frame = parse_usb_frame(
+            r#"{"type":"calibration_config","requestId":"cal-001","op":"clear","channel":"vin_adc"}"#,
+        )
+        .expect("calibration_config frame parses");
+
+        match frame {
+            UsbFrame::CalibrationConfig { request_id, config } => {
+                assert_eq!(request_id.as_str(), "cal-001");
+                assert_eq!(config.op, CalibrationConfigOp::Clear);
+                assert_eq!(config.channel, Some(CalibrationChannelWire::VinAdc));
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_calibration_apply_frame_type() {
+        let frame = parse_usb_frame(r#"{"type":"calibration_apply","requestId":"apply-001"}"#)
+            .expect("calibration_apply frame parses");
+
+        match frame {
+            UsbFrame::CalibrationApply { request_id } => {
+                assert_eq!(request_id.as_str(), "apply-001");
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn full_calibration_state_response_fits_usb_line() {
+        let mut memory = MemoryConfig::default();
+        for index in 0..ADC_CALIBRATION_MAX_SAMPLES {
+            let sample = AdcCalibrationSample {
+                observed_mv: 400 + index as u16 * 170,
+                expected_mv: 420 + index as u16 * 170,
+            };
+            memory
+                .active_adc_calibration
+                .vin
+                .insert(sample)
+                .expect("active sample slot exists");
+            memory
+                .draft_adc_calibration
+                .vin
+                .insert(sample)
+                .expect("draft sample slot exists");
+        }
+        let frame = UsbFrame::Response {
+            request_id: string("cal-full"),
+            ok: true,
+            result: Some(UsbResponsePayload::Calibration(
+                calibration_state_from_memory(&memory),
+            )),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).expect("full calibration state fits");
+
+        assert!(json.contains(r#""requestId":"cal-full""#));
+        assert!(json.contains(r#""activeFit""#));
+        assert!(json.contains(r#""draftFit""#));
     }
 
     #[test]

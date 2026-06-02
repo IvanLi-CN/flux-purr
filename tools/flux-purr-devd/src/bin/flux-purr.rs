@@ -42,6 +42,10 @@ enum Command {
         #[command(subcommand)]
         command: WifiCommand,
     },
+    Calibration {
+        #[command(subcommand)]
+        command: CalibrationCommand,
+    },
     Flash(FlashArgs),
     Monitor(MonitorArgs),
     Hardware {
@@ -126,6 +130,69 @@ struct RuntimeSetArgs {
 enum WifiCommand {
     Set(WifiSetArgs),
     Clear(TargetSelector),
+}
+
+#[derive(Debug, Subcommand)]
+enum CalibrationCommand {
+    Get(TargetSelector),
+    Capture(CalibrationCaptureArgs),
+    Delete(CalibrationDeleteArgs),
+    Clear(CalibrationChannelArgs),
+    Import(CalibrationImportArgs),
+    Export(CalibrationExportArgs),
+    Apply(TargetSelector),
+}
+
+#[derive(Debug, Args)]
+struct CalibrationChannelArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    channel: String,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationCaptureArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    channel: String,
+    #[arg(long = "reference-temp-c")]
+    reference_temp_c: Option<f32>,
+    #[arg(long = "reference-vin-volts")]
+    reference_vin_volts: Option<String>,
+    #[arg(long = "reference-vin-mv")]
+    reference_vin_mv: Option<u32>,
+    #[arg(long = "observed-mv")]
+    observed_mv: Option<u16>,
+    #[arg(long = "expected-mv")]
+    expected_mv: Option<u16>,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationDeleteArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    channel: String,
+    #[arg(long = "sample-index")]
+    sample_index: usize,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationImportArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationExportArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -345,6 +412,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .await?
             }
         },
+        Command::Calibration { command } => {
+            handle_calibration_command(&client, &cli.devd, command).await?
+        }
         Command::Flash(args) => {
             let resolved = resolve_target(args.target.clone(), &cli.devd)?;
             let artifact = resolve_artifact(
@@ -457,6 +527,153 @@ async fn request_leased(
         .error_for_status()?
         .json::<Value>()
         .await?)
+}
+
+async fn handle_calibration_command(
+    client: &Client,
+    default_devd: &str,
+    command: CalibrationCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        CalibrationCommand::Get(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, default_devd)?,
+                Method::GET,
+                "/calibration",
+                None,
+            )
+            .await
+        }
+        CalibrationCommand::Capture(args) => {
+            let mut body = serde_json::Map::new();
+            body.insert("op".to_string(), json!("capture"));
+            body.insert(
+                "channel".to_string(),
+                json!(parse_calibration_channel(&args.channel)?),
+            );
+            insert_if_some(&mut body, "referenceTempC", args.reference_temp_c);
+            insert_if_some(
+                &mut body,
+                "referenceVinMv",
+                parse_reference_vin_mv(args.reference_vin_mv, args.reference_vin_volts.as_deref())?,
+            );
+            insert_if_some(&mut body, "observedMv", args.observed_mv);
+            insert_if_some(&mut body, "expectedMv", args.expected_mv);
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/calibration",
+                Some(Value::Object(body)),
+            )
+            .await
+        }
+        CalibrationCommand::Delete(args) => {
+            let body = json!({
+                "op": "delete",
+                "channel": parse_calibration_channel(&args.channel)?,
+                "sampleIndex": args.sample_index,
+            });
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/calibration",
+                Some(body),
+            )
+            .await
+        }
+        CalibrationCommand::Clear(args) => {
+            let body = json!({
+                "op": "clear",
+                "channel": parse_calibration_channel(&args.channel)?,
+            });
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/calibration",
+                Some(body),
+            )
+            .await
+        }
+        CalibrationCommand::Import(args) => {
+            let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
+            let package = imported
+                .get("draft")
+                .cloned()
+                .or_else(|| imported.get("package").cloned())
+                .unwrap_or(imported);
+            let body = json!({
+                "op": "import",
+                "package": package,
+            });
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/calibration",
+                Some(body),
+            )
+            .await
+        }
+        CalibrationCommand::Export(args) => {
+            let payload = request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::GET,
+                "/calibration",
+                None,
+            )
+            .await?;
+            if let Some(parent) = args
+                .file
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&args.file, serde_json::to_vec_pretty(&payload)?)?;
+            Ok(json!({
+                "ok": true,
+                "path": args.file,
+            }))
+        }
+        CalibrationCommand::Apply(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, default_devd)?,
+                Method::POST,
+                "/calibration/apply",
+                Some(json!({})),
+            )
+            .await
+        }
+    }
+}
+
+fn parse_calibration_channel(
+    value: &str,
+) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>> {
+    match value {
+        "rtd" | "rtd-adc" | "temp" | "temperature" => Ok("rtd_adc"),
+        "vin" | "vin-adc" | "voltage" | "power" => Ok("vin_adc"),
+        _ => Err("calibration channel must be rtd-adc or vin-adc".into()),
+    }
+}
+
+fn parse_reference_vin_mv(
+    millivolts: Option<u32>,
+    volts: Option<&str>,
+) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
+    if millivolts.is_some() && volts.is_some() {
+        return Err("use either --reference-vin-mv or --reference-vin-volts, not both".into());
+    }
+    if let Some(millivolts) = millivolts {
+        return Ok(Some(millivolts));
+    }
+    volts.map(parse_voltage_to_mv).transpose()
 }
 
 async fn create_lease(
@@ -577,6 +794,38 @@ fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send 
     }
 
     Ok(millivolts as u16)
+}
+
+fn parse_voltage_to_mv(value: &str) -> Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.starts_with('-') {
+        return Err("voltage must be a positive decimal value".into());
+    }
+
+    let (whole, fractional) = trimmed.split_once('.').unwrap_or((trimmed, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.len() > 3
+    {
+        return Err("voltage must use at most three decimal places".into());
+    }
+
+    let whole_mv = whole.parse::<u32>()?.saturating_mul(1_000);
+    let fractional_mv = match fractional.len() {
+        0 => 0,
+        1 => u32::from(fractional.as_bytes()[0] - b'0') * 100,
+        2 => {
+            u32::from(fractional.as_bytes()[0] - b'0') * 100
+                + u32::from(fractional.as_bytes()[1] - b'0') * 10
+        }
+        _ => {
+            u32::from(fractional.as_bytes()[0] - b'0') * 100
+                + u32::from(fractional.as_bytes()[1] - b'0') * 10
+                + u32::from(fractional.as_bytes()[2] - b'0')
+        }
+    };
+    Ok(whole_mv.saturating_add(fractional_mv))
 }
 
 fn parse_pps_amps(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
@@ -954,6 +1203,23 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
                 .and_then(Value::as_str)
                 .unwrap_or("-"),
             payload.get("status").and_then(Value::as_str).unwrap_or("-")
+        ));
+    }
+    if payload.get("activeFit").is_some() && payload.get("draftFit").is_some() {
+        let draft = payload.get("draft").unwrap_or(&Value::Null);
+        let rtd_count = draft
+            .get("rtdAdc")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter(|item| !item.is_null()).count())
+            .unwrap_or(0);
+        let vin_count = draft
+            .get("vinAdc")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter(|item| !item.is_null()).count())
+            .unwrap_or(0);
+        return Ok(format!(
+            "Calibration draft: rtd_adc={} samples vin_adc={} samples",
+            rtd_count, vin_count
         ));
     }
     if payload.get("hardware").is_some() || payload.get("usb").is_some() {

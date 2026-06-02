@@ -58,6 +58,87 @@ export const DemoManualPpsPanel: Story = {
   },
 }
 
+export const DemoCalibrationIdle: Story = {
+  name: 'Demo / Calibration idle',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? { ...device, currentTempC: 183.6, targetTempC: 183.6, heaterOutputPercent: 0 }
+          : { ...device, heaterOutputPercent: 0 }
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: false,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+}
+
+export const DemoCalibrationTab: Story = {
+  name: 'Demo / Calibration tab',
+  args: {
+    scenario: controlPlaneScenario,
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('calibration panels are visible', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'RTD ADC' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'VIN ADC' })).toBeVisible()
+    })
+
+    await step('capture creates a draft sample', async () => {
+      await userEvent.click((await canvas.findAllByRole('button', { name: 'Capture sample' }))[0])
+      await expect(await canvas.findByText(/sample captured/i)).toBeVisible()
+      await expect(await canvas.findByText(/1\/8 samples/i)).toBeVisible()
+    })
+  },
+}
+
+export const DemoCalibrationApplyBlocked: Story = {
+  name: 'Demo / Calibration apply blocked',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      selectedDeviceId: 'fp-kit-02',
+    },
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('heater output blocks calibration apply', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Apply calibration' })).toBeDisabled()
+      await expect(
+        await canvas.findByText('Apply is blocked while heater output is active.')
+      ).toBeVisible()
+    })
+  },
+}
+
 export const LiveWebSerialAddDevice: Story = {
   name: 'Live / Web Serial Add Device',
   play: async ({ canvasElement, step }) => {

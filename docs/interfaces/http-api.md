@@ -3,6 +3,7 @@
 Source of truth for this implementation scope:
 
 - `docs/specs/m8r4q-real-control-plane-runtime/SPEC.md`
+- `docs/specs/jt8r2-adc-calibration-control-plane/SPEC.md`
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md`
 
 ## Shared Models
@@ -21,7 +22,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "apiVersion": "2026-05-23",
   "protocolVersion": "flux-purr.usb.v1",
   "hostname": "flux-purr-s3-001",
-  "capabilities": ["identity", "status", "network", "wifi_config", "monitor", "firmware_check"]
+  "capabilities": ["identity", "status", "network", "wifi_config", "monitor", "firmware_check", "calibration"]
 }
 ```
 
@@ -78,6 +79,32 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
+`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept.
+
+### `CalibrationState`
+
+```json
+{
+  "active": {
+    "rtdAdc": [null, null, null, null, null, null, null, null],
+    "vinAdc": [null, null, null, null, null, null, null, null]
+  },
+  "draft": {
+    "rtdAdc": [{ "observedMv": 1120, "expectedMv": 1118 }, null, null, null, null, null, null, null],
+    "vinAdc": [{ "observedMv": 1670, "expectedMv": 1820 }, null, null, null, null, null, null, null]
+  },
+  "activeFit": {
+    "rtdAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 0, "defaultSampleCount": 2 },
+    "vinAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 0, "defaultSampleCount": 2 }
+  },
+  "draftFit": {
+    "rtdAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 1, "defaultSampleCount": 2 },
+    "vinAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 1, "defaultSampleCount": 2 }
+  }
+}
+```
+
+Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples. Capture commands accept physical references (`referenceTempC` or `referenceVinMv`) and convert them into expected ADC millivolts using the RTD/PT1000 or VIN divider model. Import replaces the full draft package.
 
 ### `FirmwareArtifact`
 
@@ -204,9 +231,12 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/identity?lease_id=...`
 - `GET /api/v1/devices/:id/network?lease_id=...`
 - `GET /api/v1/devices/:id/status?lease_id=...`
+- `GET /api/v1/devices/:id/calibration?lease_id=...`
 - `GET /api/v1/devices/:id/events`
 - `PUT /api/v1/devices/:id/wifi`
 - `PUT /api/v1/devices/:id/runtime`
+- `PUT /api/v1/devices/:id/calibration`
+- `POST /api/v1/devices/:id/calibration/apply`
 - `GET /api/v1/artifacts`
 - `POST /api/v1/artifacts/verify`
 - `POST /api/v1/devices/:id/flash`
@@ -242,6 +272,29 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 ```
 
 All runtime fields are optional except `leaseId`; the response is the updated `Status`. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the advertised PPS capability, on a `100mV` step, `manualPpsMa` within the advertised APDO current capability, on a `50mA` step, and no higher than `21.0V`. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
+
+`PUT /api/v1/devices/:id/calibration` body:
+
+```json
+{
+  "leaseId": "lease-001",
+  "op": "capture",
+  "channel": "rtd_adc",
+  "referenceTempC": 25.0
+}
+```
+
+`op` is `capture | delete | clear | import`. `capture` requires `channel` and either a physical reference (`referenceTempC` for `rtd_adc`, `referenceVinMv` for `vin_adc`) or explicit `expectedMv`; `observedMv` is optional and otherwise comes from the latest device ADC reading. `delete` requires `sampleIndex`. `clear` requires `channel`. `import` requires a complete `package` with `rtdAdc` and `vinAdc` arrays.
+
+`POST /api/v1/devices/:id/calibration/apply` body:
+
+```json
+{
+  "leaseId": "lease-001"
+}
+```
+
+Apply copies draft calibration to active calibration and returns the updated `CalibrationState`. It is rejected with `calibration_apply_heater_active` when the heater is enabled or output is nonzero.
 
 `GET /api/v1/artifacts` response:
 
@@ -315,6 +368,7 @@ Core commands:
 - `flux-purr runtime get|set --device <id> ...`
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
+- `flux-purr calibration get|capture|delete|clear|import|export|apply --device <id>` or `--hardware <saved-id>`
 - `flux-purr wifi set|clear --device <id> ...`
 - `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
 - `flux-purr monitor --device <id>`
@@ -388,7 +442,7 @@ Each frame is UTF-8 JSON followed by `\n`.
 }
 ```
 
-`op`: `get_identity | get_network | get_status | set_log_level`.
+`op`: `get_identity | get_network | get_status | get_calibration | set_log_level`.
 
 ### `wifi_config`
 
@@ -461,6 +515,31 @@ The response returns the updated status:
   }
 }
 ```
+
+### `calibration_config`
+
+```json
+{
+  "type": "calibration_config",
+  "requestId": "req-004",
+  "op": "capture",
+  "channel": "vin_adc",
+  "referenceVinMv": 20000
+}
+```
+
+Supported operations are `capture`, `delete`, `clear`, and `import`. The response returns `CalibrationState`.
+
+### `calibration_apply`
+
+```json
+{
+  "type": "calibration_apply",
+  "requestId": "req-005"
+}
+```
+
+The response returns `CalibrationState`, or `calibration_apply_heater_active` when applying would change active calibration while heater output is active.
 
 ### `error`
 

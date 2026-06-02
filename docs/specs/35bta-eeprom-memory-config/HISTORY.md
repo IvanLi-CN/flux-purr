@@ -5,3 +5,8 @@
 - 冻结 EEPROM 记忆配置为 `M24C64` 双槽 record + TLV payload + CRC。
 - 明确保存用户偏好，不保存 heater arm、故障、fan runtime、页面 route 等运行态安全状态。
 - 采用 debounce 写回，避免前面板每次按键立即写 EEPROM。
+
+## 2026-06-02
+
+- 将 ADC calibration active/draft packages 纳入 `MemoryConfig` TLV payload。
+- 保持实时 ADC sample、实时温度、电压与 fault latch 不进入 EEPROM。

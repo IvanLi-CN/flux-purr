@@ -42,13 +42,20 @@ use flux_purr_firmware::adapters::ch224q;
 #[cfg(test)]
 use flux_purr_firmware::adapters::ch224q::Status;
 #[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::board::s3_frontpanel;
+#[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     ApiError, ControlPlaneStatus, Identity, RuntimeConfigCommand, UsbFrame, UsbFrameError,
-    UsbRequestOp, UsbResponsePayload, network_from_memory, parse_usb_frame, write_usb_frame,
+    UsbRequestOp, UsbResponsePayload, calibration_state_from_memory, network_from_memory,
+    parse_usb_frame, write_usb_frame,
+};
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::{
+    CalibrationChannelWire, CalibrationConfigCommand, CalibrationConfigOp,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{hello_frame, log_frame};
@@ -57,8 +64,12 @@ use flux_purr_firmware::frontpanel::{
     FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRuntimeMode,
     FrontPanelUiState, HeaterLockReason,
 };
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::memory::AdcCalibrationSample;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::MemoryConfig;
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     M24C64_PAGE_SIZE, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
@@ -74,7 +85,6 @@ use flux_purr_firmware::{DeviceMode, DeviceStatus, PdState};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
     adapters::ch224q::{self, Address, Status},
-    board::s3_frontpanel,
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
         FRONTPANEL_DEBOUNCE_MS, FRONTPANEL_DOUBLE_CLICK_MS, FrontPanelInputController,
@@ -183,7 +193,7 @@ const DISPLAY_BRINGUP_TIMEOUT_MS: u64 = 1_500;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 const USB_CONTROL_LINE_CAPACITY: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-const USB_CONTROL_TX_BUFFER_LEN: usize = 1536;
+const USB_CONTROL_TX_BUFFER_LEN: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -967,6 +977,7 @@ fn temp_c_to_deci_c(temp_c: f32) -> i16 {
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RtdMeasurement {
+    raw_adc_mv: u16,
     adc_mv: u16,
     resistance_ohms: f32,
     temp_c: f32,
@@ -1271,6 +1282,30 @@ fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
+    let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
+    let adc_mv = (RTD_DIVIDER_SUPPLY_MV as f32 * resistance_ohms)
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms);
+    (adc_mv + 0.5).clamp(0.0, u16::MAX as f32) as u16
+}
+
+#[cfg(target_arch = "xtensa")]
+fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
+    let numerator = input_mv.saturating_mul(s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS);
+    let denominator =
+        s3_frontpanel::VIN_DIVIDER_R_HIGH_OHMS + s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS;
+    (numerator / denominator).min(u32::from(u16::MAX)) as u16
+}
+
+#[cfg(target_arch = "xtensa")]
+fn vin_input_mv_from_adc_mv(adc_mv: u16) -> u32 {
+    let numerator = u32::from(adc_mv).saturating_mul(
+        s3_frontpanel::VIN_DIVIDER_R_HIGH_OHMS + s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS,
+    );
+    numerator / s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS
+}
+
+#[cfg(target_arch = "xtensa")]
 fn read_rtd_adc_mv<'a>(
     adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
     pin: &mut esp_hal::analog::adc::AdcPin<
@@ -1295,6 +1330,53 @@ fn read_rtd_adc_mv<'a>(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn read_vin_adc_mv<'a>(
+    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
+    pin: &mut esp_hal::analog::adc::AdcPin<
+        esp_hal::peripherals::GPIO1<'a>,
+        esp_hal::peripherals::ADC1<'a>,
+        AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+    >,
+) -> Option<u16> {
+    let mut sum_mv: u32 = 0;
+    for _ in 0..RTD_SAMPLE_COUNT {
+        let sample_mv = loop {
+            match adc.read_oneshot(pin) {
+                Ok(value) => break value,
+                Err(nb::Error::WouldBlock) => continue,
+                Err(_) => return None,
+            }
+        };
+        sum_mv = sum_mv.saturating_add(sample_mv as u32);
+    }
+
+    Some((sum_mv / RTD_SAMPLE_COUNT as u32) as u16)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn read_calibrated_vin_mv<'a>(
+    adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
+    pin: &mut esp_hal::analog::adc::AdcPin<
+        esp_hal::peripherals::GPIO1<'a>,
+        esp_hal::peripherals::ADC1<'a>,
+        AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+    >,
+    memory_config: &MemoryConfig,
+) -> Option<(u16, u16, u32)> {
+    let raw_adc_mv = read_vin_adc_mv(adc, pin)?;
+    let corrected_adc_mv = correct_adc_mv(
+        &memory_config.active_adc_calibration,
+        AdcCalibrationChannel::Vin,
+        raw_adc_mv,
+    );
+    Some((
+        raw_adc_mv,
+        corrected_adc_mv,
+        vin_input_mv_from_adc_mv(corrected_adc_mv),
+    ))
+}
+
+#[cfg(target_arch = "xtensa")]
 fn read_rtd_sample<'a>(
     adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
     pin: &mut esp_hal::analog::adc::AdcPin<
@@ -1302,13 +1384,33 @@ fn read_rtd_sample<'a>(
         esp_hal::peripherals::ADC1<'a>,
         AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
     >,
+    memory_config: &MemoryConfig,
 ) -> RtdSample {
-    let Some(adc_mv) = read_rtd_adc_mv(adc, pin) else {
+    let Some(raw_adc_mv) = read_rtd_adc_mv(adc, pin) else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
+
+    if raw_adc_mv <= RTD_SHORT_FAULT_MAX_MV {
+        return RtdSample::Fault {
+            adc_mv: Some(raw_adc_mv),
+            reason: HeaterFaultReason::SensorShort,
+        };
+    }
+    if raw_adc_mv >= RTD_OPEN_FAULT_MIN_MV {
+        return RtdSample::Fault {
+            adc_mv: Some(raw_adc_mv),
+            reason: HeaterFaultReason::SensorOpen,
+        };
+    }
+
+    let adc_mv = correct_adc_mv(
+        &memory_config.active_adc_calibration,
+        AdcCalibrationChannel::Rtd,
+        raw_adc_mv,
+    );
 
     match rtd_resistance_ohms_from_mv(adc_mv) {
         Ok(resistance_ohms) => {
@@ -1319,6 +1421,7 @@ fn read_rtd_sample<'a>(
                 (temp_c - 0.5) as i16
             };
             RtdSample::Valid(RtdMeasurement {
+                raw_adc_mv,
                 adc_mv,
                 resistance_ohms,
                 temp_c,
@@ -1446,6 +1549,8 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         wifi_password: previous.wifi_password.clone(),
         wifi_auto_reconnect: previous.wifi_auto_reconnect,
         telemetry_interval_ms: previous.telemetry_interval_ms,
+        active_adc_calibration: previous.active_adc_calibration,
+        draft_adc_calibration: previous.draft_adc_calibration,
     }
 }
 
@@ -1844,6 +1949,7 @@ struct UsbRuntimeStatusContext {
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     last_raw_state: FrontPanelRawState,
+    vin_mv: u32,
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -1883,7 +1989,7 @@ fn usb_runtime_status(
             } else {
                 DeviceMode::Idle
             },
-            voltage_mv: u32::from(pd_contract_mv),
+            voltage_mv: context.vin_mv,
             current_ma: u32::from(
                 context
                     .last_pd_observation
@@ -1971,6 +2077,163 @@ fn apply_manual_pps_config(
     }
 
     Ok(())
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_calibration_config_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    config: CalibrationConfigCommand,
+    memory_config: &mut MemoryConfig,
+    latest_rtd_raw_adc_mv: u16,
+    latest_vin_raw_adc_mv: u16,
+) -> UsbFrame {
+    let result = match config.op {
+        CalibrationConfigOp::Capture => {
+            let Some(channel) = config.channel else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_channel_required",
+                    "Calibration capture requires a channel.",
+                );
+            };
+            let observed_mv = config.observed_mv.unwrap_or(match channel {
+                CalibrationChannelWire::RtdAdc => latest_rtd_raw_adc_mv,
+                CalibrationChannelWire::VinAdc => latest_vin_raw_adc_mv,
+            });
+            let expected_mv = match expected_calibration_adc_mv(&config, channel) {
+                Some(expected_mv) => expected_mv,
+                None => {
+                    return usb_error_response(
+                        request_id,
+                        "calibration_reference_required",
+                        "Calibration capture requires a valid physical reference.",
+                    );
+                }
+            };
+            memory_config
+                .draft_adc_calibration
+                .channel_mut(channel.as_memory_channel())
+                .insert(AdcCalibrationSample {
+                    observed_mv,
+                    expected_mv,
+                })
+                .ok_or(ApiError::new(
+                    "calibration_samples_full",
+                    "Calibration channel already has 8 samples.",
+                    false,
+                ))
+        }
+        CalibrationConfigOp::Delete => {
+            let Some(channel) = config.channel else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_channel_required",
+                    "Calibration delete requires a channel.",
+                );
+            };
+            let Some(index) = config.sample_index else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_index_required",
+                    "Calibration delete requires sampleIndex.",
+                );
+            };
+            if memory_config
+                .draft_adc_calibration
+                .channel_mut(channel.as_memory_channel())
+                .delete(index)
+            {
+                Ok(index)
+            } else {
+                Err(ApiError::new(
+                    "calibration_sample_not_found",
+                    "Calibration sample index was not present.",
+                    false,
+                ))
+            }
+        }
+        CalibrationConfigOp::Clear => {
+            let Some(channel) = config.channel else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_channel_required",
+                    "Calibration clear requires a channel.",
+                );
+            };
+            memory_config
+                .draft_adc_calibration
+                .channel_mut(channel.as_memory_channel())
+                .clear();
+            Ok(0)
+        }
+        CalibrationConfigOp::Import => {
+            let Some(package) = config.package else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_package_required",
+                    "Calibration import requires a package.",
+                );
+            };
+            memory_config.draft_adc_calibration = package.to_memory();
+            Ok(0)
+        }
+    };
+
+    if let Err(error) = result {
+        return UsbFrame::Response {
+            request_id,
+            ok: false,
+            result: None,
+            error: Some(error),
+        };
+    }
+    memory_config.sanitize();
+    usb_response(
+        request_id,
+        UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_calibration_apply_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    ui_state: &FrontPanelUiState,
+    memory_config: &mut MemoryConfig,
+) -> UsbFrame {
+    if ui_state.heater_enabled || ui_state.heater_output_percent != 0 {
+        return UsbFrame::Response {
+            request_id,
+            ok: false,
+            result: None,
+            error: Some(ApiError::new(
+                "calibration_apply_heater_active",
+                "Calibration cannot be applied while the heater is active.",
+                false,
+            )),
+        };
+    }
+
+    memory_config.active_adc_calibration = memory_config.draft_adc_calibration;
+    memory_config.sanitize();
+    usb_response(
+        request_id,
+        UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn expected_calibration_adc_mv(
+    config: &CalibrationConfigCommand,
+    channel: CalibrationChannelWire,
+) -> Option<u16> {
+    if let Some(expected_mv) = config.expected_mv {
+        return Some(expected_mv);
+    }
+
+    match channel {
+        CalibrationChannelWire::RtdAdc => config.reference_temp_c.map(rtd_adc_mv_for_temperature_c),
+        CalibrationChannelWire::VinAdc => config.reference_vin_mv.map(vin_adc_mv_for_input_mv),
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2137,6 +2400,10 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 request_id,
                 UsbResponsePayload::Network(network_from_memory(memory_config)),
             ),
+            UsbRequestOp::GetCalibration => usb_response(
+                request_id,
+                UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+            ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
             UsbRequestOp::GetStatus => usb_error_response_with_retryable(
                 request_id,
@@ -2146,7 +2413,9 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
             ),
         },
         Ok(UsbFrame::WifiConfig { request_id, .. })
-        | Ok(UsbFrame::RuntimeConfig { request_id, .. }) => usb_error_response_with_retryable(
+        | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::CalibrationConfig { request_id, .. })
+        | Ok(UsbFrame::CalibrationApply { request_id }) => usb_error_response_with_retryable(
             request_id,
             "startup_busy",
             "Configuration writes are not available until hardware initialization completes.",
@@ -2272,10 +2541,16 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                 request_id,
                 UsbResponsePayload::Status(usb_recovery_status(memory_config, elapsed_ms)),
             ),
+            UsbRequestOp::GetCalibration => usb_response(
+                request_id,
+                UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+            ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         },
         Ok(UsbFrame::WifiConfig { request_id, .. })
-        | Ok(UsbFrame::RuntimeConfig { request_id, .. }) => usb_error_response_with_retryable(
+        | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::CalibrationConfig { request_id, .. })
+        | Ok(UsbFrame::CalibrationApply { request_id }) => usb_error_response_with_retryable(
             request_id,
             "hardware_bringup_failed",
             "Runtime writes are unavailable because hardware bring-up did not complete.",
@@ -2320,6 +2595,9 @@ fn handle_usb_control_line(
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     last_raw_state: FrontPanelRawState,
+    latest_rtd_raw_adc_mv: u16,
+    latest_vin_raw_adc_mv: u16,
+    latest_vin_mv: u32,
 ) -> bool {
     let mut needs_redraw = false;
     let runtime_context = UsbRuntimeStatusContext {
@@ -2330,6 +2608,7 @@ fn handle_usb_control_line(
         fan_command,
         current_rtd_fault,
         last_raw_state,
+        vin_mv: latest_vin_mv,
     };
     let response = match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => match op {
@@ -2348,6 +2627,10 @@ fn handle_usb_control_line(
                     memory_config,
                     runtime_context,
                 )),
+            ),
+            UsbRequestOp::GetCalibration => usb_response(
+                request_id,
+                UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         },
@@ -2375,6 +2658,28 @@ fn handle_usb_control_line(
                 *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
             needs_redraw = true;
+            response
+        }
+        Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
+            let previous_memory_config = memory_config.clone();
+            let response = usb_calibration_config_response(
+                request_id,
+                config,
+                memory_config,
+                latest_rtd_raw_adc_mv,
+                latest_vin_raw_adc_mv,
+            );
+            if *memory_config != previous_memory_config {
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            }
+            response
+        }
+        Ok(UsbFrame::CalibrationApply { request_id }) => {
+            let previous_memory_config = memory_config.clone();
+            let response = usb_calibration_apply_response(request_id, ui_state, memory_config);
+            if *memory_config != previous_memory_config {
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+            }
             response
         }
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
@@ -2923,11 +3228,13 @@ async fn main(_spawner: Spawner) {
     );
 
     let mut adc1_config = AdcConfig::new();
+    let mut vin_adc_pin = adc1_config
+        .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO1, RTD_SAMPLE_ATTENUATION);
     let mut rtd_adc_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO2, RTD_SAMPLE_ATTENUATION);
     let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
     info!(
-        "rtd monitor active: gpio2 atten={=str} samples={=u8} interval_ms={=u64}",
+        "adc monitor active: vin_gpio1 rtd_gpio2 atten={=str} samples={=u8} interval_ms={=u64}",
         "6dB", RTD_SAMPLE_COUNT as u8, RTD_LOG_INTERVAL_MS,
     );
 
@@ -3079,7 +3386,7 @@ async fn main(_spawner: Spawner) {
         ),
     }
 
-    let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin);
+    let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
     let mut controller = FrontPanelInputController::new(
         FrontPanelKeyMap::default(),
         FrontPanelInputTimings::default(),
@@ -3091,8 +3398,12 @@ async fn main(_spawner: Spawner) {
     let mut current_rtd_fault: Option<HeaterFaultReason> = None;
     let mut latest_temp_c = 0.0_f32;
     let mut latest_temp_i16 = 0_i16;
+    let mut latest_rtd_raw_adc_mv = 0_u16;
+    let mut latest_vin_raw_adc_mv = 0_u16;
+    let mut latest_vin_mv = 0_u32;
     match initial_rtd_sample {
         RtdSample::Valid(measurement) => {
+            latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
             latest_temp_c = measurement.temp_c;
             latest_temp_i16 = measurement.current_temp_c;
             if is_overtemp_sample(measurement.temp_c) {
@@ -3106,7 +3417,8 @@ async fn main(_spawner: Spawner) {
             ui_state.current_temp_c = measurement.current_temp_c;
             ui_state.current_temp_deci_c = temp_c_to_deci_c(measurement.temp_c);
             info!(
-                "rtd initial adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32}",
+                "rtd initial raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32}",
+                measurement.raw_adc_mv,
                 measurement.adc_mv,
                 RTD_DIVIDER_SUPPLY_MV,
                 measurement.resistance_ohms,
@@ -3124,6 +3436,16 @@ async fn main(_spawner: Spawner) {
                 reason.label(),
             );
         }
+    }
+    if let Some((raw_adc_mv, corrected_adc_mv, vin_mv)) =
+        read_calibrated_vin_mv(&mut adc1, &mut vin_adc_pin, &memory_config)
+    {
+        latest_vin_raw_adc_mv = raw_adc_mv;
+        latest_vin_mv = vin_mv;
+        info!(
+            "vin initial raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
+            raw_adc_mv, corrected_adc_mv, vin_mv,
+        );
     }
     let mut last_heater_duty = 0_u8;
     let mut cooling_disabled_lock_latched = false;
@@ -3248,6 +3570,9 @@ async fn main(_spawner: Spawner) {
                         fan_command,
                         current_rtd_fault,
                         last_raw_state,
+                        latest_rtd_raw_adc_mv,
+                        latest_vin_raw_adc_mv,
+                        latest_vin_mv,
                     );
                     usb_rx_line.clear();
                 }
@@ -3449,8 +3774,9 @@ async fn main(_spawner: Spawner) {
         if elapsed_ms.saturating_sub(last_control_ms) >= HEATER_CONTROL_INTERVAL_MS {
             last_control_ms = elapsed_ms;
 
-            match read_rtd_sample(&mut adc1, &mut rtd_adc_pin) {
+            match read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config) {
                 RtdSample::Valid(measurement) => {
+                    latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     current_rtd_fault = if is_overtemp_sample(measurement.temp_c) {
                         Some(HeaterFaultReason::OverTemp)
                     } else {
@@ -3468,7 +3794,8 @@ async fn main(_spawner: Spawner) {
                         needs_redraw = true;
                     }
                     info!(
-                        "rtd sample adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32} heater_arm={=bool}",
+                        "rtd sample raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32} heater_arm={=bool}",
+                        measurement.raw_adc_mv,
                         measurement.adc_mv,
                         RTD_DIVIDER_SUPPLY_MV,
                         measurement.resistance_ohms,
@@ -3477,6 +3804,7 @@ async fn main(_spawner: Spawner) {
                     );
                 }
                 RtdSample::Fault { adc_mv, reason } => {
+                    latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
                     current_rtd_fault = Some(reason);
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
                     if ui_state.current_temp_c != 0 || ui_state.current_temp_deci_c != 0 {
@@ -3491,6 +3819,20 @@ async fn main(_spawner: Spawner) {
                         ui_state.heater_enabled,
                     );
                 }
+            }
+
+            if let Some((raw_adc_mv, corrected_adc_mv, vin_mv)) =
+                read_calibrated_vin_mv(&mut adc1, &mut vin_adc_pin, &memory_config)
+            {
+                latest_vin_raw_adc_mv = raw_adc_mv;
+                if latest_vin_mv != vin_mv {
+                    latest_vin_mv = vin_mv;
+                    needs_redraw = true;
+                }
+                info!(
+                    "vin sample raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
+                    raw_adc_mv, corrected_adc_mv, vin_mv,
+                );
             }
 
             if let Some(reason) = current_rtd_fault
@@ -3965,6 +4307,7 @@ mod tests {
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
+                vin_mv: 20_000,
             },
         );
 
@@ -4034,6 +4377,7 @@ mod tests {
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
+                vin_mv: 20_000,
             },
         );
 

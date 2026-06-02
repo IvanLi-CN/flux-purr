@@ -18,6 +18,7 @@
 
 - 在 `M24C64` 外部 EEPROM 中保存版本化记忆配置。
 - 保存并恢复 `target_temp_c`、`selected_preset_slot`、`presets_c[10]`、`active_cooling_enabled` 和 Wi-Fi 配置字段。
+- 保存并恢复 `active_adc_calibration` 与 `draft_adc_calibration`，供 ADC 校准控制面跨重启保留。
 - 使用双槽 record、TLV payload 和 CRC，保证坏数据自动回退默认值、未知字段可跳过。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
 
@@ -26,6 +27,7 @@
 - 不保存 `heater_enabled`，重启后 heater 仍不得自动恢复加热。
 - 不保存实时温度、fan runtime、fault latch、页面 route、菜单位置或蜂鸣器 reminder。
 - 不实现运行时 PID 参数持久化。
+- 不保存实时 ADC sample、实时温度、实时输入电压或 fault latch；ADC calibration 只保存用户确认的 sample package。
 - 不对 Wi-Fi 密码做加密；但密码不得进入日志、前面板明文或状态输出。
 - 不新增前面板菜单或改变现有视觉布局。
 
@@ -82,6 +84,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
+- ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个 slot，每个 slot 使用 `observed_mv + expected_mv` 的 `u16le` pair，`u16::MAX` 表示空 slot。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)
   - `0x02`: `selected_preset_slot` (`u8`)
@@ -91,6 +94,8 @@
   - `0x11`: `wifi_password` (`utf8 bytes`)
   - `0x12`: `wifi_auto_reconnect` (`u8 bool`)
   - `0x13`: `telemetry_interval_ms` (`u32le`)
+  - `0x20`: `active_adc_calibration`
+  - `0x21`: `draft_adc_calibration`
 
 ## 验收标准（Acceptance Criteria）
 
@@ -101,6 +106,7 @@
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
 - Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一 EEPROM 槽。
 - Given heater 曾在重启前开启，When 固件重启，Then heater 不因 EEPROM 配置自动开启。
+- Given ADC calibration active/draft packages 已写入 EEPROM，When 固件重启，Then active 与 draft packages 都恢复并重新计算 fit。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
