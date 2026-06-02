@@ -58,6 +58,202 @@ export const DemoManualPpsPanel: Story = {
   },
 }
 
+export const DemoCalibrationIdle: Story = {
+  name: 'Demo / Calibration idle',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? { ...device, currentTempC: 183.6, targetTempC: 183.6, heaterOutputPercent: 0 }
+          : { ...device, heaterOutputPercent: 0 }
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: false,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+}
+
+export const DemoCalibrationTab: Story = {
+  name: 'Demo / Calibration tab',
+  args: {
+    scenario: controlPlaneScenario,
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('calibration panels are visible', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'RTD ADC' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'VIN ADC' })).toBeVisible()
+    })
+
+    await step('capture creates a draft sample', async () => {
+      await userEvent.click((await canvas.findAllByRole('button', { name: 'Capture sample' }))[0])
+      await waitFor(() => {
+        expect(canvas.getAllByText(/sample captured/i).length).toBeGreaterThan(0)
+      })
+      await expect(await canvas.findByText(/1\/8 samples/i)).toBeVisible()
+    })
+  },
+}
+
+export const DemoCalibrationApplyBlocked: Story = {
+  name: 'Demo / Calibration apply blocked',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? { ...device, heaterEnabled: true, heaterOutputPercent: 0 }
+          : device
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('heater enabled blocks calibration apply before output rises', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Apply calibration' })).toBeDisabled()
+      await expect(
+        await canvas.findByText('Apply is blocked while heater output is active.')
+      ).toBeVisible()
+    })
+  },
+}
+
+export const DemoCalibrationManualFit: Story = {
+  name: 'Demo / Calibration manual fit',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? { ...device, heaterOutputPercent: 0 }
+          : device
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('manual fit controls update both draft channels', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+
+      const gainInputs = await canvas.findAllByRole('spinbutton', { name: /Draft gain/ })
+      const offsetInputs = await canvas.findAllByRole('spinbutton', { name: /Draft offset/ })
+      const setFitButtons = await canvas.findAllByRole('button', { name: 'Set draft fit' })
+
+      await userEvent.clear(gainInputs[0])
+      await userEvent.type(gainInputs[0], '1.01234')
+      await userEvent.clear(offsetInputs[0])
+      await userEvent.type(offsetInputs[0], '12.3')
+      await userEvent.click(setFitButtons[0])
+
+      await userEvent.clear(gainInputs[1])
+      await userEvent.type(gainInputs[1], '0.98047')
+      await userEvent.clear(offsetInputs[1])
+      await userEvent.type(offsetInputs[1], '149.8')
+      await userEvent.click(setFitButtons[1])
+
+      await waitFor(() => {
+        expect(canvas.getAllByText('8/8 samples')).toHaveLength(2)
+      })
+      await expect(await canvas.findByText(/VIN ADC draft fit set/)).toBeVisible()
+    })
+  },
+}
+
+export const DemoCalibrationDenseLists: Story = {
+  name: 'Demo / Calibration dense lists',
+  args: {
+    scenario: createCalibrationDenseScenario(),
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('fills both calibration sample lists to their scroll boundary', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+
+      const captureButtons = await canvas.findAllByRole('button', { name: 'Capture sample' })
+      for (let index = 0; index < 8; index += 1) {
+        await userEvent.click(captureButtons[0])
+        await userEvent.click(captureButtons[1])
+      }
+
+      await waitFor(() => {
+        expect(canvas.getAllByText('8/8 samples')).toHaveLength(2)
+      })
+
+      const rtdList = await canvas.findByRole('region', { name: 'RTD ADC sample list' })
+      const vinList = await canvas.findByRole('region', { name: 'VIN ADC sample list' })
+      rtdList.scrollTop = rtdList.scrollHeight
+      vinList.scrollTop = vinList.scrollHeight
+      fireEvent.scroll(rtdList)
+      fireEvent.scroll(vinList)
+
+      const logScroller = canvasElement.querySelector<HTMLElement>(
+        '.industrial-log-panel__rows .simplebar-content-wrapper'
+      )
+      if (!logScroller) {
+        throw new Error('Log scroller was not found.')
+      }
+      logScroller.scrollTop = 900
+      fireEvent.scroll(logScroller)
+
+      await expect(
+        within(rtdList).getByRole('button', { name: 'Delete RTD ADC sample 8' })
+      ).toBeVisible()
+      await expect(
+        within(vinList).getByRole('button', { name: 'Delete VIN ADC sample 8' })
+      ).toBeVisible()
+      await expect(await canvas.findByText(/\d+ \/ \d+ frames/)).toBeVisible()
+      await waitFor(() => {
+        expect(canvas.getAllByText(/calibration_config response payload/).length).toBeGreaterThan(0)
+      })
+    })
+  },
+}
+
 export const LiveWebSerialAddDevice: Story = {
   name: 'Live / Web Serial Add Device',
   play: async ({ canvasElement, step }) => {
@@ -275,6 +471,28 @@ export const LiveQuickAddBridgeDevice: Story = {
   },
 }
 
+function createCalibrationDenseScenario(): ControlPlaneScenario {
+  const longTraceDetail =
+    'calibration_config response payload includes active and draft ADC fits, eight persisted sample slots, raw observed millivolts, reference targets, and operator feedback metadata for the current lease'
+
+  return {
+    ...controlPlaneScenario,
+    devices: controlPlaneScenario.devices.map((device) =>
+      device.id === controlPlaneScenario.selectedDeviceId
+        ? { ...device, heaterOutputPercent: 0, currentTempC: 183.6, voltageMv: 20_010 }
+        : { ...device, heaterOutputPercent: 0 }
+    ),
+    events: controlPlaneScenario.events.map((event, index) => ({
+      ...event,
+      detail: index % 2 === 0 ? longTraceDetail : event.detail,
+      message:
+        index % 3 === 0
+          ? `${event.message}; calibration draft and event stream remained bounded after dense operator sampling`
+          : event.message,
+    })),
+  }
+}
+
 class FakeWebSerialClient {
   private currentStatus: ControlPlaneStatus = status
 
@@ -416,6 +634,7 @@ function createKnownDeviceSelectionScenario() {
         ppsCapabilityMaxMv: 21_000,
         ppsCapabilityMaxMa: 3_000,
         manualPpsError: null,
+        heaterEnabled: false,
         heaterOutputPercent: 0,
         activeCoolingEnabled: true,
         fanState: 'AUTO',
@@ -450,6 +669,7 @@ function createKnownDeviceSelectionScenario() {
         ppsCapabilityMaxMv: 21_000,
         ppsCapabilityMaxMa: 3_000,
         manualPpsError: null,
+        heaterEnabled: false,
         heaterOutputPercent: 0,
         activeCoolingEnabled: true,
         fanState: 'AUTO',

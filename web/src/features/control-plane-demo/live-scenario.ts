@@ -31,6 +31,7 @@ export const liveControlPlaneScenario: ControlPlaneScenario = {
       ppsCapabilityMaxMv: null,
       ppsCapabilityMaxMa: null,
       manualPpsError: null,
+      heaterEnabled: false,
       heaterOutputPercent: 0,
       activeCoolingEnabled: false,
       fanState: 'OFF',

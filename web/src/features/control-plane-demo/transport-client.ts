@@ -1,6 +1,8 @@
 import type {
   ApiErrorEnvelope,
   ArtifactVerifyResult,
+  CalibrationConfigRequest,
+  CalibrationState,
   ControlPlaneStatus,
   DevdDeviceList,
   DevdDeviceRecord,
@@ -76,6 +78,17 @@ export interface ControlPlaneHttpClient {
     deviceId: string,
     request: RuntimeConfigRequest
   ): Promise<ControlPlaneStatus>
+  getCalibration(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<CalibrationState>
+  configureCalibration(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: CalibrationConfigRequest
+  ): Promise<CalibrationState>
+  applyCalibration(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: { leaseId: string }
+  ): Promise<CalibrationState>
   configureWifi(
     devdBaseUrl: string,
     deviceId: string,
@@ -192,6 +205,34 @@ export function createControlPlaneHttpClient(
         }
       )
     },
+    getCalibration(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<CalibrationState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration?lease_id=${encodeURIComponent(leaseId)}`
+      )
+    },
+    configureCalibration(devdBaseUrl, deviceId, request) {
+      return requestJson<CalibrationState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
+    applyCalibration(devdBaseUrl, deviceId, request) {
+      return requestJson<CalibrationState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/apply`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
     async configureWifi(devdBaseUrl, deviceId, request) {
       const response = await requestJson<{ network: NetworkSummary }>(
         fetcher,
@@ -260,6 +301,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     ppsCapabilityMaxMv: record.status.ppsCapabilityMaxMv ?? null,
     ppsCapabilityMaxMa: record.status.ppsCapabilityMaxMa ?? null,
     manualPpsError: record.status.manualPpsError ?? null,
+    heaterEnabled: record.status.heaterEnabled,
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
     fanState: record.status.fanDisplayState,

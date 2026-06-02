@@ -83,6 +83,7 @@ export interface DevdDeviceRecord {
   identity: Identity
   network: NetworkSummary
   status: ControlPlaneStatus
+  calibration?: CalibrationState
   logs?: DevdLogEntry[]
   trace?: DevdTraceEntry[]
   events?: DevdEvent[]
@@ -162,6 +163,49 @@ export interface RuntimeConfigRequest {
 }
 
 export type DirectRuntimeConfigRequest = Omit<RuntimeConfigRequest, 'leaseId'>
+
+export type CalibrationChannel = 'rtd_adc' | 'vin_adc'
+
+export interface CalibrationSample {
+  observedMv: number
+  expectedMv: number
+}
+
+export interface CalibrationPackage {
+  rtdAdc: Array<CalibrationSample | null>
+  vinAdc: Array<CalibrationSample | null>
+}
+
+export interface CalibrationFit {
+  gain: number
+  offsetMv: number
+  customSampleCount: number
+  defaultSampleCount: number
+}
+
+export interface CalibrationFits {
+  rtdAdc: CalibrationFit
+  vinAdc: CalibrationFit
+}
+
+export interface CalibrationState {
+  active: CalibrationPackage
+  draft: CalibrationPackage
+  activeFit: CalibrationFits
+  draftFit: CalibrationFits
+}
+
+export interface CalibrationConfigRequest {
+  leaseId: string
+  op: 'capture' | 'delete' | 'clear' | 'import'
+  channel?: CalibrationChannel
+  referenceTempC?: number
+  referenceVinMv?: number
+  observedMv?: number
+  expectedMv?: number
+  sampleIndex?: number
+  package?: CalibrationPackage
+}
 
 export interface FirmwareArtifactManifest {
   artifactId: string
