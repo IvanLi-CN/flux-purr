@@ -214,6 +214,7 @@ None
 
 - Dashboard manual PPS override：
 
+PR: include
 ![Dashboard manual PPS override](./assets/dashboard-manual-pps.png)
 
 - Dashboard PPS `28V`：

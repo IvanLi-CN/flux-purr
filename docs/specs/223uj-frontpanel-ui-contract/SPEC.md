@@ -231,6 +231,7 @@ None
 
 #### Dashboard Manual PPS
 
+PR: include
 ![Front panel dashboard manual PPS](./assets/frontpanel-dashboard-manual-pps.png)
 
 #### Menu Level 1
