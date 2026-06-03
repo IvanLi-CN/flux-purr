@@ -80,7 +80,7 @@
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
   - the control loop runs at `1 Hz` and produces a normalized `0..100%` heater output
-  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum, `1..100%` maps into `12 V..28 V` subject to source capability, and `GPIO47` is only driven as static MOS off/on
+  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum; `1..100%` maps from the source PPS minimum up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
   - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
   - control interval is `1 Hz`
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`

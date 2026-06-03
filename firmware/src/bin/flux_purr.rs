@@ -218,6 +218,14 @@ const HEATER_HOLD_OFF_ERROR_C: f32 = 0.05;
 const HEATER_OVERSHOOT_CUTOFF_C: f32 = 0.25;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_TEMP_FILTER_ALPHA: f32 = 0.45;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PROFILE_R20_OHMS: f32 = 3.2;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PROFILE_TEMP_COEFFICIENT_PER_C: f32 = 0.00393;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_CURRENT_LIMIT_FALLBACK_REQUEST: ch224q::VoltageRequest = ch224q::VoltageRequest::V9;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_CURRENT_LIMIT_RETURN_HYSTERESIS_MV: u16 = 200;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(target_arch = "xtensa")]
@@ -1019,15 +1027,20 @@ impl HeaterPowerBackendReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HeaterPowerBackend {
     PpsMos {
-        adjustable_min_mv: u16,
+        pps_min_mv: u16,
+        idle_request_mv: u16,
         pps_max_mv: u16,
         adjustable_max_mv: u16,
+        capability_max_ma: u16,
         current_mode: Option<ch224q::AdjustableVoltageMode>,
         current_request_mv: u16,
+        current_limit_fixed_pwm_active: bool,
+        current_limit_fixed_request_confirmed: bool,
     },
     FixedPdPwmFallback {
         reason: HeaterPowerBackendReason,
         fixed_request_confirmed: bool,
+        fixed_request: ch224q::VoltageRequest,
     },
 }
 
@@ -1203,7 +1216,7 @@ impl HeaterPowerBackend {
             Self::PpsMos {
                 current_request_mv, ..
             } => current_request_mv,
-            Self::FixedPdPwmFallback { .. } => DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+            Self::FixedPdPwmFallback { fixed_request, .. } => fixed_request.millivolts(),
         }
     }
 }
@@ -1449,25 +1462,111 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
-fn round_mv_to_100mv(millivolts: u16) -> u16 {
-    (((u32::from(millivolts) + 50) / 100) * 100) as u16
+#[allow(dead_code)]
+fn floor_mv_to_100mv(millivolts: u16) -> u16 {
+    (millivolts / 100) * 100
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn heater_request_mv_from_percent(
-    duty_percent: u8,
-    adjustable_min_mv: u16,
-    adjustable_max_mv: u16,
+fn estimated_heater_resistance_ohms(current_temp_c: f32) -> f32 {
+    HEATER_PROFILE_R20_OHMS
+        * (1.0 + HEATER_PROFILE_TEMP_COEFFICIENT_PER_C * (current_temp_c - 20.0))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn effective_pps_current_limit_ma(
+    capability_max_ma: u16,
+    pd_observation: Option<PdStatusObservation>,
 ) -> u16 {
-    let bounded_min_mv =
-        adjustable_min_mv.clamp(HEATER_ADJUSTABLE_MIN_MV, HEATER_ADJUSTABLE_MAX_MV);
-    let bounded_max_mv = adjustable_max_mv.clamp(bounded_min_mv, HEATER_ADJUSTABLE_MAX_MV);
+    if capability_max_ma == 0 {
+        return 0;
+    }
+
+    let observed_current_ma = pd_observation
+        .filter(|observation| observation.status.pd_active && observation.current_ma > 0)
+        .map(|observation| observation.current_ma);
+    observed_current_ma
+        .map(|observed_current_ma| observed_current_ma.min(capability_max_ma))
+        .unwrap_or(capability_max_ma)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_safe_max_mv_for_temp(
+    current_temp_c: f32,
+    effective_current_limit_ma: u16,
+    source_voltage_max_mv: u16,
+) -> u16 {
+    if effective_current_limit_ma == 0 {
+        return 0;
+    }
+
+    let estimated_mv = (estimated_heater_resistance_ohms(current_temp_c)
+        * f32::from(effective_current_limit_ma))
+    .max(0.0)
+    .min(f32::from(u16::MAX)) as u16;
+    floor_mv_to_100mv(estimated_mv).min(source_voltage_max_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn should_use_current_limit_fixed_pwm_fallback(
+    duty_percent: u8,
+    was_active: bool,
+    safe_max_mv: u16,
+    pps_min_mv: u16,
+) -> bool {
+    if duty_percent == 0 {
+        return false;
+    }
+
+    if was_active {
+        safe_max_mv < pps_min_mv.saturating_add(HEATER_CURRENT_LIMIT_RETURN_HYSTERESIS_MV)
+    } else {
+        safe_max_mv < pps_min_mv
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn should_apply_current_limit_fixed_pwm_fallback(
+    duty_percent: u8,
+    manual_pps_active: bool,
+    was_active: bool,
+    safe_max_mv: u16,
+    pps_min_mv: u16,
+) -> bool {
+    !manual_pps_active
+        && should_use_current_limit_fixed_pwm_fallback(
+            duty_percent,
+            was_active,
+            safe_max_mv,
+            pps_min_mv,
+        )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn current_limit_fixed_pwm_duty_percent(
+    duty_percent: u8,
+    current_temp_c: f32,
+    effective_current_limit_ma: u16,
+) -> u8 {
+    let fixed_mv = HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts();
+    if duty_percent == 0 || fixed_mv == 0 {
+        return 0;
+    }
+
+    let safe_mv = heater_safe_max_mv_for_temp(current_temp_c, effective_current_limit_ma, fixed_mv);
+    let capped_percent = (u32::from(safe_mv) * 100 / u32::from(fixed_mv)).min(100) as u8;
+    duty_percent.min(capped_percent)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_request_mv_from_percent(duty_percent: u8, floor_mv: u16, ceiling_mv: u16) -> u16 {
+    let bounded_min_mv = floor_mv.clamp(0, HEATER_ADJUSTABLE_MAX_MV);
+    let bounded_max_mv = ceiling_mv.clamp(bounded_min_mv, HEATER_ADJUSTABLE_MAX_MV);
     let span_mv = u32::from(bounded_max_mv - bounded_min_mv);
     let requested_mv =
-        u32::from(bounded_min_mv) + ((span_mv * u32::from(duty_percent.min(100)) + 50) / 100);
+        u32::from(bounded_min_mv) + (span_mv * u32::from(duty_percent.min(100)) / 100);
 
-    round_mv_to_100mv((requested_mv as u16).clamp(bounded_min_mv, bounded_max_mv))
+    floor_mv_to_100mv((requested_mv as u16).clamp(bounded_min_mv, bounded_max_mv))
         .clamp(bounded_min_mv, bounded_max_mv)
 }
 
@@ -1490,6 +1589,7 @@ fn select_heater_power_backend(
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::CapabilityReadFailed,
             fixed_request_confirmed: true,
+            fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
         };
     };
 
@@ -1497,17 +1597,19 @@ fn select_heater_power_backend(
         return HeaterPowerBackend::FixedPdPwmFallback {
             reason: HeaterPowerBackendReason::NoPps20vCapability,
             fixed_request_confirmed: true,
+            fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
         };
     }
 
+    let pps_min_mv = capabilities
+        .pps_min_mv
+        .unwrap_or(HEATER_ADJUSTABLE_MIN_MV)
+        .clamp(0, ch224q::CH224Q_PPS_MAX_MV);
     let pps_max_mv = capabilities
         .pps_max_mv
         .unwrap_or(ch224q::PPS_GATE_MV)
         .clamp(ch224q::PPS_GATE_MV, ch224q::CH224Q_PPS_MAX_MV);
-    let adjustable_min_mv = capabilities
-        .pps_min_mv
-        .unwrap_or(HEATER_ADJUSTABLE_MIN_MV)
-        .clamp(HEATER_ADJUSTABLE_MIN_MV, pps_max_mv);
+    let idle_request_mv = HEATER_ADJUSTABLE_MIN_MV.clamp(pps_min_mv, pps_max_mv);
     let avs_max_mv = if status.is_some_and(|status| status.avs_exist) {
         capabilities
             .avs_min_mv
@@ -1526,13 +1628,18 @@ fn select_heater_power_backend(
         None
     };
     let adjustable_max_mv = avs_max_mv.unwrap_or_else(|| pps_max_mv.min(HEATER_ADJUSTABLE_MAX_MV));
+    let capability_max_ma = capabilities.pps_max_ma.unwrap_or(0);
 
     HeaterPowerBackend::PpsMos {
-        adjustable_min_mv,
+        pps_min_mv,
+        idle_request_mv,
         pps_max_mv,
         adjustable_max_mv,
+        capability_max_ma,
         current_mode: None,
-        current_request_mv: adjustable_min_mv,
+        current_request_mv: idle_request_mv,
+        current_limit_fixed_pwm_active: false,
+        current_limit_fixed_request_confirmed: false,
     }
 }
 
@@ -1561,6 +1668,7 @@ async fn apply_heater_power_output<PWM>(
     backend: &mut HeaterPowerBackend,
     manual_pps: &mut ManualPpsState,
     pd_observation: Option<PdStatusObservation>,
+    current_temp_c: f32,
     duty_percent: u8,
     last_physical_duty_percent: &mut u8,
 ) -> bool
@@ -1613,24 +1721,35 @@ where
 
     if manual_pps.consume_automatic_restore_pending() {
         match *backend {
-            HeaterPowerBackend::FixedPdPwmFallback { reason, .. } => {
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason,
+                fixed_request,
+                ..
+            } => {
                 *backend = HeaterPowerBackend::FixedPdPwmFallback {
                     reason,
                     fixed_request_confirmed: false,
+                    fixed_request,
                 };
             }
             HeaterPowerBackend::PpsMos {
-                adjustable_min_mv,
+                pps_min_mv,
+                idle_request_mv,
                 pps_max_mv,
                 adjustable_max_mv,
+                capability_max_ma,
                 ..
             } => {
                 *backend = HeaterPowerBackend::PpsMos {
-                    adjustable_min_mv,
+                    pps_min_mv,
+                    idle_request_mv,
                     pps_max_mv,
                     adjustable_max_mv,
+                    capability_max_ma,
                     current_mode: None,
-                    current_request_mv: 0,
+                    current_request_mv: idle_request_mv,
+                    current_limit_fixed_pwm_active: false,
+                    current_limit_fixed_request_confirmed: false,
                 };
             }
         }
@@ -1640,13 +1759,15 @@ where
         HeaterPowerBackend::FixedPdPwmFallback {
             reason,
             fixed_request_confirmed,
+            fixed_request,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
-                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+                let fixed_payload = ch224q::voltage_request_payload(fixed_request);
                 if write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
                     *backend = HeaterPowerBackend::FixedPdPwmFallback {
                         reason,
                         fixed_request_confirmed: true,
+                        fixed_request,
                     };
                     info!("heater backend fallback fixed-pd request confirmed");
                 } else {
@@ -1662,14 +1783,86 @@ where
             false
         }
         HeaterPowerBackend::PpsMos {
-            adjustable_min_mv,
+            pps_min_mv,
+            idle_request_mv,
             pps_max_mv,
             adjustable_max_mv,
+            capability_max_ma,
             current_mode,
             current_request_mv,
+            current_limit_fixed_pwm_active,
+            current_limit_fixed_request_confirmed,
         } => {
-            let request_mv =
-                heater_request_mv_from_percent(duty_percent, adjustable_min_mv, adjustable_max_mv);
+            let effective_current_limit_ma =
+                effective_pps_current_limit_ma(capability_max_ma, pd_observation);
+            let safe_max_mv = heater_safe_max_mv_for_temp(
+                current_temp_c,
+                effective_current_limit_ma,
+                adjustable_max_mv,
+            );
+            let current_limit_fixed_pwm_active = should_apply_current_limit_fixed_pwm_fallback(
+                duty_percent,
+                manual_pps_active,
+                current_limit_fixed_pwm_active,
+                safe_max_mv,
+                pps_min_mv,
+            );
+            if current_limit_fixed_pwm_active {
+                if !current_limit_fixed_request_confirmed {
+                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                    let fixed_payload =
+                        ch224q::voltage_request_payload(HEATER_CURRENT_LIMIT_FALLBACK_REQUEST);
+                    if !write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
+                        info!(
+                            "heater current-limit fallback waiting fixed_mv={=u16} safe_max_mv={=u16} pps_min_mv={=u16} current_limit_ma={=u16}",
+                            HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
+                            safe_max_mv,
+                            pps_min_mv,
+                            effective_current_limit_ma,
+                        );
+                        return false;
+                    }
+                    EmbassyTimer::after_millis(HEATER_PPS_MOS_SETTLE_MS).await;
+                }
+
+                *backend = HeaterPowerBackend::PpsMos {
+                    pps_min_mv,
+                    idle_request_mv,
+                    pps_max_mv,
+                    adjustable_max_mv,
+                    capability_max_ma,
+                    current_mode: None,
+                    current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
+                    current_limit_fixed_pwm_active: true,
+                    current_limit_fixed_request_confirmed: true,
+                };
+                let fallback_duty_percent = current_limit_fixed_pwm_duty_percent(
+                    duty_percent,
+                    current_temp_c,
+                    effective_current_limit_ma,
+                );
+                apply_heater_duty(
+                    heater_pwm,
+                    fallback_duty_percent,
+                    last_physical_duty_percent,
+                );
+                info!(
+                    "heater current-limit fallback active temp_c={=f32} current_limit_ma={=u16} safe_max_mv={=u16} pps_min_mv={=u16} fixed_mv={=u16} duty={=u8}%",
+                    current_temp_c,
+                    effective_current_limit_ma,
+                    safe_max_mv,
+                    pps_min_mv,
+                    HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
+                    fallback_duty_percent,
+                );
+                return true;
+            }
+
+            let request_mv = if duty_percent == 0 {
+                idle_request_mv
+            } else {
+                heater_request_mv_from_percent(duty_percent, pps_min_mv, safe_max_mv)
+            };
             let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
             let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
             let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
@@ -1698,6 +1891,7 @@ where
                     *backend = HeaterPowerBackend::FixedPdPwmFallback {
                         reason: HeaterPowerBackendReason::AdjustableRequestFailed,
                         fixed_request_confirmed,
+                        fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                     };
                     if fixed_request_confirmed {
                         apply_heater_duty(heater_pwm, duty_percent, last_physical_duty_percent);
@@ -1711,16 +1905,30 @@ where
                 }
 
                 *backend = HeaterPowerBackend::PpsMos {
-                    adjustable_min_mv,
+                    pps_min_mv,
+                    idle_request_mv,
                     pps_max_mv,
                     adjustable_max_mv,
+                    capability_max_ma,
                     current_mode: Some(request_mode),
                     current_request_mv: request_mv,
+                    current_limit_fixed_pwm_active: false,
+                    current_limit_fixed_request_confirmed: false,
                 };
                 EmbassyTimer::after_millis(HEATER_PPS_MOS_SETTLE_MS).await;
             }
 
             apply_heater_duty(heater_pwm, gate_duty_percent, last_physical_duty_percent);
+            if voltage_changed || mode_changed {
+                info!(
+                    "heater pps request temp_c={=f32} control={=u8}% current_limit_ma={=u16} safe_max_mv={=u16} request_mv={=u16}",
+                    current_temp_c,
+                    duty_percent,
+                    effective_current_limit_ma,
+                    safe_max_mv,
+                    request_mv,
+                );
+            }
             false
         }
     }
@@ -3059,23 +3267,29 @@ async fn main(_spawner: Spawner) {
     );
     match heater_power_backend {
         HeaterPowerBackend::PpsMos {
+            pps_min_mv,
             pps_max_mv,
             adjustable_max_mv,
             ..
         } => info!(
-            "heater backend selected mode={=str} reason={=str} min_mv={=u16} pps_max_mv={=u16} adjustable_max_mv={=u16} gate_mv={=u16}",
+            "heater backend selected mode={=str} reason={=str} pps_min_mv={=u16} idle_mv={=u16} pps_max_mv={=u16} adjustable_max_mv={=u16} gate_mv={=u16}",
             heater_power_backend.label(),
             HeaterPowerBackendReason::PpsCovers20v.label(),
-            HEATER_ADJUSTABLE_MIN_MV,
+            pps_min_mv,
+            heater_power_backend.pd_contract_mv(),
             pps_max_mv,
             adjustable_max_mv,
             ch224q::PPS_GATE_MV,
         ),
-        HeaterPowerBackend::FixedPdPwmFallback { reason, .. } => info!(
+        HeaterPowerBackend::FixedPdPwmFallback {
+            reason,
+            fixed_request,
+            ..
+        } => info!(
             "heater backend selected mode={=str} reason={=str} fixed_mv={=u16}",
             heater_power_backend.label(),
             reason.label(),
-            DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+            fixed_request.millivolts(),
         ),
     }
 
@@ -3159,6 +3373,7 @@ async fn main(_spawner: Spawner) {
         &mut heater_power_backend,
         &mut manual_pps_state,
         last_pd_observation,
+        latest_temp_c,
         0,
         &mut last_heater_duty,
     )
@@ -3551,6 +3766,7 @@ async fn main(_spawner: Spawner) {
                 &mut heater_power_backend,
                 &mut manual_pps_state,
                 current_pd_observation,
+                latest_temp_c,
                 pid_snapshot.duty_percent,
                 &mut last_heater_duty,
             )
@@ -3644,6 +3860,7 @@ async fn main(_spawner: Spawner) {
                 &mut heater_power_backend,
                 &mut manual_pps_state,
                 last_pd_observation,
+                latest_temp_c,
                 0,
                 &mut last_heater_duty,
             )
@@ -3960,6 +4177,7 @@ mod tests {
                 heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                     reason: HeaterPowerBackendReason::NoPps20vCapability,
                     fixed_request_confirmed: true,
+                    fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                 },
                 manual_pps: ManualPpsState::default(),
                 fan_command: FanHardwareCommand::disabled(),
@@ -4024,11 +4242,15 @@ mod tests {
                 elapsed_ms: 1_000,
                 last_pd_observation: None,
                 heater_power_backend: HeaterPowerBackend::PpsMos {
-                    adjustable_min_mv: 12_000,
+                    pps_min_mv: 5_000,
+                    idle_request_mv: 12_000,
                     pps_max_mv: 21_000,
                     adjustable_max_mv: 21_000,
+                    capability_max_ma: 3_000,
                     current_mode: None,
                     current_request_mv: 12_000,
+                    current_limit_fixed_pwm_active: false,
+                    current_limit_fixed_request_confirmed: false,
                 },
                 manual_pps: context_manual_pps,
                 fan_command: FanHardwareCommand::disabled(),
@@ -4256,7 +4478,7 @@ mod tests {
     }
 
     #[test]
-    fn heater_adjustable_voltage_maps_percent_to_12v_28v() {
+    fn heater_adjustable_voltage_maps_percent_to_requested_range() {
         assert_eq!(
             heater_request_mv_from_percent(0, HEATER_ADJUSTABLE_MIN_MV, HEATER_ADJUSTABLE_MAX_MV),
             12_000
@@ -4272,7 +4494,7 @@ mod tests {
     }
 
     #[test]
-    fn heater_adjustable_voltage_clamps_to_source_capability() {
+    fn heater_adjustable_voltage_clamps_to_requested_ceiling() {
         assert_eq!(
             heater_request_mv_from_percent(100, HEATER_ADJUSTABLE_MIN_MV, 21_000),
             21_000
@@ -4282,6 +4504,91 @@ mod tests {
             19_000
         );
         assert_eq!(heater_request_mv_from_percent(0, 15_000, 21_000), 15_000);
+    }
+
+    #[test]
+    fn heater_safe_max_matches_65w_temperature_limits() {
+        assert_eq!(heater_safe_max_mv_for_temp(0.0, 3_250, 21_000), 9_500);
+        assert_eq!(heater_safe_max_mv_for_temp(20.0, 3_250, 21_000), 10_400);
+        assert_eq!(heater_safe_max_mv_for_temp(60.0, 3_250, 21_000), 12_000);
+        assert_eq!(heater_safe_max_mv_for_temp(85.0, 3_250, 21_000), 13_000);
+        assert_eq!(heater_safe_max_mv_for_temp(165.0, 3_250, 21_000), 16_300);
+        assert_eq!(heater_safe_max_mv_for_temp(296.0, 3_250, 21_000), 21_000);
+    }
+
+    #[test]
+    fn heater_safe_max_preserves_higher_power_sources() {
+        assert_eq!(heater_safe_max_mv_for_temp(20.0, 5_000, 24_000), 16_000);
+        assert_eq!(heater_safe_max_mv_for_temp(165.0, 5_000, 24_000), 24_000);
+    }
+
+    #[test]
+    fn effective_pps_current_limit_prefers_lower_live_status_when_valid() {
+        let status_limit = effective_pps_current_limit_ma(
+            3_000,
+            Some(PdStatusObservation {
+                status_raw: 0,
+                status: Status {
+                    pd_active: true,
+                    ..Status::default()
+                },
+                current_raw: 40,
+                current_ma: 2_000,
+            }),
+        );
+        assert_eq!(status_limit, 2_000);
+
+        let status_zero_falls_back = effective_pps_current_limit_ma(
+            3_000,
+            Some(PdStatusObservation {
+                status_raw: 0,
+                status: Status {
+                    pd_active: true,
+                    ..Status::default()
+                },
+                current_raw: 0,
+                current_ma: 0,
+            }),
+        );
+        assert_eq!(status_zero_falls_back, 3_000);
+
+        let missing_status_falls_back = effective_pps_current_limit_ma(3_000, None);
+        assert_eq!(missing_status_falls_back, 3_000);
+    }
+
+    #[test]
+    fn current_limit_fixed_pwm_fallback_uses_hysteresis() {
+        assert_eq!(HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(), 9_000);
+        assert!(should_apply_current_limit_fixed_pwm_fallback(
+            100, false, false, 10_400, 12_000
+        ));
+        assert!(should_apply_current_limit_fixed_pwm_fallback(
+            100, false, true, 12_100, 12_000
+        ));
+        assert!(!should_apply_current_limit_fixed_pwm_fallback(
+            100, false, true, 12_200, 12_000
+        ));
+        assert!(!should_apply_current_limit_fixed_pwm_fallback(
+            0, false, true, 9_500, 12_000
+        ));
+        assert!(!should_apply_current_limit_fixed_pwm_fallback(
+            100, true, false, 10_400, 12_000
+        ));
+    }
+
+    #[test]
+    fn current_limit_fixed_pwm_fallback_caps_low_current_duty() {
+        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 20.0, 1_000), 35);
+        assert_eq!(current_limit_fixed_pwm_duty_percent(50, 20.0, 1_000), 35);
+        assert_eq!(current_limit_fixed_pwm_duty_percent(20, 20.0, 1_000), 20);
+        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 20.0, 0), 0);
+    }
+
+    #[test]
+    fn current_limit_fixed_pwm_fallback_preserves_65w_duty() {
+        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 0.0, 3_250), 100);
+        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 20.0, 3_250), 100);
+        assert_eq!(current_limit_fixed_pwm_duty_percent(42, 20.0, 3_250), 42);
     }
 
     #[test]
@@ -4305,11 +4612,15 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                adjustable_min_mv: 12_000,
+                pps_min_mv: 3_300,
+                idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 28_000,
+                capability_max_ma: 3_000,
                 current_mode: None,
                 current_request_mv: 12_000,
+                current_limit_fixed_pwm_active: false,
+                current_limit_fixed_request_confirmed: false,
             }
         );
 
@@ -4330,6 +4641,7 @@ mod tests {
             HeaterPowerBackend::FixedPdPwmFallback {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
                 fixed_request_confirmed: true,
+                fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
             }
         );
     }
@@ -4352,11 +4664,15 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                adjustable_min_mv: 12_000,
+                pps_min_mv: 3_300,
+                idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 21_000,
+                capability_max_ma: 3_000,
                 current_mode: None,
                 current_request_mv: 12_000,
+                current_limit_fixed_pwm_active: false,
+                current_limit_fixed_request_confirmed: false,
             }
         );
         assert_eq!(
@@ -4386,11 +4702,15 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                adjustable_min_mv: 12_000,
+                pps_min_mv: 3_300,
+                idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 24_000,
+                capability_max_ma: 3_000,
                 current_mode: None,
                 current_request_mv: 12_000,
+                current_limit_fixed_pwm_active: false,
+                current_limit_fixed_request_confirmed: false,
             }
         );
         assert_eq!(
@@ -4420,11 +4740,15 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                adjustable_min_mv: 12_000,
+                pps_min_mv: 3_300,
+                idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 21_000,
+                capability_max_ma: 3_000,
                 current_mode: None,
                 current_request_mv: 12_000,
+                current_limit_fixed_pwm_active: false,
+                current_limit_fixed_request_confirmed: false,
             }
         );
     }
@@ -4447,11 +4771,15 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                adjustable_min_mv: 15_000,
+                pps_min_mv: 15_000,
+                idle_request_mv: 15_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 21_000,
+                capability_max_ma: 3_000,
                 current_mode: None,
                 current_request_mv: 15_000,
+                current_limit_fixed_pwm_active: false,
+                current_limit_fixed_request_confirmed: false,
             }
         );
         assert_eq!(heater_request_mv_from_percent(0, 15_000, 21_000), 15_000);
