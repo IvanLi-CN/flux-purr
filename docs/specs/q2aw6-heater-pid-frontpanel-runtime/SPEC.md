@@ -24,7 +24,7 @@
   - active cooling `OFF`：`>100°C` 进入最低电压 `0.2Hz` 使能脉冲，脉冲占空比按 `floor((temp-100)/10)%` 递增并封顶 `25%`。
   - active cooling `OFF` 且 `>350°C`：锁住停热并保持风扇 `50%`；`>360°C` 改为全速。
   - `temp >= 420°C`：保持 heater hard cutoff fault-latch。
-- 默认启动时把 CH224Q 请求固定为 `20V`，再读取 CH224Q `0x60~0x8F` power data；只有 PPS capability 覆盖 `20V` 时才启用可调加热后端。可调请求范围为 `12V..28V`，并受 source capability 钳制。
+- 默认启动时把 CH224Q 请求固定为 `20V`，再读取 CH224Q `0x60~0x8F` power data；只有 PPS capability 覆盖 `20V` 时才启用可调加热后端。自动加热时可调请求上限必须受 source capability 与 `I_source_max * R_estimated(T)` 的较小值限制；`R_estimated(T)` 使用当前 `3.2 ohm` heater load class 的一阶铜电阻估算。
 - 产出 merge-ready 所需的 spec、视觉证据、板级验证与 review 收敛材料。
 
 ### Non-goals
@@ -59,12 +59,12 @@
 
 ### MUST
 
-- heater 控制周期固定为 `1 Hz`。`pps-mos` 后端下 `GPIO47` 只允许静态 `0% / 100%` 输出，中间功率由 `12V..28V` 可调 PD 请求承担；fallback 后端继续使用 `2 kHz` PWM。
+- heater 控制周期固定为 `1 Hz`。`pps-mos` 后端下 `GPIO47` 只允许静态 `0% / 100%` 输出，中间功率由受温度/电流合同限制的可调 PD 请求承担；fallback 后端继续使用 `2 kHz` PWM。
 - 目标温度与 preset 写入都必须 clamp 到 `0~400°C`。
 - RTD 开路、短路、ADC 读失败、`temp >= 420°C` 时，heater 必须立即关断并进入 fault-latch。
 - fault-latch 期间 heater 不得自动恢复；故障解除后必须由用户再次短按中键重臂。
 - CH224Q 在启动时默认请求 `20V`；`pd-request-12v` / `pd-request-28v` 仅改变默认固定请求值。随后必须读取 CH224Q power data 并只在 PPS APDO 覆盖 `20V` 时启用 `pps-mos`。固定 `20V` PDO 不得被当作 PPS 覆盖 `20V`。
-- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS，并请求 `12V` 或 source 宣告的更高 PPS 最小电压；控制输出 `1..100%` 必须映射到 `12V..28V` 并受 source capability 上下限钳制，先关 MOS、写入 PPS/AVS 电压、settle 后再开 MOS。任一关键调压写入失败必须切回固定 PD + `GPIO47` PWM fallback。
+- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS，并请求 `12V` 或 source 宣告的更高 PPS 最小电压；控制输出 `1..100%` 必须映射到 `source PPS minimum .. safe_max_mv`，其中 `safe_max_mv = floor_100mV(min(V_source_max, I_source_max * R_estimated(T)))`，并继续受 PPS/AVS capability 上下限钳制。若加热时 `safe_max_mv < PPS minimum`，则必须临时请求固定 `9V` 并切回 `GPIO47` PWM，且 PWM duty 必须继续按 `I_source_max * R_estimated(T) / 9V` 钳制，直到 `safe_max_mv >= PPS minimum + 200mV` 才恢复 `pps-mos`；任一关键调压写入失败必须切回默认固定 PD + `GPIO47` PWM fallback。
 - 手动 PPS 覆盖是非持久化调试状态，不写 EEPROM。启用时暂停自动 PPS/PID 电压写入，但 heater/PID 输出与 MOS gate 仍按既有逻辑运行；改压时不得主动干预 MOS gate。
 - 手动 PPS 覆盖不依赖 `pps_covers_20v`，但必须存在 PPS APDO capability，目标电压必须在 capability 内、按 `100mV` 对齐且不高于 `21.0V`。CH224Q 写入失败或 PD 状态丢失时必须自动清除覆盖，回到默认固定 PD 请求或既有 fallback，并通过 status/trace 暴露错误。
 - `active_cooling_enabled=true` 时，Dashboard fan line 必须只显示 `AUTO` 或 `RUN`；`active_cooling_enabled=false` 时必须显示 `OFF`，即使保护链路正在临时驱动真实风扇。
@@ -94,7 +94,7 @@
 ### Core flows
 
 - 启动后先请求 feature-selected 固定 PD 电压（默认 `20V`），随后读取 CH224Q status 与 power data。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
-- 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端把该控制量映射到可调 PD 电压并静态打开 MOS；fallback 后端把该控制量作为原 PWM duty。
+- 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端先按 `3.2 ohm` heater load class 估算 `R_estimated(T)`，再用 `min(PPS APDO max current, valid CH224Q status current)` 计算动态电压上限；控制量 `1..100%` 仅在该安全上限内映射为可调 PD 电压并静态打开 MOS。若当前安全上限低于 PPS minimum，则临时改为固定 `9V` + `GPIO47` PWM，并继续按当前电流合同钳制 fallback PWM duty，待安全上限恢复后再回到 `pps-mos`。
 - Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / active cooling / menu 语义不受 hold-repeat 影响。
 - 用户双击中键后，切换的是“主动降温”策略位，而不是直接强制 fan GPIO。
 - Dashboard fan line 只反映“策略开关 + 当前是否实际运行”：
@@ -146,7 +146,7 @@ None
 - Given active cooling 关闭且温度 `>350°C`，When 控制循环更新，Then heater 必须被锁住停热；When 用户重新开启风扇策略或手动重新 arm heater，Then 才允许离开锁态。
 - Given `temp >= 420°C`，When 故障出现，Then heater 立即归零并进入 `hard-overtemp` fault-latch。
 - Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。
-- Given CH224Q power data 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`，`0% / 50% / 100%` 控制量分别请求 `12V / 20V / 28V`（若 source capability 允许）且 GPIO47 只输出静态关/开。
+- Given CH224Q power data 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`，`0%` 维持 MOS 关闭且请求 `12V` 或更高 PPS minimum；`1..100%` 只在 `min(V_source_max, I_source_max * R_estimated(T))` 允许的范围内请求 PPS/AVS 电压；对于 `3.25A` source，`0C / 20C` 下的自动加热不得直接请求 `12V` 或更高静态全开电压，必要时必须先关 MOS 再切到固定 `9V` + PWM fallback；对于更低电流 source，fallback duty 必须继续被压到不高于该电流合同对应的等效占空比，且 GPIO47 在 `pps-mos` 正常路径中仍只输出静态关/开。
 - Given CH224Q 只提供固定 `20V` PDO 或 PPS APDO 不覆盖 `20V`，When runtime 初始化 heater 后端，Then 选择 `fixed-pd-pwm-fallback`，不得把固定 `20V` 误判为 PPS 可调能力。
 - Given source 回报 PPS APDO capability，When 手动 PPS 覆盖启用为 `10.4V`，Then 自动 PPS/PID 电压写入暂停，MOS gate 不被设置动作额外改写，status 回显 manual/capability；When 覆盖清除、PD 丢失或写入失败，Then 自动控制恢复且错误码可见。
 
