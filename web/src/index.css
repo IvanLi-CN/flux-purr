@@ -124,6 +124,10 @@
     align-items: center;
   }
 
+  .industrial-setpoint-stepper--input-only {
+    grid-template-columns: minmax(7rem, 9rem);
+  }
+
   .industrial-setpoint-stepper button,
   .industrial-setpoint-stepper input {
     height: 2.35rem;
@@ -1271,6 +1275,7 @@
   .industrial-log-virtual-space {
     position: relative;
     min-height: 100%;
+    overflow-anchor: none;
   }
 
   @media (max-width: 759px) {
@@ -1338,7 +1343,7 @@
     }
 
     .industrial-view-tabs {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0.45rem;
     }
 
@@ -2619,6 +2624,7 @@
     left: 0;
     width: auto;
     align-items: center;
+    box-sizing: border-box;
   }
 
   .industrial-event.is-danger strong,
@@ -4038,6 +4044,482 @@
 
   .industrial-settings-grid--controls .industrial-segmented-control {
     margin: 0;
+  }
+
+  .industrial-calibration-workbench {
+    display: grid;
+    gap: 0.65rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-topbar {
+    display: grid;
+    gap: 0.62rem;
+    align-items: start;
+  }
+
+  .industrial-calibration-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.52rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-summary--topbar {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .industrial-calibration-summary-card {
+    display: grid;
+    align-content: start;
+    gap: 0.28rem;
+    min-height: 5.25rem;
+    border: 1px solid rgba(80, 67, 58, 0.14);
+    border-radius: 14px;
+    background: rgba(236, 240, 245, 0.66);
+    box-shadow:
+      inset 3px 3px 6px rgba(186, 190, 204, 0.56),
+      inset -3px -3px 6px rgba(255, 255, 255, 0.78);
+    padding: 0.72rem 0.82rem;
+  }
+
+  .industrial-calibration-summary-card strong,
+  .industrial-calibration-package__status span,
+  .industrial-calibration-fit-table strong {
+    overflow: hidden;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 850;
+    line-height: 1.08;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-calibration-summary-card strong {
+    font-size: 1.35rem;
+    line-height: 1.02;
+  }
+
+  .industrial-calibration-summary-card span,
+  .industrial-calibration-package__status small,
+  .industrial-calibration-fit-table th,
+  .industrial-calibration-fit-table td,
+  .industrial-calibration-channel__header span,
+  .industrial-calibration-capture-row label > span:first-child,
+  .industrial-calibration-empty {
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 750;
+    line-height: 1.2;
+  }
+
+  .industrial-calibration-summary-card span {
+    white-space: normal;
+  }
+
+  .industrial-calibration-summary-card.is-accent {
+    background: rgba(229, 234, 241, 0.78);
+  }
+
+  .industrial-calibration-summary-card.is-accent strong {
+    color: color-mix(in srgb, var(--industrial-accent) 78%, var(--industrial-text));
+  }
+
+  .industrial-calibration-summary-card.is-muted strong {
+    color: rgba(74, 85, 104, 0.82);
+  }
+
+  .industrial-calibration-command-bar {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.44rem;
+    align-items: stretch;
+    min-width: 0;
+    border: 1px solid rgba(80, 67, 58, 0.14);
+    border-radius: 14px;
+    background: rgba(232, 236, 242, 0.54);
+    box-shadow:
+      inset 3px 3px 6px rgba(186, 190, 204, 0.48),
+      inset -3px -3px 6px rgba(255, 255, 255, 0.76);
+    padding: 0.56rem;
+  }
+
+  .industrial-calibration-command-bar__apply,
+  .industrial-calibration-command-bar__action,
+  .industrial-calibration-capture-row .industrial-button,
+  .industrial-calibration-manual-fit .industrial-button,
+  .industrial-calibration-samples .industrial-button {
+    min-height: 2.35rem;
+    border-radius: 8px;
+    padding: 0.48rem 0.68rem;
+    font-size: 0.66rem;
+    letter-spacing: 0.035em;
+  }
+
+  .industrial-calibration-command-bar__apply,
+  .industrial-calibration-command-bar__action {
+    width: 100%;
+  }
+
+  .industrial-calibration-command-bar__apply:disabled {
+    border-color: rgba(80, 67, 58, 0.12);
+    background: rgba(219, 224, 232, 0.72);
+    color: rgba(74, 85, 104, 0.72);
+    opacity: 1;
+    box-shadow:
+      inset 2px 2px 4px rgba(186, 190, 204, 0.5),
+      inset -2px -2px 4px rgba(255, 255, 255, 0.72);
+  }
+
+  .industrial-button--danger-quiet {
+    border: 1px solid rgba(143, 60, 22, 0.2);
+    background: rgba(255, 238, 215, 0.34);
+    color: #8f3c16;
+    box-shadow:
+      3px 3px 6px rgba(186, 190, 204, 0.38),
+      -3px -3px 6px rgba(255, 255, 255, 0.6);
+  }
+
+  .industrial-button--danger-quiet:disabled {
+    border-color: rgba(80, 67, 58, 0.1);
+    background: rgba(224, 229, 236, 0.38);
+    color: rgba(74, 85, 104, 0.46);
+    cursor: not-allowed;
+    opacity: 1;
+    box-shadow:
+      inset 1px 1px 3px rgba(186, 190, 204, 0.4),
+      inset -1px -1px 3px rgba(255, 255, 255, 0.64);
+  }
+
+  .industrial-calibration-warning {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.38rem;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0;
+    border: 1px solid rgba(199, 93, 44, 0.32);
+    border-radius: 8px;
+    background: rgba(255, 238, 215, 0.74);
+    padding: 0.34rem 0.48rem;
+    color: #8f3c16;
+    font-size: 0.76rem;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+
+  .industrial-calibration-grid {
+    display: grid;
+    align-items: stretch;
+    gap: 0.72rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-channel {
+    display: grid;
+    gap: 0.5rem;
+    min-width: 0;
+    border: 1px solid rgba(80, 67, 58, 0.14);
+    border-radius: 8px;
+    background: rgba(237, 240, 245, 0.42);
+    padding: 0.58rem;
+  }
+
+  .industrial-calibration-channel__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-channel__header span {
+    flex: 0 0 auto;
+    border: 1px solid rgba(80, 67, 58, 0.12);
+    border-radius: 999px;
+    background: rgba(224, 229, 236, 0.62);
+    padding: 0.18rem 0.42rem;
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+  }
+
+  .industrial-calibration-fit-table {
+    display: grid;
+    min-width: 0;
+    overflow: hidden;
+    border-spacing: 0;
+    border: 1px solid rgba(80, 67, 58, 0.1);
+    border-radius: 8px;
+    background: rgba(248, 249, 251, 0.34);
+    box-shadow:
+      inset 1px 1px 3px rgba(186, 190, 204, 0.42),
+      inset -1px -1px 3px rgba(255, 255, 255, 0.62);
+  }
+
+  .industrial-calibration-fit-table thead,
+  .industrial-calibration-fit-table tbody {
+    display: contents;
+  }
+
+  .industrial-calibration-fit-table tr {
+    display: grid;
+    grid-template-columns: minmax(3.8rem, 0.72fr) minmax(4.3rem, 0.9fr) minmax(0, 1fr) minmax(
+        0,
+        0.85fr
+      );
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    border-top: 1px solid rgba(80, 67, 58, 0.08);
+    padding: 0.36rem 0.52rem;
+  }
+
+  .industrial-calibration-fit-table thead tr {
+    border-top: 0;
+    background: rgba(224, 229, 236, 0.56);
+    font-size: 0.61rem;
+    font-weight: 850;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .industrial-calibration-fit-table th,
+  .industrial-calibration-fit-table td,
+  .industrial-calibration-fit-table strong {
+    display: block;
+    overflow: hidden;
+    min-width: 0;
+    padding: 0;
+    font-family: "JetBrains Mono", monospace;
+    line-height: 1.15;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-calibration-fit-table strong {
+    font-size: 0.82rem;
+  }
+
+  .industrial-calibration-capture-row {
+    display: grid;
+    grid-template-columns: minmax(8rem, 1fr) minmax(6.5rem, auto) minmax(4.4rem, auto);
+    gap: 0.36rem;
+    align-items: end;
+    min-width: 0;
+  }
+
+  .industrial-calibration-capture-row,
+  .industrial-calibration-manual-fit {
+    min-width: 0;
+  }
+
+  .industrial-calibration-capture-row label {
+    display: grid;
+    gap: 0.28rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-manual-fit {
+    display: grid;
+    grid-template-columns: minmax(6rem, 1fr) minmax(6rem, 1fr) minmax(7rem, auto);
+    gap: 0.36rem;
+    align-items: end;
+    min-width: 0;
+    border: 1px dashed rgba(80, 67, 58, 0.16);
+    border-radius: 8px;
+    background: rgba(224, 229, 236, 0.3);
+    padding: 0.44rem;
+  }
+
+  .industrial-calibration-manual-fit label {
+    display: grid;
+    gap: 0.28rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-manual-fit label > span:first-child {
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 750;
+    line-height: 1.2;
+  }
+
+  .industrial-calibration-input {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.4rem;
+    border: 1px solid rgba(80, 67, 58, 0.16);
+    border-radius: 8px;
+    background: rgba(248, 249, 251, 0.74);
+    box-shadow:
+      inset 2px 2px 4px rgba(186, 190, 204, 0.45),
+      inset -2px -2px 4px rgba(255, 255, 255, 0.72);
+    padding: 0.3rem 0.46rem;
+  }
+
+  .industrial-calibration-input input {
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.92rem;
+    font-weight: 850;
+    line-height: 1.2;
+    outline: none;
+  }
+
+  .industrial-calibration-input input:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 4px;
+  }
+
+  .industrial-calibration-input small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 850;
+  }
+
+  .industrial-calibration-capture-row .industrial-button {
+    min-width: 0;
+    padding-inline: 0.52rem;
+  }
+
+  .industrial-calibration-manual-fit .industrial-button {
+    min-width: 0;
+    padding-inline: 0.52rem;
+  }
+
+  .industrial-calibration-samples-scroll {
+    min-width: 0;
+    max-height: clamp(10.5rem, 25vh, 15.75rem);
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border-spacing: 0;
+    border: 1px solid rgba(80, 67, 58, 0.12);
+    border-radius: 8px;
+  }
+
+  .industrial-calibration-samples-scroll:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 3px;
+  }
+
+  .industrial-calibration-samples {
+    display: grid;
+    min-width: 0;
+    width: 100%;
+    border-spacing: 0;
+  }
+
+  .industrial-calibration-samples thead,
+  .industrial-calibration-samples tbody {
+    display: contents;
+  }
+
+  .industrial-calibration-samples tr {
+    display: grid;
+    grid-template-columns: 3.3rem minmax(0, 1fr) minmax(0, 1fr) minmax(4.8rem, auto);
+    align-items: center;
+    gap: 0.48rem;
+    min-width: 0;
+    border-top: 1px solid rgba(80, 67, 58, 0.1);
+    background: rgba(248, 249, 251, 0.58);
+    padding: 0.36rem 0.42rem;
+  }
+
+  .industrial-calibration-samples thead tr {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    border-top: 0;
+    background: rgba(224, 229, 236, 0.68);
+    color: var(--industrial-muted-text);
+    font-size: 0.62rem;
+    font-weight: 850;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .industrial-calibration-samples th,
+  .industrial-calibration-samples td,
+  .industrial-calibration-samples strong {
+    overflow: hidden;
+    min-width: 0;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-calibration-samples th,
+  .industrial-calibration-samples td {
+    display: block;
+    padding: 0;
+    text-align: left;
+  }
+
+  .industrial-calibration-samples strong {
+    color: var(--industrial-text);
+    font-weight: 850;
+  }
+
+  .industrial-calibration-samples .industrial-button {
+    justify-self: end;
+    min-width: 4.8rem;
+  }
+
+  .industrial-calibration-empty {
+    display: grid;
+    gap: 0.18rem;
+    margin: 0;
+    border: 1px dashed rgba(80, 67, 58, 0.18);
+    border-radius: 8px;
+    background: rgba(224, 229, 236, 0.38);
+    padding: 0.52rem 0.58rem;
+    font-family: "JetBrains Mono", monospace;
+    text-transform: uppercase;
+  }
+
+  .industrial-calibration-empty small {
+    color: rgba(74, 85, 104, 0.68);
+    font-size: 0.66rem;
+    font-weight: 800;
+    text-transform: none;
+  }
+
+  @media (min-width: 960px) {
+    .industrial-calibration-topbar > .industrial-action-feedback--compact {
+      grid-column: 1 / -1;
+    }
+
+    .industrial-calibration-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 720px) {
+    .industrial-calibration-summary,
+    .industrial-calibration-summary--topbar,
+    .industrial-calibration-command-bar,
+    .industrial-calibration-manual-fit,
+    .industrial-calibration-capture-row,
+    .industrial-calibration-samples tr {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .industrial-calibration-samples {
+      min-width: 0;
+    }
+
+    .industrial-calibration-samples .industrial-button {
+      justify-self: stretch;
+    }
   }
 
   .industrial-log-panel.is-quiet {

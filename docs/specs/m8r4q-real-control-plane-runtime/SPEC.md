@@ -16,6 +16,7 @@
 - firmware 提供 feature-gated `web_serial` contract adapter，复用现有热控 runtime 和 EEPROM WiFi 字段；direct `net_http` 只有在固件 HTTP server 落地后才可声明。
 - `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
 - `flux-purr` 作为 released CLI，通过 `devd` 执行命令行硬件控制、用户级硬件记忆、USB 端口配置、artifact dry-run 与 guarded real flash。
+- ADC calibration control family 由 `#jt8r2` 约束，并复用本规格的 lease、USB JSONL、devd HTTP、CLI 与 Web capability boundary。
 - Release 使用单一产品 tag `vX.Y.Z`，Web、firmware 与 host-tools 资产挂同一 Release，并通过 release manifest 的组件指纹避免无效升级。
 - Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock、browser Web Serial 与 devd contract，并对危险操作做 capability gate。
 - 无真机时必须能用 host tests、mock serial 和 devd dry-run 验证主要契约。
@@ -51,6 +52,7 @@
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
 - runtime config frame 和 devd runtime endpoint 必须能更新目标温度、当前 preset slot、`presets_c[10]`、主动散热开关、heater hold 状态与调试用手动 PPS 覆盖。
+- calibration frame 和 devd calibration endpoint 必须能读取 active/draft 校准、编辑 draft、导入完整 package，并在 heater inactive 时 apply draft 到 active。
 - Web app 必须在目标下拉的底部只提供一个 `Add device` 入口；选择该入口后进入单独的 Add device 页面，并在该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型。
 - Web app 在 live 模式没有选中真实目标时，主工作区必须显示全宽设备选择页；该页上半部分显示 known devices 网格，空设备提示不得呈现为卡片，中间显示分隔线，下半部分以单行三卡片显示 WiFi、Web Serial 与 Bridge 三种新增类型，且不显示右侧全局日志列或额外的分区标题。
 - Web app 必须通过 Add device 页面里的 Web Serial 类型提供显式 browser Web Serial 连接动作；连接成功后必须通过 USB JSONL 读取 identity、network、status，并用 `runtime_config` 直接控制目标温度、Settings preset slot / preset 温度 / preset 启用状态、主动散热开关与 heater hold 状态。
@@ -91,6 +93,7 @@
 - `POST /api/v1/devices/:id/bind`、`connect`、`disconnect`：管理 daemon-local device record。
 - `POST /api/v1/devices/:id/leases`：创建 lease；`POST /api/v1/leases/:lease_id/heartbeat` 续租；`DELETE /api/v1/leases/:lease_id` 释放。
 - `GET /api/v1/devices/:id/identity|network|status`：读取同一领域契约；leased USB session 需要 `lease_id`。
+- `GET|PUT /api/v1/devices/:id/calibration` 与 `POST /api/v1/devices/:id/calibration/apply`：读取、编辑和应用 ADC calibration；细节见 `../jt8r2-adc-calibration-control-plane/SPEC.md`。
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
 - `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled`、`manual_pps_enabled`、`manual_pps_mv`、`manual_pps_ma` 的部分更新。
@@ -123,6 +126,7 @@
 - `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
 - `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`、`manualPpsEnabled`、`manualPpsMv`、`manualPpsMa`；response 返回更新后的 status。`manualPpsEnabled=false` 清除覆盖；启用时 `manualPpsMv` 必须在 PPS APDO capability 内、最高 `21.0V`、且按 `100mV` 对齐；`manualPpsMa` 必须在 APDO current capability 内、且按 `50mA` 对齐。CH224Q 只通过 `0x53` 写 PPS 电压，`manualPpsMa` 是用于校验与回显的请求电流值。
+- `calibration_config` / `calibration_apply`：`request_id` + calibration fields；response 返回 calibration state。校准领域契约见 `#jt8r2`。
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 

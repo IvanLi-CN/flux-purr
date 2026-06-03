@@ -18,7 +18,15 @@ import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 
 const DEVD_POLL_MS = 2_000
 const DEVD_TRACE_LIMIT = 1_000
-const DEVD_EVENT_KINDS = ['serial', 'lease', 'wifi', 'runtime', 'flash', 'transport'] as const
+const DEVD_EVENT_KINDS = [
+  'serial',
+  'lease',
+  'wifi',
+  'runtime',
+  'calibration',
+  'flash',
+  'transport',
+] as const
 
 export interface LiveDevdOptions {
   enabled?: boolean

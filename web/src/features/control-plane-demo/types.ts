@@ -31,6 +31,7 @@ export interface DeviceTarget {
   ppsCapabilityMaxMv?: number | null
   ppsCapabilityMaxMa?: number | null
   manualPpsError?: string | null
+  heaterEnabled: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
   fanState: 'OFF' | 'AUTO' | 'RUN'

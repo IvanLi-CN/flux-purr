@@ -39,6 +39,17 @@ pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
+const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
+const RTD_DEFAULT_HIGH_MV: u16 = 2_800;
+const VIN_DEFAULT_HIGH_MV: u16 = 2_337;
+const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
+const RTD_DIVIDER_SUPPLY_MV: f32 = 3_000.0;
+const PT1000_R0_OHMS: f32 = 1_000.0;
+const PT1000_A: f32 = 3.9083e-3;
+const PT1000_B: f32 = -5.775e-7;
+const PT1000_C: f32 = -4.183e-12;
+const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
+const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
 const USER_CONFIG_FILE: &str = "config.json";
 const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
@@ -321,6 +332,7 @@ pub struct DeviceRecord {
     pub identity: Identity,
     pub network: NetworkSummary,
     pub status: ControlPlaneStatus,
+    pub calibration: CalibrationState,
     pub selected_artifact_id: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
@@ -342,6 +354,7 @@ impl DeviceRecord {
                 "identity".to_string(),
                 "status".to_string(),
                 "network".to_string(),
+                "calibration".to_string(),
                 "wifi_config".to_string(),
                 "monitor".to_string(),
                 "firmware_check".to_string(),
@@ -407,6 +420,7 @@ impl DeviceRecord {
             identity,
             network,
             status,
+            calibration: CalibrationState::default(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -510,6 +524,207 @@ pub struct ControlPlaneStatus {
     pub network: NetworkSummary,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationChannel {
+    RtdAdc,
+    VinAdc,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationSample {
+    pub observed_mv: u16,
+    pub expected_mv: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationPackage {
+    pub rtd_adc: Vec<Option<CalibrationSample>>,
+    pub vin_adc: Vec<Option<CalibrationSample>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationFit {
+    pub gain: f32,
+    pub offset_mv: f32,
+    pub custom_sample_count: usize,
+    pub default_sample_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationFits {
+    pub rtd_adc: CalibrationFit,
+    pub vin_adc: CalibrationFit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationState {
+    pub active: CalibrationPackage,
+    pub draft: CalibrationPackage,
+    pub active_fit: CalibrationFits,
+    pub draft_fit: CalibrationFits,
+}
+
+impl Default for CalibrationPackage {
+    fn default() -> Self {
+        Self {
+            rtd_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+            vin_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+        }
+    }
+}
+
+impl Default for CalibrationState {
+    fn default() -> Self {
+        let package = CalibrationPackage::default();
+        Self::from_packages(package.clone(), package)
+    }
+}
+
+impl CalibrationState {
+    fn from_packages(active: CalibrationPackage, draft: CalibrationPackage) -> Self {
+        Self {
+            active_fit: CalibrationFits::from_package(&active),
+            draft_fit: CalibrationFits::from_package(&draft),
+            active,
+            draft,
+        }
+    }
+
+    fn refresh_fits(&mut self) {
+        self.active_fit = CalibrationFits::from_package(&self.active);
+        self.draft_fit = CalibrationFits::from_package(&self.draft);
+    }
+}
+
+impl CalibrationFits {
+    fn from_package(package: &CalibrationPackage) -> Self {
+        Self {
+            rtd_adc: fit_calibration_channel(&package.rtd_adc, CalibrationChannel::RtdAdc),
+            vin_adc: fit_calibration_channel(&package.vin_adc, CalibrationChannel::VinAdc),
+        }
+    }
+}
+
+impl CalibrationPackage {
+    fn channel_mut(&mut self, channel: CalibrationChannel) -> &mut Vec<Option<CalibrationSample>> {
+        match channel {
+            CalibrationChannel::RtdAdc => &mut self.rtd_adc,
+            CalibrationChannel::VinAdc => &mut self.vin_adc,
+        }
+    }
+}
+
+fn fit_calibration_channel(
+    samples: &[Option<CalibrationSample>],
+    channel: CalibrationChannel,
+) -> CalibrationFit {
+    let custom: Vec<CalibrationSample> = samples.iter().flatten().copied().collect();
+    let defaults = default_calibration_samples(channel);
+    let default_sample_count = if custom.len() < 2 { defaults.len() } else { 0 };
+    let mut points = if custom.len() < 2 {
+        defaults.to_vec()
+    } else {
+        Vec::new()
+    };
+    points.extend(custom.iter().copied());
+    if points.len() < 2 {
+        return CalibrationFit {
+            gain: 1.0,
+            offset_mv: 0.0,
+            custom_sample_count: custom.len(),
+            default_sample_count,
+        };
+    }
+
+    let n = points.len() as f32;
+    let sum_x = points
+        .iter()
+        .map(|sample| sample.observed_mv as f32)
+        .sum::<f32>();
+    let sum_y = points
+        .iter()
+        .map(|sample| sample.expected_mv as f32)
+        .sum::<f32>();
+    let sum_xx = points
+        .iter()
+        .map(|sample| {
+            let x = sample.observed_mv as f32;
+            x * x
+        })
+        .sum::<f32>();
+    let sum_xy = points
+        .iter()
+        .map(|sample| sample.observed_mv as f32 * sample.expected_mv as f32)
+        .sum::<f32>();
+    let denominator = (n * sum_xx) - (sum_x * sum_x);
+    let (gain, offset_mv) = if denominator.abs() < f32::EPSILON {
+        (1.0, (sum_y - sum_x) / n)
+    } else {
+        let gain = ((n * sum_xy) - (sum_x * sum_y)) / denominator;
+        (gain, (sum_y - gain * sum_x) / n)
+    };
+    CalibrationFit {
+        gain,
+        offset_mv,
+        custom_sample_count: custom.len(),
+        default_sample_count,
+    }
+}
+
+fn default_calibration_samples(channel: CalibrationChannel) -> [CalibrationSample; 2] {
+    match channel {
+        CalibrationChannel::RtdAdc => [
+            CalibrationSample {
+                observed_mv: 0,
+                expected_mv: 0,
+            },
+            CalibrationSample {
+                observed_mv: RTD_DEFAULT_HIGH_MV,
+                expected_mv: RTD_DEFAULT_HIGH_MV,
+            },
+        ],
+        CalibrationChannel::VinAdc => [
+            CalibrationSample {
+                observed_mv: 0,
+                expected_mv: 0,
+            },
+            CalibrationSample {
+                observed_mv: VIN_DEFAULT_HIGH_MV,
+                expected_mv: VIN_DEFAULT_HIGH_MV,
+            },
+        ],
+    }
+}
+
+fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
+    let resistance = {
+        let polynomial = 1.0 + PT1000_A * temp_c + PT1000_B * temp_c * temp_c;
+        if temp_c >= 0.0 {
+            PT1000_R0_OHMS * polynomial
+        } else {
+            PT1000_R0_OHMS * (polynomial + PT1000_C * (temp_c - 100.0) * temp_c * temp_c * temp_c)
+        }
+    };
+    ((RTD_DIVIDER_SUPPLY_MV * resistance) / (RTD_REFERENCE_RESISTOR_OHMS + resistance))
+        .round()
+        .clamp(0.0, u16::MAX as f32) as u16
+}
+
+fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
+    let denominator = VIN_DIVIDER_R_HIGH_OHMS + VIN_DIVIDER_R_LOW_OHMS;
+    input_mv
+        .saturating_mul(VIN_DIVIDER_R_LOW_OHMS)
+        .checked_div(denominator)
+        .unwrap_or(0)
+        .min(u32::from(u16::MAX)) as u16
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebLease {
@@ -577,6 +792,35 @@ pub struct RuntimeConfigRequest {
     pub manual_pps_ma: Option<u16>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationConfigRequest {
+    pub lease_id: String,
+    pub op: CalibrationConfigOp,
+    pub channel: Option<CalibrationChannel>,
+    pub reference_temp_c: Option<f32>,
+    pub reference_vin_mv: Option<u32>,
+    pub observed_mv: Option<u16>,
+    pub expected_mv: Option<u16>,
+    pub sample_index: Option<usize>,
+    pub package: Option<CalibrationPackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationApplyRequest {
+    pub lease_id: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationConfigOp {
+    Capture,
+    Delete,
+    Clear,
+    Import,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WifiConfigOp {
@@ -641,6 +885,37 @@ struct UsbRuntimeConfigWire<'a> {
     manual_pps_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_ma: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbCalibrationConfigWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: CalibrationConfigOp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel: Option<CalibrationChannel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference_temp_c: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reference_vin_mv: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    package: Option<&'a CalibrationPackage>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbCalibrationApplyWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -824,6 +1099,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/runtime",
             put(configure_runtime),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/calibration",
+            get(device_calibration).put(configure_calibration),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/calibration/apply",
+            post(apply_calibration),
         )
         .route("/api/v1/artifacts", get(list_artifacts_route))
         .route("/api/v1/artifacts/verify", post(verify_artifact_route))
@@ -1111,6 +1394,140 @@ async fn device_status(
     Ok(Json(target.status))
 }
 
+async fn device_calibration(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<CalibrationState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let calibration = match serial_calibration_get(&state, &target).await {
+            Ok(calibration) => calibration,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "calibration", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.calibration = calibration.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(calibration));
+    }
+
+    Ok(Json(target.calibration))
+}
+
+async fn configure_calibration(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<CalibrationConfigRequest>,
+) -> Result<Json<CalibrationState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let calibration = match serial_calibration_config(&state, &target, &payload).await {
+            Ok(calibration) => calibration,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "calibration_config", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.calibration = calibration.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        drop(state_lock);
+        emit_calibration_event(&state, &device_id, &payload.op, &calibration);
+        return Ok(Json(calibration));
+    }
+
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    apply_mock_calibration_config(&mut device.calibration, &payload)?;
+    let calibration = device.calibration.clone();
+    drop(state_lock);
+    emit_calibration_event(&state, &device_id, &payload.op, &calibration);
+    Ok(Json(calibration))
+}
+
+async fn apply_calibration(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<CalibrationApplyRequest>,
+) -> Result<Json<CalibrationState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.status.heater_enabled || target.status.heater_output_percent != 0 {
+        return Err(HttpError::forbidden(
+            "calibration_apply_heater_active",
+            "Calibration cannot be applied while the heater is active.",
+        ));
+    }
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let calibration = match serial_calibration_apply(&state, &target).await {
+            Ok(calibration) => calibration,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "calibration_apply", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.calibration = calibration.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        drop(state_lock);
+        emit_calibration_apply_event(&state, &device_id, &calibration);
+        return Ok(Json(calibration));
+    }
+
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    device.calibration.active = device.calibration.draft.clone();
+    device.calibration.refresh_fits();
+    let calibration = device.calibration.clone();
+    drop(state_lock);
+    emit_calibration_apply_event(&state, &device_id, &calibration);
+    Ok(Json(calibration))
+}
+
 async fn device_events(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -1383,6 +1800,137 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
     Ok(())
 }
 
+fn apply_mock_calibration_config(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) -> Result<(), HttpError> {
+    match payload.op {
+        CalibrationConfigOp::Capture => {
+            let channel = payload.channel.ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_channel_required",
+                    "Calibration capture requires a channel.",
+                )
+            })?;
+            let observed_mv = payload
+                .observed_mv
+                .unwrap_or_else(|| mock_observed_adc_mv(channel));
+            let expected_mv = expected_calibration_adc_mv(payload, channel).ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_reference_required",
+                    "Calibration capture requires a valid physical reference.",
+                )
+            })?;
+            let samples = calibration.draft.channel_mut(channel);
+            let Some(slot) = samples.iter_mut().find(|slot| slot.is_none()) else {
+                return Err(HttpError::bad_request(
+                    "calibration_samples_full",
+                    "Calibration channel already has 8 samples.",
+                ));
+            };
+            *slot = Some(CalibrationSample {
+                observed_mv,
+                expected_mv,
+            });
+        }
+        CalibrationConfigOp::Delete => {
+            let channel = payload.channel.ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_channel_required",
+                    "Calibration delete requires a channel.",
+                )
+            })?;
+            let index = payload.sample_index.ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_index_required",
+                    "Calibration delete requires sampleIndex.",
+                )
+            })?;
+            let samples = calibration.draft.channel_mut(channel);
+            let Some(slot) = samples.get_mut(index) else {
+                return Err(HttpError::bad_request(
+                    "calibration_sample_not_found",
+                    "Calibration sample index was not present.",
+                ));
+            };
+            if slot.is_none() {
+                return Err(HttpError::bad_request(
+                    "calibration_sample_not_found",
+                    "Calibration sample index was not present.",
+                ));
+            }
+            *slot = None;
+            compact_calibration_samples(samples);
+        }
+        CalibrationConfigOp::Clear => {
+            let channel = payload.channel.ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_channel_required",
+                    "Calibration clear requires a channel.",
+                )
+            })?;
+            *calibration.draft.channel_mut(channel) = vec![None; ADC_CALIBRATION_MAX_SAMPLES];
+        }
+        CalibrationConfigOp::Import => {
+            let package = payload.package.clone().ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_package_required",
+                    "Calibration import requires a package.",
+                )
+            })?;
+            validate_calibration_package(&package)?;
+            calibration.draft = normalize_calibration_package(package);
+        }
+    }
+    calibration.refresh_fits();
+    Ok(())
+}
+
+fn compact_calibration_samples(samples: &mut Vec<Option<CalibrationSample>>) {
+    let mut compacted: Vec<Option<CalibrationSample>> =
+        samples.iter().flatten().copied().map(Some).collect();
+    compacted.resize(ADC_CALIBRATION_MAX_SAMPLES, None);
+    *samples = compacted;
+}
+
+fn validate_calibration_package(package: &CalibrationPackage) -> Result<(), HttpError> {
+    if package.rtd_adc.len() > ADC_CALIBRATION_MAX_SAMPLES
+        || package.vin_adc.len() > ADC_CALIBRATION_MAX_SAMPLES
+    {
+        return Err(HttpError::bad_request(
+            "calibration_package_too_large",
+            "Calibration import supports at most 8 samples per channel.",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_calibration_package(mut package: CalibrationPackage) -> CalibrationPackage {
+    compact_calibration_samples(&mut package.rtd_adc);
+    compact_calibration_samples(&mut package.vin_adc);
+    package
+}
+
+fn mock_observed_adc_mv(channel: CalibrationChannel) -> u16 {
+    match channel {
+        CalibrationChannel::RtdAdc => 1_120,
+        CalibrationChannel::VinAdc => 1_670,
+    }
+}
+
+fn expected_calibration_adc_mv(
+    payload: &CalibrationConfigRequest,
+    channel: CalibrationChannel,
+) -> Option<u16> {
+    if let Some(expected_mv) = payload.expected_mv {
+        return Some(expected_mv);
+    }
+    match channel {
+        CalibrationChannel::RtdAdc => payload.reference_temp_c.map(rtd_adc_mv_for_temperature_c),
+        CalibrationChannel::VinAdc => payload.reference_vin_mv.map(vin_adc_mv_for_input_mv),
+    }
+}
+
 fn validate_manual_pps_request_against_status(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
@@ -1516,6 +2064,53 @@ async fn serial_runtime_config(
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
     let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
     extract_usb_payload(result, "status")
+}
+
+async fn serial_calibration_get(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<CalibrationState, HttpError> {
+    serial_request_payload::<CalibrationState>(state, target, "get_calibration", "calibration")
+        .await
+}
+
+async fn serial_calibration_config(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &CalibrationConfigRequest,
+) -> Result<CalibrationState, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-calibration", now_millis());
+    let request = serde_json::to_string(&UsbCalibrationConfigWire {
+        frame_type: "calibration_config",
+        request_id: &request_id,
+        op: payload.op,
+        channel: payload.channel,
+        reference_temp_c: payload.reference_temp_c,
+        reference_vin_mv: payload.reference_vin_mv,
+        observed_mv: payload.observed_mv,
+        expected_mv: payload.expected_mv,
+        sample_index: payload.sample_index,
+        package: payload.package.as_ref(),
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB calibration request"))?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    extract_usb_payload(result, "calibration")
+}
+
+async fn serial_calibration_apply(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<CalibrationState, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-calibration-apply", now_millis());
+    let request = serde_json::to_string(&UsbCalibrationApplyWire {
+        frame_type: "calibration_apply",
+        request_id: &request_id,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB calibration apply request"))?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    extract_usb_payload(result, "calibration")
 }
 
 async fn serial_exchange(
@@ -2480,6 +3075,42 @@ fn emit_runtime_config_event(
                 "manualPpsEnabled": status.manual_pps_enabled,
                 "manualPpsMv": status.manual_pps_mv,
                 "manualPpsMa": status.manual_pps_ma,
+            },
+        }),
+    ));
+}
+
+fn emit_calibration_event(
+    state: &AppState,
+    device_id: &str,
+    op: &CalibrationConfigOp,
+    calibration: &CalibrationState,
+) {
+    state.emit(event(
+        device_id,
+        "calibration",
+        "calibration draft updated",
+        json!({
+            "op": op,
+            "draftFit": calibration.draft_fit,
+            "draftSamples": {
+                "rtdAdc": calibration.draft.rtd_adc.iter().flatten().count(),
+                "vinAdc": calibration.draft.vin_adc.iter().flatten().count(),
+            },
+        }),
+    ));
+}
+
+fn emit_calibration_apply_event(state: &AppState, device_id: &str, calibration: &CalibrationState) {
+    state.emit(event(
+        device_id,
+        "calibration",
+        "calibration applied",
+        json!({
+            "activeFit": calibration.active_fit,
+            "activeSamples": {
+                "rtdAdc": calibration.active.rtd_adc.iter().flatten().count(),
+                "vinAdc": calibration.active.vin_adc.iter().flatten().count(),
             },
         }),
     ));

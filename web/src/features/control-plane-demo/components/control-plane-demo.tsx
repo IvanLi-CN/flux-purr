@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
+  Download,
   Fan,
   Gauge,
   Minus,
@@ -10,7 +11,9 @@ import {
   Power,
   SlidersHorizontal,
   ToggleRight,
+  Trash2,
   Upload,
+  Wrench,
   Zap,
 } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
@@ -24,6 +27,12 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import type {
+  CalibrationChannel,
+  CalibrationConfigRequest,
+  CalibrationPackage,
+  CalibrationState,
+} from '../contracts'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import {
   type LiveWebSerialControls,
@@ -51,7 +60,7 @@ interface ControlPlaneDemoProps {
   allowDemoControls?: boolean
 }
 
-type ConsoleView = 'dashboard' | 'settings' | 'update' | 'add-device'
+type ConsoleView = 'dashboard' | 'settings' | 'calibration' | 'update' | 'add-device'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 type LogFilter = 'all' | EventLogEntry['tone']
@@ -144,6 +153,12 @@ const consoleViews: Array<{
     icon: SlidersHorizontal,
   },
   {
+    id: 'calibration',
+    label: 'Calibration',
+    caption: 'adc trim',
+    icon: Wrench,
+  },
+  {
     id: 'update',
     label: 'Update',
     caption: 'firmware dry-run',
@@ -170,6 +185,7 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     pdRequestMv: 0,
     pdContractMv: 0,
     pdState: 'fault' as const,
+    heaterEnabled: false,
     heaterOutputPercent: 0,
     manualPpsEnabled: false,
     manualPpsMv: null,
@@ -251,6 +267,12 @@ export function ControlPlaneDemo({
   const [heaterHeldByDevice, setHeaterHeldByDevice] = useState<Record<string, boolean>>({})
   const [manualPpsByDevice, setManualPpsByDevice] = useState<
     Record<string, { enabled: boolean; mv: number | null; ma: number | null }>
+  >({})
+  const [calibrationByDevice, setCalibrationByDevice] = useState<Record<string, CalibrationState>>(
+    {}
+  )
+  const [calibrationRefsByDevice, setCalibrationRefsByDevice] = useState<
+    Record<string, { rtdTempC: number; vinMv: number }>
   >({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
   const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>([])
@@ -467,6 +489,7 @@ export function ControlPlaneDemo({
       targetTempC,
       fanState,
       activeCoolingEnabled: selectedDevice.activeCoolingEnabled,
+      heaterEnabled: heaterHeldByDevice[selectedDevice.id] ? false : selectedDevice.heaterEnabled,
       heaterOutputPercent: heaterHeldByDevice[selectedDevice.id] ? 0 : heaterOutputPercent,
       manualPpsEnabled,
       manualPpsMv,
@@ -503,6 +526,12 @@ export function ControlPlaneDemo({
   const visiblePresetTemps = presetTempsFromValues(visiblePresetValues)
   const visiblePresetEnabled = presetEnabledFromValues(visiblePresetValues)
   const visibleFanPolicy = fanPolicyByDevice[visibleDevice.id] ?? fanPolicyFromDevice(visibleDevice)
+  const visibleCalibration =
+    calibrationByDevice[visibleDevice.id] ?? createDefaultCalibrationState()
+  const visibleCalibrationRefs = calibrationRefsByDevice[visibleDevice.id] ?? {
+    rtdTempC: Number(visibleDevice.currentTempC.toFixed(1)),
+    vinMv: visibleDevice.voltageMv,
+  }
   const selectedArtifact = useMemo(
     () =>
       activeScenario.artifacts.find(
@@ -521,6 +550,43 @@ export function ControlPlaneDemo({
   const isDeviceSelectionRequired = isNoLiveTargetDevice(visibleDevice)
   const showDeviceSelection = isDeviceSelectionRequired && activeView !== 'add-device'
   const isDeviceAddFlowActive = isDeviceSelectionRequired || activeView === 'add-device'
+  useEffect(() => {
+    if (
+      visibleDevice.transport !== 'devd' ||
+      !visibleDevice.leaseId ||
+      !devdBaseUrl ||
+      activeView !== 'calibration'
+    ) {
+      return
+    }
+    let cancelled = false
+    void controlClient
+      .getCalibration(devdBaseUrl, visibleDevice.id, visibleDevice.leaseId)
+      .then((calibration) => {
+        if (!cancelled) {
+          setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setFeedback({
+            title: 'Calibration unavailable',
+            detail: errorMessage(error),
+            tone: 'warning',
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    visibleDevice.id,
+    visibleDevice.leaseId,
+    visibleDevice.transport,
+  ])
   const scenarioEvents = useMemo(
     () =>
       allowDemoControls
@@ -1219,6 +1285,158 @@ export function ControlPlaneDemo({
     emitEvent('artifact', `${nextArtifact.version} selected`, blocked ? 'warning' : 'info')
   }
 
+  const setCalibrationReference = (channel: CalibrationChannel, value: number) => {
+    setCalibrationRefsByDevice((current) => {
+      const existing = current[visibleDevice.id] ?? visibleCalibrationRefs
+      return {
+        ...current,
+        [visibleDevice.id]:
+          channel === 'rtd_adc' ? { ...existing, rtdTempC: value } : { ...existing, vinMv: value },
+      }
+    })
+  }
+
+  const updateCalibrationDraft = async (request: Omit<CalibrationConfigRequest, 'leaseId'>) => {
+    if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
+      const calibration = await controlClient.configureCalibration(devdBaseUrl, visibleDevice.id, {
+        ...request,
+        leaseId: visibleDevice.leaseId,
+      })
+      setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+      return
+    }
+
+    const calibration = applyLocalCalibrationRequest(visibleCalibration, request)
+    setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+  }
+
+  const handleCalibrationCapture = async (channel: CalibrationChannel) => {
+    const request =
+      channel === 'rtd_adc'
+        ? {
+            op: 'capture' as const,
+            channel,
+            referenceTempC: visibleCalibrationRefs.rtdTempC,
+          }
+        : {
+            op: 'capture' as const,
+            channel,
+            referenceVinMv: visibleCalibrationRefs.vinMv,
+          }
+    try {
+      await updateCalibrationDraft(request)
+      setFeedback({
+        title: 'Calibration draft updated',
+        detail: `${channelLabel(channel)} sample captured.`,
+        tone: 'success',
+      })
+      emitEvent('calibration', `${channelLabel(channel)} sample captured`, 'success')
+    } catch (error) {
+      setFeedback({ title: 'Calibration failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleCalibrationDelete = async (channel: CalibrationChannel, sampleIndex: number) => {
+    try {
+      await updateCalibrationDraft({ op: 'delete', channel, sampleIndex })
+      setFeedback({
+        title: 'Calibration draft updated',
+        detail: `${channelLabel(channel)} sample removed.`,
+        tone: 'info',
+      })
+    } catch (error) {
+      setFeedback({ title: 'Calibration failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleCalibrationClear = async (channel: CalibrationChannel) => {
+    try {
+      await updateCalibrationDraft({ op: 'clear', channel })
+      setFeedback({
+        title: 'Calibration draft updated',
+        detail: `${channelLabel(channel)} draft cleared.`,
+        tone: 'info',
+      })
+    } catch (error) {
+      setFeedback({ title: 'Calibration failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleCalibrationManualFit = async (
+    channel: CalibrationChannel,
+    gain: number,
+    offsetMv: number
+  ) => {
+    try {
+      const calibrationPackage = calibrationPackageWithManualFit(
+        visibleCalibration.draft,
+        channel,
+        gain,
+        offsetMv
+      )
+      await updateCalibrationDraft({ op: 'import', package: calibrationPackage })
+      setFeedback({
+        title: 'Calibration draft updated',
+        detail: `${channelLabel(channel)} draft fit set to ${gain.toFixed(5)}x / ${offsetMv.toFixed(
+          1
+        )}mV.`,
+        tone: 'success',
+      })
+      emitEvent('calibration', `${channelLabel(channel)} manual fit updated`, 'success')
+    } catch (error) {
+      setFeedback({ title: 'Calibration failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleCalibrationImport = async (calibrationPackage: CalibrationPackage) => {
+    try {
+      await updateCalibrationDraft({ op: 'import', package: calibrationPackage })
+      setFeedback({
+        title: 'Calibration imported',
+        detail: 'Draft samples were replaced from JSON.',
+        tone: 'success',
+      })
+    } catch (error) {
+      setFeedback({ title: 'Calibration failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleCalibrationApply = async () => {
+    if (visibleDevice.heaterEnabled || visibleDevice.heaterOutputPercent !== 0) {
+      setFeedback({
+        title: 'Apply blocked',
+        detail: 'Turn the heater off before applying ADC calibration.',
+        tone: 'warning',
+      })
+      return
+    }
+    try {
+      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
+        const calibration = await controlClient.applyCalibration(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+        })
+        setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+      } else {
+        setCalibrationByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: {
+            ...visibleCalibration,
+            active: cloneCalibrationPackage(visibleCalibration.draft),
+            activeFit: createCalibrationFits(visibleCalibration.draft),
+          },
+        }))
+      }
+      setFeedback({
+        title: 'Calibration applied',
+        detail: 'Active ADC calibration now matches the draft.',
+        tone: 'success',
+      })
+      emitEvent('calibration', 'ADC calibration applied', 'success')
+    } catch (error) {
+      setFeedback({ title: 'Apply failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
   if (!visibleDevice) {
     return null
   }
@@ -1290,6 +1508,8 @@ export function ControlPlaneDemo({
                 artifacts={activeScenario.artifacts}
                 artifact={selectedArtifact}
                 feedback={feedback}
+                calibration={visibleCalibration}
+                calibrationRefs={visibleCalibrationRefs}
                 flashRun={flashRun}
                 onTargetTempChange={handleTargetTempChange}
                 onPresetSlotChange={handlePresetSlotChange}
@@ -1300,6 +1520,13 @@ export function ControlPlaneDemo({
                 onManualPpsClear={handleManualPpsClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onArtifactChange={handleArtifactChange}
+                onCalibrationReferenceChange={setCalibrationReference}
+                onCalibrationCapture={handleCalibrationCapture}
+                onCalibrationDelete={handleCalibrationDelete}
+                onCalibrationClear={handleCalibrationClear}
+                onCalibrationManualFit={handleCalibrationManualFit}
+                onCalibrationImport={handleCalibrationImport}
+                onCalibrationApply={handleCalibrationApply}
                 onDeviceSelect={handleDeviceChange}
                 onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDevice}
@@ -1417,6 +1644,230 @@ function dryRunPhaseState(index: number, progress: number): WorkflowPhase['state
   }
 
   return index < 3 ? 'done' : 'active'
+}
+
+function createDefaultCalibrationState(): CalibrationState {
+  const empty = createEmptyCalibrationPackage()
+  return {
+    active: cloneCalibrationPackage(empty),
+    draft: cloneCalibrationPackage(empty),
+    activeFit: createCalibrationFits(empty),
+    draftFit: createCalibrationFits(empty),
+  }
+}
+
+function createEmptyCalibrationPackage(): CalibrationPackage {
+  return {
+    rtdAdc: Array.from({ length: 8 }, () => null),
+    vinAdc: Array.from({ length: 8 }, () => null),
+  }
+}
+
+function cloneCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
+  return {
+    rtdAdc: calibrationPackage.rtdAdc.map((sample) => (sample ? { ...sample } : null)),
+    vinAdc: calibrationPackage.vinAdc.map((sample) => (sample ? { ...sample } : null)),
+  }
+}
+
+function createCalibrationFits(
+  calibrationPackage: CalibrationPackage
+): CalibrationState['activeFit'] {
+  return {
+    rtdAdc: createCalibrationFit(calibrationPackage.rtdAdc, 'rtd_adc'),
+    vinAdc: createCalibrationFit(calibrationPackage.vinAdc, 'vin_adc'),
+  }
+}
+
+function createCalibrationFit(
+  samples: Array<{ observedMv: number; expectedMv: number } | null>,
+  channel: CalibrationChannel
+) {
+  const custom = samples.filter((sample): sample is { observedMv: number; expectedMv: number } =>
+    Boolean(sample)
+  )
+  const defaults =
+    channel === 'rtd_adc'
+      ? [
+          { observedMv: 0, expectedMv: 0 },
+          { observedMv: 2800, expectedMv: 2800 },
+        ]
+      : [
+          { observedMv: 0, expectedMv: 0 },
+          { observedMv: 2337, expectedMv: 2337 },
+        ]
+  const points = custom.length < 2 ? [...defaults, ...custom] : custom
+  const n = points.length
+  const sumX = points.reduce((sum, sample) => sum + sample.observedMv, 0)
+  const sumY = points.reduce((sum, sample) => sum + sample.expectedMv, 0)
+  const sumXX = points.reduce((sum, sample) => sum + sample.observedMv * sample.observedMv, 0)
+  const sumXY = points.reduce((sum, sample) => sum + sample.observedMv * sample.expectedMv, 0)
+  const denominator = n * sumXX - sumX * sumX
+  const gain = Math.abs(denominator) < Number.EPSILON ? 1 : (n * sumXY - sumX * sumY) / denominator
+  const offsetMv =
+    Math.abs(denominator) < Number.EPSILON ? (sumY - sumX) / n : (sumY - gain * sumX) / n
+  return {
+    gain,
+    offsetMv,
+    customSampleCount: custom.length,
+    defaultSampleCount: custom.length < 2 ? 2 : 0,
+  }
+}
+
+function calibrationSampleKeys(samples: Array<{ observedMv: number; expectedMv: number } | null>) {
+  const seen = new Map<string, number>()
+  return samples.map((sample) => {
+    if (!sample) {
+      return null
+    }
+    const base = `${sample.observedMv}-${sample.expectedMv}`
+    const ordinal = seen.get(base) ?? 0
+    seen.set(base, ordinal + 1)
+    return `${base}-${ordinal}`
+  })
+}
+
+function applyLocalCalibrationRequest(
+  current: CalibrationState,
+  request: Omit<CalibrationConfigRequest, 'leaseId'>
+): CalibrationState {
+  const draft = cloneCalibrationPackage(current.draft)
+  if (request.op === 'import') {
+    const imported = request.package ? normalizeCalibrationPackage(request.package) : draft
+    return {
+      ...current,
+      draft: imported,
+      draftFit: createCalibrationFits(imported),
+    }
+  }
+  const channel = request.channel
+  if (!channel) {
+    throw new Error('Calibration channel is required.')
+  }
+  const samples = channel === 'rtd_adc' ? draft.rtdAdc : draft.vinAdc
+  if (request.op === 'clear') {
+    samples.fill(null)
+  } else if (request.op === 'delete') {
+    if (request.sampleIndex == null || !samples[request.sampleIndex]) {
+      throw new Error('Calibration sample was not found.')
+    }
+    samples[request.sampleIndex] = null
+  } else if (request.op === 'capture') {
+    const slot = samples.findIndex((sample) => sample == null)
+    if (slot < 0) {
+      throw new Error('Calibration channel already has 8 samples.')
+    }
+    samples[slot] = {
+      observedMv: request.observedMv ?? (channel === 'rtd_adc' ? 1120 : 1670),
+      expectedMv:
+        request.expectedMv ??
+        (channel === 'rtd_adc'
+          ? rtdAdcMvForTemperature(request.referenceTempC ?? 0)
+          : vinAdcMvForInput(request.referenceVinMv ?? 0)),
+    }
+  }
+  const normalized = normalizeCalibrationPackage(draft)
+  return {
+    ...current,
+    draft: normalized,
+    draftFit: createCalibrationFits(normalized),
+  }
+}
+
+function calibrationPackageWithManualFit(
+  currentDraft: CalibrationPackage,
+  channel: CalibrationChannel,
+  gain: number,
+  offsetMv: number
+): CalibrationPackage {
+  const samples = manualFitSamples(gain, offsetMv)
+  const next = cloneCalibrationPackage(currentDraft)
+  if (channel === 'rtd_adc') {
+    next.rtdAdc = samples
+  } else {
+    next.vinAdc = samples
+  }
+  return next
+}
+
+function manualFitSamples(gain: number, offsetMv: number): CalibrationPackage['rtdAdc'] {
+  if (!Number.isFinite(gain) || gain <= 0 || !Number.isFinite(offsetMv)) {
+    throw new Error('Manual calibration fit requires a positive gain and finite offset.')
+  }
+
+  const low = Math.max(0, Math.ceil(offsetMv < 0 ? (-offsetMv + 1) / gain : 0))
+  const high = Math.min(65_535, Math.floor((65_535 - offsetMv) / gain))
+  if (high <= low) {
+    throw new Error('Manual calibration fit is outside the ADC millivolt range.')
+  }
+
+  const points = Array.from({ length: 8 }, (_, index) => {
+    const observedMv = Math.round(low + ((high - low) * index) / 7)
+    return {
+      observedMv,
+      expectedMv: Math.round(gain * observedMv + offsetMv),
+    }
+  })
+
+  if (
+    high > 65_535 ||
+    points.some(
+      (sample) =>
+        sample.observedMv < 0 ||
+        sample.observedMv > 65_535 ||
+        sample.expectedMv < 0 ||
+        sample.expectedMv > 65_535
+    )
+  ) {
+    throw new Error('Manual calibration fit is outside the ADC millivolt range.')
+  }
+
+  return points
+}
+
+function normalizeCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
+  const normalize = (samples: Array<{ observedMv: number; expectedMv: number } | null>) => {
+    const compacted = samples.filter(Boolean) as Array<{ observedMv: number; expectedMv: number }>
+    return Array.from({ length: 8 }, (_, index) => compacted[index] ?? null)
+  }
+  return {
+    rtdAdc: normalize(calibrationPackage.rtdAdc),
+    vinAdc: normalize(calibrationPackage.vinAdc),
+  }
+}
+
+function rtdAdcMvForTemperature(tempC: number) {
+  const resistance =
+    tempC >= 0
+      ? 1000 * (1 + 3.9083e-3 * tempC - 5.775e-7 * tempC * tempC)
+      : 1000 *
+        (1 +
+          3.9083e-3 * tempC -
+          5.775e-7 * tempC * tempC -
+          4.183e-12 * (tempC - 100) * tempC * tempC * tempC)
+  return Math.round((3000 * resistance) / (2490 + resistance))
+}
+
+function vinAdcMvForInput(inputMv: number) {
+  return Math.round((inputMv * 5100) / (56_000 + 5100))
+}
+
+function channelLabel(channel: CalibrationChannel) {
+  return channel === 'rtd_adc' ? 'RTD ADC' : 'VIN ADC'
+}
+
+function calibrationFitMode(fit: CalibrationState['activeFit']['rtdAdc']) {
+  if (fit.customSampleCount >= 2) {
+    return 'Custom'
+  }
+  if (fit.customSampleCount === 1) {
+    return '1-point'
+  }
+  return 'Default'
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Request failed.'
 }
 
 function deviceControlBlockReason(device: DeviceTarget) {
@@ -1646,6 +2097,8 @@ function ViewPanel({
   artifacts,
   artifact,
   feedback,
+  calibration,
+  calibrationRefs,
   flashRun,
   onTargetTempChange,
   onPresetSlotChange,
@@ -1661,6 +2114,13 @@ function ViewPanel({
   onAddDevice,
   onStartDryRun,
   onStartFlash,
+  onCalibrationReferenceChange,
+  onCalibrationCapture,
+  onCalibrationDelete,
+  onCalibrationClear,
+  onCalibrationManualFit,
+  onCalibrationImport,
+  onCalibrationApply,
 }: {
   view: ConsoleView
   device: DeviceTarget
@@ -1676,6 +2136,8 @@ function ViewPanel({
   artifacts: FirmwareArtifact[]
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
+  calibration: CalibrationState
+  calibrationRefs: { rtdTempC: number; vinMv: number }
   flashRun: { status: FlashRunStatus; progress: number }
   onTargetTempChange: (nextTargetTemp: number) => void
   onPresetSlotChange: (presetIndex: number) => void | Promise<void>
@@ -1691,6 +2153,17 @@ function ViewPanel({
   onAddDevice: (kind: AddDeviceKind) => void
   onStartDryRun: () => void
   onStartFlash: () => void
+  onCalibrationReferenceChange: (channel: CalibrationChannel, value: number) => void
+  onCalibrationCapture: (channel: CalibrationChannel) => void | Promise<void>
+  onCalibrationDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
+  onCalibrationClear: (channel: CalibrationChannel) => void | Promise<void>
+  onCalibrationManualFit: (
+    channel: CalibrationChannel,
+    gain: number,
+    offsetMv: number
+  ) => void | Promise<void>
+  onCalibrationImport: (calibrationPackage: CalibrationPackage) => void | Promise<void>
+  onCalibrationApply: () => void | Promise<void>
 }) {
   if (showDeviceSelection) {
     return (
@@ -1745,6 +2218,24 @@ function ViewPanel({
         onArtifactChange={onArtifactChange}
         onStartDryRun={onStartDryRun}
         onStartFlash={onStartFlash}
+      />
+    )
+  }
+
+  if (view === 'calibration') {
+    return (
+      <CalibrationView
+        device={device}
+        calibration={calibration}
+        refs={calibrationRefs}
+        feedback={feedback}
+        onReferenceChange={onCalibrationReferenceChange}
+        onCapture={onCalibrationCapture}
+        onDelete={onCalibrationDelete}
+        onClear={onCalibrationClear}
+        onManualFit={onCalibrationManualFit}
+        onImport={onCalibrationImport}
+        onApply={onCalibrationApply}
       />
     )
   }
@@ -2355,6 +2846,355 @@ function SettingsView({
   )
 }
 
+function CalibrationView({
+  device,
+  calibration,
+  refs,
+  feedback,
+  onReferenceChange,
+  onCapture,
+  onDelete,
+  onClear,
+  onManualFit,
+  onImport,
+  onApply,
+}: {
+  device: DeviceTarget
+  calibration: CalibrationState
+  refs: { rtdTempC: number; vinMv: number }
+  feedback: ActionFeedback
+  onReferenceChange: (channel: CalibrationChannel, value: number) => void
+  onCapture: (channel: CalibrationChannel) => void | Promise<void>
+  onDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
+  onClear: (channel: CalibrationChannel) => void | Promise<void>
+  onManualFit: (channel: CalibrationChannel, gain: number, offsetMv: number) => void | Promise<void>
+  onImport: (calibrationPackage: CalibrationPackage) => void | Promise<void>
+  onApply: () => void | Promise<void>
+}) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const applyBlocked = device.heaterEnabled || device.heaterOutputPercent !== 0
+  const exportCalibration = () => {
+    const blob = new Blob([JSON.stringify(calibration, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${device.id}-adc-calibration.json`
+    link.click()
+    URL.revokeObjectURL(url)
+  }
+  const importFile = async (file: File | null) => {
+    if (!file) {
+      return
+    }
+    const parsed = JSON.parse(await file.text()) as
+      | CalibrationState
+      | { package: CalibrationPackage }
+    const calibrationPackage =
+      'draft' in parsed ? parsed.draft : 'package' in parsed ? parsed.package : null
+    if (calibrationPackage) {
+      await onImport(calibrationPackage)
+    }
+  }
+  const rtdSampleCount = calibration.draft.rtdAdc.filter(Boolean).length
+  const vinSampleCount = calibration.draft.vinAdc.filter(Boolean).length
+  const draftSampleCount = rtdSampleCount + vinSampleCount
+  const draftPackageDetail = `${rtdSampleCount}/8 RTD · ${vinSampleCount}/8 VIN`
+  return (
+    <div className="industrial-view-panel">
+      <PanelHeader kicker="Calibration" title="ADC trim" />
+      <div className="industrial-calibration-workbench">
+        <section className="industrial-calibration-topbar" aria-label="Calibration package">
+          <div className="industrial-calibration-summary industrial-calibration-summary--topbar">
+            <CalibrationSummaryCard
+              label="Live RTD"
+              value={formatTemp(device.currentTempC)}
+              detail={`${calibrationFitMode(calibration.activeFit.rtdAdc)} fit`}
+            />
+            <CalibrationSummaryCard
+              label="Live VIN"
+              value={formatVolts(device.voltageMv)}
+              detail={`${calibrationFitMode(calibration.activeFit.vinAdc)} fit`}
+            />
+            <CalibrationSummaryCard
+              label="Draft package"
+              value={`${draftSampleCount}/16`}
+              detail={draftPackageDetail}
+              tone={draftSampleCount === 0 ? 'muted' : 'accent'}
+            />
+          </div>
+          <div className="industrial-calibration-command-bar">
+            <button
+              type="button"
+              className="industrial-button industrial-button--primary industrial-calibration-command-bar__apply"
+              disabled={applyBlocked}
+              onClick={onApply}
+            >
+              <CheckCircle2 size={15} aria-hidden="true" />
+              Apply calibration
+            </button>
+            <button
+              type="button"
+              className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
+              onClick={exportCalibration}
+            >
+              <Download size={15} aria-hidden="true" />
+              Export JSON
+            </button>
+            <button
+              type="button"
+              className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Upload size={15} aria-hidden="true" />
+              Import JSON
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              onChange={(event) => void importFile(event.currentTarget.files?.[0] ?? null)}
+            />
+          </div>
+          <ActionFeedbackPanel feedback={feedback} compact />
+        </section>
+        <div className="industrial-calibration-grid">
+          <CalibrationChannelPanel
+            channel="rtd_adc"
+            title="RTD ADC"
+            referenceLabel="Reference temperature"
+            referenceValue={refs.rtdTempC}
+            referenceUnit="C"
+            activeFit={calibration.activeFit.rtdAdc}
+            draftFit={calibration.draftFit.rtdAdc}
+            samples={calibration.draft.rtdAdc}
+            onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
+            onCapture={() => onCapture('rtd_adc')}
+            onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
+            onClear={() => onClear('rtd_adc')}
+            onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
+          />
+
+          <CalibrationChannelPanel
+            channel="vin_adc"
+            title="VIN ADC"
+            referenceLabel="Reference VIN"
+            referenceValue={refs.vinMv}
+            referenceUnit="mV"
+            activeFit={calibration.activeFit.vinAdc}
+            draftFit={calibration.draftFit.vinAdc}
+            samples={calibration.draft.vinAdc}
+            onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
+            onCapture={() => onCapture('vin_adc')}
+            onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
+            onClear={() => onClear('vin_adc')}
+            onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function CalibrationChannelPanel({
+  title,
+  referenceLabel,
+  referenceValue,
+  referenceUnit,
+  activeFit,
+  draftFit,
+  samples,
+  onReferenceChange,
+  onCapture,
+  onDelete,
+  onClear,
+  onManualFit,
+}: {
+  channel: CalibrationChannel
+  title: string
+  referenceLabel: string
+  referenceValue: number
+  referenceUnit: string
+  activeFit: CalibrationState['activeFit']['rtdAdc']
+  draftFit: CalibrationState['draftFit']['rtdAdc']
+  samples: Array<{ observedMv: number; expectedMv: number } | null>
+  onReferenceChange: (value: number) => void
+  onCapture: () => void | Promise<void>
+  onDelete: (sampleIndex: number) => void | Promise<void>
+  onClear: () => void | Promise<void>
+  onManualFit: (gain: number, offsetMv: number) => void | Promise<void>
+}) {
+  const [manualGain, setManualGain] = useState(() => draftFit.gain.toFixed(5))
+  const [manualOffsetMv, setManualOffsetMv] = useState(() => draftFit.offsetMv.toFixed(1))
+  const sampleCount = samples.filter(Boolean).length
+  const sampleKeys = calibrationSampleKeys(samples)
+  const populatedSamples = samples
+    .map((sample, index) => (sample ? { ...sample, index } : null))
+    .filter((sample): sample is { observedMv: number; expectedMv: number; index: number } =>
+      Boolean(sample)
+    )
+  useEffect(() => {
+    setManualGain(draftFit.gain.toFixed(5))
+    setManualOffsetMv(draftFit.offsetMv.toFixed(1))
+  }, [draftFit.gain, draftFit.offsetMv])
+  const parsedManualGain = Number(manualGain)
+  const parsedManualOffsetMv = Number(manualOffsetMv)
+  const manualFitInvalid =
+    !Number.isFinite(parsedManualGain) ||
+    parsedManualGain <= 0 ||
+    !Number.isFinite(parsedManualOffsetMv)
+
+  return (
+    <section className="industrial-calibration-channel">
+      <div className="industrial-calibration-channel__header">
+        <h3 className="industrial-section-title">{title}</h3>
+        <span>{sampleCount}/8 samples</span>
+      </div>
+
+      <table className="industrial-calibration-fit-table" aria-label={`${title} fit summary`}>
+        <thead>
+          <tr>
+            <th scope="col">Fit</th>
+            <th scope="col">Mode</th>
+            <th scope="col">Gain</th>
+            <th scope="col">Offset</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Active</th>
+            <td>{calibrationFitMode(activeFit)}</td>
+            <td>
+              <strong>{activeFit.gain.toFixed(5)}x</strong>
+            </td>
+            <td>{activeFit.offsetMv.toFixed(1)}mV</td>
+          </tr>
+          <tr>
+            <th scope="row">Draft</th>
+            <td>{calibrationFitMode(draftFit)}</td>
+            <td>
+              <strong>{draftFit.gain.toFixed(5)}x</strong>
+            </td>
+            <td>{draftFit.offsetMv.toFixed(1)}mV</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div className="industrial-calibration-manual-fit">
+        <label>
+          <span>Draft gain</span>
+          <span className="industrial-calibration-input">
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.00001"
+              value={manualGain}
+              onChange={(event) => setManualGain(event.currentTarget.value)}
+            />
+            <small>x</small>
+          </span>
+        </label>
+        <label>
+          <span>Draft offset</span>
+          <span className="industrial-calibration-input">
+            <input
+              type="number"
+              inputMode="decimal"
+              step="0.1"
+              value={manualOffsetMv}
+              onChange={(event) => setManualOffsetMv(event.currentTarget.value)}
+            />
+            <small>mV</small>
+          </span>
+        </label>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={manualFitInvalid}
+          onClick={() => onManualFit(parsedManualGain, parsedManualOffsetMv)}
+        >
+          Set draft fit
+        </button>
+      </div>
+
+      <div className="industrial-calibration-capture-row">
+        <label>
+          <span>{referenceLabel}</span>
+          <span className="industrial-calibration-input">
+            <input
+              type="number"
+              value={Number.isFinite(referenceValue) ? referenceValue : 0}
+              onChange={(event) => onReferenceChange(Number(event.currentTarget.value))}
+            />
+            <small>{referenceUnit}</small>
+          </span>
+        </label>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          onClick={onCapture}
+        >
+          Capture sample
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--danger-quiet"
+          disabled={sampleCount === 0}
+          aria-label={`Clear ${title} draft samples`}
+          onClick={onClear}
+        >
+          <Trash2 size={14} aria-hidden="true" />
+          Clear
+        </button>
+      </div>
+      {populatedSamples.length > 0 ? (
+        <section
+          className="industrial-calibration-samples-scroll"
+          aria-label={`${title} sample list`}
+        >
+          <table className="industrial-calibration-samples" aria-label={`${title} samples`}>
+            <thead>
+              <tr>
+                <th scope="col">Slot</th>
+                <th scope="col">Observed</th>
+                <th scope="col">Expected</th>
+                <th scope="col">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {populatedSamples.map((sample) => (
+                <tr key={sampleKeys[sample.index]}>
+                  <td>#{sample.index + 1}</td>
+                  <td>
+                    <strong>{sample.observedMv}mV</strong>
+                  </td>
+                  <td>{sample.expectedMv}mV</td>
+                  <td>
+                    <button
+                      type="button"
+                      className="industrial-button industrial-button--danger-quiet"
+                      aria-label={`Delete ${title} sample ${sample.index + 1}`}
+                      onClick={() => onDelete(sample.index)}
+                    >
+                      <Trash2 size={14} aria-hidden="true" />
+                      Delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      ) : (
+        <p className="industrial-calibration-empty">
+          <span>Capture with physical reference</span>
+          <small>8 draft slots available</small>
+        </p>
+      )}
+    </section>
+  )
+}
+
 function PresetTemperatureEditor({
   selectedPresetIndex,
   presetTemps,
@@ -2643,6 +3483,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
     estimateSize: () => 112,
+    measureElement: (element) => element.getBoundingClientRect().height,
     overscan: 8,
   })
 
@@ -2747,9 +3588,10 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
             return (
               <div
                 key={virtualItem.key}
+                ref={rowVirtualizer.measureElement}
                 className={`industrial-event industrial-event--virtual is-${event.tone}`}
+                data-index={virtualItem.index}
                 style={{
-                  height: `${virtualItem.size}px`,
                   transform: `translateY(${virtualItem.start}px)`,
                 }}
               >
@@ -2849,6 +3691,26 @@ function ActionFeedbackPanel({
       <p className="industrial-label">Last action</p>
       <strong>{feedback.title}</strong>
       <span>{feedback.detail}</span>
+    </div>
+  )
+}
+
+function CalibrationSummaryCard({
+  label,
+  value,
+  detail,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  detail: string
+  tone?: 'default' | 'accent' | 'muted'
+}) {
+  return (
+    <div className={`industrial-calibration-summary-card is-${tone}`}>
+      <p className="industrial-label">{label}</p>
+      <strong>{value}</strong>
+      <span>{detail}</span>
     </div>
   )
 }
