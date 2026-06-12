@@ -100,6 +100,7 @@ Current hardware design notes and manufacturing support assets are frozen in:
 - [docs/hardware/tps62933-dual-rail-power-design.md](docs/hardware/tps62933-dual-rail-power-design.md)
 - [docs/hardware/heater-power-switch-design.md](docs/hardware/heater-power-switch-design.md)
 - [docs/hardware/heater-plate-design.md](docs/hardware/heater-plate-design.md)
+- [docs/hardware/heater-stack-support-7p0cm.md](docs/hardware/heater-stack-support-7p0cm.md)
 - [docs/hardware/fan-pcb-variants.md](docs/hardware/fan-pcb-variants.md)
 - [docs/hardware/enclosure-5p6cm.md](docs/hardware/enclosure-5p6cm.md)
 
