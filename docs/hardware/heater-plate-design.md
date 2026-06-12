@@ -39,6 +39,8 @@ Firmware must treat the heater plate as a calibrated load profile. The board rev
 
 The `heater-5p6-3p2`, `heater-5p6-4p5`, and `heater-7p0-3p2` versions are peer heater-plate options. Firmware must select the matching calibrated electrical profile for the installed plate. The `heater-5p6-3p2` and `heater-7p0-3p2` versions share the same firmware-facing `3.2 ohm` load class; their physical size changes thermal characterization and bring-up expectations, not the cold-resistance load class.
 
+The `70 mm x 70 mm` heater stack also uses separate non-heater companion boards for structure and interconnect. Those stack support boards are documented in [heater-stack-support-7p0cm.md](heater-stack-support-7p0cm.md) and are not part of the heater-plate profile catalog.
+
 ## 4) Common Electrical Model
 
 Each heater plate must be measured during bring-up and the measured cold resistance must be used by firmware power limiting.
