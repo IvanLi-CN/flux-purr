@@ -57,7 +57,7 @@
 - 主工作区真机 smoke 已覆盖 ESP32-S3 release build、`devd` USB 设备枚举、lease、identity/network/status、WiFi provisioning set/clear event redaction、artifact verify、dry-run guard、runtime mutation/readback/restore、`mcu-agentd` flash、direct USB JSONL `hello` / `get_identity` / `wifi_config clear` / `get_network` 与 lease event stream。当前授权端口在线时，Web -> `devd` -> USB JSONL -> firmware 的真实硬件控制链路可用。
 - `devd` real flash path 绑定 lease 对应 native serial port；本地 ESP32-S3 release ELF 通过 `espflash flash --after hard-reset` 写入，只有 raw app binary artifact 才允许 `espflash write-bin` + explicit flash address；空 artifact 不再被 dry-run 视为通过。执行 `espflash` 前，daemon 会在 serial RPC 互斥锁内释放该端口的缓存 serial session，避免 daemon 自身持有 USB fd 导致真实烧录无法打开同一授权端口。
 - Release automation 已收敛到单一 product workflow：`Release Product` 从 release snapshot 计算 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>`，打包 Web、firmware 与跨平台 host-tools，并生成 `flux-purr-release-manifest-<tag>.json`。Manifest 为每个组件记录 asset `sha256`、`contentSha256`、`sourceSha`、`protocolVersions`、`changedSincePrevious` 与 `updateReason`。
-- Repo 级 `skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 固化普通用户 released-tool 路径、开发/HIL 路径、端口授权纪律和 product release manifest 规则。
+- Repo 级 `skills/flux-purr-developer-policy` 负责开发者总约束分流，`skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 分别固化普通用户 released-tool 路径与仓库内 developer operations/HIL 路径，同时保留端口授权纪律和 product release manifest 规则。
 
 ## Remaining Gaps
 
