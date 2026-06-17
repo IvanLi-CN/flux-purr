@@ -10,6 +10,8 @@ The daemon is started with `flux-purr-devd serve`. Default bind is `127.0.0.1:30
 
 The user-facing command-line entry point is `flux-purr`. It talks to `flux-purr-devd`, creates and heartbeats device leases automatically, and covers `devices`, `status`, `runtime`, `wifi`, `flash`, `monitor`, `hardware`, and `usb-port` commands. User hardware memory and the default USB port live in the OS user config directory; `FLUX_PURR_HOME` overrides that location. `flux-purr usb-port set <port>` updates the remembered default for future daemon starts.
 
+For repository-side developer work, start from `skills/flux-purr-developer-operations/SKILL.md`. It is the default source/devd/HIL/release entry for Flux Purr contributors and same-identity agents. If the task crosses into IsolaPurr bench, HUB, or source-side maintenance, switch to `$isolapurr-developer-operations` instead of treating IsolaPurr tooling as part of the default Flux Purr flow.
+
 ## Repository layout
 
 - `firmware/` - Rust `no_std` firmware domain crate (ESP32-S3 first)

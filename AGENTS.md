@@ -12,6 +12,18 @@
 - `docs/solutions/`：可复用工程经验。
 - `docs/hardware/`：硬件基线、引脚、电源链路与网表。
 
+## 默认开发入口
+
+- 当前开发者与 same-identity agents 在本仓执行 source checkout、devd/CLI、firmware/Web 集成、HIL、release automation 或仓库级硬件验证时，默认先读并遵循 `skills/flux-purr-developer-operations/SKILL.md`。
+- 该 skill 是本仓 developer flow 的默认可发现入口；只有当任务明确是普通终端用户操作时，才切到 `skills/flux-purr-user-operations/SKILL.md`。
+- 上述默认入口不替代本文件；端口授权、HUB 边界、文档与 Git 纪律仍以本 `AGENTS.md` 为准。
+
+## IsolaPurr 边界
+
+- 涉及 IsolaPurr 侧 source checkout、`isolapurr-devd` / `isolapurr`、HUB bench、电源链路、发布资产、校准或 HIL 的工作，不属于 Flux Purr developer flow。
+- 这类任务默认切换到 `$isolapurr-developer-operations`，并按该 skill 的 checkout gate、hardware safety 与 release maintenance 规则执行。
+- 在 Flux Purr 仓库内引用 IsolaPurr，只应用于外部 bench / HUB / telemetry 边界；不得把 IsolaPurr 仓库、host tools、selector 或发布流程当作本仓默认开发入口。
+
 ## 常用验证命令
 
 - 固件格式：`bun run check:firmware:fmt`
