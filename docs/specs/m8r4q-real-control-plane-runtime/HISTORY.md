@@ -78,4 +78,4 @@
 - `flux-purr` CLI 覆盖 devices/identity/status/runtime/wifi/flash/monitor/hardware/usb-port，自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出。
 - 用户级硬件记忆和默认 USB port 写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；运行中的 daemon 不因配置文件变化自动切换端口。
 - 发布收敛为单一 product tag `vX.Y.Z`；Web、firmware、host-tools 和 release manifest 挂同一 GitHub Release，manifest 的组件指纹决定是否需要升级。
-- Repo 级 user/developer operation skills 固化 released CLI/devd、Web Serial、开发 HIL、端口授权和 release manifest 边界。
+- Repo 级 skill 分层现已拆为 developer policy 与 user/developer operations：`skills/flux-purr-developer-policy` 负责开发者总约束分流，`skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 分别固化 released-user 路径与仓库内 developer operations/HIL 边界。

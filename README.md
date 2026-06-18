@@ -34,6 +34,11 @@ bun install --cwd web
 bun run hooks:install
 ```
 
+## Developer guidance
+
+- Repo-local developer policy: [docs/guides/flux-purr-developer-policy.md](docs/guides/flux-purr-developer-policy.md)
+- Agent routing and non-bypassable hard gates: [AGENTS.md](AGENTS.md)
+
 ## Local checks
 
 ```bash

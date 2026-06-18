@@ -1,0 +1,4 @@
+interface:
+  display_name: "Flux Purr Developer Policy"
+  short_description: "Apply repository-wide developer agent rules."
+  default_prompt: "Use this skill when acting as a Flux Purr developer agent inside the repository. Read the repo-local developer policy first, then route into developer operations or user operations as needed."
