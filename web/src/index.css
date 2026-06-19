@@ -718,10 +718,20 @@
     min-height: 0;
   }
 
+  .industrial-console__main {
+    overflow: hidden;
+  }
+
   .industrial-view-panel {
     display: grid;
     min-height: 0;
     gap: 0.9rem;
+  }
+
+  .industrial-view-panel--calibration {
+    min-height: 0;
+    max-height: 100%;
+    overflow: hidden;
   }
 
   .industrial-dashboard-grid,
@@ -4048,8 +4058,10 @@
 
   .industrial-calibration-workbench {
     display: grid;
-    gap: 0.65rem;
+    gap: 0.55rem;
     min-width: 0;
+    min-height: 0;
+    max-height: 100%;
   }
 
   .industrial-calibration-topbar {
@@ -4058,32 +4070,6 @@
     align-items: start;
   }
 
-  .industrial-calibration-summary {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.52rem;
-    min-width: 0;
-  }
-
-  .industrial-calibration-summary--topbar {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .industrial-calibration-summary-card {
-    display: grid;
-    align-content: start;
-    gap: 0.28rem;
-    min-height: 5.25rem;
-    border: 1px solid rgba(80, 67, 58, 0.14);
-    border-radius: 14px;
-    background: rgba(236, 240, 245, 0.66);
-    box-shadow:
-      inset 3px 3px 6px rgba(186, 190, 204, 0.56),
-      inset -3px -3px 6px rgba(255, 255, 255, 0.78);
-    padding: 0.72rem 0.82rem;
-  }
-
-  .industrial-calibration-summary-card strong,
   .industrial-calibration-package__status span,
   .industrial-calibration-fit-table strong {
     overflow: hidden;
@@ -4095,12 +4081,6 @@
     white-space: nowrap;
   }
 
-  .industrial-calibration-summary-card strong {
-    font-size: 1.35rem;
-    line-height: 1.02;
-  }
-
-  .industrial-calibration-summary-card span,
   .industrial-calibration-package__status small,
   .industrial-calibration-fit-table th,
   .industrial-calibration-fit-table td,
@@ -4111,22 +4091,6 @@
     font-size: 0.72rem;
     font-weight: 750;
     line-height: 1.2;
-  }
-
-  .industrial-calibration-summary-card span {
-    white-space: normal;
-  }
-
-  .industrial-calibration-summary-card.is-accent {
-    background: rgba(229, 234, 241, 0.78);
-  }
-
-  .industrial-calibration-summary-card.is-accent strong {
-    color: color-mix(in srgb, var(--industrial-accent) 78%, var(--industrial-text));
-  }
-
-  .industrial-calibration-summary-card.is-muted strong {
-    color: rgba(74, 85, 104, 0.82);
   }
 
   .industrial-calibration-command-bar {
@@ -4142,6 +4106,201 @@
       inset 3px 3px 6px rgba(186, 190, 204, 0.48),
       inset -3px -3px 6px rgba(255, 255, 255, 0.76);
     padding: 0.56rem;
+  }
+
+  .industrial-calibration-tabs {
+    display: grid;
+    gap: 0.52rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-tabs__list {
+    width: 100%;
+    justify-content: start;
+    border: 0;
+    border-bottom: 1px solid rgba(80, 67, 58, 0.16);
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+  }
+
+  .industrial-calibration-tab {
+    min-height: 2.35rem;
+    flex: 0 1 auto;
+    border-radius: 8px 8px 0 0;
+    padding-inline: 0.85rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.82rem;
+    font-weight: 800;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .industrial-calibration-tab[data-state="active"] {
+    border-color: rgba(80, 67, 58, 0.16);
+    border-bottom-color: transparent;
+    background: rgba(237, 240, 245, 0.56);
+    color: var(--industrial-text);
+    box-shadow:
+      inset 2px 2px 4px rgba(255, 255, 255, 0.62),
+      0 -1px 0 rgba(255, 255, 255, 0.58);
+  }
+
+  .industrial-calibration-tabs__content {
+    display: grid;
+    gap: 0.55rem;
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 0.18rem;
+  }
+
+  .industrial-calibration-adc-toolbar {
+    display: grid;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .industrial-heater-curve-panel {
+    display: grid;
+    gap: 0.52rem;
+    min-width: 0;
+  }
+
+  .industrial-heater-curve-panel__header {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    align-items: start;
+    min-width: 0;
+  }
+
+  .industrial-heater-curve-panel__subtitle {
+    margin: 0.1rem 0 0;
+    color: var(--industrial-muted-text);
+    font-size: 0.74rem;
+    line-height: 1.35;
+  }
+
+  .industrial-heater-curve-panel__meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: end;
+    gap: 0.4rem;
+  }
+
+  .industrial-heater-curve-panel__meta span {
+    border: 1px solid rgba(80, 67, 58, 0.12);
+    border-radius: 999px;
+    background: rgba(224, 229, 236, 0.62);
+    padding: 0.2rem 0.5rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 850;
+    text-transform: uppercase;
+  }
+
+  .industrial-heater-curve-toolbar {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.44rem;
+  }
+
+  .industrial-heater-curve-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.25fr) minmax(19rem, 0.9fr);
+    gap: 0.65rem;
+    align-items: start;
+    min-width: 0;
+  }
+
+  .industrial-heater-curve-table-wrap,
+  .industrial-heater-curve-editor {
+    min-width: 0;
+    border: 1px solid rgba(80, 67, 58, 0.12);
+    border-radius: 10px;
+    background: rgba(237, 240, 245, 0.42);
+    padding: 0.58rem;
+  }
+
+  .industrial-heater-curve-table {
+    display: grid;
+    min-width: 0;
+    width: 100%;
+    border-spacing: 0;
+  }
+
+  .industrial-heater-curve-table thead,
+  .industrial-heater-curve-table tbody {
+    display: contents;
+  }
+
+  .industrial-heater-curve-table tr {
+    display: grid;
+    grid-template-columns: var(
+        --industrial-heater-curve-table-columns,
+        3rem minmax(0, 1fr) minmax(0, 1fr)
+      );
+    gap: 0.48rem;
+    min-width: 0;
+    border-top: 1px solid rgba(80, 67, 58, 0.08);
+    padding: 0.42rem 0.22rem;
+  }
+
+  .industrial-heater-curve-table thead tr {
+    border-top: 0;
+    background: rgba(224, 229, 236, 0.6);
+    color: var(--industrial-muted-text);
+    font-size: 0.62rem;
+    font-weight: 850;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .industrial-heater-curve-table th,
+  .industrial-heater-curve-table td {
+    display: block;
+    overflow: hidden;
+    min-width: 0;
+    padding: 0;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.72rem;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-heater-curve-editor {
+    display: grid;
+    gap: 0.42rem;
+    padding-block: 0.45rem;
+  }
+
+  .industrial-heater-curve-editor summary {
+    cursor: pointer;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.7rem;
+    font-weight: 850;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+
+  .industrial-heater-curve-editor__label {
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 850;
+  }
+
+  .industrial-heater-curve-editor__textarea {
+    min-height: 8rem;
+    overflow: hidden;
+    resize: none;
+    border-radius: 10px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.8rem;
+    line-height: 1.45;
   }
 
   .industrial-calibration-command-bar__apply,
@@ -4191,21 +4350,12 @@
       inset -1px -1px 3px rgba(255, 255, 255, 0.64);
   }
 
-  .industrial-calibration-warning {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.38rem;
-    width: fit-content;
-    max-width: 100%;
+  .industrial-heater-curve-note {
     margin: 0;
-    border: 1px solid rgba(199, 93, 44, 0.32);
-    border-radius: 8px;
-    background: rgba(255, 238, 215, 0.74);
-    padding: 0.34rem 0.48rem;
-    color: #8f3c16;
-    font-size: 0.76rem;
-    font-weight: 800;
-    line-height: 1.2;
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 650;
+    line-height: 1.35;
   }
 
   .industrial-calibration-grid {
@@ -4497,20 +4647,30 @@
     .industrial-calibration-topbar > .industrial-action-feedback--compact {
       grid-column: 1 / -1;
     }
-
-    .industrial-calibration-grid {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
   }
 
   @media (max-width: 720px) {
     .industrial-calibration-summary,
     .industrial-calibration-summary--topbar,
     .industrial-calibration-command-bar,
+    .industrial-heater-curve-toolbar,
     .industrial-calibration-manual-fit,
     .industrial-calibration-capture-row,
     .industrial-calibration-samples tr {
       grid-template-columns: minmax(0, 1fr);
+    }
+
+    .industrial-calibration-tabs__list {
+      display: grid;
+      gap: 0.28rem;
+    }
+
+    .industrial-heater-curve-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .industrial-heater-curve-panel__header {
+      flex-direction: column;
     }
 
     .industrial-calibration-samples {

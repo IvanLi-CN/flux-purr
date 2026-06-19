@@ -16,6 +16,7 @@ import {
   Wrench,
   Zap,
 } from 'lucide-react'
+import type { CSSProperties } from 'react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import SimpleBar from 'simplebar-react'
 import {
@@ -27,11 +28,16 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Textarea } from '@/components/ui/textarea'
 import type {
   CalibrationChannel,
   CalibrationConfigRequest,
   CalibrationPackage,
   CalibrationState,
+  HeaterCurveConfigRequest,
+  HeaterCurvePackage,
+  HeaterCurveState,
 } from '../contracts'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import {
@@ -61,6 +67,7 @@ interface ControlPlaneDemoProps {
 }
 
 type ConsoleView = 'dashboard' | 'settings' | 'calibration' | 'update' | 'add-device'
+type CalibrationWorkspaceTab = 'heater_curve' | 'rtd_adc' | 'vin_adc'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 type LogFilter = 'all' | EventLogEntry['tone']
@@ -271,6 +278,12 @@ export function ControlPlaneDemo({
   const [calibrationByDevice, setCalibrationByDevice] = useState<Record<string, CalibrationState>>(
     {}
   )
+  const [heaterCurveByDevice, setHeaterCurveByDevice] = useState<Record<string, HeaterCurveState>>(
+    {}
+  )
+  const [calibrationWorkspaceTabByDevice, setCalibrationWorkspaceTabByDevice] = useState<
+    Record<string, CalibrationWorkspaceTab>
+  >({})
   const [calibrationRefsByDevice, setCalibrationRefsByDevice] = useState<
     Record<string, { rtdTempC: number; vinMv: number }>
   >({})
@@ -528,6 +541,12 @@ export function ControlPlaneDemo({
   const visibleFanPolicy = fanPolicyByDevice[visibleDevice.id] ?? fanPolicyFromDevice(visibleDevice)
   const visibleCalibration =
     calibrationByDevice[visibleDevice.id] ?? createDefaultCalibrationState()
+  const visibleHeaterCurve =
+    heaterCurveByDevice[visibleDevice.id] ??
+    scenario.devices.find((device) => device.id === visibleDevice.id)?.heaterCurve ??
+    createDefaultHeaterCurveState()
+  const visibleCalibrationWorkspaceTab =
+    calibrationWorkspaceTabByDevice[visibleDevice.id] ?? 'heater_curve'
   const visibleCalibrationRefs = calibrationRefsByDevice[visibleDevice.id] ?? {
     rtdTempC: Number(visibleDevice.currentTempC.toFixed(1)),
     vinMv: visibleDevice.voltageMv,
@@ -571,6 +590,44 @@ export function ControlPlaneDemo({
         if (!cancelled) {
           setFeedback({
             title: 'Calibration unavailable',
+            detail: errorMessage(error),
+            tone: 'warning',
+          })
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    visibleDevice.id,
+    visibleDevice.leaseId,
+    visibleDevice.transport,
+  ])
+  useEffect(() => {
+    if (
+      visibleDevice.transport !== 'devd' ||
+      !visibleDevice.leaseId ||
+      !devdBaseUrl ||
+      activeView !== 'calibration'
+    ) {
+      return
+    }
+
+    let cancelled = false
+    void controlClient
+      .getHeaterCurve(devdBaseUrl, visibleDevice.id, visibleDevice.leaseId)
+      .then((heaterCurve) => {
+        if (!cancelled) {
+          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: heaterCurve }))
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setFeedback({
+            title: 'Heater curve unavailable',
             detail: errorMessage(error),
             tone: 'warning',
           })
@@ -1437,6 +1494,83 @@ export function ControlPlaneDemo({
     }
   }
 
+  const updateHeaterCurveState = useCallback(
+    async (request: Omit<HeaterCurveConfigRequest, 'leaseId'>) => {
+      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
+        const next = await controlClient.configureHeaterCurve(devdBaseUrl, visibleDevice.id, {
+          ...request,
+          leaseId: visibleDevice.leaseId,
+        })
+        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        return next
+      }
+
+      const next = applyLocalHeaterCurveRequest(visibleHeaterCurve, request)
+      setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+      return next
+    },
+    [
+      controlClient,
+      devdBaseUrl,
+      visibleDevice.id,
+      visibleDevice.leaseId,
+      visibleDevice.transport,
+      visibleHeaterCurve,
+    ]
+  )
+
+  const handleHeaterCurvePreview = async (heaterCurve: HeaterCurvePackage) => {
+    try {
+      await updateHeaterCurveState({ op: 'preview', package: heaterCurve })
+      setFeedback({
+        title: 'Heater curve previewed',
+        detail: 'Preview takes effect immediately; save persists it to EEPROM.',
+        tone: 'success',
+      })
+      emitEvent('calibration', 'heater curve preview updated', 'success')
+    } catch (error) {
+      setFeedback({ title: 'Heater curve failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleHeaterCurveClearPreview = async () => {
+    try {
+      await updateHeaterCurveState({ op: 'clear_preview' })
+      setFeedback({
+        title: 'Heater curve preview cleared',
+        detail: 'Preview was removed; active curve is unchanged.',
+        tone: 'info',
+      })
+      emitEvent('calibration', 'heater curve preview cleared', 'info')
+    } catch (error) {
+      setFeedback({ title: 'Heater curve failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
+  const handleHeaterCurveSave = async () => {
+    try {
+      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
+        const next = await controlClient.saveHeaterCurve(devdBaseUrl, visibleDevice.id, {
+          leaseId: visibleDevice.leaseId,
+        })
+        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+      } else {
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: applyLocalHeaterCurveSave(visibleHeaterCurve),
+        }))
+      }
+      setFeedback({
+        title: 'Heater curve saved',
+        detail: 'Preview was promoted to the active curve.',
+        tone: 'success',
+      })
+      emitEvent('calibration', 'heater curve saved', 'success')
+    } catch (error) {
+      setFeedback({ title: 'Heater curve failed', detail: errorMessage(error), tone: 'warning' })
+    }
+  }
+
   if (!visibleDevice) {
     return null
   }
@@ -1509,7 +1643,9 @@ export function ControlPlaneDemo({
                 artifact={selectedArtifact}
                 feedback={feedback}
                 calibration={visibleCalibration}
+                heaterCurve={visibleHeaterCurve}
                 calibrationRefs={visibleCalibrationRefs}
+                calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
                 flashRun={flashRun}
                 onTargetTempChange={handleTargetTempChange}
                 onPresetSlotChange={handlePresetSlotChange}
@@ -1527,6 +1663,15 @@ export function ControlPlaneDemo({
                 onCalibrationManualFit={handleCalibrationManualFit}
                 onCalibrationImport={handleCalibrationImport}
                 onCalibrationApply={handleCalibrationApply}
+                onHeaterCurvePreview={handleHeaterCurvePreview}
+                onHeaterCurveClearPreview={handleHeaterCurveClearPreview}
+                onHeaterCurveSave={handleHeaterCurveSave}
+                onCalibrationWorkspaceTabChange={(nextTab) =>
+                  setCalibrationWorkspaceTabByDevice((current) => ({
+                    ...current,
+                    [visibleDevice.id]: nextTab,
+                  }))
+                }
                 onDeviceSelect={handleDeviceChange}
                 onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDevice}
@@ -2098,7 +2243,9 @@ function ViewPanel({
   artifact,
   feedback,
   calibration,
+  heaterCurve,
   calibrationRefs,
+  calibrationWorkspaceTab,
   flashRun,
   onTargetTempChange,
   onPresetSlotChange,
@@ -2121,6 +2268,10 @@ function ViewPanel({
   onCalibrationManualFit,
   onCalibrationImport,
   onCalibrationApply,
+  onHeaterCurvePreview,
+  onHeaterCurveClearPreview,
+  onHeaterCurveSave,
+  onCalibrationWorkspaceTabChange,
 }: {
   view: ConsoleView
   device: DeviceTarget
@@ -2137,7 +2288,9 @@ function ViewPanel({
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
   calibration: CalibrationState
+  heaterCurve: HeaterCurveState
   calibrationRefs: { rtdTempC: number; vinMv: number }
+  calibrationWorkspaceTab: CalibrationWorkspaceTab
   flashRun: { status: FlashRunStatus; progress: number }
   onTargetTempChange: (nextTargetTemp: number) => void
   onPresetSlotChange: (presetIndex: number) => void | Promise<void>
@@ -2164,6 +2317,10 @@ function ViewPanel({
   ) => void | Promise<void>
   onCalibrationImport: (calibrationPackage: CalibrationPackage) => void | Promise<void>
   onCalibrationApply: () => void | Promise<void>
+  onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
+  onHeaterCurveClearPreview: () => void | Promise<void>
+  onHeaterCurveSave: () => void | Promise<void>
+  onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
 }) {
   if (showDeviceSelection) {
     return (
@@ -2227,8 +2384,10 @@ function ViewPanel({
       <CalibrationView
         device={device}
         calibration={calibration}
+        heaterCurve={heaterCurve}
         refs={calibrationRefs}
         feedback={feedback}
+        calibrationWorkspaceTab={calibrationWorkspaceTab}
         onReferenceChange={onCalibrationReferenceChange}
         onCapture={onCalibrationCapture}
         onDelete={onCalibrationDelete}
@@ -2236,6 +2395,10 @@ function ViewPanel({
         onManualFit={onCalibrationManualFit}
         onImport={onCalibrationImport}
         onApply={onCalibrationApply}
+        onHeaterCurvePreview={onHeaterCurvePreview}
+        onHeaterCurveClearPreview={onHeaterCurveClearPreview}
+        onHeaterCurveSave={onHeaterCurveSave}
+        onCalibrationWorkspaceTabChange={onCalibrationWorkspaceTabChange}
       />
     )
   }
@@ -2325,7 +2488,7 @@ function AddDeviceView({
   onAddDevice: (kind: AddDeviceKind) => void
 }) {
   return (
-    <div className="industrial-view-panel">
+    <div className="industrial-view-panel industrial-view-panel--calibration">
       <PanelHeader kicker="Add device" title="Choose connection" />
       <AddDeviceChoices
         allowDemoControls={allowDemoControls}
@@ -2849,8 +3012,10 @@ function SettingsView({
 function CalibrationView({
   device,
   calibration,
+  heaterCurve,
   refs,
   feedback,
+  calibrationWorkspaceTab,
   onReferenceChange,
   onCapture,
   onDelete,
@@ -2858,11 +3023,17 @@ function CalibrationView({
   onManualFit,
   onImport,
   onApply,
+  onHeaterCurvePreview,
+  onHeaterCurveClearPreview,
+  onHeaterCurveSave,
+  onCalibrationWorkspaceTabChange,
 }: {
   device: DeviceTarget
   calibration: CalibrationState
+  heaterCurve: HeaterCurveState
   refs: { rtdTempC: number; vinMv: number }
   feedback: ActionFeedback
+  calibrationWorkspaceTab: CalibrationWorkspaceTab
   onReferenceChange: (channel: CalibrationChannel, value: number) => void
   onCapture: (channel: CalibrationChannel) => void | Promise<void>
   onDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
@@ -2870,8 +3041,13 @@ function CalibrationView({
   onManualFit: (channel: CalibrationChannel, gain: number, offsetMv: number) => void | Promise<void>
   onImport: (calibrationPackage: CalibrationPackage) => void | Promise<void>
   onApply: () => void | Promise<void>
+  onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
+  onHeaterCurveClearPreview: () => void | Promise<void>
+  onHeaterCurveSave: () => void | Promise<void>
+  onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const [heaterCurveDraftText, setHeaterCurveDraftText] = useState('')
   const applyBlocked = device.heaterEnabled || device.heaterOutputPercent !== 0
   const exportCalibration = () => {
     const blob = new Blob([JSON.stringify(calibration, null, 2)], { type: 'application/json' })
@@ -2895,104 +3071,324 @@ function CalibrationView({
       await onImport(calibrationPackage)
     }
   }
-  const rtdSampleCount = calibration.draft.rtdAdc.filter(Boolean).length
-  const vinSampleCount = calibration.draft.vinAdc.filter(Boolean).length
-  const draftSampleCount = rtdSampleCount + vinSampleCount
-  const draftPackageDetail = `${rtdSampleCount}/8 RTD · ${vinSampleCount}/8 VIN`
+  useEffect(() => {
+    const source = heaterCurve.preview ?? heaterCurve.active
+    setHeaterCurveDraftText(JSON.stringify(source, null, 2))
+  }, [heaterCurve.active, heaterCurve.preview])
   return (
     <div className="industrial-view-panel">
-      <PanelHeader kicker="Calibration" title="ADC trim" />
+      <PanelHeader kicker="Calibration" title="Calibration data package" />
       <div className="industrial-calibration-workbench">
-        <section className="industrial-calibration-topbar" aria-label="Calibration package">
-          <div className="industrial-calibration-summary industrial-calibration-summary--topbar">
-            <CalibrationSummaryCard
-              label="Live RTD"
-              value={formatTemp(device.currentTempC)}
-              detail={`${calibrationFitMode(calibration.activeFit.rtdAdc)} fit`}
-            />
-            <CalibrationSummaryCard
-              label="Live VIN"
-              value={formatVolts(device.voltageMv)}
-              detail={`${calibrationFitMode(calibration.activeFit.vinAdc)} fit`}
-            />
-            <CalibrationSummaryCard
-              label="Draft package"
-              value={`${draftSampleCount}/16`}
-              detail={draftPackageDetail}
-              tone={draftSampleCount === 0 ? 'muted' : 'accent'}
-            />
-          </div>
-          <div className="industrial-calibration-command-bar">
-            <button
-              type="button"
-              className="industrial-button industrial-button--primary industrial-calibration-command-bar__apply"
-              disabled={applyBlocked}
-              onClick={onApply}
-            >
-              <CheckCircle2 size={15} aria-hidden="true" />
-              Apply calibration
-            </button>
-            <button
-              type="button"
-              className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
-              onClick={exportCalibration}
-            >
-              <Download size={15} aria-hidden="true" />
-              Export JSON
-            </button>
-            <button
-              type="button"
-              className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <Upload size={15} aria-hidden="true" />
-              Import JSON
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="application/json,.json"
-              hidden
-              onChange={(event) => void importFile(event.currentTarget.files?.[0] ?? null)}
-            />
-          </div>
-          <ActionFeedbackPanel feedback={feedback} compact />
-        </section>
-        <div className="industrial-calibration-grid">
-          <CalibrationChannelPanel
-            channel="rtd_adc"
-            title="RTD ADC"
-            referenceLabel="Reference temperature"
-            referenceValue={refs.rtdTempC}
-            referenceUnit="C"
-            activeFit={calibration.activeFit.rtdAdc}
-            draftFit={calibration.draftFit.rtdAdc}
-            samples={calibration.draft.rtdAdc}
-            onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
-            onCapture={() => onCapture('rtd_adc')}
-            onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
-            onClear={() => onClear('rtd_adc')}
-            onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
-          />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          hidden
+          onChange={(event) => void importFile(event.currentTarget.files?.[0] ?? null)}
+        />
+        <Tabs
+          value={calibrationWorkspaceTab}
+          onValueChange={(value) =>
+            onCalibrationWorkspaceTabChange(value as CalibrationWorkspaceTab)
+          }
+          className="industrial-calibration-tabs"
+        >
+          <TabsList
+            variant="line"
+            className="industrial-calibration-tabs__list"
+            aria-label="Calibration tools"
+          >
+            <TabsTrigger value="heater_curve" className="industrial-calibration-tab">
+              Heater curve
+            </TabsTrigger>
+            <TabsTrigger value="rtd_adc" className="industrial-calibration-tab">
+              RTD ADC
+            </TabsTrigger>
+            <TabsTrigger value="vin_adc" className="industrial-calibration-tab">
+              VIN ADC
+            </TabsTrigger>
+          </TabsList>
 
-          <CalibrationChannelPanel
-            channel="vin_adc"
-            title="VIN ADC"
-            referenceLabel="Reference VIN"
-            referenceValue={refs.vinMv}
-            referenceUnit="mV"
-            activeFit={calibration.activeFit.vinAdc}
-            draftFit={calibration.draftFit.vinAdc}
-            samples={calibration.draft.vinAdc}
-            onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
-            onCapture={() => onCapture('vin_adc')}
-            onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
-            onClear={() => onClear('vin_adc')}
-            onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
-          />
-        </div>
+          <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">
+            <HeaterCurvePanel
+              device={device}
+              heaterCurve={heaterCurve}
+              draftText={heaterCurveDraftText}
+              onDraftTextChange={setHeaterCurveDraftText}
+              onPreview={onHeaterCurvePreview}
+              onClearPreview={onHeaterCurveClearPreview}
+              onSave={onHeaterCurveSave}
+            />
+          </TabsContent>
+          <TabsContent value="rtd_adc" className="industrial-calibration-tabs__content">
+            <AdcCalibrationToolbar
+              applyBlocked={applyBlocked}
+              feedback={feedback}
+              onApply={onApply}
+              onExport={exportCalibration}
+              onImport={() => fileInputRef.current?.click()}
+            />
+            <CalibrationChannelPanel
+              channel="rtd_adc"
+              title="RTD ADC"
+              referenceLabel="Reference temperature"
+              referenceValue={refs.rtdTempC}
+              referenceUnit="C"
+              activeFit={calibration.activeFit.rtdAdc}
+              draftFit={calibration.draftFit.rtdAdc}
+              samples={calibration.draft.rtdAdc}
+              onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
+              onCapture={() => onCapture('rtd_adc')}
+              onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
+              onClear={() => onClear('rtd_adc')}
+              onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
+            />
+          </TabsContent>
+          <TabsContent value="vin_adc" className="industrial-calibration-tabs__content">
+            <AdcCalibrationToolbar
+              applyBlocked={applyBlocked}
+              feedback={feedback}
+              onApply={onApply}
+              onExport={exportCalibration}
+              onImport={() => fileInputRef.current?.click()}
+            />
+            <CalibrationChannelPanel
+              channel="vin_adc"
+              title="VIN ADC"
+              referenceLabel="Reference VIN"
+              referenceValue={refs.vinMv}
+              referenceUnit="mV"
+              activeFit={calibration.activeFit.vinAdc}
+              draftFit={calibration.draftFit.vinAdc}
+              samples={calibration.draft.vinAdc}
+              onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
+              onCapture={() => onCapture('vin_adc')}
+              onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
+              onClear={() => onClear('vin_adc')}
+              onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
+            />
+          </TabsContent>
+        </Tabs>
       </div>
     </div>
+  )
+}
+
+function AdcCalibrationToolbar({
+  applyBlocked,
+  feedback,
+  onApply,
+  onExport,
+  onImport,
+}: {
+  applyBlocked: boolean
+  feedback: ActionFeedback
+  onApply: () => void | Promise<void>
+  onExport: () => void
+  onImport: () => void
+}) {
+  return (
+    <section className="industrial-calibration-adc-toolbar" aria-label="ADC calibration actions">
+      <div className="industrial-calibration-command-bar">
+        <button
+          type="button"
+          className="industrial-button industrial-button--primary industrial-calibration-command-bar__apply"
+          disabled={applyBlocked}
+          onClick={onApply}
+        >
+          <CheckCircle2 size={15} aria-hidden="true" />
+          Apply calibration
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
+          onClick={onExport}
+        >
+          <Download size={15} aria-hidden="true" />
+          Export JSON
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
+          onClick={onImport}
+        >
+          <Upload size={15} aria-hidden="true" />
+          Import JSON
+        </button>
+      </div>
+      <ActionFeedbackPanel feedback={feedback} compact />
+    </section>
+  )
+}
+
+function HeaterCurvePanel({
+  device,
+  heaterCurve,
+  draftText,
+  onDraftTextChange,
+  onPreview,
+  onClearPreview,
+  onSave,
+}: {
+  device: DeviceTarget
+  heaterCurve: HeaterCurveState
+  draftText: string
+  onDraftTextChange: (value: string) => void
+  onPreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
+  onClearPreview: () => void | Promise<void>
+  onSave: () => void | Promise<void>
+}) {
+  const heaterCurveEditorRef = useRef<HTMLTextAreaElement | null>(null)
+  const activeCount = countHeaterCurvePoints(heaterCurve.active)
+  const previewCount = heaterCurve.preview ? countHeaterCurvePoints(heaterCurve.preview) : 0
+  const heaterCurveTableColumns = heaterCurve.preview
+    ? '3rem minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)'
+    : '3rem minmax(0, 1fr) minmax(0, 1fr)'
+  const activeRows = heaterCurve.active.points.map((point, index) => ({
+    index,
+    point,
+    preview: heaterCurve.preview?.points[index] ?? null,
+  }))
+
+  const parseDraft = () => {
+    const parsed = JSON.parse(draftText) as HeaterCurvePackage | { package?: HeaterCurvePackage }
+    const packageValue = 'points' in parsed ? parsed : parsed.package
+    if (!packageValue) {
+      throw new Error('Heater curve JSON must contain a points array.')
+    }
+    return normalizeHeaterCurvePackage(packageValue)
+  }
+
+  useLayoutEffect(() => {
+    const editor = heaterCurveEditorRef.current
+    if (!editor) {
+      return
+    }
+
+    editor.style.height = '0px'
+    editor.style.height = `${editor.scrollHeight}px`
+  }, [])
+
+  return (
+    <section className="industrial-heater-curve-panel" aria-label="Heater curve">
+      <div className="industrial-heater-curve-panel__header">
+        <div>
+          <h3 className="industrial-section-title">Heater curve</h3>
+          <p className="industrial-heater-curve-panel__subtitle">
+            Active curve writes to EEPROM; preview is immediate and temporary.
+          </p>
+        </div>
+        <div className="industrial-heater-curve-panel__meta">
+          <span>{activeCount}/8 active</span>
+          <span>{heaterCurve.preview ? `${previewCount}/8 preview` : 'Preview not loaded'}</span>
+        </div>
+      </div>
+
+      <div className="industrial-heater-curve-toolbar">
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          onClick={() => {
+            try {
+              onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
+            } catch {
+              onDraftTextChange(JSON.stringify(heaterCurve.active, null, 2))
+            }
+          }}
+        >
+          Read curve
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          onClick={() => {
+            try {
+              void onPreview(parseDraft())
+            } catch {
+              onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
+            }
+          }}
+        >
+          Import preview
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={!heaterCurve.preview}
+          onClick={() => void onClearPreview()}
+        >
+          Clear preview
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--primary"
+          disabled={!heaterCurve.preview}
+          onClick={() => void onSave()}
+        >
+          Save curve
+        </button>
+      </div>
+
+      <p className="industrial-heater-curve-note">
+        Preview updates the live curve immediately; save writes the active curve to EEPROM.
+      </p>
+
+      <section className="industrial-heater-curve-table-wrap" aria-label="Heater curve points">
+        <table
+          className="industrial-heater-curve-table"
+          aria-label="Heater curve points"
+          style={
+            {
+              '--industrial-heater-curve-table-columns': heaterCurveTableColumns,
+            } as CSSProperties
+          }
+        >
+          <thead>
+            <tr>
+              <th scope="col">Slot</th>
+              <th scope="col">Active temp</th>
+              <th scope="col">Active ohms</th>
+              {heaterCurve.preview ? <th scope="col">Preview temp</th> : null}
+              {heaterCurve.preview ? <th scope="col">Preview ohms</th> : null}
+            </tr>
+          </thead>
+          <tbody>
+            {activeRows.map(({ index, point, preview }) => (
+              <tr key={index}>
+                <td>#{index + 1}</td>
+                <td>{point ? formatHeaterCurveTemp(point.tempCentiC) : '—'}</td>
+                <td>{point ? formatHeaterCurveResistance(point.resistanceMilliohms) : '—'}</td>
+                {heaterCurve.preview ? (
+                  <>
+                    <td>{preview ? formatHeaterCurveTemp(preview.tempCentiC) : '—'}</td>
+                    <td>
+                      {preview ? formatHeaterCurveResistance(preview.resistanceMilliohms) : '—'}
+                    </td>
+                  </>
+                ) : null}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <details className="industrial-heater-curve-editor">
+        <summary>JSON package editor</summary>
+        <label
+          className="industrial-heater-curve-editor__label"
+          htmlFor={`heater-curve-json-${device.id}`}
+        >
+          Heater curve JSON
+        </label>
+        <Textarea
+          id={`heater-curve-json-${device.id}`}
+          ref={heaterCurveEditorRef}
+          className="industrial-heater-curve-editor__textarea"
+          value={draftText}
+          onChange={(event) => onDraftTextChange(event.currentTarget.value)}
+        />
+      </details>
+    </section>
   )
 }
 
@@ -3193,6 +3589,78 @@ function CalibrationChannelPanel({
       )}
     </section>
   )
+}
+
+function formatHeaterCurveTemp(value: number) {
+  return `${(value / 100).toFixed(2).replace(/\.00$/, '')}℃`
+}
+
+function formatHeaterCurveResistance(value: number) {
+  return `${(value / 1000).toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}Ω`
+}
+
+function countHeaterCurvePoints(packageValue: HeaterCurvePackage) {
+  return packageValue.points.filter(Boolean).length
+}
+
+function createDefaultHeaterCurveState(): HeaterCurveState {
+  const empty = createEmptyHeaterCurvePackage()
+  return {
+    active: cloneHeaterCurvePackage(empty),
+    preview: null,
+  }
+}
+
+function createEmptyHeaterCurvePackage(): HeaterCurvePackage {
+  return {
+    points: Array.from({ length: 8 }, () => null),
+  }
+}
+
+function cloneHeaterCurvePackage(packageValue: HeaterCurvePackage): HeaterCurvePackage {
+  return {
+    points: packageValue.points.map((point) => (point ? { ...point } : null)),
+  }
+}
+
+function normalizeHeaterCurvePackage(packageValue: HeaterCurvePackage): HeaterCurvePackage {
+  const points = packageValue.points
+    .filter((point): point is NonNullable<typeof point> => Boolean(point))
+    .map((point) => ({ ...point }))
+    .sort((left, right) => left.tempCentiC - right.tempCentiC)
+  return {
+    points: Array.from({ length: 8 }, (_, index) => points[index] ?? null),
+  }
+}
+
+function applyLocalHeaterCurveRequest(
+  current: HeaterCurveState,
+  request: Omit<HeaterCurveConfigRequest, 'leaseId'>
+): HeaterCurveState {
+  if (request.op === 'preview') {
+    if (!request.package) {
+      throw new Error('Heater curve package is required.')
+    }
+    return {
+      ...current,
+      preview: normalizeHeaterCurvePackage(request.package),
+    }
+  }
+
+  return {
+    ...current,
+    preview: null,
+  }
+}
+
+function applyLocalHeaterCurveSave(current: HeaterCurveState): HeaterCurveState {
+  if (!current.preview) {
+    throw new Error('Heater curve preview is required before saving.')
+  }
+  return {
+    active: cloneHeaterCurvePackage(current.preview),
+    preview: null,
+  }
 }
 
 function PresetTemperatureEditor({
@@ -3691,26 +4159,6 @@ function ActionFeedbackPanel({
       <p className="industrial-label">Last action</p>
       <strong>{feedback.title}</strong>
       <span>{feedback.detail}</span>
-    </div>
-  )
-}
-
-function CalibrationSummaryCard({
-  label,
-  value,
-  detail,
-  tone = 'default',
-}: {
-  label: string
-  value: string
-  detail: string
-  tone?: 'default' | 'accent' | 'muted'
-}) {
-  return (
-    <div className={`industrial-calibration-summary-card is-${tone}`}>
-      <p className="industrial-label">{label}</p>
-      <strong>{value}</strong>
-      <span>{detail}</span>
     </div>
   )
 }

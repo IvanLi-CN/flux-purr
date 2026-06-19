@@ -77,6 +77,8 @@ pub struct DeviceStatus {
     pub voltage_mv: u32,
     pub current_ma: u32,
     pub board_temp_centi: i32,
+    pub rtd_raw_adc_mv: u16,
+    pub vin_raw_adc_mv: u16,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdState,
@@ -202,6 +204,8 @@ fn snapshot_at(tick: u32, uptime_secs: u32) -> DeviceStatus {
         voltage_mv: u32::from(request.millivolts()) + (tick % 50),
         current_ma: 800 + (tick % 40),
         board_temp_centi: 3_200 + ((tick % 30) as i32),
+        rtd_raw_adc_mv: 1_120 + (tick % 12) as u16,
+        vin_raw_adc_mv: 1_670 + (tick % 18) as u16,
         pd_request_mv: request.millivolts(),
         pd_contract_mv,
         pd_state: if fallback {

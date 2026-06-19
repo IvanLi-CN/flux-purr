@@ -4,6 +4,8 @@ import { ControlPlaneDemo } from '@/features/control-plane-demo/components/contr
 import type {
   ControlPlaneStatus,
   DirectRuntimeConfigRequest,
+  HeaterCurvePackage,
+  HeaterCurveState,
   Identity,
   NetworkSummary,
 } from '@/features/control-plane-demo/contracts'
@@ -35,6 +37,18 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
+const heaterCurveStoryPackage = {
+  points: [
+    { tempCentiC: 2120, resistanceMilliohms: 4251 },
+    { tempCentiC: 5180, resistanceMilliohms: 4732 },
+    { tempCentiC: 7560, resistanceMilliohms: 5144 },
+    { tempCentiC: 10600, resistanceMilliohms: 5555 },
+    { tempCentiC: 14150, resistanceMilliohms: 6053 },
+    { tempCentiC: 17675, resistanceMilliohms: 6469 },
+    { tempCentiC: 21010, resistanceMilliohms: 6831 },
+    { tempCentiC: 24340, resistanceMilliohms: 7124 },
+  ],
+} satisfies HeaterCurvePackage
 
 export const DemoManualPpsPanel: Story = {
   name: 'Demo / Manual PPS panel',
@@ -97,17 +111,101 @@ export const DemoCalibrationTab: Story = {
     const canvas = within(canvasElement)
 
     await step('calibration panels are visible', async () => {
-      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
-      await expect(await canvas.findByRole('heading', { name: 'RTD ADC' })).toBeVisible()
-      await expect(await canvas.findByRole('heading', { name: 'VIN ADC' })).toBeVisible()
+      await expect(
+        await canvas.findByRole('heading', { name: 'Calibration data package' })
+      ).toBeVisible()
+      await expect(await canvas.findByRole('table', { name: 'Heater curve points' })).toBeVisible()
+      await expect(await canvas.findByText(/0\/8 active/i)).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'Runtime trace' })).toBeVisible()
+      await expect(await canvas.findByText(/\d+ \/ \d+ frames/)).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Import preview' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Save curve' })).toBeDisabled()
+      await expect(await canvas.findByText('Preview not loaded')).toBeVisible()
+      await expect(canvas.queryByRole('heading', { name: 'RTD ADC' })).not.toBeInTheDocument()
+      await expect(canvas.queryByRole('heading', { name: 'VIN ADC' })).not.toBeInTheDocument()
+      const heaterCurveTable = await canvas.findByRole('table', { name: 'Heater curve points' })
+      expect(heaterCurveTable.scrollWidth).toBeLessThanOrEqual(heaterCurveTable.clientWidth + 1)
     })
 
     await step('capture creates a draft sample', async () => {
+      await userEvent.click(await canvas.findByRole('tab', { name: /RTD ADC/ }))
+      await expect(await canvas.findByRole('heading', { name: 'RTD ADC' })).toBeVisible()
       await userEvent.click((await canvas.findAllByRole('button', { name: 'Capture sample' }))[0])
       await waitFor(() => {
         expect(canvas.getAllByText(/sample captured/i).length).toBeGreaterThan(0)
       })
       await expect(await canvas.findByText(/1\/8 samples/i)).toBeVisible()
+      await userEvent.click(await canvas.findByRole('tab', { name: /VIN ADC/ }))
+      await expect(await canvas.findByRole('heading', { name: 'VIN ADC' })).toBeVisible()
+    })
+  },
+}
+
+export const DemoCalibrationHeaterCurvePreview: Story = {
+  name: 'Demo / Heater curve preview',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === controlPlaneScenario.selectedDeviceId
+          ? {
+              ...device,
+              heaterCurve: {
+                active: {
+                  points: [
+                    { tempCentiC: 2120, resistanceMilliohms: 4251 },
+                    { tempCentiC: 5180, resistanceMilliohms: 4732 },
+                    { tempCentiC: 7560, resistanceMilliohms: 5144 },
+                    { tempCentiC: 10600, resistanceMilliohms: 5555 },
+                    { tempCentiC: 14150, resistanceMilliohms: 6053 },
+                    { tempCentiC: 17675, resistanceMilliohms: 6469 },
+                    { tempCentiC: 21010, resistanceMilliohms: 6831 },
+                    { tempCentiC: 24340, resistanceMilliohms: 7124 },
+                  ],
+                },
+                preview: {
+                  points: [
+                    { tempCentiC: 2120, resistanceMilliohms: 4270 },
+                    { tempCentiC: 5180, resistanceMilliohms: 4750 },
+                    { tempCentiC: 7560, resistanceMilliohms: 5160 },
+                    { tempCentiC: 10600, resistanceMilliohms: 5572 },
+                    { tempCentiC: 14150, resistanceMilliohms: 6073 },
+                    { tempCentiC: 17675, resistanceMilliohms: 6488 },
+                    { tempCentiC: 21010, resistanceMilliohms: 6850 },
+                    { tempCentiC: 24340, resistanceMilliohms: 7142 },
+                  ],
+                },
+              },
+            }
+          : device
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('shows a previewed heater curve', async () => {
+      await expect(await canvas.findByRole('table', { name: 'Heater curve points' })).toBeVisible()
+      await expect(await canvas.findByText(/8\/8 preview/i)).toBeVisible()
+      await expect(await canvas.findByRole('columnheader', { name: 'Preview temp' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: 'Save curve' })).toBeEnabled()
+    })
+
+    await step('save promotes preview to active curve', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: 'Save curve' }))
+      await waitFor(() => {
+        expect(canvas.getByText('Preview not loaded')).toBeVisible()
+      })
+      await expect(await canvas.findByRole('button', { name: 'Save curve' })).toBeDisabled()
+      await expect(canvas.getByRole('table', { name: 'Heater curve points' })).toBeVisible()
     })
   },
 }
@@ -136,11 +234,12 @@ export const DemoCalibrationApplyBlocked: Story = {
     const canvas = within(canvasElement)
 
     await step('heater enabled blocks calibration apply before output rises', async () => {
-      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
-      await expect(await canvas.findByRole('button', { name: 'Apply calibration' })).toBeDisabled()
       await expect(
-        await canvas.findByText('Apply is blocked while heater output is active.')
+        await canvas.findByRole('heading', { name: 'Calibration data package' })
       ).toBeVisible()
+      await userEvent.click(await canvas.findByRole('tab', { name: /RTD ADC/ }))
+      await expect(await canvas.findByRole('button', { name: 'Apply calibration' })).toBeDisabled()
+      await expect(await canvas.findByRole('heading', { name: 'RTD ADC' })).toBeVisible()
     })
   },
 }
@@ -169,26 +268,34 @@ export const DemoCalibrationManualFit: Story = {
     const canvas = within(canvasElement)
 
     await step('manual fit controls update both draft channels', async () => {
-      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+      await expect(
+        await canvas.findByRole('heading', { name: 'Calibration data package' })
+      ).toBeVisible()
+      await userEvent.click(await canvas.findByRole('tab', { name: /RTD ADC/ }))
 
-      const gainInputs = await canvas.findAllByRole('spinbutton', { name: /Draft gain/ })
-      const offsetInputs = await canvas.findAllByRole('spinbutton', { name: /Draft offset/ })
-      const setFitButtons = await canvas.findAllByRole('button', { name: 'Set draft fit' })
+      let gainInput = await canvas.findByRole('spinbutton', { name: /Draft gain/ })
+      let offsetInput = await canvas.findByRole('spinbutton', { name: /Draft offset/ })
+      let setFitButton = await canvas.findByRole('button', { name: 'Set draft fit' })
 
-      await userEvent.clear(gainInputs[0])
-      await userEvent.type(gainInputs[0], '1.01234')
-      await userEvent.clear(offsetInputs[0])
-      await userEvent.type(offsetInputs[0], '12.3')
-      await userEvent.click(setFitButtons[0])
+      await userEvent.clear(gainInput)
+      await userEvent.type(gainInput, '1.01234')
+      await userEvent.clear(offsetInput)
+      await userEvent.type(offsetInput, '12.3')
+      await userEvent.click(setFitButton)
 
-      await userEvent.clear(gainInputs[1])
-      await userEvent.type(gainInputs[1], '0.98047')
-      await userEvent.clear(offsetInputs[1])
-      await userEvent.type(offsetInputs[1], '149.8')
-      await userEvent.click(setFitButtons[1])
+      await userEvent.click(await canvas.findByRole('tab', { name: /VIN ADC/ }))
+      gainInput = await canvas.findByRole('spinbutton', { name: /Draft gain/ })
+      offsetInput = await canvas.findByRole('spinbutton', { name: /Draft offset/ })
+      setFitButton = await canvas.findByRole('button', { name: 'Set draft fit' })
+
+      await userEvent.clear(gainInput)
+      await userEvent.type(gainInput, '0.98047')
+      await userEvent.clear(offsetInput)
+      await userEvent.type(offsetInput, '149.8')
+      await userEvent.click(setFitButton)
 
       await waitFor(() => {
-        expect(canvas.getAllByText('8/8 samples')).toHaveLength(2)
+        expect(canvas.getByText('8/8 samples')).toBeVisible()
       })
       await expect(await canvas.findByText(/VIN ADC draft fit set/)).toBeVisible()
     })
@@ -212,44 +319,43 @@ export const DemoCalibrationDenseLists: Story = {
     const canvas = within(canvasElement)
 
     await step('fills both calibration sample lists to their scroll boundary', async () => {
-      await expect(await canvas.findByRole('heading', { name: 'ADC trim' })).toBeVisible()
+      await expect(
+        await canvas.findByRole('heading', { name: 'Calibration data package' })
+      ).toBeVisible()
+      await userEvent.click(await canvas.findByRole('tab', { name: /RTD ADC/ }))
 
-      const captureButtons = await canvas.findAllByRole('button', { name: 'Capture sample' })
       for (let index = 0; index < 8; index += 1) {
-        await userEvent.click(captureButtons[0])
-        await userEvent.click(captureButtons[1])
+        await userEvent.click(await canvas.findByRole('button', { name: 'Capture sample' }))
       }
 
       await waitFor(() => {
-        expect(canvas.getAllByText('8/8 samples')).toHaveLength(2)
+        expect(canvas.getByText('8/8 samples')).toBeVisible()
       })
 
       const rtdList = await canvas.findByRole('region', { name: 'RTD ADC sample list' })
-      const vinList = await canvas.findByRole('region', { name: 'VIN ADC sample list' })
       rtdList.scrollTop = rtdList.scrollHeight
-      vinList.scrollTop = vinList.scrollHeight
       fireEvent.scroll(rtdList)
-      fireEvent.scroll(vinList)
 
-      const logScroller = canvasElement.querySelector<HTMLElement>(
-        '.industrial-log-panel__rows .simplebar-content-wrapper'
-      )
-      if (!logScroller) {
-        throw new Error('Log scroller was not found.')
-      }
-      logScroller.scrollTop = 900
-      fireEvent.scroll(logScroller)
+      await expect(await canvas.findByRole('heading', { name: 'Runtime trace' })).toBeVisible()
 
       await expect(
         within(rtdList).getByRole('button', { name: 'Delete RTD ADC sample 8' })
       ).toBeVisible()
+
+      await userEvent.click(await canvas.findByRole('tab', { name: /VIN ADC/ }))
+      for (let index = 0; index < 8; index += 1) {
+        await userEvent.click(await canvas.findByRole('button', { name: 'Capture sample' }))
+      }
+      await waitFor(() => {
+        expect(canvas.getByText('8/8 samples')).toBeVisible()
+      })
+      const vinList = await canvas.findByRole('region', { name: 'VIN ADC sample list' })
+      vinList.scrollTop = vinList.scrollHeight
+      fireEvent.scroll(vinList)
       await expect(
         within(vinList).getByRole('button', { name: 'Delete VIN ADC sample 8' })
       ).toBeVisible()
       await expect(await canvas.findByText(/\d+ \/ \d+ frames/)).toBeVisible()
-      await waitFor(() => {
-        expect(canvas.getAllByText(/calibration_config response payload/).length).toBeGreaterThan(0)
-      })
     })
   },
 }
@@ -495,6 +601,10 @@ function createCalibrationDenseScenario(): ControlPlaneScenario {
 
 class FakeWebSerialClient {
   private currentStatus: ControlPlaneStatus = status
+  private heaterCurve: HeaterCurveState = {
+    active: heaterCurveStoryPackage,
+    preview: null,
+  }
 
   connect() {
     return Promise.resolve({ ...webSerialProbe, status: this.currentStatus })
@@ -538,6 +648,36 @@ class FakeWebSerialClient {
           : this.currentStatus.pdContractMv,
     }
     return Promise.resolve(this.currentStatus satisfies ControlPlaneStatus)
+  }
+
+  getHeaterCurve() {
+    return Promise.resolve(this.heaterCurve)
+  }
+
+  previewHeaterCurve(heaterCurve: HeaterCurvePackage) {
+    this.heaterCurve = {
+      ...this.heaterCurve,
+      preview: heaterCurve,
+    }
+    return Promise.resolve(this.heaterCurve)
+  }
+
+  clearHeaterCurvePreview() {
+    this.heaterCurve = {
+      ...this.heaterCurve,
+      preview: null,
+    }
+    return Promise.resolve(this.heaterCurve)
+  }
+
+  saveHeaterCurve() {
+    if (this.heaterCurve.preview) {
+      this.heaterCurve = {
+        active: this.heaterCurve.preview,
+        preview: null,
+      }
+    }
+    return Promise.resolve(this.heaterCurve)
   }
 
   disconnect() {

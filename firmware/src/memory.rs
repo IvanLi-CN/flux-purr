@@ -17,6 +17,7 @@ pub const MEMORY_WIFI_SSID_MAX_LEN: usize = 32;
 pub const MEMORY_WIFI_PASSWORD_MAX_LEN: usize = 64;
 pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
+pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const ADC_CALIBRATION_RTD_DEFAULT_LOW_MV: u16 = 0;
 pub const ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV: u16 = 2_800;
 pub const ADC_CALIBRATION_VIN_DEFAULT_LOW_MV: u16 = 0;
@@ -37,6 +38,7 @@ const TLV_WIFI_AUTO_RECONNECT: u8 = 0x12;
 const TLV_TELEMETRY_INTERVAL_MS: u8 = 0x13;
 const TLV_ACTIVE_ADC_CALIBRATION: u8 = 0x20;
 const TLV_DRAFT_ADC_CALIBRATION: u8 = 0x21;
+const TLV_ACTIVE_HEATER_CURVE: u8 = 0x30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryConfig {
@@ -50,6 +52,7 @@ pub struct MemoryConfig {
     pub telemetry_interval_ms: u32,
     pub active_adc_calibration: AdcCalibrationConfig,
     pub draft_adc_calibration: AdcCalibrationConfig,
+    pub active_heater_curve: HeaterCurveConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +65,17 @@ pub enum AdcCalibrationChannel {
 pub struct AdcCalibrationSample {
     pub observed_mv: u16,
     pub expected_mv: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaterCurvePoint {
+    pub temp_centi_c: i16,
+    pub resistance_milliohms: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaterCurveConfig {
+    pub points: [Option<HeaterCurvePoint>; HEATER_CURVE_MAX_POINTS],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +101,14 @@ impl Default for AdcCalibrationChannelConfig {
     fn default() -> Self {
         Self {
             samples: [None; ADC_CALIBRATION_MAX_SAMPLES],
+        }
+    }
+}
+
+impl Default for HeaterCurveConfig {
+    fn default() -> Self {
+        Self {
+            points: [None; HEATER_CURVE_MAX_POINTS],
         }
     }
 }
@@ -163,6 +185,7 @@ impl Default for MemoryConfig {
             telemetry_interval_ms: 500,
             active_adc_calibration: AdcCalibrationConfig::default(),
             draft_adc_calibration: AdcCalibrationConfig::default(),
+            active_heater_curve: HeaterCurveConfig::default(),
         }
     }
 }
@@ -181,7 +204,58 @@ impl MemoryConfig {
         }
         sanitize_adc_calibration(&mut self.active_adc_calibration);
         sanitize_adc_calibration(&mut self.draft_adc_calibration);
+        sanitize_heater_curve(&mut self.active_heater_curve);
     }
+}
+
+pub fn heater_resistance_ohms_from_curve(
+    curve: &HeaterCurveConfig,
+    current_temp_c: f32,
+) -> Option<f32> {
+    let points = compacted_heater_points(curve);
+    let first = points.first().copied()?;
+    if points.len() == 1 {
+        return Some(milliohms_to_ohms(first.resistance_milliohms));
+    }
+
+    let temp_centi_c = (current_temp_c * 100.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    if temp_centi_c <= first.temp_centi_c {
+        return Some(milliohms_to_ohms(first.resistance_milliohms));
+    }
+
+    for pair in points.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if temp_centi_c <= right.temp_centi_c {
+            let span = (right.temp_centi_c - left.temp_centi_c) as f32;
+            if span <= 0.0 {
+                return Some(milliohms_to_ohms(left.resistance_milliohms));
+            }
+            let t = (temp_centi_c - left.temp_centi_c) as f32 / span;
+            let left_r = milliohms_to_ohms(left.resistance_milliohms);
+            let right_r = milliohms_to_ohms(right.resistance_milliohms);
+            return Some(left_r + ((right_r - left_r) * t));
+        }
+    }
+
+    points
+        .last()
+        .map(|point| milliohms_to_ohms(point.resistance_milliohms))
+}
+
+fn milliohms_to_ohms(value: u16) -> f32 {
+    value as f32 / 1_000.0
+}
+
+fn compacted_heater_points(
+    curve: &HeaterCurveConfig,
+) -> heapless::Vec<HeaterCurvePoint, HEATER_CURVE_MAX_POINTS> {
+    let mut points = heapless::Vec::new();
+    for point in curve.points.iter().flatten() {
+        let _ = points.push(*point);
+    }
+    points.sort_unstable_by_key(|point| point.temp_centi_c);
+    points
 }
 
 pub fn adc_calibration_fit(
@@ -209,6 +283,14 @@ pub fn correct_adc_mv(
 fn sanitize_adc_calibration(config: &mut AdcCalibrationConfig) {
     compact_channel(&mut config.rtd);
     compact_channel(&mut config.vin);
+}
+
+fn sanitize_heater_curve(config: &mut HeaterCurveConfig) {
+    let points = compacted_heater_points(config);
+    config.points = [None; HEATER_CURVE_MAX_POINTS];
+    for (index, point) in points.into_iter().enumerate() {
+        config.points[index] = Some(point);
+    }
 }
 
 fn compact_channel(channel: &mut AdcCalibrationChannelConfig) {
@@ -553,6 +635,14 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
+    let mut heater_curve_payload = [0u8; HEATER_CURVE_MAX_POINTS * 4];
+    encode_heater_curve(&config.active_heater_curve, &mut heater_curve_payload);
+    push_tlv(
+        TLV_ACTIVE_HEATER_CURVE,
+        &heater_curve_payload,
+        out,
+        &mut cursor,
+    )?;
     Ok(cursor)
 }
 
@@ -619,6 +709,9 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             TLV_DRAFT_ADC_CALIBRATION if len == ADC_CALIBRATION_MAX_SAMPLES * 2 * 2 * 2 => {
                 config.draft_adc_calibration = decode_adc_calibration(value);
             }
+            TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
+                config.active_heater_curve = decode_heater_curve(value);
+            }
             _ => {}
         }
     }
@@ -661,6 +754,40 @@ fn decode_adc_calibration(bytes: &[u8]) -> AdcCalibrationConfig {
             };
             cursor += 4;
         }
+    }
+    config
+}
+
+fn encode_heater_curve(config: &HeaterCurveConfig, out: &mut [u8]) {
+    let mut cursor = 0;
+    for point in config.points {
+        let temp = point
+            .map(|point| point.temp_centi_c)
+            .unwrap_or(PRESET_NONE_WIRE_VALUE);
+        let resistance = point
+            .map(|point| point.resistance_milliohms)
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        out[cursor..cursor + 2].copy_from_slice(&temp.to_le_bytes());
+        out[cursor + 2..cursor + 4].copy_from_slice(&resistance.to_le_bytes());
+        cursor += 4;
+    }
+}
+
+fn decode_heater_curve(bytes: &[u8]) -> HeaterCurveConfig {
+    let mut config = HeaterCurveConfig::default();
+    let mut cursor = 0;
+    for slot in config.points.iter_mut() {
+        let temp = i16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        let resistance = u16::from_le_bytes([bytes[cursor + 2], bytes[cursor + 3]]);
+        *slot = if temp == PRESET_NONE_WIRE_VALUE || resistance == CALIBRATION_NONE_WIRE_VALUE {
+            None
+        } else {
+            Some(HeaterCurvePoint {
+                temp_centi_c: temp,
+                resistance_milliohms: resistance,
+            })
+        };
+        cursor += 4;
     }
     config
 }

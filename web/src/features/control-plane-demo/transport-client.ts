@@ -12,6 +12,8 @@ import type {
   FirmwareArtifactManifest,
   FlashRequest,
   FlashResult,
+  HeaterCurveConfigRequest,
+  HeaterCurveState,
   Identity,
   NetworkSummary,
   RuntimeConfigRequest,
@@ -89,6 +91,17 @@ export interface ControlPlaneHttpClient {
     deviceId: string,
     request: { leaseId: string }
   ): Promise<CalibrationState>
+  getHeaterCurve(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<HeaterCurveState>
+  configureHeaterCurve(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: HeaterCurveConfigRequest
+  ): Promise<HeaterCurveState>
+  saveHeaterCurve(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: { leaseId: string }
+  ): Promise<HeaterCurveState>
   configureWifi(
     devdBaseUrl: string,
     deviceId: string,
@@ -226,6 +239,34 @@ export function createControlPlaneHttpClient(
       return requestJson<CalibrationState>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/apply`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
+    getHeaterCurve(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<HeaterCurveState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/heater-curve?lease_id=${encodeURIComponent(leaseId)}`
+      )
+    },
+    configureHeaterCurve(devdBaseUrl, deviceId, request) {
+      return requestJson<HeaterCurveState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/heater-curve`,
+        {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
+    saveHeaterCurve(devdBaseUrl, deviceId, request) {
+      return requestJson<HeaterCurveState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/heater-curve/save`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },

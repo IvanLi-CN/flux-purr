@@ -2,8 +2,12 @@ import type {
   ApiErrorEnvelope,
   ControlPlaneStatus,
   DirectRuntimeConfigRequest,
+  HeaterCurvePackage,
+  HeaterCurveState,
   Identity,
   NetworkSummary,
+  UsbHeaterCurveConfigFrame,
+  UsbHeaterCurveSaveFrame,
   UsbRequestFrame,
   UsbRuntimeConfigFrame,
 } from './contracts'
@@ -183,9 +187,46 @@ export class WebSerialControlPlaneClient {
     }))
   }
 
+  async getHeaterCurve(): Promise<HeaterCurveState> {
+    return this.requestPayload<HeaterCurveState>(
+      'heater_curve',
+      createUsbRequestFrame('get_heater_curve')
+    )
+  }
+
+  async previewHeaterCurve(heaterCurve: HeaterCurvePackage): Promise<HeaterCurveState> {
+    return this.requestPayload<HeaterCurveState>('heater_curve', (requestId) => ({
+      type: 'heater_curve_config',
+      requestId,
+      op: 'preview',
+      heaterCurve,
+    }))
+  }
+
+  async clearHeaterCurvePreview(): Promise<HeaterCurveState> {
+    return this.requestPayload<HeaterCurveState>('heater_curve', (requestId) => ({
+      type: 'heater_curve_config',
+      requestId,
+      op: 'clear_preview',
+    }))
+  }
+
+  async saveHeaterCurve(): Promise<HeaterCurveState> {
+    return this.requestPayload<HeaterCurveState>('heater_curve', (requestId) => ({
+      type: 'heater_curve_save',
+      requestId,
+    }))
+  }
+
   private async requestPayload<T>(
     payloadKey: string,
-    frameFactory: (requestId: string) => UsbRequestFrame | UsbRuntimeConfigFrame
+    frameFactory: (
+      requestId: string
+    ) =>
+      | UsbRequestFrame
+      | UsbRuntimeConfigFrame
+      | UsbHeaterCurveConfigFrame
+      | UsbHeaterCurveSaveFrame
   ): Promise<T> {
     const requestId = createWebSerialRequestId()
     const result = await this.exchange(frameFactory(requestId))
@@ -202,7 +243,13 @@ export class WebSerialControlPlaneClient {
     return payload as T
   }
 
-  private exchange(frame: UsbRequestFrame | UsbRuntimeConfigFrame) {
+  private exchange(
+    frame:
+      | UsbRequestFrame
+      | UsbRuntimeConfigFrame
+      | UsbHeaterCurveConfigFrame
+      | UsbHeaterCurveSaveFrame
+  ) {
     const port = this.requireOpenPort()
     if (!port.writable) {
       throw new ControlPlaneClientError(

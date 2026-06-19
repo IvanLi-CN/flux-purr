@@ -6,8 +6,8 @@ use crate::{
     frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey},
     memory::{
         ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationConfig,
-        AdcCalibrationSample, MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig,
-        adc_calibration_fit,
+        AdcCalibrationSample, HEATER_CURVE_MAX_POINTS, HeaterCurveConfig, HeaterCurvePoint,
+        MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, adc_calibration_fit,
     },
 };
 
@@ -130,6 +130,8 @@ pub struct ControlPlaneStatus {
     pub voltage_mv: u32,
     pub current_ma: u32,
     pub board_temp_centi: i32,
+    pub rtd_raw_adc_mv: u16,
+    pub vin_raw_adc_mv: u16,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdStateWire,
@@ -176,6 +178,8 @@ impl ControlPlaneStatus {
             voltage_mv: status.voltage_mv,
             current_ma: status.current_ma,
             board_temp_centi: status.board_temp_centi,
+            rtd_raw_adc_mv: status.rtd_raw_adc_mv,
+            vin_raw_adc_mv: status.vin_raw_adc_mv,
             pd_request_mv: status.pd_request_mv,
             pd_contract_mv: status.pd_contract_mv,
             pd_state: status.pd_state.into(),
@@ -432,6 +436,58 @@ pub struct CalibrationStateWire {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurvePointWire {
+    pub temp_centi_c: i16,
+    pub resistance_milliohms: u16,
+}
+
+impl From<HeaterCurvePoint> for HeaterCurvePointWire {
+    fn from(value: HeaterCurvePoint) -> Self {
+        Self {
+            temp_centi_c: value.temp_centi_c,
+            resistance_milliohms: value.resistance_milliohms,
+        }
+    }
+}
+
+impl From<HeaterCurvePointWire> for HeaterCurvePoint {
+    fn from(value: HeaterCurvePointWire) -> Self {
+        Self {
+            temp_centi_c: value.temp_centi_c,
+            resistance_milliohms: value.resistance_milliohms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurvePackageWire {
+    pub points: [Option<HeaterCurvePointWire>; HEATER_CURVE_MAX_POINTS],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveStateWire {
+    pub active: HeaterCurvePackageWire,
+    pub preview: Option<HeaterCurvePackageWire>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaterCurveConfigOp {
+    Preview,
+    ClearPreview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveConfigCommand {
+    pub op: HeaterCurveConfigOp,
+    pub package: Option<HeaterCurvePackageWire>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationConfigOp {
     Capture,
@@ -473,12 +529,40 @@ impl CalibrationPackageWire {
     }
 }
 
+impl HeaterCurvePackageWire {
+    pub fn from_memory(config: &HeaterCurveConfig) -> Self {
+        let mut points = [None; HEATER_CURVE_MAX_POINTS];
+        for (index, point) in config.points.into_iter().enumerate() {
+            points[index] = point.map(Into::into);
+        }
+        Self { points }
+    }
+
+    pub fn to_memory(self) -> HeaterCurveConfig {
+        let mut points = [None; HEATER_CURVE_MAX_POINTS];
+        for (index, point) in self.points.into_iter().enumerate() {
+            points[index] = point.map(Into::into);
+        }
+        HeaterCurveConfig { points }
+    }
+}
+
 pub fn calibration_state_from_memory(config: &MemoryConfig) -> CalibrationStateWire {
     CalibrationStateWire {
         active: CalibrationPackageWire::from_memory(&config.active_adc_calibration),
         draft: CalibrationPackageWire::from_memory(&config.draft_adc_calibration),
         active_fit: CalibrationFitsWire::from_memory(&config.active_adc_calibration),
         draft_fit: CalibrationFitsWire::from_memory(&config.draft_adc_calibration),
+    }
+}
+
+pub fn heater_curve_state_from_memory(
+    config: &MemoryConfig,
+    preview: Option<&HeaterCurveConfig>,
+) -> HeaterCurveStateWire {
+    HeaterCurveStateWire {
+        active: HeaterCurvePackageWire::from_memory(&config.active_heater_curve),
+        preview: preview.map(HeaterCurvePackageWire::from_memory),
     }
 }
 
@@ -550,6 +634,13 @@ pub enum UsbFrame {
     CalibrationApply {
         request_id: String<REQUEST_ID_MAX_LEN>,
     },
+    HeaterCurveConfig {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        config: HeaterCurveConfigCommand,
+    },
+    HeaterCurveSave {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+    },
     Response {
         request_id: String<REQUEST_ID_MAX_LEN>,
         ok: bool,
@@ -601,6 +692,7 @@ struct UsbFrameWire {
     expected_mv: Option<u16>,
     sample_index: Option<usize>,
     package: Option<CalibrationPackageWire>,
+    heater_curve: Option<HeaterCurvePackageWire>,
     ok: Option<bool>,
     result: Option<UsbResponsePayload>,
     error: Option<ApiError>,
@@ -663,6 +755,16 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
             "calibration_apply" => Ok(UsbFrame::CalibrationApply {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
             }),
+            "heater_curve_config" => Ok(UsbFrame::HeaterCurveConfig {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: HeaterCurveConfigCommand {
+                    op: parse_heater_curve_config_op(value.op.as_deref())?,
+                    package: value.heater_curve,
+                },
+            }),
+            "heater_curve_save" => Ok(UsbFrame::HeaterCurveSave {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+            }),
             "response" => Ok(UsbFrame::Response {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 ok: value.ok.ok_or(UsbFrameError::MalformedJson)?,
@@ -714,6 +816,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             expected_mv: None,
             sample_index: None,
             package: None,
+            heater_curve: None,
             ok: None,
             result: None,
             error: None,
@@ -777,6 +880,16 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.frame_type = string("calibration_apply");
                 wire.request_id = Some(request_id.clone());
             }
+            UsbFrame::HeaterCurveConfig { request_id, config } => {
+                wire.frame_type = string("heater_curve_config");
+                wire.request_id = Some(request_id.clone());
+                wire.op = Some(string(config.op.as_str()));
+                wire.heater_curve = config.package;
+            }
+            UsbFrame::HeaterCurveSave { request_id } => {
+                wire.frame_type = string("heater_curve_save");
+                wire.request_id = Some(request_id.clone());
+            }
             UsbFrame::Response {
                 request_id,
                 ok,
@@ -816,6 +929,7 @@ pub enum UsbRequestOp {
     GetNetwork,
     GetStatus,
     GetCalibration,
+    GetHeaterCurve,
     SetLogLevel,
 }
 
@@ -826,7 +940,17 @@ impl UsbRequestOp {
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
             Self::GetCalibration => "get_calibration",
+            Self::GetHeaterCurve => "get_heater_curve",
             Self::SetLogLevel => "set_log_level",
+        }
+    }
+}
+
+impl HeaterCurveConfigOp {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Preview => "preview",
+            Self::ClearPreview => "clear_preview",
         }
     }
 }
@@ -859,6 +983,7 @@ pub enum UsbResponsePayload {
     Status(ControlPlaneStatus),
     Wifi(RedactedWifiConfig),
     Calibration(CalibrationStateWire),
+    HeaterCurve(HeaterCurveStateWire),
     Ack,
 }
 
@@ -955,7 +1080,16 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
+        Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
+        _ => Err(UsbFrameError::MalformedJson),
+    }
+}
+
+fn parse_heater_curve_config_op(value: Option<&str>) -> Result<HeaterCurveConfigOp, UsbFrameError> {
+    match value {
+        Some("preview") => Ok(HeaterCurveConfigOp::Preview),
+        Some("clear_preview") => Ok(HeaterCurveConfigOp::ClearPreview),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }

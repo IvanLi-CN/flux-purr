@@ -61,6 +61,8 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "voltageMv": 20010,
   "currentMa": 840,
   "boardTempCenti": 3840,
+  "rtdRawAdcMv": 1123,
+  "vinRawAdcMv": 1678,
   "pdRequestMv": 20000,
   "pdContractMv": 20000,
   "pdState": "ready",
@@ -80,6 +82,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `fanDisplayState`: `OFF | AUTO | RUN`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept.
+`rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
 
 ### `CalibrationState`
 
@@ -105,6 +108,28 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 ```
 
 Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples. Capture commands accept physical references (`referenceTempC` or `referenceVinMv`) and convert them into expected ADC millivolts using the RTD/PT1000 or VIN divider model. Import replaces the full draft package.
+
+### `HeaterCurveState`
+
+```json
+{
+  "active": {
+    "points": [
+      { "tempCentiC": 13977, "resistanceMilliohms": 6033 },
+      { "tempCentiC": 18153, "resistanceMilliohms": 6522 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "preview": null
+}
+```
+
+Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in EEPROM and restored after reboot.
 
 ### `FirmwareArtifact`
 
@@ -237,6 +262,9 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `PUT /api/v1/devices/:id/runtime`
 - `PUT /api/v1/devices/:id/calibration`
 - `POST /api/v1/devices/:id/calibration/apply`
+- `GET /api/v1/devices/:id/heater-curve?lease_id=...`
+- `PUT /api/v1/devices/:id/heater-curve`
+- `POST /api/v1/devices/:id/heater-curve/save`
 - `GET /api/v1/artifacts`
 - `POST /api/v1/artifacts/verify`
 - `POST /api/v1/devices/:id/flash`
@@ -295,6 +323,39 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 ```
 
 Apply copies draft calibration to active calibration and returns the updated `CalibrationState`. It is rejected with `calibration_apply_heater_active` when the heater is enabled or output is nonzero.
+
+`PUT /api/v1/devices/:id/heater-curve` body:
+
+```json
+{
+  "leaseId": "lease-001",
+  "op": "preview",
+  "package": {
+    "points": [
+      { "tempCentiC": 13977, "resistanceMilliohms": 6033 },
+      { "tempCentiC": 18153, "resistanceMilliohms": 6522 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  }
+}
+```
+
+`op` is `preview | clear_preview`. Preview updates runtime heater curve state without writing EEPROM.
+
+`POST /api/v1/devices/:id/heater-curve/save` body:
+
+```json
+{
+  "leaseId": "lease-001"
+}
+```
+
+Save copies the preview curve to active curve and schedules EEPROM persistence. If no preview exists, the request is rejected with `heater_curve_preview_required`.
 
 `GET /api/v1/artifacts` response:
 
@@ -368,7 +429,7 @@ Core commands:
 - `flux-purr runtime get|set --device <id> ...`
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
-- `flux-purr calibration get|capture|delete|clear|import|export|apply --device <id>` or `--hardware <saved-id>`
+- `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr wifi set|clear --device <id> ...`
 - `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
 - `flux-purr monitor --device <id>`
@@ -540,6 +601,41 @@ Supported operations are `capture`, `delete`, `clear`, and `import`. The respons
 ```
 
 The response returns `CalibrationState`, or `calibration_apply_heater_active` when applying would change active calibration while heater output is active.
+
+### `heater_curve_config`
+
+```json
+{
+  "type": "heater_curve_config",
+  "requestId": "req-006",
+  "op": "preview",
+  "heaterCurve": {
+    "points": [
+      { "tempCentiC": 13977, "resistanceMilliohms": 6033 },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  }
+}
+```
+
+Supported operations are `preview` and `clear_preview`. The response returns `HeaterCurveState`.
+
+### `heater_curve_save`
+
+```json
+{
+  "type": "heater_curve_save",
+  "requestId": "req-007"
+}
+```
+
+The response returns `HeaterCurveState`. Saved `active` curve is restored from EEPROM after reboot; preview is not restored.
 
 ### `error`
 

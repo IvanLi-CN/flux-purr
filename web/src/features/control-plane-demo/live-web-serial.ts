@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DirectRuntimeConfigRequest } from './contracts'
+import type { DirectRuntimeConfigRequest, HeaterCurvePackage, HeaterCurveState } from './contracts'
 import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 import {
   getBrowserSerial,
@@ -24,6 +24,10 @@ export interface LiveWebSerialControls {
   connect: () => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
+  getHeaterCurve: () => Promise<HeaterCurveState>
+  previewHeaterCurve: (heaterCurve: HeaterCurvePackage) => Promise<HeaterCurveState>
+  clearHeaterCurvePreview: () => Promise<HeaterCurveState>
+  saveHeaterCurve: () => Promise<HeaterCurveState>
 }
 
 export function useLiveWebSerialScenario(
@@ -180,6 +184,71 @@ export function useLiveWebSerialScenario(
     [appendEvent]
   )
 
+  const requireClient = useCallback(() => {
+    const client = clientRef.current
+    if (!client) {
+      const message = 'Web Serial port is not connected.'
+      setError(message)
+      throw new Error(message)
+    }
+    return client
+  }, [])
+
+  const getHeaterCurve = useCallback(async () => {
+    try {
+      const heaterCurve = await requireClient().getHeaterCurve()
+      appendEvent('heater curve read over browser Web Serial', 'success')
+      return heaterCurve
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Web Serial heater curve read failed.')
+      setState('error')
+      appendEvent('browser Web Serial heater curve read failed', 'warning')
+      throw error
+    }
+  }, [appendEvent, requireClient])
+
+  const previewHeaterCurve = useCallback(
+    async (heaterCurve: HeaterCurvePackage) => {
+      try {
+        const next = await requireClient().previewHeaterCurve(heaterCurve)
+        appendEvent('heater curve preview accepted over browser Web Serial', 'success')
+        return next
+      } catch (error) {
+        setError(error instanceof Error ? error.message : 'Web Serial heater curve preview failed.')
+        setState('error')
+        appendEvent('browser Web Serial heater curve preview failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient]
+  )
+
+  const clearHeaterCurvePreview = useCallback(async () => {
+    try {
+      const next = await requireClient().clearHeaterCurvePreview()
+      appendEvent('heater curve preview cleared over browser Web Serial', 'info')
+      return next
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Web Serial heater curve clear failed.')
+      setState('error')
+      appendEvent('browser Web Serial heater curve clear failed', 'warning')
+      throw error
+    }
+  }, [appendEvent, requireClient])
+
+  const saveHeaterCurve = useCallback(async () => {
+    try {
+      const next = await requireClient().saveHeaterCurve()
+      appendEvent('heater curve saved over browser Web Serial', 'success')
+      return next
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Web Serial heater curve save failed.')
+      setState('error')
+      appendEvent('browser Web Serial heater curve save failed', 'warning')
+      throw error
+    }
+  }, [appendEvent, requireClient])
+
   useEffect(() => {
     if (state !== 'connected') {
       return
@@ -221,9 +290,8 @@ export function useLiveWebSerialScenario(
     }
   }, [device, events, scenario])
 
-  return {
-    scenario: serialScenario,
-    serial: {
+  const serial = useMemo(
+    () => ({
       state,
       supported,
       error,
@@ -231,6 +299,28 @@ export function useLiveWebSerialScenario(
       connect,
       disconnect,
       configureRuntime,
-    },
+      getHeaterCurve,
+      previewHeaterCurve,
+      clearHeaterCurvePreview,
+      saveHeaterCurve,
+    }),
+    [
+      clearHeaterCurvePreview,
+      configureRuntime,
+      connect,
+      device?.id,
+      disconnect,
+      error,
+      getHeaterCurve,
+      previewHeaterCurve,
+      saveHeaterCurve,
+      state,
+      supported,
+    ]
+  )
+
+  return {
+    scenario: serialScenario,
+    serial,
   }
 }

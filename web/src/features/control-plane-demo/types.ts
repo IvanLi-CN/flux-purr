@@ -1,4 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
+import type { HeaterCurveState } from './contracts'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
 export type DeviceSeverity = 'nominal' | 'warning' | 'offline'
@@ -41,6 +42,7 @@ export interface DeviceTarget {
   leaseState?: 'none' | 'active' | 'conflict' | 'expired'
   leaseId?: string
   transportIssue?: string
+  heaterCurve?: HeaterCurveState
 }
 
 export interface ControlPlaneMetric {

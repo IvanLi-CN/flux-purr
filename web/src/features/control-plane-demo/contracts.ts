@@ -207,6 +207,26 @@ export interface CalibrationConfigRequest {
   package?: CalibrationPackage
 }
 
+export interface HeaterCurvePoint {
+  tempCentiC: number
+  resistanceMilliohms: number
+}
+
+export interface HeaterCurvePackage {
+  points: Array<HeaterCurvePoint | null>
+}
+
+export interface HeaterCurveState {
+  active: HeaterCurvePackage
+  preview: HeaterCurvePackage | null
+}
+
+export interface HeaterCurveConfigRequest {
+  leaseId: string
+  op: 'preview' | 'clear_preview'
+  package?: HeaterCurvePackage
+}
+
 export interface FirmwareArtifactManifest {
   artifactId: string
   name: string
@@ -258,7 +278,7 @@ export interface FlashResult {
 export interface UsbRequestFrame {
   type: 'request'
   requestId: string
-  op: 'get_identity' | 'get_network' | 'get_status' | 'set_log_level'
+  op: 'get_identity' | 'get_network' | 'get_status' | 'get_heater_curve' | 'set_log_level'
 }
 
 export interface UsbWifiConfigFrame {
@@ -282,4 +302,16 @@ export interface UsbRuntimeConfigFrame {
   manualPpsEnabled?: boolean
   manualPpsMv?: number
   manualPpsMa?: number
+}
+
+export interface UsbHeaterCurveConfigFrame {
+  type: 'heater_curve_config'
+  requestId: string
+  op: 'preview' | 'clear_preview'
+  heaterCurve?: HeaterCurvePackage
+}
+
+export interface UsbHeaterCurveSaveFrame {
+  type: 'heater_curve_save'
+  requestId: string
 }
