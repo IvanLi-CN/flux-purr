@@ -50,12 +50,13 @@ use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     ApiError, ControlPlaneStatus, Identity, RuntimeConfigCommand, UsbFrame, UsbFrameError,
-    UsbRequestOp, UsbResponsePayload, calibration_state_from_memory, network_from_memory,
-    parse_usb_frame, write_usb_frame,
+    UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
+    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
     CalibrationChannelWire, CalibrationConfigCommand, CalibrationConfigOp,
+    HeaterCurveConfigCommand, HeaterCurveConfigOp,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{hello_frame, log_frame};
@@ -66,10 +67,12 @@ use flux_purr_firmware::frontpanel::{
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::memory::AdcCalibrationSample;
-#[cfg(any(target_arch = "xtensa", test))]
-use flux_purr_firmware::memory::MemoryConfig;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
+#[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::memory::{
+    HeaterCurveConfig, MemoryConfig, heater_resistance_ohms_from_curve,
+};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     M24C64_PAGE_SIZE, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
@@ -1564,6 +1567,7 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         telemetry_interval_ms: previous.telemetry_interval_ms,
         active_adc_calibration: previous.active_adc_calibration,
         draft_adc_calibration: previous.draft_adc_calibration,
+        active_heater_curve: previous.active_heater_curve,
     }
 }
 
@@ -1573,9 +1577,23 @@ fn floor_mv_to_100mv(millivolts: u16) -> u16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn estimated_heater_resistance_ohms(current_temp_c: f32) -> f32 {
+fn default_estimated_heater_resistance_ohms(current_temp_c: f32) -> f32 {
     HEATER_PROFILE_R20_OHMS
         * (1.0 + HEATER_PROFILE_TEMP_COEFFICIENT_PER_C * (current_temp_c - 20.0))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn estimated_heater_resistance_ohms(
+    current_temp_c: f32,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> f32 {
+    preview_heater_curve
+        .and_then(|curve| heater_resistance_ohms_from_curve(curve, current_temp_c))
+        .or_else(|| {
+            heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
+        })
+        .unwrap_or_else(|| default_estimated_heater_resistance_ohms(current_temp_c))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1600,15 +1618,18 @@ fn heater_safe_max_mv_for_temp(
     current_temp_c: f32,
     effective_current_limit_ma: u16,
     source_voltage_max_mv: u16,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
 ) -> u16 {
     if effective_current_limit_ma == 0 {
         return 0;
     }
 
-    let estimated_mv = (estimated_heater_resistance_ohms(current_temp_c)
-        * f32::from(effective_current_limit_ma))
-    .max(0.0)
-    .min(f32::from(u16::MAX)) as u16;
+    let estimated_mv =
+        (estimated_heater_resistance_ohms(current_temp_c, preview_heater_curve, memory_config)
+            * f32::from(effective_current_limit_ma))
+        .max(0.0)
+        .min(f32::from(u16::MAX)) as u16;
     floor_mv_to_100mv(estimated_mv).min(source_voltage_max_mv)
 }
 
@@ -1652,13 +1673,21 @@ fn current_limit_fixed_pwm_duty_percent(
     duty_percent: u8,
     current_temp_c: f32,
     effective_current_limit_ma: u16,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
 ) -> u8 {
     let fixed_mv = HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts();
     if duty_percent == 0 || fixed_mv == 0 {
         return 0;
     }
 
-    let safe_mv = heater_safe_max_mv_for_temp(current_temp_c, effective_current_limit_ma, fixed_mv);
+    let safe_mv = heater_safe_max_mv_for_temp(
+        current_temp_c,
+        effective_current_limit_ma,
+        fixed_mv,
+        preview_heater_curve,
+        memory_config,
+    );
     let capped_percent = (u32::from(safe_mv) * 100 / u32::from(fixed_mv)).min(100) as u8;
     duty_percent.min(capped_percent)
 }
@@ -1776,6 +1805,8 @@ async fn apply_heater_power_output<PWM>(
     current_temp_c: f32,
     duty_percent: u8,
     last_physical_duty_percent: &mut u8,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
 ) -> bool
 where
     PWM: SetDutyCycle,
@@ -1904,6 +1935,8 @@ where
                 current_temp_c,
                 effective_current_limit_ma,
                 adjustable_max_mv,
+                preview_heater_curve,
+                memory_config,
             );
             let current_limit_fixed_pwm_active = should_apply_current_limit_fixed_pwm_fallback(
                 duty_percent,
@@ -1945,6 +1978,8 @@ where
                     duty_percent,
                     current_temp_c,
                     effective_current_limit_ma,
+                    preview_heater_curve,
+                    memory_config,
                 );
                 apply_heater_duty(
                     heater_pwm,
@@ -2157,6 +2192,8 @@ struct UsbRuntimeStatusContext {
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     last_raw_state: FrontPanelRawState,
+    latest_rtd_raw_adc_mv: u16,
+    latest_vin_raw_adc_mv: u16,
     vin_mv: u32,
 }
 
@@ -2205,6 +2242,8 @@ fn usb_runtime_status(
                     .unwrap_or(0),
             ),
             board_temp_centi: i32::from(ui_state.current_temp_deci_c) * 10,
+            rtd_raw_adc_mv: 0,
+            vin_raw_adc_mv: 0,
             pd_request_mv: context
                 .manual_pps
                 .target_mv
@@ -2221,6 +2260,8 @@ fn usb_runtime_status(
         (context.elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
         network_from_memory(memory_config),
     );
+    status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
+    status.vin_raw_adc_mv = context.latest_vin_raw_adc_mv;
     status.manual_pps_enabled = context.manual_pps.enabled;
     status.manual_pps_mv = context.manual_pps.target_mv;
     status.manual_pps_ma = context.manual_pps.target_ma;
@@ -2430,6 +2471,41 @@ fn usb_calibration_apply_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_heater_curve_config_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    config: HeaterCurveConfigCommand,
+    memory_config: &MemoryConfig,
+    preview_heater_curve: &mut Option<HeaterCurveConfig>,
+) -> UsbFrame {
+    match config.op {
+        HeaterCurveConfigOp::Preview => {
+            let Some(package) = config.package else {
+                return usb_error_response(
+                    request_id,
+                    "heater_curve_package_required",
+                    "Heater curve preview requires a package.",
+                );
+            };
+            let mut curve = package.to_memory();
+            curve.points.sort_unstable_by_key(|point| {
+                point.map(|point| point.temp_centi_c).unwrap_or(i16::MAX)
+            });
+            *preview_heater_curve = Some(curve);
+        }
+        HeaterCurveConfigOp::ClearPreview => {
+            *preview_heater_curve = None;
+        }
+    }
+    usb_response(
+        request_id,
+        UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+            memory_config,
+            preview_heater_curve.as_ref(),
+        )),
+    )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn expected_calibration_adc_mv(
     config: &CalibrationConfigCommand,
     channel: CalibrationChannelWire,
@@ -2612,6 +2688,13 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 request_id,
                 UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
             ),
+            UsbRequestOp::GetHeaterCurve => usb_response(
+                request_id,
+                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+                    memory_config,
+                    None,
+                )),
+            ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
             UsbRequestOp::GetStatus => usb_error_response_with_retryable(
                 request_id,
@@ -2719,6 +2802,8 @@ fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Control
             voltage_mv: 0,
             current_ma: 0,
             board_temp_centi: 0,
+            rtd_raw_adc_mv: 0,
+            vin_raw_adc_mv: 0,
             pd_request_mv: DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
             pd_contract_mv: 0,
             pd_state: PdState::Fault,
@@ -2752,6 +2837,13 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
             UsbRequestOp::GetCalibration => usb_response(
                 request_id,
                 UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+            ),
+            UsbRequestOp::GetHeaterCurve => usb_response(
+                request_id,
+                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+                    memory_config,
+                    None,
+                )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         },
@@ -2795,6 +2887,7 @@ fn handle_usb_control_line(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
+    preview_heater_curve: &mut Option<HeaterCurveConfig>,
     memory_commit_due_ms: &mut Option<u64>,
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
@@ -2816,6 +2909,8 @@ fn handle_usb_control_line(
         fan_command,
         current_rtd_fault,
         last_raw_state,
+        latest_rtd_raw_adc_mv,
+        latest_vin_raw_adc_mv,
         vin_mv: latest_vin_mv,
     };
     let response = match parse_usb_frame(line) {
@@ -2839,6 +2934,13 @@ fn handle_usb_control_line(
             UsbRequestOp::GetCalibration => usb_response(
                 request_id,
                 UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+            ),
+            UsbRequestOp::GetHeaterCurve => usb_response(
+                request_id,
+                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+                    memory_config,
+                    preview_heater_curve.as_ref(),
+                )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         },
@@ -2889,6 +2991,32 @@ fn handle_usb_control_line(
                 *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
             response
+        }
+        Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => usb_heater_curve_config_response(
+            request_id,
+            config,
+            memory_config,
+            preview_heater_curve,
+        ),
+        Ok(UsbFrame::HeaterCurveSave { request_id }) => {
+            if let Some(preview) = *preview_heater_curve {
+                memory_config.active_heater_curve = preview;
+                memory_config.sanitize();
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                usb_response(
+                    request_id,
+                    UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
+                        memory_config,
+                        preview_heater_curve.as_ref(),
+                    )),
+                )
+            } else {
+                usb_error_response(
+                    request_id,
+                    "heater_curve_preview_required",
+                    "Heater curve save requires an active preview package.",
+                )
+            }
         }
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
@@ -3416,6 +3544,7 @@ async fn main(_spawner: Spawner) {
         .as_ref()
         .map(|record| record.config.clone())
         .unwrap_or_default();
+    let mut preview_heater_curve: Option<HeaterCurveConfig> = None;
     let mut memory_sequence = restored_memory_record
         .as_ref()
         .map(|record| record.sequence)
@@ -3698,6 +3827,8 @@ async fn main(_spawner: Spawner) {
         latest_temp_c,
         0,
         &mut last_heater_duty,
+        preview_heater_curve.as_ref(),
+        &memory_config,
     )
     .await;
     ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
@@ -3777,6 +3908,7 @@ async fn main(_spawner: Spawner) {
                         &mut usb_tx_buf,
                         &mut ui_state,
                         &mut memory_config,
+                        &mut preview_heater_curve,
                         &mut memory_commit_due_ms,
                         elapsed_ms,
                         last_pd_observation,
@@ -4111,6 +4243,8 @@ async fn main(_spawner: Spawner) {
                 latest_temp_c,
                 pid_snapshot.duty_percent,
                 &mut last_heater_duty,
+                preview_heater_curve.as_ref(),
+                &memory_config,
             )
             .await
             {
@@ -4130,9 +4264,10 @@ async fn main(_spawner: Spawner) {
             }
 
             info!(
-                "heater loop set_c={=i16} temp_c={=f32} control={=u8}% pd_mv={=u16} backend={=str} mos_gate={=u8}% error_c={=f32} control_error_c={=f32} temp_avg_c={=f32} phase={=str} arm={=bool} fault={=str}",
+                "heater loop set_c={=i16} temp_c={=f32} control={=u8}% physical={=u8}% pd_mv={=u16} backend={=str} mos_gate={=u8}% error_c={=f32} control_error_c={=f32} temp_avg_c={=f32} phase={=str} arm={=bool} fault={=str}",
                 ui_state.target_temp_c,
                 latest_temp_c,
+                pid_snapshot.duty_percent,
                 pid_snapshot.duty_percent,
                 next_pd_contract_mv,
                 heater_power_backend.label(),
@@ -4205,6 +4340,8 @@ async fn main(_spawner: Spawner) {
                 latest_temp_c,
                 0,
                 &mut last_heater_duty,
+                preview_heater_curve.as_ref(),
+                &memory_config,
             )
             .await;
             let next_pd_contract_mv = heater_power_backend.pd_contract_mv();
@@ -4525,6 +4662,8 @@ mod tests {
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
+                latest_rtd_raw_adc_mv: 0,
+                latest_vin_raw_adc_mv: 0,
                 vin_mv: 20_000,
             },
         );
@@ -4599,6 +4738,8 @@ mod tests {
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
+                latest_rtd_raw_adc_mv: 0,
+                latest_vin_raw_adc_mv: 0,
                 vin_mv: 20_000,
             },
         );
@@ -4852,18 +4993,42 @@ mod tests {
 
     #[test]
     fn heater_safe_max_matches_65w_temperature_limits() {
-        assert_eq!(heater_safe_max_mv_for_temp(0.0, 3_250, 21_000), 9_500);
-        assert_eq!(heater_safe_max_mv_for_temp(20.0, 3_250, 21_000), 10_400);
-        assert_eq!(heater_safe_max_mv_for_temp(60.0, 3_250, 21_000), 12_000);
-        assert_eq!(heater_safe_max_mv_for_temp(85.0, 3_250, 21_000), 13_000);
-        assert_eq!(heater_safe_max_mv_for_temp(165.0, 3_250, 21_000), 16_300);
-        assert_eq!(heater_safe_max_mv_for_temp(296.0, 3_250, 21_000), 21_000);
+        assert_eq!(
+            heater_safe_max_mv_for_temp(0.0, 3_250, 21_000, None, &MemoryConfig::default()),
+            9_500
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(20.0, 3_250, 21_000, None, &MemoryConfig::default()),
+            10_400
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(60.0, 3_250, 21_000, None, &MemoryConfig::default()),
+            12_000
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(85.0, 3_250, 21_000, None, &MemoryConfig::default()),
+            13_000
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(165.0, 3_250, 21_000, None, &MemoryConfig::default()),
+            16_300
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(296.0, 3_250, 21_000, None, &MemoryConfig::default()),
+            21_000
+        );
     }
 
     #[test]
     fn heater_safe_max_preserves_higher_power_sources() {
-        assert_eq!(heater_safe_max_mv_for_temp(20.0, 5_000, 24_000), 16_000);
-        assert_eq!(heater_safe_max_mv_for_temp(165.0, 5_000, 24_000), 24_000);
+        assert_eq!(
+            heater_safe_max_mv_for_temp(20.0, 5_000, 24_000, None, &MemoryConfig::default()),
+            16_000
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(165.0, 5_000, 24_000, None, &MemoryConfig::default()),
+            24_000
+        );
     }
 
     #[test]
@@ -4922,17 +5087,38 @@ mod tests {
 
     #[test]
     fn current_limit_fixed_pwm_fallback_caps_low_current_duty() {
-        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 20.0, 1_000), 35);
-        assert_eq!(current_limit_fixed_pwm_duty_percent(50, 20.0, 1_000), 35);
-        assert_eq!(current_limit_fixed_pwm_duty_percent(20, 20.0, 1_000), 20);
-        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 20.0, 0), 0);
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(100, 20.0, 1_000, None, &MemoryConfig::default()),
+            35
+        );
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(50, 20.0, 1_000, None, &MemoryConfig::default()),
+            35
+        );
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(20, 20.0, 1_000, None, &MemoryConfig::default()),
+            20
+        );
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(100, 20.0, 0, None, &MemoryConfig::default()),
+            0
+        );
     }
 
     #[test]
     fn current_limit_fixed_pwm_fallback_preserves_65w_duty() {
-        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 0.0, 3_250), 100);
-        assert_eq!(current_limit_fixed_pwm_duty_percent(100, 20.0, 3_250), 100);
-        assert_eq!(current_limit_fixed_pwm_duty_percent(42, 20.0, 3_250), 42);
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(100, 0.0, 3_250, None, &MemoryConfig::default()),
+            100
+        );
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(100, 20.0, 3_250, None, &MemoryConfig::default()),
+            100
+        );
+        assert_eq!(
+            current_limit_fixed_pwm_duty_percent(42, 20.0, 3_250, None, &MemoryConfig::default()),
+            42
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@ pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
+const HEATER_CURVE_MAX_POINTS: usize = 8;
 const RTD_DEFAULT_HIGH_MV: u16 = 2_800;
 const VIN_DEFAULT_HIGH_MV: u16 = 2_337;
 const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
@@ -194,8 +195,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: AppConfig) -> Self {
         let (events, _) = broadcast::channel(DEFAULT_EVENT_LIMIT);
-        let mut state = DevdState::default();
-        state.seed_mock_device();
+        let state = DevdState::default();
 
         Self {
             config,
@@ -207,7 +207,13 @@ impl AppState {
     }
 
     pub fn test() -> Self {
-        Self::new(AppConfig::default())
+        let state = Self::new(AppConfig::default());
+        state
+            .inner
+            .lock()
+            .expect("test devd state lock")
+            .seed_mock_device();
+        state
     }
 
     pub fn lease_device(&self, device_id: &str) -> Result<WebLease, HttpError> {
@@ -333,6 +339,7 @@ pub struct DeviceRecord {
     pub network: NetworkSummary,
     pub status: ControlPlaneStatus,
     pub calibration: CalibrationState,
+    pub heater_curve: HeaterCurveState,
     pub selected_artifact_id: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
@@ -397,6 +404,8 @@ impl DeviceRecord {
             voltage_mv: 20_010,
             current_ma: 840,
             board_temp_centi: 3_840,
+            rtd_raw_adc_mv: Some(1_123),
+            vin_raw_adc_mv: Some(1_678),
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: DEFAULT_PD_REQUEST_MV,
             pd_state: "ready".to_string(),
@@ -421,6 +430,7 @@ impl DeviceRecord {
             network,
             status,
             calibration: CalibrationState::default(),
+            heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -503,6 +513,10 @@ pub struct ControlPlaneStatus {
     pub voltage_mv: u32,
     pub current_ma: u32,
     pub board_temp_centi: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vin_raw_adc_mv: Option<u16>,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: String,
@@ -570,11 +584,48 @@ pub struct CalibrationState {
     pub draft_fit: CalibrationFits,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurvePoint {
+    pub temp_centi_c: i16,
+    pub resistance_milliohms: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurvePackage {
+    pub points: Vec<Option<HeaterCurvePoint>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveState {
+    pub active: HeaterCurvePackage,
+    pub preview: Option<HeaterCurvePackage>,
+}
+
 impl Default for CalibrationPackage {
     fn default() -> Self {
         Self {
             rtd_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
             vin_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+        }
+    }
+}
+
+impl Default for HeaterCurvePackage {
+    fn default() -> Self {
+        Self {
+            points: vec![None; HEATER_CURVE_MAX_POINTS],
+        }
+    }
+}
+
+impl Default for HeaterCurveState {
+    fn default() -> Self {
+        Self {
+            active: HeaterCurvePackage::default(),
+            preview: None,
         }
     }
 }
@@ -812,6 +863,20 @@ pub struct CalibrationApplyRequest {
     pub lease_id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveConfigRequest {
+    pub lease_id: String,
+    pub op: HeaterCurveConfigOp,
+    pub package: Option<HeaterCurvePackage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveSaveRequest {
+    pub lease_id: String,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationConfigOp {
@@ -819,6 +884,13 @@ pub enum CalibrationConfigOp {
     Delete,
     Clear,
     Import,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaterCurveConfigOp {
+    Preview,
+    ClearPreview,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -913,6 +985,25 @@ struct UsbCalibrationConfigWire<'a> {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsbCalibrationApplyWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbHeaterCurveConfigWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: HeaterCurveConfigOp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heater_curve: Option<&'a HeaterCurvePackage>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbHeaterCurveSaveWire<'a> {
     #[serde(rename = "type")]
     frame_type: &'static str,
     request_id: &'a str,
@@ -1107,6 +1198,14 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/calibration/apply",
             post(apply_calibration),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/heater-curve",
+            get(device_heater_curve).put(configure_heater_curve),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/heater-curve/save",
+            post(save_heater_curve),
         )
         .route("/api/v1/artifacts", get(list_artifacts_route))
         .route("/api/v1/artifacts/verify", post(verify_artifact_route))
@@ -1528,6 +1627,142 @@ async fn apply_calibration(
     Ok(Json(calibration))
 }
 
+async fn device_heater_curve(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<HeaterCurveState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let heater_curve = match serial_heater_curve_get(&state, &target).await {
+            Ok(heater_curve) => heater_curve,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "heater_curve", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.heater_curve = heater_curve.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(heater_curve));
+    }
+
+    Ok(Json(target.heater_curve))
+}
+
+async fn configure_heater_curve(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<HeaterCurveConfigRequest>,
+) -> Result<Json<HeaterCurveState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let heater_curve = match serial_heater_curve_config(&state, &target, &payload).await {
+            Ok(heater_curve) => heater_curve,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "heater_curve_config", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.heater_curve = heater_curve.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(heater_curve));
+    }
+
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    match payload.op {
+        HeaterCurveConfigOp::Preview => {
+            let package = payload.package.clone().ok_or_else(|| {
+                HttpError::bad_request(
+                    "heater_curve_package_required",
+                    "Heater curve preview requires a package.",
+                )
+            })?;
+            validate_heater_curve_package(&package)?;
+            device.heater_curve.preview = Some(normalize_heater_curve_package(package));
+        }
+        HeaterCurveConfigOp::ClearPreview => {
+            device.heater_curve.preview = None;
+        }
+    }
+    Ok(Json(device.heater_curve.clone()))
+}
+
+async fn save_heater_curve(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<HeaterCurveSaveRequest>,
+) -> Result<Json<HeaterCurveState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let heater_curve = match serial_heater_curve_save(&state, &target).await {
+            Ok(heater_curve) => heater_curve,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "heater_curve_save", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.heater_curve = heater_curve.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(heater_curve));
+    }
+
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    let preview = device.heater_curve.preview.clone().ok_or_else(|| {
+        HttpError::bad_request(
+            "heater_curve_preview_required",
+            "Heater curve save requires an active preview package.",
+        )
+    })?;
+    device.heater_curve.active = preview;
+    Ok(Json(device.heater_curve.clone()))
+}
+
 async fn device_events(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -1911,6 +2146,24 @@ fn normalize_calibration_package(mut package: CalibrationPackage) -> Calibration
     package
 }
 
+fn validate_heater_curve_package(package: &HeaterCurvePackage) -> Result<(), HttpError> {
+    if package.points.len() > HEATER_CURVE_MAX_POINTS {
+        return Err(HttpError::bad_request(
+            "heater_curve_package_too_large",
+            "Heater curve supports at most 8 points.",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_heater_curve_package(mut package: HeaterCurvePackage) -> HeaterCurvePackage {
+    package
+        .points
+        .sort_by_key(|point| point.map(|point| point.temp_centi_c).unwrap_or(i16::MAX));
+    package.points.resize(HEATER_CURVE_MAX_POINTS, None);
+    package
+}
+
 fn mock_observed_adc_mv(channel: CalibrationChannel) -> u16 {
     match channel {
         CalibrationChannel::RtdAdc => 1_120,
@@ -2111,6 +2364,53 @@ async fn serial_calibration_apply(
     .map_err(|_| HttpError::internal("failed to encode USB calibration apply request"))?;
     let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
     extract_usb_payload(result, "calibration")
+}
+
+async fn serial_heater_curve_get(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<HeaterCurveState, HttpError> {
+    serial_request_payload::<HeaterCurveState>(state, target, "get_heater_curve", "heater_curve")
+        .await
+}
+
+async fn serial_heater_curve_config(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &HeaterCurveConfigRequest,
+) -> Result<HeaterCurveState, HttpError> {
+    let package = if let Some(package) = payload.package.as_ref() {
+        validate_heater_curve_package(package)?;
+        Some(normalize_heater_curve_package(package.clone()))
+    } else {
+        None
+    };
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-heater-curve", now_millis());
+    let request = serde_json::to_string(&UsbHeaterCurveConfigWire {
+        frame_type: "heater_curve_config",
+        request_id: &request_id,
+        op: payload.op,
+        heater_curve: package.as_ref(),
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB heater curve request"))?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    extract_usb_payload(result, "heater_curve")
+}
+
+async fn serial_heater_curve_save(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<HeaterCurveState, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-heater-curve-save", now_millis());
+    let request = serde_json::to_string(&UsbHeaterCurveSaveWire {
+        frame_type: "heater_curve_save",
+        request_id: &request_id,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB heater curve save request"))?;
+    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    extract_usb_payload(result, "heater_curve")
 }
 
 async fn serial_exchange(

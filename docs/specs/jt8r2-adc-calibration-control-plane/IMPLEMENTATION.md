@@ -6,6 +6,7 @@
 - `adc_calibration_fit` 按 `0/1/>=2` custom point 规则计算线性 gain/offset；`correct_adc_mv` 在 ADC 域修正 observed millivolts。
 - RTD raw ADC 先用于开路/短路故障判断，再对有效 ADC 读数应用 active calibration 并换算温度。
 - VIN ADC 由 `GPIO1` 采样，active calibration 后按分压比换算为 `status.voltageMv`。
+- Runtime status now also exposes latest raw RTD/VIN ADC millivolts so host-side calibration data packet collection can record uncalibrated samples alongside calibrated status.
 - USB JSONL 支持 `get_calibration`、`calibration_config` 与 `calibration_apply`；启动/恢复窗口对 mutating calibration frame 返回可重试 busy/error。
 - `devd` exposes `GET|PUT /api/v1/devices/:id/calibration` and `POST /api/v1/devices/:id/calibration/apply` with mock and native serial paths.
 - `flux-purr calibration` 支持 get/capture/delete/clear/import/export/apply。
@@ -25,4 +26,3 @@
 
 - 真机校准需要主人授权具体 USB 端口后执行 HIL smoke。
 - 前面板本机校准菜单不属于当前控制面。
-

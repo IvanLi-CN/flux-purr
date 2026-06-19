@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs::{self, File},
+    io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -45,6 +46,10 @@ enum Command {
     Calibration {
         #[command(subcommand)]
         command: CalibrationCommand,
+    },
+    HeaterCurve {
+        #[command(subcommand)]
+        command: HeaterCurveCommand,
     },
     Flash(FlashArgs),
     Monitor(MonitorArgs),
@@ -141,6 +146,24 @@ enum CalibrationCommand {
     Import(CalibrationImportArgs),
     Export(CalibrationExportArgs),
     Apply(TargetSelector),
+    Collect(CalibrationCollectArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum HeaterCurveCommand {
+    Get(TargetSelector),
+    Preview(HeaterCurveFileArgs),
+    ClearPreview(TargetSelector),
+    Save(TargetSelector),
+    Export(HeaterCurveFileArgs),
+}
+
+#[derive(Debug, Args)]
+struct HeaterCurveFileArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    file: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -193,6 +216,56 @@ struct CalibrationExportArgs {
     target: TargetSelector,
     #[arg(long)]
     file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationCollectArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(
+        long = "source-current-a",
+        alias = "current-a",
+        help = "External bench source current in amps, using decimal notation."
+    )]
+    source_current_a: String,
+    #[arg(
+        long = "source-device-id",
+        default_value = "856a14",
+        help = "External bench source device id recorded in the output package."
+    )]
+    source_device_id: String,
+    #[arg(
+        long = "target-temp-c",
+        default_value_t = 270,
+        help = "Heater target temperature used to avoid hold logic during capture."
+    )]
+    target_temp_c: i16,
+    #[arg(
+        long = "stop-temp-c",
+        default_value_t = 250.0,
+        help = "Temperature at which the script automatically disables heating."
+    )]
+    stop_temp_c: f32,
+    #[arg(
+        long = "sample-interval-ms",
+        default_value_t = 500,
+        help = "Polling interval for status capture."
+    )]
+    sample_interval_ms: u64,
+    #[arg(
+        long = "max-runtime-seconds",
+        default_value_t = 3600,
+        help = "Safety timeout for a single capture run."
+    )]
+    max_runtime_seconds: u64,
+    #[arg(
+        long = "output-dir",
+        default_value = "calibration-runs",
+        help = "Directory where the raw and derived run artifacts are written."
+    )]
+    output_dir: PathBuf,
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -414,6 +487,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
         Command::Calibration { command } => {
             handle_calibration_command(&client, &cli.devd, command).await?
+        }
+        Command::HeaterCurve { command } => {
+            handle_heater_curve_command(&client, &cli.devd, command).await?
         }
         Command::Flash(args) => {
             let resolved = resolve_target(args.target.clone(), &cli.devd)?;
@@ -650,6 +726,91 @@ async fn handle_calibration_command(
             )
             .await
         }
+        CalibrationCommand::Collect(args) => {
+            collect_calibration_run(client, default_devd, args).await
+        }
+    }
+}
+
+async fn handle_heater_curve_command(
+    client: &Client,
+    default_devd: &str,
+    command: HeaterCurveCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        HeaterCurveCommand::Get(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, default_devd)?,
+                Method::GET,
+                "/heater-curve",
+                None,
+            )
+            .await
+        }
+        HeaterCurveCommand::Preview(args) => {
+            let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
+            let package = imported
+                .get("active")
+                .cloned()
+                .or_else(|| imported.get("package").cloned())
+                .unwrap_or(imported);
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/heater-curve",
+                Some(json!({
+                    "op": "preview",
+                    "package": package,
+                })),
+            )
+            .await
+        }
+        HeaterCurveCommand::ClearPreview(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, default_devd)?,
+                Method::PUT,
+                "/heater-curve",
+                Some(json!({
+                    "op": "clear_preview",
+                })),
+            )
+            .await
+        }
+        HeaterCurveCommand::Save(selector) => {
+            request_with_lease(
+                client,
+                resolve_target(selector, default_devd)?,
+                Method::POST,
+                "/heater-curve/save",
+                Some(json!({})),
+            )
+            .await
+        }
+        HeaterCurveCommand::Export(args) => {
+            let payload = request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::GET,
+                "/heater-curve",
+                None,
+            )
+            .await?;
+            if let Some(parent) = args
+                .file
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                fs::create_dir_all(parent)?;
+            }
+            fs::write(&args.file, serde_json::to_vec_pretty(&payload)?)?;
+            Ok(json!({
+                "ok": true,
+                "path": args.file,
+            }))
+        }
     }
 }
 
@@ -674,6 +835,469 @@ fn parse_reference_vin_mv(
         return Ok(Some(millivolts));
     }
     volts.map(parse_voltage_to_mv).transpose()
+}
+
+#[derive(Debug, Clone)]
+struct CalibrationSeriesStats {
+    count: u64,
+    min: f64,
+    max: f64,
+    sum: f64,
+    first: f64,
+    last: f64,
+}
+
+impl CalibrationSeriesStats {
+    fn new(value: f64) -> Self {
+        Self {
+            count: 1,
+            min: value,
+            max: value,
+            sum: value,
+            first: value,
+            last: value,
+        }
+    }
+
+    fn observe(&mut self, value: f64) {
+        self.count = self.count.saturating_add(1);
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
+        self.sum += value;
+        self.last = value;
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "count": self.count,
+            "min": self.min,
+            "max": self.max,
+            "avg": self.sum / self.count.max(1) as f64,
+            "first": self.first,
+            "last": self.last,
+        })
+    }
+}
+
+fn observe_series(stats: &mut Option<CalibrationSeriesStats>, value: f64) {
+    if let Some(stats) = stats.as_mut() {
+        stats.observe(value);
+    } else {
+        *stats = Some(CalibrationSeriesStats::new(value));
+    }
+}
+
+fn current_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn slugify_path_component(value: &str) -> String {
+    let mut slug = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    while slug.starts_with('-') {
+        slug.remove(0);
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "run".to_string()
+    } else {
+        slug
+    }
+}
+
+fn require_status_f64(
+    status: &Value,
+    key: &str,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    status.get(key).and_then(Value::as_f64).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("status missing numeric field: {key}"),
+        )
+        .into()
+    })
+}
+
+fn require_status_u64(
+    status: &Value,
+    key: &str,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    status.get(key).and_then(Value::as_u64).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("status missing integer field: {key}"),
+        )
+        .into()
+    })
+}
+
+fn require_status_u16(
+    status: &Value,
+    key: &str,
+) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
+    let value = require_status_u64(status, key)?;
+    u16::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("status field out of range: {key}"),
+        )
+        .into()
+    })
+}
+
+fn require_status_i32(
+    status: &Value,
+    key: &str,
+) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+    let value = status.get(key).and_then(Value::as_i64).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("status missing integer field: {key}"),
+        )
+    })?;
+    i32::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("status field out of range: {key}"),
+        )
+        .into()
+    })
+}
+
+fn status_snapshot(status: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(json!({
+        "mode": status
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: mode"))?,
+        "heaterEnabled": status
+            .get("heaterEnabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: heaterEnabled"))?,
+        "heaterOutputPercent": require_status_u64(status, "heaterOutputPercent")?,
+        "currentTempC": require_status_f64(status, "currentTempC")?,
+        "targetTempC": require_status_i32(status, "targetTempC")?,
+        "voltageMv": require_status_u64(status, "voltageMv")?,
+        "currentMa": require_status_u64(status, "currentMa")?,
+        "boardTempCenti": require_status_i32(status, "boardTempCenti")?,
+        "rtdRawAdcMv": require_status_u16(status, "rtdRawAdcMv")?,
+        "vinRawAdcMv": require_status_u16(status, "vinRawAdcMv")?,
+        "pdRequestMv": require_status_u16(status, "pdRequestMv")?,
+        "pdContractMv": require_status_u16(status, "pdContractMv")?,
+        "pdState": status
+            .get("pdState")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: pdState"))?,
+        "activeCoolingEnabled": status
+            .get("activeCoolingEnabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: activeCoolingEnabled"))?,
+        "fanDisplayState": status
+            .get("fanDisplayState")
+            .and_then(Value::as_str)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: fanDisplayState"))?,
+        "fanEnabled": status
+            .get("fanEnabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: fanEnabled"))?,
+        "fanPwmPermille": require_status_u64(status, "fanPwmPermille")?,
+    }))
+}
+
+async fn collect_calibration_run(
+    client: &Client,
+    default_devd: &str,
+    args: CalibrationCollectArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let resolved = resolve_target(args.target, default_devd)?;
+    let source_current_ma = parse_pps_amps(&args.source_current_a)?;
+    let run_started_unix_ms = current_unix_millis();
+    let run_id = format!(
+        "cal-{}-{}-{}mA",
+        run_started_unix_ms,
+        slugify_path_component(&resolved.device),
+        source_current_ma
+    );
+    let run_dir = args.output_dir.join(&run_id);
+    fs::create_dir_all(&run_dir)?;
+    let samples_path = run_dir.join("samples.ndjson");
+    let summary_path = run_dir.join("run.json");
+    let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
+
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+
+    let mut stop_reason = None::<&'static str>;
+    let mut threshold_sample_index = None::<usize>;
+    let mut stopped_sample_index = None::<usize>;
+    let mut sample_index = 0usize;
+    let mut samples_count = 0usize;
+    let mut current_temp_stats: Option<CalibrationSeriesStats> = None;
+    let mut voltage_stats: Option<CalibrationSeriesStats> = None;
+    let mut current_ma_stats: Option<CalibrationSeriesStats> = None;
+    let mut heater_output_stats: Option<CalibrationSeriesStats> = None;
+    let mut board_temp_stats: Option<CalibrationSeriesStats> = None;
+    let mut rtd_raw_stats: Option<CalibrationSeriesStats> = None;
+    let mut vin_raw_stats: Option<CalibrationSeriesStats> = None;
+    let mut first_status_snapshot: Option<Value> = None;
+    let mut last_status_snapshot: Option<Value> = None;
+    let mut heater_started = false;
+    let mut heater_stopped = false;
+    let mut final_status_snapshot = None::<Value>;
+    let mut loop_started = tokio::time::Instant::now();
+    let sample_interval = Duration::from_millis(args.sample_interval_ms.max(1));
+    let max_runtime = Duration::from_secs(args.max_runtime_seconds.max(1));
+
+    let collect_result = async {
+        if !args.dry_run {
+            let initial_status = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::GET,
+                "/status",
+                None,
+            )
+            .await?;
+            let initial_current_temp = require_status_f64(&initial_status, "currentTempC")?;
+            if initial_current_temp > 40.0 {
+                return Err(format!(
+                    "calibration collect requires room-temperature start (<= 40C), got {initial_current_temp:.1}C"
+                )
+                .into());
+            }
+            let body = json!({
+                "heaterEnabled": true,
+                "targetTempC": args.target_temp_c,
+            });
+            request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::PUT,
+                "/runtime",
+                Some(body),
+            )
+            .await?;
+            heater_started = true;
+            let readback = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::GET,
+                "/status",
+                None,
+            )
+            .await?;
+            let readback_target = require_status_i32(&readback, "targetTempC")?;
+            if !readback
+                .get("heaterEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || readback_target != args.target_temp_c as i32
+            {
+                return Err("heater start readback did not match requested runtime state".into());
+            }
+        }
+
+        loop_started = tokio::time::Instant::now();
+        let deadline = loop_started + max_runtime;
+        let mut next_tick = loop_started;
+
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                stop_reason = Some("max_runtime");
+                break;
+            }
+
+            let status = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::GET,
+                "/status",
+                None,
+            )
+            .await?;
+            let current_temp_c = require_status_f64(&status, "currentTempC")?;
+            let voltage_mv = require_status_u64(&status, "voltageMv")? as f64;
+            let current_ma = require_status_u64(&status, "currentMa")? as f64;
+            let heater_output_percent = require_status_u64(&status, "heaterOutputPercent")? as f64;
+            let board_temp_centi = require_status_i32(&status, "boardTempCenti")? as f64;
+            let rtd_raw_adc_mv = require_status_u16(&status, "rtdRawAdcMv")? as f64;
+            let vin_raw_adc_mv = require_status_u16(&status, "vinRawAdcMv")? as f64;
+
+            observe_series(&mut current_temp_stats, current_temp_c);
+            observe_series(&mut voltage_stats, voltage_mv);
+            observe_series(&mut current_ma_stats, current_ma);
+            observe_series(&mut heater_output_stats, heater_output_percent);
+            observe_series(&mut board_temp_stats, board_temp_centi);
+            observe_series(&mut rtd_raw_stats, rtd_raw_adc_mv);
+            observe_series(&mut vin_raw_stats, vin_raw_adc_mv);
+
+            let phase = if args.dry_run {
+                "dry_run"
+            } else {
+                "warmup"
+            };
+            let status_snapshot = status_snapshot(&status)?;
+            if first_status_snapshot.is_none() {
+                first_status_snapshot = Some(status_snapshot.clone());
+            }
+            last_status_snapshot = Some(status_snapshot.clone());
+            let captured_at_unix_ms = current_unix_millis();
+            let elapsed_ms = captured_at_unix_ms.saturating_sub(run_started_unix_ms);
+            let sample = json!({
+                "runId": run_id.clone(),
+                "sampleIndex": sample_index,
+                "capturedAtUnixMs": captured_at_unix_ms,
+                "elapsedMs": elapsed_ms,
+                "phase": phase,
+                "sourceCurrentMa": source_current_ma,
+                "status": status,
+            });
+            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+            samples_writer.flush()?;
+            samples_count += 1;
+
+            if !args.dry_run && current_temp_c >= f64::from(args.stop_temp_c) {
+                stop_reason = Some("temperature_threshold");
+                threshold_sample_index = Some(sample_index);
+                break;
+            }
+
+            sample_index = sample_index.saturating_add(1);
+            let target_tick = next_tick + sample_interval;
+            next_tick = target_tick;
+            tokio::time::sleep_until(target_tick).await;
+        }
+
+        if !args.dry_run {
+            let _ = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::PUT,
+                "/runtime",
+                Some(json!({"heaterEnabled": false})),
+            )
+            .await?;
+            heater_stopped = true;
+            let stop_status = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::GET,
+                "/status",
+                None,
+            )
+            .await?;
+            let stop_snapshot = status_snapshot(&stop_status)?;
+            let captured_at_unix_ms = current_unix_millis();
+            let elapsed_ms = captured_at_unix_ms.saturating_sub(run_started_unix_ms);
+            let sample = json!({
+                "runId": run_id.clone(),
+                "sampleIndex": sample_index.saturating_add(1),
+                "capturedAtUnixMs": captured_at_unix_ms,
+                "elapsedMs": elapsed_ms,
+                "phase": "stopped",
+                "sourceCurrentMa": source_current_ma,
+                "status": stop_status,
+            });
+            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+            samples_writer.flush()?;
+            samples_count += 1;
+            stopped_sample_index = Some(sample_index.saturating_add(1));
+            final_status_snapshot = Some(stop_snapshot.clone());
+            last_status_snapshot = Some(stop_snapshot);
+        } else {
+            final_status_snapshot = last_status_snapshot.clone();
+            stop_reason = Some("max_runtime");
+        }
+
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+
+    if heater_started && !heater_stopped {
+        let _ = request_leased(
+            client,
+            &resolved,
+            &lease.lease_id,
+            Method::PUT,
+            "/runtime",
+            Some(json!({"heaterEnabled": false})),
+        )
+        .await;
+    }
+
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+
+    collect_result?;
+
+    let duration_ms = current_unix_millis().saturating_sub(run_started_unix_ms);
+    let summary = json!({
+        "ok": true,
+        "runId": run_id.clone(),
+        "dryRun": args.dry_run,
+        "target": {
+            "deviceId": resolved.device.clone(),
+            "hardwareId": resolved.hardware_id.clone(),
+            "devd": resolved.devd.clone(),
+        },
+        "source": {
+            "deviceId": args.source_device_id,
+            "mode": "manual_cc",
+            "currentMa": source_current_ma,
+        },
+        "parameters": {
+            "targetTempC": args.target_temp_c,
+            "stopTempC": args.stop_temp_c,
+            "sampleIntervalMs": args.sample_interval_ms.max(1),
+            "maxRuntimeSeconds": args.max_runtime_seconds.max(1),
+        },
+        "files": {
+            "runDir": run_dir,
+            "summaryPath": summary_path,
+            "samplesPath": samples_path,
+        },
+        "sampleCount": samples_count,
+        "durationMs": duration_ms,
+        "stopReason": stop_reason.unwrap_or("max_runtime"),
+        "complete": args.dry_run || stop_reason == Some("temperature_threshold"),
+        "thresholdSampleIndex": threshold_sample_index,
+        "stoppedSampleIndex": stopped_sample_index,
+        "startStatus": first_status_snapshot,
+        "finalStatus": final_status_snapshot,
+        "stats": {
+            "currentTempC": current_temp_stats.map(|stats| stats.to_value()),
+            "voltageMv": voltage_stats.map(|stats| stats.to_value()),
+            "currentMa": current_ma_stats.map(|stats| stats.to_value()),
+            "heaterOutputPercent": heater_output_stats.map(|stats| stats.to_value()),
+            "boardTempCenti": board_temp_stats.map(|stats| stats.to_value()),
+            "rtdRawAdcMv": rtd_raw_stats.map(|stats| stats.to_value()),
+            "vinRawAdcMv": vin_raw_stats.map(|stats| stats.to_value()),
+        }
+    });
+
+    fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
+    if let Some(id) = resolved.hardware_id.as_deref() {
+        let _ = remember_usb(id, &resolved.device, &resolved.devd);
+    }
+    Ok(summary)
 }
 
 async fn create_lease(
@@ -1222,6 +1846,24 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
             rtd_count, vin_count
         ));
     }
+    if payload.get("runId").is_some() && payload.get("sampleCount").is_some() {
+        return Ok(format!(
+            "Calibration run {}: {} samples stop={} complete={}",
+            payload.get("runId").and_then(Value::as_str).unwrap_or("-"),
+            payload
+                .get("sampleCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            payload
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("-"),
+            payload
+                .get("complete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ));
+    }
     if payload.get("hardware").is_some() || payload.get("usb").is_some() {
         return Ok(serde_json::to_string_pretty(&redact_cli_sensitive(
             payload,
@@ -1296,6 +1938,20 @@ mod tests {
         let redacted = redact_cli_sensitive(&payload);
         assert_eq!(redacted["wifi"]["password"], "<redacted>");
         assert_eq!(redacted["token"], "<redacted>");
+    }
+
+    #[test]
+    fn renders_calibration_collect_summary() {
+        let payload = json!({
+            "runId": "cal-1",
+            "sampleCount": 42,
+            "stopReason": "temperature_threshold",
+            "complete": true,
+        });
+        let rendered = render_human(&payload).unwrap();
+        assert!(rendered.contains(
+            "Calibration run cal-1: 42 samples stop=temperature_threshold complete=true"
+        ));
     }
 
     #[test]

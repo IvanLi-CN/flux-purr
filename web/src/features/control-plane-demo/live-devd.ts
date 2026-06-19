@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ControlPlaneStatus,
   DevdDeviceRecord,
@@ -18,6 +18,7 @@ import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 
 const DEVD_POLL_MS = 2_000
 const DEVD_TRACE_LIMIT = 1_000
+const DEVD_LEASE_STORAGE_PREFIX = 'flux-purr:devd-lease:'
 const DEVD_EVENT_KINDS = [
   'serial',
   'lease',
@@ -61,6 +62,9 @@ export function useLiveDevdScenario(
   const [artifacts, setArtifacts] = useState<ControlPlaneScenario['artifacts']>([])
   const [recordEvents, setRecordEvents] = useState<DevdEvent[]>([])
   const [streamEvents, setStreamEvents] = useState<DevdEvent[]>([])
+  const activeLeaseRef = useRef<DevdLease | null>(null)
+  const activeLeaseDeviceIdRef = useRef<string | null>(null)
+  const refreshInFlightRef = useRef(false)
   const liveDevdDeviceId = useMemo(
     () => devices.find((device) => device.transport === 'devd')?.id,
     [devices]
@@ -76,9 +80,30 @@ export function useLiveDevdScenario(
     }
 
     let cancelled = false
-    let activeLease: DevdLease | null = null
+    const releaseActiveLease = async () => {
+      const lease = activeLeaseRef.current
+      const deviceId = activeLeaseDeviceIdRef.current
+      if (!lease || !deviceId) {
+        return
+      }
+
+      activeLeaseRef.current = null
+      activeLeaseDeviceIdRef.current = null
+      clearStoredDevdLeaseId(devdBaseUrl, deviceId)
+      await client.releaseDevdLease(devdBaseUrl, lease.leaseId).catch(() => undefined)
+    }
+
+    const handlePageHide = () => {
+      void releaseActiveLease()
+    }
+
+    window.addEventListener('pagehide', handlePageHide)
 
     const refresh = async () => {
+      if (cancelled || refreshInFlightRef.current) {
+        return
+      }
+      refreshInFlightRef.current = true
       let records: DevdDeviceRecord[] = []
       try {
         const [nextRecords, nextArtifacts] = await Promise.all([
@@ -96,34 +121,42 @@ export function useLiveDevdScenario(
         const baseDevices = visibleRecords.map(devdRecordToDeviceTarget)
         const liveRecord = selectLiveDevdRecord(records)
         if (!liveRecord) {
+          activeLeaseRef.current = null
+          activeLeaseDeviceIdRef.current = null
           if (!cancelled) {
             setDevices(baseDevices)
           }
+          refreshInFlightRef.current = false
           return
         }
 
         try {
-          if (!activeLease || activeLease.deviceId !== liveRecord.id) {
-            if (activeLease) {
-              void client.releaseDevdLease(devdBaseUrl, activeLease.leaseId)
-            }
-            activeLease = await client.createDevdLease(devdBaseUrl, liveRecord.id)
-          } else {
-            activeLease = await client.heartbeatDevdLease(devdBaseUrl, activeLease.leaseId)
-          }
+          const lease = await resolveDevdLease({
+            client,
+            devdBaseUrl,
+            deviceId: liveRecord.id,
+            currentLease: activeLeaseRef.current,
+            currentLeaseDeviceId: activeLeaseDeviceIdRef.current,
+            storage: getDevdLeaseStorage(),
+            cancelled: () => cancelled,
+          })
+          activeLeaseRef.current = lease
+          activeLeaseDeviceIdRef.current = liveRecord.id
 
-          const live = await client.probeDevdDevice(devdBaseUrl, liveRecord.id, activeLease.leaseId)
+          const live = await client.probeDevdDevice(devdBaseUrl, liveRecord.id, lease.leaseId)
           const liveDevice = devdRecordToDeviceTarget(mergeDevdProbeRecord(liveRecord, live))
           liveDevice.leaseState = 'active'
-          liveDevice.leaseId = activeLease.leaseId
+          liveDevice.leaseId = lease.leaseId
 
           if (!cancelled) {
             setDevices(replaceDevice(baseDevices, liveDevice))
           }
         } catch (error) {
-          const failedLease = activeLease
+          const failedLease = activeLeaseRef.current
           if (isLeaseInvalid(error)) {
-            activeLease = null
+            activeLeaseRef.current = null
+            activeLeaseDeviceIdRef.current = null
+            clearStoredDevdLeaseId(devdBaseUrl, liveRecord.id)
           }
           const issueDevice = devdRecordToDeviceTarget(liveRecord)
           issueDevice.severity = 'warning'
@@ -133,6 +166,8 @@ export function useLiveDevdScenario(
           if (!cancelled) {
             setDevices(replaceDevice(baseDevices, issueDevice))
           }
+        } finally {
+          refreshInFlightRef.current = false
         }
       } catch {
         if (!cancelled) {
@@ -141,6 +176,7 @@ export function useLiveDevdScenario(
           setRecordEvents([])
           setStreamEvents([])
         }
+        refreshInFlightRef.current = false
       }
     }
 
@@ -150,10 +186,9 @@ export function useLiveDevdScenario(
     return () => {
       cancelled = true
       window.clearInterval(timer)
+      window.removeEventListener('pagehide', handlePageHide)
       setStreamEvents([])
-      if (activeLease) {
-        void client.releaseDevdLease(devdBaseUrl, activeLease.leaseId)
-      }
+      void releaseActiveLease()
     }
   }, [client, devdBaseUrl, enabled, includeMockDevices])
 
@@ -340,6 +375,127 @@ function leaseStateForError(
     }
   }
   return activeLease ? 'active' : 'none'
+}
+
+export function devdLeaseStorageKey(devdBaseUrl: string, deviceId: string) {
+  return `${DEVD_LEASE_STORAGE_PREFIX}${devdBaseUrl}::${deviceId}`
+}
+
+interface DevdLeaseStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+  removeItem(key: string): void
+}
+
+export function getDevdLeaseStorage(): DevdLeaseStorage | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  return window.sessionStorage
+}
+
+export function readStoredDevdLeaseId(
+  devdBaseUrl: string,
+  deviceId: string,
+  storage: DevdLeaseStorage | null = getDevdLeaseStorage()
+) {
+  if (!storage) {
+    return null
+  }
+
+  try {
+    return storage.getItem(devdLeaseStorageKey(devdBaseUrl, deviceId))
+  } catch {
+    return null
+  }
+}
+
+export function writeStoredDevdLeaseId(
+  devdBaseUrl: string,
+  deviceId: string,
+  leaseId: string,
+  storage: DevdLeaseStorage | null = getDevdLeaseStorage()
+) {
+  if (!storage) {
+    return
+  }
+
+  try {
+    storage.setItem(devdLeaseStorageKey(devdBaseUrl, deviceId), leaseId)
+  } catch {
+    // Ignore storage failures; the in-memory lease still keeps the page live.
+  }
+}
+
+export function clearStoredDevdLeaseId(
+  devdBaseUrl: string,
+  deviceId: string,
+  storage: DevdLeaseStorage | null = getDevdLeaseStorage()
+) {
+  if (!storage) {
+    return
+  }
+
+  try {
+    storage.removeItem(devdLeaseStorageKey(devdBaseUrl, deviceId))
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+export async function resolveDevdLease({
+  client,
+  devdBaseUrl,
+  deviceId,
+  currentLease,
+  currentLeaseDeviceId,
+  storage,
+  cancelled,
+}: {
+  client: ControlPlaneHttpClient
+  devdBaseUrl: string
+  deviceId: string
+  currentLease: DevdLease | null
+  currentLeaseDeviceId: string | null
+  storage: DevdLeaseStorage | null
+  cancelled: () => boolean
+}) {
+  if (currentLease && currentLeaseDeviceId === deviceId) {
+    writeStoredDevdLeaseId(devdBaseUrl, deviceId, currentLease.leaseId, storage)
+    return client.heartbeatDevdLease(devdBaseUrl, currentLease.leaseId)
+  }
+
+  if (currentLease && currentLeaseDeviceId && currentLeaseDeviceId !== deviceId) {
+    await client.releaseDevdLease(devdBaseUrl, currentLease.leaseId).catch(() => undefined)
+  }
+
+  const storedLeaseId = readStoredDevdLeaseId(devdBaseUrl, deviceId, storage)
+  if (storedLeaseId) {
+    try {
+      const lease = await client.heartbeatDevdLease(devdBaseUrl, storedLeaseId)
+      writeStoredDevdLeaseId(devdBaseUrl, deviceId, lease.leaseId, storage)
+      return lease
+    } catch (error) {
+      clearStoredDevdLeaseId(devdBaseUrl, deviceId, storage)
+      if (!isLeaseInvalid(error)) {
+        throw error
+      }
+    }
+  }
+
+  const lease = await client.createDevdLease(devdBaseUrl, deviceId)
+  if (cancelled()) {
+    await client.releaseDevdLease(devdBaseUrl, lease.leaseId).catch(() => undefined)
+    throw new ControlPlaneClientError(
+      'devd lease acquisition was cancelled.',
+      'lease_cancelled',
+      true
+    )
+  }
+
+  writeStoredDevdLeaseId(devdBaseUrl, deviceId, lease.leaseId, storage)
+  return lease
 }
 
 function isLeaseInvalid(error: unknown) {
