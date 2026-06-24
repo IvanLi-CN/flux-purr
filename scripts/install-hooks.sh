@@ -377,6 +377,7 @@ if [[ -z "$main_root" ]]; then
 fi
 
 hooks_dir="$(shared_hooks_dir)"
+snapshot_dir="$(legacy_hooks_dir)"
 previous_hooks_value="$(git -C "$main_root" config --local --path --get core.hooksPath 2>/dev/null || true)"
 previous_hooks_dir=''
 previous_hooks_origin=''
@@ -386,11 +387,16 @@ if [[ -n "$previous_hooks_value" ]]; then
     previous_hooks_dir=''
   fi
 fi
-if [[ -n "$previous_hooks_dir" ]]; then
-  snapshot_dir="$(legacy_hooks_dir)"
-  snapshot_legacy_hooks "$previous_hooks_dir" "$snapshot_dir"
+if [[ -z "$previous_hooks_dir" ]] && snapshot_has_hooks "$snapshot_dir"; then
   previous_hooks_dir="$snapshot_dir"
-  previous_hooks_origin='custom'
+  previous_hooks_origin='shared-backup'
+fi
+if [[ -n "$previous_hooks_dir" ]]; then
+  if [[ "$previous_hooks_dir" != "$snapshot_dir" ]]; then
+    snapshot_legacy_hooks "$previous_hooks_dir" "$snapshot_dir"
+    previous_hooks_dir="$snapshot_dir"
+    previous_hooks_origin='custom'
+  fi
 fi
 
 git -C "$main_root" config --local core.hooksPath "$hooks_dir"
@@ -401,7 +407,6 @@ git -C "$main_root" config --local core.hooksPath "$hooks_dir"
 )
 
 if [[ -z "$previous_hooks_dir" ]]; then
-  snapshot_dir="$(legacy_hooks_dir)"
   snapshot_backup_hooks "$hooks_dir" "$snapshot_dir"
   if snapshot_has_hooks "$snapshot_dir"; then
     previous_hooks_dir="$snapshot_dir"

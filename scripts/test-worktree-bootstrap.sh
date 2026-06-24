@@ -209,6 +209,7 @@ git -C "$custom_repo" config core.hooksPath .custom-hooks
   cd "$custom_repo"
   PATH="$fake_bin:$PATH" bun install --frozen-lockfile >/dev/null
   PATH="$fake_bin:$PATH" bash scripts/install-hooks.sh >/dev/null
+  PATH="$fake_bin:$PATH" bash scripts/install-hooks.sh >/dev/null
 )
 configured_hooks_path="$(git -C "$custom_repo" config --local --get core.hooksPath)"
 configured_hooks_abs="$(cd "$custom_repo" && cd "$configured_hooks_path" && pwd -P)"
