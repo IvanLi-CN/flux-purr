@@ -24,10 +24,18 @@ copy_repo() {
   mkdir -p "$dest"
   rsync -a \
     --exclude '.git' \
+    --exclude 'Cargo.lock' \
+    --exclude 'target' \
     --exclude 'node_modules' \
     --exclude 'web/node_modules' \
+    --exclude 'web/dist' \
+    --exclude 'web/storybook-static' \
+    --exclude 'web/playwright-report' \
+    --exclude 'web/test-results' \
     --exclude 'firmware/target' \
     --exclude 'tools/flux-purr-devd/target' \
+    --exclude '.tmp' \
+    --exclude '.mcu-agentd' \
     "$src/" "$dest/"
 }
 

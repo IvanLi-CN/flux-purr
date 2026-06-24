@@ -281,8 +281,12 @@ if [[ "$mode" == "auto" && "$run_root_install" -eq 0 && "$run_web_install" -eq 0
   log "linked worktree healthy; no repo-managed dependency changes detected"
 fi
 
-log "refresh shared hooks"
-(cd "$repo_root" && bash scripts/install-hooks.sh)
+if [[ "$mode" == "manual" ]]; then
+  log "refresh shared hooks"
+  (cd "$repo_root" && bash scripts/install-hooks.sh)
+else
+  log "reuse seeded shared hooks during auto bootstrap"
+fi
 
 cat > "$stamp_file" <<EOF_STATE
 saved_root_lock="$current_root_lock"
