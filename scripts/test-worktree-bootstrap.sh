@@ -49,6 +49,10 @@ init_repo() {
   LEFTHOOK=0 git -C "$repo" commit -m 'test fixture' >/dev/null
 }
 
+run_git_fixture() {
+  GIT_LFS_SKIP_SMUDGE=1 git "$@"
+}
+
 assert_contains() {
   local file="$1"
   local needle="$2"
@@ -186,7 +190,7 @@ if [[ -e "$fixture_repo/Cargo.lock" ]]; then
   exit 1
 fi
 
-PATH="$fake_bin:$PATH" git -C "$fixture_repo" worktree add --detach "$worktree_dir" HEAD >/dev/null
+PATH="$fake_bin:$PATH" run_git_fixture -C "$fixture_repo" worktree add --detach "$worktree_dir" HEAD >/dev/null
 assert_contains "$bun_log" "$worktree_dir"$'\t''install --frozen-lockfile'
 assert_contains "$bun_log" "$worktree_dir"$'\t''install --cwd web --frozen-lockfile'
 if [[ -e "$worktree_dir/Cargo.lock" ]]; then
@@ -195,7 +199,7 @@ if [[ -e "$worktree_dir/Cargo.lock" ]]; then
 fi
 
 before_bun_lines="$(wc -l < "$bun_log")"
-PATH="$fake_bin:$PATH" git -C "$worktree_dir" checkout --detach HEAD >/dev/null
+PATH="$fake_bin:$PATH" run_git_fixture -C "$worktree_dir" checkout --detach HEAD >/dev/null
 after_bun_lines="$(wc -l < "$bun_log")"
 if [[ "$before_bun_lines" != "$after_bun_lines" ]]; then
   printf 'expected repeated checkout to skip bun install\n' >&2
@@ -203,7 +207,7 @@ if [[ "$before_bun_lines" != "$after_bun_lines" ]]; then
 fi
 
 printf '\n# fixture comment\n' >> "$worktree_dir/web/bun.lock"
-PATH="$fake_bin:$PATH" git -C "$worktree_dir" checkout --detach HEAD >/dev/null
+PATH="$fake_bin:$PATH" run_git_fixture -C "$worktree_dir" checkout --detach HEAD >/dev/null
 assert_contains "$bun_log" "$worktree_dir"$'\t''install --cwd web --frozen-lockfile'
 
 (
@@ -246,8 +250,8 @@ legacy_worktree="$tmp_root/legacy-linked"
   PATH="$fake_bin:$PATH" bun install --frozen-lockfile >/dev/null
   PATH="$fake_bin:$PATH" bash scripts/install-hooks.sh >/dev/null
 )
-PATH="$fake_bin:$PATH" git -C "$legacy_repo" worktree add --detach "$legacy_worktree" HEAD >/dev/null
-PATH="$fake_bin:$PATH" git -C "$legacy_worktree" checkout --detach HEAD^ >/dev/null
-PATH="$fake_bin:$PATH" git -C "$legacy_worktree" checkout --detach HEAD@{1} >/dev/null
+PATH="$fake_bin:$PATH" run_git_fixture -C "$legacy_repo" worktree add --detach "$legacy_worktree" HEAD >/dev/null
+PATH="$fake_bin:$PATH" run_git_fixture -C "$legacy_worktree" checkout --detach HEAD^ >/dev/null
+PATH="$fake_bin:$PATH" run_git_fixture -C "$legacy_worktree" checkout --detach HEAD@{1} >/dev/null
 
 printf 'worktree bootstrap smoke passed\n'

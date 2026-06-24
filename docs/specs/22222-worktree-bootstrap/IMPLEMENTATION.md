@@ -8,6 +8,7 @@
 - auto mode 使用 worktree-local stamp 对 root lock、web lock 和 Cargo manifest 指纹做增量判断；未变化时只输出 healthy 摘要。
 - `scripts/test-worktree-bootstrap.sh` 用真实临时 linked worktree fixture 覆盖首次自动 bootstrap、重复 checkout skip、web lock 变化重跑、custom `core.hooksPath` preservation 与历史 revision no-op。
 - smoke fixture 复制当前仓库内容时会显式排除忽略态 lockfile 与本地构建产物，避免把开发机残留文件误判成 bootstrap 回归。
+- smoke fixture 的 `git worktree add` / detached checkout 会显式跳过 Git LFS smudge，避免 CI runner 因硬件模型大文件下载失败而误报 bootstrap contract 回归。
 - `CI PR`、`CI Main` 与 `.github/quality-gates.json` 都已声明 `Worktree bootstrap` 为正式 gate。
 - Cargo 预热在临时 workspace snapshot 中执行，因此 bootstrap 不会在真实 checkout 留下新的 `Cargo.lock`。
 
