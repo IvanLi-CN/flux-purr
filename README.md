@@ -33,7 +33,7 @@ The first seeded checkout installs shared Git hooks and records the main worktre
 Automatic bootstrap is intentionally warning-only:
 
 - It installs repo-managed development dependencies in the current checkout: root `bun install --frozen-lockfile`, `web/` `bun install --frozen-lockfile`, Cargo fetch prewarm, and shared hooks refresh.
-- Cargo fetch prewarm stays best-effort. If this checkout does not currently satisfy `cargo fetch --locked` without creating or changing a workspace `Cargo.lock`, bootstrap prints a repair hint and continues.
+- Cargo fetch prewarm stays best-effort. It runs against a temporary workspace snapshot so the real checkout does not gain a bootstrap-generated `Cargo.lock`; if Cargo networking or the Xtensa toolchain is unhealthy, bootstrap prints a repair hint and continues.
 - It does not install or modify system prerequisites such as Bun, Rust/rustup, `cargo +esp`, `jq`, or Playwright browsers.
 - When a system prerequisite is missing, checkout still succeeds and the bootstrap output prints the exact recovery command.
 

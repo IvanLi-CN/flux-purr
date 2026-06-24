@@ -15,7 +15,7 @@
 - 源码开发默认从当前仓库 checkout 运行工具，不依赖全局安装的 `flux-purr` 或 `flux-purr-devd`。
 - 主工作区首次 seed 统一使用 `bun run bootstrap:dev`；它负责 root / `web/` repo-managed 依赖、Cargo fetch 预热与 shared hooks 安装。
 - linked worktree 在首次 `post-checkout` 时会自动尝试同一套 repo-managed bootstrap；自动路径是 warning-only，系统前置缺失时只输出修复命令，不阻断 checkout。
-- Cargo fetch 预热也遵循 warning-only：当当前 checkout 不能满足 `cargo fetch --locked` 的只读前提时，只报告修复提示，不自动生成或修改 workspace `Cargo.lock`。
+- Cargo fetch 预热也遵循 warning-only：它在临时 workspace snapshot 中执行，不会因为 bootstrap 在真实 checkout 写入 `Cargo.lock`；Cargo 网络或 Xtensa toolchain 不健康时只报告修复提示。
 - 显式恢复入口固定为 `bun run bootstrap:dev` 与 `bun run worktree:setup`。
 - Flux Purr 自身 daemon 和 CLI 必须优先从 `tools/flux-purr-devd` 运行。
 - `devd`、CLI、Web/native bridge、release、校准、烧录、mock smoke、真机验证与 HIL 路径，统一由 `skills/flux-purr-developer-operations` 约束。

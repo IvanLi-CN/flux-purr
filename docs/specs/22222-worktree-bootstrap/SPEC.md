@@ -57,7 +57,7 @@ Flux Purr 当前只在 README 中提供手动 `bun install` / `bun install --cwd
 - shared Git hooks 目录必须由 repo-local `scripts/install-hooks.sh` 管理，且包含 `pre-commit`、`commit-msg`、`pre-push`、`post-checkout` wrapper。
 - `post-checkout` 必须调用当前 checkout 的 bootstrap runner；若当前 revision 缺少 runner，必须安全 no-op。
 - 自动 bootstrap 只允许安装 repo-managed 开发依赖：根目录 `bun install --frozen-lockfile`、`web/` `bun install --frozen-lockfile`、Cargo fetch 预热、hooks 收口。
-- Cargo fetch 预热属于 best-effort repo-managed 恢复层；若 workspace lockfile 未声明或 `--locked` 无法满足，bootstrap 只输出 warning 和修复命令，不阻断 checkout。
+- Cargo fetch 预热属于 best-effort repo-managed 恢复层；它必须在临时 workspace snapshot 中执行，避免在真实 checkout 写入 bootstrap 生成的 `Cargo.lock`；若 Cargo 网络或 Xtensa toolchain 不健康，bootstrap 只输出 warning 和修复命令，不阻断 checkout。
 - 系统前置缺失时，auto / manual 两条路径都必须只输出明确修复命令，不得尝试修改开发机，也不得让 checkout 失败。
 - auto mode 必须在 linked worktree 首次 checkout 或 lock/manifests 变化时重跑对应层；未变化时只输出 skip/healthy 摘要。
 - smoke test 必须覆盖真实 linked worktree、shared hooks、重复 checkout skip、历史 revision no-op、custom hook preservation。

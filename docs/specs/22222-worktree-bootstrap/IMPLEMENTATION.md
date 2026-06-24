@@ -8,6 +8,7 @@
 - auto mode 使用 worktree-local stamp 对 root lock、web lock 和 Cargo manifest 指纹做增量判断；未变化时只输出 healthy 摘要。
 - `scripts/test-worktree-bootstrap.sh` 用真实临时 linked worktree fixture 覆盖首次自动 bootstrap、重复 checkout skip、web lock 变化重跑、custom `core.hooksPath` preservation 与历史 revision no-op。
 - `CI PR`、`CI Main` 与 `.github/quality-gates.json` 都已声明 `Worktree bootstrap` 为正式 gate。
+- Cargo 预热在临时 workspace snapshot 中执行，因此 bootstrap 不会在真实 checkout 留下新的 `Cargo.lock`。
 
 ## Validation
 
@@ -20,4 +21,4 @@
 
 - 主工作区仍需先显式执行一次 `bun run bootstrap:dev` 作为 seed。
 - 后续新 linked worktree 会自动尝试 repo-managed bootstrap，但所有失败都保持 warning-only；手动恢复入口固定为 `bun run bootstrap:dev` 与 `bun run worktree:setup`。
-- 当前 workspace 未跟踪根级 `Cargo.lock` 时，Cargo prewarm 会输出 warning 与修复命令，但不会阻断 checkout 或 Bun 依赖恢复。
+- Cargo prewarm 不会在真实 checkout 生成 `Cargo.lock`；当 Cargo 网络或 Xtensa toolchain 不健康时，它只输出 warning 与修复命令，不阻断 checkout 或 Bun 依赖恢复。

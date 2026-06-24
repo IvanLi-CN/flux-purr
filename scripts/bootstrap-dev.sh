@@ -71,6 +71,14 @@ warn() {
   printf '[worktree-bootstrap][warn] %s\n' "$*" >&2
 }
 
+cleanup_dir() {
+  local path="$1"
+
+  if [[ -n "$path" && -d "$path" ]]; then
+    rm -rf "$path"
+  fi
+}
+
 hash_file() {
   local path="$1"
 
@@ -98,6 +106,29 @@ hash_glob() {
   fi
 
   shasum -a 256 "${existing[@]}" | shasum -a 256 | awk '{print $1}'
+}
+
+prepare_cargo_prewarm_workspace() {
+  local temp_root
+
+  temp_root="$(mktemp -d "${TMPDIR:-/tmp}/flux-purr-cargo-prewarm.XXXXXX")"
+
+  cp "$repo_root/Cargo.toml" "$temp_root/Cargo.toml"
+  if [[ -f "$repo_root/rust-toolchain.toml" ]]; then
+    cp "$repo_root/rust-toolchain.toml" "$temp_root/rust-toolchain.toml"
+  fi
+  if [[ -d "$repo_root/.cargo" ]]; then
+    mkdir -p "$temp_root/.cargo"
+    cp -R "$repo_root/.cargo/." "$temp_root/.cargo/"
+  fi
+
+  mkdir -p "$temp_root/firmware" "$temp_root/tools"
+  cp -R "$repo_root/firmware" "$temp_root/"
+  cp -R "$repo_root/tools/flux-purr-devd" "$temp_root/tools/"
+  cleanup_dir "$temp_root/firmware/target"
+  cleanup_dir "$temp_root/tools/flux-purr-devd/target"
+
+  printf '%s\n' "$temp_root"
 }
 
 current_root_lock="$(hash_file "$repo_root/bun.lock")"
@@ -221,17 +252,24 @@ fi
 
 if [[ "$run_cargo_fetch" -eq 1 ]]; then
   if command -v cargo >/dev/null 2>&1; then
+    cargo_prewarm_workspace=""
     log "prewarm Cargo dependencies"
-    if ! (cd "$repo_root" && cargo fetch --locked --manifest-path firmware/Cargo.toml); then
+    cargo_prewarm_workspace="$(prepare_cargo_prewarm_workspace)"
+    if ! cargo fetch --manifest-path "$cargo_prewarm_workspace/Cargo.toml"; then
       warn_bootstrap_failure \
-        "Cargo prewarm failed for firmware/Cargo.toml" \
-        "add or refresh the workspace Cargo.lock intentionally, then rerun \`bun run bootstrap:dev\`"
+        "Cargo prewarm failed for the temporary workspace snapshot" \
+        "check Cargo network/toolchain health, then rerun \`bun run bootstrap:dev\`"
     fi
-    if ! (cd "$repo_root" && cargo fetch --locked --manifest-path tools/flux-purr-devd/Cargo.toml); then
-      warn_bootstrap_failure \
-        "Cargo prewarm failed for tools/flux-purr-devd/Cargo.toml" \
-        "add or refresh the workspace Cargo.lock intentionally, then rerun \`bun run bootstrap:dev\`"
+    if cargo +esp --version >/dev/null 2>&1; then
+      if ! cargo +esp fetch --manifest-path "$cargo_prewarm_workspace/Cargo.toml" --target xtensa-esp32s3-none-elf; then
+        warn_bootstrap_failure \
+          "Cargo prewarm failed for the Xtensa firmware target snapshot" \
+          "check the Xtensa toolchain install, then rerun \`bun run bootstrap:dev\`"
+      fi
+    else
+      log "skip Xtensa Cargo prewarm because cargo +esp is unavailable"
     fi
+    cleanup_dir "$cargo_prewarm_workspace"
   else
     warn "skip Cargo fetch because cargo is missing"
   fi

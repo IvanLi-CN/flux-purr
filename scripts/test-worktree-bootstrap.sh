@@ -171,12 +171,20 @@ test -x "$hooks_dir/post-checkout"
 
 assert_contains "$bun_log" "$fixture_repo"$'\t''install --frozen-lockfile'
 assert_contains "$bun_log" "$fixture_repo"$'\t''install --cwd web --frozen-lockfile'
-assert_contains "$cargo_log" "$fixture_repo"$'\t''fetch --locked --manifest-path firmware/Cargo.toml'
-assert_contains "$cargo_log" "$fixture_repo"$'\t''fetch --locked --manifest-path tools/flux-purr-devd/Cargo.toml'
+assert_contains "$cargo_log" $'\t''fetch --manifest-path '
+assert_contains "$cargo_log" $'\t''+esp fetch --manifest-path '
+if [[ -e "$fixture_repo/Cargo.lock" ]]; then
+  printf 'expected bootstrap prewarm to avoid writing Cargo.lock into the real checkout\n' >&2
+  exit 1
+fi
 
 PATH="$fake_bin:$PATH" git -C "$fixture_repo" worktree add --detach "$worktree_dir" HEAD >/dev/null
 assert_contains "$bun_log" "$worktree_dir"$'\t''install --frozen-lockfile'
 assert_contains "$bun_log" "$worktree_dir"$'\t''install --cwd web --frozen-lockfile'
+if [[ -e "$worktree_dir/Cargo.lock" ]]; then
+  printf 'expected linked worktree bootstrap to avoid writing Cargo.lock into the real checkout\n' >&2
+  exit 1
+fi
 
 before_bun_lines="$(wc -l < "$bun_log")"
 PATH="$fake_bin:$PATH" git -C "$worktree_dir" checkout --detach HEAD >/dev/null
