@@ -90,10 +90,29 @@ jobs:
           SKIP_E2E: "1"
         run: bash scripts/check-web-e2e.sh
 
+  worktree-bootstrap:
+    name: Worktree bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install root dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Worktree bootstrap smoke
+        run: bun run test:worktree-bootstrap
+
   release-snapshot:
     name: Release Snapshot
     runs-on: ubuntu-latest
-    needs: [firmware, web]
+    needs: [firmware, web, worktree-bootstrap]
     if: github.event_name == 'push'
     timeout-minutes: 10
     permissions:

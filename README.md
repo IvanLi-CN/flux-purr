@@ -24,14 +24,24 @@ The user-facing command-line entry point is `flux-purr`. It talks to `flux-purr-
 ## Quick start
 
 ```bash
-# Install root tooling (lefthook + commitlint)
-bun install
+# Seed the main checkout once
+bun run bootstrap:dev
+```
 
-# Install web dependencies
-bun install --cwd web
+The first seeded checkout installs shared Git hooks and records the main worktree for later linked worktree bootstrap. After that, new linked worktrees automatically attempt the same repo-managed bootstrap during their first `post-checkout`.
 
-# Install git hooks
-bun run hooks:install
+Automatic bootstrap is intentionally warning-only:
+
+- It installs repo-managed development dependencies in the current checkout: root `bun install --frozen-lockfile`, `web/` `bun install --frozen-lockfile`, Cargo fetch prewarm, and shared hooks refresh.
+- Cargo fetch prewarm stays best-effort. If this checkout does not currently satisfy `cargo fetch --locked` without creating or changing a workspace `Cargo.lock`, bootstrap prints a repair hint and continues.
+- It does not install or modify system prerequisites such as Bun, Rust/rustup, `cargo +esp`, `jq`, or Playwright browsers.
+- When a system prerequisite is missing, checkout still succeeds and the bootstrap output prints the exact recovery command.
+
+Manual recovery remains available from any checkout:
+
+```bash
+bun run bootstrap:dev
+bun run worktree:setup
 ```
 
 ## Developer guidance
@@ -48,6 +58,7 @@ bun run check:firmware:build
 bun run check:web
 bun run check:web:build
 bun run check:storybook
+bun run test:worktree-bootstrap
 ```
 
 ## PR labels, releases, and branch protection
@@ -68,6 +79,7 @@ The branch protection contract is declared in [.github/quality-gates.json](.gith
 - `Validate PR labels`
 - `Firmware checks`
 - `Web checks`
+- `Worktree bootstrap`
 
 ## Firmware target notes
 

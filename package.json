@@ -4,8 +4,11 @@
   "version": "0.1.0",
   "description": "Flux Purr mono-repo bootstrap",
   "scripts": {
-    "prepare": "lefthook install",
-    "hooks:install": "lefthook install",
+    "prepare": "bash scripts/install-hooks.sh",
+    "hooks:install": "bash scripts/install-hooks.sh",
+    "bootstrap:dev": "bash scripts/bootstrap-dev.sh --manual",
+    "worktree:setup": "bash scripts/bootstrap-dev.sh --manual",
+    "test:worktree-bootstrap": "bash scripts/test-worktree-bootstrap.sh",
     "check:firmware:fmt": "bash scripts/check-firmware-fmt.sh",
     "check:firmware:clippy": "bash scripts/check-firmware-clippy.sh",
     "check:firmware:build": "bash scripts/check-firmware-build.sh",

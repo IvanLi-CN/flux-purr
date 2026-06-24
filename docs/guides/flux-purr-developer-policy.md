@@ -13,6 +13,10 @@
 ## 默认开发路径
 
 - 源码开发默认从当前仓库 checkout 运行工具，不依赖全局安装的 `flux-purr` 或 `flux-purr-devd`。
+- 主工作区首次 seed 统一使用 `bun run bootstrap:dev`；它负责 root / `web/` repo-managed 依赖、Cargo fetch 预热与 shared hooks 安装。
+- linked worktree 在首次 `post-checkout` 时会自动尝试同一套 repo-managed bootstrap；自动路径是 warning-only，系统前置缺失时只输出修复命令，不阻断 checkout。
+- Cargo fetch 预热也遵循 warning-only：当当前 checkout 不能满足 `cargo fetch --locked` 的只读前提时，只报告修复提示，不自动生成或修改 workspace `Cargo.lock`。
+- 显式恢复入口固定为 `bun run bootstrap:dev` 与 `bun run worktree:setup`。
 - Flux Purr 自身 daemon 和 CLI 必须优先从 `tools/flux-purr-devd` 运行。
 - `devd`、CLI、Web/native bridge、release、校准、烧录、mock smoke、真机验证与 HIL 路径，统一由 `skills/flux-purr-developer-operations` 约束。
 - owner-facing 的已发布产品操作，统一由 `skills/flux-purr-user-operations` 约束；不要把 released/user 路径误用为本仓开发流程。
@@ -36,6 +40,7 @@
 ## 验证与工具链要求
 
 - 常用本地验证入口：
+  - `bun run bootstrap:dev`
   - `bun run check:firmware:fmt`
   - `bun run check:firmware:clippy`
   - `bun run check:firmware:build`
@@ -44,6 +49,7 @@
   - `bun run check:web:build`
   - `bun run check:storybook`
   - `bun run check:e2e`
+  - `bun run test:worktree-bootstrap`
 - ESP32-S3 release 构建基线：
 
 ```bash
@@ -51,6 +57,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 ```
 
 - 非硬件验证先于任何真机/HIL 操作完成。
+- `bun`、`rustup`、`cargo +esp`、`jq` 与 Playwright browsers 属于系统前置；bootstrap 只检测并提示，不自动安装。
 - `devd` 启动、CLI 调用和 Web live development 要显式使用当前 repo checkout、显式 bind/port 和显式环境变量，不依赖默认端口或全局二进制。
 - `scripts/devd-hardware-smoke.py --device-id mock-fp-lab-01 --allow-mock-device` 只证明 localhost HTTP contract；不得把 mock smoke 报告成硬件验证。
 - Web live development 在需要 leased `devd` 端口时，必须显式设置 `VITE_FLUX_PURR_DEVD_URL` 与 `VITE_FLUX_PURR_ENABLE_DEVD=1`。

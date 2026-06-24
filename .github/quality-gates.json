@@ -24,7 +24,8 @@
   "required_checks": [
     "Validate PR labels",
     "Firmware checks",
-    "Web checks"
+    "Web checks",
+    "Worktree bootstrap"
   ],
   "informational_checks": [],
   "waivers": [],
@@ -37,14 +38,14 @@
     {
       "workflow": "CI PR",
       "path": ".github/workflows/ci.yml",
-      "jobs": ["Firmware checks", "Web checks"]
+      "jobs": ["Firmware checks", "Web checks", "Worktree bootstrap"]
     }
   ],
   "expected_main_workflows": [
     {
       "workflow": "CI Main",
       "path": ".github/workflows/ci-main.yml",
-      "jobs": ["Firmware checks", "Web checks", "Release Snapshot"]
+      "jobs": ["Firmware checks", "Web checks", "Worktree bootstrap", "Release Snapshot"]
     }
   ],
   "expected_release_workflows": [

@@ -1,0 +1,23 @@
+# Flux Purr Worktree Bootstrap 实现状态（#22222）
+
+## Current Coverage
+
+- `scripts/install-hooks.sh` 统一接管 shared Git hooks 安装，记录主工作区，并在当前 worktree binary 不可用时回退到主工作区 `lefthook` binary。
+- `lefthook.yml` 新增 shared `post-checkout` wiring，linked worktree 首次 checkout 会自动调用 `scripts/post-checkout-bootstrap.sh`。
+- `scripts/bootstrap-dev.sh` 提供 `--manual` 与 `--auto` 两种模式，覆盖 root Bun、`web/` Bun、Cargo fetch 预热、shared hooks 刷新，以及系统前置 detect-only 报告。
+- auto mode 使用 worktree-local stamp 对 root lock、web lock 和 Cargo manifest 指纹做增量判断；未变化时只输出 healthy 摘要。
+- `scripts/test-worktree-bootstrap.sh` 用真实临时 linked worktree fixture 覆盖首次自动 bootstrap、重复 checkout skip、web lock 变化重跑、custom `core.hooksPath` preservation 与历史 revision no-op。
+- `CI PR`、`CI Main` 与 `.github/quality-gates.json` 都已声明 `Worktree bootstrap` 为正式 gate。
+
+## Validation
+
+- `bun run test:worktree-bootstrap`
+- `python3 .github/scripts/check-quality-gates.py`
+- `bun run check:web`
+- `bun run check:devd`
+
+## Rollout Notes
+
+- 主工作区仍需先显式执行一次 `bun run bootstrap:dev` 作为 seed。
+- 后续新 linked worktree 会自动尝试 repo-managed bootstrap，但所有失败都保持 warning-only；手动恢复入口固定为 `bun run bootstrap:dev` 与 `bun run worktree:setup`。
+- 当前 workspace 未跟踪根级 `Cargo.lock` 时，Cargo prewarm 会输出 warning 与修复命令，但不会阻断 checkout 或 Bun 依赖恢复。
