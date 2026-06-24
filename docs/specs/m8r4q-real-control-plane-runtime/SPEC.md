@@ -17,6 +17,7 @@
 - `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
 - `flux-purr` 作为 released CLI，通过 `devd` 执行命令行硬件控制、用户级硬件记忆、USB 端口配置、artifact dry-run 与 guarded real flash。
 - ADC calibration control family 由 `#jt8r2` 约束，并复用本规格的 lease、USB JSONL、devd HTTP、CLI 与 Web capability boundary。
+- calibration live control 和 auto job 是本规格的一等 runtime contract；它们必须在 firmware USB JSONL、native `devd` HTTP、CLI、Web Serial 与 Web app 间保持 transport parity。
 - Release 使用单一产品 tag `vX.Y.Z`，Web、firmware 与 host-tools 资产挂同一 Release，并通过 release manifest 的组件指纹避免无效升级。
 - Web demo 保持轻量 bench console 形态，但通过 client/transport 层接入 mock、browser Web Serial 与 devd contract，并对危险操作做 capability gate。
 - 无真机时必须能用 host tests、mock serial 和 devd dry-run 验证主要契约。
@@ -64,7 +65,7 @@
 - devd 必须在没有显式 `--serial-port` 或 `FLUX_PURR_DEVD_SERIAL_PORT` 时读取用户级默认 USB port；运行中变更默认 USB port 不得静默切换当前 daemon。
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - `flux-purr` CLI 必须为 status/runtime/wifi/flash/monitor 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。
-- `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进且不高于 `21.0V`，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
+- `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进、必须落在硬件 `5V~28V` 边界内且不高于实时 source capability，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
 - `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；HTTP/LAN/mDNS 只能作为未来 transport 预留，不得伪装为当前能力。
 - `flux-purr usb-port set` 必须写用户配置，并明确需要重启运行中的 `devd`。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
@@ -72,6 +73,10 @@
 - firmware artifact verify 必须校验 file existence、size 和 sha256，且只允许 artifact root 内的相对路径；real flash 必须先通过 dry-run。
 - devd artifact catalog 必须从本地构建产物计算 size/sha256，Web dry-check 必须调用 devd verify，而不是只做前端计时模拟。
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
+- Calibration mode control 必须只支持 PPS；Web 的 mode 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定`，owner-facing 术语不得回退到旧命名。
+- Calibration mode live control 请求必须同时满足硬件 `5V~28V` 与实时 PPS capability。任何 transport 都不得实际发出不在该交集内的电压请求。
+- `runtime_config` 必须支持 `calibration` 子对象，表达 mode、mode-owned PPS 请求、heater on/off、温度模式 ADC-hold 目标与稳定状态；旧 `manualPps*` 调试字段继续保留，但不承载新模式产品语义。
+- first-class calibration auto jobs 必须支持 `vin_adc_auto` 与 `heater_curve_auto` 两种 `kind`，并通过 `calibration_job` frame / `/calibration/job` endpoint 暴露 `idle|running|completed|failed|canceled` 状态、进度、样本数、下一目标电压与错误信息。
 - Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
 - `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
 - `demo=false` 必须使用独立 live scenario，不得混入 demo fixture、degraded demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。
@@ -94,9 +99,10 @@
 - `POST /api/v1/devices/:id/leases`：创建 lease；`POST /api/v1/leases/:lease_id/heartbeat` 续租；`DELETE /api/v1/leases/:lease_id` 释放。
 - `GET /api/v1/devices/:id/identity|network|status`：读取同一领域契约；leased USB session 需要 `lease_id`。
 - `GET|PUT /api/v1/devices/:id/calibration` 与 `POST /api/v1/devices/:id/calibration/apply`：读取、编辑和应用 ADC calibration；细节见 `../jt8r2-adc-calibration-control-plane/SPEC.md`。
+- `GET|POST /api/v1/devices/:id/calibration/job`：读取、启动或取消 calibration auto job；job 细节见 `../jt8r2-adc-calibration-control-plane/SPEC.md`。
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
-- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled`、`manual_pps_enabled`、`manual_pps_mv`、`manual_pps_ma` 的部分更新。
+- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled`、`manual_pps_enabled`、`manual_pps_mv`、`manual_pps_ma` 与 `calibration` 的部分更新。
 - `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file kind、path、size、sha256 与可选 flash address；本地 ESP32-S3 release ELF 必须作为 `elf` artifact 走 `espflash flash`。
 - `POST /api/v1/artifacts/verify`：校验 catalog/artifact 文件。
 - `POST /api/v1/devices/:id/flash`：`dry_run=true` 只校验；`dry_run=false` 必须先有同 artifact 的通过记录。
@@ -107,7 +113,8 @@
 - `flux-purr identity --device <id>|--hardware <saved-id>`：通过 leased identity endpoint 读取设备身份。
 - `flux-purr status --device <id>|--hardware <saved-id>`：通过 leased status endpoint 读取状态。
 - `flux-purr runtime get|set`：读取或部分更新目标温度、preset、主动散热与 heater hold。
-- `flux-purr pd pps set|clear`：设置或清除调试用手动 PPS 覆盖；设置路径要求 source status 已回报 PPS capability，且电压在 capability 与 `21.0V` 上限内，请求电流在 APDO current capability 内。
+- `flux-purr pd pps set|clear`：设置或清除调试用手动 PPS 覆盖；设置路径要求 source status 已回报 PPS capability，且电压在硬件 `5V~28V` 与 capability 交集内，请求电流在 APDO current capability 内。
+- `flux-purr calibration-mode ...`：提供 owner-facing 三模式入口；现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear`：通过 leased WiFi endpoint 写入或清除 WiFi 配置，输出必须 redaction password。
 - `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。
 - `flux-purr monitor`：读取 bounded event backlog，不拥有长期未释放 lease。
@@ -125,8 +132,9 @@
 - `hello`：device 主动或 host 请求；返回 protocol、framing、identity、capabilities。
 - `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
-- `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`、`manualPpsEnabled`、`manualPpsMv`、`manualPpsMa`；response 返回更新后的 status。`manualPpsEnabled=false` 清除覆盖；启用时 `manualPpsMv` 必须在 PPS APDO capability 内、最高 `21.0V`、且按 `100mV` 对齐；`manualPpsMa` 必须在 APDO current capability 内、且按 `50mA` 对齐。CH224Q 只通过 `0x53` 写 PPS 电压，`manualPpsMa` 是用于校验与回显的请求电流值。
+- `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`、`manualPpsEnabled`、`manualPpsMv`、`manualPpsMa` 与 `calibration`；response 返回更新后的 status。`manualPpsEnabled=false` 清除调试覆盖；启用时 `manualPpsMv` 必须在硬件 `5V~28V` 与 PPS capability 交集内并按 `100mV` 对齐，`manualPpsMa` 必须在 APDO current capability 内并按 `50mA` 对齐。`calibration` 语义遵循 `#jt8r2`，用于 owner-facing 三模式控制。CH224Q 只通过 `0x53` 写 PPS 电压，`manualPpsMa` 是用于校验与回显的请求电流值。
 - `calibration_config` / `calibration_apply`：`request_id` + calibration fields；response 返回 calibration state。校准领域契约见 `#jt8r2`。
+- `calibration_job`：`request_id` + `op=start|cancel` + optional `kind=vin_adc_auto|heater_curve_auto`；response 返回 calibration auto-job 状态。
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 
@@ -136,6 +144,7 @@
 - Web Serial port 使用 `115200` baud 打开，按 USB JSONL 一行一帧写入 `request` / `runtime_config`，并只消费匹配 `requestId` 的 `response`。
 - 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
 - Direct Web Serial 控制项只包括 runtime control、manual PPS debug override 与 status polling；status polling 必须回读 target、preset、cooling、heater、manual PPS/capability/error 与 power/network summary，供 Web 与前面板设置界面双向回显。firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
+- Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration draft/apply 和 heater curve preview/save，以保证 calibration workbench 的 transport parity。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -152,6 +161,10 @@
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
 - Given CLI 指向 `devd` mock target，When 执行 devices/status/runtime/wifi/flash dry-run/monitor，Then CLI 自动 lease、输出可读 human 文本或 `--json`，且 secret 被 redaction。
 - Given CLI 或 Web live target 具备 PPS capability，When operator 设置 `10.4V / 2.50A` 手动 PPS 覆盖，Then runtime status 回显 `manualPpsEnabled=true`、`manualPpsMv=10400`、`manualPpsMa=2500`、capability 范围和更新后的 PD request/contract；When 清除覆盖，Then status 回到自动 PPS 控制。
+- Given Web 或 CLI 打开 calibration workbench / mode commands，When operator 进入 `电压读数标定`、`温度标定` 或 `加热曲线标定`，Then runtime status、USB JSONL、devd HTTP、CLI 与 Web Serial 都表达相同的 mode live state。
+- Given calibration live control 请求超出硬件 `5V~28V` 或实时 PPS capability，When operator 通过 Web、CLI、devd HTTP 或 Web Serial 提交，Then Web 以受限控件和 inline error 阻止、CLI 报错退出、firmware/devd 拒绝请求，且不会发出非法电压请求。
+- Given `电压读数标定` auto job 启动，When runtime capability 允许，Then job 以 `1V` 步进扫点并把样本写入 `vin_adc draft`。
+- Given `加热曲线标定` auto job 启动，When稳定温区完成采样，Then runtime 先生成平滑后的 `heater_curve preview`，只有用户显式 `Save` 才写入 `active`。
 - Given 用户保存默认 USB port，When 重启 `flux-purr-devd serve` 且未显式传入 serial port，Then daemon 只扫描该用户配置 port。
 - Given product release 发布，When 查看 release assets，Then Web、firmware、host-tools 与 release manifest 同挂一个 `vX.Y.Z` Release；manifest 可区分 unchanged component。
 - Given PR 收敛，When checks 完成，Then firmware、devd/CLI、release policy、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。
@@ -169,6 +182,7 @@
 - `bun run --cwd web typecheck`
 - `bun run --cwd web build`
 - Web app browser smoke against Vite preview with `devd` running.
+- Calibration workbench browser smoke against both devd HTTP and direct Web Serial transports.
 
 ## Visual Evidence
 

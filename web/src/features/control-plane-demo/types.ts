@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import type { HeaterCurveState } from './contracts'
+import type { CalibrationRuntimeState, CalibrationState, HeaterCurveState } from './contracts'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
 export type DeviceSeverity = 'nominal' | 'warning' | 'offline'
@@ -20,6 +20,8 @@ export interface DeviceTarget {
   targetTempC: number
   selectedPresetIndex?: number
   presetsC?: Array<number | null>
+  rtdRawAdcMv?: number
+  vinRawAdcMv?: number
   voltageMv: number
   currentMa: number
   pdRequestMv: number
@@ -32,6 +34,8 @@ export interface DeviceTarget {
   ppsCapabilityMaxMv?: number | null
   ppsCapabilityMaxMa?: number | null
   manualPpsError?: string | null
+  calibration: CalibrationRuntimeState
+  storedCalibration?: CalibrationState
   heaterEnabled: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean

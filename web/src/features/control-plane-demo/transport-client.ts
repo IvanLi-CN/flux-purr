@@ -2,6 +2,8 @@ import type {
   ApiErrorEnvelope,
   ArtifactVerifyResult,
   CalibrationConfigRequest,
+  CalibrationJobRequest,
+  CalibrationJobState,
   CalibrationState,
   ControlPlaneStatus,
   DevdDeviceList,
@@ -81,11 +83,21 @@ export interface ControlPlaneHttpClient {
     request: RuntimeConfigRequest
   ): Promise<ControlPlaneStatus>
   getCalibration(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<CalibrationState>
+  getCalibrationJob(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<CalibrationJobState>
   configureCalibration(
     devdBaseUrl: string,
     deviceId: string,
     request: CalibrationConfigRequest
   ): Promise<CalibrationState>
+  configureCalibrationJob(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: CalibrationJobRequest
+  ): Promise<CalibrationJobState>
   applyCalibration(
     devdBaseUrl: string,
     deviceId: string,
@@ -224,12 +236,29 @@ export function createControlPlaneHttpClient(
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration?lease_id=${encodeURIComponent(leaseId)}`
       )
     },
+    getCalibrationJob(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<CalibrationJobState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/job?lease_id=${encodeURIComponent(leaseId)}`
+      )
+    },
     configureCalibration(devdBaseUrl, deviceId, request) {
       return requestJson<CalibrationState>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration`,
         {
           method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
+      )
+    },
+    configureCalibrationJob(devdBaseUrl, deviceId, request) {
+      return requestJson<CalibrationJobState>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/job`,
+        {
+          method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(request),
         }
@@ -330,6 +359,8 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     targetTempC: record.status.targetTempC,
     selectedPresetIndex: record.status.selectedPresetSlot,
     presetsC: record.status.presetsC,
+    rtdRawAdcMv: record.status.rtdRawAdcMv,
+    vinRawAdcMv: record.status.vinRawAdcMv,
     voltageMv: record.status.voltageMv,
     currentMa: record.status.currentMa,
     pdRequestMv: record.status.pdRequestMv,
@@ -342,6 +373,8 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     ppsCapabilityMaxMv: record.status.ppsCapabilityMaxMv ?? null,
     ppsCapabilityMaxMa: record.status.ppsCapabilityMaxMa ?? null,
     manualPpsError: record.status.manualPpsError ?? null,
+    calibration: record.status.calibration,
+    storedCalibration: record.calibration,
     heaterEnabled: record.status.heaterEnabled,
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
@@ -350,6 +383,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     capabilities: record.identity.capabilities,
     networkState: record.network.state,
     leaseState: record.transport === 'native_serial' ? 'none' : undefined,
+    heaterCurve: record.heaterCurve,
   }
 }
 
@@ -371,13 +405,14 @@ function devdEventDetail(event: DevdEvent) {
       .join(' / ')
   }
   if (event.kind === 'runtime') {
-    const status = recordPayload(event.payload?.status)
+    const status = recordPayload(event.payload?.status) as Partial<ControlPlaneStatus> | undefined
     return [
       targetTempLabel(status?.targetTempC),
       presetSlotLabel(status?.selectedPresetSlot),
       boolLabel('cooling', status?.activeCoolingEnabled),
       boolLabel('heater', status?.heaterEnabled),
       manualPpsLabel(status?.manualPpsEnabled, status?.manualPpsMv, status?.manualPpsMa),
+      calibrationModeLabel(status?.calibration?.mode),
     ]
       .filter(Boolean)
       .join(' / ')
@@ -438,18 +473,19 @@ function targetTempLabel(value: unknown) {
   return targetTempC === null ? null : `target ${targetTempC}C`
 }
 
-function manualPpsLabel(enabled: unknown, millivolts: unknown, milliamps: unknown) {
+function manualPpsLabel(enabled: unknown, millivolts: unknown, _milliamps: unknown) {
   if (enabled !== true) {
     return enabled === false ? 'manual PPS off' : null
   }
   const value = safeNumber(millivolts)
-  const amps = safeNumber(milliamps)
   if (value === null) {
     return 'manual PPS on'
   }
-  return amps === null
-    ? `manual PPS ${(value / 1000).toFixed(1)}V`
-    : `manual PPS ${(value / 1000).toFixed(1)}V/${(amps / 1000).toFixed(2)}A`
+  return `manual PPS ${(value / 1000).toFixed(1)}V`
+}
+
+function calibrationModeLabel(mode: unknown) {
+  return typeof mode === 'string' && mode !== 'off' ? `calibration ${mode}` : null
 }
 
 function presetSlotLabel(value: unknown) {
