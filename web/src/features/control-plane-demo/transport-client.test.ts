@@ -35,6 +35,57 @@ describe('control-plane transport client', () => {
         ssid: 'FluxPurr-Lab',
         wifiRssi: -54,
       },
+      calibration: {
+        active: {
+          rtdAdc: [null, null, null, null, null, null, null, null],
+          vinAdc: [
+            { observedMv: 1010, expectedMv: 20000 },
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+          ],
+        },
+        draft: {
+          rtdAdc: [null, null, null, null, null, null, null, null],
+          vinAdc: [
+            { observedMv: 1010, expectedMv: 20000 },
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+          ],
+        },
+        activeFit: {
+          rtdAdc: { customSampleCount: 0, defaultSampleCount: 2, gain: 1, offsetMv: 0 },
+          vinAdc: { customSampleCount: 1, defaultSampleCount: 2, gain: 1.01, offsetMv: 3 },
+        },
+        draftFit: {
+          rtdAdc: { customSampleCount: 0, defaultSampleCount: 2, gain: 1, offsetMv: 0 },
+          vinAdc: { customSampleCount: 1, defaultSampleCount: 2, gain: 1.01, offsetMv: 3 },
+        },
+      },
+      heaterCurve: {
+        active: {
+          points: [
+            { tempCentiC: 2120, resistanceMilliohms: 4251 },
+            { tempCentiC: 5180, resistanceMilliohms: 4732 },
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+          ],
+        },
+        preview: null,
+      },
       status: {
         mode: 'sampling',
         uptimeSeconds: 3661,
@@ -48,12 +99,33 @@ describe('control-plane transport client', () => {
         fanDisplayState: 'AUTO',
         fanEnabled: true,
         fanPwmPermille: 500,
+        rtdRawAdcMv: 1123,
+        vinRawAdcMv: 1678,
         voltageMv: 20010,
         currentMa: 840,
         boardTempCenti: 3840,
         pdRequestMv: 20000,
         pdContractMv: 20000,
         pdState: 'ready',
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
         frontpanelKey: null,
         network: {
           state: 'connected',
@@ -69,6 +141,14 @@ describe('control-plane transport client', () => {
     expect(target.capabilities).toContain('wifi_config')
     expect(target.selectedPresetIndex).toBe(5)
     expect(target.presetsC?.[5]).toBe(220)
+    expect(target.storedCalibration?.active.vinAdc[0]).toEqual({
+      observedMv: 1010,
+      expectedMv: 20000,
+    })
+    expect(target.heaterCurve?.active.points[0]).toEqual({
+      tempCentiC: 2120,
+      resistanceMilliohms: 4251,
+    })
   })
 
   it('keeps daemon-local capabilities after a successful native firmware probe', () => {
@@ -104,12 +184,33 @@ describe('control-plane transport client', () => {
         fanDisplayState: 'OFF',
         fanEnabled: false,
         fanPwmPermille: 1000,
+        rtdRawAdcMv: 0,
+        vinRawAdcMv: 417,
         voltageMv: 5000,
         currentMa: 0,
         boardTempCenti: 0,
         pdRequestMv: 20000,
         pdContractMv: 5000,
         pdState: 'fallback_5v',
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
         frontpanelKey: null,
         network: {
           state: 'idle',
@@ -426,6 +527,70 @@ describe('control-plane transport client', () => {
       'http://127.0.0.1:30080/api/v1/artifacts/verify',
       expect.objectContaining({ method: 'POST' })
     )
+  })
+
+  it('reads and writes calibration auto-job state through devd endpoints', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/calibration/job?lease_id=lease-1')) {
+        return {
+          ok: true,
+          json: async () => ({
+            kind: 'vin_adc_auto',
+            status: 'running',
+            progressPercent: 25,
+            samplesCollected: 2,
+            nextRequestMv: 12000,
+            message: null,
+          }),
+        }
+      }
+      if (url.endsWith('/calibration/job')) {
+        expect(init).toMatchObject({
+          method: 'POST',
+        })
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          leaseId: 'lease-1',
+          op: 'start',
+          kind: 'heater_curve_auto',
+        })
+        return {
+          ok: true,
+          json: async () => ({
+            kind: 'heater_curve_auto',
+            status: 'running',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: 20000,
+            message: null,
+          }),
+        }
+      }
+      throw new Error(`unexpected url ${url}`)
+    }) as unknown as typeof fetch
+    const client = createControlPlaneHttpClient(fetcher)
+
+    const current = await client.getCalibrationJob(
+      'http://127.0.0.1:30080',
+      'bench target',
+      'lease-1'
+    )
+    const started = await client.configureCalibrationJob('http://127.0.0.1:30080', 'bench target', {
+      leaseId: 'lease-1',
+      op: 'start',
+      kind: 'heater_curve_auto',
+    })
+
+    expect(current).toMatchObject({
+      kind: 'vin_adc_auto',
+      status: 'running',
+      progressPercent: 25,
+    })
+    expect(started).toMatchObject({
+      kind: 'heater_curve_auto',
+      status: 'running',
+      nextRequestMv: 20000,
+    })
   })
 
   it('sends runtime, wifi, and flash mutations through devd endpoints', async () => {

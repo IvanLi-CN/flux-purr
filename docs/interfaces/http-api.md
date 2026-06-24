@@ -59,7 +59,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "fanEnabled": true,
   "fanPwmPermille": 500,
   "voltageMv": 20010,
-  "currentMa": 840,
+  "currentMa": 3000,
   "boardTempCenti": 3840,
   "rtdRawAdcMv": 1123,
   "vinRawAdcMv": 1678,
@@ -81,8 +81,9 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
-`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept.
+`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
 `rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
+`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth.
 
 ### `CalibrationState`
 
@@ -108,6 +109,37 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 ```
 
 Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples. Capture commands accept physical references (`referenceTempC` or `referenceVinMv`) and convert them into expected ADC millivolts using the RTD/PT1000 or VIN divider model. Import replaces the full draft package.
+
+### `CalibrationRuntimeState`
+
+```json
+{
+  "mode": "vin_adc",
+  "ppsEnabled": true,
+  "ppsMv": 12000,
+  "heaterEnabled": false,
+  "targetAdcMv": null,
+  "stable": true,
+  "stabilityErrorMv": 0,
+  "error": null,
+  "job": {
+    "kind": "vin_adc_auto",
+    "status": "running",
+    "progressPercent": 38,
+    "samplesCollected": 3,
+    "nextRequestMv": 13000,
+    "message": null
+  }
+}
+```
+
+Owner-facing calibration modes are fixed as:
+
+- `vin_adc` => `电压读数标定`
+- `rtd_adc` => `温度标定`
+- `heater_curve` => `加热曲线标定`
+
+Calibration live control is PPS-only. Any requested PPS value must stay within the hardware `5V~28V` safety range and the device's real-time PPS capability. The effective request window is therefore `max(5V, ppsCapabilityMinMv)` through `min(28V, ppsCapabilityMaxMv)`.
 
 ### `HeaterCurveState`
 
@@ -227,8 +259,9 @@ Direct browser targets are represented in the Web app as `transport=serial`, `ba
 
 Supported direct operations:
 
-- `request` with `op=get_identity|get_network|get_status`
-- `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `activeCoolingEnabled`, and `heaterEnabled`
+- `request` with `op=get_identity|get_network|get_status|get_calibration|get_calibration_job|get_heater_curve`
+- `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `activeCoolingEnabled`, `heaterEnabled`, and `calibration`
+- `calibration_config`, `calibration_apply`, `calibration_job`, `heater_curve_config`, and `heater_curve_save`
 
 Unsupported direct operations:
 
@@ -257,11 +290,13 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/network?lease_id=...`
 - `GET /api/v1/devices/:id/status?lease_id=...`
 - `GET /api/v1/devices/:id/calibration?lease_id=...`
+- `GET /api/v1/devices/:id/calibration/job?lease_id=...`
 - `GET /api/v1/devices/:id/events`
 - `PUT /api/v1/devices/:id/wifi`
 - `PUT /api/v1/devices/:id/runtime`
 - `PUT /api/v1/devices/:id/calibration`
 - `POST /api/v1/devices/:id/calibration/apply`
+- `POST /api/v1/devices/:id/calibration/job`
 - `GET /api/v1/devices/:id/heater-curve?lease_id=...`
 - `PUT /api/v1/devices/:id/heater-curve`
 - `POST /api/v1/devices/:id/heater-curve/save`
@@ -295,11 +330,17 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
   "heaterEnabled": true,
   "manualPpsEnabled": true,
   "manualPpsMv": 10400,
-  "manualPpsMa": 2500
+  "manualPpsMa": 2500,
+  "calibration": {
+    "mode": "vin_adc",
+    "ppsEnabled": true,
+    "ppsMv": 12000,
+    "heaterEnabled": false
+  }
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the advertised PPS capability, on a `100mV` step, `manualPpsMa` within the advertised APDO current capability, on a `50mA` step, and no higher than `21.0V`. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
 
 `PUT /api/v1/devices/:id/calibration` body:
 
@@ -323,6 +364,31 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 ```
 
 Apply copies draft calibration to active calibration and returns the updated `CalibrationState`. It is rejected with `calibration_apply_heater_active` when the heater is enabled or output is nonzero.
+
+`GET /api/v1/devices/:id/calibration/job?lease_id=...` returns the current auto-job state:
+
+```json
+{
+  "kind": "vin_adc_auto",
+  "status": "running",
+  "progressPercent": 38,
+  "samplesCollected": 3,
+  "nextRequestMv": 13000,
+  "message": null
+}
+```
+
+`POST /api/v1/devices/:id/calibration/job` body:
+
+```json
+{
+  "leaseId": "lease-001",
+  "op": "start",
+  "kind": "heater_curve_auto"
+}
+```
+
+`op` is `start | cancel`. `start` currently accepts `kind=vin_adc_auto|heater_curve_auto`. Both jobs are firmware-driven first-class tasks: `vin_adc_auto` writes samples into `vin_adc draft`; `heater_curve_auto` writes a smoothed result into `heater_curve preview`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
 `PUT /api/v1/devices/:id/heater-curve` body:
 
@@ -430,6 +496,8 @@ Core commands:
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
+- `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
+- `flux-purr calibration-mode voltage|temperature|heater-curve ...`
 - `flux-purr wifi set|clear --device <id> ...`
 - `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
 - `flux-purr monitor --device <id>`
@@ -503,7 +571,7 @@ Each frame is UTF-8 JSON followed by `\n`.
 }
 ```
 
-`op`: `get_identity | get_network | get_status | get_calibration | set_log_level`.
+`op`: `get_identity | get_network | get_status | get_calibration | get_calibration_job | get_heater_curve | set_log_level`.
 
 ### `wifi_config`
 
@@ -551,7 +619,14 @@ Responses must redact the password:
   "heaterEnabled": true,
   "manualPpsEnabled": true,
   "manualPpsMv": 10400,
-  "manualPpsMa": 2500
+  "manualPpsMa": 2500,
+  "calibration": {
+    "mode": "rtd_adc",
+    "ppsEnabled": true,
+    "ppsMv": 12000,
+    "heaterEnabled": true,
+    "targetAdcMv": 1120
+  }
 }
 ```
 
@@ -571,11 +646,31 @@ The response returns the updated status:
       "heaterEnabled": true,
       "manualPpsEnabled": true,
       "manualPpsMv": 10400,
-      "manualPpsMa": 2500
+      "manualPpsMa": 2500,
+      "calibration": {
+        "mode": "rtd_adc",
+        "ppsEnabled": true,
+        "ppsMv": 12000,
+        "heaterEnabled": true,
+        "targetAdcMv": 1120,
+        "stable": false,
+        "stabilityErrorMv": 18,
+        "error": null,
+        "job": {
+          "kind": null,
+          "status": "idle",
+          "progressPercent": 0,
+          "samplesCollected": 0,
+          "nextRequestMv": null,
+          "message": null
+        }
+      }
     }
   }
 }
 ```
+
+`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. Both paths must reject any PPS request outside the hardware `5V~28V` range, outside the advertised capability, or off the required `100mV / 50mA` steps.
 
 ### `calibration_config`
 
@@ -601,6 +696,19 @@ Supported operations are `capture`, `delete`, `clear`, and `import`. The respons
 ```
 
 The response returns `CalibrationState`, or `calibration_apply_heater_active` when applying would change active calibration while heater output is active.
+
+### `calibration_job`
+
+```json
+{
+  "type": "calibration_job",
+  "requestId": "req-005",
+  "op": "start",
+  "kind": "vin_adc_auto"
+}
+```
+
+Supported operations are `start` and `cancel`. `start` currently accepts `vin_adc_auto` and `heater_curve_auto`. The response returns `CalibrationJobState`.
 
 ### `heater_curve_config`
 

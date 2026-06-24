@@ -237,12 +237,12 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto('/?demo=false')
 
-    const targetRegion = page.getByRole('region', { name: 'Current target' })
-    await expect(page.getByRole('combobox', { name: 'Target' })).toContainText('/ DEVD')
-    await expect(targetRegion).toContainText('Transport')
+    const targetRegion = page.getByRole('region', { name: '当前目标' })
+    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(targetRegion).toContainText('传输')
     await expect(targetRegion).toContainText('DEVD')
-    await expect(targetRegion).toContainText('Lease')
-    await expect(targetRegion).toContainText('ACTIVE')
+    await expect(targetRegion).toContainText('租约')
+    await expect(targetRegion).toContainText('有效')
     await page.waitForTimeout(1800)
     await expect(page.getByText('181.5').first()).toBeVisible()
     await expect(page.getByText('Heater 18%')).toBeVisible()
@@ -250,7 +250,7 @@ test.describe('control plane live devd bridge', () => {
       page.getByText('native serial RPC failed: status / usb_response_timeout').first()
     ).toBeVisible()
 
-    await page.getByRole('button', { name: /update/i }).click()
+    await page.getByRole('button', { name: /更新/i }).click()
     await expect(page.getByRole('combobox', { name: 'Firmware artifact' })).toContainText(
       'local-build'
     )
@@ -291,17 +291,17 @@ test.describe('control plane live devd bridge', () => {
   test('sends runtime commands through the active devd lease', async ({ page }) => {
     await page.goto('/?demo=false')
 
-    await expect(page.getByRole('combobox', { name: 'Target' })).toContainText('/ DEVD')
+    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
 
-    await page.getByRole('button', { name: /dashboard/i }).click()
+    await page.getByRole('button', { name: /总览/i }).click()
     await page.getByLabel('Dashboard target temperature').fill('235')
     await expect(page.getByText('Target updated')).toBeVisible()
 
-    await page.getByRole('button', { name: /settings/i }).click()
+    await page.getByRole('button', { name: /设置/i }).click()
     await page.getByRole('button', { name: 'OFF' }).click()
     await expect(page.getByText('Fan policy updated', { exact: true })).toBeVisible()
 
-    await page.getByRole('button', { name: /dashboard/i }).click()
+    await page.getByRole('button', { name: /总览/i }).click()
     await page.getByRole('button', { name: 'Hold heater' }).click()
     await expect(page.getByText('Heater held')).toBeVisible()
 
