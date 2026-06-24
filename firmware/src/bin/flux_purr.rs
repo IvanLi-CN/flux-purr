@@ -41,7 +41,7 @@ use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 use flux_purr_firmware::adapters::ch224q;
 #[cfg(test)]
 use flux_purr_firmware::adapters::ch224q::Status;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::buzzer::BuzzerOutput;
@@ -49,24 +49,28 @@ use flux_purr_firmware::buzzer::BuzzerOutput;
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
-    ApiError, ControlPlaneStatus, Identity, RuntimeConfigCommand, UsbFrame, UsbFrameError,
-    UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
-    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
+    ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
+    CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire, ControlPlaneStatus,
+    Identity, RuntimeConfigCommand, UsbFrame, UsbFrameError, UsbRequestOp, UsbResponsePayload,
+    calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
+    parse_usb_frame, write_usb_frame,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
     CalibrationChannelWire, CalibrationConfigCommand, CalibrationConfigOp,
-    HeaterCurveConfigCommand, HeaterCurveConfigOp,
+    CalibrationJobCommandWire, CalibrationJobOpWire, HeaterCurveConfigCommand, HeaterCurveConfigOp,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{hello_frame, log_frame};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
-    FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRuntimeMode,
-    FrontPanelUiState, HeaterLockReason,
+    FRONTPANEL_TARGET_TEMP_MAX_C, FRONTPANEL_TARGET_TEMP_MIN_C, FanDisplayState, FrontPanelKeyMap,
+    FrontPanelRawState, FrontPanelRuntimeMode, FrontPanelUiState, HeaterLockReason,
 };
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-use flux_purr_firmware::memory::AdcCalibrationSample;
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+use flux_purr_firmware::memory::{
+    ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationSample, HEATER_CURVE_MAX_POINTS, HeaterCurvePoint,
+};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(any(target_arch = "xtensa", test))]
@@ -257,28 +261,28 @@ const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 const RTD_SAMPLE_COUNT: usize = 8;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const PT1000_R0_OHMS: f32 = 1_000.0;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const PT1000_A: f32 = 3.9083e-3;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const PT1000_B: f32 = -5.775e-7;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const PT1000_C: f32 = -4.183e-12;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 // Use the board's effective RTD divider rail instead of the ideal 3V3 nominal.
 // Runtime samples on the current hardware land near ambient only when the divider
 // is solved against ~3.0 V; hardcoding 3.3 V biases the PT1000 reading low.
 const RTD_DIVIDER_SUPPLY_MV: u16 = 3_000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const RTD_OPEN_FAULT_MIN_MV: u16 = 2_800;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const RTD_TEMP_MIN_C: f32 = -50.0;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const RTD_TEMP_MAX_C: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_I2C_FREQUENCY_HZ: u32 = 100_000;
@@ -1069,6 +1073,13 @@ enum ManualPpsError {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManualPpsOwner {
+    Debug,
+    Calibration,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 impl ManualPpsError {
     const fn code(self) -> &'static str {
         match self {
@@ -1092,9 +1103,10 @@ impl ManualPpsError {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ManualPpsState {
     enabled: bool,
+    owner: ManualPpsOwner,
     target_mv: Option<u16>,
     target_ma: Option<u16>,
     applied_mv: Option<u16>,
@@ -1104,6 +1116,313 @@ struct ManualPpsState {
     capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     error: Option<ManualPpsError>,
     automatic_restore_pending: bool,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl Default for ManualPpsState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            owner: ManualPpsOwner::Debug,
+            target_mv: None,
+            target_ma: None,
+            applied_mv: None,
+            capability_min_mv: None,
+            capability_max_mv: None,
+            capability_max_ma: None,
+            capability_apdos: [None; ch224q::MAX_PPS_APDOS],
+            error: None,
+            automatic_restore_pending: false,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CalibrationMode {
+    Off,
+    VinAdc,
+    RtdAdc,
+    HeaterCurve,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl CalibrationMode {
+    const fn to_wire(self) -> CalibrationModeWire {
+        match self {
+            Self::Off => CalibrationModeWire::Off,
+            Self::VinAdc => CalibrationModeWire::VinAdc,
+            Self::RtdAdc => CalibrationModeWire::RtdAdc,
+            Self::HeaterCurve => CalibrationModeWire::HeaterCurve,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl From<CalibrationModeWire> for CalibrationMode {
+    fn from(value: CalibrationModeWire) -> Self {
+        match value {
+            CalibrationModeWire::Off => Self::Off,
+            CalibrationModeWire::VinAdc => Self::VinAdc,
+            CalibrationModeWire::RtdAdc => Self::RtdAdc,
+            CalibrationModeWire::HeaterCurve => Self::HeaterCurve,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CalibrationJobKind {
+    VinAdcAuto,
+    HeaterCurveAuto,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl CalibrationJobKind {
+    const fn to_wire(self) -> CalibrationJobKindWire {
+        match self {
+            Self::VinAdcAuto => CalibrationJobKindWire::VinAdcAuto,
+            Self::HeaterCurveAuto => CalibrationJobKindWire::HeaterCurveAuto,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl From<CalibrationJobKindWire> for CalibrationJobKind {
+    fn from(value: CalibrationJobKindWire) -> Self {
+        match value {
+            CalibrationJobKindWire::VinAdcAuto => Self::VinAdcAuto,
+            CalibrationJobKindWire::HeaterCurveAuto => Self::HeaterCurveAuto,
+        }
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CalibrationJobStatus {
+    Idle,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl CalibrationJobStatus {
+    const fn to_wire(self) -> CalibrationJobStatusWire {
+        match self {
+            Self::Idle => CalibrationJobStatusWire::Idle,
+            Self::Running => CalibrationJobStatusWire::Running,
+            Self::Completed => CalibrationJobStatusWire::Completed,
+            Self::Failed => CalibrationJobStatusWire::Failed,
+            Self::Canceled => CalibrationJobStatusWire::Canceled,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CalibrationJobState {
+    kind: Option<CalibrationJobKind>,
+    status: CalibrationJobStatus,
+    progress_percent: u8,
+    samples_collected: u8,
+    next_request_mv: Option<u16>,
+    message: Option<ManualPpsError>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl Default for CalibrationJobState {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            status: CalibrationJobStatus::Idle,
+            progress_percent: 0,
+            samples_collected: 0,
+            next_request_mv: None,
+            message: None,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
+#[cfg(any(target_arch = "xtensa", test))]
+const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CalibrationVinAutoJob {
+    start_request_mv: u16,
+    next_request_mv: u16,
+    max_request_mv: u16,
+    target_ma: u16,
+    settle_ticks: u8,
+    stable_ticks: u8,
+    last_observed_mv: Option<u16>,
+    sample_count: u8,
+    samples: [Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HeaterCurveAutoBin {
+    min_temp_c: f32,
+    max_temp_c: f32,
+    samples: u16,
+    temp_sum_c: f32,
+    resistance_sum_ohms: f32,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl HeaterCurveAutoBin {
+    const fn new(min_temp_c: f32, max_temp_c: f32) -> Self {
+        Self {
+            min_temp_c,
+            max_temp_c,
+            samples: 0,
+            temp_sum_c: 0.0,
+            resistance_sum_ohms: 0.0,
+        }
+    }
+
+    fn contains(self, temp_c: f32) -> bool {
+        temp_c >= self.min_temp_c && temp_c < self.max_temp_c
+    }
+
+    fn observe(&mut self, temp_c: f32, resistance_ohms: f32) {
+        self.samples = self.samples.saturating_add(1);
+        self.temp_sum_c += temp_c;
+        self.resistance_sum_ohms += resistance_ohms;
+    }
+
+    fn averaged_point(self) -> Option<(i16, u16)> {
+        if self.samples == 0 {
+            return None;
+        }
+        let temp_c = self.temp_sum_c / f32::from(self.samples);
+        let resistance_ohms = self.resistance_sum_ohms / f32::from(self.samples);
+        let temp_centi_c = round_to_i16(temp_c * 100.0);
+        let resistance_milliohms = round_to_u16_nonnegative(resistance_ohms * 1000.0);
+        Some((temp_centi_c, resistance_milliohms))
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn round_to_i16(value: f32) -> i16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let rounded = if value >= 0.0 {
+        value + 0.5
+    } else {
+        value - 0.5
+    };
+    rounded.clamp(i16::MIN as f32, i16::MAX as f32) as i16
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn round_to_u16_nonnegative(value: f32) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    (value + 0.5).clamp(0.0, u16::MAX as f32) as u16
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CalibrationHeaterCurveAutoJob {
+    stable_ticks: u8,
+    started_ticks: u8,
+    bins: [HeaterCurveAutoBin; 4],
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl Default for CalibrationHeaterCurveAutoJob {
+    fn default() -> Self {
+        Self {
+            stable_ticks: 0,
+            started_ticks: 0,
+            bins: [
+                HeaterCurveAutoBin::new(120.0, 160.0),
+                HeaterCurveAutoBin::new(160.0, 200.0),
+                HeaterCurveAutoBin::new(200.0, 230.0),
+                HeaterCurveAutoBin::new(230.0, 251.0),
+            ],
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CalibrationJobData {
+    VinAdcAuto(CalibrationVinAutoJob),
+    HeaterCurveAuto(CalibrationHeaterCurveAutoJob),
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CalibrationRuntimeState {
+    mode: CalibrationMode,
+    pps_enabled: bool,
+    pps_mv: Option<u16>,
+    pps_ma: Option<u16>,
+    heater_enabled: bool,
+    target_adc_mv: Option<u16>,
+    stable: bool,
+    stability_error_mv: Option<i16>,
+    error: Option<ManualPpsError>,
+    job: CalibrationJobState,
+    job_data: Option<CalibrationJobData>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl Default for CalibrationRuntimeState {
+    fn default() -> Self {
+        Self {
+            mode: CalibrationMode::Off,
+            pps_enabled: false,
+            pps_mv: None,
+            pps_ma: None,
+            heater_enabled: false,
+            target_adc_mv: None,
+            stable: false,
+            stability_error_mv: None,
+            error: None,
+            job: CalibrationJobState::default(),
+            job_data: None,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn calibration_runtime_state_to_wire(
+    state: CalibrationRuntimeState,
+) -> CalibrationRuntimeStateWire {
+    CalibrationRuntimeStateWire {
+        mode: state.mode.to_wire(),
+        pps_enabled: state.pps_enabled,
+        pps_mv: state.pps_mv,
+        pps_ma: state.pps_ma,
+        heater_enabled: state.heater_enabled,
+        target_adc_mv: state.target_adc_mv,
+        stable: state.stable,
+        stability_error_mv: state.stability_error_mv,
+        error: state.error.map(manual_pps_error_code),
+        job: CalibrationJobStateWire {
+            kind: state.job.kind.map(CalibrationJobKind::to_wire),
+            status: state.job.status.to_wire(),
+            progress_percent: state.job.progress_percent,
+            samples_collected: state.job.samples_collected,
+            next_request_mv: state.job.next_request_mv,
+            message: state.job.message.or(state.error).map(|error| {
+                let mut out = heapless::String::new();
+                let _ = out.push_str(error.message());
+                out
+            }),
+        },
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1164,12 +1483,18 @@ impl ManualPpsState {
         })
     }
 
-    fn enable(&mut self, target_mv: u16, target_ma: Option<u16>) -> Result<(), ManualPpsError> {
+    fn enable(
+        &mut self,
+        owner: ManualPpsOwner,
+        target_mv: u16,
+        target_ma: Option<u16>,
+    ) -> Result<(), ManualPpsError> {
         let target_ma = target_ma
             .or(self.capability_max_ma)
             .ok_or(ManualPpsError::NoPpsCapability)?;
         self.validate_target(target_mv, target_ma)?;
         self.enabled = true;
+        self.owner = owner;
         self.target_mv = Some(target_mv);
         self.target_ma = Some(target_ma);
         self.error = None;
@@ -1183,6 +1508,7 @@ impl ManualPpsState {
             || self.target_ma.is_some()
             || self.applied_mv.is_some();
         self.enabled = false;
+        self.owner = ManualPpsOwner::Debug;
         self.target_mv = None;
         self.target_ma = None;
         self.applied_mv = None;
@@ -1192,6 +1518,7 @@ impl ManualPpsState {
 
     fn fail(&mut self, error: ManualPpsError) {
         self.enabled = false;
+        self.owner = ManualPpsOwner::Debug;
         self.target_mv = None;
         self.target_ma = None;
         self.applied_mv = None;
@@ -1255,7 +1582,7 @@ fn log_ui_state(state: &FrontPanelUiState) {
     );
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn pt1000_resistance_ohms_at(temp_c: f32) -> f32 {
     let polynomial = 1.0 + PT1000_A * temp_c + PT1000_B * temp_c * temp_c;
     if temp_c >= 0.0 {
@@ -1265,7 +1592,7 @@ fn pt1000_resistance_ohms_at(temp_c: f32) -> f32 {
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn pt1000_temperature_c_from_resistance(resistance_ohms: f32) -> f32 {
     let mut low = RTD_TEMP_MIN_C;
     let mut high = RTD_TEMP_MAX_C;
@@ -1280,7 +1607,7 @@ fn pt1000_temperature_c_from_resistance(resistance_ohms: f32) -> f32 {
     (low + high) * 0.5
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
     if adc_mv <= RTD_SHORT_FAULT_MAX_MV {
         return Err(HeaterFaultReason::SensorShort);
@@ -1297,7 +1624,7 @@ fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
     Ok(RTD_REFERENCE_RESISTOR_OHMS * adc_mv_f / (supply_mv_f - adc_mv_f))
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
     let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
     let adc_mv = (RTD_DIVIDER_SUPPLY_MV as f32 * resistance_ohms)
@@ -1305,7 +1632,7 @@ fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
     (adc_mv + 0.5).clamp(0.0, u16::MAX as f32) as u16
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
     let numerator = input_mv.saturating_mul(s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS);
     let denominator =
@@ -2189,6 +2516,7 @@ struct UsbRuntimeStatusContext {
     last_pd_observation: Option<PdStatusObservation>,
     heater_power_backend: HeaterPowerBackend,
     manual_pps: ManualPpsState,
+    calibration: CalibrationRuntimeState,
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     last_raw_state: FrontPanelRawState,
@@ -2269,6 +2597,7 @@ fn usb_runtime_status(
     status.pps_capability_max_mv = context.manual_pps.capability_max_mv;
     status.pps_capability_max_ma = context.manual_pps.capability_max_ma;
     status.manual_pps_error = context.manual_pps.error.map(manual_pps_error_code);
+    status.calibration = calibration_runtime_state_to_wire(context.calibration);
     status
 }
 
@@ -2280,26 +2609,70 @@ fn usb_runtime_config_response(
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
     mut context: UsbRuntimeStatusContext,
-) -> UsbFrame {
+) -> (UsbFrame, CalibrationRuntimeState) {
+    if let Some(calibration) = config.calibration
+        && let Err(error) =
+            apply_calibration_control_config(&calibration, &mut context.calibration, manual_pps)
+    {
+        return (
+            UsbFrame::Response {
+                request_id,
+                ok: false,
+                result: None,
+                error: Some(ApiError::new(error.code(), error.message(), false)),
+            },
+            context.calibration,
+        );
+    }
     if let Err(error) = apply_manual_pps_config(&config, manual_pps) {
-        return UsbFrame::Response {
-            request_id,
-            ok: false,
-            result: None,
-            error: Some(ApiError::new(error.code(), error.message(), false)),
-        };
+        return (
+            UsbFrame::Response {
+                request_id,
+                ok: false,
+                result: None,
+                error: Some(ApiError::new(error.code(), error.message(), false)),
+            },
+            context.calibration,
+        );
     }
     config.apply_to(memory_config);
     apply_memory_config_to_ui(ui_state, memory_config);
     if let Some(heater_enabled) = config.heater_enabled {
         ui_state.heater_enabled = heater_enabled;
     }
+    if context.calibration.mode != CalibrationMode::Off {
+        if let Some(heater_enabled) = config
+            .calibration
+            .and_then(|calibration| calibration.heater_enabled)
+        {
+            ui_state.heater_enabled = heater_enabled;
+        }
+        if context.calibration.mode == CalibrationMode::RtdAdc
+            && context.calibration.heater_enabled
+            && let Some(target_adc_mv) = context.calibration.target_adc_mv
+        {
+            let hold_target_c = pt1000_temperature_c_from_resistance(
+                rtd_resistance_ohms_from_mv(target_adc_mv)
+                    .unwrap_or_else(|_| pt1000_resistance_ohms_at(0.0)),
+            );
+            let hold_target_c = if hold_target_c >= 0.0 {
+                (hold_target_c + 0.5) as i16
+            } else {
+                (hold_target_c - 0.5) as i16
+            };
+            ui_state.target_temp_c =
+                hold_target_c.clamp(FRONTPANEL_TARGET_TEMP_MIN_C, FRONTPANEL_TARGET_TEMP_MAX_C);
+        }
+    }
     ui_state.manual_pps_enabled = manual_pps.enabled;
     context.manual_pps = *manual_pps;
 
-    usb_response(
-        request_id,
-        UsbResponsePayload::Status(usb_runtime_status(ui_state, memory_config, context)),
+    (
+        usb_response(
+            request_id,
+            UsbResponsePayload::Status(usb_runtime_status(ui_state, memory_config, context)),
+        ),
+        context.calibration,
     )
 }
 
@@ -2322,10 +2695,582 @@ fn apply_manual_pps_config(
             .or(manual_pps.target_mv)
             .ok_or(ManualPpsError::InvalidVoltage)?;
         let target_ma = config.manual_pps_ma.or(manual_pps.target_ma);
-        manual_pps.enable(target_mv, target_ma)?;
+        manual_pps.enable(ManualPpsOwner::Debug, target_mv, target_ma)?;
     }
 
     Ok(())
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn apply_calibration_control_config(
+    config: &CalibrationControlCommand,
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) -> Result<(), ManualPpsError> {
+    if let Some(mode) = config.mode {
+        calibration.mode = mode.into();
+        if calibration.mode == CalibrationMode::Off {
+            calibration.pps_enabled = false;
+            calibration.heater_enabled = false;
+            calibration.target_adc_mv = None;
+            calibration.stable = false;
+            calibration.stability_error_mv = None;
+            calibration.job = CalibrationJobState::default();
+            calibration.job_data = None;
+        }
+    }
+
+    if let Some(target_adc_mv) = config.target_adc_mv {
+        calibration.target_adc_mv = Some(target_adc_mv);
+    }
+
+    if let Some(heater_enabled) = config.heater_enabled {
+        calibration.heater_enabled = heater_enabled;
+    }
+
+    if config.pps_enabled == Some(false) {
+        calibration.pps_enabled = false;
+        calibration.pps_mv = None;
+        calibration.pps_ma = None;
+        if manual_pps.owner == ManualPpsOwner::Calibration {
+            manual_pps.clear();
+        }
+        return Ok(());
+    }
+
+    if config.pps_enabled == Some(true) || config.pps_mv.is_some() {
+        let target_mv = config
+            .pps_mv
+            .or(calibration.pps_mv)
+            .ok_or(ManualPpsError::InvalidVoltage)?;
+        let target_ma = calibration
+            .pps_ma
+            .or(manual_pps.target_ma)
+            .or(manual_pps.capability_max_ma);
+        manual_pps.enable(ManualPpsOwner::Calibration, target_mv, target_ma)?;
+        calibration.pps_enabled = true;
+        calibration.pps_mv = manual_pps.target_mv;
+        calibration.pps_ma = manual_pps.target_ma;
+        calibration.error = None;
+    }
+
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+fn update_calibration_runtime_state(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &ManualPpsState,
+    latest_rtd_raw_adc_mv: u16,
+    latest_vin_raw_adc_mv: u16,
+) {
+    calibration.pps_enabled = manual_pps.enabled && manual_pps.owner == ManualPpsOwner::Calibration;
+    if calibration.pps_enabled {
+        calibration.pps_mv = manual_pps.target_mv;
+        calibration.pps_ma = manual_pps.target_ma;
+        calibration.error = manual_pps.error;
+    } else if manual_pps.owner != ManualPpsOwner::Calibration {
+        calibration.pps_mv = None;
+        calibration.pps_ma = None;
+        calibration.error = None;
+    }
+
+    let observed_adc_mv = match calibration.mode {
+        CalibrationMode::RtdAdc => Some(latest_rtd_raw_adc_mv),
+        CalibrationMode::VinAdc => Some(latest_vin_raw_adc_mv),
+        CalibrationMode::Off | CalibrationMode::HeaterCurve => None,
+    };
+
+    calibration.stability_error_mv = calibration
+        .target_adc_mv
+        .zip(observed_adc_mv)
+        .map(|(target, observed)| (i32::from(observed) - i32::from(target)) as i16);
+    calibration.stable = calibration
+        .stability_error_mv
+        .is_some_and(|error_mv| error_mv.abs() <= 8);
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn calibration_job_fail(
+    calibration: &mut CalibrationRuntimeState,
+    error: ManualPpsError,
+    clear_manual_pps: bool,
+    manual_pps: &mut ManualPpsState,
+) {
+    calibration.job.status = CalibrationJobStatus::Failed;
+    calibration.job.message = Some(error);
+    calibration.job_data = None;
+    calibration.heater_enabled = false;
+    if clear_manual_pps && manual_pps.owner == ManualPpsOwner::Calibration {
+        manual_pps.clear();
+        calibration.pps_enabled = false;
+        calibration.pps_mv = None;
+        calibration.pps_ma = None;
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn calibration_job_complete(
+    calibration: &mut CalibrationRuntimeState,
+    kind: CalibrationJobKind,
+    samples_collected: u8,
+    next_request_mv: Option<u16>,
+) {
+    calibration.job.kind = Some(kind);
+    calibration.job.status = CalibrationJobStatus::Completed;
+    calibration.job.progress_percent = 100;
+    calibration.job.samples_collected = samples_collected;
+    calibration.job.next_request_mv = next_request_mv;
+    calibration.job.message = None;
+    calibration.job_data = None;
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn calibration_job_canceled(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) {
+    calibration.job.status = CalibrationJobStatus::Canceled;
+    calibration.job.message = None;
+    calibration.job_data = None;
+    calibration.heater_enabled = false;
+    if manual_pps.owner == ManualPpsOwner::Calibration {
+        manual_pps.clear();
+        calibration.pps_enabled = false;
+        calibration.pps_mv = None;
+        calibration.pps_ma = None;
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn calibration_job_start(
+    calibration: &mut CalibrationRuntimeState,
+    kind: CalibrationJobKind,
+    memory_config: &mut MemoryConfig,
+    manual_pps: &mut ManualPpsState,
+) -> Result<(), ManualPpsError> {
+    if calibration.job.status == CalibrationJobStatus::Running {
+        return Err(ManualPpsError::WriteFailed);
+    }
+    match kind {
+        CalibrationJobKind::VinAdcAuto => {
+            if calibration.mode != CalibrationMode::VinAdc {
+                return Err(ManualPpsError::InvalidVoltage);
+            }
+            let min_mv = manual_pps
+                .capability_min_mv
+                .ok_or(ManualPpsError::NoPpsCapability)?
+                .max(5_000);
+            let max_mv = manual_pps
+                .capability_max_mv
+                .ok_or(ManualPpsError::NoPpsCapability)?
+                .min(28_000);
+            let target_ma = calibration
+                .pps_ma
+                .or(manual_pps.capability_max_ma)
+                .ok_or(ManualPpsError::NoPpsCapability)?;
+            let next_request_mv = min_mv.div_ceil(100) * 100;
+            manual_pps.enable(
+                ManualPpsOwner::Calibration,
+                next_request_mv,
+                Some(target_ma),
+            )?;
+            memory_config.draft_adc_calibration.vin.clear();
+            memory_config.sanitize();
+            calibration.pps_enabled = true;
+            calibration.pps_mv = Some(next_request_mv);
+            calibration.pps_ma = Some(target_ma);
+            calibration.heater_enabled = false;
+            calibration.job = CalibrationJobState {
+                kind: Some(kind),
+                status: CalibrationJobStatus::Running,
+                progress_percent: 0,
+                samples_collected: 0,
+                next_request_mv: Some(next_request_mv),
+                message: None,
+            };
+            calibration.job_data = Some(CalibrationJobData::VinAdcAuto(CalibrationVinAutoJob {
+                start_request_mv: next_request_mv,
+                next_request_mv,
+                max_request_mv: max_mv,
+                target_ma,
+                settle_ticks: 0,
+                stable_ticks: 0,
+                last_observed_mv: None,
+                sample_count: 0,
+                samples: [None; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
+            }));
+            Ok(())
+        }
+        CalibrationJobKind::HeaterCurveAuto => {
+            if calibration.mode != CalibrationMode::HeaterCurve {
+                return Err(ManualPpsError::InvalidVoltage);
+            }
+            let target_mv = calibration.pps_mv.ok_or(ManualPpsError::InvalidVoltage)?;
+            let target_ma = calibration
+                .pps_ma
+                .or(manual_pps.target_ma)
+                .or(manual_pps.capability_max_ma)
+                .ok_or(ManualPpsError::NoPpsCapability)?;
+            manual_pps.enable(ManualPpsOwner::Calibration, target_mv, Some(target_ma))?;
+            calibration.pps_enabled = true;
+            calibration.pps_mv = manual_pps.target_mv;
+            calibration.pps_ma = manual_pps.target_ma;
+            calibration.heater_enabled = true;
+            calibration.job = CalibrationJobState {
+                kind: Some(kind),
+                status: CalibrationJobStatus::Running,
+                progress_percent: 0,
+                samples_collected: 0,
+                next_request_mv: Some(target_mv),
+                message: None,
+            };
+            calibration.job_data = Some(CalibrationJobData::HeaterCurveAuto(
+                CalibrationHeaterCurveAutoJob::default(),
+            ));
+            Ok(())
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn monotonic_smooth_heater_curve_points(
+    points: &mut heapless::Vec<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>,
+) {
+    if points.len() <= 1 {
+        return;
+    }
+
+    for index in 1..points.len() {
+        if points[index].resistance_milliohms < points[index - 1].resistance_milliohms {
+            points[index].resistance_milliohms = points[index - 1].resistance_milliohms;
+        }
+        if points[index].temp_centi_c <= points[index - 1].temp_centi_c {
+            points[index].temp_centi_c = points[index - 1].temp_centi_c.saturating_add(1);
+        }
+    }
+
+    if points.len() >= 3 {
+        let original = points.clone();
+        for index in 1..(points.len() - 1) {
+            let left = u32::from(original[index - 1].resistance_milliohms);
+            let center = u32::from(original[index].resistance_milliohms);
+            let right = u32::from(original[index + 1].resistance_milliohms);
+            points[index].resistance_milliohms = ((left + center + right) / 3) as u16;
+        }
+        for index in 1..points.len() {
+            if points[index].resistance_milliohms < points[index - 1].resistance_milliohms {
+                points[index].resistance_milliohms = points[index - 1].resistance_milliohms;
+            }
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn select_vin_auto_draft_samples(
+    collected: &[Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
+    sample_count: usize,
+) -> heapless::Vec<AdcCalibrationSample, ADC_CALIBRATION_MAX_SAMPLES> {
+    let mut dense =
+        heapless::Vec::<AdcCalibrationSample, CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES>::new();
+    for sample in collected.iter().take(sample_count).flatten() {
+        let _ = dense.push(*sample);
+    }
+
+    let mut selected = heapless::Vec::<AdcCalibrationSample, ADC_CALIBRATION_MAX_SAMPLES>::new();
+    if dense.is_empty() {
+        return selected;
+    }
+    if dense.len() <= ADC_CALIBRATION_MAX_SAMPLES {
+        for sample in dense {
+            let _ = selected.push(sample);
+        }
+        return selected;
+    }
+
+    let last_index = dense.len() - 1;
+    let bucket_count = ADC_CALIBRATION_MAX_SAMPLES - 1;
+    let mut previous_index = None::<usize>;
+    for slot in 0..ADC_CALIBRATION_MAX_SAMPLES {
+        let index = if slot == 0 {
+            0
+        } else if slot == ADC_CALIBRATION_MAX_SAMPLES - 1 {
+            last_index
+        } else {
+            ((slot * last_index) + (bucket_count / 2)) / bucket_count
+        };
+        if previous_index == Some(index) {
+            continue;
+        }
+        previous_index = Some(index);
+        let _ = selected.push(dense[index]);
+    }
+    selected
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn commit_vin_auto_samples_to_draft(
+    memory_config: &mut MemoryConfig,
+    collected: &[Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
+    sample_count: usize,
+) -> usize {
+    let selected = select_vin_auto_draft_samples(collected, sample_count);
+    memory_config.draft_adc_calibration.vin.clear();
+    for sample in selected {
+        let _ = memory_config.draft_adc_calibration.vin.insert(sample);
+    }
+    memory_config.sanitize();
+    memory_config.draft_adc_calibration.vin.sample_count()
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_curve_preview_from_auto_bins(
+    bins: &[HeaterCurveAutoBin; 4],
+) -> Option<HeaterCurveConfig> {
+    let mut compacted = heapless::Vec::<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>::new();
+    for bin in bins {
+        let Some((temp_centi_c, resistance_milliohms)) = bin.averaged_point() else {
+            continue;
+        };
+        let _ = compacted.push(HeaterCurvePoint {
+            temp_centi_c,
+            resistance_milliohms,
+        });
+    }
+    if compacted.is_empty() {
+        return None;
+    }
+    monotonic_smooth_heater_curve_points(&mut compacted);
+    let mut points = [None; HEATER_CURVE_MAX_POINTS];
+    for (index, point) in compacted.into_iter().enumerate() {
+        points[index] = Some(point);
+    }
+    Some(HeaterCurveConfig { points })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(any(target_arch = "xtensa", test))]
+fn update_calibration_job_state(
+    calibration: &mut CalibrationRuntimeState,
+    memory_config: &mut MemoryConfig,
+    preview_heater_curve: &mut Option<HeaterCurveConfig>,
+    manual_pps: &mut ManualPpsState,
+    _latest_rtd_raw_adc_mv: u16,
+    latest_vin_raw_adc_mv: u16,
+    latest_temp_c: f32,
+    pd_current_ma: u16,
+    latest_vin_mv: u32,
+) {
+    if calibration.job.status != CalibrationJobStatus::Running {
+        return;
+    }
+    let Some(job_data) = calibration.job_data else {
+        return;
+    };
+
+    match job_data {
+        CalibrationJobData::VinAdcAuto(mut job) => {
+            if manual_pps.error.is_some() || !manual_pps.enabled {
+                calibration_job_fail(
+                    calibration,
+                    manual_pps.error.unwrap_or(ManualPpsError::WriteFailed),
+                    false,
+                    manual_pps,
+                );
+                return;
+            }
+
+            if calibration.pps_mv != Some(job.next_request_mv) {
+                match manual_pps.enable(
+                    ManualPpsOwner::Calibration,
+                    job.next_request_mv,
+                    Some(job.target_ma),
+                ) {
+                    Ok(()) => {
+                        calibration.pps_enabled = true;
+                        calibration.pps_mv = Some(job.next_request_mv);
+                        calibration.pps_ma = Some(job.target_ma);
+                        job.settle_ticks = 0;
+                        job.stable_ticks = 0;
+                        job.last_observed_mv = None;
+                    }
+                    Err(error) => {
+                        calibration_job_fail(calibration, error, false, manual_pps);
+                        return;
+                    }
+                }
+            }
+
+            let requested_mv = manual_pps.target_mv.unwrap_or(job.next_request_mv);
+            let request_locked =
+                (i64::from(requested_mv) - i64::from(job.next_request_mv)).abs() <= 100;
+            let raw_adc_stable = job.last_observed_mv.is_some_and(|previous_mv| {
+                (i32::from(previous_mv) - i32::from(latest_vin_raw_adc_mv)).abs() <= 8
+            });
+            let moved_from_previous_sample = if job.sample_count == 0 {
+                true
+            } else {
+                job.samples[usize::from(job.sample_count.saturating_sub(1))]
+                    .map(|sample| {
+                        (i32::from(sample.observed_mv) - i32::from(latest_vin_raw_adc_mv)).abs()
+                            >= i32::from(CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV)
+                    })
+                    .unwrap_or(true)
+            };
+
+            if request_locked {
+                job.settle_ticks = job.settle_ticks.saturating_add(1);
+            } else {
+                job.settle_ticks = 0;
+            }
+
+            if job.settle_ticks >= 3 && raw_adc_stable && moved_from_previous_sample {
+                job.stable_ticks = job.stable_ticks.saturating_add(1);
+            } else {
+                job.stable_ticks = 0;
+            }
+            job.last_observed_mv = Some(latest_vin_raw_adc_mv);
+
+            if job.stable_ticks >= 2 {
+                if usize::from(job.sample_count) >= job.samples.len() {
+                    calibration_job_fail(
+                        calibration,
+                        ManualPpsError::WriteFailed,
+                        false,
+                        manual_pps,
+                    );
+                    return;
+                }
+                job.samples[usize::from(job.sample_count)] = Some(AdcCalibrationSample {
+                    observed_mv: latest_vin_raw_adc_mv,
+                    expected_mv: vin_adc_mv_for_input_mv(u32::from(job.next_request_mv)),
+                });
+                job.sample_count = job.sample_count.saturating_add(1);
+                calibration.job.samples_collected =
+                    calibration.job.samples_collected.saturating_add(1);
+                let next_mv = job.next_request_mv.saturating_add(1_000);
+                if next_mv > job.max_request_mv {
+                    let stored_samples = commit_vin_auto_samples_to_draft(
+                        memory_config,
+                        &job.samples,
+                        usize::from(job.sample_count),
+                    );
+                    if stored_samples == 0 {
+                        calibration_job_fail(
+                            calibration,
+                            ManualPpsError::WriteFailed,
+                            false,
+                            manual_pps,
+                        );
+                        return;
+                    }
+                    calibration_job_complete(
+                        calibration,
+                        CalibrationJobKind::VinAdcAuto,
+                        calibration.job.samples_collected,
+                        None,
+                    );
+                    return;
+                }
+                job.next_request_mv = next_mv;
+                job.settle_ticks = 0;
+                job.stable_ticks = 0;
+                job.last_observed_mv = None;
+                calibration.job.next_request_mv = Some(job.next_request_mv);
+            }
+
+            let span_mv = job
+                .max_request_mv
+                .saturating_sub(job.start_request_mv)
+                .max(1);
+            let done_mv = job
+                .next_request_mv
+                .saturating_sub(job.start_request_mv)
+                .min(span_mv);
+            calibration.job.progress_percent =
+                ((u32::from(done_mv) * 100) / u32::from(span_mv)).min(99) as u8;
+            calibration.job_data = Some(CalibrationJobData::VinAdcAuto(job));
+        }
+        CalibrationJobData::HeaterCurveAuto(mut job) => {
+            if manual_pps.error.is_some() || !manual_pps.enabled {
+                calibration_job_fail(
+                    calibration,
+                    manual_pps.error.unwrap_or(ManualPpsError::WriteFailed),
+                    true,
+                    manual_pps,
+                );
+                return;
+            }
+
+            if !calibration.heater_enabled {
+                if job.started_ticks > 0 {
+                    calibration_job_fail(
+                        calibration,
+                        ManualPpsError::WriteFailed,
+                        true,
+                        manual_pps,
+                    );
+                    return;
+                }
+                calibration.heater_enabled = true;
+            }
+
+            if latest_temp_c >= 80.0 {
+                job.started_ticks = job.started_ticks.saturating_add(1);
+            }
+            if latest_temp_c >= 120.0 {
+                job.stable_ticks = job.stable_ticks.saturating_add(1);
+            } else {
+                job.stable_ticks = 0;
+            }
+
+            if job.started_ticks > 0 && latest_vin_mv > 0 && pd_current_ma > 0 {
+                let resistance_ohms = latest_vin_mv as f32 / pd_current_ma as f32;
+                for bin in &mut job.bins {
+                    if (*bin).contains(latest_temp_c) {
+                        bin.observe(latest_temp_c, resistance_ohms);
+                    }
+                }
+                calibration.job.samples_collected =
+                    calibration.job.samples_collected.saturating_add(1);
+            }
+
+            calibration.job.progress_percent = round_to_u16_nonnegative(
+                (latest_temp_c.clamp(120.0, 250.0) - 120.0) / (250.0 - 120.0) * 100.0,
+            )
+            .min(99) as u8;
+
+            if latest_temp_c >= 250.0 && job.stable_ticks >= 3 {
+                let Some(preview) = heater_curve_preview_from_auto_bins(&job.bins) else {
+                    calibration_job_fail(
+                        calibration,
+                        ManualPpsError::WriteFailed,
+                        true,
+                        manual_pps,
+                    );
+                    return;
+                };
+                *preview_heater_curve = Some(preview);
+                calibration.heater_enabled = false;
+                if manual_pps.owner == ManualPpsOwner::Calibration {
+                    manual_pps.clear();
+                }
+                calibration.pps_enabled = false;
+                calibration.pps_mv = None;
+                calibration.pps_ma = None;
+                calibration_job_complete(
+                    calibration,
+                    CalibrationJobKind::HeaterCurveAuto,
+                    calibration.job.samples_collected,
+                    None,
+                );
+                return;
+            }
+
+            calibration.job.next_request_mv = calibration.pps_mv;
+            calibration.job_data = Some(CalibrationJobData::HeaterCurveAuto(job));
+        }
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2503,6 +3448,46 @@ fn usb_heater_curve_config_response(
             preview_heater_curve.as_ref(),
         )),
     )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_calibration_job_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    command: CalibrationJobCommandWire,
+    calibration: &mut CalibrationRuntimeState,
+    memory_config: &mut MemoryConfig,
+    manual_pps: &mut ManualPpsState,
+) -> UsbFrame {
+    match command.op {
+        CalibrationJobOpWire::Cancel => {
+            calibration_job_canceled(calibration, manual_pps);
+            usb_response(
+                request_id,
+                UsbResponsePayload::CalibrationJob(
+                    calibration_runtime_state_to_wire(*calibration).job,
+                ),
+            )
+        }
+        CalibrationJobOpWire::Start => {
+            let Some(kind) = command.kind.map(CalibrationJobKind::from) else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_job_kind_required",
+                    "Calibration auto job requires a job kind.",
+                );
+            };
+            if let Err(error) = calibration_job_start(calibration, kind, memory_config, manual_pps)
+            {
+                return usb_error_response(request_id, error.code(), error.message());
+            }
+            usb_response(
+                request_id,
+                UsbResponsePayload::CalibrationJob(
+                    calibration_runtime_state_to_wire(*calibration).job,
+                ),
+            )
+        }
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -2688,6 +3673,10 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 request_id,
                 UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
             ),
+            UsbRequestOp::GetCalibrationJob => usb_response(
+                request_id,
+                UsbResponsePayload::CalibrationJob(CalibrationRuntimeStateWire::default().job),
+            ),
             UsbRequestOp::GetHeaterCurve => usb_response(
                 request_id,
                 UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
@@ -2705,6 +3694,7 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
         },
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::CalibrationJob { request_id, .. })
         | Ok(UsbFrame::CalibrationConfig { request_id, .. })
         | Ok(UsbFrame::CalibrationApply { request_id }) => usb_error_response_with_retryable(
             request_id,
@@ -2796,7 +3786,7 @@ async fn run_usb_recovery_control_loop(
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> ControlPlaneStatus {
-    ControlPlaneStatus::from_device_status(
+    let mut status = ControlPlaneStatus::from_device_status(
         DeviceStatus {
             mode: DeviceMode::Fault,
             voltage_mv: 0,
@@ -2815,7 +3805,9 @@ fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Control
         memory_config,
         (elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
         network_from_memory(memory_config),
-    )
+    );
+    status.calibration = CalibrationRuntimeStateWire::default();
+    status
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -2837,6 +3829,10 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
             UsbRequestOp::GetCalibration => usb_response(
                 request_id,
                 UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
+            ),
+            UsbRequestOp::GetCalibrationJob => usb_response(
+                request_id,
+                UsbResponsePayload::CalibrationJob(CalibrationJobStateWire::default()),
             ),
             UsbRequestOp::GetHeaterCurve => usb_response(
                 request_id,
@@ -2889,6 +3885,7 @@ fn handle_usb_control_line(
     memory_config: &mut MemoryConfig,
     preview_heater_curve: &mut Option<HeaterCurveConfig>,
     memory_commit_due_ms: &mut Option<u64>,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
     heater_power_backend: &mut HeaterPowerBackend,
@@ -2906,6 +3903,7 @@ fn handle_usb_control_line(
         last_pd_observation,
         heater_power_backend: *heater_power_backend,
         manual_pps: *manual_pps,
+        calibration: *calibration_runtime_state,
         fan_command,
         current_rtd_fault,
         last_raw_state,
@@ -2935,6 +3933,12 @@ fn handle_usb_control_line(
                 request_id,
                 UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
             ),
+            UsbRequestOp::GetCalibrationJob => usb_response(
+                request_id,
+                UsbResponsePayload::CalibrationJob(
+                    calibration_runtime_state_to_wire(*calibration_runtime_state).job,
+                ),
+            ),
             UsbRequestOp::GetHeaterCurve => usb_response(
                 request_id,
                 UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
@@ -2956,7 +3960,7 @@ fn handle_usb_control_line(
         }
         Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
             let previous_memory_config = memory_config.clone();
-            let response = usb_runtime_config_response(
+            let (response, next_calibration_runtime_state) = usb_runtime_config_response(
                 request_id,
                 config,
                 ui_state,
@@ -2964,6 +3968,7 @@ fn handle_usb_control_line(
                 manual_pps,
                 runtime_context,
             );
+            *calibration_runtime_state = next_calibration_runtime_state;
             if *memory_config != previous_memory_config {
                 *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
@@ -2992,6 +3997,16 @@ fn handle_usb_control_line(
             }
             response
         }
+        Ok(UsbFrame::CalibrationJob {
+            request_id,
+            command,
+        }) => usb_calibration_job_response(
+            request_id,
+            command,
+            calibration_runtime_state,
+            memory_config,
+            manual_pps,
+        ),
         Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => usb_heater_curve_config_response(
             request_id,
             config,
@@ -3697,6 +4712,7 @@ async fn main(_spawner: Spawner) {
         None => info!("ch224q power data read failed"),
     }
     let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
+    let mut calibration_runtime_state = CalibrationRuntimeState::default();
     let mut heater_power_backend = select_heater_power_backend(
         power_data_capabilities,
         last_pd_observation.map(|status| status.status),
@@ -3910,6 +4926,7 @@ async fn main(_spawner: Spawner) {
                         &mut memory_config,
                         &mut preview_heater_curve,
                         &mut memory_commit_due_ms,
+                        &mut calibration_runtime_state,
                         elapsed_ms,
                         last_pd_observation,
                         &mut heater_power_backend,
@@ -4252,6 +5269,46 @@ async fn main(_spawner: Spawner) {
             }
             if ui_state.manual_pps_enabled != manual_pps_state.enabled {
                 ui_state.manual_pps_enabled = manual_pps_state.enabled;
+                needs_redraw = true;
+            }
+            update_calibration_runtime_state(
+                &mut calibration_runtime_state,
+                &manual_pps_state,
+                latest_rtd_raw_adc_mv,
+                latest_vin_raw_adc_mv,
+            );
+            update_calibration_job_state(
+                &mut calibration_runtime_state,
+                &mut memory_config,
+                &mut preview_heater_curve,
+                &mut manual_pps_state,
+                latest_rtd_raw_adc_mv,
+                latest_vin_raw_adc_mv,
+                latest_temp_c,
+                current_pd_observation
+                    .map(|observation| observation.current_ma)
+                    .unwrap_or(0),
+                latest_vin_mv,
+            );
+            if calibration_runtime_state.mode != CalibrationMode::Off {
+                if calibration_runtime_state.heater_enabled
+                    && current_rtd_fault.is_none()
+                    && heater_controller.fault_latched().is_some()
+                {
+                    heater_controller.clear_fault_latch();
+                    info!("calibration heater re-arm -> cleared latched fault");
+                }
+                let calibration_heater_allowed = !is_sensor_fault(current_rtd_fault)
+                    && !cooling_disabled_lock_latched
+                    && heater_controller.fault_latched().is_none();
+                let desired_calibration_heater =
+                    calibration_runtime_state.heater_enabled && calibration_heater_allowed;
+                if ui_state.heater_enabled != desired_calibration_heater {
+                    ui_state.heater_enabled = desired_calibration_heater;
+                    needs_redraw = true;
+                }
+            } else if ui_state.heater_enabled {
+                ui_state.heater_enabled = false;
                 needs_redraw = true;
             }
             let next_pd_contract_mv = manual_pps_state
@@ -4635,7 +5692,7 @@ mod tests {
         };
         let mut manual_pps = ManualPpsState::default();
 
-        let response = usb_runtime_config_response(
+        let (response, _) = usb_runtime_config_response(
             request_id,
             RuntimeConfigCommand {
                 target_temp_c: Some(240),
@@ -4646,6 +5703,7 @@ mod tests {
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                calibration: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -4659,6 +5717,7 @@ mod tests {
                     fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                 },
                 manual_pps: ManualPpsState::default(),
+                calibration: CalibrationRuntimeState::default(),
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
@@ -4705,7 +5764,7 @@ mod tests {
             }));
 
         let context_manual_pps = manual_pps;
-        let response = usb_runtime_config_response(
+        let (response, _) = usb_runtime_config_response(
             request_id,
             RuntimeConfigCommand {
                 target_temp_c: None,
@@ -4716,6 +5775,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
+                calibration: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -4735,6 +5795,7 @@ mod tests {
                     current_limit_fixed_request_confirmed: false,
                 },
                 manual_pps: context_manual_pps,
+                calibration: CalibrationRuntimeState::default(),
                 fan_command: FanHardwareCommand::disabled(),
                 current_rtd_fault: None,
                 last_raw_state: FrontPanelRawState::default(),
@@ -4776,6 +5837,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_450),
                 manual_pps_ma: Some(2_500),
+                calibration: None,
             },
             &mut manual_pps,
         )
@@ -4792,6 +5854,7 @@ mod tests {
                 manual_pps_enabled: Some(false),
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                calibration: None,
             },
             &mut manual_pps,
         )
@@ -4815,7 +5878,9 @@ mod tests {
                 ..Default::default()
             }));
 
-        manual_pps.enable(10_400, Some(2_500)).unwrap();
+        manual_pps
+            .enable(ManualPpsOwner::Debug, 10_400, Some(2_500))
+            .unwrap();
         manual_pps.applied_mv = Some(10_400);
         manual_pps.fail(ManualPpsError::WriteFailed);
 
@@ -4856,11 +5921,201 @@ mod tests {
                 avs_max_mv: None,
             }));
 
-        manual_pps.enable(10_400, Some(2_500)).unwrap();
+        manual_pps
+            .enable(ManualPpsOwner::Debug, 10_400, Some(2_500))
+            .unwrap();
         assert_eq!(
-            manual_pps.enable(20_000, Some(2_500)).unwrap_err(),
+            manual_pps
+                .enable(ManualPpsOwner::Debug, 20_000, Some(2_500))
+                .unwrap_err(),
             ManualPpsError::InvalidVoltage
         );
+    }
+
+    #[test]
+    fn vin_auto_draft_selection_preserves_sweep_endpoints() {
+        let mut collected = [None; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES];
+        for (index, request_mv) in (5_000..=21_000).step_by(1_000).enumerate() {
+            collected[index] = Some(AdcCalibrationSample {
+                observed_mv: 280 + (index as u16 * 40),
+                expected_mv: request_mv,
+            });
+        }
+
+        let selected = select_vin_auto_draft_samples(&collected, 17);
+        assert_eq!(selected.len(), ADC_CALIBRATION_MAX_SAMPLES);
+        assert_eq!(
+            selected.first().map(|sample| sample.expected_mv),
+            Some(5_000)
+        );
+        assert_eq!(
+            selected.last().map(|sample| sample.expected_mv),
+            Some(21_000)
+        );
+        assert!(
+            selected
+                .windows(2)
+                .all(|pair| pair[1].expected_mv > pair[0].expected_mv)
+        );
+    }
+
+    #[test]
+    fn vin_auto_job_finishes_full_sweep_without_storage_overflow() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::VinAdc,
+            pps_ma: Some(3_000),
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        memory_config
+            .draft_adc_calibration
+            .vin
+            .insert(AdcCalibrationSample {
+                observed_mv: 999,
+                expected_mv: 9_999,
+            });
+        let mut preview_heater_curve = None;
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::VinAdcAuto,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
+        assert_eq!(memory_config.draft_adc_calibration.vin.sample_count(), 0);
+
+        for step in 0..17u16 {
+            let vin_raw_mv = 280 + (step * 45);
+            let latest_vin_mv = u32::from(5_000 + (step * 1_000));
+            for _ in 0..4 {
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut preview_heater_curve,
+                    &mut manual_pps,
+                    0,
+                    vin_raw_mv,
+                    25.0,
+                    3_000,
+                    latest_vin_mv,
+                );
+            }
+        }
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        assert_eq!(calibration.job.kind, Some(CalibrationJobKind::VinAdcAuto));
+        assert_eq!(calibration.job.samples_collected, 17);
+        assert_eq!(memory_config.draft_adc_calibration.vin.sample_count(), 8);
+        assert_eq!(
+            memory_config.draft_adc_calibration.vin.samples[0].map(|sample| sample.expected_mv),
+            Some(vin_adc_mv_for_input_mv(5_000))
+        );
+        assert_eq!(
+            memory_config.draft_adc_calibration.vin.samples[7].map(|sample| sample.expected_mv),
+            Some(vin_adc_mv_for_input_mv(21_000))
+        );
+    }
+
+    #[test]
+    fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::VinAdc,
+            pps_ma: Some(3_000),
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        let mut preview_heater_curve = None;
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::VinAdcAuto,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
+
+        for step in 0..17u16 {
+            let request_mv = 5_000 + (step * 1_000);
+            let settled_raw_mv = 280 + (step * 45);
+
+            for _ in 0..3 {
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut preview_heater_curve,
+                    &mut manual_pps,
+                    0,
+                    settled_raw_mv.saturating_sub(80),
+                    25.0,
+                    3_000,
+                    u32::from(request_mv),
+                );
+            }
+            assert_eq!(calibration.job.samples_collected, step as u8);
+
+            for _ in 0..5 {
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut preview_heater_curve,
+                    &mut manual_pps,
+                    0,
+                    settled_raw_mv,
+                    25.0,
+                    3_000,
+                    u32::from(request_mv),
+                );
+            }
+            assert_eq!(calibration.job.samples_collected, step as u8 + 1);
+        }
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        assert_eq!(memory_config.draft_adc_calibration.vin.sample_count(), 8);
     }
 
     #[test]

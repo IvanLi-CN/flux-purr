@@ -1,11 +1,18 @@
 import type {
   ApiErrorEnvelope,
+  CalibrationConfigRequest,
+  CalibrationJobRequest,
+  CalibrationJobState,
+  CalibrationState,
   ControlPlaneStatus,
   DirectRuntimeConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
   Identity,
   NetworkSummary,
+  UsbCalibrationApplyFrame,
+  UsbCalibrationConfigFrame,
+  UsbCalibrationJobFrame,
   UsbHeaterCurveConfigFrame,
   UsbHeaterCurveSaveFrame,
   UsbRequestFrame,
@@ -85,6 +92,8 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     targetTempC: probe.status.targetTempC,
     selectedPresetIndex: probe.status.selectedPresetSlot,
     presetsC: probe.status.presetsC,
+    rtdRawAdcMv: probe.status.rtdRawAdcMv,
+    vinRawAdcMv: probe.status.vinRawAdcMv,
     voltageMv: probe.status.voltageMv,
     currentMa: probe.status.currentMa,
     pdRequestMv: probe.status.pdRequestMv,
@@ -97,6 +106,7 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     ppsCapabilityMaxMv: probe.status.ppsCapabilityMaxMv ?? null,
     ppsCapabilityMaxMa: probe.status.ppsCapabilityMaxMa ?? null,
     manualPpsError: probe.status.manualPpsError ?? null,
+    calibration: probe.status.calibration,
     heaterEnabled: probe.status.heaterEnabled,
     heaterOutputPercent: probe.status.heaterOutputPercent,
     activeCoolingEnabled: probe.status.activeCoolingEnabled,
@@ -187,6 +197,30 @@ export class WebSerialControlPlaneClient {
     }))
   }
 
+  async getCalibration(): Promise<CalibrationState> {
+    return this.requestPayload<CalibrationState>(
+      'calibration',
+      createUsbRequestFrame('get_calibration')
+    )
+  }
+
+  async configureCalibration(
+    request: Omit<CalibrationConfigRequest, 'leaseId'>
+  ): Promise<CalibrationState> {
+    return this.requestPayload<CalibrationState>('calibration', (requestId) => ({
+      type: 'calibration_config',
+      requestId,
+      ...request,
+    }))
+  }
+
+  async applyCalibration(): Promise<CalibrationState> {
+    return this.requestPayload<CalibrationState>('calibration', (requestId) => ({
+      type: 'calibration_apply',
+      requestId,
+    }))
+  }
+
   async getHeaterCurve(): Promise<HeaterCurveState> {
     return this.requestPayload<HeaterCurveState>(
       'heater_curve',
@@ -218,6 +252,23 @@ export class WebSerialControlPlaneClient {
     }))
   }
 
+  async getCalibrationJob(): Promise<CalibrationJobState> {
+    return this.requestPayload<CalibrationJobState>(
+      'calibration_job',
+      createUsbRequestFrame('get_calibration_job')
+    )
+  }
+
+  async configureCalibrationJob(
+    request: Omit<CalibrationJobRequest, 'leaseId'>
+  ): Promise<CalibrationJobState> {
+    return this.requestPayload<CalibrationJobState>('calibration_job', (requestId) => ({
+      type: 'calibration_job',
+      requestId,
+      ...request,
+    }))
+  }
+
   private async requestPayload<T>(
     payloadKey: string,
     frameFactory: (
@@ -225,6 +276,9 @@ export class WebSerialControlPlaneClient {
     ) =>
       | UsbRequestFrame
       | UsbRuntimeConfigFrame
+      | UsbCalibrationJobFrame
+      | UsbCalibrationConfigFrame
+      | UsbCalibrationApplyFrame
       | UsbHeaterCurveConfigFrame
       | UsbHeaterCurveSaveFrame
   ): Promise<T> {
@@ -247,6 +301,9 @@ export class WebSerialControlPlaneClient {
     frame:
       | UsbRequestFrame
       | UsbRuntimeConfigFrame
+      | UsbCalibrationJobFrame
+      | UsbCalibrationConfigFrame
+      | UsbCalibrationApplyFrame
       | UsbHeaterCurveConfigFrame
       | UsbHeaterCurveSaveFrame
   ) {

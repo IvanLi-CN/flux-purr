@@ -67,6 +67,36 @@ describe('web serial control-plane client', () => {
 
     await client.disconnect()
   })
+
+  it('sends calibration auto-job frames over USB JSONL', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const current = await client.getCalibrationJob()
+    const started = await client.configureCalibrationJob({
+      op: 'start',
+      kind: 'vin_adc_auto',
+    })
+
+    expect(current).toMatchObject({
+      kind: null,
+      status: 'idle',
+      progressPercent: 0,
+    })
+    expect(started).toMatchObject({
+      kind: 'vin_adc_auto',
+      status: 'running',
+      nextRequestMv: 11000,
+    })
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'calibration_job',
+      op: 'start',
+      kind: 'vin_adc_auto',
+    })
+
+    await client.disconnect()
+  })
 })
 
 class FakeSerial implements BrowserSerial {
@@ -134,6 +164,23 @@ function responseFor(request: Record<string, unknown>) {
   if (request.type === 'request' && request.op === 'get_status') {
     return { type: 'response', requestId, ok: true, result: { status: baseStatus } }
   }
+  if (request.type === 'request' && request.op === 'get_calibration_job') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        calibration_job: {
+          kind: null,
+          status: 'idle',
+          progressPercent: 0,
+          samplesCollected: 0,
+          nextRequestMv: null,
+          message: null,
+        },
+      },
+    }
+  }
   if (request.type === 'runtime_config') {
     const selectedPresetSlot =
       typeof request.selectedPresetSlot === 'number'
@@ -165,6 +212,23 @@ function responseFor(request: Record<string, unknown>) {
           heaterOutputPercent: request.heaterEnabled === false ? 0 : baseStatus.heaterOutputPercent,
           fanDisplayState:
             request.activeCoolingEnabled === false ? 'OFF' : baseStatus.fanDisplayState,
+        },
+      },
+    }
+  }
+  if (request.type === 'calibration_job') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        calibration_job: {
+          kind: request.kind,
+          status: request.op === 'cancel' ? 'canceled' : 'running',
+          progressPercent: 0,
+          samplesCollected: 0,
+          nextRequestMv: request.kind === 'vin_adc_auto' ? 11000 : 20000,
+          message: null,
         },
       },
     }

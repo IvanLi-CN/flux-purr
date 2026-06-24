@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { DirectRuntimeConfigRequest, HeaterCurvePackage, HeaterCurveState } from './contracts'
+import type {
+  CalibrationConfigRequest,
+  CalibrationJobRequest,
+  CalibrationJobState,
+  CalibrationState,
+  DirectRuntimeConfigRequest,
+  HeaterCurvePackage,
+  HeaterCurveState,
+} from './contracts'
 import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 import {
   getBrowserSerial,
@@ -24,6 +32,15 @@ export interface LiveWebSerialControls {
   connect: () => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
+  getCalibration: () => Promise<CalibrationState>
+  getCalibrationJob: () => Promise<CalibrationJobState>
+  configureCalibration: (
+    request: Omit<CalibrationConfigRequest, 'leaseId'>
+  ) => Promise<CalibrationState>
+  configureCalibrationJob: (
+    request: Omit<CalibrationJobRequest, 'leaseId'>
+  ) => Promise<CalibrationJobState>
+  applyCalibration: () => Promise<CalibrationState>
   getHeaterCurve: () => Promise<HeaterCurveState>
   previewHeaterCurve: (heaterCurve: HeaterCurvePackage) => Promise<HeaterCurveState>
   clearHeaterCurvePreview: () => Promise<HeaterCurveState>
@@ -194,6 +211,48 @@ export function useLiveWebSerialScenario(
     return client
   }, [])
 
+  const getCalibration = useCallback(async () => {
+    try {
+      const calibration = await requireClient().getCalibration()
+      appendEvent('adc calibration read over browser Web Serial', 'success')
+      return calibration
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Web Serial calibration read failed.')
+      setState('error')
+      appendEvent('browser Web Serial calibration read failed', 'warning')
+      throw error
+    }
+  }, [appendEvent, requireClient])
+
+  const configureCalibration = useCallback(
+    async (request: Omit<CalibrationConfigRequest, 'leaseId'>) => {
+      try {
+        const calibration = await requireClient().configureCalibration(request)
+        appendEvent('adc calibration draft updated over browser Web Serial', 'success')
+        return calibration
+      } catch (error) {
+        setError(error instanceof Error ? error.message : 'Web Serial calibration update failed.')
+        setState('error')
+        appendEvent('browser Web Serial calibration update failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient]
+  )
+
+  const applyCalibration = useCallback(async () => {
+    try {
+      const calibration = await requireClient().applyCalibration()
+      appendEvent('adc calibration applied over browser Web Serial', 'success')
+      return calibration
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Web Serial calibration apply failed.')
+      setState('error')
+      appendEvent('browser Web Serial calibration apply failed', 'warning')
+      throw error
+    }
+  }, [appendEvent, requireClient])
+
   const getHeaterCurve = useCallback(async () => {
     try {
       const heaterCurve = await requireClient().getHeaterCurve()
@@ -206,6 +265,37 @@ export function useLiveWebSerialScenario(
       throw error
     }
   }, [appendEvent, requireClient])
+
+  const getCalibrationJob = useCallback(async () => {
+    try {
+      const job = await requireClient().getCalibrationJob()
+      appendEvent('calibration auto job read over browser Web Serial', 'success')
+      return job
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Web Serial calibration job read failed.')
+      setState('error')
+      appendEvent('browser Web Serial calibration job read failed', 'warning')
+      throw error
+    }
+  }, [appendEvent, requireClient])
+
+  const configureCalibrationJob = useCallback(
+    async (request: Omit<CalibrationJobRequest, 'leaseId'>) => {
+      try {
+        const job = await requireClient().configureCalibrationJob(request)
+        appendEvent('calibration auto job command accepted over browser Web Serial', 'success')
+        return job
+      } catch (error) {
+        setError(
+          error instanceof Error ? error.message : 'Web Serial calibration job update failed.'
+        )
+        setState('error')
+        appendEvent('browser Web Serial calibration job update failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient]
+  )
 
   const previewHeaterCurve = useCallback(
     async (heaterCurve: HeaterCurvePackage) => {
@@ -299,18 +389,28 @@ export function useLiveWebSerialScenario(
       connect,
       disconnect,
       configureRuntime,
+      getCalibration,
+      getCalibrationJob,
+      configureCalibration,
+      configureCalibrationJob,
+      applyCalibration,
       getHeaterCurve,
       previewHeaterCurve,
       clearHeaterCurvePreview,
       saveHeaterCurve,
     }),
     [
+      applyCalibration,
       clearHeaterCurvePreview,
+      configureCalibration,
+      configureCalibrationJob,
       configureRuntime,
       connect,
       device?.id,
       disconnect,
       error,
+      getCalibration,
+      getCalibrationJob,
       getHeaterCurve,
       previewHeaterCurve,
       saveHeaterCurve,

@@ -51,6 +51,8 @@ export interface ControlPlaneStatus {
   voltageMv: number
   currentMa: number
   boardTempCenti: number
+  rtdRawAdcMv?: number
+  vinRawAdcMv?: number
   pdRequestMv: number
   pdContractMv: number
   pdState: PdState
@@ -61,8 +63,36 @@ export interface ControlPlaneStatus {
   ppsCapabilityMaxMv?: number | null
   ppsCapabilityMaxMa?: number | null
   manualPpsError?: string | null
+  calibration: CalibrationRuntimeState
   frontpanelKey?: 'center' | 'right' | 'down' | 'left' | 'up' | null
   network: NetworkSummary
+}
+
+export type CalibrationMode = 'off' | 'vin_adc' | 'rtd_adc' | 'heater_curve'
+export type CalibrationJobKind = 'vin_adc_auto' | 'heater_curve_auto'
+export type CalibrationJobStatus = 'idle' | 'running' | 'completed' | 'failed' | 'canceled'
+export type CalibrationJobOp = 'start' | 'cancel'
+
+export interface CalibrationJobState {
+  kind?: CalibrationJobKind | null
+  status: CalibrationJobStatus
+  progressPercent: number
+  samplesCollected: number
+  nextRequestMv?: number | null
+  message?: string | null
+}
+
+export interface CalibrationRuntimeState {
+  mode: CalibrationMode
+  ppsEnabled: boolean
+  ppsMv?: number | null
+  ppsMa?: number | null
+  heaterEnabled: boolean
+  targetAdcMv?: number | null
+  stable: boolean
+  stabilityErrorMv?: number | null
+  error?: string | null
+  job: CalibrationJobState
 }
 
 export interface ApiErrorEnvelope {
@@ -84,6 +114,7 @@ export interface DevdDeviceRecord {
   network: NetworkSummary
   status: ControlPlaneStatus
   calibration?: CalibrationState
+  heaterCurve?: HeaterCurveState
   logs?: DevdLogEntry[]
   trace?: DevdTraceEntry[]
   events?: DevdEvent[]
@@ -160,6 +191,15 @@ export interface RuntimeConfigRequest {
   manualPpsEnabled?: boolean
   manualPpsMv?: number
   manualPpsMa?: number
+  calibration?: CalibrationControlRequest
+}
+
+export interface CalibrationControlRequest {
+  mode?: CalibrationMode
+  ppsEnabled?: boolean
+  ppsMv?: number
+  heaterEnabled?: boolean
+  targetAdcMv?: number
 }
 
 export type DirectRuntimeConfigRequest = Omit<RuntimeConfigRequest, 'leaseId'>
@@ -227,6 +267,12 @@ export interface HeaterCurveConfigRequest {
   package?: HeaterCurvePackage
 }
 
+export interface CalibrationJobRequest {
+  leaseId: string
+  op: CalibrationJobOp
+  kind?: CalibrationJobKind
+}
+
 export interface FirmwareArtifactManifest {
   artifactId: string
   name: string
@@ -278,7 +324,14 @@ export interface FlashResult {
 export interface UsbRequestFrame {
   type: 'request'
   requestId: string
-  op: 'get_identity' | 'get_network' | 'get_status' | 'get_heater_curve' | 'set_log_level'
+  op:
+    | 'get_identity'
+    | 'get_network'
+    | 'get_status'
+    | 'get_calibration'
+    | 'get_calibration_job'
+    | 'get_heater_curve'
+    | 'set_log_level'
 }
 
 export interface UsbWifiConfigFrame {
@@ -302,6 +355,32 @@ export interface UsbRuntimeConfigFrame {
   manualPpsEnabled?: boolean
   manualPpsMv?: number
   manualPpsMa?: number
+  calibration?: CalibrationControlRequest
+}
+
+export interface UsbCalibrationJobFrame {
+  type: 'calibration_job'
+  requestId: string
+  op: CalibrationJobOp
+  kind?: CalibrationJobKind
+}
+
+export interface UsbCalibrationConfigFrame {
+  type: 'calibration_config'
+  requestId: string
+  op: 'capture' | 'delete' | 'clear' | 'import'
+  channel?: CalibrationChannel
+  referenceTempC?: number
+  referenceVinMv?: number
+  observedMv?: number
+  expectedMv?: number
+  sampleIndex?: number
+  package?: CalibrationPackage
+}
+
+export interface UsbCalibrationApplyFrame {
+  type: 'calibration_apply'
+  requestId: string
 }
 
 export interface UsbHeaterCurveConfigFrame {

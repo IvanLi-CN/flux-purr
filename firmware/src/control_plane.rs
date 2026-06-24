@@ -142,6 +142,7 @@ pub struct ControlPlaneStatus {
     pub pps_capability_max_mv: Option<u16>,
     pub pps_capability_max_ma: Option<u16>,
     pub manual_pps_error: Option<String<ERROR_CODE_MAX_LEN>>,
+    pub calibration: CalibrationRuntimeStateWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
 }
@@ -190,10 +191,117 @@ impl ControlPlaneStatus {
             pps_capability_max_mv: None,
             pps_capability_max_ma: None,
             manual_pps_error: None,
+            calibration: CalibrationRuntimeStateWire::default(),
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationModeWire {
+    Off,
+    VinAdc,
+    RtdAdc,
+    HeaterCurve,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationJobKindWire {
+    VinAdcAuto,
+    HeaterCurveAuto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationJobStatusWire {
+    Idle,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationJobOpWire {
+    Start,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationJobStateWire {
+    pub kind: Option<CalibrationJobKindWire>,
+    pub status: CalibrationJobStatusWire,
+    pub progress_percent: u8,
+    pub samples_collected: u8,
+    pub next_request_mv: Option<u16>,
+    pub message: Option<String<ERROR_MESSAGE_MAX_LEN>>,
+}
+
+impl Default for CalibrationJobStateWire {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            status: CalibrationJobStatusWire::Idle,
+            progress_percent: 0,
+            samples_collected: 0,
+            next_request_mv: None,
+            message: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationControlCommand {
+    pub mode: Option<CalibrationModeWire>,
+    pub pps_enabled: Option<bool>,
+    pub pps_mv: Option<u16>,
+    pub heater_enabled: Option<bool>,
+    pub target_adc_mv: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationRuntimeStateWire {
+    pub mode: CalibrationModeWire,
+    pub pps_enabled: bool,
+    pub pps_mv: Option<u16>,
+    pub pps_ma: Option<u16>,
+    pub heater_enabled: bool,
+    pub target_adc_mv: Option<u16>,
+    pub stable: bool,
+    pub stability_error_mv: Option<i16>,
+    pub error: Option<String<ERROR_CODE_MAX_LEN>>,
+    pub job: CalibrationJobStateWire,
+}
+
+impl Default for CalibrationRuntimeStateWire {
+    fn default() -> Self {
+        Self {
+            mode: CalibrationModeWire::Off,
+            pps_enabled: false,
+            pps_mv: None,
+            pps_ma: None,
+            heater_enabled: false,
+            target_adc_mv: None,
+            stable: false,
+            stability_error_mv: None,
+            error: None,
+            job: CalibrationJobStateWire::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationJobCommandWire {
+    pub op: CalibrationJobOpWire,
+    pub kind: Option<CalibrationJobKindWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,6 +442,7 @@ pub struct RuntimeConfigCommand {
     pub manual_pps_enabled: Option<bool>,
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
+    pub calibration: Option<CalibrationControlCommand>,
 }
 
 impl RuntimeConfigCommand {
@@ -634,6 +743,10 @@ pub enum UsbFrame {
     CalibrationApply {
         request_id: String<REQUEST_ID_MAX_LEN>,
     },
+    CalibrationJob {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        command: CalibrationJobCommandWire,
+    },
     HeaterCurveConfig {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: HeaterCurveConfigCommand,
@@ -672,7 +785,7 @@ struct UsbFrameWire {
     capabilities: Option<Vec<String<CAPABILITY_MAX_LEN>, CAPABILITY_COUNT_MAX>>,
     #[serde(rename = "requestId")]
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
-    op: Option<String<16>>,
+    op: Option<String<24>>,
     ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
     auto_reconnect: Option<bool>,
@@ -685,12 +798,15 @@ struct UsbFrameWire {
     manual_pps_enabled: Option<bool>,
     manual_pps_mv: Option<u16>,
     manual_pps_ma: Option<u16>,
+    calibration: Option<CalibrationControlCommand>,
     channel: Option<CalibrationChannelWire>,
     reference_temp_c: Option<f32>,
     reference_vin_mv: Option<u32>,
     observed_mv: Option<u16>,
     expected_mv: Option<u16>,
     sample_index: Option<usize>,
+    #[serde(rename = "kind", alias = "jobKind")]
+    job_kind: Option<CalibrationJobKindWire>,
     package: Option<CalibrationPackageWire>,
     heater_curve: Option<HeaterCurvePackageWire>,
     ok: Option<bool>,
@@ -737,6 +853,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     manual_pps_enabled: value.manual_pps_enabled,
                     manual_pps_mv: value.manual_pps_mv,
                     manual_pps_ma: value.manual_pps_ma,
+                    calibration: value.calibration,
                 },
             }),
             "calibration_config" => Ok(UsbFrame::CalibrationConfig {
@@ -754,6 +871,13 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
             }),
             "calibration_apply" => Ok(UsbFrame::CalibrationApply {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+            }),
+            "calibration_job" => Ok(UsbFrame::CalibrationJob {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: CalibrationJobCommandWire {
+                    op: parse_calibration_job_op(value.op.as_deref())?,
+                    kind: value.job_kind,
+                },
             }),
             "heater_curve_config" => Ok(UsbFrame::HeaterCurveConfig {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
@@ -809,12 +933,14 @@ impl From<&UsbFrame> for UsbFrameWire {
             manual_pps_enabled: None,
             manual_pps_mv: None,
             manual_pps_ma: None,
+            calibration: None,
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
             observed_mv: None,
             expected_mv: None,
             sample_index: None,
+            job_kind: None,
             package: None,
             heater_curve: None,
             ok: None,
@@ -863,6 +989,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.manual_pps_enabled = config.manual_pps_enabled;
                 wire.manual_pps_mv = config.manual_pps_mv;
                 wire.manual_pps_ma = config.manual_pps_ma;
+                wire.calibration = config.calibration;
             }
             UsbFrame::CalibrationConfig { request_id, config } => {
                 wire.frame_type = string("calibration_config");
@@ -879,6 +1006,15 @@ impl From<&UsbFrame> for UsbFrameWire {
             UsbFrame::CalibrationApply { request_id } => {
                 wire.frame_type = string("calibration_apply");
                 wire.request_id = Some(request_id.clone());
+            }
+            UsbFrame::CalibrationJob {
+                request_id,
+                command,
+            } => {
+                wire.frame_type = string("calibration_job");
+                wire.request_id = Some(request_id.clone());
+                wire.op = Some(string(command.op.as_str()));
+                wire.job_kind = command.kind;
             }
             UsbFrame::HeaterCurveConfig { request_id, config } => {
                 wire.frame_type = string("heater_curve_config");
@@ -929,6 +1065,7 @@ pub enum UsbRequestOp {
     GetNetwork,
     GetStatus,
     GetCalibration,
+    GetCalibrationJob,
     GetHeaterCurve,
     SetLogLevel,
 }
@@ -940,6 +1077,7 @@ impl UsbRequestOp {
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
             Self::GetCalibration => "get_calibration",
+            Self::GetCalibrationJob => "get_calibration_job",
             Self::GetHeaterCurve => "get_heater_curve",
             Self::SetLogLevel => "set_log_level",
         }
@@ -966,6 +1104,15 @@ impl CalibrationConfigOp {
     }
 }
 
+impl CalibrationJobOpWire {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Cancel => "cancel",
+        }
+    }
+}
+
 impl WifiConfigOp {
     const fn as_str(self) -> &'static str {
         match self {
@@ -975,6 +1122,7 @@ impl WifiConfigOp {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsbResponsePayload {
@@ -983,6 +1131,7 @@ pub enum UsbResponsePayload {
     Status(ControlPlaneStatus),
     Wifi(RedactedWifiConfig),
     Calibration(CalibrationStateWire),
+    CalibrationJob(CalibrationJobStateWire),
     HeaterCurve(HeaterCurveStateWire),
     Ack,
 }
@@ -1080,6 +1229,7 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
+        Some("get_calibration_job") => Ok(UsbRequestOp::GetCalibrationJob),
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
         _ => Err(UsbFrameError::MalformedJson),
@@ -1090,6 +1240,14 @@ fn parse_heater_curve_config_op(value: Option<&str>) -> Result<HeaterCurveConfig
     match value {
         Some("preview") => Ok(HeaterCurveConfigOp::Preview),
         Some("clear_preview") => Ok(HeaterCurveConfigOp::ClearPreview),
+        _ => Err(UsbFrameError::MalformedJson),
+    }
+}
+
+fn parse_calibration_job_op(value: Option<&str>) -> Result<CalibrationJobOpWire, UsbFrameError> {
+    match value {
+        Some("start") => Ok(CalibrationJobOpWire::Start),
+        Some("cancel") => Ok(CalibrationJobOpWire::Cancel),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -1334,6 +1492,7 @@ mod tests {
             manual_pps_enabled: None,
             manual_pps_mv: None,
             manual_pps_ma: None,
+            calibration: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -1365,6 +1524,7 @@ mod tests {
             manual_pps_enabled: None,
             manual_pps_mv: None,
             manual_pps_ma: None,
+            calibration: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -1435,6 +1595,7 @@ mod tests {
                     manual_pps_enabled: Some(true),
                     manual_pps_mv: Some(10_400),
                     manual_pps_ma: Some(2_500),
+                    calibration: None,
                 },
             }
         );
@@ -1471,9 +1632,60 @@ mod tests {
                     manual_pps_enabled: None,
                     manual_pps_mv: None,
                     manual_pps_ma: None,
+                    calibration: None,
                 },
             }
         );
+    }
+
+    #[test]
+    fn parse_calibration_job_frame_accepts_kind_alias() {
+        let frame = parse_usb_frame(
+            r#"{"type":"calibration_job","requestId":"req-005","op":"start","kind":"vin_adc_auto"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame,
+            UsbFrame::CalibrationJob {
+                request_id: string("req-005"),
+                command: CalibrationJobCommandWire {
+                    op: CalibrationJobOpWire::Start,
+                    kind: Some(CalibrationJobKindWire::VinAdcAuto),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn parse_usb_request_accepts_long_calibration_job_op() {
+        let frame = parse_usb_frame(
+            r#"{"type":"request","requestId":"req-006","op":"get_calibration_job"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame,
+            UsbFrame::Request {
+                request_id: string("req-006"),
+                op: UsbRequestOp::GetCalibrationJob,
+            }
+        );
+    }
+
+    #[test]
+    fn write_calibration_job_frame_uses_kind_alias_for_host() {
+        let frame = UsbFrame::CalibrationJob {
+            request_id: string("req-007"),
+            command: CalibrationJobCommandWire {
+                op: CalibrationJobOpWire::Start,
+                kind: Some(CalibrationJobKindWire::HeaterCurveAuto),
+            },
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).unwrap();
+        assert!(json.contains(r#""type":"calibration_job""#));
+        assert!(json.contains(r#""kind":"heater_curve_auto""#));
     }
 
     #[test]

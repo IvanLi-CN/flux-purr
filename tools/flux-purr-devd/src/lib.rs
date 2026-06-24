@@ -39,6 +39,8 @@ pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
+const PPS_HARDWARE_MIN_MV: u16 = 5_000;
+const PPS_HARDWARE_MAX_MV: u16 = 28_000;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const RTD_DEFAULT_HIGH_MV: u16 = 2_800;
@@ -68,6 +70,12 @@ const LOCK_NB: i32 = 4;
 const LOCK_UN: i32 = 8;
 
 static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SerialRetryPolicy {
+    ReadOnly,
+    SingleShot,
+}
 
 #[cfg(unix)]
 unsafe extern "C" {
@@ -416,6 +424,7 @@ impl DeviceRecord {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            calibration: CalibrationRuntimeState::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -427,6 +436,85 @@ impl DeviceRecord {
             transport,
             connection: ConnectionState::Connected,
             identity,
+            network,
+            status,
+            calibration: CalibrationState::default(),
+            heater_curve: HeaterCurveState::default(),
+            selected_artifact_id: None,
+            logs: VecDeque::new(),
+            trace: VecDeque::new(),
+            events: VecDeque::new(),
+        }
+    }
+
+    fn native_serial_placeholder(id: &str, display_name: String, port_path: String) -> Self {
+        let network = NetworkSummary {
+            state: NetworkState::Idle,
+            ssid: None,
+            ip: None,
+            gateway: None,
+            dns: Vec::new(),
+            wifi_rssi: None,
+            last_error: None,
+        };
+        let status = ControlPlaneStatus {
+            mode: "idle".to_string(),
+            uptime_seconds: 0,
+            current_temp_c: 0.0,
+            target_temp_c: 220,
+            selected_preset_slot: None,
+            presets_c: None,
+            heater_enabled: false,
+            heater_output_percent: 0,
+            active_cooling_enabled: true,
+            fan_display_state: "OFF".to_string(),
+            fan_enabled: false,
+            fan_pwm_permille: 0,
+            voltage_mv: 0,
+            current_ma: 0,
+            board_temp_centi: 0,
+            rtd_raw_adc_mv: None,
+            vin_raw_adc_mv: None,
+            pd_request_mv: DEFAULT_PD_REQUEST_MV,
+            pd_contract_mv: 0,
+            pd_state: "unknown".to_string(),
+            manual_pps_enabled: false,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            pps_capability_min_mv: None,
+            pps_capability_max_mv: None,
+            pps_capability_max_ma: None,
+            manual_pps_error: None,
+            calibration: CalibrationRuntimeState::default(),
+            frontpanel_key: None,
+            network: network.clone(),
+        };
+
+        Self {
+            id: id.to_string(),
+            display_name,
+            port_path: Some(port_path),
+            transport: DeviceTransport::NativeSerial,
+            connection: ConnectionState::Disconnected,
+            identity: Identity {
+                device_id: id.to_string(),
+                firmware_version: "unknown".to_string(),
+                build_id: "native-serial-placeholder".to_string(),
+                git_sha: "unknown".to_string(),
+                board: "unknown".to_string(),
+                api_version: "2026-05-29".to_string(),
+                protocol_version: "flux-purr.usb.v1".to_string(),
+                hostname: id.to_string(),
+                capabilities: vec![
+                    "identity".to_string(),
+                    "status".to_string(),
+                    "network".to_string(),
+                    "wifi_config".to_string(),
+                    "monitor".to_string(),
+                    "firmware_check".to_string(),
+                    "flash".to_string(),
+                ],
+            },
             network,
             status,
             calibration: CalibrationState::default(),
@@ -534,8 +622,71 @@ pub struct ControlPlaneStatus {
     pub pps_capability_max_ma: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_pps_error: Option<String>,
+    #[serde(default)]
+    pub calibration: CalibrationRuntimeState,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationMode {
+    #[default]
+    Off,
+    VinAdc,
+    RtdAdc,
+    HeaterCurve,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationJobKind {
+    VinAdcAuto,
+    HeaterCurveAuto,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationJobStatus {
+    #[default]
+    Idle,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationJobOp {
+    Start,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationJobState {
+    pub kind: Option<CalibrationJobKind>,
+    pub status: CalibrationJobStatus,
+    pub progress_percent: u8,
+    pub samples_collected: u8,
+    pub next_request_mv: Option<u16>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationRuntimeState {
+    pub mode: CalibrationMode,
+    pub pps_enabled: bool,
+    pub pps_mv: Option<u16>,
+    pub pps_ma: Option<u16>,
+    pub heater_enabled: bool,
+    pub target_adc_mv: Option<u16>,
+    pub stable: bool,
+    pub stability_error_mv: Option<i16>,
+    pub error: Option<String>,
+    pub job: CalibrationJobState,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -841,6 +992,17 @@ pub struct RuntimeConfigRequest {
     pub manual_pps_enabled: Option<bool>,
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
+    pub calibration: Option<CalibrationControlRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationControlRequest {
+    pub mode: Option<CalibrationMode>,
+    pub pps_enabled: Option<bool>,
+    pub pps_mv: Option<u16>,
+    pub heater_enabled: Option<bool>,
+    pub target_adc_mv: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -875,6 +1037,14 @@ pub struct HeaterCurveConfigRequest {
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurveSaveRequest {
     pub lease_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationJobRequest {
+    pub lease_id: String,
+    pub op: CalibrationJobOp,
+    pub kind: Option<CalibrationJobKind>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -957,6 +1127,8 @@ struct UsbRuntimeConfigWire<'a> {
     manual_pps_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_ma: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calibration: Option<&'a CalibrationControlRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1007,6 +1179,17 @@ struct UsbHeaterCurveSaveWire<'a> {
     #[serde(rename = "type")]
     frame_type: &'static str,
     request_id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbCalibrationJobWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: CalibrationJobOp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<CalibrationJobKind>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1198,6 +1381,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/calibration/apply",
             post(apply_calibration),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/calibration/job",
+            get(device_calibration_job).post(configure_calibration_job),
         )
         .route(
             "/api/v1/devices/{device_id}/heater-curve",
@@ -1627,6 +1814,109 @@ async fn apply_calibration(
     Ok(Json(calibration))
 }
 
+async fn device_calibration_job(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<CalibrationJobState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let job = match serial_calibration_job_get(&state, &target).await {
+            Ok(job) => job,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "calibration_job", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status.calibration.job = job.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(job));
+    }
+
+    Ok(Json(target.status.calibration.job))
+}
+
+async fn configure_calibration_job(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<CalibrationJobRequest>,
+) -> Result<Json<CalibrationJobState>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+
+    if target.transport == DeviceTransport::NativeSerial {
+        let job = match serial_calibration_job_config(&state, &target, &payload).await {
+            Ok(job) => job,
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "calibration_job", &error);
+                return Err(error);
+            }
+        };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status.calibration.job = job.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(job));
+    }
+
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    match payload.op {
+        CalibrationJobOp::Cancel => {
+            device.status.calibration.job = CalibrationJobState {
+                status: CalibrationJobStatus::Canceled,
+                ..CalibrationJobState::default()
+            };
+            device.status.calibration.heater_enabled = false;
+            device.status.calibration.pps_enabled = false;
+            device.status.calibration.pps_mv = None;
+            device.status.calibration.pps_ma = None;
+        }
+        CalibrationJobOp::Start => {
+            let kind = payload.kind.ok_or_else(|| {
+                HttpError::bad_request(
+                    "calibration_job_kind_required",
+                    "Calibration auto job requires a job kind.",
+                )
+            })?;
+            device.status.calibration.job = CalibrationJobState {
+                kind: Some(kind),
+                status: CalibrationJobStatus::Running,
+                progress_percent: 0,
+                samples_collected: 0,
+                next_request_mv: device.status.calibration.pps_mv,
+                message: None,
+            };
+        }
+    }
+    Ok(Json(device.status.calibration.job.clone()))
+}
+
 async fn device_heater_curve(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -1930,6 +2220,13 @@ async fn configure_runtime(
     }
 
     validate_manual_pps_request_against_status(&payload, &target.status)?;
+    if let Some(calibration) = payload.calibration.as_ref() {
+        validate_calibration_request_against_status(
+            calibration,
+            &target.status,
+            &target.status.calibration,
+        )?;
+    }
 
     let mut state_lock = state.lock()?;
     let device = state_lock
@@ -1979,7 +2276,7 @@ async fn configure_runtime(
         let manual_pps_ma = payload
             .manual_pps_ma
             .or(device.status.manual_pps_ma)
-            .or(device.status.pps_capability_max_ma)
+            .or(effective_pps_current_capability_ma(&device.status))
             .expect("manual PPS current validated");
         device.status.manual_pps_enabled = true;
         device.status.manual_pps_mv = Some(manual_pps_mv);
@@ -1989,10 +2286,81 @@ async fn configure_runtime(
         device.status.voltage_mv = u32::from(manual_pps_mv);
         device.status.manual_pps_error = None;
     }
+    if let Some(calibration) = payload.calibration.as_ref() {
+        apply_mock_calibration_runtime_config(&mut device.status, calibration);
+    }
     let status = device.status.clone();
     drop(state_lock);
     emit_runtime_config_event(&state, &device_id, &payload, &status);
     Ok(Json(status))
+}
+
+fn apply_mock_calibration_runtime_config(
+    status: &mut ControlPlaneStatus,
+    calibration: &CalibrationControlRequest,
+) {
+    let current_ma = effective_pps_current_capability_ma(status);
+    if let Some(mode) = calibration.mode {
+        status.calibration.mode = mode;
+        if mode == CalibrationMode::Off {
+            status.calibration = CalibrationRuntimeState::default();
+        }
+    }
+
+    if let Some(target_adc_mv) = calibration.target_adc_mv {
+        status.calibration.target_adc_mv = Some(target_adc_mv);
+    }
+
+    if let Some(heater_enabled) = calibration.heater_enabled {
+        status.calibration.heater_enabled = heater_enabled;
+        status.heater_enabled = heater_enabled;
+        if !heater_enabled {
+            status.heater_output_percent = 0;
+        }
+    }
+
+    if calibration.pps_enabled == Some(false) {
+        status.calibration.pps_enabled = false;
+        status.calibration.pps_mv = None;
+        status.calibration.pps_ma = None;
+        return;
+    }
+
+    if calibration.pps_enabled == Some(true) || calibration.pps_mv.is_some() {
+        let pps_mv = calibration
+            .pps_mv
+            .or(status.calibration.pps_mv)
+            .or(status.manual_pps_mv)
+            .unwrap_or(status.pd_contract_mv);
+        let pps_ma = current_ma.or(status.manual_pps_ma);
+        status.calibration.pps_enabled = true;
+        status.calibration.pps_mv = Some(pps_mv);
+        status.calibration.pps_ma = pps_ma;
+        status.manual_pps_enabled = true;
+        status.manual_pps_mv = Some(pps_mv);
+        status.manual_pps_ma = pps_ma;
+        status.pd_request_mv = pps_mv;
+        status.pd_contract_mv = pps_mv;
+        status.voltage_mv = u32::from(pps_mv);
+        status.manual_pps_error = None;
+        status.calibration.error = None;
+    }
+
+    let observed_mv = match status.calibration.mode {
+        CalibrationMode::RtdAdc => status.rtd_raw_adc_mv,
+        CalibrationMode::VinAdc => status.vin_raw_adc_mv,
+        CalibrationMode::Off | CalibrationMode::HeaterCurve => None,
+    };
+
+    status.calibration.stability_error_mv = status
+        .calibration
+        .target_adc_mv
+        .zip(observed_mv)
+        .map(|(target, observed)| (i32::from(observed) - i32::from(target)) as i16);
+    status.calibration.stable = status
+        .calibration
+        .stability_error_mv
+        .is_some_and(|error_mv| error_mv.abs() <= 8);
 }
 
 fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
@@ -2016,11 +2384,12 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
         ));
     }
     if payload.manual_pps_mv.is_some_and(|millivolts| {
-        !millivolts.is_multiple_of(100) || millivolts > 21_000 || millivolts == 0
+        !millivolts.is_multiple_of(100)
+            || !(PPS_HARDWARE_MIN_MV..=PPS_HARDWARE_MAX_MV).contains(&millivolts)
     }) {
         return Err(HttpError::bad_request(
             "invalid_manual_pps",
-            "manualPpsMv must use 100mV steps and be no higher than 21000.",
+            "manualPpsMv must use 100mV steps and stay within 5000..28000.",
         ));
     }
     if payload
@@ -2030,6 +2399,24 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
         return Err(HttpError::bad_request(
             "invalid_manual_pps",
             "manualPpsMa must use 50mA steps and be greater than 0.",
+        ));
+    }
+    if let Some(calibration) = payload.calibration.as_ref() {
+        validate_calibration_control_request(calibration)?;
+    }
+    Ok(())
+}
+
+fn validate_calibration_control_request(
+    calibration: &CalibrationControlRequest,
+) -> Result<(), HttpError> {
+    if calibration.pps_mv.is_some_and(|millivolts| {
+        !millivolts.is_multiple_of(100)
+            || !(PPS_HARDWARE_MIN_MV..=PPS_HARDWARE_MAX_MV).contains(&millivolts)
+    }) {
+        return Err(HttpError::bad_request(
+            "invalid_calibration_pps",
+            "calibration.ppsMv must use 100mV steps and stay within 5000..28000.",
         ));
     }
     Ok(())
@@ -2184,6 +2571,33 @@ fn expected_calibration_adc_mv(
     }
 }
 
+fn effective_pps_current_capability_ma(status: &ControlPlaneStatus) -> Option<u16> {
+    u16::try_from(status.current_ma)
+        .ok()
+        .filter(|value| *value > 0)
+        .or(status.pps_capability_max_ma)
+}
+
+fn validate_pps_voltage_against_status(
+    millivolts: u16,
+    status: &ControlPlaneStatus,
+) -> Result<(), HttpError> {
+    let (Some(min_mv), Some(max_mv)) = (status.pps_capability_min_mv, status.pps_capability_max_mv)
+    else {
+        return Err(HttpError::bad_request(
+            "manual_pps_no_capability",
+            "PPS capability is unavailable.",
+        ));
+    };
+    if millivolts < min_mv || millivolts > max_mv {
+        return Err(HttpError::bad_request(
+            "manual_pps_out_of_range",
+            "manualPpsMv is outside the advertised PPS capability.",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_manual_pps_request_against_status(
     payload: &RuntimeConfigRequest,
     status: &ControlPlaneStatus,
@@ -2207,27 +2621,53 @@ fn validate_manual_pps_request_against_status(
     validate_manual_pps_against_status(manual_pps_mv, manual_pps_ma, status)
 }
 
+fn validate_calibration_request_against_status(
+    calibration: &CalibrationControlRequest,
+    status: &ControlPlaneStatus,
+    current: &CalibrationRuntimeState,
+) -> Result<(), HttpError> {
+    let current_ma = effective_pps_current_capability_ma(status);
+    if calibration.pps_enabled != Some(true) && calibration.pps_mv.is_none() {
+        return Ok(());
+    }
+
+    let manual_pps_mv = calibration.pps_mv.or(current.pps_mv).ok_or_else(|| {
+        HttpError::bad_request("invalid_calibration_pps", "calibration.ppsMv is required.")
+    })?;
+    let Some(_manual_pps_ma) = current_ma.or(status.manual_pps_ma) else {
+        return Err(HttpError::bad_request(
+            "invalid_calibration_pps",
+            "Calibration PPS requires a readable PPS current capability.",
+        ));
+    };
+    validate_pps_voltage_against_status(manual_pps_mv, status).map_err(|error| {
+        if error.error.code == "manual_pps_no_capability" {
+            HttpError::bad_request(
+                "calibration_pps_no_capability",
+                "PPS capability is unavailable.",
+            )
+        } else {
+            HttpError::bad_request(
+                "calibration_pps_out_of_range",
+                "Calibration PPS request is outside the advertised PPS capability.",
+            )
+        }
+    })?;
+    Ok(())
+}
+
 fn validate_manual_pps_against_status(
     millivolts: u16,
     milliamps: u16,
     status: &ControlPlaneStatus,
 ) -> Result<(), HttpError> {
-    let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
-        status.pps_capability_min_mv,
-        status.pps_capability_max_mv,
-        status.pps_capability_max_ma,
-    ) else {
+    validate_pps_voltage_against_status(millivolts, status)?;
+    let Some(max_ma) = status.pps_capability_max_ma else {
         return Err(HttpError::bad_request(
             "manual_pps_no_capability",
             "PPS capability is unavailable.",
         ));
     };
-    if millivolts < min_mv || millivolts > max_mv {
-        return Err(HttpError::bad_request(
-            "manual_pps_out_of_range",
-            "manualPpsMv is outside the advertised PPS capability.",
-        ));
-    }
     if milliamps > max_ma {
         return Err(HttpError::bad_request(
             "manual_pps_out_of_range",
@@ -2271,7 +2711,15 @@ where
         op,
     })
     .map_err(|_| HttpError::internal("failed to encode USB request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::ReadOnly,
+    )
+    .await?;
     extract_usb_payload(result, payload_key)
 }
 
@@ -2292,7 +2740,15 @@ async fn serial_wifi_config(
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
-    serial_exchange(state, &target.id, port_path, request_id, request, true).await
+    serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await
 }
 
 async fn serial_runtime_config(
@@ -2313,10 +2769,35 @@ async fn serial_runtime_config(
         manual_pps_enabled: payload.manual_pps_enabled,
         manual_pps_mv: payload.manual_pps_mv,
         manual_pps_ma: payload.manual_pps_ma,
+        calibration: payload.calibration.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
-    extract_usb_payload(result, "status")
+    match serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await
+    {
+        Ok(result) => extract_usb_payload(result, "status"),
+        Err(error) if should_reconcile_runtime_config_timeout(&error) => {
+            match serial_request_payload::<ControlPlaneStatus>(
+                state,
+                target,
+                "get_status",
+                "status",
+            )
+            .await
+            {
+                Ok(status) if runtime_config_matches_status(payload, &status) => Ok(status),
+                Ok(_) | Err(_) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn serial_calibration_get(
@@ -2347,7 +2828,15 @@ async fn serial_calibration_config(
         package: payload.package.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB calibration request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
     extract_usb_payload(result, "calibration")
 }
 
@@ -2362,8 +2851,55 @@ async fn serial_calibration_apply(
         request_id: &request_id,
     })
     .map_err(|_| HttpError::internal("failed to encode USB calibration apply request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
     extract_usb_payload(result, "calibration")
+}
+
+async fn serial_calibration_job_get(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<CalibrationJobState, HttpError> {
+    serial_request_payload::<CalibrationJobState>(
+        state,
+        target,
+        "get_calibration_job",
+        "calibration_job",
+    )
+    .await
+}
+
+async fn serial_calibration_job_config(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &CalibrationJobRequest,
+) -> Result<CalibrationJobState, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-calibration-job", now_millis());
+    let request = serde_json::to_string(&UsbCalibrationJobWire {
+        frame_type: "calibration_job",
+        request_id: &request_id,
+        op: payload.op,
+        kind: payload.kind,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB calibration job request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    extract_usb_payload(result, "calibration_job")
 }
 
 async fn serial_heater_curve_get(
@@ -2394,7 +2930,15 @@ async fn serial_heater_curve_config(
         heater_curve: package.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB heater curve request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
     extract_usb_payload(result, "heater_curve")
 }
 
@@ -2409,7 +2953,15 @@ async fn serial_heater_curve_save(
         request_id: &request_id,
     })
     .map_err(|_| HttpError::internal("failed to encode USB heater curve save request"))?;
-    let result = serial_exchange(state, &target.id, port_path, request_id, request, true).await?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
     extract_usb_payload(result, "heater_curve")
 }
 
@@ -2419,7 +2971,7 @@ async fn serial_exchange(
     port_path: String,
     request_id: String,
     request: String,
-    retry_on_silence: bool,
+    retry_policy: SerialRetryPolicy,
 ) -> Result<Value, HttpError> {
     record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
     let _serial_rpc = state.serial_rpc.lock().await;
@@ -2431,7 +2983,7 @@ async fn serial_exchange(
             &port_path,
             &worker_request_id,
             &request,
-            retry_on_silence,
+            retry_policy,
         )
     })
     .await
@@ -2510,12 +3062,12 @@ fn serial_exchange_blocking(
     port_path: &str,
     request_id: &str,
     request: &str,
-    retry_on_silence: bool,
+    retry_policy: SerialRetryPolicy,
 ) -> Result<Value, HttpError> {
     let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
     let mut session = take_or_open_serial_session(&mut serial_sessions, port_path, deadline)?;
-    write_serial_request(&mut *session.port, request)?;
+    session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
 
     let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
     let mut read_buf = [0_u8; 256];
@@ -2527,7 +3079,7 @@ fn serial_exchange_blocking(
                 maybe_retry_silent_serial_request(
                     &mut *session.port,
                     request,
-                    retry_on_silence,
+                    retry_policy,
                     &mut next_silent_retry_at,
                     deadline,
                 )?;
@@ -2546,7 +3098,9 @@ fn serial_exchange_blocking(
                                     && Instant::now() < deadline =>
                             {
                                 std::thread::sleep(SERIAL_STARTUP_RETRY_DELAY);
-                                write_serial_request(&mut *session.port, request)?;
+                                session = write_serial_request_with_reopen(
+                                    session, port_path, request, deadline,
+                                )?;
                             }
                             Err(error) => {
                                 store_serial_session(&mut serial_sessions, port_path, session);
@@ -2565,7 +3119,7 @@ fn serial_exchange_blocking(
                 maybe_retry_silent_serial_request(
                     &mut *session.port,
                     request,
-                    retry_on_silence,
+                    retry_policy,
                     &mut next_silent_retry_at,
                     deadline,
                 )?;
@@ -2573,7 +3127,7 @@ fn serial_exchange_blocking(
             Err(error) if is_recoverable_serial_io_error(&error) => {
                 drop(session);
                 session = reopen_serial_session(port_path, deadline)?;
-                write_serial_request(&mut *session.port, request)?;
+                session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
                 next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
                 line.clear();
             }
@@ -2758,15 +3312,33 @@ fn write_serial_request(
         .map_err(serial_io_http_error)
 }
 
+fn write_serial_request_with_reopen(
+    mut session: SerialSession,
+    port_path: &str,
+    request: &str,
+    deadline: Instant,
+) -> Result<SerialSession, HttpError> {
+    match write_serial_request(&mut *session.port, request) {
+        Ok(()) => Ok(session),
+        Err(error) if is_recoverable_write_http_error(&error) => {
+            drop(session);
+            let mut reopened = reopen_serial_session(port_path, deadline)?;
+            write_serial_request(&mut *reopened.port, request)?;
+            Ok(reopened)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn maybe_retry_silent_serial_request(
     port: &mut dyn serialport::SerialPort,
     request: &str,
-    retry_on_silence: bool,
+    retry_policy: SerialRetryPolicy,
     next_retry_at: &mut Instant,
     deadline: Instant,
 ) -> Result<(), HttpError> {
     let now = Instant::now();
-    if should_retry_silent_serial_request(retry_on_silence, now, *next_retry_at, deadline) {
+    if should_retry_silent_serial_request(retry_policy, now, *next_retry_at, deadline) {
         write_serial_request(port, request)?;
         *next_retry_at = now + SERIAL_SILENT_RETRY_DELAY;
     }
@@ -2774,12 +3346,12 @@ fn maybe_retry_silent_serial_request(
 }
 
 fn should_retry_silent_serial_request(
-    retry_on_silence: bool,
+    retry_policy: SerialRetryPolicy,
     now: Instant,
     next_retry_at: Instant,
     deadline: Instant,
 ) -> bool {
-    retry_on_silence && now >= next_retry_at && now < deadline
+    matches!(retry_policy, SerialRetryPolicy::ReadOnly) && now >= next_retry_at && now < deadline
 }
 
 fn is_recoverable_serial_io_error(error: &io::Error) -> bool {
@@ -2797,6 +3369,97 @@ fn is_recoverable_serial_io_error(error: &io::Error) -> bool {
 
 fn is_retryable_startup_busy(error: &HttpError) -> bool {
     error.error.retryable && error.error.code == "startup_busy"
+}
+
+fn should_reconcile_runtime_config_timeout(error: &HttpError) -> bool {
+    error.error.retryable && error.error.code == "usb_response_timeout"
+}
+
+fn runtime_config_matches_status(
+    payload: &RuntimeConfigRequest,
+    status: &ControlPlaneStatus,
+) -> bool {
+    if payload
+        .target_temp_c
+        .is_some_and(|target_temp_c| status.target_temp_c != target_temp_c)
+    {
+        return false;
+    }
+    if payload
+        .selected_preset_slot
+        .is_some_and(|selected_preset_slot| {
+            status.selected_preset_slot != Some(selected_preset_slot)
+        })
+    {
+        return false;
+    }
+    if let Some(presets_c) = payload.presets_c.as_ref()
+        && status.presets_c.as_ref() != Some(presets_c)
+    {
+        return false;
+    }
+    if payload
+        .active_cooling_enabled
+        .is_some_and(|enabled| status.active_cooling_enabled != enabled)
+    {
+        return false;
+    }
+    if payload
+        .heater_enabled
+        .is_some_and(|enabled| status.heater_enabled != enabled)
+    {
+        return false;
+    }
+    if payload
+        .manual_pps_enabled
+        .is_some_and(|enabled| status.manual_pps_enabled != enabled)
+    {
+        return false;
+    }
+    if payload
+        .manual_pps_mv
+        .is_some_and(|manual_pps_mv| status.manual_pps_mv != Some(manual_pps_mv))
+    {
+        return false;
+    }
+    if payload
+        .manual_pps_ma
+        .is_some_and(|manual_pps_ma| status.manual_pps_ma != Some(manual_pps_ma))
+    {
+        return false;
+    }
+    if let Some(calibration) = payload.calibration.as_ref() {
+        if calibration
+            .mode
+            .is_some_and(|mode| status.calibration.mode != mode)
+        {
+            return false;
+        }
+        if calibration
+            .pps_enabled
+            .is_some_and(|enabled| status.calibration.pps_enabled != enabled)
+        {
+            return false;
+        }
+        if calibration
+            .pps_mv
+            .is_some_and(|pps_mv| status.calibration.pps_mv != Some(pps_mv))
+        {
+            return false;
+        }
+        if calibration.heater_enabled.is_some_and(|enabled| {
+            status.calibration.heater_enabled != enabled || status.heater_enabled != enabled
+        }) {
+            return false;
+        }
+        if calibration
+            .target_adc_mv
+            .is_some_and(|target_adc_mv| status.calibration.target_adc_mv != Some(target_adc_mv))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Value>, HttpError> {
@@ -2831,6 +3494,28 @@ fn serial_io_http_error(error: io::Error) -> HttpError {
         &format!("Serial I/O failed: {error}"),
         true,
     )
+}
+
+fn is_recoverable_write_http_error(error: &HttpError) -> bool {
+    error.error.code == "serial_io_failed"
+        && error.error.retryable
+        && error
+            .error
+            .message
+            .strip_prefix("Serial I/O failed: ")
+            .map(is_recoverable_serial_error_message)
+            .unwrap_or(false)
+}
+
+fn is_recoverable_serial_error_message(message: &str) -> bool {
+    message.contains("Broken pipe")
+        || message.contains("broken pipe")
+        || message.contains("No such file or directory")
+        || message.contains("Connection reset")
+        || message.contains("Connection aborted")
+        || message.contains("UnexpectedEof")
+        || message.contains("Device not configured")
+        || message.contains("device not configured")
 }
 
 async fn flash_device(
@@ -3046,20 +3731,7 @@ fn serial_device_record(
             "Authorized serial device".to_string(),
         ),
     };
-    let mut device = DeviceRecord::mock(&id, DeviceTransport::NativeSerial);
-    device.display_name = display_name;
-    device.port_path = Some(port_name.to_string());
-    device.connection = ConnectionState::Disconnected;
-    device.identity.capabilities = vec![
-        "identity".to_string(),
-        "status".to_string(),
-        "network".to_string(),
-        "wifi_config".to_string(),
-        "monitor".to_string(),
-        "firmware_check".to_string(),
-        "flash".to_string(),
-    ];
-    device
+    DeviceRecord::native_serial_placeholder(&id, display_name, port_name.to_string())
 }
 
 pub fn verify_artifact(
@@ -3093,6 +3765,14 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
             "local-esp32s3-release",
             "Local ESP32-S3 release",
             "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+            "release + web_serial",
+            vec!["web_serial".to_string()],
+            "elf",
+        ),
+        (
+            "local-esp32s3-release-root-target",
+            "Local ESP32-S3 release (root target)",
+            "target/xtensa-esp32s3-none-elf/release/flux-purr",
             "release + web_serial",
             vec!["web_serial".to_string()],
             "elf",
@@ -3703,6 +4383,14 @@ mod tests {
         let device = serial_device_record("/dev/cu.usbmodem-test", None);
 
         assert_eq!(device.transport, DeviceTransport::NativeSerial);
+        assert_eq!(device.connection, ConnectionState::Disconnected);
+        assert_eq!(device.identity.build_id, "native-serial-placeholder");
+        assert_eq!(device.identity.board, "unknown");
+        assert_eq!(device.status.current_temp_c, 0.0);
+        assert!(!device.status.heater_enabled);
+        assert_eq!(device.status.pd_contract_mv, 0);
+        assert_eq!(device.network.state, NetworkState::Idle);
+        assert_eq!(device.network.ssid, None);
         assert!(
             device
                 .identity
@@ -3710,6 +4398,17 @@ mod tests {
                 .contains(&"firmware_check".to_string())
         );
         assert!(device.identity.capabilities.contains(&"flash".to_string()));
+    }
+
+    #[test]
+    fn native_serial_placeholder_does_not_reuse_mock_hot_state() {
+        let device = serial_device_record("/dev/cu.usbmodem-test", None);
+
+        assert_ne!(device.identity.build_id, "devd-mock");
+        assert_ne!(device.status.current_temp_c, 183.6);
+        assert_ne!(device.network.ssid.as_deref(), Some("FluxPurr-Lab"));
+        assert_eq!(device.status.mode, "idle");
+        assert_eq!(device.status.network.state, NetworkState::Idle);
     }
 
     #[test]
@@ -3938,6 +4637,22 @@ mod tests {
     }
 
     #[test]
+    fn artifact_catalog_discovers_root_target_build_outputs() {
+        let dir = tempdir().unwrap();
+        let artifact_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
+        fs::create_dir_all(&artifact_path).unwrap();
+        fs::write(artifact_path.join("flux-purr"), b"firmware-image-root").unwrap();
+
+        let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_id == "local-esp32s3-release-root-target")
+        );
+    }
+
+    #[test]
     fn real_flash_args_flash_elf_and_hard_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
@@ -4030,6 +4745,7 @@ mod tests {
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                calibration: None,
             }),
         )
         .await
@@ -4131,6 +4847,7 @@ mod tests {
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                calibration: None,
             }),
         )
         .await
@@ -4178,6 +4895,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                calibration: None,
             }),
         )
         .await
@@ -4203,6 +4921,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
+                calibration: None,
             }),
         )
         .await
@@ -4226,6 +4945,7 @@ mod tests {
                 manual_pps_enabled: Some(false),
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                calibration: None,
             }),
         )
         .await
@@ -4236,6 +4956,95 @@ mod tests {
         assert_eq!(cleared_status.manual_pps_ma, None);
         assert_eq!(cleared_status.pd_contract_mv, DEFAULT_PD_REQUEST_MV);
         assert_eq!(cleared_status.voltage_mv, u32::from(DEFAULT_PD_REQUEST_MV));
+    }
+
+    #[tokio::test]
+    async fn calibration_runtime_uses_readback_current_and_ignores_stale_calibration_current() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        {
+            let mut inner = state.lock().unwrap();
+            let device = inner.devices.get_mut("mock-fp-lab-01").unwrap();
+            device.status.current_ma = 1_350;
+            device.status.manual_pps_ma = None;
+            device.status.pps_capability_max_ma = Some(3_000);
+            device.status.calibration.pps_ma = Some(2_500);
+        }
+
+        let status = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: Some(CalibrationControlRequest {
+                    mode: Some(CalibrationMode::VinAdc),
+                    pps_enabled: Some(true),
+                    pps_mv: Some(12_000),
+                    heater_enabled: Some(false),
+                    target_adc_mv: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(status.calibration.pps_enabled);
+        assert_eq!(status.calibration.pps_mv, Some(12_000));
+        assert_eq!(status.calibration.pps_ma, Some(1_350));
+        assert_eq!(status.manual_pps_ma, Some(1_350));
+    }
+
+    #[tokio::test]
+    async fn calibration_runtime_falls_back_to_capability_current_when_readback_is_missing() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        {
+            let mut inner = state.lock().unwrap();
+            let device = inner.devices.get_mut("mock-fp-lab-01").unwrap();
+            device.status.current_ma = 0;
+            device.status.manual_pps_ma = None;
+            device.status.pps_capability_max_ma = Some(3_000);
+            device.status.calibration.pps_ma = Some(2_500);
+        }
+
+        let status = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: Some(CalibrationControlRequest {
+                    mode: Some(CalibrationMode::VinAdc),
+                    pps_enabled: Some(true),
+                    pps_mv: Some(12_000),
+                    heater_enabled: Some(false),
+                    target_adc_mv: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert!(status.calibration.pps_enabled);
+        assert_eq!(status.calibration.pps_ma, Some(3_000));
+        assert_eq!(status.manual_pps_ma, Some(3_000));
     }
 
     #[tokio::test]
@@ -4445,26 +5254,209 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_matcher_accepts_matching_calibration_status() {
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: Some(45),
+            selected_preset_slot: Some(2),
+            presets_c: Some(vec![
+                Some(50),
+                Some(100),
+                Some(150),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ]),
+            active_cooling_enabled: Some(false),
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: Some(CalibrationControlRequest {
+                mode: Some(CalibrationMode::RtdAdc),
+                pps_enabled: Some(true),
+                pps_mv: Some(12_000),
+                heater_enabled: Some(true),
+                target_adc_mv: Some(930),
+            }),
+        };
+        let status = ControlPlaneStatus {
+            mode: "sampling".to_string(),
+            uptime_seconds: 12,
+            current_temp_c: 31.5,
+            target_temp_c: 45,
+            selected_preset_slot: Some(2),
+            presets_c: payload.presets_c.clone(),
+            heater_enabled: true,
+            heater_output_percent: 12,
+            active_cooling_enabled: false,
+            fan_display_state: "AUTO".to_string(),
+            fan_enabled: true,
+            fan_pwm_permille: 500,
+            voltage_mv: 12_000,
+            current_ma: 2_800,
+            board_temp_centi: 3150,
+            rtd_raw_adc_mv: Some(934),
+            vin_raw_adc_mv: Some(1003),
+            pd_request_mv: 12_000,
+            pd_contract_mv: 12_000,
+            pd_state: "ready".to_string(),
+            manual_pps_enabled: true,
+            manual_pps_mv: Some(12_000),
+            manual_pps_ma: Some(3_000),
+            pps_capability_min_mv: Some(5_000),
+            pps_capability_max_mv: Some(21_000),
+            pps_capability_max_ma: Some(3_000),
+            manual_pps_error: None,
+            calibration: CalibrationRuntimeState {
+                mode: CalibrationMode::RtdAdc,
+                pps_enabled: true,
+                pps_mv: Some(12_000),
+                pps_ma: Some(3_000),
+                heater_enabled: true,
+                target_adc_mv: Some(930),
+                stable: true,
+                stability_error_mv: Some(4),
+                error: None,
+                job: CalibrationJobState::default(),
+            },
+            frontpanel_key: None,
+            network: NetworkSummary {
+                state: NetworkState::Idle,
+                ssid: None,
+                ip: None,
+                gateway: None,
+                dns: Vec::new(),
+                wifi_rssi: None,
+                last_error: None,
+            },
+        };
+
+        assert!(runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn runtime_config_matcher_rejects_mismatched_calibration_status() {
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: Some(CalibrationControlRequest {
+                mode: Some(CalibrationMode::VinAdc),
+                pps_enabled: Some(true),
+                pps_mv: Some(16_000),
+                heater_enabled: Some(false),
+                target_adc_mv: None,
+            }),
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.calibration.mode = CalibrationMode::VinAdc;
+        status.calibration.pps_enabled = true;
+        status.calibration.pps_mv = Some(12_000);
+        status.calibration.heater_enabled = false;
+
+        assert!(!runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
     fn silent_serial_retry_only_applies_to_read_only_policy_window() {
         let now = Instant::now();
         let retry_at = now - Duration::from_millis(1);
         let deadline = now + Duration::from_millis(100);
 
         assert!(should_retry_silent_serial_request(
-            true, now, retry_at, deadline
+            SerialRetryPolicy::ReadOnly,
+            now,
+            retry_at,
+            deadline
         ));
         assert!(!should_retry_silent_serial_request(
-            false, now, retry_at, deadline
+            SerialRetryPolicy::SingleShot,
+            now,
+            retry_at,
+            deadline
         ));
         assert!(!should_retry_silent_serial_request(
-            true,
+            SerialRetryPolicy::ReadOnly,
             now,
             now + Duration::from_millis(1),
             deadline
         ));
         assert!(!should_retry_silent_serial_request(
-            true, now, retry_at, now
+            SerialRetryPolicy::ReadOnly,
+            now,
+            retry_at,
+            now
         ));
+    }
+
+    #[test]
+    fn write_stage_recoverable_serial_http_errors_are_detected() {
+        let broken_pipe = HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_io_failed",
+            "Serial I/O failed: Broken pipe",
+            true,
+        );
+        assert!(is_recoverable_write_http_error(&broken_pipe));
+
+        let disappeared_port = HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_io_failed",
+            "Serial I/O failed: No such file or directory",
+            true,
+        );
+        assert!(is_recoverable_write_http_error(&disappeared_port));
+
+        let permanent = HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_io_failed",
+            "Serial I/O failed: Permission denied",
+            true,
+        );
+        assert!(!is_recoverable_write_http_error(&permanent));
+
+        let other_code = HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "usb_payload_decode_failed",
+            "USB response payload could not be decoded.",
+            true,
+        );
+        assert!(!is_recoverable_write_http_error(&other_code));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
+        let port_path = "/tmp/flux-purr-devd-test-port";
+        let deadline = Instant::now() + Duration::from_millis(50);
+
+        let first = SerialPortProcessLock::acquire(port_path, deadline).unwrap();
+
+        let second = match SerialPortProcessLock::acquire(
+            port_path,
+            Instant::now() + Duration::from_millis(50),
+        ) {
+            Ok(_) => panic!("second serial lock should time out while first session is alive"),
+            Err(error) => error,
+        };
+        assert_eq!(second.error.code, "serial_lock_timeout");
+
+        drop(first);
+
+        let reopened =
+            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(50));
+        assert!(reopened.is_ok());
     }
 
     fn test_artifact_with_file(root: &Path, relative_path: &str, bytes: &[u8]) -> FirmwareArtifact {
