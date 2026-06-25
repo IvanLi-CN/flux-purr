@@ -41,6 +41,8 @@ const TLV_ACTIVE_ADC_CALIBRATION: u8 = 0x20;
 const TLV_DRAFT_ADC_CALIBRATION: u8 = 0x21;
 const TLV_ACTIVE_ADC_CALIBRATION_REFERENCES: u8 = 0x22;
 const TLV_DRAFT_ADC_CALIBRATION_REFERENCES: u8 = 0x23;
+const TLV_ACTIVE_ADC_CALIBRATION_TARGETS: u8 = 0x24;
+const TLV_DRAFT_ADC_CALIBRATION_TARGETS: u8 = 0x25;
 const TLV_ACTIVE_HEATER_CURVE: u8 = 0x30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +71,7 @@ pub struct AdcCalibrationSample {
     pub observed_mv: u16,
     pub expected_mv: u16,
     pub reference_temp_deci_c: Option<i16>,
+    pub target_adc_mv: Option<u16>,
     pub reference_vin_mv: Option<u16>,
 }
 
@@ -317,12 +320,14 @@ fn default_points(channel: AdcCalibrationChannel) -> [AdcCalibrationSample; 2] {
                 observed_mv: ADC_CALIBRATION_RTD_DEFAULT_LOW_MV,
                 expected_mv: ADC_CALIBRATION_RTD_DEFAULT_LOW_MV,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
             AdcCalibrationSample {
                 observed_mv: ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV,
                 expected_mv: ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
         ],
@@ -331,12 +336,14 @@ fn default_points(channel: AdcCalibrationChannel) -> [AdcCalibrationSample; 2] {
                 observed_mv: ADC_CALIBRATION_VIN_DEFAULT_LOW_MV,
                 expected_mv: ADC_CALIBRATION_VIN_DEFAULT_LOW_MV,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
             AdcCalibrationSample {
                 observed_mv: ADC_CALIBRATION_VIN_DEFAULT_HIGH_MV,
                 expected_mv: ADC_CALIBRATION_VIN_DEFAULT_HIGH_MV,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
         ],
@@ -652,6 +659,17 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
+    let mut calibration_target_payload = [0u8; ADC_CALIBRATION_MAX_SAMPLES * 2];
+    encode_adc_calibration_targets(
+        &config.active_adc_calibration,
+        &mut calibration_target_payload,
+    );
+    push_tlv(
+        TLV_ACTIVE_ADC_CALIBRATION_TARGETS,
+        &calibration_target_payload,
+        out,
+        &mut cursor,
+    )?;
     encode_adc_calibration(&config.draft_adc_calibration, &mut calibration_payload);
     push_tlv(
         TLV_DRAFT_ADC_CALIBRATION,
@@ -666,6 +684,16 @@ fn encode_config_payload(
     push_tlv(
         TLV_DRAFT_ADC_CALIBRATION_REFERENCES,
         &calibration_reference_payload,
+        out,
+        &mut cursor,
+    )?;
+    encode_adc_calibration_targets(
+        &config.draft_adc_calibration,
+        &mut calibration_target_payload,
+    );
+    push_tlv(
+        TLV_DRAFT_ADC_CALIBRATION_TARGETS,
+        &calibration_target_payload,
         out,
         &mut cursor,
     )?;
@@ -753,6 +781,12 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             {
                 decode_adc_calibration_references(value, &mut config.draft_adc_calibration);
             }
+            TLV_ACTIVE_ADC_CALIBRATION_TARGETS if len == ADC_CALIBRATION_MAX_SAMPLES * 2 => {
+                decode_adc_calibration_targets(value, &mut config.active_adc_calibration);
+            }
+            TLV_DRAFT_ADC_CALIBRATION_TARGETS if len == ADC_CALIBRATION_MAX_SAMPLES * 2 => {
+                decode_adc_calibration_targets(value, &mut config.draft_adc_calibration);
+            }
             TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
                 config.active_heater_curve = decode_heater_curve(value);
             }
@@ -798,6 +832,17 @@ fn encode_adc_calibration_references(config: &AdcCalibrationConfig, out: &mut [u
     }
 }
 
+fn encode_adc_calibration_targets(config: &AdcCalibrationConfig, out: &mut [u8]) {
+    let mut cursor = 0;
+    for sample in config.rtd.samples {
+        let target = sample
+            .and_then(|sample| sample.target_adc_mv)
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        out[cursor..cursor + 2].copy_from_slice(&target.to_le_bytes());
+        cursor += 2;
+    }
+}
+
 fn decode_adc_calibration(bytes: &[u8]) -> AdcCalibrationConfig {
     let mut config = AdcCalibrationConfig::default();
     let mut cursor = 0;
@@ -814,6 +859,7 @@ fn decode_adc_calibration(bytes: &[u8]) -> AdcCalibrationConfig {
                     observed_mv: observed,
                     expected_mv: expected,
                     reference_temp_deci_c: None,
+                    target_adc_mv: None,
                     reference_vin_mv: None,
                 })
             };
@@ -830,6 +876,7 @@ fn decode_adc_calibration_references(bytes: &[u8], config: &mut AdcCalibrationCo
         if let Some(sample) = slot.as_mut() {
             sample.reference_temp_deci_c =
                 (reference != CALIBRATION_REFERENCE_NONE_WIRE_VALUE).then_some(reference);
+            sample.target_adc_mv = None;
             sample.reference_vin_mv = None;
         }
         cursor += 2;
@@ -840,6 +887,18 @@ fn decode_adc_calibration_references(bytes: &[u8], config: &mut AdcCalibrationCo
             sample.reference_vin_mv =
                 (reference != CALIBRATION_REFERENCE_NONE_WIRE_VALUE).then_some(reference as u16);
             sample.reference_temp_deci_c = None;
+            sample.target_adc_mv = None;
+        }
+        cursor += 2;
+    }
+}
+
+fn decode_adc_calibration_targets(bytes: &[u8], config: &mut AdcCalibrationConfig) {
+    let mut cursor = 0;
+    for slot in config.rtd.samples.iter_mut() {
+        let target = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        if let Some(sample) = slot.as_mut() {
+            sample.target_adc_mv = (target != CALIBRATION_NONE_WIRE_VALUE).then_some(target);
         }
         cursor += 2;
     }
@@ -950,6 +1009,7 @@ mod tests {
                 observed_mv: 1_000,
                 expected_mv: 1_030,
                 reference_temp_deci_c: Some(250),
+                target_adc_mv: Some(970),
                 reference_vin_mv: None,
             })
             .unwrap();
@@ -960,6 +1020,7 @@ mod tests {
                 observed_mv: 1_800,
                 expected_mv: 1_760,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: Some(20_000),
             })
             .unwrap();
@@ -994,6 +1055,11 @@ mod tests {
             Some(250)
         );
         assert_eq!(
+            decoded.config.draft_adc_calibration.rtd.samples[0]
+                .and_then(|sample| sample.target_adc_mv),
+            Some(970)
+        );
+        assert_eq!(
             decoded.config.active_adc_calibration.vin.samples[0]
                 .and_then(|sample| sample.reference_vin_mv),
             Some(20_000)
@@ -1021,6 +1087,8 @@ mod tests {
             let tlv_len = 2 + value_len;
             if tag != TLV_ACTIVE_ADC_CALIBRATION_REFERENCES
                 && tag != TLV_DRAFT_ADC_CALIBRATION_REFERENCES
+                && tag != TLV_ACTIVE_ADC_CALIBRATION_TARGETS
+                && tag != TLV_DRAFT_ADC_CALIBRATION_TARGETS
             {
                 filtered_payload[filtered_len..filtered_len + tlv_len]
                     .copy_from_slice(&payload[cursor..cursor + tlv_len]);
@@ -1044,10 +1112,12 @@ mod tests {
         assert_eq!(draft_rtd.observed_mv, 1_000);
         assert_eq!(draft_rtd.expected_mv, 1_030);
         assert_eq!(draft_rtd.reference_temp_deci_c, None);
+        assert_eq!(draft_rtd.target_adc_mv, None);
         assert_eq!(draft_rtd.reference_vin_mv, None);
         assert_eq!(active_vin.observed_mv, 1_800);
         assert_eq!(active_vin.expected_mv, 1_760);
         assert_eq!(active_vin.reference_temp_deci_c, None);
+        assert_eq!(active_vin.target_adc_mv, None);
         assert_eq!(active_vin.reference_vin_mv, None);
     }
 
@@ -1074,6 +1144,7 @@ mod tests {
                 observed_mv: 1_000,
                 expected_mv: 1_100,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: Some(12_000),
             })
             .unwrap();
@@ -1092,6 +1163,7 @@ mod tests {
                 observed_mv: 1_000,
                 expected_mv: 1_100,
                 reference_temp_deci_c: Some(250),
+                target_adc_mv: Some(900),
                 reference_vin_mv: None,
             })
             .unwrap();
@@ -1101,6 +1173,7 @@ mod tests {
                 observed_mv: 2_000,
                 expected_mv: 2_200,
                 reference_temp_deci_c: Some(500),
+                target_adc_mv: Some(1_700),
                 reference_vin_mv: None,
             })
             .unwrap();
@@ -1120,6 +1193,7 @@ mod tests {
                     observed_mv: index as u16,
                     expected_mv: index as u16,
                     reference_temp_deci_c: Some(index as i16),
+                    target_adc_mv: Some(index as u16),
                     reference_vin_mv: None,
                 }),
                 Some(index)
@@ -1130,6 +1204,7 @@ mod tests {
                 observed_mv: 9,
                 expected_mv: 9,
                 reference_temp_deci_c: Some(9),
+                target_adc_mv: Some(9),
                 reference_vin_mv: None,
             }),
             None

@@ -4254,44 +4254,96 @@
 
   .industrial-calibration-leave-guard {
     position: fixed;
-    z-index: 80;
+    z-index: 120;
+    isolation: isolate;
     display: grid;
     justify-items: start;
-    gap: 0.36rem;
-    width: min(18rem, calc(100vw - 2rem));
-    border: 1px solid rgba(82, 93, 113, 0.14);
-    border-radius: 18px;
+    gap: 0.48rem;
+    width: min(19rem, calc(100vw - 1.5rem));
+    border: 1px solid rgba(191, 93, 56, 0.24);
+    border-radius: 20px;
     background:
-      linear-gradient(150deg, rgba(250, 251, 253, 0.96), rgba(235, 239, 245, 0.92)),
-      rgba(241, 244, 248, 0.94);
+      linear-gradient(180deg, rgba(255, 250, 245, 0.98), rgba(245, 238, 229, 0.96)),
+      rgba(249, 244, 237, 0.97);
     box-shadow:
-      inset 1px 1px 0 rgba(255, 255, 255, 0.72),
-      8px 8px 18px rgba(163, 177, 198, 0.18),
-      -6px -6px 14px rgba(255, 255, 255, 0.64);
-    padding: 0.7rem 0.78rem;
+      0 28px 44px rgba(103, 79, 53, 0.2),
+      0 12px 20px rgba(128, 97, 61, 0.14),
+      inset 0 1px 0 rgba(255, 255, 255, 0.84);
+    backdrop-filter: blur(18px) saturate(1.04);
+    -webkit-backdrop-filter: blur(18px) saturate(1.04);
+    padding: 0.82rem 0.88rem 0.9rem;
     pointer-events: auto;
+    animation: industrial-calibration-leave-guard-enter 160ms ease-out;
+  }
+
+  .industrial-calibration-leave-guard::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: -0.48rem;
+    width: 0.96rem;
+    height: 0.96rem;
+    border: 1px solid rgba(191, 93, 56, 0.24);
+    border-radius: 0.18rem;
+    background: linear-gradient(180deg, rgba(255, 250, 245, 0.98), rgba(245, 238, 229, 0.96));
+    box-shadow: 10px -10px 16px rgba(128, 97, 61, 0.12);
+    transform: translateY(-50%) rotate(45deg);
+    pointer-events: none;
+  }
+
+  .industrial-calibration-leave-guard::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.36);
+    pointer-events: none;
+  }
+
+  .industrial-calibration-leave-guard__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.55rem;
+    width: 100%;
+  }
+
+  .industrial-calibration-leave-guard__badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.34rem;
+    min-height: 1.55rem;
+    padding: 0.1rem 0.56rem 0.08rem 0.46rem;
+    border: 1px solid rgba(198, 80, 40, 0.18);
+    border-radius: 999px;
+    background: rgba(201, 79, 37, 0.14);
+    color: rgba(149, 54, 24, 0.96);
+    font-size: 0.64rem;
+    font-weight: 820;
+    letter-spacing: 0.04em;
   }
 
   .industrial-calibration-leave-guard__eyebrow {
-    color: rgba(78, 91, 110, 0.78);
-    font-size: 0.58rem;
-    font-weight: 760;
-    letter-spacing: 0.16em;
+    color: rgba(110, 86, 55, 0.82);
+    font-size: 0.56rem;
+    font-weight: 780;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
+    white-space: nowrap;
   }
 
   .industrial-calibration-leave-guard p {
     margin: 0;
     color: var(--industrial-text);
-    font-size: 0.72rem;
-    font-weight: 740;
-    line-height: 1.34;
+    font-size: 0.74rem;
+    font-weight: 770;
+    line-height: 1.38;
   }
 
   .industrial-calibration-leave-guard__actions {
     display: flex;
     flex-wrap: wrap;
-    justify-content: flex-end;
+    justify-content: flex-start;
     gap: 0.36rem;
     width: 100%;
   }
@@ -4310,8 +4362,32 @@
     transform-origin: top right;
   }
 
+  .industrial-calibration-leave-guard[data-side="bottom"]::before {
+    top: -0.48rem;
+    right: 1.35rem;
+    transform: rotate(45deg);
+  }
+
   .industrial-calibration-leave-guard[data-side="top"] {
     transform-origin: bottom right;
+  }
+
+  .industrial-calibration-leave-guard[data-side="top"]::before {
+    top: auto;
+    bottom: -0.48rem;
+    right: 1.35rem;
+    transform: rotate(45deg);
+  }
+
+  @keyframes industrial-calibration-leave-guard-enter {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 0.18rem, 0) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+    }
   }
 
   @media (max-width: 860px) {
@@ -4726,23 +4802,48 @@
   }
 
   .industrial-button--danger-quiet {
-    border: 1px solid rgba(143, 60, 22, 0.2);
-    background: rgba(255, 238, 215, 0.34);
-    color: #8f3c16;
+    border: 1px solid rgba(188, 111, 63, 0.3);
+    background:
+      linear-gradient(180deg, rgba(255, 247, 236, 0.92), rgba(245, 229, 209, 0.9)),
+      rgba(252, 241, 227, 0.86);
+    color: #9a4317;
     box-shadow:
-      3px 3px 6px rgba(186, 190, 204, 0.38),
-      -3px -3px 6px rgba(255, 255, 255, 0.6);
+      5px 5px 10px rgba(193, 182, 170, 0.46),
+      -5px -5px 10px rgba(255, 255, 255, 0.72),
+      inset 1px 1px 0 rgba(255, 255, 255, 0.54);
+  }
+
+  .industrial-button--danger-quiet:hover:not(:disabled) {
+    transform: translateY(-2px);
+    border-color: rgba(186, 95, 42, 0.4);
+    background:
+      linear-gradient(180deg, rgba(255, 244, 229, 0.98), rgba(246, 223, 195, 0.94)),
+      rgba(251, 235, 214, 0.92);
+    color: #8a3611;
+    box-shadow:
+      9px 9px 18px rgba(193, 182, 170, 0.5),
+      -9px -9px 18px rgba(255, 255, 255, 0.82),
+      inset 1px 1px 0 rgba(255, 255, 255, 0.62);
+  }
+
+  .industrial-button--danger-quiet:active:not(:disabled) {
+    transform: translateY(2px);
+    box-shadow:
+      inset 5px 5px 10px rgba(193, 182, 170, 0.54),
+      inset -5px -5px 10px rgba(255, 255, 255, 0.7);
   }
 
   .industrial-button--danger-quiet:disabled {
     border-color: rgba(80, 67, 58, 0.1);
-    background: rgba(224, 229, 236, 0.38);
-    color: rgba(74, 85, 104, 0.46);
+    background:
+      linear-gradient(180deg, rgba(232, 236, 242, 0.56), rgba(220, 225, 233, 0.5)),
+      rgba(224, 229, 236, 0.42);
+    color: rgba(96, 83, 74, 0.44);
     cursor: not-allowed;
     opacity: 1;
     box-shadow:
-      inset 1px 1px 3px rgba(186, 190, 204, 0.4),
-      inset -1px -1px 3px rgba(255, 255, 255, 0.64);
+      inset 2px 2px 4px rgba(186, 190, 204, 0.42),
+      inset -2px -2px 4px rgba(255, 255, 255, 0.64);
   }
 
   .industrial-heater-curve-note {
@@ -5026,18 +5127,40 @@
 
   .industrial-calibration-sample-target {
     display: grid;
-    gap: 0.08rem;
+    gap: 0.24rem;
     min-width: 0;
+  }
+
+  .industrial-calibration-sample-target__row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: baseline;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-sample-target__label {
+    color: rgba(78, 91, 110, 0.72);
+    font-size: 0.62rem;
+    font-weight: 760;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+
+  .industrial-calibration-sample-target__row strong,
+  .industrial-calibration-sample-target__row small {
+    justify-self: end;
+    text-align: right;
   }
 
   .industrial-calibration-sample-target small {
     overflow: hidden;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.64rem;
-    font-weight: 760;
-    line-height: 1.15;
-    text-overflow: ellipsis;
+    font-size: 0.74rem;
+    font-weight: 780;
+    line-height: 1.2;
     white-space: nowrap;
   }
 

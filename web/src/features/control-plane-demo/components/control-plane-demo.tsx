@@ -1973,13 +1973,17 @@ export function ControlPlaneDemo({
     setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
   }
 
-  const handleCalibrationCapture = async (channel: CalibrationChannel) => {
+  const handleCalibrationCapture = async (
+    channel: CalibrationChannel,
+    options?: { targetAdcMv?: number }
+  ) => {
     const request =
       channel === 'rtd_adc'
         ? {
             op: 'capture' as const,
             channel,
             referenceTempC: visibleCalibrationRefs.rtdTempC,
+            targetAdcMv: options?.targetAdcMv,
           }
         : {
             op: 'capture' as const,
@@ -2547,6 +2551,18 @@ function isRtdCalibrationSample(
   return 'referenceTempC' in sample
 }
 
+function formatRtdCalibrationReference(sample: RtdCalibrationSample) {
+  if (sample.referenceTempC != null) {
+    return `${sample.referenceTempC.toFixed(1)}℃`
+  }
+  return `${rtdTemperatureForAdcMv(sample.expectedMv).toFixed(1)}℃`
+}
+
+function formatRtdCalibrationTargetAdc(sample: RtdCalibrationSample) {
+  const targetAdcMv = sample.targetAdcMv ?? sample.expectedMv
+  return `${targetAdcMv}mV`
+}
+
 function cloneCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
   return {
     rtdAdc: calibrationPackage.rtdAdc.map((sample) => (sample ? { ...sample } : null)),
@@ -2693,6 +2709,7 @@ function applyLocalCalibrationRequest(
             observedMv,
             expectedMv,
             referenceTempC: request.referenceTempC,
+            targetAdcMv: request.targetAdcMv,
           }
         : {
             observedMv,
@@ -3173,7 +3190,10 @@ function ViewPanel({
   onStartDryRun: () => void
   onStartFlash: () => void
   onCalibrationReferenceChange: (channel: CalibrationChannel, value: number) => void
-  onCalibrationCapture: (channel: CalibrationChannel) => void | Promise<void>
+  onCalibrationCapture: (
+    channel: CalibrationChannel,
+    options?: { targetAdcMv?: number }
+  ) => void | Promise<void>
   onCalibrationDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onCalibrationClear: (channel: CalibrationChannel) => void | Promise<void>
   onCalibrationManualFit: (
@@ -4036,7 +4056,10 @@ function CalibrationView({
   calibrationWorkspaceTab: CalibrationWorkspaceTab
   onTargetTempChange: (nextTargetTemp: number) => void
   onReferenceChange: (channel: CalibrationChannel, value: number) => void
-  onCapture: (channel: CalibrationChannel) => void | Promise<void>
+  onCapture: (
+    channel: CalibrationChannel,
+    options?: { targetAdcMv?: number }
+  ) => void | Promise<void>
   onDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onClear: (channel: CalibrationChannel) => void | Promise<void>
   onManualFit: (channel: CalibrationChannel, gain: number, offsetMv: number) => void | Promise<void>
@@ -4151,6 +4174,9 @@ function CalibrationView({
   }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
 
   const parseIntegerInput = (rawValue: string) => {
+    if (rawValue.trim() === '') {
+      return null
+    }
     const next = Number(rawValue)
     return Number.isFinite(next) ? Math.round(next) : null
   }
@@ -4687,7 +4713,15 @@ function CalibrationView({
                 samples={calibration.draft.rtdAdc}
                 onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
                 disabled={controlsBlocked}
-                onCapture={() => onCapture('rtd_adc')}
+                onCapture={() =>
+                  onCapture('rtd_adc', {
+                    targetAdcMv:
+                      rtdTargetAdcMv ??
+                      runtimeCalibration.targetAdcMv ??
+                      device.rtdRawAdcMv ??
+                      undefined,
+                  })
+                }
                 onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
                 onClear={() => onClear('rtd_adc')}
                 onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
@@ -5072,7 +5106,13 @@ function CalibrationLeaveGuardBubble({
             aria-live="polite"
             style={bubbleStyle}
           >
-            <div className="industrial-calibration-leave-guard__eyebrow">切换前提醒</div>
+            <div className="industrial-calibration-leave-guard__header">
+              <div className="industrial-calibration-leave-guard__badge">
+                <AlertTriangle size={12} strokeWidth={2.3} aria-hidden="true" />
+                <span>校准未关闭</span>
+              </div>
+              <div className="industrial-calibration-leave-guard__eyebrow">切换前提醒</div>
+            </div>
             <p>校准控制仍开着，先关闭后再切到“{nextLabel}”。</p>
             <div className="industrial-calibration-leave-guard__actions">
               <button
@@ -5579,6 +5619,7 @@ function CalibrationChannelPanel({
           <span className="industrial-calibration-input">
             <input
               type="number"
+              aria-label={referenceLabel}
               disabled={disabled}
               value={Number.isFinite(referenceValue) ? referenceValue : 0}
               onChange={(event) => onReferenceChange(Number(event.currentTarget.value))}
@@ -5612,7 +5653,7 @@ function CalibrationChannelPanel({
               <tr>
                 <th scope="col">槽位</th>
                 <th scope="col">观测值</th>
-                <th scope="col">{channel === 'rtd_adc' ? '标定目标' : '目标值'}</th>
+                <th scope="col">{channel === 'rtd_adc' ? '标定值 / 目标 ADC' : '目标值'}</th>
                 <th scope="col">操作</th>
               </tr>
             </thead>
@@ -5624,14 +5665,20 @@ function CalibrationChannelPanel({
                     <strong>{sample.observedMv}mV</strong>
                   </td>
                   <td>
-                    {channel === 'rtd_adc' ? (
+                    {channel === 'rtd_adc' && isRtdCalibrationSample(sample) ? (
                       <div className="industrial-calibration-sample-target">
-                        <strong>{sample.expectedMv}mV</strong>
-                        <small>
-                          {isRtdCalibrationSample(sample) && sample.referenceTempC != null
-                            ? `${sample.referenceTempC.toFixed(1)}℃`
-                            : `${rtdTemperatureForAdcMv(sample.expectedMv).toFixed(1)}℃`}
-                        </small>
+                        <div className="industrial-calibration-sample-target__row">
+                          <span className="industrial-calibration-sample-target__label">
+                            标定温度
+                          </span>
+                          <strong>{formatRtdCalibrationReference(sample)}</strong>
+                        </div>
+                        <div className="industrial-calibration-sample-target__row">
+                          <span className="industrial-calibration-sample-target__label">
+                            目标 ADC
+                          </span>
+                          <small>{formatRtdCalibrationTargetAdc(sample)}</small>
+                        </div>
                       </div>
                     ) : (
                       `${sample.expectedMv}mV`

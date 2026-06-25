@@ -501,6 +501,7 @@ pub struct CalibrationSampleWire {
     pub observed_mv: u16,
     pub expected_mv: u16,
     pub reference_temp_c: Option<f32>,
+    pub target_adc_mv: Option<u16>,
     pub reference_vin_mv: Option<u16>,
 }
 
@@ -510,6 +511,7 @@ impl From<AdcCalibrationSample> for CalibrationSampleWire {
             observed_mv: value.observed_mv,
             expected_mv: value.expected_mv,
             reference_temp_c: value.reference_temp_deci_c.map(|value| value as f32 / 10.0),
+            target_adc_mv: value.target_adc_mv,
             reference_vin_mv: value.reference_vin_mv,
         }
     }
@@ -525,6 +527,7 @@ impl From<CalibrationSampleWire> for AdcCalibrationSample {
                     .round()
                     .clamp(i16::MIN as f32, i16::MAX as f32) as i16
             }),
+            target_adc_mv: value.target_adc_mv,
             reference_vin_mv: value.reference_vin_mv,
         }
     }
@@ -630,6 +633,7 @@ pub struct CalibrationConfigCommand {
     pub channel: Option<CalibrationChannelWire>,
     pub reference_temp_c: Option<f32>,
     pub reference_vin_mv: Option<u32>,
+    pub target_adc_mv: Option<u16>,
     pub observed_mv: Option<u16>,
     pub expected_mv: Option<u16>,
     pub sample_index: Option<usize>,
@@ -820,6 +824,7 @@ struct UsbFrameWire {
     channel: Option<CalibrationChannelWire>,
     reference_temp_c: Option<f32>,
     reference_vin_mv: Option<u32>,
+    target_adc_mv: Option<u16>,
     observed_mv: Option<u16>,
     expected_mv: Option<u16>,
     sample_index: Option<usize>,
@@ -881,6 +886,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     channel: value.channel,
                     reference_temp_c: value.reference_temp_c,
                     reference_vin_mv: value.reference_vin_mv,
+                    target_adc_mv: value.target_adc_mv,
                     observed_mv: value.observed_mv,
                     expected_mv: value.expected_mv,
                     sample_index: value.sample_index,
@@ -955,6 +961,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
+            target_adc_mv: None,
             observed_mv: None,
             expected_mv: None,
             sample_index: None,
@@ -1016,6 +1023,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.channel = config.channel;
                 wire.reference_temp_c = config.reference_temp_c;
                 wire.reference_vin_mv = config.reference_vin_mv;
+                wire.target_adc_mv = config.target_adc_mv;
                 wire.observed_mv = config.observed_mv;
                 wire.expected_mv = config.expected_mv;
                 wire.sample_index = config.sample_index;
@@ -1406,6 +1414,7 @@ mod tests {
                 observed_mv: 400 + index as u16 * 170,
                 expected_mv: 420 + index as u16 * 170,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: Some(420 + index as u16 * 170),
             };
             memory

@@ -3164,6 +3164,7 @@ fn update_calibration_job_state(
                     observed_mv: latest_vin_raw_adc_mv,
                     expected_mv: vin_adc_mv_for_input_mv(u32::from(job.next_request_mv)),
                     reference_temp_deci_c: None,
+                    target_adc_mv: None,
                     reference_vin_mv: Some(job.next_request_mv),
                 });
                 job.sample_count = job.sample_count.saturating_add(1);
@@ -3331,6 +3332,18 @@ fn usb_calibration_config_response(
                 .insert(AdcCalibrationSample {
                     observed_mv,
                     expected_mv,
+                    reference_temp_deci_c: config.reference_temp_c.map(|temp_c| {
+                        (temp_c * 10.0)
+                            .round()
+                            .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                    }),
+                    target_adc_mv: config
+                        .target_adc_mv
+                        .filter(|_| channel == CalibrationChannelWire::RtdAdc),
+                    reference_vin_mv: config
+                        .reference_vin_mv
+                        .and_then(|millivolts| u16::try_from(millivolts).ok())
+                        .filter(|_| channel == CalibrationChannelWire::VinAdc),
                 })
                 .ok_or(ApiError::new(
                     "calibration_samples_full",
@@ -6000,6 +6013,7 @@ mod tests {
                 observed_mv: 280 + (index as u16 * 40),
                 expected_mv: request_mv,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: Some(request_mv),
             });
         }
@@ -6036,6 +6050,7 @@ mod tests {
                 observed_mv: 999,
                 expected_mv: 9_999,
                 reference_temp_deci_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: Some(9_999),
             });
         let mut preview_heater_curve = None;

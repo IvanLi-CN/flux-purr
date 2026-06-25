@@ -704,6 +704,7 @@ pub struct CalibrationSample {
     pub observed_mv: u16,
     pub expected_mv: u16,
     pub reference_temp_c: Option<f32>,
+    pub target_adc_mv: Option<u16>,
     pub reference_vin_mv: Option<u16>,
 }
 
@@ -890,12 +891,14 @@ fn default_calibration_samples(channel: CalibrationChannel) -> [CalibrationSampl
                 observed_mv: 0,
                 expected_mv: 0,
                 reference_temp_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
             CalibrationSample {
                 observed_mv: RTD_DEFAULT_HIGH_MV,
                 expected_mv: RTD_DEFAULT_HIGH_MV,
                 reference_temp_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
         ],
@@ -904,12 +907,14 @@ fn default_calibration_samples(channel: CalibrationChannel) -> [CalibrationSampl
                 observed_mv: 0,
                 expected_mv: 0,
                 reference_temp_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
             CalibrationSample {
                 observed_mv: VIN_DEFAULT_HIGH_MV,
                 expected_mv: VIN_DEFAULT_HIGH_MV,
                 reference_temp_c: None,
+                target_adc_mv: None,
                 reference_vin_mv: None,
             },
         ],
@@ -1025,6 +1030,7 @@ pub struct CalibrationConfigRequest {
     pub channel: Option<CalibrationChannel>,
     pub reference_temp_c: Option<f32>,
     pub reference_vin_mv: Option<u32>,
+    pub target_adc_mv: Option<u16>,
     pub observed_mv: Option<u16>,
     pub expected_mv: Option<u16>,
     pub sample_index: Option<usize>,
@@ -1156,6 +1162,8 @@ struct UsbCalibrationConfigWire<'a> {
     reference_temp_c: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reference_vin_mv: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_adc_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2521,6 +2529,9 @@ fn apply_mock_calibration_config(
                 reference_temp_c: payload
                     .reference_temp_c
                     .filter(|_| channel == CalibrationChannel::RtdAdc),
+                target_adc_mv: payload
+                    .target_adc_mv
+                    .filter(|_| channel == CalibrationChannel::RtdAdc),
                 reference_vin_mv: payload
                     .reference_vin_mv
                     .and_then(|millivolts| u16::try_from(millivolts).ok())
@@ -2924,6 +2935,7 @@ async fn serial_calibration_config(
         channel: payload.channel,
         reference_temp_c: payload.reference_temp_c,
         reference_vin_mv: payload.reference_vin_mv,
+        target_adc_mv: payload.target_adc_mv,
         observed_mv: payload.observed_mv,
         expected_mv: payload.expected_mv,
         sample_index: payload.sample_index,

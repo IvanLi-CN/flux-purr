@@ -1244,6 +1244,78 @@ describe('control-plane transport client', () => {
     }
   })
 
+  it('sends RTD calibration capture payload with operator temperature and target ADC', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) : null
+
+      expect(url).toBe('http://127.0.0.1:30080/api/v1/devices/bench%20target/calibration')
+      expect(body).toMatchObject({
+        leaseId: 'lease-1',
+        op: 'capture',
+        channel: 'rtd_adc',
+        referenceTempC: 21.6,
+        targetAdcMv: 970,
+      })
+
+      return {
+        ok: true,
+        json: async () => ({
+          active: {
+            rtdAdc: [null, null, null, null, null, null, null, null],
+            vinAdc: [null, null, null, null, null, null, null, null],
+          },
+          draft: {
+            rtdAdc: [
+              {
+                observedMv: 997,
+                expectedMv: 970,
+                referenceTempC: 21.6,
+                targetAdcMv: 970,
+              },
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+            ],
+            vinAdc: [null, null, null, null, null, null, null, null],
+          },
+          activeFit: {
+            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          },
+          draftFit: {
+            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 1, defaultSampleCount: 2 },
+            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          },
+        }),
+      }
+    }) as unknown as typeof fetch
+    const client = createControlPlaneHttpClient(fetcher)
+
+    const calibration = await client.configureCalibration(
+      'http://127.0.0.1:30080',
+      'bench target',
+      {
+        leaseId: 'lease-1',
+        op: 'capture',
+        channel: 'rtd_adc',
+        referenceTempC: 21.6,
+        targetAdcMv: 970,
+      }
+    )
+
+    expect(calibration.draft.rtdAdc[0]).toMatchObject({
+      observedMv: 997,
+      expectedMv: 970,
+      referenceTempC: 21.6,
+      targetAdcMv: 970,
+    })
+  })
+
   it('sends daemon-local device mutations with the active lease', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

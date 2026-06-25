@@ -220,7 +220,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration leave guard bubble](./assets/calibration-leave-guard-bubble.trimmed.png)
 
-`assets/calibration-rtd-sample-reference.trimmed.png` shows the RTD sample table rendering both the ADC-domain target (`1216mV`) and the persisted owner-entered physical reference (`183.6℃`) in the same target cell after capture, proving the UI no longer relies on reverse-derived placeholder temperatures.
+`assets/calibration-rtd-sample-reference.trimmed.png` shows the RTD sample table rendering the persisted owner-entered calibration temperature and the hardware target ADC as two explicit values in the same cell after capture, proving the UI no longer relies on reverse-derived placeholder temperatures.
 
 ![Calibration RTD sample reference](./assets/calibration-rtd-sample-reference.trimmed.png)
 

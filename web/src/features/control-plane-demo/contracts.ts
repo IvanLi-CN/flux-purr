@@ -215,6 +215,7 @@ export interface BaseCalibrationSample {
 
 export interface RtdCalibrationSample extends BaseCalibrationSample {
   referenceTempC?: number
+  targetAdcMv?: number
 }
 
 export interface VinCalibrationSample extends BaseCalibrationSample {
@@ -251,6 +252,7 @@ export interface CalibrationConfigRequest {
   channel?: CalibrationChannel
   referenceTempC?: number
   referenceVinMv?: number
+  targetAdcMv?: number
   observedMv?: number
   expectedMv?: number
   sampleIndex?: number
