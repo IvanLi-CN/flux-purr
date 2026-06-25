@@ -11,6 +11,8 @@
 - `devd` exposes `GET|PUT /api/v1/devices/:id/calibration` and `POST /api/v1/devices/:id/calibration/apply` with mock and native serial paths.
 - `flux-purr calibration` 支持 get/capture/delete/clear/import/export/apply。
 - Web 控制台包含 Calibration tab，并在 Storybook 中覆盖 Calibration 场景。
+- RTD/VIN calibration samples now persist owner-entered physical references alongside ADC-domain points so refreshed/reloaded sample tables can render the original `referenceTempC` / `referenceVinMv` instead of reverse-derived placeholders.
+- 页面内离开已加 owner-facing guard：当任一标定模式仍处于 armed 状态时，切换顶层视图、切换设备或切换标定子 tab 会先在开关附近显示自定义提示泡泡，要求先关闭开关，再允许继续跳转；本轮不拦截浏览器刷新或关页。
 
 ## Validation
 
@@ -21,6 +23,9 @@
 - `bun run check:web`
 - `bun run check:web:build`
 - `bun run check:storybook`
+- `bun run --cwd web typecheck`
+- `bun run --cwd web test:unit -- src/features/control-plane-demo/calibration-leave-guard.test.ts src/features/control-plane-demo/control-plane-demo.test.ts`
+- `bun run --cwd web test:storybook -- src/stories/ControlPlaneDemo.stories.tsx`
 
 ## Remaining Work
 

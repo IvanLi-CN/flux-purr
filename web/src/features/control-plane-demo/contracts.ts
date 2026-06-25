@@ -12,6 +12,7 @@ export type NetworkState =
   | 'timeout'
 export type PdState = 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
 export type FanDisplayState = 'OFF' | 'AUTO' | 'RUN'
+export type HeaterLockReason = 'cooling-disabled-overtemp' | 'hard-overtemp'
 
 export interface Identity {
   deviceId: string
@@ -63,6 +64,7 @@ export interface ControlPlaneStatus {
   ppsCapabilityMaxMv?: number | null
   ppsCapabilityMaxMa?: number | null
   manualPpsError?: string | null
+  heaterLockReason?: HeaterLockReason | null
   calibration: CalibrationRuntimeState
   frontpanelKey?: 'center' | 'right' | 'down' | 'left' | 'up' | null
   network: NetworkSummary
@@ -206,14 +208,22 @@ export type DirectRuntimeConfigRequest = Omit<RuntimeConfigRequest, 'leaseId'>
 
 export type CalibrationChannel = 'rtd_adc' | 'vin_adc'
 
-export interface CalibrationSample {
+export interface BaseCalibrationSample {
   observedMv: number
   expectedMv: number
 }
 
+export interface RtdCalibrationSample extends BaseCalibrationSample {
+  referenceTempC?: number
+}
+
+export interface VinCalibrationSample extends BaseCalibrationSample {
+  referenceVinMv?: number
+}
+
 export interface CalibrationPackage {
-  rtdAdc: Array<CalibrationSample | null>
-  vinAdc: Array<CalibrationSample | null>
+  rtdAdc: Array<RtdCalibrationSample | null>
+  vinAdc: Array<VinCalibrationSample | null>
 }
 
 export interface CalibrationFit {

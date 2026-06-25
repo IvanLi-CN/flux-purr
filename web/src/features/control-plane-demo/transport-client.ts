@@ -344,6 +344,7 @@ export function createControlPlaneHttpClient(
 }
 
 export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget {
+  const transportIssue = devdTransportIssue(record)
   return {
     id: record.id,
     alias: record.displayName,
@@ -373,6 +374,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     ppsCapabilityMaxMv: record.status.ppsCapabilityMaxMv ?? null,
     ppsCapabilityMaxMa: record.status.ppsCapabilityMaxMa ?? null,
     manualPpsError: record.status.manualPpsError ?? null,
+    heaterLockReason: record.status.heaterLockReason ?? null,
     calibration: record.status.calibration,
     storedCalibration: record.calibration,
     heaterEnabled: record.status.heaterEnabled,
@@ -383,8 +385,92 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     capabilities: record.identity.capabilities,
     networkState: record.network.state,
     leaseState: record.transport === 'native_serial' ? 'none' : undefined,
+    transportIssue,
     heaterCurve: record.heaterCurve,
   }
+}
+
+function devdTransportIssue(record: DevdDeviceRecord) {
+  if (record.transport !== 'native_serial') {
+    return undefined
+  }
+
+  const lastError = normalizeDevdTransportIssue(record.network.lastError)
+  if (lastError) {
+    return lastError
+  }
+
+  const serialEvent = selectLatestDevdTransportIssueEvent(record.events ?? [])
+  if (serialEvent) {
+    return devdEventToTransportIssue(serialEvent) ?? devdEventToLogEntry(serialEvent).message
+  }
+
+  return undefined
+}
+
+export function selectLatestDevdTransportIssueEvent(events: DevdEvent[]) {
+  return [...events].reverse().find(isMeaningfulDevdTransportIssueEvent)
+}
+
+export function isMeaningfulDevdTransportIssueEvent(event: DevdEvent) {
+  if (event.kind !== 'serial') {
+    return false
+  }
+
+  if (event.message === 'authorized serial port missing') {
+    return true
+  }
+
+  if (event.message === 'native serial RPC failed') {
+    return true
+  }
+
+  if (event.payload?.code !== 'firmware_log') {
+    return false
+  }
+
+  const line = safeString(event.payload?.line)
+  if (!line) {
+    return false
+  }
+
+  return /rst:|panic|abort|brownout|Guru Meditation/i.test(line)
+}
+
+export function devdEventToTransportIssue(event: DevdEvent) {
+  if (event.kind !== 'serial') {
+    return null
+  }
+
+  const code = safeString(event.payload?.code)
+  if (code === 'authorized_port_missing') {
+    const portPath = safeString(event.payload?.portPath)
+    const candidates = Array.isArray(event.payload?.candidates)
+      ? event.payload?.candidates.filter((value): value is string => typeof value === 'string')
+      : []
+    if (!portPath) {
+      return '已授权串口当前缺失，页面不会自动切换到其它设备。'
+    }
+    return candidates.length > 0
+      ? `已授权串口 ${portPath} 当前缺失；检测到其它 Espressif 端口 ${candidates.join(', ')}，页面不会自动切换。`
+      : `已授权串口 ${portPath} 当前缺失，页面不会自动切换到其它设备。`
+  }
+
+  if (event.message === 'native serial RPC failed') {
+    return normalizeDevdTransportIssue(safeString(event.payload?.message), code)
+  }
+
+  const line = safeString(event.payload?.line)
+  if (!line) {
+    return null
+  }
+  if (/rst:/i.test(line)) {
+    return `串口日志检测到设备复位：${line}`
+  }
+  if (/panic|abort|brownout|Guru Meditation/i.test(line)) {
+    return `串口日志检测到固件异常：${line}`
+  }
+  return null
 }
 
 export function devdEventToLogEntry(event: DevdEvent): EventLogEntry {
@@ -399,6 +485,15 @@ export function devdEventToLogEntry(event: DevdEvent): EventLogEntry {
 }
 
 function devdEventDetail(event: DevdEvent) {
+  if (event.kind === 'serial') {
+    return [
+      safeString(event.payload?.line),
+      safeString(event.payload?.stage),
+      safeString(event.payload?.code),
+    ]
+      .filter(Boolean)
+      .join(' / ')
+  }
   if (event.kind === 'wifi') {
     return [safeString(event.payload?.ssid), passwordPresence(event.payload?.passwordPresent)]
       .filter(Boolean)
@@ -445,23 +540,123 @@ function devdEventFrameDetail(event: DevdEvent) {
   if (event.kind !== 'transport') {
     return undefined
   }
-  const frame = event.payload?.frame
-  if (frame == null) {
-    return undefined
-  }
-  return stableStringify(frame)
+  return summarizeTransportFrame(event.payload)
 }
 
-function stableStringify(value: unknown) {
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
+function summarizeTransportFrame(payload: DevdEvent['payload']) {
+  if (!payload) {
+    return undefined
   }
+
+  const frame = payload.frame
+  const direction = safeString(payload.direction)?.toUpperCase()
+  const frameType = safeString(payload.frameType)
+  const requestId = safeString(payload.requestId)
+  const status = transportFrameStatus(frame)
+  const targetTemp = transportFrameTargetTemp(frame)
+  const mode = transportFrameMode(frame)
+  const errorCode = transportFrameErrorCode(frame)
+  const pieces = [direction, frameType, requestId, status, targetTemp, mode, errorCode].filter(
+    Boolean
+  )
+
+  return pieces.length > 0 ? pieces.join(' / ') : undefined
+}
+
+function transportFrameStatus(frame: unknown) {
+  const record = recordPayload(frame)
+  if (!record) {
+    return null
+  }
+
+  if (record.ok === true) {
+    return 'ok'
+  }
+  if (record.ok === false) {
+    return 'error'
+  }
+  return safeString(record.type)
+}
+
+function transportFrameTargetTemp(frame: unknown) {
+  const record = recordPayload(frame)
+  if (!record) {
+    return null
+  }
+
+  const directTarget = safeNumber(record.targetTempC)
+  if (directTarget !== null) {
+    return `target ${directTarget}C`
+  }
+
+  const result = recordPayload(record.result)
+  const status = result ? recordPayload(result.status) : null
+  const nestedTarget = status ? safeNumber(status.targetTempC) : null
+  return nestedTarget === null ? null : `target ${nestedTarget}C`
+}
+
+function transportFrameMode(frame: unknown) {
+  const record = recordPayload(frame)
+  if (!record) {
+    return null
+  }
+
+  const directMode = safeString(record.mode)
+  if (directMode) {
+    return `mode ${directMode}`
+  }
+
+  const result = recordPayload(record.result)
+  const status = result ? recordPayload(result.status) : null
+  const nestedMode = status ? safeString(status.mode) : null
+  return nestedMode ? `mode ${nestedMode}` : null
+}
+
+function transportFrameErrorCode(frame: unknown) {
+  const record = recordPayload(frame)
+  if (!record) {
+    return null
+  }
+
+  const error = recordPayload(record.error)
+  const code = error ? safeString(error.code) : null
+  return code ? `error ${code}` : null
 }
 
 function safeString(value: unknown) {
   return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function normalizeDevdTransportIssue(value: unknown, errorCode?: string | null): string | null {
+  const message = safeString(value)
+
+  if (
+    errorCode === 'usb_response_timeout' ||
+    message === 'Timed out waiting for a matching USB JSONL response.'
+  ) {
+    return '授权串口在 12 秒内未返回匹配的 USB JSONL 响应；设备可能正在启动、重启，或链路暂时不稳定。'
+  }
+
+  if (
+    errorCode === 'serial_lock_timeout' ||
+    message === 'Timed out waiting for exclusive USB serial access.'
+  ) {
+    return '授权串口当前被其他进程持续占用；devd 在 8 秒内未拿到独占访问。请关闭其它 devd、串口监视器或终端后重试。'
+  }
+
+  if (message?.includes('Resource busy')) {
+    return '授权串口当前被其他进程占用（Resource busy）；请关闭其它 devd、串口监视器或终端后重试。'
+  }
+
+  if (
+    errorCode === 'serial_open_failed' &&
+    message?.includes('No such file or directory') &&
+    !message.startsWith('Authorized serial port ')
+  ) {
+    return '已授权串口当前不可用；设备可能刚重枚举，页面不会自动切换到新的串口路径。'
+  }
+
+  return message
 }
 
 function safeNumber(value: unknown) {
@@ -562,6 +757,21 @@ export function manifestToArtifact(manifest: FirmwareArtifactManifest): Firmware
     protocol: manifest.protocol,
     features: manifest.features,
     files: manifest.files,
+  }
+}
+
+export function bestEffortReleaseDevdLease(
+  devdBaseUrl: string,
+  leaseId: string,
+  fetcher: typeof fetch = fetch
+) {
+  try {
+    void fetcher(`${devdBaseUrl}/api/v1/leases/${encodeURIComponent(leaseId)}`, {
+      method: 'DELETE',
+      keepalive: true,
+    }).catch(() => undefined)
+  } catch {
+    // Ignore best-effort release failures during page teardown.
   }
 }
 

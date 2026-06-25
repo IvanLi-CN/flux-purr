@@ -17,8 +17,9 @@ import {
   Wrench,
   Zap,
 } from 'lucide-react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import SimpleBar from 'simplebar-react'
 import {
   Select,
@@ -32,7 +33,17 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { syncCalibrationDraftText } from '../calibration-draft'
+import {
+  type CalibrationLeaveRequest,
+  type CalibrationWorkspaceTab,
+  type ConsoleView,
+  shouldBlockCalibrationDeviceChange,
+  shouldBlockCalibrationViewChange,
+  shouldBlockCalibrationWorkspaceTabChange,
+} from '../calibration-leave-guard'
 import type {
+  BaseCalibrationSample,
   CalibrationChannel,
   CalibrationConfigRequest,
   CalibrationControlRequest,
@@ -43,6 +54,8 @@ import type {
   HeaterCurveConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
+  RtdCalibrationSample,
+  VinCalibrationSample,
 } from '../contracts'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import {
@@ -51,6 +64,16 @@ import {
   useLiveWebSerialScenario,
 } from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
+import { rtdAdcMvForTemperature, rtdTemperatureForAdcMv } from '../rtd-calibration-display'
+import {
+  createPendingHeaterFeedback,
+  deviceControlBlockReason,
+  HEATER_CONFIRMATION_TIMEOUT_MS,
+  heaterLockReasonText,
+  type PendingHeaterConfirmation,
+  resolvePendingHeaterConfirmation,
+  runtimeHeaterState,
+} from '../runtime-status'
 import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
 import type {
   ControlPlaneScenario,
@@ -70,9 +93,6 @@ interface ControlPlaneDemoProps {
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
 }
-
-type ConsoleView = 'dashboard' | 'settings' | 'calibration' | 'update' | 'add-device'
-type CalibrationWorkspaceTab = 'heater_curve' | 'rtd_adc' | 'vin_adc'
 type CalibrationWorkbenchMode = 'vin_adc' | 'rtd_adc' | 'heater_curve'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
@@ -82,6 +102,12 @@ interface ActionFeedback {
   title: string
   detail: string
   tone: 'info' | 'success' | 'warning'
+}
+
+interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
+  continueAction: () => void | Promise<void>
+  nextView?: ConsoleView
+  nextWorkspaceTab?: CalibrationWorkspaceTab
 }
 
 const LOG_FEED_SIZE = 1000
@@ -105,11 +131,11 @@ const RTD_TARGET_MAX_MV = 2_800
 const RTD_TARGET_STEP_MV = 10
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const CALIBRATION_ACTION_LOCK_MS = 800
+const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
 const PRESET_ENABLED = PRESETS_C.map((preset) => preset != null)
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
-const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
 const ADD_DEVICE_VALUE = '__add_device__'
 
 const severityLabels: Record<DeviceSeverity, string> = {
@@ -249,6 +275,7 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     ppsCapabilityMaxMv: null,
     ppsCapabilityMaxMa: null,
     manualPpsError: null,
+    heaterLockReason: null,
     calibration: {
       mode: 'off',
       ppsEnabled: false,
@@ -369,6 +396,11 @@ export function ControlPlaneDemo({
   const targetTempCommitTimersRef = useRef<Record<string, number>>({})
   const targetTempCommitVersionRef = useRef<Record<string, number>>({})
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
+  const [pendingHeaterConfirmation, setPendingHeaterConfirmation] =
+    useState<PendingHeaterConfirmation | null>(null)
+  const [heaterConfirmationTick, setHeaterConfirmationTick] = useState(0)
+  const [calibrationLeaveGuard, setCalibrationLeaveGuard] =
+    useState<CalibrationLeaveGuardState | null>(null)
   const [feedback, setFeedback] = useState<ActionFeedback>({
     title: allowDemoControls ? '运行时已同步' : '暂无在线目标',
     detail: allowDemoControls
@@ -447,7 +479,8 @@ export function ControlPlaneDemo({
     )
     if (
       nextSelectedDevice?.transport === 'devd' &&
-      feedback.detail === '当前热控状态来自模拟设备契约。'
+      (feedback.detail === '当前热控状态来自模拟设备契约。' ||
+        feedback.detail === '连接浏览器 Web Serial 端口后即可加载真实硬件状态。')
     ) {
       setFeedback({
         title: '运行时已同步',
@@ -468,12 +501,129 @@ export function ControlPlaneDemo({
   }, [webSerial.error, webSerial.state])
 
   useEffect(() => {
+    const liveDevdDevice = activeScenario.devices.find((device) => device.transport === 'devd')
+    if (!liveDevdDevice || LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(liveDevdDevice.id)) {
+      return
+    }
+
+    const nextDeviceId = liveDevdDevice.id
+    const previousIds = LIVE_DEVD_TRANSIENT_DEVICE_IDS
+
+    const migrateRecord = <T,>(
+      setter: Dispatch<SetStateAction<Record<string, T>>>,
+      clone?: (value: T) => T
+    ) => {
+      setter((current) => {
+        if (current[nextDeviceId] !== undefined) {
+          return current
+        }
+
+        const sourceId = Array.from(previousIds).find((deviceId) => current[deviceId] !== undefined)
+        if (!sourceId) {
+          return current
+        }
+
+        const value = current[sourceId]
+        if (value === undefined) {
+          return current
+        }
+
+        const next = { ...current, [nextDeviceId]: clone ? clone(value) : value }
+        delete next[sourceId]
+        return next
+      })
+    }
+
+    migrateRecord(setTargetTempByDevice)
+    migrateRecord(setSelectedPresetByDevice)
+    migrateRecord(setPresetTempsByDevice, (value) => [...value])
+    migrateRecord(setPresetEnabledByDevice, (value) => [...value])
+    migrateRecord(setFanPolicyByDevice)
+    migrateRecord(setHeaterHeldByDevice)
+    migrateRecord(setManualPpsByDevice, (value) => ({ ...value }))
+    migrateRecord(setCalibrationRuntimeByDevice, (value) => ({
+      ...value,
+      job: { ...value.job },
+    }))
+    migrateRecord(setCalibrationByDevice, (value) => ({
+      ...value,
+      active: cloneCalibrationPackage(value.active),
+      draft: cloneCalibrationPackage(value.draft),
+      activeFit: {
+        rtdAdc: { ...value.activeFit.rtdAdc },
+        vinAdc: { ...value.activeFit.vinAdc },
+      },
+      draftFit: {
+        rtdAdc: { ...value.draftFit.rtdAdc },
+        vinAdc: { ...value.draftFit.vinAdc },
+      },
+    }))
+    migrateRecord(setHeaterCurveByDevice, (value) => ({
+      active: cloneHeaterCurvePackage(value.active),
+      preview: value.preview ? cloneHeaterCurvePackage(value.preview) : null,
+    }))
+    migrateRecord(setCalibrationWorkspaceTabByDevice)
+    migrateRecord(setCalibrationRefsByDevice, (value) => ({ ...value }))
+    migrateRecord(setArtifactByDevice)
+
+    if (selectedDeviceId && LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(selectedDeviceId)) {
+      setSelectedDeviceId(nextDeviceId)
+    }
+    if (
+      pendingHeaterConfirmation &&
+      LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(pendingHeaterConfirmation.deviceId)
+    ) {
+      setPendingHeaterConfirmation((current) =>
+        current && LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(current.deviceId)
+          ? { ...current, deviceId: nextDeviceId }
+          : current
+      )
+    }
+  }, [activeScenario.devices, pendingHeaterConfirmation, selectedDeviceId])
+
+  useEffect(() => {
     setTargetTempByDevice((current) => {
       let next = current
       for (const device of activeScenario.devices) {
         if (
           !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
           current[device.id] !== device.targetTempC
+        ) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
+  useEffect(() => {
+    setCalibrationRuntimeByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        const localRuntime = current[device.id]
+        if (!localRuntime) {
+          continue
+        }
+        if (
+          localRuntime.mode !== device.calibration.mode ||
+          localRuntime.ppsEnabled !== device.calibration.ppsEnabled ||
+          localRuntime.ppsMv !== device.calibration.ppsMv ||
+          localRuntime.ppsMa !== device.calibration.ppsMa ||
+          localRuntime.heaterEnabled !== device.calibration.heaterEnabled ||
+          localRuntime.targetAdcMv !== device.calibration.targetAdcMv ||
+          localRuntime.stable !== device.calibration.stable ||
+          localRuntime.stabilityErrorMv !== device.calibration.stabilityErrorMv ||
+          localRuntime.error !== device.calibration.error ||
+          localRuntime.job.kind !== device.calibration.job.kind ||
+          localRuntime.job.status !== device.calibration.job.status ||
+          localRuntime.job.progressPercent !== device.calibration.job.progressPercent ||
+          localRuntime.job.samplesCollected !== device.calibration.job.samplesCollected ||
+          localRuntime.job.nextRequestMv !== device.calibration.job.nextRequestMv ||
+          localRuntime.job.message !== device.calibration.job.message
         ) {
           continue
         }
@@ -620,6 +770,111 @@ export function ControlPlaneDemo({
     rtdTempC: Number(visibleDevice.currentTempC.toFixed(1)),
     vinMv: visibleDevice.voltageMv,
   }
+
+  useEffect(() => {
+    if (!calibrationLeaveGuard) {
+      return
+    }
+
+    if (activeView !== 'calibration' || visibleRuntimeCalibration.mode === 'off') {
+      setCalibrationLeaveGuard(null)
+    }
+  }, [activeView, calibrationLeaveGuard, visibleRuntimeCalibration.mode])
+
+  useEffect(() => {
+    if (activeView !== 'calibration') {
+      return
+    }
+
+    const activeMode = asWorkbenchMode(visibleRuntimeCalibration.mode)
+    if (!activeMode || activeMode === visibleCalibrationWorkspaceTab) {
+      return
+    }
+
+    setCalibrationWorkspaceTabByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: activeMode,
+    }))
+  }, [activeView, visibleCalibrationWorkspaceTab, visibleDevice.id, visibleRuntimeCalibration.mode])
+
+  useEffect(() => {
+    if (!visibleDeviceIsLive) {
+      return
+    }
+
+    const blockedReason = deviceControlBlockReason(visibleDevice)
+    if (!blockedReason) {
+      return
+    }
+
+    const conflictTitle = visibleDevice.leaseState === 'conflict' ? '设备租约冲突' : '硬件连接受阻'
+    setFeedback((current) => {
+      if (current.detail === blockedReason && current.title === conflictTitle) {
+        return current
+      }
+      return {
+        title: conflictTitle,
+        detail: blockedReason,
+        tone: 'warning',
+      }
+    })
+  }, [visibleDevice, visibleDeviceIsLive])
+
+  useEffect(() => {
+    if (!visibleDeviceIsLive || !visibleDevice.heaterLockReason) {
+      return
+    }
+
+    const detail = heaterLockReasonText(visibleDevice.heaterLockReason)
+    setFeedback((current) => {
+      if (current.title === '加热安全锁已触发' && current.detail === detail) {
+        return current
+      }
+      return {
+        title: '加热安全锁已触发',
+        detail,
+        tone: 'warning',
+      }
+    })
+  }, [visibleDevice, visibleDeviceIsLive])
+
+  useEffect(() => {
+    if (!pendingHeaterConfirmation) {
+      return
+    }
+
+    const remainingMs = Math.max(
+      0,
+      HEATER_CONFIRMATION_TIMEOUT_MS - (Date.now() - pendingHeaterConfirmation.requestedAtMs)
+    )
+    const timer = window.setTimeout(() => {
+      setHeaterConfirmationTick((current) => current + 1)
+    }, remainingMs)
+
+    return () => window.clearTimeout(timer)
+  }, [pendingHeaterConfirmation])
+
+  useEffect(() => {
+    if (!visibleDeviceIsLive) {
+      return
+    }
+
+    const blockedReason = deviceControlBlockReason(visibleDevice)
+    if (blockedReason) {
+      return
+    }
+
+    setFeedback((current) => {
+      if (!isTransportBlockedFeedback(current)) {
+        return current
+      }
+      return {
+        title: '运行时已同步',
+        detail: '当前热控状态来自 devd 固件状态。',
+        tone: 'info',
+      }
+    })
+  }, [visibleDevice, visibleDeviceIsLive])
   const selectedArtifact = useMemo(
     () =>
       activeScenario.artifacts.find(
@@ -638,6 +893,11 @@ export function ControlPlaneDemo({
   const isDeviceSelectionRequired = isNoLiveTargetDevice(visibleDevice)
   const showDeviceSelection = isDeviceSelectionRequired && activeView !== 'add-device'
   const isDeviceAddFlowActive = isDeviceSelectionRequired || activeView === 'add-device'
+  const visibleDeviceId = visibleDevice.id
+  const visibleDeviceTransport = visibleDevice.transport
+  const visibleDeviceLeaseId = visibleDevice.leaseId
+  const visibleDeviceNetworkState = visibleDevice.networkState
+  const visibleDeviceIsDirectWebSerial = isDirectWebSerialDevice(visibleDevice)
   useEffect(() => {
     if (activeView !== 'calibration') {
       return
@@ -645,23 +905,30 @@ export function ControlPlaneDemo({
     let cancelled = false
     const load = async () => {
       try {
-        if (isDirectWebSerialDevice(visibleDevice)) {
+        if (visibleDeviceIsDirectWebSerial) {
           const calibration = await webSerial.getCalibration()
           if (!cancelled) {
-            setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+            setCalibrationByDevice((current) => ({ ...current, [visibleDeviceId]: calibration }))
           }
           return
         }
-        if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
+        if (
+          visibleDeviceTransport !== 'devd' ||
+          !visibleDeviceLeaseId ||
+          !devdBaseUrl ||
+          visibleDeviceNetworkState === 'error' ||
+          visibleDeviceNetworkState === 'timeout'
+        ) {
           return
         }
         const calibration = await controlClient.getCalibration(
           devdBaseUrl,
-          visibleDevice.id,
-          visibleDevice.leaseId
+          visibleDeviceId,
+          visibleDeviceLeaseId
         )
         if (!cancelled) {
-          setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+          setCalibrationByDevice((current) => ({ ...current, [visibleDeviceId]: calibration }))
+          setFeedback((current) => clearCalibrationLoadWarning(current))
         }
       } catch (error) {
         if (!cancelled) {
@@ -677,7 +944,17 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [activeView, controlClient, devdBaseUrl, visibleDevice, webSerial])
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceNetworkState,
+    visibleDeviceTransport,
+    webSerial,
+  ])
   useEffect(() => {
     if (activeView !== 'calibration') {
       return
@@ -686,23 +963,30 @@ export function ControlPlaneDemo({
     let cancelled = false
     const load = async () => {
       try {
-        if (isDirectWebSerialDevice(visibleDevice)) {
+        if (visibleDeviceIsDirectWebSerial) {
           const heaterCurve = await webSerial.getHeaterCurve()
           if (!cancelled) {
-            setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: heaterCurve }))
+            setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
           }
           return
         }
-        if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
+        if (
+          visibleDeviceTransport !== 'devd' ||
+          !visibleDeviceLeaseId ||
+          !devdBaseUrl ||
+          visibleDeviceNetworkState === 'error' ||
+          visibleDeviceNetworkState === 'timeout'
+        ) {
           return
         }
         const heaterCurve = await controlClient.getHeaterCurve(
           devdBaseUrl,
-          visibleDevice.id,
-          visibleDevice.leaseId
+          visibleDeviceId,
+          visibleDeviceLeaseId
         )
         if (!cancelled) {
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: heaterCurve }))
+          setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+          setFeedback((current) => clearCalibrationLoadWarning(current))
         }
       } catch (error) {
         if (!cancelled) {
@@ -718,7 +1002,17 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [activeView, controlClient, devdBaseUrl, visibleDevice, webSerial])
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceNetworkState,
+    visibleDeviceTransport,
+    webSerial,
+  ])
   const scenarioEvents = useMemo(
     () =>
       allowDemoControls
@@ -748,6 +1042,35 @@ export function ControlPlaneDemo({
     },
     []
   )
+
+  useEffect(() => {
+    if (!pendingHeaterConfirmation || !visibleDeviceIsLive) {
+      return
+    }
+    if (pendingHeaterConfirmation.deviceId !== visibleDevice.id) {
+      setPendingHeaterConfirmation(null)
+      return
+    }
+
+    const resolution = resolvePendingHeaterConfirmation(
+      pendingHeaterConfirmation,
+      visibleDevice,
+      pendingHeaterConfirmation.requestedAtMs + heaterConfirmationTick
+    )
+    if (resolution.outcome === 'pending') {
+      return
+    }
+
+    setPendingHeaterConfirmation(null)
+    setFeedback(resolution.feedback)
+    emitEvent('heater', resolution.eventMessage, resolution.eventTone)
+  }, [
+    emitEvent,
+    heaterConfirmationTick,
+    pendingHeaterConfirmation,
+    visibleDevice,
+    visibleDeviceIsLive,
+  ])
 
   const applyLocalCalibrationRuntimePatch = useCallback(
     (patch: {
@@ -824,6 +1147,9 @@ export function ControlPlaneDemo({
           leaseId: visibleDevice.leaseId,
           ...patch,
         })
+        if (patch.calibration) {
+          applyLocalCalibrationRuntimePatch(patch)
+        }
         return true
       } catch (error) {
         const detail = error instanceof Error ? error.message : failureMessage
@@ -931,38 +1257,109 @@ export function ControlPlaneDemo({
     setFlashRun({ status: 'passed', progress: 100 })
   }, [emitEvent, flashRun.progress, flashRun.status, selectedArtifact?.version])
 
+  const dismissCalibrationLeaveGuard = useCallback(() => {
+    setCalibrationLeaveGuard(null)
+  }, [])
+
+  const requestCalibrationLeave = useCallback(
+    async (
+      request: CalibrationLeaveRequest,
+      continueAction: () => void | Promise<void>
+    ): Promise<boolean> => {
+      let shouldBlock = false
+
+      switch (request.reason) {
+        case 'view-change':
+        case 'add-device-flow':
+          shouldBlock = shouldBlockCalibrationViewChange(
+            visibleRuntimeCalibration.mode,
+            activeView,
+            request.nextView ?? 'dashboard'
+          )
+          break
+        case 'device-change':
+          shouldBlock = shouldBlockCalibrationDeviceChange(
+            visibleRuntimeCalibration.mode,
+            activeView
+          )
+          break
+        case 'workspace-tab-change':
+          shouldBlock = shouldBlockCalibrationWorkspaceTabChange(
+            visibleRuntimeCalibration.mode,
+            visibleCalibrationWorkspaceTab,
+            request.nextWorkspaceTab ?? visibleCalibrationWorkspaceTab
+          )
+          break
+      }
+
+      if (!shouldBlock) {
+        await continueAction()
+        return true
+      }
+
+      setCalibrationLeaveGuard({
+        ...request,
+        continueAction,
+      })
+      setFeedback({
+        title: '请先关闭校准控制',
+        detail: `${calibrationModeLabel(visibleCalibrationWorkspaceTab)}仍在运行，离开前请先关闭开关。`,
+        tone: 'warning',
+      })
+      return false
+    },
+    [activeView, visibleCalibrationWorkspaceTab, visibleRuntimeCalibration.mode]
+  )
+
   const handleDeviceChange = (deviceId: string) => {
     if (deviceId === ADD_DEVICE_VALUE) {
-      setActiveView('add-device')
-      setFlashRun({ status: 'idle', progress: 0 })
-      flashCompletionEmittedRef.current = false
-      setFeedback({
-        title: 'Add device',
-        detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
-        tone: 'info',
-      })
+      void requestCalibrationLeave(
+        {
+          reason: 'add-device-flow',
+          nextLabel: '添加设备',
+          nextView: 'add-device',
+        },
+        () => {
+          setActiveView('add-device')
+          setFlashRun({ status: 'idle', progress: 0 })
+          flashCompletionEmittedRef.current = false
+          setFeedback({
+            title: 'Add device',
+            detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
+            tone: 'info',
+          })
+        }
+      )
       return
     }
 
     const nextDevice = deviceOptions.find((device) => device.id === deviceId)
 
-    setSelectedDeviceId(deviceId)
-    setFlashRun({ status: 'idle', progress: 0 })
-    flashCompletionEmittedRef.current = false
+    void requestCalibrationLeave(
+      {
+        reason: 'device-change',
+        nextLabel: nextDevice?.alias ?? '切换设备',
+      },
+      () => {
+        setSelectedDeviceId(deviceId)
+        setFlashRun({ status: 'idle', progress: 0 })
+        flashCompletionEmittedRef.current = false
 
-    if (!nextDevice) {
-      return
-    }
+        if (!nextDevice) {
+          return
+        }
 
-    setFeedback({
-      title: `${nextDevice.alias} selected`,
-      detail: `${transportLabels[nextDevice.transport]} target loaded with ${nextDevice.firmware}.`,
-      tone: nextDevice.severity === 'nominal' ? 'info' : 'warning',
-    })
-    emitEvent(
-      'target',
-      `${nextDevice.alias} selected`,
-      nextDevice.severity === 'offline' ? 'warning' : 'info'
+        setFeedback({
+          title: `${nextDevice.alias} selected`,
+          detail: `${transportLabels[nextDevice.transport]} target loaded with ${nextDevice.firmware}.`,
+          tone: nextDevice.severity === 'nominal' ? 'info' : 'warning',
+        })
+        emitEvent(
+          'target',
+          `${nextDevice.alias} selected`,
+          nextDevice.severity === 'offline' ? 'warning' : 'info'
+        )
+      }
     )
   }
 
@@ -1011,9 +1408,70 @@ export function ControlPlaneDemo({
   }
 
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {
-    setActiveView('add-device')
-    await handleAddDevice(kind, { showPendingDashboard: false })
+    await requestCalibrationLeave(
+      {
+        reason: 'add-device-flow',
+        nextLabel: addDeviceOptions.find((option) => option.kind === kind)?.label ?? '添加设备',
+        nextView: 'add-device',
+      },
+      async () => {
+        setActiveView('add-device')
+        await handleAddDevice(kind, { showPendingDashboard: false })
+      }
+    )
   }
+
+  const handleGuardedViewChange = useCallback(
+    (nextView: ConsoleView) => {
+      if (nextView === activeView) {
+        dismissCalibrationLeaveGuard()
+        return
+      }
+
+      void requestCalibrationLeave(
+        {
+          reason: 'view-change',
+          nextLabel: consoleViewLabel(nextView),
+          nextView,
+        },
+        () => {
+          dismissCalibrationLeaveGuard()
+          setActiveView(nextView)
+        }
+      )
+    },
+    [activeView, dismissCalibrationLeaveGuard, requestCalibrationLeave]
+  )
+
+  const handleGuardedWorkspaceTabChange = useCallback(
+    (nextTab: CalibrationWorkspaceTab) => {
+      if (nextTab === visibleCalibrationWorkspaceTab) {
+        dismissCalibrationLeaveGuard()
+        return
+      }
+
+      void requestCalibrationLeave(
+        {
+          reason: 'workspace-tab-change',
+          nextLabel: calibrationModeLabel(nextTab),
+          nextWorkspaceTab: nextTab,
+        },
+        () => {
+          dismissCalibrationLeaveGuard()
+          setCalibrationWorkspaceTabByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: nextTab,
+          }))
+        }
+      )
+    },
+    [
+      dismissCalibrationLeaveGuard,
+      requestCalibrationLeave,
+      visibleCalibrationWorkspaceTab,
+      visibleDevice.id,
+    ]
+  )
 
   async function handleWebSerialConnect() {
     if (webSerial.state === 'connected') {
@@ -1052,6 +1510,17 @@ export function ControlPlaneDemo({
   const handleTargetTempChange = (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
     const deviceId = visibleDevice.id
+    const blockedReason = deviceControlBlockReason(visibleDevice)
+    if (blockedReason) {
+      setFeedback({
+        title: visibleDevice.leaseState === 'conflict' ? '目标温度更新被阻止' : '硬件连接受阻',
+        detail: blockedReason,
+        tone: 'warning',
+      })
+      emitEvent('devd', 'target temperature update blocked by transport state', 'warning')
+      return
+    }
+
     setTargetTempByDevice((current) => ({
       ...current,
       [deviceId]: clampedTarget,
@@ -1263,12 +1732,24 @@ export function ControlPlaneDemo({
   }
 
   const handleHeaterHoldToggle = async () => {
-    const nextHeld = !heaterHeldByDevice[visibleDevice.id]
+    const nextHeld = visibleDeviceIsLive
+      ? visibleDevice.heaterEnabled
+      : !heaterHeldByDevice[visibleDevice.id]
+    const nextHeaterEnabled = !nextHeld
     const liveUpdated = await configureLiveRuntime(
-      { heaterEnabled: !nextHeld },
+      { heaterEnabled: nextHeaterEnabled },
       'heater hold update was not accepted by devd'
     )
     if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (visibleDeviceIsLive) {
+      setPendingHeaterConfirmation({
+        deviceId: visibleDevice.id,
+        requestedEnabled: nextHeaterEnabled,
+        requestedAtMs: Date.now(),
+      })
+      setFeedback(createPendingHeaterFeedback(nextHeaterEnabled))
       return
     }
     setHeaterHeldByDevice((current) => ({
@@ -1276,16 +1757,16 @@ export function ControlPlaneDemo({
       ...(visibleDeviceIsLive ? {} : { [visibleDevice.id]: nextHeld }),
     }))
     setFeedback({
-      title: nextHeld ? 'Heater held' : 'Heater resumed',
-      detail: nextHeld
-        ? 'Heater output is forced to 0% in the mock runtime.'
-        : 'Heater output follows the target temperature again.',
-      tone: nextHeld ? 'warning' : 'success',
+      title: nextHeaterEnabled ? 'Heater resumed' : 'Heater held',
+      detail: nextHeaterEnabled
+        ? 'Heater output follows the target temperature again.'
+        : 'Heater output is disabled until resumed again.',
+      tone: nextHeaterEnabled ? 'success' : 'warning',
     })
     emitEvent(
       'heater',
-      nextHeld ? 'heater output held at 0%' : 'heater output resumed',
-      nextHeld ? 'warning' : 'success'
+      nextHeaterEnabled ? 'heater output resumed' : 'heater output held at 0%',
+      nextHeaterEnabled ? 'success' : 'warning'
     )
   }
 
@@ -1473,6 +1954,12 @@ export function ControlPlaneDemo({
       setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
       return
     }
+    if (visibleDeviceIsLive) {
+      const blockedReason = deviceControlBlockReason(visibleDevice)
+      if (blockedReason) {
+        throw new Error(blockedReason)
+      }
+    }
     if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
       const calibration = await controlClient.configureCalibration(devdBaseUrl, visibleDevice.id, {
         ...request,
@@ -1630,6 +2117,12 @@ export function ControlPlaneDemo({
           return next
         }
       }
+      if (visibleDeviceIsLive) {
+        const blockedReason = deviceControlBlockReason(visibleDevice)
+        if (blockedReason) {
+          throw new Error(blockedReason)
+        }
+      }
       if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
         const next = await controlClient.configureHeaterCurve(devdBaseUrl, visibleDevice.id, {
           ...request,
@@ -1647,6 +2140,7 @@ export function ControlPlaneDemo({
       controlClient,
       devdBaseUrl,
       visibleDevice,
+      visibleDeviceIsLive,
       visibleHeaterCurve,
       webSerial.clearHeaterCurvePreview,
       webSerial.previewHeaterCurve,
@@ -1758,13 +2252,13 @@ export function ControlPlaneDemo({
     [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
   )
 
-  const handleCalibrationModeExit = async () => {
+  const handleCalibrationModeExit = async (): Promise<boolean> => {
     const liveUpdated = await updateCalibrationRuntime(
       { mode: 'off', ppsEnabled: false, heaterEnabled: false },
       'calibration mode exit was not accepted'
     )
     if (visibleDeviceIsLive && !liveUpdated) {
-      return
+      return false
     }
     if (!visibleDeviceIsLive) {
       applyLocalCalibrationRuntimePatch({
@@ -1777,6 +2271,7 @@ export function ControlPlaneDemo({
       tone: 'success',
     })
     emitEvent('calibration', 'exited calibration mode', 'success')
+    return true
   }
 
   const handleCalibrationModeEnter = async (
@@ -1839,7 +2334,7 @@ export function ControlPlaneDemo({
                   type="button"
                   className={isActive ? 'industrial-view-tab is-selected' : 'industrial-view-tab'}
                   aria-pressed={isActive}
-                  onClick={() => setActiveView(view.id)}
+                  onClick={() => handleGuardedViewChange(view.id)}
                 >
                   <Icon size={18} aria-hidden="true" />
                   <span>
@@ -1907,12 +2402,9 @@ export function ControlPlaneDemo({
                 onHeaterCurvePreview={handleHeaterCurvePreview}
                 onHeaterCurveClearPreview={handleHeaterCurveClearPreview}
                 onHeaterCurveSave={handleHeaterCurveSave}
-                onCalibrationWorkspaceTabChange={(nextTab) =>
-                  setCalibrationWorkspaceTabByDevice((current) => ({
-                    ...current,
-                    [visibleDevice.id]: nextTab,
-                  }))
-                }
+                onCalibrationWorkspaceTabChange={handleGuardedWorkspaceTabChange}
+                calibrationLeaveGuard={activeView === 'calibration' ? calibrationLeaveGuard : null}
+                onCalibrationLeaveGuardDismiss={dismissCalibrationLeaveGuard}
                 onDeviceSelect={handleDeviceChange}
                 onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDevice}
@@ -2049,6 +2541,12 @@ function createEmptyCalibrationPackage(): CalibrationPackage {
   }
 }
 
+function isRtdCalibrationSample(
+  sample: RtdCalibrationSample | VinCalibrationSample
+): sample is RtdCalibrationSample {
+  return 'referenceTempC' in sample
+}
+
 function cloneCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
   return {
     rtdAdc: calibrationPackage.rtdAdc.map((sample) => (sample ? { ...sample } : null)),
@@ -2108,12 +2606,10 @@ function createCalibrationFits(
 }
 
 function createCalibrationFit(
-  samples: Array<{ observedMv: number; expectedMv: number } | null>,
+  samples: Array<BaseCalibrationSample | null>,
   channel: CalibrationChannel
 ) {
-  const custom = samples.filter((sample): sample is { observedMv: number; expectedMv: number } =>
-    Boolean(sample)
-  )
+  const custom = samples.filter((sample): sample is BaseCalibrationSample => Boolean(sample))
   const defaults =
     channel === 'rtd_adc'
       ? [
@@ -2142,7 +2638,7 @@ function createCalibrationFit(
   }
 }
 
-function calibrationSampleKeys(samples: Array<{ observedMv: number; expectedMv: number } | null>) {
+function calibrationSampleKeys(samples: Array<BaseCalibrationSample | null>) {
   const seen = new Map<string, number>()
   return samples.map((sample) => {
     if (!sample) {
@@ -2185,14 +2681,24 @@ function applyLocalCalibrationRequest(
     if (slot < 0) {
       throw new Error('该标定通道已达到 8 个样本上限。')
     }
-    samples[slot] = {
-      observedMv: request.observedMv ?? (channel === 'rtd_adc' ? 1120 : 1670),
-      expectedMv:
-        request.expectedMv ??
-        (channel === 'rtd_adc'
-          ? rtdAdcMvForTemperature(request.referenceTempC ?? 0)
-          : vinAdcMvForInput(request.referenceVinMv ?? 0)),
-    }
+    const observedMv = request.observedMv ?? (channel === 'rtd_adc' ? 1120 : 1670)
+    const expectedMv =
+      request.expectedMv ??
+      (channel === 'rtd_adc'
+        ? rtdAdcMvForTemperature(request.referenceTempC ?? 0)
+        : vinAdcMvForInput(request.referenceVinMv ?? 0))
+    samples[slot] =
+      channel === 'rtd_adc'
+        ? {
+            observedMv,
+            expectedMv,
+            referenceTempC: request.referenceTempC,
+          }
+        : {
+            observedMv,
+            expectedMv,
+            referenceVinMv: request.referenceVinMv,
+          }
   }
   const normalized = normalizeCalibrationPackage(draft)
   return {
@@ -2254,26 +2760,16 @@ function manualFitSamples(gain: number, offsetMv: number): CalibrationPackage['r
 }
 
 function normalizeCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
-  const normalize = (samples: Array<{ observedMv: number; expectedMv: number } | null>) => {
-    const compacted = samples.filter(Boolean) as Array<{ observedMv: number; expectedMv: number }>
+  const normalize = <TSample extends BaseCalibrationSample>(
+    samples: Array<TSample | null>
+  ): Array<TSample | null> => {
+    const compacted = samples.filter(Boolean) as TSample[]
     return Array.from({ length: 8 }, (_, index) => compacted[index] ?? null)
   }
   return {
     rtdAdc: normalize(calibrationPackage.rtdAdc),
     vinAdc: normalize(calibrationPackage.vinAdc),
   }
-}
-
-function rtdAdcMvForTemperature(tempC: number) {
-  const resistance =
-    tempC >= 0
-      ? 1000 * (1 + 3.9083e-3 * tempC - 5.775e-7 * tempC * tempC)
-      : 1000 *
-        (1 +
-          3.9083e-3 * tempC -
-          5.775e-7 * tempC * tempC -
-          4.183e-12 * (tempC - 100) * tempC * tempC * tempC)
-  return Math.round((3000 * resistance) / (2490 + resistance))
 }
 
 function vinAdcMvForInput(inputMv: number) {
@@ -2298,17 +2794,24 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '请求失败。'
 }
 
-function deviceControlBlockReason(device: DeviceTarget) {
-  if (device.severity === 'offline') {
-    return '目标设备当前离线。'
+function clearCalibrationLoadWarning(current: ActionFeedback): ActionFeedback {
+  if (current.title === 'Calibration unavailable' || current.title === 'Heater curve unavailable') {
+    return {
+      title: '标定数据已同步',
+      detail: '当前标定数据来自 devd 固件状态。',
+      tone: 'info',
+    }
   }
 
-  const networkState = device.networkState
-  if (networkState && BLOCKED_NETWORK_STATES.has(networkState)) {
-    return device.transportIssue ?? '当前传输尚未恢复，暂时无法下发控制。'
-  }
+  return current
+}
 
-  return null
+function isTransportBlockedFeedback(current: ActionFeedback) {
+  return (
+    current.title === '设备租约冲突' ||
+    current.title === '硬件连接受阻' ||
+    current.title === '目标温度更新被阻止'
+  )
 }
 
 function isNoLiveTargetDevice(device: DeviceTarget) {
@@ -2415,6 +2918,21 @@ function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
       return '温度标定'
     case 'heater_curve':
       return '加热曲线标定'
+  }
+}
+
+function consoleViewLabel(view: ConsoleView) {
+  switch (view) {
+    case 'dashboard':
+      return '总览'
+    case 'settings':
+      return '设置'
+    case 'calibration':
+      return '校准'
+    case 'update':
+      return '更新'
+    case 'add-device':
+      return '添加设备'
   }
 }
 
@@ -2617,6 +3135,8 @@ function ViewPanel({
   onHeaterCurveClearPreview,
   onHeaterCurveSave,
   onCalibrationWorkspaceTabChange,
+  calibrationLeaveGuard,
+  onCalibrationLeaveGuardDismiss,
 }: {
   view: ConsoleView
   device: DeviceTarget
@@ -2667,7 +3187,7 @@ function ViewPanel({
     mode: CalibrationWorkbenchMode,
     request: CalibrationControlRequest
   ) => void | Promise<void>
-  onCalibrationModeExit: () => void | Promise<void>
+  onCalibrationModeExit: () => boolean | Promise<boolean>
   onCalibrationRuntimeChange: (
     request: Partial<CalibrationControlRequest>,
     failureMessage: string
@@ -2680,6 +3200,8 @@ function ViewPanel({
   onHeaterCurveClearPreview: () => void | Promise<void>
   onHeaterCurveSave: () => void | Promise<void>
   onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
+  calibrationLeaveGuard: CalibrationLeaveGuardState | null
+  onCalibrationLeaveGuardDismiss: () => void
 }) {
   if (showDeviceSelection) {
     return (
@@ -2764,6 +3286,8 @@ function ViewPanel({
         onHeaterCurveClearPreview={onHeaterCurveClearPreview}
         onHeaterCurveSave={onHeaterCurveSave}
         onCalibrationWorkspaceTabChange={onCalibrationWorkspaceTabChange}
+        calibrationLeaveGuard={calibrationLeaveGuard}
+        onCalibrationLeaveGuardDismiss={onCalibrationLeaveGuardDismiss}
       />
     )
   }
@@ -2942,14 +3466,7 @@ function DashboardView({
     setManualPpsDraftMv(manualPpsDefaultMv)
     setManualPpsDraftDirty(false)
   }, [advancedOpen, device.id, manualPpsDefaultMv, manualPpsDraftDirty])
-  const heaterState =
-    device.severity === 'offline'
-      ? 'offline'
-      : device.pdState === 'ready'
-        ? device.heaterOutputPercent > 0
-          ? 'holding'
-          : 'held'
-        : device.pdState
+  const heaterState = runtimeHeaterState(device)
   const powerCapabilityMa = effectivePpsCurrentCapabilityMa(device) ?? 0
   return (
     <div className="industrial-view-panel">
@@ -3016,7 +3533,7 @@ function DashboardView({
           onClick={onHeaterHoldToggle}
         >
           <Power size={16} aria-hidden="true" />
-          {device.heaterOutputPercent > 0 ? 'Hold heater' : 'Resume heater'}
+          {device.heaterEnabled ? 'Hold heater' : 'Resume heater'}
         </button>
         <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
       </div>
@@ -3291,6 +3808,7 @@ function CalibrationSliderInputField({
 function CalibrationModeControlPanel({
   title,
   modeToggle,
+  leaveGuard,
   capability,
   voltageText,
   onVoltageChange,
@@ -3302,6 +3820,11 @@ function CalibrationModeControlPanel({
 }: {
   title: string
   modeToggle?: ReactNode
+  leaveGuard?: {
+    nextLabel: string
+    onDismiss: () => void
+    onContinue: () => void
+  } | null
   capability: ReturnType<typeof calibrationPowerCapability>
   voltageText: string
   onVoltageChange: (value: string) => void
@@ -3319,6 +3842,15 @@ function CalibrationModeControlPanel({
     <CalibrationLiveCard
       title={title}
       modeToggle={modeToggle}
+      modeToggleHint={
+        leaveGuard ? (
+          <CalibrationLeaveGuardBubble
+            nextLabel={leaveGuard.nextLabel}
+            onDismiss={leaveGuard.onDismiss}
+            onContinue={leaveGuard.onContinue}
+          />
+        ) : null
+      }
       titleMeta={<CalibrationCapabilityHint capability={capability} />}
     >
       <PpsCalibrationFields
@@ -3362,6 +3894,9 @@ function RuntimeMiniStatus({
         {device.fanState}
       </span>
       <span>{artifact?.version ?? device.firmware}</span>
+      {device.heaterLockReason ? (
+        <span>{heaterLockReasonText(device.heaterLockReason)}</span>
+      ) : null}
     </div>
   )
 }
@@ -3385,6 +3920,7 @@ function CapabilityStrip({ device }: { device: DeviceTarget }) {
       ))}
       <strong>{device.networkState ?? 'unknown'}</strong>
       {device.transportIssue ? <em>{device.transportIssue}</em> : null}
+      {device.heaterLockReason ? <em>{heaterLockReasonText(device.heaterLockReason)}</em> : null}
     </section>
   )
 }
@@ -3488,6 +4024,8 @@ function CalibrationView({
   onHeaterCurveClearPreview,
   onHeaterCurveSave,
   onCalibrationWorkspaceTabChange,
+  calibrationLeaveGuard,
+  onCalibrationLeaveGuardDismiss,
 }: {
   device: DeviceTarget
   calibration: CalibrationState
@@ -3508,7 +4046,7 @@ function CalibrationView({
     mode: CalibrationWorkbenchMode,
     request: CalibrationControlRequest
   ) => void | Promise<void>
-  onModeExit: () => void | Promise<void>
+  onModeExit: () => boolean | Promise<boolean>
   onCalibrationRuntimeChange: (
     request: Partial<CalibrationControlRequest>,
     failureMessage: string
@@ -3521,6 +4059,8 @@ function CalibrationView({
   onHeaterCurveClearPreview: () => void | Promise<void>
   onHeaterCurveSave: () => void | Promise<void>
   onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
+  calibrationLeaveGuard: CalibrationLeaveGuardState | null
+  onCalibrationLeaveGuardDismiss: () => void
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [heaterCurveDraftText, setHeaterCurveDraftText] = useState('')
@@ -3529,7 +4069,13 @@ function CalibrationView({
   const [rtdTargetAdcText, setRtdTargetAdcText] = useState('')
   const [heaterPpsMvText, setHeaterPpsMvText] = useState('')
   const [pendingCalibrationAction, setPendingCalibrationAction] = useState<string | null>(null)
-  const applyBlocked = device.heaterEnabled || device.heaterOutputPercent !== 0
+  const lastRtdDraftDeviceIdRef = useRef<string | null>(null)
+  const lastLiveRtdTargetAdcMvRef = useRef<number | null>(null)
+  const rtdTargetAdcCommitTimerRef = useRef<number | null>(null)
+  const rtdTargetAdcCommitVersionRef = useRef(0)
+  const transportBlockedReason = deviceControlBlockReason(device)
+  const controlsBlocked = transportBlockedReason != null
+  const applyBlocked = controlsBlocked || device.heaterEnabled || device.heaterOutputPercent !== 0
   const requestedWorkbenchMode = calibrationWorkspaceTab
   const activeWorkbenchMode = asWorkbenchMode(runtimeCalibration.mode)
   const modeArmed = activeWorkbenchMode === requestedWorkbenchMode
@@ -3578,7 +4124,30 @@ function CalibrationView({
   }, [basePpsDraft.millivolts])
 
   useEffect(() => {
-    setRtdTargetAdcText(String(runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv ?? 0))
+    if (lastRtdDraftDeviceIdRef.current === device.id) {
+      return
+    }
+
+    if (rtdTargetAdcCommitTimerRef.current != null) {
+      window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      rtdTargetAdcCommitTimerRef.current = null
+    }
+    rtdTargetAdcCommitVersionRef.current = 0
+    lastRtdDraftDeviceIdRef.current = device.id
+    lastLiveRtdTargetAdcMvRef.current = runtimeCalibration.targetAdcMv ?? null
+    const nextTargetAdcMv = runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv
+    setRtdTargetAdcText(nextTargetAdcMv != null ? String(nextTargetAdcMv) : '')
+  }, [device.id, device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
+
+  useEffect(() => {
+    setRtdTargetAdcText((current) =>
+      syncCalibrationDraftText(
+        current,
+        runtimeCalibration.targetAdcMv ?? null,
+        device.rtdRawAdcMv ?? null,
+        lastLiveRtdTargetAdcMvRef
+      )
+    )
   }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
 
   const parseIntegerInput = (rawValue: string) => {
@@ -3611,12 +4180,67 @@ function CalibrationView({
 
   useEffect(
     () => () => {
+      if (rtdTargetAdcCommitTimerRef.current != null) {
+        window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      }
       if (actionLockTimerRef.current != null) {
         window.clearTimeout(actionLockTimerRef.current)
       }
     },
     []
   )
+
+  useEffect(() => {
+    if (rtdTargetAdcCommitTimerRef.current != null) {
+      window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      rtdTargetAdcCommitTimerRef.current = null
+    }
+
+    if (
+      controlsBlocked ||
+      pendingCalibrationAction != null ||
+      !modeArmed ||
+      runtimeCalibration.mode !== 'rtd_adc' ||
+      !runtimeCalibration.ppsEnabled ||
+      rtdTargetAdcMv == null ||
+      rtdTargetError != null ||
+      runtimeCalibration.targetAdcMv === rtdTargetAdcMv
+    ) {
+      return
+    }
+
+    const nextVersion = rtdTargetAdcCommitVersionRef.current + 1
+    rtdTargetAdcCommitVersionRef.current = nextVersion
+    rtdTargetAdcCommitTimerRef.current = window.setTimeout(() => {
+      rtdTargetAdcCommitTimerRef.current = null
+      if (rtdTargetAdcCommitVersionRef.current !== nextVersion) {
+        return
+      }
+      void onCalibrationRuntimeChange(
+        {
+          targetAdcMv: rtdTargetAdcMv,
+        },
+        '目标 ADC 更新失败。'
+      )
+    }, 180)
+
+    return () => {
+      if (rtdTargetAdcCommitTimerRef.current != null) {
+        window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+        rtdTargetAdcCommitTimerRef.current = null
+      }
+    }
+  }, [
+    controlsBlocked,
+    modeArmed,
+    onCalibrationRuntimeChange,
+    pendingCalibrationAction,
+    rtdTargetAdcMv,
+    rtdTargetError,
+    runtimeCalibration.mode,
+    runtimeCalibration.ppsEnabled,
+    runtimeCalibration.targetAdcMv,
+  ])
 
   const runCalibrationAction = useCallback(
     async (actionKey: string, action: () => void | Promise<void>) => {
@@ -3640,10 +4264,26 @@ function CalibrationView({
   )
 
   const calibrationActionPending = (actionKey: string) => pendingCalibrationAction === actionKey
+  const leaveGuardViewModel = calibrationLeaveGuard
+    ? {
+        nextLabel: calibrationLeaveGuard.nextLabel,
+        onDismiss: onCalibrationLeaveGuardDismiss,
+        onContinue: async () => {
+          const continueAction = calibrationLeaveGuard.continueAction
+          const exited = await onModeExit()
+          if (!exited) {
+            return
+          }
+          onCalibrationLeaveGuardDismiss()
+          await continueAction()
+        },
+      }
+    : null
 
   const adcApplyToolbar = (
     <AdcCalibrationToolbar
       applyBlocked={applyBlocked}
+      disabled={controlsBlocked}
       feedback={feedback}
       onApply={onApply}
       onExport={exportCalibration}
@@ -3692,6 +4332,7 @@ function CalibrationView({
                   modeToggle={
                     <CalibrationModeToggle
                       active={modeArmed}
+                      disabled={controlsBlocked}
                       onEnable={() =>
                         void onModeEnter('heater_curve', {
                           mode: 'heater_curve',
@@ -3699,9 +4340,10 @@ function CalibrationView({
                           heaterEnabled: false,
                         })
                       }
-                      onDisable={() => void onModeExit()}
+                      onDisable={() => onModeExit()}
                     />
                   }
+                  leaveGuard={leaveGuardViewModel}
                   capability={powerCapability}
                   voltageText={heaterPpsMvText}
                   onVoltageChange={setHeaterPpsMvText}
@@ -3720,6 +4362,7 @@ function CalibrationView({
                           type="button"
                           className="industrial-button industrial-button--secondary"
                           disabled={
+                            controlsBlocked ||
                             pendingCalibrationAction != null ||
                             (!runtimeCalibration.ppsEnabled && !heaterCanSubmitPps)
                           }
@@ -3758,6 +4401,7 @@ function CalibrationView({
                           type="button"
                           className="industrial-button industrial-button--secondary"
                           disabled={
+                            controlsBlocked ||
                             pendingCalibrationAction != null ||
                             (!jobRunning && (!modeArmed || !heaterCanSubmitPps))
                           }
@@ -3788,7 +4432,9 @@ function CalibrationView({
                         <button
                           type="button"
                           className="industrial-button industrial-button--secondary"
-                          disabled={!modeArmed || pendingCalibrationAction != null}
+                          disabled={
+                            controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                          }
                           onClick={() =>
                             void runCalibrationAction('heater-heater-toggle', () =>
                               onCalibrationRuntimeChange(
@@ -3818,7 +4464,7 @@ function CalibrationView({
                     min={TARGET_TEMP_MIN}
                     max={TARGET_TEMP_MAX}
                     step={TARGET_TEMP_STEP}
-                    disabled={!modeArmed || pendingCalibrationAction != null}
+                    disabled={controlsBlocked || !modeArmed || pendingCalibrationAction != null}
                     inputAriaLabel="加热曲线标定目标温度输入"
                     sliderAriaLabel="加热曲线标定目标温度滑块"
                     onChange={(value) => {
@@ -3860,6 +4506,7 @@ function CalibrationView({
                 device={device}
                 heaterCurve={heaterCurve}
                 draftText={heaterCurveDraftText}
+                disabled={controlsBlocked}
                 onDraftTextChange={setHeaterCurveDraftText}
                 onPreview={onHeaterCurvePreview}
                 onClearPreview={onHeaterCurveClearPreview}
@@ -3875,17 +4522,23 @@ function CalibrationView({
                   modeToggle={
                     <CalibrationModeToggle
                       active={modeArmed}
+                      disabled={controlsBlocked}
                       onEnable={() =>
                         void onModeEnter('rtd_adc', {
                           mode: 'rtd_adc',
                           ppsEnabled: false,
                           heaterEnabled: false,
-                          targetAdcMv: runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv,
+                          targetAdcMv:
+                            rtdTargetAdcMv ??
+                            runtimeCalibration.targetAdcMv ??
+                            device.rtdRawAdcMv ??
+                            undefined,
                         })
                       }
-                      onDisable={() => void onModeExit()}
+                      onDisable={() => onModeExit()}
                     />
                   }
+                  leaveGuard={leaveGuardViewModel}
                   capability={powerCapability}
                   voltageText={rtdPpsMvText}
                   onVoltageChange={setRtdPpsMvText}
@@ -3909,6 +4562,7 @@ function CalibrationView({
                           type="button"
                           className="industrial-button industrial-button--secondary"
                           disabled={
+                            controlsBlocked ||
                             pendingCalibrationAction != null ||
                             (!runtimeCalibration.ppsEnabled && !rtdCanSubmitRuntime)
                           }
@@ -3956,7 +4610,9 @@ function CalibrationView({
                         <button
                           type="button"
                           className="industrial-button industrial-button--secondary"
-                          disabled={!modeArmed || pendingCalibrationAction != null}
+                          disabled={
+                            controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                          }
                           onClick={() =>
                             void runCalibrationAction('rtd-heater-toggle', () =>
                               onCalibrationRuntimeChange(
@@ -3986,7 +4642,7 @@ function CalibrationView({
                     min={RTD_TARGET_MIN_MV}
                     max={RTD_TARGET_MAX_MV}
                     step={RTD_TARGET_STEP_MV}
-                    disabled={!hasPpsCapability}
+                    disabled={controlsBlocked || !hasPpsCapability}
                     inputAriaLabel="目标 ADC 输入"
                     sliderAriaLabel="目标 ADC 滑块"
                     onChange={setRtdTargetAdcText}
@@ -4030,6 +4686,7 @@ function CalibrationView({
                 draftFit={calibration.draftFit.rtdAdc}
                 samples={calibration.draft.rtdAdc}
                 onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
+                disabled={controlsBlocked}
                 onCapture={() => onCapture('rtd_adc')}
                 onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
                 onClear={() => onClear('rtd_adc')}
@@ -4045,6 +4702,7 @@ function CalibrationView({
                   modeToggle={
                     <CalibrationModeToggle
                       active={modeArmed}
+                      disabled={controlsBlocked}
                       onEnable={() =>
                         void onModeEnter('vin_adc', {
                           mode: 'vin_adc',
@@ -4052,9 +4710,10 @@ function CalibrationView({
                           heaterEnabled: false,
                         })
                       }
-                      onDisable={() => void onModeExit()}
+                      onDisable={() => onModeExit()}
                     />
                   }
+                  leaveGuard={leaveGuardViewModel}
                   capability={powerCapability}
                   voltageText={vinPpsMvText}
                   onVoltageChange={setVinPpsMvText}
@@ -4073,6 +4732,7 @@ function CalibrationView({
                           type="button"
                           className="industrial-button industrial-button--secondary"
                           disabled={
+                            controlsBlocked ||
                             pendingCalibrationAction != null ||
                             (!runtimeCalibration.ppsEnabled && !vinCanSubmitPps)
                           }
@@ -4111,6 +4771,7 @@ function CalibrationView({
                           type="button"
                           className="industrial-button industrial-button--secondary"
                           disabled={
+                            controlsBlocked ||
                             pendingCalibrationAction != null ||
                             (!jobRunning && (!modeArmed || !vinCanSubmitPps))
                           }
@@ -4141,7 +4802,9 @@ function CalibrationView({
                         <button
                           type="button"
                           className="industrial-button industrial-button--secondary"
-                          disabled={!modeArmed || pendingCalibrationAction != null}
+                          disabled={
+                            controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                          }
                           onClick={() =>
                             void runCalibrationAction('vin-heater-toggle', () =>
                               onCalibrationRuntimeChange(
@@ -4171,7 +4834,7 @@ function CalibrationView({
                     min={TARGET_TEMP_MIN}
                     max={TARGET_TEMP_MAX}
                     step={TARGET_TEMP_STEP}
-                    disabled={!modeArmed || pendingCalibrationAction != null}
+                    disabled={controlsBlocked || !modeArmed || pendingCalibrationAction != null}
                     inputAriaLabel="电压读数标定目标温度输入"
                     sliderAriaLabel="电压读数标定目标温度滑块"
                     onChange={(value) => {
@@ -4224,6 +4887,7 @@ function CalibrationView({
                 draftFit={calibration.draftFit.vinAdc}
                 samples={calibration.draft.vinAdc}
                 onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
+                disabled={controlsBlocked}
                 onCapture={() => onCapture('vin_adc')}
                 onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
                 onClear={() => onClear('vin_adc')}
@@ -4239,17 +4903,20 @@ function CalibrationView({
 
 function CalibrationModeToggle({
   active,
+  disabled = false,
   onEnable,
   onDisable,
 }: {
   active: boolean
+  disabled?: boolean
   onEnable: () => void | Promise<void>
-  onDisable: () => void | Promise<void>
+  onDisable: () => boolean | Promise<boolean>
 }) {
   return (
     <Switch
       aria-label="标定模式"
       checked={active}
+      disabled={disabled}
       onCheckedChange={(checked) => void (checked ? onEnable() : onDisable())}
     />
   )
@@ -4259,12 +4926,14 @@ function CalibrationLiveCard({
   title,
   detail,
   modeToggle,
+  modeToggleHint,
   titleMeta,
   children,
 }: {
   title: string
   detail?: string
   modeToggle?: ReactNode
+  modeToggleHint?: ReactNode
   titleMeta?: ReactNode
   children: ReactNode
 }) {
@@ -4285,11 +4954,155 @@ function CalibrationLiveCard({
             </div>
             {detail ? <p>{detail}</p> : null}
           </div>
-          {modeToggle ?? null}
+          <div className="industrial-calibration-live-card__mode-control">
+            {modeToggleHint ?? null}
+            {modeToggle ?? null}
+          </div>
         </div>
       </div>
       {children}
     </section>
+  )
+}
+
+function CalibrationLeaveGuardBubble({
+  nextLabel,
+  onDismiss,
+  onContinue,
+}: {
+  nextLabel: string
+  onDismiss: () => void
+  onContinue: () => void
+}) {
+  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const bubbleRef = useRef<HTMLDivElement | null>(null)
+  const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({ visibility: 'hidden' })
+  const [bubbleSide, setBubbleSide] = useState<'left' | 'bottom' | 'top'>('left')
+
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor) {
+      return
+    }
+
+    let frameId = 0
+    const gap = 12
+    const viewportMargin = 16
+
+    const updatePosition = () => {
+      const bubble = bubbleRef.current
+      if (!bubble) {
+        return
+      }
+
+      const anchorRect = anchor.getBoundingClientRect()
+      const bubbleRect = bubble.getBoundingClientRect()
+      let nextSide: 'left' | 'bottom' | 'top' = 'left'
+      let left = anchorRect.left - bubbleRect.width - gap
+      let top = anchorRect.top + anchorRect.height / 2 - bubbleRect.height / 2
+
+      if (left < viewportMargin) {
+        nextSide = 'bottom'
+        left = anchorRect.right - bubbleRect.width
+        top = anchorRect.bottom + gap
+
+        if (top + bubbleRect.height > window.innerHeight - viewportMargin) {
+          nextSide = 'top'
+          top = anchorRect.top - bubbleRect.height - gap
+        }
+      }
+
+      left = Math.min(
+        Math.max(viewportMargin, left),
+        Math.max(viewportMargin, window.innerWidth - bubbleRect.width - viewportMargin)
+      )
+      top = Math.min(
+        Math.max(viewportMargin, top),
+        Math.max(viewportMargin, window.innerHeight - bubbleRect.height - viewportMargin)
+      )
+
+      setBubbleSide(nextSide)
+      setBubbleStyle({
+        left,
+        top,
+        visibility: 'visible',
+      })
+    }
+
+    const scheduleUpdate = () => {
+      if (frameId !== 0) {
+        window.cancelAnimationFrame(frameId)
+      }
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0
+        updatePosition()
+      })
+    }
+
+    scheduleUpdate()
+    window.addEventListener('resize', scheduleUpdate)
+    window.addEventListener('scroll', scheduleUpdate, true)
+
+    const observer =
+      typeof ResizeObserver === 'function' ? new ResizeObserver(() => scheduleUpdate()) : null
+    observer?.observe(anchor)
+    if (bubbleRef.current) {
+      observer?.observe(bubbleRef.current)
+    }
+
+    return () => {
+      if (frameId !== 0) {
+        window.cancelAnimationFrame(frameId)
+      }
+      observer?.disconnect()
+      window.removeEventListener('resize', scheduleUpdate)
+      window.removeEventListener('scroll', scheduleUpdate, true)
+    }
+  }, [])
+
+  const bubble =
+    typeof document === 'undefined'
+      ? null
+      : createPortal(
+          <div
+            ref={bubbleRef}
+            className="industrial-calibration-leave-guard"
+            data-side={bubbleSide}
+            role="alert"
+            aria-live="polite"
+            style={bubbleStyle}
+          >
+            <div className="industrial-calibration-leave-guard__eyebrow">切换前提醒</div>
+            <p>校准控制仍开着，先关闭后再切到“{nextLabel}”。</p>
+            <div className="industrial-calibration-leave-guard__actions">
+              <button
+                type="button"
+                className="industrial-button industrial-button--secondary"
+                onClick={onContinue}
+              >
+                关闭并继续
+              </button>
+              <button
+                type="button"
+                className="industrial-button industrial-button--ghost"
+                onClick={onDismiss}
+              >
+                留在当前页
+              </button>
+            </div>
+          </div>,
+          document.body
+        )
+
+  return (
+    <>
+      <span
+        ref={anchorRef}
+        className="industrial-calibration-leave-guard-anchor"
+        aria-hidden="true"
+      />
+      {bubble}
+    </>
   )
 }
 
@@ -4410,12 +5223,14 @@ function PpsCalibrationFields({
 
 function AdcCalibrationToolbar({
   applyBlocked,
+  disabled = false,
   feedback,
   onApply,
   onExport,
   onImport,
 }: {
   applyBlocked: boolean
+  disabled?: boolean
   feedback: ActionFeedback
   onApply: () => void | Promise<void>
   onExport: () => void
@@ -4444,6 +5259,7 @@ function AdcCalibrationToolbar({
         <button
           type="button"
           className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
+          disabled={disabled}
           onClick={onImport}
         >
           <Upload size={15} aria-hidden="true" />
@@ -4459,6 +5275,7 @@ function HeaterCurvePanel({
   device,
   heaterCurve,
   draftText,
+  disabled = false,
   onDraftTextChange,
   onPreview,
   onClearPreview,
@@ -4467,6 +5284,7 @@ function HeaterCurvePanel({
   device: DeviceTarget
   heaterCurve: HeaterCurveState
   draftText: string
+  disabled?: boolean
   onDraftTextChange: (value: string) => void
   onPreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
   onClearPreview: () => void | Promise<void>
@@ -4522,6 +5340,7 @@ function HeaterCurvePanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
+          disabled={disabled}
           onClick={() => {
             try {
               onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
@@ -4535,6 +5354,7 @@ function HeaterCurvePanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
+          disabled={disabled}
           onClick={() => {
             try {
               void onPreview(parseDraft())
@@ -4548,7 +5368,7 @@ function HeaterCurvePanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
-          disabled={!heaterCurve.preview}
+          disabled={disabled || !heaterCurve.preview}
           onClick={() => void onClearPreview()}
         >
           清除预览
@@ -4556,7 +5376,7 @@ function HeaterCurvePanel({
         <button
           type="button"
           className="industrial-button industrial-button--primary"
-          disabled={!heaterCurve.preview}
+          disabled={disabled || !heaterCurve.preview}
           onClick={() => void onSave()}
         >
           保存曲线
@@ -4618,6 +5438,7 @@ function HeaterCurvePanel({
           id={`heater-curve-json-${device.id}`}
           ref={heaterCurveEditorRef}
           className="industrial-heater-curve-editor__textarea"
+          disabled={disabled}
           value={draftText}
           onChange={(event) => onDraftTextChange(event.currentTarget.value)}
         />
@@ -4627,6 +5448,7 @@ function HeaterCurvePanel({
 }
 
 function CalibrationChannelPanel({
+  channel,
   title,
   referenceLabel,
   referenceValue,
@@ -4634,6 +5456,7 @@ function CalibrationChannelPanel({
   activeFit,
   draftFit,
   samples,
+  disabled = false,
   onReferenceChange,
   onCapture,
   onDelete,
@@ -4647,7 +5470,8 @@ function CalibrationChannelPanel({
   referenceUnit: string
   activeFit: CalibrationState['activeFit']['rtdAdc']
   draftFit: CalibrationState['draftFit']['rtdAdc']
-  samples: Array<{ observedMv: number; expectedMv: number } | null>
+  samples: Array<RtdCalibrationSample | VinCalibrationSample | null>
+  disabled?: boolean
   onReferenceChange: (value: number) => void
   onCapture: () => void | Promise<void>
   onDelete: (sampleIndex: number) => void | Promise<void>
@@ -4660,7 +5484,7 @@ function CalibrationChannelPanel({
   const sampleKeys = calibrationSampleKeys(samples)
   const populatedSamples = samples
     .map((sample, index) => (sample ? { ...sample, index } : null))
-    .filter((sample): sample is { observedMv: number; expectedMv: number; index: number } =>
+    .filter((sample): sample is (RtdCalibrationSample | VinCalibrationSample) & { index: number } =>
       Boolean(sample)
     )
   useEffect(() => {
@@ -4718,6 +5542,7 @@ function CalibrationChannelPanel({
               type="number"
               inputMode="decimal"
               step="0.00001"
+              disabled={disabled}
               value={manualGain}
               onChange={(event) => setManualGain(event.currentTarget.value)}
             />
@@ -4731,6 +5556,7 @@ function CalibrationChannelPanel({
               type="number"
               inputMode="decimal"
               step="0.1"
+              disabled={disabled}
               value={manualOffsetMv}
               onChange={(event) => setManualOffsetMv(event.currentTarget.value)}
             />
@@ -4740,7 +5566,7 @@ function CalibrationChannelPanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
-          disabled={manualFitInvalid}
+          disabled={disabled || manualFitInvalid}
           onClick={() => onManualFit(parsedManualGain, parsedManualOffsetMv)}
         >
           设置草稿拟合
@@ -4753,6 +5579,7 @@ function CalibrationChannelPanel({
           <span className="industrial-calibration-input">
             <input
               type="number"
+              disabled={disabled}
               value={Number.isFinite(referenceValue) ? referenceValue : 0}
               onChange={(event) => onReferenceChange(Number(event.currentTarget.value))}
             />
@@ -4762,6 +5589,7 @@ function CalibrationChannelPanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
+          disabled={disabled}
           onClick={onCapture}
         >
           采集样本
@@ -4769,7 +5597,7 @@ function CalibrationChannelPanel({
         <button
           type="button"
           className="industrial-button industrial-button--danger-quiet"
-          disabled={sampleCount === 0}
+          disabled={disabled || sampleCount === 0}
           aria-label={`清空 ${title} 草稿样本`}
           onClick={onClear}
         >
@@ -4784,7 +5612,7 @@ function CalibrationChannelPanel({
               <tr>
                 <th scope="col">槽位</th>
                 <th scope="col">观测值</th>
-                <th scope="col">目标值</th>
+                <th scope="col">{channel === 'rtd_adc' ? '标定目标' : '目标值'}</th>
                 <th scope="col">操作</th>
               </tr>
             </thead>
@@ -4795,11 +5623,25 @@ function CalibrationChannelPanel({
                   <td>
                     <strong>{sample.observedMv}mV</strong>
                   </td>
-                  <td>{sample.expectedMv}mV</td>
+                  <td>
+                    {channel === 'rtd_adc' ? (
+                      <div className="industrial-calibration-sample-target">
+                        <strong>{sample.expectedMv}mV</strong>
+                        <small>
+                          {isRtdCalibrationSample(sample) && sample.referenceTempC != null
+                            ? `${sample.referenceTempC.toFixed(1)}℃`
+                            : `${rtdTemperatureForAdcMv(sample.expectedMv).toFixed(1)}℃`}
+                        </small>
+                      </div>
+                    ) : (
+                      `${sample.expectedMv}mV`
+                    )}
+                  </td>
                   <td>
                     <button
                       type="button"
                       className="industrial-button industrial-button--danger-quiet"
+                      disabled={disabled}
                       aria-label={`删除 ${title} 样本 ${sample.index + 1}`}
                       onClick={() => onDelete(sample.index)}
                     >

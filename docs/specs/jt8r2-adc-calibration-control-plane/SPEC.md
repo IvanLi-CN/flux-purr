@@ -52,7 +52,7 @@
 
 ### MUST
 
-- 每个 channel 最多保存 `8` 个 user samples；样本结构为 `{ observedMv, expectedMv }`。
+- 每个 channel 最多保存 `8` 个 user samples；样本结构必须保存 ADC 域点位 `{ observedMv, expectedMv }`，并在 RTD/VIN channel 上分别原样保存操作者输入的 `referenceTempC` / `referenceVinMv`，避免 owner-facing physical reference 只能靠 ADC 反推恢复。
 - Channel 名称固定为 `rtd_adc` 与 `vin_adc`。
 - 加热曲线继续保存到 `heater_curve.active` / `heater_curve.preview`；`preview` 只在显式 `Save` 后才能写入 `active`。
 - `0` 个 custom point 时使用默认 identity points；`1` 个 custom point 时与默认 identity points 混合；`>=2` 个 custom points 时仅使用 custom points 拟合。
@@ -67,6 +67,8 @@
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
 - `电压读数标定` 手动模式必须支持直接输入和 `1V` 步进；自动模式必须按 `1V` 步进在实时 PPS capability 内扫点，并以“请求 PPS 电压”作为 reference 写入 `vin_adc draft`。
 - `温度标定` 只能是手动/半自动；firmware 必须按目标 `RTD_ADC` 毫伏值持续控热并暴露稳定状态，最终 capture 继续写 `rtd_adc draft`。
+- `温度标定` 样本表必须让操作者同时看见目标 ADC 毫伏值和对应的标定温度，避免把物理参考温度完全折叠成纯 ADC 域数字。
+- 当 RTD/VIN draft 或 active package 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
 - `加热曲线标定` 自动模式必须丢弃启动瞬态，在稳定温区内做分段统计和单调平滑，再生成 `heater_curve preview`；手动模式继续保留当前最终结果填写形态。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
 
@@ -87,8 +89,8 @@
     "vinAdc": [null]
   },
   "draft": {
-    "rtdAdc": [{ "observedMv": 1120, "expectedMv": 1118 }],
-    "vinAdc": [{ "observedMv": 1670, "expectedMv": 1820 }]
+    "rtdAdc": [{ "observedMv": 1120, "expectedMv": 1118, "referenceTempC": 25.0 }],
+    "vinAdc": [{ "observedMv": 1670, "expectedMv": 1820, "referenceVinMv": 20000 }]
   },
   "activeFit": {
     "rtdAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 0, "defaultSampleCount": 2 },
@@ -151,6 +153,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 - Given `电压读数标定` auto is started, When the device exposes PPS capability, Then the job walks `1V` steps within that capability and writes captured points to `vin_adc draft`.
 - Given `温度标定` mode is armed, When the target ADC and heater are enabled, Then runtime status reports whether the RTD ADC has stabilized so the operator can capture against an external thermometer.
 - Given `加热曲线标定` auto is started, When stable bins are collected after startup transient, Then the generated curve is monotonic-smoothed into `heater_curve preview` and requires an explicit `Save`.
+- Given any calibration mode switch is still on, When the operator attempts a page-internal view/device/calibration-tab change, Then Web blocks that navigation and shows an inline prompt near the switch to close calibration mode first before continuing.
 
 ## 非功能性验收 / 质量门槛
 
@@ -212,6 +215,14 @@ Arrays normalize to length `8`; empty slots are `null`.
 `assets/calibration-workbench-modes.png` shows the current owner-facing calibration workbench with the three top-level modes `加热曲线标定 / 温度标定 / 电压读数标定`, the voltage-reading mode armed as the active operator surface, PPS-only controls constrained by the live capability range, auto-job entry buttons, and the shared Runtime trace visible in the same workbench.
 
 ![Calibration workbench modes](./assets/calibration-workbench-modes.png)
+
+`assets/calibration-leave-guard-bubble.trimmed.png` shows the page-internal leave guard rendered as a floating bubble near the calibration switch while `温度标定` is still armed, without shifting the static document flow of the workbench content below it.
+
+![Calibration leave guard bubble](./assets/calibration-leave-guard-bubble.trimmed.png)
+
+`assets/calibration-rtd-sample-reference.trimmed.png` shows the RTD sample table rendering both the ADC-domain target (`1216mV`) and the persisted owner-entered physical reference (`183.6℃`) in the same target cell after capture, proving the UI no longer relies on reverse-derived placeholder temperatures.
+
+![Calibration RTD sample reference](./assets/calibration-rtd-sample-reference.trimmed.png)
 
 ## 风险 / 开放问题 / 假设
 

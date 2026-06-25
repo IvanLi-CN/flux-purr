@@ -4235,6 +4235,91 @@
     line-height: 1.2;
   }
 
+  .industrial-calibration-live-card__mode-control {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    min-width: fit-content;
+  }
+
+  .industrial-calibration-leave-guard-anchor {
+    position: absolute;
+    right: calc(100% + 0.65rem);
+    top: 50%;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+  }
+
+  .industrial-calibration-leave-guard {
+    position: fixed;
+    z-index: 80;
+    display: grid;
+    justify-items: start;
+    gap: 0.36rem;
+    width: min(18rem, calc(100vw - 2rem));
+    border: 1px solid rgba(82, 93, 113, 0.14);
+    border-radius: 18px;
+    background:
+      linear-gradient(150deg, rgba(250, 251, 253, 0.96), rgba(235, 239, 245, 0.92)),
+      rgba(241, 244, 248, 0.94);
+    box-shadow:
+      inset 1px 1px 0 rgba(255, 255, 255, 0.72),
+      8px 8px 18px rgba(163, 177, 198, 0.18),
+      -6px -6px 14px rgba(255, 255, 255, 0.64);
+    padding: 0.7rem 0.78rem;
+    pointer-events: auto;
+  }
+
+  .industrial-calibration-leave-guard__eyebrow {
+    color: rgba(78, 91, 110, 0.78);
+    font-size: 0.58rem;
+    font-weight: 760;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .industrial-calibration-leave-guard p {
+    margin: 0;
+    color: var(--industrial-text);
+    font-size: 0.72rem;
+    font-weight: 740;
+    line-height: 1.34;
+  }
+
+  .industrial-calibration-leave-guard__actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.36rem;
+    width: 100%;
+  }
+
+  .industrial-calibration-leave-guard .industrial-button {
+    min-height: 2rem;
+    padding-inline: 0.72rem;
+    font-size: 0.64rem;
+  }
+
+  .industrial-calibration-leave-guard[data-side="left"] {
+    transform-origin: right center;
+  }
+
+  .industrial-calibration-leave-guard[data-side="bottom"] {
+    transform-origin: top right;
+  }
+
+  .industrial-calibration-leave-guard[data-side="top"] {
+    transform-origin: bottom right;
+  }
+
+  @media (max-width: 860px) {
+    .industrial-calibration-live-card__title-row {
+      flex-wrap: wrap;
+    }
+  }
+
   .industrial-calibration-capability {
     display: inline-flex;
     align-items: center;
@@ -4937,6 +5022,23 @@
   .industrial-calibration-samples .industrial-button {
     justify-self: end;
     min-width: 4.8rem;
+  }
+
+  .industrial-calibration-sample-target {
+    display: grid;
+    gap: 0.08rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-sample-target small {
+    overflow: hidden;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.64rem;
+    font-weight: 760;
+    line-height: 1.15;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .industrial-calibration-empty {

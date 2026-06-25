@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DeviceMode, DeviceStatus, PdState,
-    frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey},
+    frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey, HeaterLockReason},
     memory::{
         ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationConfig,
         AdcCalibrationSample, HEATER_CURVE_MAX_POINTS, HeaterCurveConfig, HeaterCurvePoint,
@@ -142,6 +142,7 @@ pub struct ControlPlaneStatus {
     pub pps_capability_max_mv: Option<u16>,
     pub pps_capability_max_ma: Option<u16>,
     pub manual_pps_error: Option<String<ERROR_CODE_MAX_LEN>>,
+    pub heater_lock_reason: Option<String<ERROR_CODE_MAX_LEN>>,
     pub calibration: CalibrationRuntimeStateWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
@@ -191,10 +192,17 @@ impl ControlPlaneStatus {
             pps_capability_max_mv: None,
             pps_capability_max_ma: None,
             manual_pps_error: None,
+            heater_lock_reason: None,
             calibration: CalibrationRuntimeStateWire::default(),
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
         }
+    }
+}
+
+impl From<HeaterLockReason> for String<ERROR_CODE_MAX_LEN> {
+    fn from(value: HeaterLockReason) -> Self {
+        string(value.label())
     }
 }
 
@@ -487,11 +495,13 @@ impl CalibrationChannelWire {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationSampleWire {
     pub observed_mv: u16,
     pub expected_mv: u16,
+    pub reference_temp_c: Option<f32>,
+    pub reference_vin_mv: Option<u16>,
 }
 
 impl From<AdcCalibrationSample> for CalibrationSampleWire {
@@ -499,6 +509,8 @@ impl From<AdcCalibrationSample> for CalibrationSampleWire {
         Self {
             observed_mv: value.observed_mv,
             expected_mv: value.expected_mv,
+            reference_temp_c: value.reference_temp_deci_c.map(|value| value as f32 / 10.0),
+            reference_vin_mv: value.reference_vin_mv,
         }
     }
 }
@@ -508,11 +520,17 @@ impl From<CalibrationSampleWire> for AdcCalibrationSample {
         Self {
             observed_mv: value.observed_mv,
             expected_mv: value.expected_mv,
+            reference_temp_deci_c: value.reference_temp_c.map(|temp_c| {
+                (temp_c * 10.0)
+                    .round()
+                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+            }),
+            reference_vin_mv: value.reference_vin_mv,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationPackageWire {
     pub rtd_adc: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
@@ -1323,6 +1341,7 @@ mod tests {
         assert_eq!(status.network.state, NetworkState::Idle);
         assert_eq!(status.network.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(status.frontpanel_key, Some(FrontPanelKeyWire::Center));
+        assert_eq!(status.heater_lock_reason, None);
     }
 
     #[test]
@@ -1344,6 +1363,7 @@ mod tests {
 
         assert!(json.contains(r#""pdState":"fallback_5v""#));
         assert!(json.contains(r#""manualPpsEnabled":false"#));
+        assert!(json.contains(r#""heaterLockReason":null"#));
         assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
         assert!(!json.contains("fallback5v"));
     }
@@ -1385,6 +1405,8 @@ mod tests {
             let sample = AdcCalibrationSample {
                 observed_mv: 400 + index as u16 * 170,
                 expected_mv: 420 + index as u16 * 170,
+                reference_temp_deci_c: None,
+                reference_vin_mv: Some(420 + index as u16 * 170),
             };
             memory
                 .active_adc_calibration
