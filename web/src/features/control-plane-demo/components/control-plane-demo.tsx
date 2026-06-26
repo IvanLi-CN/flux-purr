@@ -4721,17 +4721,17 @@ function CalibrationView({
                       onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
                     />
                   </CalibrationWorkbenchCard>
-                  <section className="industrial-calibration-channel industrial-calibration-channel--samples industrial-calibration-channel--embedded">
-                    <CalibrationChannelSamples
-                      channel="rtd_adc"
-                      title="温度 ADC"
-                      samples={calibration.draft.rtdAdc}
-                      disabled={controlsBlocked}
-                      onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
-                    />
-                  </section>
                 </div>
               </div>
+              <section className="industrial-calibration-channel industrial-calibration-channel--samples">
+                <CalibrationChannelSamples
+                  channel="rtd_adc"
+                  title="温度 ADC"
+                  samples={calibration.draft.rtdAdc}
+                  disabled={controlsBlocked}
+                  onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
+                />
+              </section>
               {adcApplyToolbar}
             </section>
           </TabsContent>
@@ -4937,17 +4937,17 @@ function CalibrationView({
                       onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
                     />
                   </CalibrationWorkbenchCard>
-                  <section className="industrial-calibration-channel industrial-calibration-channel--samples industrial-calibration-channel--embedded">
-                    <CalibrationChannelSamples
-                      channel="vin_adc"
-                      title="电压 ADC"
-                      samples={calibration.draft.vinAdc}
-                      disabled={controlsBlocked}
-                      onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
-                    />
-                  </section>
                 </div>
               </div>
+              <section className="industrial-calibration-channel industrial-calibration-channel--samples">
+                <CalibrationChannelSamples
+                  channel="vin_adc"
+                  title="电压 ADC"
+                  samples={calibration.draft.vinAdc}
+                  disabled={controlsBlocked}
+                  onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
+                />
+              </section>
               {adcApplyToolbar}
             </section>
           </TabsContent>
