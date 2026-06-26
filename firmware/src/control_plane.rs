@@ -523,9 +523,12 @@ impl From<CalibrationSampleWire> for AdcCalibrationSample {
             observed_mv: value.observed_mv,
             expected_mv: value.expected_mv,
             reference_temp_deci_c: value.reference_temp_c.map(|temp_c| {
-                (temp_c * 10.0)
-                    .round()
-                    .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                let scaled = if temp_c >= 0.0 {
+                    temp_c * 10.0 + 0.5
+                } else {
+                    temp_c * 10.0 - 0.5
+                };
+                (scaled as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
             }),
             target_adc_mv: value.target_adc_mv,
             reference_vin_mv: value.reference_vin_mv,
@@ -738,6 +741,7 @@ fn samples_from_wire(
     out
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsbFrame {
     Hello {

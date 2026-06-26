@@ -1355,6 +1355,7 @@ impl Default for CalibrationHeaterCurveAutoJob {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CalibrationJobData {
     VinAdcAuto(CalibrationVinAutoJob),
@@ -3333,9 +3334,12 @@ fn usb_calibration_config_response(
                     observed_mv,
                     expected_mv,
                     reference_temp_deci_c: config.reference_temp_c.map(|temp_c| {
-                        (temp_c * 10.0)
-                            .round()
-                            .clamp(i16::MIN as f32, i16::MAX as f32) as i16
+                        let scaled = if temp_c >= 0.0 {
+                            temp_c * 10.0 + 0.5
+                        } else {
+                            temp_c * 10.0 - 0.5
+                        };
+                        (scaled as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
                     }),
                     target_adc_mv: config
                         .target_adc_mv
