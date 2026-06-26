@@ -4283,6 +4283,8 @@ function CalibrationView({
         },
       }
     : null
+  const leaveGuardForTab = (tab: CalibrationWorkspaceTab) =>
+    calibrationWorkspaceTab === tab ? leaveGuardViewModel : null
 
   const adcApplyToolbar = (
     <AdcCalibrationToolbar
@@ -4348,7 +4350,7 @@ function CalibrationView({
                         onDisable={() => onModeExit()}
                       />
                     }
-                    leaveGuard={leaveGuardViewModel}
+                    leaveGuard={leaveGuardForTab('heater_curve')}
                     capability={powerCapability}
                     voltageText={heaterPpsMvText}
                     onVoltageChange={setHeaterPpsMvText}
@@ -4533,7 +4535,7 @@ function CalibrationView({
                         onDisable={() => onModeExit()}
                       />
                     }
-                    leaveGuard={leaveGuardViewModel}
+                    leaveGuard={leaveGuardForTab('rtd_adc')}
                     capability={powerCapability}
                     voltageText={rtdPpsMvText}
                     onVoltageChange={setRtdPpsMvText}
@@ -4729,7 +4731,7 @@ function CalibrationView({
                         onDisable={() => onModeExit()}
                       />
                     }
-                    leaveGuard={leaveGuardViewModel}
+                    leaveGuard={leaveGuardForTab('vin_adc')}
                     capability={powerCapability}
                     voltageText={vinPpsMvText}
                     onVoltageChange={setVinPpsMvText}
