@@ -4945,6 +4945,8 @@ function CalibrationModeToggle({
   return (
     <Switch
       aria-label="标定模式"
+      size="industrial"
+      className="industrial-calibration-mode-switch"
       checked={active}
       disabled={disabled}
       onCheckedChange={(checked) => void (checked ? onEnable() : onDisable())}
@@ -4986,7 +4988,7 @@ function CalibrationLiveCard({
             }
           >
             <div className="industrial-calibration-live-card__title-main">
-              <h4>{title}</h4>
+              <h3>{title}</h3>
               {titleMeta ?? null}
             </div>
             {detail ? <p>{detail}</p> : null}
@@ -5105,8 +5107,8 @@ function CalibrationLeaveGuardBubble({
             ref={bubbleRef}
             className="industrial-calibration-leave-guard"
             data-side={bubbleSide}
-            role="alert"
-            aria-live="polite"
+            role="dialog"
+            aria-modal="false"
             style={bubbleStyle}
           >
             <div className="industrial-calibration-leave-guard__header">
