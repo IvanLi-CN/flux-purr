@@ -109,6 +109,7 @@ interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
   continueAction: () => void | Promise<void>
   nextView?: ConsoleView
   nextWorkspaceTab?: CalibrationWorkspaceTab
+  anchorId?: string
 }
 
 const LOG_FEED_SIZE = 1000
@@ -398,6 +399,20 @@ export function ControlPlaneDemo({
     () => [...activeScenario.devices, ...pendingDevices],
     [activeScenario.devices, pendingDevices]
   )
+  const preferredSelectedDeviceId = useMemo(() => {
+    if (!deviceOptions.some((device) => device.id === selectedDeviceId)) {
+      return activeScenario.selectedDeviceId
+    }
+
+    if (
+      selectedDeviceId === scenario.selectedDeviceId &&
+      activeScenario.selectedDeviceId !== scenario.selectedDeviceId
+    ) {
+      return activeScenario.selectedDeviceId
+    }
+
+    return selectedDeviceId
+  }, [activeScenario.selectedDeviceId, deviceOptions, scenario.selectedDeviceId, selectedDeviceId])
 
   useEffect(() => {
     if (pendingDeviceModeRef.current === allowDemoControls) {
@@ -422,11 +437,16 @@ export function ControlPlaneDemo({
 
   const selectedDevice = useMemo(
     () =>
-      deviceOptions.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions.find((device) => device.id === preferredSelectedDeviceId) ??
       deviceOptions.find((device) => device.id === activeScenario.selectedDeviceId) ??
       deviceOptions[0] ??
       activeScenario.devices[0],
-    [activeScenario.devices, activeScenario.selectedDeviceId, deviceOptions, selectedDeviceId]
+    [
+      activeScenario.devices,
+      activeScenario.selectedDeviceId,
+      deviceOptions,
+      preferredSelectedDeviceId,
+    ]
   )
 
   useEffect(() => {
@@ -448,16 +468,16 @@ export function ControlPlaneDemo({
       return
     }
 
-    const currentSelection = deviceOptions.find((device) => device.id === selectedDeviceId)
+    const currentSelection = deviceOptions.find((device) => device.id === preferredSelectedDeviceId)
     const shouldAdoptWebSerialTarget =
       !currentSelection ||
       isNoLiveTargetDevice(currentSelection) ||
       isPendingDeviceChoice(currentSelection)
 
-    if (shouldAdoptWebSerialTarget && selectedDeviceId !== webSerial.deviceId) {
+    if (shouldAdoptWebSerialTarget && preferredSelectedDeviceId !== webSerial.deviceId) {
       setSelectedDeviceId(webSerial.deviceId)
     }
-  }, [deviceOptions, selectedDeviceId, webSerial.deviceId, webSerial.state])
+  }, [deviceOptions, preferredSelectedDeviceId, webSerial.deviceId, webSerial.state])
 
   useEffect(() => {
     const nextSelectedDevice = activeScenario.devices.find(
@@ -3819,6 +3839,7 @@ function CalibrationModeControlPanel({
   title: string
   modeToggle?: ReactNode
   leaveGuard?: {
+    anchorId?: string
     nextLabel: string
     onDismiss: () => void
     onContinue: () => void
@@ -3840,9 +3861,11 @@ function CalibrationModeControlPanel({
     <CalibrationLiveCard
       title={title}
       modeToggle={modeToggle}
+      modeToggleAnchorId={leaveGuard ? 'calibration-mode-toggle-anchor' : undefined}
       modeToggleHint={
         leaveGuard ? (
           <CalibrationLeaveGuardBubble
+            anchorId="calibration-mode-toggle-anchor"
             nextLabel={leaveGuard.nextLabel}
             onDismiss={leaveGuard.onDismiss}
             onContinue={leaveGuard.onContinue}
@@ -4270,6 +4293,7 @@ function CalibrationView({
   const calibrationActionPending = (actionKey: string) => pendingCalibrationAction === actionKey
   const leaveGuardViewModel = calibrationLeaveGuard
     ? {
+        anchorId: calibrationLeaveGuard.anchorId,
         nextLabel: calibrationLeaveGuard.nextLabel,
         onDismiss: onCalibrationLeaveGuardDismiss,
         onContinue: async () => {
@@ -4320,13 +4344,13 @@ function CalibrationView({
             aria-label="Calibration tools"
           >
             <TabsTrigger value="heater_curve" className="industrial-calibration-tab">
-              加热曲线标定
+              <span>加热曲线标定</span>
             </TabsTrigger>
             <TabsTrigger value="rtd_adc" className="industrial-calibration-tab">
-              温度标定
+              <span>温度标定</span>
             </TabsTrigger>
             <TabsTrigger value="vin_adc" className="industrial-calibration-tab">
-              电压读数标定
+              <span>电压读数标定</span>
             </TabsTrigger>
           </TabsList>
 
@@ -4697,18 +4721,18 @@ function CalibrationView({
                       onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
                     />
                   </CalibrationWorkbenchCard>
+                  <section className="industrial-calibration-channel industrial-calibration-channel--samples industrial-calibration-channel--embedded">
+                    <CalibrationChannelSamples
+                      channel="rtd_adc"
+                      title="温度 ADC"
+                      samples={calibration.draft.rtdAdc}
+                      disabled={controlsBlocked}
+                      onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
+                    />
+                  </section>
                 </div>
               </div>
               {adcApplyToolbar}
-              <section className="industrial-calibration-channel industrial-calibration-channel--samples">
-                <CalibrationChannelSamples
-                  channel="rtd_adc"
-                  title="温度 ADC"
-                  samples={calibration.draft.rtdAdc}
-                  disabled={controlsBlocked}
-                  onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
-                />
-              </section>
             </section>
           </TabsContent>
           <TabsContent value="vin_adc" className="industrial-calibration-tabs__content">
@@ -4913,18 +4937,18 @@ function CalibrationView({
                       onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
                     />
                   </CalibrationWorkbenchCard>
+                  <section className="industrial-calibration-channel industrial-calibration-channel--samples industrial-calibration-channel--embedded">
+                    <CalibrationChannelSamples
+                      channel="vin_adc"
+                      title="电压 ADC"
+                      samples={calibration.draft.vinAdc}
+                      disabled={controlsBlocked}
+                      onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
+                    />
+                  </section>
                 </div>
               </div>
               {adcApplyToolbar}
-              <section className="industrial-calibration-channel industrial-calibration-channel--samples">
-                <CalibrationChannelSamples
-                  channel="vin_adc"
-                  title="电压 ADC"
-                  samples={calibration.draft.vinAdc}
-                  disabled={controlsBlocked}
-                  onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
-                />
-              </section>
             </section>
           </TabsContent>
         </Tabs>
@@ -4961,6 +4985,7 @@ function CalibrationLiveCard({
   detail,
   modeToggle,
   modeToggleHint,
+  modeToggleAnchorId,
   titleMeta,
   compact = false,
   children,
@@ -4969,6 +4994,7 @@ function CalibrationLiveCard({
   detail?: string
   modeToggle?: ReactNode
   modeToggleHint?: ReactNode
+  modeToggleAnchorId?: string
   titleMeta?: ReactNode
   compact?: boolean
   children: ReactNode
@@ -4996,8 +5022,15 @@ function CalibrationLiveCard({
             {detail ? <p>{detail}</p> : null}
           </div>
           <div className="industrial-calibration-live-card__mode-control">
+            {modeToggle ? (
+              <div
+                id={modeToggleAnchorId}
+                className="industrial-calibration-live-card__mode-toggle-anchor"
+              >
+                {modeToggle}
+              </div>
+            ) : null}
             {modeToggleHint ?? null}
-            {modeToggle ?? null}
           </div>
         </div>
       </div>
@@ -5007,27 +5040,30 @@ function CalibrationLiveCard({
 }
 
 function CalibrationLeaveGuardBubble({
+  anchorId,
   nextLabel,
   onDismiss,
   onContinue,
 }: {
+  anchorId?: string
   nextLabel: string
   onDismiss: () => void
   onContinue: () => void
 }) {
-  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const anchorRef = useRef<HTMLElement | null>(null)
   const bubbleRef = useRef<HTMLDivElement | null>(null)
   const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({ visibility: 'hidden' })
-  const [bubbleSide, setBubbleSide] = useState<'left' | 'bottom' | 'top'>('left')
+  const [bubbleSide, setBubbleSide] = useState<'bottom' | 'top'>('bottom')
 
   useLayoutEffect(() => {
-    const anchor = anchorRef.current
+    const anchor = (anchorId ? document.getElementById(anchorId) : null) ?? anchorRef.current
+    anchorRef.current = anchor
     if (!anchor) {
       return
     }
 
     let frameId = 0
-    const gap = 12
+    const gap = 10
     const viewportMargin = 16
 
     const updatePosition = () => {
@@ -5038,19 +5074,13 @@ function CalibrationLeaveGuardBubble({
 
       const anchorRect = anchor.getBoundingClientRect()
       const bubbleRect = bubble.getBoundingClientRect()
-      let nextSide: 'left' | 'bottom' | 'top' = 'left'
-      let left = anchorRect.left - bubbleRect.width - gap
-      let top = anchorRect.top + anchorRect.height / 2 - bubbleRect.height / 2
+      let nextSide: 'bottom' | 'top' = 'bottom'
+      let left = anchorRect.left + anchorRect.width / 2 - bubbleRect.width / 2
+      let top = anchorRect.bottom + gap
 
-      if (left < viewportMargin) {
-        nextSide = 'bottom'
-        left = anchorRect.right - bubbleRect.width
-        top = anchorRect.bottom + gap
-
-        if (top + bubbleRect.height > window.innerHeight - viewportMargin) {
-          nextSide = 'top'
-          top = anchorRect.top - bubbleRect.height - gap
-        }
+      if (top + bubbleRect.height > window.innerHeight - viewportMargin) {
+        nextSide = 'top'
+        top = anchorRect.top - bubbleRect.height - gap
       }
 
       left = Math.min(
@@ -5099,7 +5129,7 @@ function CalibrationLeaveGuardBubble({
       window.removeEventListener('resize', scheduleUpdate)
       window.removeEventListener('scroll', scheduleUpdate, true)
     }
-  }, [])
+  }, [anchorId])
 
   const bubble =
     typeof document === 'undefined'
@@ -5118,7 +5148,6 @@ function CalibrationLeaveGuardBubble({
                 <AlertTriangle size={12} strokeWidth={2.3} aria-hidden="true" />
                 <span>校准未关闭</span>
               </div>
-              <div className="industrial-calibration-leave-guard__eyebrow">切换前提醒</div>
             </div>
             <p>校准控制仍开着，先关闭后再切到“{nextLabel}”。</p>
             <div className="industrial-calibration-leave-guard__actions">

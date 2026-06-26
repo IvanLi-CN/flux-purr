@@ -306,41 +306,36 @@ export const DemoCalibrationTab: Story = {
 
         await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
 
-        const leaveGuardMessage = await portalCanvas.findByText(
-          '校准控制仍开着，先关闭后再切到“温度标定”。'
-        )
-        await expect(leaveGuardMessage).toBeVisible()
+        await waitFor(() => {
+          const leaveGuard = canvasElement.ownerDocument.body.querySelector(
+            '.industrial-calibration-leave-guard'
+          ) as HTMLElement | null
+          expect(leaveGuard).not.toBeNull()
+          expect(leaveGuard).toBeVisible()
+        })
+        const leaveGuard = canvasElement.ownerDocument.body.querySelector(
+          '.industrial-calibration-leave-guard'
+        ) as HTMLElement | null
+        const modeToggleAnchor = canvasElement.querySelector(
+          '#calibration-mode-toggle-anchor'
+        ) as HTMLElement | null
+        if (!leaveGuard || !modeToggleAnchor) {
+          throw new Error('Expected calibration leave guard and mode toggle to exist')
+        }
+        await expect(
+          await portalCanvas.findByText('校准控制仍开着，先关闭后再切到“温度标定”。')
+        ).toBeVisible()
         await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toHaveAttribute(
           'data-state',
           'active'
         )
-        const leaveGuard = canvasElement.ownerDocument.body.querySelector(
-          '.industrial-calibration-leave-guard'
-        ) as HTMLElement | null
-        const liveCard = canvasElement.querySelector(
-          '.industrial-calibration-live-card'
-        ) as HTMLElement | null
-        expect(leaveGuard).not.toBeNull()
-        expect(liveCard).not.toBeNull()
-        if (!leaveGuard || !liveCard) {
-          throw new Error('Expected calibration leave guard and live card to exist')
-        }
 
         const leaveGuardRect = leaveGuard.getBoundingClientRect()
-        const liveCardRect = liveCard.getBoundingClientRect()
-        const leaveGuardAnchor = canvasElement.querySelector(
-          '.industrial-calibration-leave-guard-anchor'
-        ) as HTMLElement | null
-        expect(leaveGuardAnchor).not.toBeNull()
-        if (!leaveGuardAnchor) {
-          throw new Error('Expected calibration leave guard anchor to exist')
-        }
-        expect(leaveGuardAnchor.offsetWidth).toBe(0)
-        expect(leaveGuardAnchor.offsetHeight).toBe(0)
-        expect(leaveGuardRect.left).toBeLessThanOrEqual(liveCardRect.right)
-        expect(leaveGuardRect.right).toBeGreaterThanOrEqual(liveCardRect.left)
-        expect(leaveGuardRect.bottom).toBeGreaterThanOrEqual(liveCardRect.top)
-        expect(leaveGuardRect.top).toBeLessThanOrEqual(liveCardRect.bottom)
+        const modeToggleRect = modeToggleAnchor.getBoundingClientRect()
+        expect(leaveGuardRect.top).toBeGreaterThanOrEqual(modeToggleRect.bottom - 72)
+        expect(leaveGuardRect.top).toBeLessThan(modeToggleRect.bottom + 88)
+        expect(leaveGuardRect.left).toBeLessThan(modeToggleRect.right + 40)
+        expect(leaveGuardRect.right).toBeGreaterThan(modeToggleRect.left - 40)
 
         await userEvent.click(await portalCanvas.findByRole('button', { name: '关闭并继续' }))
 
@@ -353,6 +348,38 @@ export const DemoCalibrationTab: Story = {
         )
       }
     )
+  },
+}
+
+export const DemoCalibrationLeaveGuard: Story = {
+  name: 'Demo / Calibration leave guard',
+  args: {
+    scenario: controlPlaneScenario,
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('tab', { name: '电压读数标定' }))
+    const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+    await userEvent.click(modeToggle)
+    await waitFor(() => {
+      expect(modeToggle).toHaveAttribute('aria-checked', 'true')
+    })
+    await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
+    await waitFor(() => {
+      const leaveGuard = canvasElement.ownerDocument.body.querySelector(
+        '.industrial-calibration-leave-guard'
+      ) as HTMLElement | null
+      expect(leaveGuard).not.toBeNull()
+      expect(leaveGuard).toBeVisible()
+    })
   },
 }
 

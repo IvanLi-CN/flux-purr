@@ -14,6 +14,7 @@ export interface CalibrationLeaveRequest {
   nextLabel: string
   nextView?: ConsoleView
   nextWorkspaceTab?: CalibrationWorkspaceTab
+  anchorId?: string
 }
 
 export function asCalibrationWorkbenchMode(mode: CalibrationMode): CalibrationWorkspaceTab | null {
