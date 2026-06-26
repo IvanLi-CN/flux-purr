@@ -115,6 +115,14 @@ interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
 const LOG_FEED_SIZE = 1000
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
+function parseCalibrationIntegerInput(rawValue: string) {
+  if (rawValue.trim() === '') {
+    return null
+  }
+  const next = Number(rawValue)
+  return Number.isFinite(next) ? Math.round(next) : null
+}
+
 const LOG_FILTER_OPTIONS: Array<{ value: LogFilter; label: string }> = [
   { value: 'all', label: '全部' },
   { value: 'info', label: '信息' },
@@ -1981,20 +1989,20 @@ export function ControlPlaneDemo({
 
   const handleCalibrationCapture = async (
     channel: CalibrationChannel,
-    options?: { targetAdcMv?: number }
+    options?: { referenceValue?: number; targetAdcMv?: number }
   ) => {
     const request =
       channel === 'rtd_adc'
         ? {
             op: 'capture' as const,
             channel,
-            referenceTempC: visibleCalibrationRefs.rtdTempC,
+            referenceTempC: options?.referenceValue ?? visibleCalibrationRefs.rtdTempC,
             targetAdcMv: options?.targetAdcMv,
           }
         : {
             op: 'capture' as const,
             channel,
-            referenceVinMv: visibleCalibrationRefs.vinMv,
+            referenceVinMv: options?.referenceValue ?? visibleCalibrationRefs.vinMv,
           }
     try {
       await updateCalibrationDraft(request)
@@ -3190,7 +3198,7 @@ function ViewPanel({
   onCalibrationReferenceChange: (channel: CalibrationChannel, value: number) => void
   onCalibrationCapture: (
     channel: CalibrationChannel,
-    options?: { targetAdcMv?: number }
+    options?: { referenceValue?: number; targetAdcMv?: number }
   ) => void | Promise<void>
   onCalibrationDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onCalibrationClear: (channel: CalibrationChannel) => void | Promise<void>
@@ -4059,7 +4067,7 @@ function CalibrationView({
   onReferenceChange: (channel: CalibrationChannel, value: number) => void
   onCapture: (
     channel: CalibrationChannel,
-    options?: { targetAdcMv?: number }
+    options?: { referenceValue?: number; targetAdcMv?: number }
   ) => void | Promise<void>
   onDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onClear: (channel: CalibrationChannel) => void | Promise<void>
@@ -4092,6 +4100,8 @@ function CalibrationView({
   const [rtdPpsMvText, setRtdPpsMvText] = useState('')
   const [rtdTargetAdcText, setRtdTargetAdcText] = useState('')
   const [heaterPpsMvText, setHeaterPpsMvText] = useState('')
+  const latestRefsRef = useRef(refs)
+  const latestRtdTargetAdcTextRef = useRef(rtdTargetAdcText)
   const [pendingCalibrationAction, setPendingCalibrationAction] = useState<string | null>(null)
   const lastRtdDraftDeviceIdRef = useRef<string | null>(null)
   const lastLiveRtdTargetAdcMvRef = useRef<number | null>(null)
@@ -4174,33 +4184,33 @@ function CalibrationView({
     )
   }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
 
-  const parseIntegerInput = (rawValue: string) => {
-    if (rawValue.trim() === '') {
-      return null
-    }
-    const next = Number(rawValue)
-    return Number.isFinite(next) ? Math.round(next) : null
-  }
+  useEffect(() => {
+    latestRefsRef.current = refs
+  }, [refs])
+
+  useEffect(() => {
+    latestRtdTargetAdcTextRef.current = rtdTargetAdcText
+  }, [rtdTargetAdcText])
 
   const currentModeError = runtimeCalibration.error ?? null
   const currentJob = runtimeCalibration.job
   const jobRunning = currentJob.status === 'running'
   const actionLockTimerRef = useRef<number | null>(null)
 
-  const vinPpsMv = parseIntegerInput(vinPpsMvText)
+  const vinPpsMv = parseCalibrationIntegerInput(vinPpsMvText)
   const vinPpsError =
     vinPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, vinPpsMv)
   const vinCanSubmitPps = hasPpsCapability && vinPpsError == null
 
-  const rtdPpsMv = parseIntegerInput(rtdPpsMvText)
-  const rtdTargetAdcMv = parseIntegerInput(rtdTargetAdcText)
+  const rtdPpsMv = parseCalibrationIntegerInput(rtdPpsMvText)
+  const rtdTargetAdcMv = parseCalibrationIntegerInput(rtdTargetAdcText)
   const rtdPpsError =
     rtdPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, rtdPpsMv)
   const rtdTargetError =
     rtdTargetAdcMv == null || rtdTargetAdcMv < 0 ? '目标 ADC 必须是非负毫伏值。' : null
   const rtdCanSubmitRuntime = hasPpsCapability && rtdPpsError == null && rtdTargetError == null
 
-  const heaterPpsMv = parseIntegerInput(heaterPpsMvText)
+  const heaterPpsMv = parseCalibrationIntegerInput(heaterPpsMvText)
   const heaterPpsError =
     heaterPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, heaterPpsMv)
   const heaterCanSubmitPps = hasPpsCapability && heaterPpsError == null
@@ -4268,6 +4278,11 @@ function CalibrationView({
     runtimeCalibration.ppsEnabled,
     runtimeCalibration.targetAdcMv,
   ])
+
+  const currentRtdTargetAdcMv = useCallback(() => {
+    const parsed = parseCalibrationIntegerInput(latestRtdTargetAdcTextRef.current)
+    return parsed ?? runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv ?? undefined
+  }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
 
   const runCalibrationAction = useCallback(
     async (actionKey: string, action: () => void | Promise<void>) => {
@@ -4549,11 +4564,7 @@ function CalibrationView({
                             mode: 'rtd_adc',
                             ppsEnabled: false,
                             heaterEnabled: false,
-                            targetAdcMv:
-                              rtdTargetAdcMv ??
-                              runtimeCalibration.targetAdcMv ??
-                              device.rtdRawAdcMv ??
-                              undefined,
+                            targetAdcMv: currentRtdTargetAdcMv(),
                           })
                         }
                         onDisable={() => onModeExit()}
@@ -4599,7 +4610,7 @@ function CalibrationView({
                                         mode: 'rtd_adc',
                                         ppsEnabled: true,
                                         ppsMv: rtdPpsMv ?? undefined,
-                                        targetAdcMv: rtdTargetAdcMv ?? undefined,
+                                        targetAdcMv: currentRtdTargetAdcMv(),
                                       },
                                   runtimeCalibration.ppsEnabled
                                     ? '温度保持停止失败。'
@@ -4708,13 +4719,10 @@ function CalibrationView({
                       samples={calibration.draft.rtdAdc}
                       disabled={controlsBlocked}
                       onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
-                      onCapture={() =>
+                      onCapture={(referenceValue) =>
                         onCapture('rtd_adc', {
-                          targetAdcMv:
-                            rtdTargetAdcMv ??
-                            runtimeCalibration.targetAdcMv ??
-                            device.rtdRawAdcMv ??
-                            undefined,
+                          referenceValue,
+                          targetAdcMv: currentRtdTargetAdcMv(),
                         })
                       }
                       onClear={() => onClear('rtd_adc')}
@@ -4932,7 +4940,11 @@ function CalibrationView({
                       samples={calibration.draft.vinAdc}
                       disabled={controlsBlocked}
                       onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
-                      onCapture={() => onCapture('vin_adc')}
+                      onCapture={(referenceValue) =>
+                        onCapture('vin_adc', {
+                          referenceValue,
+                        })
+                      }
                       onClear={() => onClear('vin_adc')}
                       onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
                     />
@@ -5588,12 +5600,13 @@ function CalibrationChannelControls({
   samples: Array<RtdCalibrationSample | VinCalibrationSample | null>
   disabled?: boolean
   onReferenceChange: (value: number) => void
-  onCapture: () => void | Promise<void>
+  onCapture: (referenceValue: number) => void | Promise<void>
   onClear: () => void | Promise<void>
   onManualFit: (gain: number, offsetMv: number) => void | Promise<void>
 }) {
   const [manualGain, setManualGain] = useState(() => draftFit.gain.toFixed(5))
   const [manualOffsetMv, setManualOffsetMv] = useState(() => draftFit.offsetMv.toFixed(1))
+  const referenceInputRef = useRef<HTMLInputElement | null>(null)
   const sampleCount = samples.filter(Boolean).length
 
   useEffect(() => {
@@ -5658,6 +5671,7 @@ function CalibrationChannelControls({
               aria-label={referenceLabel}
               disabled={disabled}
               value={Number.isFinite(referenceValue) ? referenceValue : 0}
+              ref={referenceInputRef}
               onChange={(event) => onReferenceChange(Number(event.currentTarget.value))}
             />
             <small>{referenceUnit}</small>
@@ -5667,7 +5681,7 @@ function CalibrationChannelControls({
           type="button"
           className="industrial-button industrial-button--secondary"
           disabled={disabled}
-          onClick={onCapture}
+          onClick={() => onCapture(Number(referenceInputRef.current?.value ?? referenceValue ?? 0))}
         >
           采集样本
         </button>
