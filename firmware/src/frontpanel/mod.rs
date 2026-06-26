@@ -472,6 +472,16 @@ impl FrontPanelInputController {
 
         result
     }
+
+    pub fn clear_pending_short_press(&mut self, raw_key: RawFrontPanelKey) {
+        let tracker = &mut self.trackers[raw_key.index()];
+        tracker.raw_pressed = false;
+        tracker.stable_pressed = false;
+        tracker.press_started_ms = None;
+        tracker.long_fired = false;
+        tracker.next_repeat_ms = None;
+        tracker.pending_short_release_ms = None;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1340,6 +1350,57 @@ mod tests {
         assert_eq!(long_events.len(), 1);
         assert_eq!(long_events[0].key, FrontPanelKey::Center);
         assert_eq!(long_events[0].gesture, KeyGesture::LongPress);
+    }
+
+    #[test]
+    fn clearing_pending_center_short_press_prevents_late_dashboard_toggle() {
+        let dashboard_capabilities =
+            FrontPanelUiState::new(FrontPanelRuntimeMode::App).gesture_capabilities();
+        let mut controller = FrontPanelInputController::default();
+
+        assert!(
+            controller
+                .sample_with_capabilities(0, raw_state(&[]), dashboard_capabilities)
+                .events
+                .is_empty()
+        );
+        assert!(
+            controller
+                .sample_with_capabilities(
+                    10,
+                    raw_state(&[RawFrontPanelKey::CenterBoot]),
+                    dashboard_capabilities
+                )
+                .events
+                .is_empty()
+        );
+        assert!(
+            controller
+                .sample_with_capabilities(
+                    40,
+                    raw_state(&[RawFrontPanelKey::CenterBoot]),
+                    dashboard_capabilities
+                )
+                .events
+                .is_empty()
+        );
+        assert!(
+            controller
+                .sample_with_capabilities(50, raw_state(&[]), dashboard_capabilities)
+                .events
+                .is_empty()
+        );
+
+        controller.clear_pending_short_press(RawFrontPanelKey::CenterBoot);
+        let events =
+            controller.sample_with_capabilities(330, raw_state(&[]), dashboard_capabilities);
+        assert!(events.events.is_empty());
+        let events =
+            controller.sample_with_capabilities(590, raw_state(&[]), dashboard_capabilities);
+        assert!(
+            events.events.is_empty(),
+            "cleared center press should not reappear after the double-click window"
+        );
     }
 
     #[test]

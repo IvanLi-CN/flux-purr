@@ -138,12 +138,17 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toBeVisible()
       await expect(await canvas.findByRole('table', { name: '加热曲线点表' })).toBeVisible()
-      await expect(await canvas.findByText(/0\/8 已生效/i)).toBeVisible()
+      const statusCard = await canvas.findByRole('heading', { name: '状态' })
+      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
+      expect(statusCardRoot).not.toBeNull()
+      await expect(within(statusCardRoot).findByText('EEPROM')).resolves.toBeVisible()
+      await expect(within(statusCardRoot).findByText('0/8')).resolves.toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '运行时追踪' })).toBeVisible()
       await expect(await canvas.findByText(/\d+ \/ \d+ 帧/)).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '导入预览' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
-      await expect(await canvas.findByText('未加载预览')).toBeVisible()
+      await expect(within(statusCardRoot).findByText('预览')).resolves.toBeVisible()
+      await expect(within(statusCardRoot).findByText('无')).resolves.toBeVisible()
       const heaterCurveTable = await canvas.findByRole('table', { name: '加热曲线点表' })
       expect(heaterCurveTable.scrollWidth).toBeLessThanOrEqual(heaterCurveTable.clientWidth + 1)
     })
@@ -204,6 +209,12 @@ export const DemoCalibrationTab: Story = {
         ).map((button) => button.textContent?.trim())
         expect(actionButtons).toEqual(['申请 PPS', '开启加热'])
         await expect(await canvas.findByRole('heading', { name: '温度 ADC' })).toBeVisible()
+        const targetAdcInput = await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })
+        const referenceTempInput = await canvas.findByRole('spinbutton', { name: '参考温度' })
+        await userEvent.clear(targetAdcInput)
+        await userEvent.type(targetAdcInput, '970')
+        await userEvent.clear(referenceTempInput)
+        await userEvent.type(referenceTempInput, '21.6')
         await userEvent.click((await canvas.findAllByRole('button', { name: '采集样本' }))[0])
         await waitFor(() => {
           expect(canvas.getAllByText(/已采集 .* 样本|captured .* sample/i).length).toBeGreaterThan(
@@ -211,6 +222,16 @@ export const DemoCalibrationTab: Story = {
           )
         })
         await expect(await canvas.findByText(/1\/8 个样本/i)).toBeVisible()
+        const rtdSampleTable = await canvas.findByRole('table', { name: '温度 ADC 样本' })
+        expect(within(rtdSampleTable).getAllByText('ADC 电压').length).toBeGreaterThanOrEqual(1)
+        expect(within(rtdSampleTable).getAllByText('温度').length).toBeGreaterThanOrEqual(1)
+        await expect(within(rtdSampleTable).getByText('21.6℃')).toBeVisible()
+        await expect(within(rtdSampleTable).getByText('970mV')).toBeVisible()
+        await userEvent.click((await canvas.findAllByRole('button', { name: '采集样本' }))[0])
+        await waitFor(() => {
+          expect(within(rtdSampleTable).getAllByText('970mV').length).toBeGreaterThanOrEqual(2)
+        })
+        await expect(within(rtdSampleTable).getAllByText('21.6℃').length).toBeGreaterThanOrEqual(2)
         await userEvent.click(await canvas.findByRole('tab', { name: '电压读数标定' }))
         await expect(await canvas.findByRole('heading', { name: '电压 ADC' })).toBeVisible()
         await expect(await canvas.findByRole('slider', { name: 'PPS 电压滑块' })).toBeVisible()
@@ -273,6 +294,65 @@ export const DemoCalibrationTab: Story = {
         expect(startAutoButton).toBeDisabled()
       })
     })
+
+    await step(
+      'armed calibration mode blocks page-internal tab switching until closed',
+      async () => {
+        const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+        const portalCanvas = within(canvasElement.ownerDocument.body)
+        await waitFor(() => {
+          expect(modeToggle).toHaveAttribute('aria-checked', 'true')
+        })
+
+        await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
+
+        const leaveGuardMessage = await portalCanvas.findByText(
+          '校准控制仍开着，先关闭后再切到“温度标定”。'
+        )
+        await expect(leaveGuardMessage).toBeVisible()
+        await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toHaveAttribute(
+          'data-state',
+          'active'
+        )
+        const leaveGuard = canvasElement.ownerDocument.body.querySelector(
+          '.industrial-calibration-leave-guard'
+        ) as HTMLElement | null
+        const liveCard = canvasElement.querySelector(
+          '.industrial-calibration-live-card'
+        ) as HTMLElement | null
+        expect(leaveGuard).not.toBeNull()
+        expect(liveCard).not.toBeNull()
+        if (!leaveGuard || !liveCard) {
+          throw new Error('Expected calibration leave guard and live card to exist')
+        }
+
+        const leaveGuardRect = leaveGuard.getBoundingClientRect()
+        const liveCardRect = liveCard.getBoundingClientRect()
+        const leaveGuardAnchor = canvasElement.querySelector(
+          '.industrial-calibration-leave-guard-anchor'
+        ) as HTMLElement | null
+        expect(leaveGuardAnchor).not.toBeNull()
+        if (!leaveGuardAnchor) {
+          throw new Error('Expected calibration leave guard anchor to exist')
+        }
+        expect(leaveGuardAnchor.offsetWidth).toBe(0)
+        expect(leaveGuardAnchor.offsetHeight).toBe(0)
+        expect(leaveGuardRect.left).toBeLessThanOrEqual(liveCardRect.right)
+        expect(leaveGuardRect.right).toBeGreaterThanOrEqual(liveCardRect.left)
+        expect(leaveGuardRect.bottom).toBeGreaterThanOrEqual(liveCardRect.top)
+        expect(leaveGuardRect.top).toBeLessThanOrEqual(liveCardRect.bottom)
+
+        await userEvent.click(await portalCanvas.findByRole('button', { name: '关闭并继续' }))
+
+        await waitFor(() => {
+          expect(modeToggle).toHaveAttribute('aria-checked', 'false')
+        })
+        await expect(await canvas.findByRole('tab', { name: '温度标定' })).toHaveAttribute(
+          'data-state',
+          'active'
+        )
+      }
+    )
   },
 }
 
@@ -329,15 +409,24 @@ export const DemoCalibrationHeaterCurvePreview: Story = {
 
     await step('shows a previewed heater curve', async () => {
       await expect(await canvas.findByRole('table', { name: '加热曲线点表' })).toBeVisible()
-      await expect(await canvas.findByText(/8\/8 预览/i)).toBeVisible()
+      const statusCard = await canvas.findByRole('heading', { name: '状态' })
+      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
+      expect(statusCardRoot).not.toBeNull()
+      await expect(within(statusCardRoot).findByText('预览')).resolves.toBeVisible()
+      await waitFor(() => {
+        expect(within(statusCardRoot).getAllByText('8/8').length).toBeGreaterThanOrEqual(2)
+      })
       await expect(await canvas.findByRole('columnheader', { name: '预览温度' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeEnabled()
     })
 
     await step('save promotes preview to active curve', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: '保存曲线' }))
+      const statusCard = await canvas.findByRole('heading', { name: '状态' })
+      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
+      expect(statusCardRoot).not.toBeNull()
       await waitFor(() => {
-        expect(canvas.getByText('未加载预览')).toBeVisible()
+        expect(within(statusCardRoot).getByText('无')).toBeVisible()
       })
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
       await expect(canvas.getByRole('table', { name: '加热曲线点表' })).toBeVisible()
@@ -711,6 +800,141 @@ export const LiveQuickAddBridgeDevice: Story = {
   },
 }
 
+export const LiveWebSerialTemperatureCalibrationTargetHolds: Story = {
+  name: 'Live / Temperature calibration target holds while live polling',
+  args: {
+    scenario: liveControlPlaneScenario,
+    initialView: 'calibration',
+    allowDemoControls: false,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: true,
+      clientFactory: () =>
+        new FakeWebSerialClient(
+          {
+            calibration: {
+              ...idleCalibrationRuntime,
+              mode: 'rtd_adc',
+              targetAdcMv: null,
+            },
+            rtdRawAdcMv: 913,
+            targetTempC: 260,
+          },
+          {
+            mutateOnProbe: (currentStatus) => ({
+              ...currentStatus,
+              rtdRawAdcMv: (currentStatus.rtdRawAdcMv ?? 913) + 1,
+            }),
+          }
+        ) as unknown as WebSerialControlPlaneClient,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    webSerialRuntimeWrites.length = 0
+
+    await step('connects the live Web Serial target from calibration flow', async () => {
+      await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await waitFor(() => {
+        expect(canvas.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      })
+      await userEvent.click(await canvas.findByRole('button', { name: '校准' }))
+      await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
+    })
+
+    await step('keeps the drafted target ADC across live polling', async () => {
+      const targetAdcInput = await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })
+      await expect(targetAdcInput).toHaveValue(913)
+
+      await userEvent.clear(targetAdcInput)
+      await userEvent.type(targetAdcInput, '950')
+      await verifyStoryDelay(1_300)
+
+      await waitFor(() => {
+        expect(canvas.getByRole('spinbutton', { name: '目标 ADC 输入' })).toHaveValue(950)
+      })
+    })
+  },
+}
+
+export const LiveHeaterSafetyLockFeedback: Story = {
+  name: 'Live / Heater safety lock feedback',
+  args: {
+    scenario: {
+      ...liveControlPlaneScenario,
+      selectedDeviceId: 'serial-heater-lock',
+      devices: [
+        {
+          id: 'serial-heater-lock',
+          alias: 'Authorized USB target',
+          location: '/dev/cu.usbmodem21231401',
+          transport: 'devd',
+          severity: 'nominal',
+          baseUrl: 'devd://serial-heater-lock',
+          firmware: '0.1.0',
+          buildId: 'story-devd',
+          uptime: '00:09:12',
+          boardTempC: 92.4,
+          currentTempC: 214.8,
+          targetTempC: 220,
+          rtdRawAdcMv: 1498,
+          vinRawAdcMv: 2760,
+          voltageMv: 20_100,
+          currentMa: 840,
+          pdRequestMv: 20_000,
+          pdContractMv: 20_000,
+          pdState: 'ready',
+          manualPpsEnabled: false,
+          manualPpsMv: null,
+          manualPpsMa: null,
+          ppsCapabilityMinMv: 5_000,
+          ppsCapabilityMaxMv: 21_000,
+          ppsCapabilityMaxMa: 3_000,
+          manualPpsError: null,
+          heaterLockReason: 'cooling-disabled-overtemp',
+          calibration: idleCalibrationRuntime,
+          heaterEnabled: false,
+          heaterOutputPercent: 0,
+          activeCoolingEnabled: false,
+          fanState: 'OFF',
+          wifiRssi: null,
+          capabilities: ['identity', 'status', 'monitor'],
+          networkState: 'idle',
+          leaseState: 'active',
+          leaseId: 'story-lease-lock',
+        },
+      ],
+    },
+    initialView: 'dashboard',
+    allowDemoControls: false,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step(
+      'shows a concrete heater safety lock reason instead of a generic disconnect',
+      async () => {
+        await expect(await canvas.findByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+        await expect(await canvas.findByText('加热安全锁已触发')).toBeVisible()
+        await expect(await canvas.findByText('locked')).toBeVisible()
+        await expect(
+          await canvas.findAllByText('热板温度过高且主动散热已关闭，安全锁已关闭加热。')
+        ).toHaveLength(3)
+        await expect(canvas.queryByText('硬件连接受阻')).not.toBeInTheDocument()
+      }
+    )
+  },
+}
+
 function createCalibrationDenseScenario(): ControlPlaneScenario {
   const longTraceDetail =
     'calibration_config response payload includes active and draft ADC fits, eight persisted sample slots, raw observed millivolts, reference targets, and operator feedback metadata for the current lease'
@@ -733,11 +957,39 @@ function createCalibrationDenseScenario(): ControlPlaneScenario {
   }
 }
 
+type FakeWebSerialClientOptions = {
+  mutateOnProbe?: (currentStatus: ControlPlaneStatus) => ControlPlaneStatus
+}
+
 class FakeWebSerialClient {
-  private currentStatus: ControlPlaneStatus = status
+  private currentStatus: ControlPlaneStatus
   private heaterCurve: HeaterCurveState = {
     active: heaterCurveStoryPackage,
     preview: null,
+  }
+  private readonly options: FakeWebSerialClientOptions
+
+  constructor(
+    initialStatus: Partial<ControlPlaneStatus> = {},
+    options: FakeWebSerialClientOptions = {}
+  ) {
+    this.options = options
+    this.currentStatus = {
+      ...status,
+      ...initialStatus,
+      calibration: {
+        ...status.calibration,
+        ...initialStatus.calibration,
+        job: {
+          ...status.calibration.job,
+          ...initialStatus.calibration?.job,
+        },
+      },
+      network: {
+        ...status.network,
+        ...initialStatus.network,
+      },
+    }
   }
 
   connect() {
@@ -745,6 +997,9 @@ class FakeWebSerialClient {
   }
 
   probe() {
+    if (this.options.mutateOnProbe) {
+      this.currentStatus = this.options.mutateOnProbe(this.currentStatus)
+    }
     return Promise.resolve({ ...webSerialProbe, status: this.currentStatus })
   }
 
@@ -875,6 +1130,7 @@ const status = {
   ppsCapabilityMaxMv: 21_000,
   ppsCapabilityMaxMa: 3_000,
   manualPpsError: null,
+  heaterLockReason: null,
   calibration: idleCalibrationRuntime,
   frontpanelKey: null,
   network,
@@ -919,6 +1175,7 @@ function createKnownDeviceSelectionScenario() {
         ppsCapabilityMaxMv: 21_000,
         ppsCapabilityMaxMa: 3_000,
         manualPpsError: null,
+        heaterLockReason: null,
         calibration: idleCalibrationRuntime,
         heaterEnabled: false,
         heaterOutputPercent: 0,
@@ -957,6 +1214,7 @@ function createKnownDeviceSelectionScenario() {
         ppsCapabilityMaxMv: 21_000,
         ppsCapabilityMaxMa: 3_000,
         manualPpsError: null,
+        heaterLockReason: null,
         calibration: idleCalibrationRuntime,
         heaterEnabled: false,
         heaterOutputPercent: 0,
@@ -969,4 +1227,8 @@ function createKnownDeviceSelectionScenario() {
       },
     ],
   } satisfies ControlPlaneScenario
+}
+
+async function verifyStoryDelay(timeoutMs: number) {
+  await new Promise((resolve) => window.setTimeout(resolve, timeoutMs))
 }

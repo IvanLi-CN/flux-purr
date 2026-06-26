@@ -34,6 +34,8 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
+pub const DEVICE_LIST_EVENT_LIMIT: usize = 24;
+pub const DEVICE_EVENT_REPLAY_LIMIT: usize = 120;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
@@ -696,14 +698,17 @@ pub enum CalibrationChannel {
     VinAdc,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationSample {
     pub observed_mv: u16,
     pub expected_mv: u16,
+    pub reference_temp_c: Option<f32>,
+    pub target_adc_mv: Option<u16>,
+    pub reference_vin_mv: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationPackage {
     pub rtd_adc: Vec<Option<CalibrationSample>>,
@@ -885,20 +890,32 @@ fn default_calibration_samples(channel: CalibrationChannel) -> [CalibrationSampl
             CalibrationSample {
                 observed_mv: 0,
                 expected_mv: 0,
+                reference_temp_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
             CalibrationSample {
                 observed_mv: RTD_DEFAULT_HIGH_MV,
                 expected_mv: RTD_DEFAULT_HIGH_MV,
+                reference_temp_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
         ],
         CalibrationChannel::VinAdc => [
             CalibrationSample {
                 observed_mv: 0,
                 expected_mv: 0,
+                reference_temp_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
             CalibrationSample {
                 observed_mv: VIN_DEFAULT_HIGH_MV,
                 expected_mv: VIN_DEFAULT_HIGH_MV,
+                reference_temp_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
         ],
     }
@@ -1013,6 +1030,7 @@ pub struct CalibrationConfigRequest {
     pub channel: Option<CalibrationChannel>,
     pub reference_temp_c: Option<f32>,
     pub reference_vin_mv: Option<u32>,
+    pub target_adc_mv: Option<u16>,
     pub observed_mv: Option<u16>,
     pub expected_mv: Option<u16>,
     pub sample_index: Option<usize>,
@@ -1144,6 +1162,8 @@ struct UsbCalibrationConfigWire<'a> {
     reference_temp_c: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reference_vin_mv: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_adc_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     observed_mv: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1468,7 +1488,13 @@ async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
     let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
     let mut state_lock = state.lock()?;
     refresh_serial_devices(&mut state_lock, serial_devices);
-    let devices = state_lock.devices.values().cloned().collect::<Vec<_>>();
+    let devices = state_lock
+        .devices
+        .values()
+        .cloned()
+        .map(trim_device_record_for_list)
+        .map(device_list_payload)
+        .collect::<Vec<_>>();
     Ok(Json(json!({ "devices": devices })))
 }
 
@@ -2082,7 +2108,54 @@ fn device_event_backlog(state: &AppState, device_id: &str) -> Result<Vec<DevdEve
         .get(device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
 
-    Ok(device.events.iter().cloned().collect())
+    Ok(device
+        .events
+        .iter()
+        .rev()
+        .take(DEVICE_EVENT_REPLAY_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect())
+}
+
+fn trim_device_record_for_list(mut device: DeviceRecord) -> DeviceRecord {
+    device.events = device
+        .events
+        .iter()
+        .rev()
+        .take(DEVICE_LIST_EVENT_LIMIT)
+        .cloned()
+        .map(summarize_device_list_event)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    device
+}
+
+fn summarize_device_list_event(mut event: DevdEvent) -> DevdEvent {
+    if event.kind == "transport" {
+        if let Some(payload) = event.payload.as_object_mut() {
+            payload.remove("frame");
+        }
+    }
+    event
+}
+
+fn device_list_payload(device: DeviceRecord) -> Value {
+    json!({
+        "id": device.id,
+        "displayName": device.display_name,
+        "portPath": device.port_path,
+        "transport": device.transport,
+        "connection": device.connection,
+        "identity": device.identity,
+        "network": device.network,
+        "status": device.status,
+        "events": device.events,
+    })
 }
 
 fn devd_event_to_sse(event: DevdEvent) -> Event {
@@ -2453,6 +2526,16 @@ fn apply_mock_calibration_config(
             *slot = Some(CalibrationSample {
                 observed_mv,
                 expected_mv,
+                reference_temp_c: payload
+                    .reference_temp_c
+                    .filter(|_| channel == CalibrationChannel::RtdAdc),
+                target_adc_mv: payload
+                    .target_adc_mv
+                    .filter(|_| channel == CalibrationChannel::RtdAdc),
+                reference_vin_mv: payload
+                    .reference_vin_mv
+                    .and_then(|millivolts| u16::try_from(millivolts).ok())
+                    .filter(|_| channel == CalibrationChannel::VinAdc),
             });
         }
         CalibrationConfigOp::Delete => {
@@ -2515,6 +2598,22 @@ fn compact_calibration_samples(samples: &mut Vec<Option<CalibrationSample>>) {
     *samples = compacted;
 }
 
+fn normalize_calibration_sample(
+    sample: CalibrationSample,
+    channel: CalibrationChannel,
+) -> CalibrationSample {
+    match channel {
+        CalibrationChannel::RtdAdc => CalibrationSample {
+            reference_vin_mv: None,
+            ..sample
+        },
+        CalibrationChannel::VinAdc => CalibrationSample {
+            reference_temp_c: None,
+            ..sample
+        },
+    }
+}
+
 fn validate_calibration_package(package: &CalibrationPackage) -> Result<(), HttpError> {
     if package.rtd_adc.len() > ADC_CALIBRATION_MAX_SAMPLES
         || package.vin_adc.len() > ADC_CALIBRATION_MAX_SAMPLES
@@ -2528,6 +2627,20 @@ fn validate_calibration_package(package: &CalibrationPackage) -> Result<(), Http
 }
 
 fn normalize_calibration_package(mut package: CalibrationPackage) -> CalibrationPackage {
+    package.rtd_adc = package
+        .rtd_adc
+        .into_iter()
+        .map(|sample| {
+            sample.map(|sample| normalize_calibration_sample(sample, CalibrationChannel::RtdAdc))
+        })
+        .collect();
+    package.vin_adc = package
+        .vin_adc
+        .into_iter()
+        .map(|sample| {
+            sample.map(|sample| normalize_calibration_sample(sample, CalibrationChannel::VinAdc))
+        })
+        .collect();
     compact_calibration_samples(&mut package.rtd_adc);
     compact_calibration_samples(&mut package.vin_adc);
     package
@@ -2822,6 +2935,7 @@ async fn serial_calibration_config(
         channel: payload.channel,
         reference_temp_c: payload.reference_temp_c,
         reference_vin_mv: payload.reference_vin_mv,
+        target_adc_mv: payload.target_adc_mv,
         observed_mv: payload.observed_mv,
         expected_mv: payload.expected_mv,
         sample_index: payload.sample_index,
@@ -2977,8 +3091,14 @@ async fn serial_exchange(
     let _serial_rpc = state.serial_rpc.lock().await;
     let serial_sessions = state.serial_sessions.clone();
     let worker_request_id = request_id.clone();
+    let worker_device_id = device_id.to_string();
+    let worker_events = state.events.clone();
+    let worker_inner = state.inner.clone();
     let result = tokio::task::spawn_blocking(move || {
         serial_exchange_blocking(
+            &worker_inner,
+            &worker_events,
+            &worker_device_id,
             &serial_sessions,
             &port_path,
             &worker_request_id,
@@ -3058,6 +3178,9 @@ where
 }
 
 fn serial_exchange_blocking(
+    state: &Arc<Mutex<DevdState>>,
+    events: &broadcast::Sender<DevdEvent>,
+    device_id: &str,
     serial_sessions: &Arc<Mutex<SerialSessionMap>>,
     port_path: &str,
     request_id: &str,
@@ -3087,6 +3210,7 @@ fn serial_exchange_blocking(
             Ok(read) => {
                 for byte in &read_buf[..read] {
                     if *byte == b'\n' {
+                        emit_serial_log_line(state, events, device_id, &line);
                         match decode_usb_response_line(&line, request_id) {
                             Ok(Some(payload)) => {
                                 store_serial_session(&mut serial_sessions, port_path, session);
@@ -3142,6 +3266,36 @@ fn serial_exchange_blocking(
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+fn emit_serial_log_line(
+    state: &Arc<Mutex<DevdState>>,
+    events: &broadcast::Sender<DevdEvent>,
+    device_id: &str,
+    line: &[u8],
+) {
+    let Ok(message) = std::str::from_utf8(line) else {
+        return;
+    };
+    let message = message.trim();
+    if message.is_empty() || message.starts_with('{') {
+        return;
+    }
+
+    let event = event(
+        device_id,
+        "serial",
+        "native serial monitor line",
+        json!({
+            "code": "firmware_log",
+            "line": message,
+        }),
+    );
+
+    if let Ok(mut inner) = state.lock() {
+        inner.push_event(event.clone());
+    }
+    let _ = events.send(event);
 }
 
 type SerialSessionMap = HashMap<String, SerialSession>;
@@ -3674,15 +3828,16 @@ pub fn scan_serial_devices(serial_port: Option<&Path>) -> Vec<DeviceRecord> {
     let Some(serial_port) = serial_port else {
         return Vec::new();
     };
+    let port_name = serial_port.to_string_lossy().into_owned();
+    let available_ports = serialport::available_ports().ok().unwrap_or_default();
     if !serial_port.exists() {
-        return Vec::new();
+        return vec![missing_serial_device_record(&port_name, &available_ports)];
     }
 
-    let port_name = serial_port.to_string_lossy().into_owned();
-    let port_info = serialport::available_ports()
-        .ok()
-        .and_then(|ports| ports.into_iter().find(|port| port.port_name == port_name));
-    vec![serial_device_record(&port_name, port_info.as_ref())]
+    let port_info = available_ports
+        .iter()
+        .find(|port| port.port_name == port_name);
+    vec![serial_device_record(&port_name, port_info)]
 }
 
 fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecord>) {
@@ -3732,6 +3887,48 @@ fn serial_device_record(
         ),
     };
     DeviceRecord::native_serial_placeholder(&id, display_name, port_name.to_string())
+}
+
+fn missing_serial_device_record(
+    port_name: &str,
+    available_ports: &[serialport::SerialPortInfo],
+) -> DeviceRecord {
+    let mut device = serial_device_record(port_name, None);
+    let candidates = available_ports
+        .iter()
+        .filter(|port| {
+            matches!(
+                &port.port_type,
+                serialport::SerialPortType::UsbPort(info) if info.vid == 0x303a
+            )
+        })
+        .map(|port| port.port_name.clone())
+        .collect::<Vec<_>>();
+    let candidate_summary = if candidates.is_empty() {
+        "No alternate Espressif serial port is currently enumerated.".to_string()
+    } else {
+        format!(
+            "Observed alternate Espressif serial ports: {}.",
+            candidates.join(", ")
+        )
+    };
+    device.connection = ConnectionState::Error;
+    device.network.state = NetworkState::Error;
+    device.network.last_error = Some(format!(
+        "Authorized serial port {port_name} is missing. {candidate_summary}"
+    ));
+    device.status.network = device.network.clone();
+    device.events.push_back(event(
+        &device.id,
+        "serial",
+        "authorized serial port missing",
+        json!({
+            "code": "authorized_port_missing",
+            "portPath": port_name,
+            "candidates": candidates,
+        }),
+    ));
+    device
 }
 
 pub fn verify_artifact(
@@ -3994,7 +4191,15 @@ fn record_serial_bridge_error(
         } else {
             NetworkState::Error
         };
-        device.network.last_error = Some(error.error.message.clone());
+        let preserve_missing_port_diagnostic = error.error.code == "serial_open_failed"
+            && device
+                .network
+                .last_error
+                .as_deref()
+                .is_some_and(|message| message.starts_with("Authorized serial port "));
+        if !preserve_missing_port_diagnostic {
+            device.network.last_error = Some(error.error.message.clone());
+        }
         device.status.network = device.network.clone();
     }
     state.emit(event(
@@ -4284,12 +4489,14 @@ mod tests {
     #[test]
     fn device_event_backlog_replays_existing_bounded_events() {
         let state = AppState::test();
-        state.emit(event(
-            "mock-fp-lab-01",
-            "lease",
-            "lease created",
-            json!({ "leaseId": "lease-test" }),
-        ));
+        for index in 0..(DEVICE_EVENT_REPLAY_LIMIT + 7) {
+            state.emit(event(
+                "mock-fp-lab-01",
+                "lease",
+                "lease created",
+                json!({ "leaseId": format!("lease-{index}") }),
+            ));
+        }
         state.emit(event(
             "other-device",
             "lease",
@@ -4299,9 +4506,76 @@ mod tests {
 
         let backlog = device_event_backlog(&state, "mock-fp-lab-01").unwrap();
 
-        assert_eq!(backlog.len(), 1);
+        assert_eq!(backlog.len(), DEVICE_EVENT_REPLAY_LIMIT);
         assert_eq!(backlog[0].kind, "lease");
-        assert_eq!(backlog[0].payload["leaseId"], "lease-test");
+        assert_eq!(backlog[0].payload["leaseId"], "lease-7");
+        assert_eq!(
+            backlog[DEVICE_EVENT_REPLAY_LIMIT - 1].payload["leaseId"],
+            format!("lease-{}", DEVICE_EVENT_REPLAY_LIMIT + 6)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_devices_trims_inline_event_backlog_for_polling_clients() {
+        let state = AppState::test();
+        {
+            let mut inner = state.lock().unwrap();
+            let device = inner.devices.get_mut("mock-fp-lab-01").unwrap();
+            for index in 0..(DEVICE_LIST_EVENT_LIMIT + 7) {
+                push_bounded(
+                    &mut device.events,
+                    event(
+                        "mock-fp-lab-01",
+                        "transport",
+                        "transport frame",
+                        json!({
+                            "direction": "rx",
+                            "transport": "usb_jsonl",
+                            "frameType": "response",
+                            "requestId": format!("req-{index}"),
+                            "frame": {
+                                "type": "response",
+                                "requestId": format!("req-{index}"),
+                                "ok": true,
+                                "result": {
+                                    "calibration": {
+                                        "active": {
+                                            "vinAdc": [
+                                                {
+                                                    "expectedMv": 417,
+                                                    "observedMv": 279
+                                                }
+                                            ]
+                                        }
+                                    }
+                                }
+                            },
+                        }),
+                    ),
+                    DEFAULT_EVENT_LIMIT,
+                );
+            }
+        }
+
+        let response = list_devices(State(state)).await.unwrap().0;
+        let devices = response["devices"].as_array().unwrap();
+        let device = devices
+            .iter()
+            .find(|device| device["id"] == "mock-fp-lab-01")
+            .unwrap();
+        let events = device["events"].as_array().unwrap();
+
+        assert_eq!(events.len(), DEVICE_LIST_EVENT_LIMIT);
+        assert!(device.get("calibration").is_none());
+        assert!(device.get("heaterCurve").is_none());
+        assert!(device.get("logs").is_none());
+        assert!(device.get("trace").is_none());
+        assert_eq!(events[0]["payload"]["requestId"], "req-7");
+        assert!(events[0]["payload"].get("frame").is_none());
+        assert_eq!(
+            events[DEVICE_LIST_EVENT_LIMIT - 1]["payload"]["requestId"],
+            format!("req-{}", DEVICE_LIST_EVENT_LIMIT + 6)
+        );
     }
 
     #[test]
@@ -4375,7 +4649,32 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing_port = dir.path().join("missing-usbmodem");
 
-        assert!(scan_serial_devices(Some(&missing_port)).is_empty());
+        let devices = scan_serial_devices(Some(&missing_port));
+
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].connection, ConnectionState::Error);
+        assert_eq!(devices[0].network.state, NetworkState::Error);
+        assert!(
+            devices[0]
+                .network
+                .last_error
+                .as_deref()
+                .is_some_and(|message| {
+                    message.starts_with(&format!(
+                        "Authorized serial port {} is missing.",
+                        missing_port.display()
+                    ))
+                })
+        );
+        assert_eq!(devices[0].events.len(), 1);
+        assert_eq!(
+            devices[0].events[0].message,
+            "authorized serial port missing"
+        );
+        assert_eq!(
+            devices[0].events[0].payload["code"],
+            "authorized_port_missing"
+        );
     }
 
     #[test]
@@ -4504,6 +4803,68 @@ mod tests {
         assert_eq!(device.events[0].kind, "serial");
         assert_eq!(device.events[0].payload["stage"], "identity");
         assert_eq!(device.events[0].payload["code"], "usb_response_timeout");
+    }
+
+    #[test]
+    fn serial_monitor_log_line_records_serial_event_without_overwriting_errors() {
+        let state = AppState::test();
+        let mut serial_device = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
+        serial_device.port_path = Some("/dev/cu.usbmodem-test".to_string());
+        {
+            let mut inner = state.lock().unwrap();
+            inner
+                .devices
+                .insert(serial_device.id.clone(), serial_device);
+        }
+
+        emit_serial_log_line(
+            &state.inner,
+            &state.events,
+            "serial-known",
+            b"INFO heater runtime disabled by safety gate",
+        );
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("serial-known").unwrap();
+        assert_eq!(device.events.len(), 1);
+        assert_eq!(device.events[0].kind, "serial");
+        assert_eq!(device.events[0].message, "native serial monitor line");
+        assert_eq!(device.events[0].payload["code"], "firmware_log");
+        assert_eq!(
+            device.events[0].payload["line"],
+            "INFO heater runtime disabled by safety gate"
+        );
+    }
+
+    #[test]
+    fn serial_open_failed_preserves_missing_authorized_port_diagnostic() {
+        let state = AppState::test();
+        let device = missing_serial_device_record("/dev/cu.usbmodem-test", &[]);
+        {
+            let mut inner = state.lock().unwrap();
+            inner.devices.insert(device.id.clone(), device);
+        }
+
+        let error = HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "serial_open_failed",
+            "Failed to open serial port: No such file or directory",
+            true,
+        );
+
+        record_serial_bridge_error(&state, "serial-_dev_cu.usbmodem-test", "identity", &error);
+
+        let inner = state.lock().unwrap();
+        let device = inner.devices.get("serial-_dev_cu.usbmodem-test").unwrap();
+        assert_eq!(device.connection, ConnectionState::Error);
+        assert_eq!(device.network.state, NetworkState::Error);
+        assert!(device.network.last_error.as_deref().is_some_and(|message| {
+            message.starts_with("Authorized serial port /dev/cu.usbmodem-test is missing.")
+        }));
+        assert_eq!(
+            device.events.back().unwrap().message,
+            "native serial RPC failed"
+        );
     }
 
     #[test]

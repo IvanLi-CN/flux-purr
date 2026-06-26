@@ -97,6 +97,29 @@ describe('web serial control-plane client', () => {
 
     await client.disconnect()
   })
+
+  it('sends RTD calibration samples with operator temperature and target ADC', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    await client.configureCalibration({
+      op: 'capture',
+      channel: 'rtd_adc',
+      referenceTempC: 21.6,
+      targetAdcMv: 970,
+    })
+
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'calibration_config',
+      op: 'capture',
+      channel: 'rtd_adc',
+      referenceTempC: 21.6,
+      targetAdcMv: 970,
+    })
+
+    await client.disconnect()
+  })
 })
 
 class FakeSerial implements BrowserSerial {
@@ -229,6 +252,49 @@ function responseFor(request: Record<string, unknown>) {
           samplesCollected: 0,
           nextRequestMv: request.kind === 'vin_adc_auto' ? 11000 : 20000,
           message: null,
+        },
+      },
+    }
+  }
+  if (request.type === 'calibration_config') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        calibration: {
+          active: {
+            rtdAdc: [null, null, null, null, null, null, null, null],
+            vinAdc: [null, null, null, null, null, null, null, null],
+          },
+          draft: {
+            rtdAdc: [
+              request.channel === 'rtd_adc'
+                ? {
+                    observedMv: 997,
+                    expectedMv: 970,
+                    referenceTempC: request.referenceTempC,
+                    targetAdcMv: request.targetAdcMv,
+                  }
+                : null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+            ],
+            vinAdc: [null, null, null, null, null, null, null, null],
+          },
+          activeFit: {
+            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          },
+          draftFit: {
+            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 1, defaultSampleCount: 2 },
+            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          },
         },
       },
     }

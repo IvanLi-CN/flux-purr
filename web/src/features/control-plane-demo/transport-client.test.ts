@@ -9,6 +9,7 @@ import {
   devdRecordToDeviceTarget,
   manifestToArtifact,
   redactWifiConfigFrame,
+  selectLatestDevdTransportIssueEvent,
 } from './transport-client'
 
 describe('control-plane transport client', () => {
@@ -39,7 +40,7 @@ describe('control-plane transport client', () => {
         active: {
           rtdAdc: [null, null, null, null, null, null, null, null],
           vinAdc: [
-            { observedMv: 1010, expectedMv: 20000 },
+            { observedMv: 1010, expectedMv: 20000, referenceVinMv: 20000 },
             null,
             null,
             null,
@@ -52,7 +53,7 @@ describe('control-plane transport client', () => {
         draft: {
           rtdAdc: [null, null, null, null, null, null, null, null],
           vinAdc: [
-            { observedMv: 1010, expectedMv: 20000 },
+            { observedMv: 1010, expectedMv: 20000, referenceVinMv: 20000 },
             null,
             null,
             null,
@@ -107,6 +108,7 @@ describe('control-plane transport client', () => {
         pdRequestMv: 20000,
         pdContractMv: 20000,
         pdState: 'ready',
+        heaterLockReason: 'cooling-disabled-overtemp',
         calibration: {
           mode: 'off',
           ppsEnabled: false,
@@ -141,9 +143,11 @@ describe('control-plane transport client', () => {
     expect(target.capabilities).toContain('wifi_config')
     expect(target.selectedPresetIndex).toBe(5)
     expect(target.presetsC?.[5]).toBe(220)
+    expect(target.heaterLockReason).toBe('cooling-disabled-overtemp')
     expect(target.storedCalibration?.active.vinAdc[0]).toEqual({
       observedMv: 1010,
       expectedMv: 20000,
+      referenceVinMv: 20000,
     })
     expect(target.heaterCurve?.active.points[0]).toEqual({
       tempCentiC: 2120,
@@ -261,6 +265,315 @@ describe('control-plane transport client', () => {
     expect(devdRecordToDeviceTarget(merged).capabilities).toContain('flash')
   })
 
+  it('surfaces the latest native serial bridge error on the devd target', () => {
+    const target = devdRecordToDeviceTarget({
+      id: 'serial-1',
+      displayName: 'Authorized USB target',
+      portPath: '/dev/cu.usbmodem21231401',
+      transport: 'native_serial',
+      connection: 'error',
+      identity: {
+        deviceId: 'serial-1',
+        firmwareVersion: 'fw/v0.4.0-dev',
+        buildId: 'bridge-build',
+        gitSha: 'abc',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'serial-1',
+        capabilities: ['identity', 'status', 'monitor'],
+      },
+      network: {
+        state: 'timeout',
+        wifiRssi: null,
+        lastError: 'Timed out waiting for a matching USB JSONL response.',
+      },
+      status: {
+        mode: 'idle',
+        uptimeSeconds: 12,
+        currentTempC: 24,
+        targetTempC: 60,
+        heaterEnabled: false,
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanDisplayState: 'OFF',
+        fanEnabled: false,
+        fanPwmPermille: 0,
+        rtdRawAdcMv: 910,
+        vinRawAdcMv: 1660,
+        voltageMv: 20000,
+        currentMa: 0,
+        boardTempCenti: 2300,
+        pdRequestMv: 20000,
+        pdContractMv: 20000,
+        pdState: 'ready',
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
+        frontpanelKey: null,
+        network: {
+          state: 'timeout',
+          wifiRssi: null,
+          lastError: 'Timed out waiting for a matching USB JSONL response.',
+        },
+      },
+      events: [
+        {
+          id: 'event-serial-timeout',
+          timestamp: '12345',
+          deviceId: 'serial-1',
+          kind: 'serial',
+          message: 'native serial RPC failed',
+          payload: {
+            stage: 'status',
+            code: 'usb_response_timeout',
+            message: 'Timed out waiting for a matching USB JSONL response.',
+            retryable: true,
+          },
+        },
+      ],
+    })
+
+    expect(target.transportIssue).toBe(
+      '授权串口在 12 秒内未返回匹配的 USB JSONL 响应；设备可能正在启动、重启，或链路暂时不稳定。'
+    )
+  })
+
+  it('falls back to the network lastError when no serial bridge event is available', () => {
+    const target = devdRecordToDeviceTarget({
+      id: 'serial-1',
+      displayName: 'Authorized USB target',
+      portPath: '/dev/cu.usbmodem21231401',
+      transport: 'native_serial',
+      connection: 'error',
+      identity: {
+        deviceId: 'serial-1',
+        firmwareVersion: 'fw/v0.4.0-dev',
+        buildId: 'bridge-build',
+        gitSha: 'abc',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'serial-1',
+        capabilities: ['identity', 'status', 'monitor'],
+      },
+      network: {
+        state: 'error',
+        wifiRssi: null,
+        lastError: 'Serial I/O failed: Resource busy',
+      },
+      status: {
+        mode: 'idle',
+        uptimeSeconds: 12,
+        currentTempC: 24,
+        targetTempC: 60,
+        heaterEnabled: false,
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanDisplayState: 'OFF',
+        fanEnabled: false,
+        fanPwmPermille: 0,
+        rtdRawAdcMv: 910,
+        vinRawAdcMv: 1660,
+        voltageMv: 20000,
+        currentMa: 0,
+        boardTempCenti: 2300,
+        pdRequestMv: 20000,
+        pdContractMv: 20000,
+        pdState: 'ready',
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
+        frontpanelKey: null,
+        network: {
+          state: 'error',
+          wifiRssi: null,
+          lastError: 'Serial I/O failed: Resource busy',
+        },
+      },
+      events: [],
+    })
+
+    expect(target.transportIssue).toBe(
+      '授权串口当前被其他进程占用（Resource busy）；请关闭其它 devd、串口监视器或终端后重试。'
+    )
+  })
+
+  it('surfaces the missing authorized port message ahead of later serial open failures', () => {
+    const target = devdRecordToDeviceTarget({
+      id: 'serial-1',
+      displayName: 'Authorized USB target',
+      portPath: '/dev/cu.usbmodem21231401',
+      transport: 'native_serial',
+      connection: 'error',
+      identity: {
+        deviceId: 'serial-1',
+        firmwareVersion: 'unknown',
+        buildId: 'native-serial-placeholder',
+        gitSha: 'unknown',
+        board: 'unknown',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'serial-1',
+        capabilities: ['identity', 'status', 'monitor'],
+      },
+      network: {
+        state: 'error',
+        wifiRssi: null,
+        lastError:
+          'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.',
+      },
+      status: {
+        mode: 'idle',
+        uptimeSeconds: 0,
+        currentTempC: 0,
+        targetTempC: 220,
+        heaterEnabled: false,
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanDisplayState: 'OFF',
+        fanEnabled: false,
+        fanPwmPermille: 0,
+        rtdRawAdcMv: 0,
+        vinRawAdcMv: 0,
+        voltageMv: 0,
+        currentMa: 0,
+        boardTempCenti: 0,
+        pdRequestMv: 20000,
+        pdContractMv: 0,
+        pdState: 'fault',
+        heaterLockReason: null,
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
+        frontpanelKey: null,
+        network: {
+          state: 'error',
+          wifiRssi: null,
+          lastError:
+            'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.',
+        },
+      },
+      events: [
+        {
+          id: 'event-port-missing',
+          timestamp: '100',
+          deviceId: 'serial-1',
+          kind: 'serial',
+          message: 'authorized serial port missing',
+          payload: {
+            code: 'authorized_port_missing',
+            portPath: '/dev/cu.usbmodem21231401',
+            candidates: ['/dev/cu.usbmodem212101', '/dev/cu.usbmodem212201'],
+          },
+        },
+        {
+          id: 'event-rpc-failed',
+          timestamp: '101',
+          deviceId: 'serial-1',
+          kind: 'serial',
+          message: 'native serial RPC failed',
+          payload: {
+            stage: 'identity',
+            code: 'serial_open_failed',
+            message: 'Failed to open serial port: No such file or directory',
+            retryable: true,
+          },
+        },
+      ],
+    })
+
+    expect(target.transportIssue).toContain(
+      'Authorized serial port /dev/cu.usbmodem21231401 is missing.'
+    )
+    expect(target.transportIssue).toContain('/dev/cu.usbmodem212101')
+    expect(target.transportIssue).not.toContain('native serial RPC failed')
+  })
+
+  it('prefers reset and rpc failure serial events over generic firmware log noise', () => {
+    const event = selectLatestDevdTransportIssueEvent([
+      {
+        id: 'event-1',
+        timestamp: '1',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'native serial monitor line',
+        payload: {
+          code: 'firmware_log',
+          line: 'I (80) boot: End of partition table',
+        },
+      },
+      {
+        id: 'event-2',
+        timestamp: '2',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'native serial monitor line',
+        payload: {
+          code: 'firmware_log',
+          line: 'rst:0x15 (USB_UART_CHIP_RESET),boot:0x28 (SPI_FAST_FLASH_BOOT)',
+        },
+      },
+    ])
+
+    expect(event?.id).toBe('event-2')
+    if (!event) {
+      throw new Error('Expected the latest transport issue event to be present')
+    }
+    expect(devdEventToLogEntry(event)).toMatchObject({
+      message:
+        'native serial monitor line: rst:0x15 (USB_UART_CHIP_RESET),boot:0x28 (SPI_FAST_FLASH_BOOT) / firmware_log',
+    })
+  })
+
   it('redacts wifi password before writing trace history', () => {
     const frame = createUsbWifiConfigFrame('req-1', {
       op: 'set',
@@ -344,6 +657,20 @@ describe('control-plane transport client', () => {
     })
     expect(partialRuntimeEntry.message).toBe('runtime config applied: heater on')
 
+    const serialMonitorEntry = devdEventToLogEntry({
+      id: 'event-4b',
+      timestamp: '12348',
+      kind: 'serial',
+      message: 'native serial monitor line',
+      payload: {
+        code: 'firmware_log',
+        line: 'INFO heater runtime disabled by safety gate',
+      },
+    })
+    expect(serialMonitorEntry.message).toBe(
+      'native serial monitor line: INFO heater runtime disabled by safety gate / firmware_log'
+    )
+
     const transportEntry = devdEventToLogEntry({
       id: 'event-5',
       timestamp: '12349',
@@ -367,7 +694,198 @@ describe('control-plane transport client', () => {
       tone: 'info',
       message: 'transport frame: TX / usb_jsonl / runtime_config / req-runtime',
     })
-    expect(transportEntry.detail).toContain('"targetTempC": 145')
+    expect(transportEntry.detail).toBe(
+      'TX / runtime_config / req-runtime / runtime_config / target 145C'
+    )
+
+    const responseEntry = devdEventToLogEntry({
+      id: 'event-6',
+      timestamp: '12350',
+      kind: 'transport',
+      message: 'transport frame',
+      payload: {
+        direction: 'rx',
+        transport: 'usb_jsonl',
+        frameType: 'response',
+        requestId: 'req-status',
+        frame: {
+          type: 'response',
+          requestId: 'req-status',
+          ok: true,
+          result: {
+            status: {
+              mode: 'sampling',
+              targetTempC: 245,
+            },
+          },
+        },
+      },
+    })
+    expect(responseEntry.detail).toBe(
+      'RX / response / req-status / ok / target 245C / mode sampling'
+    )
+  })
+
+  it('translates serial lock and timeout failures into explicit owner-facing transport issues', async () => {
+    const timeoutTarget = devdRecordToDeviceTarget({
+      id: 'serial-1',
+      displayName: 'Authorized USB target',
+      portPath: '/dev/cu.usbmodem21231401',
+      transport: 'native_serial',
+      connection: 'error',
+      identity: {
+        deviceId: 'serial-1',
+        firmwareVersion: 'fw/v0.4.0-dev',
+        buildId: 'bridge-build',
+        gitSha: 'abc',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'serial-1',
+        capabilities: ['identity', 'status', 'monitor'],
+      },
+      network: {
+        state: 'timeout',
+        wifiRssi: null,
+        lastError: 'Timed out waiting for a matching USB JSONL response.',
+      },
+      status: {
+        mode: 'idle',
+        uptimeSeconds: 12,
+        currentTempC: 24,
+        targetTempC: 60,
+        heaterEnabled: false,
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanDisplayState: 'OFF',
+        fanEnabled: false,
+        fanPwmPermille: 0,
+        rtdRawAdcMv: 910,
+        vinRawAdcMv: 1660,
+        voltageMv: 20000,
+        currentMa: 0,
+        boardTempCenti: 2300,
+        pdRequestMv: 20000,
+        pdContractMv: 20000,
+        pdState: 'ready',
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
+        frontpanelKey: null,
+        network: {
+          state: 'timeout',
+          wifiRssi: null,
+          lastError: 'Timed out waiting for a matching USB JSONL response.',
+        },
+      },
+      events: [],
+    })
+    expect(timeoutTarget.transportIssue).toBe(
+      '授权串口在 12 秒内未返回匹配的 USB JSONL 响应；设备可能正在启动、重启，或链路暂时不稳定。'
+    )
+
+    const busyTarget = devdRecordToDeviceTarget({
+      id: 'serial-2',
+      displayName: 'Authorized USB target',
+      portPath: '/dev/cu.usbmodem21231401',
+      transport: 'native_serial',
+      connection: 'error',
+      identity: {
+        deviceId: 'serial-2',
+        firmwareVersion: 'fw/v0.4.0-dev',
+        buildId: 'bridge-build',
+        gitSha: 'abc',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'serial-2',
+        capabilities: ['identity', 'status', 'monitor'],
+      },
+      network: {
+        state: 'error',
+        wifiRssi: null,
+        lastError: 'Serial I/O failed: Resource busy',
+      },
+      status: {
+        mode: 'idle',
+        uptimeSeconds: 12,
+        currentTempC: 24,
+        targetTempC: 60,
+        heaterEnabled: false,
+        heaterOutputPercent: 0,
+        activeCoolingEnabled: true,
+        fanDisplayState: 'OFF',
+        fanEnabled: false,
+        fanPwmPermille: 0,
+        rtdRawAdcMv: 910,
+        vinRawAdcMv: 1660,
+        voltageMv: 20000,
+        currentMa: 0,
+        boardTempCenti: 2300,
+        pdRequestMv: 20000,
+        pdContractMv: 20000,
+        pdState: 'ready',
+        calibration: {
+          mode: 'off',
+          ppsEnabled: false,
+          ppsMv: null,
+          ppsMa: null,
+          heaterEnabled: false,
+          targetAdcMv: null,
+          stable: false,
+          stabilityErrorMv: null,
+          error: null,
+          job: {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          },
+        },
+        frontpanelKey: null,
+        network: {
+          state: 'error',
+          wifiRssi: null,
+          lastError: 'Serial I/O failed: Resource busy',
+        },
+      },
+      events: [],
+    })
+    expect(busyTarget.transportIssue).toBe(
+      '授权串口当前被其他进程占用（Resource busy）；请关闭其它 devd、串口监视器或终端后重试。'
+    )
+
+    const lockTimeoutEntry = devdEventToLogEntry({
+      id: 'event-lock-timeout',
+      timestamp: '12351',
+      kind: 'serial',
+      message: 'native serial RPC failed',
+      payload: {
+        stage: 'status',
+        code: 'serial_lock_timeout',
+        message: 'Timed out waiting for exclusive USB serial access.',
+        retryable: true,
+      },
+    })
+    expect(lockTimeoutEntry.message).toBe('native serial RPC failed: status / serial_lock_timeout')
   })
 
   it('surfaces API error envelopes with retry metadata', async () => {
@@ -724,6 +1242,78 @@ describe('control-plane transport client', () => {
         headers: { 'content-type': 'application/json' },
       })
     }
+  })
+
+  it('sends RTD calibration capture payload with operator temperature and target ADC', async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const body = init?.body ? JSON.parse(String(init.body)) : null
+
+      expect(url).toBe('http://127.0.0.1:30080/api/v1/devices/bench%20target/calibration')
+      expect(body).toMatchObject({
+        leaseId: 'lease-1',
+        op: 'capture',
+        channel: 'rtd_adc',
+        referenceTempC: 21.6,
+        targetAdcMv: 970,
+      })
+
+      return {
+        ok: true,
+        json: async () => ({
+          active: {
+            rtdAdc: [null, null, null, null, null, null, null, null],
+            vinAdc: [null, null, null, null, null, null, null, null],
+          },
+          draft: {
+            rtdAdc: [
+              {
+                observedMv: 997,
+                expectedMv: 970,
+                referenceTempC: 21.6,
+                targetAdcMv: 970,
+              },
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+            ],
+            vinAdc: [null, null, null, null, null, null, null, null],
+          },
+          activeFit: {
+            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          },
+          draftFit: {
+            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 1, defaultSampleCount: 2 },
+            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          },
+        }),
+      }
+    }) as unknown as typeof fetch
+    const client = createControlPlaneHttpClient(fetcher)
+
+    const calibration = await client.configureCalibration(
+      'http://127.0.0.1:30080',
+      'bench target',
+      {
+        leaseId: 'lease-1',
+        op: 'capture',
+        channel: 'rtd_adc',
+        referenceTempC: 21.6,
+        targetAdcMv: 970,
+      }
+    )
+
+    expect(calibration.draft.rtdAdc[0]).toMatchObject({
+      observedMv: 997,
+      expectedMv: 970,
+      referenceTempC: 21.6,
+      targetAdcMv: 970,
+    })
   })
 
   it('sends daemon-local device mutations with the active lease', async () => {

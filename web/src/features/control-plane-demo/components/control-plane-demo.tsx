@@ -17,8 +17,9 @@ import {
   Wrench,
   Zap,
 } from 'lucide-react'
-import type { CSSProperties, ReactNode } from 'react'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import SimpleBar from 'simplebar-react'
 import {
   Select,
@@ -32,7 +33,18 @@ import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
+import { syncCalibrationDraftText } from '../calibration-draft'
+import {
+  type CalibrationLeaveRequest,
+  type CalibrationWorkspaceTab,
+  type ConsoleView,
+  shouldBlockCalibrationDeviceChange,
+  shouldBlockCalibrationViewChange,
+  shouldBlockCalibrationWorkspaceTabChange,
+} from '../calibration-leave-guard'
 import type {
+  BaseCalibrationSample,
   CalibrationChannel,
   CalibrationConfigRequest,
   CalibrationControlRequest,
@@ -43,6 +55,8 @@ import type {
   HeaterCurveConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
+  RtdCalibrationSample,
+  VinCalibrationSample,
 } from '../contracts'
 import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
 import {
@@ -51,6 +65,16 @@ import {
   useLiveWebSerialScenario,
 } from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
+import { rtdAdcMvForTemperature, rtdTemperatureForAdcMv } from '../rtd-calibration-display'
+import {
+  createPendingHeaterFeedback,
+  deviceControlBlockReason,
+  HEATER_CONFIRMATION_TIMEOUT_MS,
+  heaterLockReasonText,
+  type PendingHeaterConfirmation,
+  resolvePendingHeaterConfirmation,
+  runtimeHeaterState,
+} from '../runtime-status'
 import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
 import type {
   ControlPlaneScenario,
@@ -70,9 +94,6 @@ interface ControlPlaneDemoProps {
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
 }
-
-type ConsoleView = 'dashboard' | 'settings' | 'calibration' | 'update' | 'add-device'
-type CalibrationWorkspaceTab = 'heater_curve' | 'rtd_adc' | 'vin_adc'
 type CalibrationWorkbenchMode = 'vin_adc' | 'rtd_adc' | 'heater_curve'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
@@ -82,6 +103,12 @@ interface ActionFeedback {
   title: string
   detail: string
   tone: 'info' | 'success' | 'warning'
+}
+
+interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
+  continueAction: () => void | Promise<void>
+  nextView?: ConsoleView
+  nextWorkspaceTab?: CalibrationWorkspaceTab
 }
 
 const LOG_FEED_SIZE = 1000
@@ -105,11 +132,11 @@ const RTD_TARGET_MAX_MV = 2_800
 const RTD_TARGET_STEP_MV = 10
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const CALIBRATION_ACTION_LOCK_MS = 800
+const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
 const PRESET_ENABLED = PRESETS_C.map((preset) => preset != null)
 const PRESET_SLOT_IDS = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8', 'M9', 'M10']
-const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
 const ADD_DEVICE_VALUE = '__add_device__'
 
 const severityLabels: Record<DeviceSeverity, string> = {
@@ -147,22 +174,6 @@ const eventSourceLabels: Record<string, string> = {
   ui: '界面',
   lease: '租约',
   serial: '串口',
-}
-
-const calibrationJobKindLabels: Record<
-  NonNullable<CalibrationRuntimeState['job']['kind']>,
-  string
-> = {
-  vin_adc_auto: '电压自动扫点',
-  heater_curve_auto: '加热曲线自动采样',
-}
-
-const calibrationJobStatusLabels: Record<CalibrationRuntimeState['job']['status'], string> = {
-  idle: '空闲',
-  running: '进行中',
-  completed: '已完成',
-  failed: '失败',
-  canceled: '已取消',
 }
 
 const addDeviceOptions: Array<{
@@ -249,6 +260,7 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     ppsCapabilityMaxMv: null,
     ppsCapabilityMaxMa: null,
     manualPpsError: null,
+    heaterLockReason: null,
     calibration: {
       mode: 'off',
       ppsEnabled: false,
@@ -369,6 +381,11 @@ export function ControlPlaneDemo({
   const targetTempCommitTimersRef = useRef<Record<string, number>>({})
   const targetTempCommitVersionRef = useRef<Record<string, number>>({})
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
+  const [pendingHeaterConfirmation, setPendingHeaterConfirmation] =
+    useState<PendingHeaterConfirmation | null>(null)
+  const [heaterConfirmationTick, setHeaterConfirmationTick] = useState(0)
+  const [calibrationLeaveGuard, setCalibrationLeaveGuard] =
+    useState<CalibrationLeaveGuardState | null>(null)
   const [feedback, setFeedback] = useState<ActionFeedback>({
     title: allowDemoControls ? '运行时已同步' : '暂无在线目标',
     detail: allowDemoControls
@@ -406,9 +423,10 @@ export function ControlPlaneDemo({
   const selectedDevice = useMemo(
     () =>
       deviceOptions.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions.find((device) => device.id === activeScenario.selectedDeviceId) ??
       deviceOptions[0] ??
       activeScenario.devices[0],
-    [activeScenario.devices, deviceOptions, selectedDeviceId]
+    [activeScenario.devices, activeScenario.selectedDeviceId, deviceOptions, selectedDeviceId]
   )
 
   useEffect(() => {
@@ -447,7 +465,8 @@ export function ControlPlaneDemo({
     )
     if (
       nextSelectedDevice?.transport === 'devd' &&
-      feedback.detail === '当前热控状态来自模拟设备契约。'
+      (feedback.detail === '当前热控状态来自模拟设备契约。' ||
+        feedback.detail === '连接浏览器 Web Serial 端口后即可加载真实硬件状态。')
     ) {
       setFeedback({
         title: '运行时已同步',
@@ -468,12 +487,129 @@ export function ControlPlaneDemo({
   }, [webSerial.error, webSerial.state])
 
   useEffect(() => {
+    const liveDevdDevice = activeScenario.devices.find((device) => device.transport === 'devd')
+    if (!liveDevdDevice || LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(liveDevdDevice.id)) {
+      return
+    }
+
+    const nextDeviceId = liveDevdDevice.id
+    const previousIds = LIVE_DEVD_TRANSIENT_DEVICE_IDS
+
+    const migrateRecord = <T,>(
+      setter: Dispatch<SetStateAction<Record<string, T>>>,
+      clone?: (value: T) => T
+    ) => {
+      setter((current) => {
+        if (current[nextDeviceId] !== undefined) {
+          return current
+        }
+
+        const sourceId = Array.from(previousIds).find((deviceId) => current[deviceId] !== undefined)
+        if (!sourceId) {
+          return current
+        }
+
+        const value = current[sourceId]
+        if (value === undefined) {
+          return current
+        }
+
+        const next = { ...current, [nextDeviceId]: clone ? clone(value) : value }
+        delete next[sourceId]
+        return next
+      })
+    }
+
+    migrateRecord(setTargetTempByDevice)
+    migrateRecord(setSelectedPresetByDevice)
+    migrateRecord(setPresetTempsByDevice, (value) => [...value])
+    migrateRecord(setPresetEnabledByDevice, (value) => [...value])
+    migrateRecord(setFanPolicyByDevice)
+    migrateRecord(setHeaterHeldByDevice)
+    migrateRecord(setManualPpsByDevice, (value) => ({ ...value }))
+    migrateRecord(setCalibrationRuntimeByDevice, (value) => ({
+      ...value,
+      job: { ...value.job },
+    }))
+    migrateRecord(setCalibrationByDevice, (value) => ({
+      ...value,
+      active: cloneCalibrationPackage(value.active),
+      draft: cloneCalibrationPackage(value.draft),
+      activeFit: {
+        rtdAdc: { ...value.activeFit.rtdAdc },
+        vinAdc: { ...value.activeFit.vinAdc },
+      },
+      draftFit: {
+        rtdAdc: { ...value.draftFit.rtdAdc },
+        vinAdc: { ...value.draftFit.vinAdc },
+      },
+    }))
+    migrateRecord(setHeaterCurveByDevice, (value) => ({
+      active: cloneHeaterCurvePackage(value.active),
+      preview: value.preview ? cloneHeaterCurvePackage(value.preview) : null,
+    }))
+    migrateRecord(setCalibrationWorkspaceTabByDevice)
+    migrateRecord(setCalibrationRefsByDevice, (value) => ({ ...value }))
+    migrateRecord(setArtifactByDevice)
+
+    if (selectedDeviceId && LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(selectedDeviceId)) {
+      setSelectedDeviceId(nextDeviceId)
+    }
+    if (
+      pendingHeaterConfirmation &&
+      LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(pendingHeaterConfirmation.deviceId)
+    ) {
+      setPendingHeaterConfirmation((current) =>
+        current && LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(current.deviceId)
+          ? { ...current, deviceId: nextDeviceId }
+          : current
+      )
+    }
+  }, [activeScenario.devices, pendingHeaterConfirmation, selectedDeviceId])
+
+  useEffect(() => {
     setTargetTempByDevice((current) => {
       let next = current
       for (const device of activeScenario.devices) {
         if (
           !(device.transport === 'devd' || isDirectWebSerialDevice(device)) ||
           current[device.id] !== device.targetTempC
+        ) {
+          continue
+        }
+        if (next === current) {
+          next = { ...current }
+        }
+        delete next[device.id]
+      }
+      return next
+    })
+  }, [activeScenario.devices])
+
+  useEffect(() => {
+    setCalibrationRuntimeByDevice((current) => {
+      let next = current
+      for (const device of activeScenario.devices) {
+        const localRuntime = current[device.id]
+        if (!localRuntime) {
+          continue
+        }
+        if (
+          localRuntime.mode !== device.calibration.mode ||
+          localRuntime.ppsEnabled !== device.calibration.ppsEnabled ||
+          localRuntime.ppsMv !== device.calibration.ppsMv ||
+          localRuntime.ppsMa !== device.calibration.ppsMa ||
+          localRuntime.heaterEnabled !== device.calibration.heaterEnabled ||
+          localRuntime.targetAdcMv !== device.calibration.targetAdcMv ||
+          localRuntime.stable !== device.calibration.stable ||
+          localRuntime.stabilityErrorMv !== device.calibration.stabilityErrorMv ||
+          localRuntime.error !== device.calibration.error ||
+          localRuntime.job.kind !== device.calibration.job.kind ||
+          localRuntime.job.status !== device.calibration.job.status ||
+          localRuntime.job.progressPercent !== device.calibration.job.progressPercent ||
+          localRuntime.job.samplesCollected !== device.calibration.job.samplesCollected ||
+          localRuntime.job.nextRequestMv !== device.calibration.job.nextRequestMv ||
+          localRuntime.job.message !== device.calibration.job.message
         ) {
           continue
         }
@@ -620,6 +756,111 @@ export function ControlPlaneDemo({
     rtdTempC: Number(visibleDevice.currentTempC.toFixed(1)),
     vinMv: visibleDevice.voltageMv,
   }
+
+  useEffect(() => {
+    if (!calibrationLeaveGuard) {
+      return
+    }
+
+    if (activeView !== 'calibration' || visibleRuntimeCalibration.mode === 'off') {
+      setCalibrationLeaveGuard(null)
+    }
+  }, [activeView, calibrationLeaveGuard, visibleRuntimeCalibration.mode])
+
+  useEffect(() => {
+    if (activeView !== 'calibration') {
+      return
+    }
+
+    const activeMode = asWorkbenchMode(visibleRuntimeCalibration.mode)
+    if (!activeMode || activeMode === visibleCalibrationWorkspaceTab) {
+      return
+    }
+
+    setCalibrationWorkspaceTabByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: activeMode,
+    }))
+  }, [activeView, visibleCalibrationWorkspaceTab, visibleDevice.id, visibleRuntimeCalibration.mode])
+
+  useEffect(() => {
+    if (!visibleDeviceIsLive) {
+      return
+    }
+
+    const blockedReason = deviceControlBlockReason(visibleDevice)
+    if (!blockedReason) {
+      return
+    }
+
+    const conflictTitle = visibleDevice.leaseState === 'conflict' ? '设备租约冲突' : '硬件连接受阻'
+    setFeedback((current) => {
+      if (current.detail === blockedReason && current.title === conflictTitle) {
+        return current
+      }
+      return {
+        title: conflictTitle,
+        detail: blockedReason,
+        tone: 'warning',
+      }
+    })
+  }, [visibleDevice, visibleDeviceIsLive])
+
+  useEffect(() => {
+    if (!visibleDeviceIsLive || !visibleDevice.heaterLockReason) {
+      return
+    }
+
+    const detail = heaterLockReasonText(visibleDevice.heaterLockReason)
+    setFeedback((current) => {
+      if (current.title === '加热安全锁已触发' && current.detail === detail) {
+        return current
+      }
+      return {
+        title: '加热安全锁已触发',
+        detail,
+        tone: 'warning',
+      }
+    })
+  }, [visibleDevice, visibleDeviceIsLive])
+
+  useEffect(() => {
+    if (!pendingHeaterConfirmation) {
+      return
+    }
+
+    const remainingMs = Math.max(
+      0,
+      HEATER_CONFIRMATION_TIMEOUT_MS - (Date.now() - pendingHeaterConfirmation.requestedAtMs)
+    )
+    const timer = window.setTimeout(() => {
+      setHeaterConfirmationTick((current) => current + 1)
+    }, remainingMs)
+
+    return () => window.clearTimeout(timer)
+  }, [pendingHeaterConfirmation])
+
+  useEffect(() => {
+    if (!visibleDeviceIsLive) {
+      return
+    }
+
+    const blockedReason = deviceControlBlockReason(visibleDevice)
+    if (blockedReason) {
+      return
+    }
+
+    setFeedback((current) => {
+      if (!isTransportBlockedFeedback(current)) {
+        return current
+      }
+      return {
+        title: '运行时已同步',
+        detail: '当前热控状态来自 devd 固件状态。',
+        tone: 'info',
+      }
+    })
+  }, [visibleDevice, visibleDeviceIsLive])
   const selectedArtifact = useMemo(
     () =>
       activeScenario.artifacts.find(
@@ -638,6 +879,11 @@ export function ControlPlaneDemo({
   const isDeviceSelectionRequired = isNoLiveTargetDevice(visibleDevice)
   const showDeviceSelection = isDeviceSelectionRequired && activeView !== 'add-device'
   const isDeviceAddFlowActive = isDeviceSelectionRequired || activeView === 'add-device'
+  const visibleDeviceId = visibleDevice.id
+  const visibleDeviceTransport = visibleDevice.transport
+  const visibleDeviceLeaseId = visibleDevice.leaseId
+  const visibleDeviceNetworkState = visibleDevice.networkState
+  const visibleDeviceIsDirectWebSerial = isDirectWebSerialDevice(visibleDevice)
   useEffect(() => {
     if (activeView !== 'calibration') {
       return
@@ -645,23 +891,30 @@ export function ControlPlaneDemo({
     let cancelled = false
     const load = async () => {
       try {
-        if (isDirectWebSerialDevice(visibleDevice)) {
+        if (visibleDeviceIsDirectWebSerial) {
           const calibration = await webSerial.getCalibration()
           if (!cancelled) {
-            setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+            setCalibrationByDevice((current) => ({ ...current, [visibleDeviceId]: calibration }))
           }
           return
         }
-        if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
+        if (
+          visibleDeviceTransport !== 'devd' ||
+          !visibleDeviceLeaseId ||
+          !devdBaseUrl ||
+          visibleDeviceNetworkState === 'error' ||
+          visibleDeviceNetworkState === 'timeout'
+        ) {
           return
         }
         const calibration = await controlClient.getCalibration(
           devdBaseUrl,
-          visibleDevice.id,
-          visibleDevice.leaseId
+          visibleDeviceId,
+          visibleDeviceLeaseId
         )
         if (!cancelled) {
-          setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
+          setCalibrationByDevice((current) => ({ ...current, [visibleDeviceId]: calibration }))
+          setFeedback((current) => clearCalibrationLoadWarning(current))
         }
       } catch (error) {
         if (!cancelled) {
@@ -677,7 +930,17 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [activeView, controlClient, devdBaseUrl, visibleDevice, webSerial])
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceNetworkState,
+    visibleDeviceTransport,
+    webSerial,
+  ])
   useEffect(() => {
     if (activeView !== 'calibration') {
       return
@@ -686,23 +949,30 @@ export function ControlPlaneDemo({
     let cancelled = false
     const load = async () => {
       try {
-        if (isDirectWebSerialDevice(visibleDevice)) {
+        if (visibleDeviceIsDirectWebSerial) {
           const heaterCurve = await webSerial.getHeaterCurve()
           if (!cancelled) {
-            setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: heaterCurve }))
+            setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
           }
           return
         }
-        if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
+        if (
+          visibleDeviceTransport !== 'devd' ||
+          !visibleDeviceLeaseId ||
+          !devdBaseUrl ||
+          visibleDeviceNetworkState === 'error' ||
+          visibleDeviceNetworkState === 'timeout'
+        ) {
           return
         }
         const heaterCurve = await controlClient.getHeaterCurve(
           devdBaseUrl,
-          visibleDevice.id,
-          visibleDevice.leaseId
+          visibleDeviceId,
+          visibleDeviceLeaseId
         )
         if (!cancelled) {
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: heaterCurve }))
+          setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+          setFeedback((current) => clearCalibrationLoadWarning(current))
         }
       } catch (error) {
         if (!cancelled) {
@@ -718,7 +988,17 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [activeView, controlClient, devdBaseUrl, visibleDevice, webSerial])
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceNetworkState,
+    visibleDeviceTransport,
+    webSerial,
+  ])
   const scenarioEvents = useMemo(
     () =>
       allowDemoControls
@@ -748,6 +1028,35 @@ export function ControlPlaneDemo({
     },
     []
   )
+
+  useEffect(() => {
+    if (!pendingHeaterConfirmation || !visibleDeviceIsLive) {
+      return
+    }
+    if (pendingHeaterConfirmation.deviceId !== visibleDevice.id) {
+      setPendingHeaterConfirmation(null)
+      return
+    }
+
+    const resolution = resolvePendingHeaterConfirmation(
+      pendingHeaterConfirmation,
+      visibleDevice,
+      pendingHeaterConfirmation.requestedAtMs + heaterConfirmationTick
+    )
+    if (resolution.outcome === 'pending') {
+      return
+    }
+
+    setPendingHeaterConfirmation(null)
+    setFeedback(resolution.feedback)
+    emitEvent('heater', resolution.eventMessage, resolution.eventTone)
+  }, [
+    emitEvent,
+    heaterConfirmationTick,
+    pendingHeaterConfirmation,
+    visibleDevice,
+    visibleDeviceIsLive,
+  ])
 
   const applyLocalCalibrationRuntimePatch = useCallback(
     (patch: {
@@ -824,6 +1133,9 @@ export function ControlPlaneDemo({
           leaseId: visibleDevice.leaseId,
           ...patch,
         })
+        if (patch.calibration) {
+          applyLocalCalibrationRuntimePatch(patch)
+        }
         return true
       } catch (error) {
         const detail = error instanceof Error ? error.message : failureMessage
@@ -931,38 +1243,109 @@ export function ControlPlaneDemo({
     setFlashRun({ status: 'passed', progress: 100 })
   }, [emitEvent, flashRun.progress, flashRun.status, selectedArtifact?.version])
 
+  const dismissCalibrationLeaveGuard = useCallback(() => {
+    setCalibrationLeaveGuard(null)
+  }, [])
+
+  const requestCalibrationLeave = useCallback(
+    async (
+      request: CalibrationLeaveRequest,
+      continueAction: () => void | Promise<void>
+    ): Promise<boolean> => {
+      let shouldBlock = false
+
+      switch (request.reason) {
+        case 'view-change':
+        case 'add-device-flow':
+          shouldBlock = shouldBlockCalibrationViewChange(
+            visibleRuntimeCalibration.mode,
+            activeView,
+            request.nextView ?? 'dashboard'
+          )
+          break
+        case 'device-change':
+          shouldBlock = shouldBlockCalibrationDeviceChange(
+            visibleRuntimeCalibration.mode,
+            activeView
+          )
+          break
+        case 'workspace-tab-change':
+          shouldBlock = shouldBlockCalibrationWorkspaceTabChange(
+            visibleRuntimeCalibration.mode,
+            visibleCalibrationWorkspaceTab,
+            request.nextWorkspaceTab ?? visibleCalibrationWorkspaceTab
+          )
+          break
+      }
+
+      if (!shouldBlock) {
+        await continueAction()
+        return true
+      }
+
+      setCalibrationLeaveGuard({
+        ...request,
+        continueAction,
+      })
+      setFeedback({
+        title: '请先关闭校准控制',
+        detail: `${calibrationModeLabel(visibleCalibrationWorkspaceTab)}仍在运行，离开前请先关闭开关。`,
+        tone: 'warning',
+      })
+      return false
+    },
+    [activeView, visibleCalibrationWorkspaceTab, visibleRuntimeCalibration.mode]
+  )
+
   const handleDeviceChange = (deviceId: string) => {
     if (deviceId === ADD_DEVICE_VALUE) {
-      setActiveView('add-device')
-      setFlashRun({ status: 'idle', progress: 0 })
-      flashCompletionEmittedRef.current = false
-      setFeedback({
-        title: 'Add device',
-        detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
-        tone: 'info',
-      })
+      void requestCalibrationLeave(
+        {
+          reason: 'add-device-flow',
+          nextLabel: '添加设备',
+          nextView: 'add-device',
+        },
+        () => {
+          setActiveView('add-device')
+          setFlashRun({ status: 'idle', progress: 0 })
+          flashCompletionEmittedRef.current = false
+          setFeedback({
+            title: 'Add device',
+            detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
+            tone: 'info',
+          })
+        }
+      )
       return
     }
 
     const nextDevice = deviceOptions.find((device) => device.id === deviceId)
 
-    setSelectedDeviceId(deviceId)
-    setFlashRun({ status: 'idle', progress: 0 })
-    flashCompletionEmittedRef.current = false
+    void requestCalibrationLeave(
+      {
+        reason: 'device-change',
+        nextLabel: nextDevice?.alias ?? '切换设备',
+      },
+      () => {
+        setSelectedDeviceId(deviceId)
+        setFlashRun({ status: 'idle', progress: 0 })
+        flashCompletionEmittedRef.current = false
 
-    if (!nextDevice) {
-      return
-    }
+        if (!nextDevice) {
+          return
+        }
 
-    setFeedback({
-      title: `${nextDevice.alias} selected`,
-      detail: `${transportLabels[nextDevice.transport]} target loaded with ${nextDevice.firmware}.`,
-      tone: nextDevice.severity === 'nominal' ? 'info' : 'warning',
-    })
-    emitEvent(
-      'target',
-      `${nextDevice.alias} selected`,
-      nextDevice.severity === 'offline' ? 'warning' : 'info'
+        setFeedback({
+          title: `${nextDevice.alias} selected`,
+          detail: `${transportLabels[nextDevice.transport]} target loaded with ${nextDevice.firmware}.`,
+          tone: nextDevice.severity === 'nominal' ? 'info' : 'warning',
+        })
+        emitEvent(
+          'target',
+          `${nextDevice.alias} selected`,
+          nextDevice.severity === 'offline' ? 'warning' : 'info'
+        )
+      }
     )
   }
 
@@ -1011,9 +1394,70 @@ export function ControlPlaneDemo({
   }
 
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {
-    setActiveView('add-device')
-    await handleAddDevice(kind, { showPendingDashboard: false })
+    await requestCalibrationLeave(
+      {
+        reason: 'add-device-flow',
+        nextLabel: addDeviceOptions.find((option) => option.kind === kind)?.label ?? '添加设备',
+        nextView: 'add-device',
+      },
+      async () => {
+        setActiveView('add-device')
+        await handleAddDevice(kind, { showPendingDashboard: false })
+      }
+    )
   }
+
+  const handleGuardedViewChange = useCallback(
+    (nextView: ConsoleView) => {
+      if (nextView === activeView) {
+        dismissCalibrationLeaveGuard()
+        return
+      }
+
+      void requestCalibrationLeave(
+        {
+          reason: 'view-change',
+          nextLabel: consoleViewLabel(nextView),
+          nextView,
+        },
+        () => {
+          dismissCalibrationLeaveGuard()
+          setActiveView(nextView)
+        }
+      )
+    },
+    [activeView, dismissCalibrationLeaveGuard, requestCalibrationLeave]
+  )
+
+  const handleGuardedWorkspaceTabChange = useCallback(
+    (nextTab: CalibrationWorkspaceTab) => {
+      if (nextTab === visibleCalibrationWorkspaceTab) {
+        dismissCalibrationLeaveGuard()
+        return
+      }
+
+      void requestCalibrationLeave(
+        {
+          reason: 'workspace-tab-change',
+          nextLabel: calibrationModeLabel(nextTab),
+          nextWorkspaceTab: nextTab,
+        },
+        () => {
+          dismissCalibrationLeaveGuard()
+          setCalibrationWorkspaceTabByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: nextTab,
+          }))
+        }
+      )
+    },
+    [
+      dismissCalibrationLeaveGuard,
+      requestCalibrationLeave,
+      visibleCalibrationWorkspaceTab,
+      visibleDevice.id,
+    ]
+  )
 
   async function handleWebSerialConnect() {
     if (webSerial.state === 'connected') {
@@ -1052,6 +1496,17 @@ export function ControlPlaneDemo({
   const handleTargetTempChange = (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
     const deviceId = visibleDevice.id
+    const blockedReason = deviceControlBlockReason(visibleDevice)
+    if (blockedReason) {
+      setFeedback({
+        title: visibleDevice.leaseState === 'conflict' ? '目标温度更新被阻止' : '硬件连接受阻',
+        detail: blockedReason,
+        tone: 'warning',
+      })
+      emitEvent('devd', 'target temperature update blocked by transport state', 'warning')
+      return
+    }
+
     setTargetTempByDevice((current) => ({
       ...current,
       [deviceId]: clampedTarget,
@@ -1263,12 +1718,24 @@ export function ControlPlaneDemo({
   }
 
   const handleHeaterHoldToggle = async () => {
-    const nextHeld = !heaterHeldByDevice[visibleDevice.id]
+    const nextHeld = visibleDeviceIsLive
+      ? visibleDevice.heaterEnabled
+      : !heaterHeldByDevice[visibleDevice.id]
+    const nextHeaterEnabled = !nextHeld
     const liveUpdated = await configureLiveRuntime(
-      { heaterEnabled: !nextHeld },
+      { heaterEnabled: nextHeaterEnabled },
       'heater hold update was not accepted by devd'
     )
     if (visibleDeviceIsLive && !liveUpdated) {
+      return
+    }
+    if (visibleDeviceIsLive) {
+      setPendingHeaterConfirmation({
+        deviceId: visibleDevice.id,
+        requestedEnabled: nextHeaterEnabled,
+        requestedAtMs: Date.now(),
+      })
+      setFeedback(createPendingHeaterFeedback(nextHeaterEnabled))
       return
     }
     setHeaterHeldByDevice((current) => ({
@@ -1276,16 +1743,16 @@ export function ControlPlaneDemo({
       ...(visibleDeviceIsLive ? {} : { [visibleDevice.id]: nextHeld }),
     }))
     setFeedback({
-      title: nextHeld ? 'Heater held' : 'Heater resumed',
-      detail: nextHeld
-        ? 'Heater output is forced to 0% in the mock runtime.'
-        : 'Heater output follows the target temperature again.',
-      tone: nextHeld ? 'warning' : 'success',
+      title: nextHeaterEnabled ? 'Heater resumed' : 'Heater held',
+      detail: nextHeaterEnabled
+        ? 'Heater output follows the target temperature again.'
+        : 'Heater output is disabled until resumed again.',
+      tone: nextHeaterEnabled ? 'success' : 'warning',
     })
     emitEvent(
       'heater',
-      nextHeld ? 'heater output held at 0%' : 'heater output resumed',
-      nextHeld ? 'warning' : 'success'
+      nextHeaterEnabled ? 'heater output resumed' : 'heater output held at 0%',
+      nextHeaterEnabled ? 'success' : 'warning'
     )
   }
 
@@ -1473,6 +1940,12 @@ export function ControlPlaneDemo({
       setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
       return
     }
+    if (visibleDeviceIsLive) {
+      const blockedReason = deviceControlBlockReason(visibleDevice)
+      if (blockedReason) {
+        throw new Error(blockedReason)
+      }
+    }
     if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
       const calibration = await controlClient.configureCalibration(devdBaseUrl, visibleDevice.id, {
         ...request,
@@ -1486,13 +1959,17 @@ export function ControlPlaneDemo({
     setCalibrationByDevice((current) => ({ ...current, [visibleDevice.id]: calibration }))
   }
 
-  const handleCalibrationCapture = async (channel: CalibrationChannel) => {
+  const handleCalibrationCapture = async (
+    channel: CalibrationChannel,
+    options?: { targetAdcMv?: number }
+  ) => {
     const request =
       channel === 'rtd_adc'
         ? {
             op: 'capture' as const,
             channel,
             referenceTempC: visibleCalibrationRefs.rtdTempC,
+            targetAdcMv: options?.targetAdcMv,
           }
         : {
             op: 'capture' as const,
@@ -1630,6 +2107,12 @@ export function ControlPlaneDemo({
           return next
         }
       }
+      if (visibleDeviceIsLive) {
+        const blockedReason = deviceControlBlockReason(visibleDevice)
+        if (blockedReason) {
+          throw new Error(blockedReason)
+        }
+      }
       if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
         const next = await controlClient.configureHeaterCurve(devdBaseUrl, visibleDevice.id, {
           ...request,
@@ -1647,6 +2130,7 @@ export function ControlPlaneDemo({
       controlClient,
       devdBaseUrl,
       visibleDevice,
+      visibleDeviceIsLive,
       visibleHeaterCurve,
       webSerial.clearHeaterCurvePreview,
       webSerial.previewHeaterCurve,
@@ -1758,13 +2242,13 @@ export function ControlPlaneDemo({
     [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
   )
 
-  const handleCalibrationModeExit = async () => {
+  const handleCalibrationModeExit = async (): Promise<boolean> => {
     const liveUpdated = await updateCalibrationRuntime(
       { mode: 'off', ppsEnabled: false, heaterEnabled: false },
       'calibration mode exit was not accepted'
     )
     if (visibleDeviceIsLive && !liveUpdated) {
-      return
+      return false
     }
     if (!visibleDeviceIsLive) {
       applyLocalCalibrationRuntimePatch({
@@ -1777,6 +2261,7 @@ export function ControlPlaneDemo({
       tone: 'success',
     })
     emitEvent('calibration', 'exited calibration mode', 'success')
+    return true
   }
 
   const handleCalibrationModeEnter = async (
@@ -1839,7 +2324,7 @@ export function ControlPlaneDemo({
                   type="button"
                   className={isActive ? 'industrial-view-tab is-selected' : 'industrial-view-tab'}
                   aria-pressed={isActive}
-                  onClick={() => setActiveView(view.id)}
+                  onClick={() => handleGuardedViewChange(view.id)}
                 >
                   <Icon size={18} aria-hidden="true" />
                   <span>
@@ -1907,12 +2392,9 @@ export function ControlPlaneDemo({
                 onHeaterCurvePreview={handleHeaterCurvePreview}
                 onHeaterCurveClearPreview={handleHeaterCurveClearPreview}
                 onHeaterCurveSave={handleHeaterCurveSave}
-                onCalibrationWorkspaceTabChange={(nextTab) =>
-                  setCalibrationWorkspaceTabByDevice((current) => ({
-                    ...current,
-                    [visibleDevice.id]: nextTab,
-                  }))
-                }
+                onCalibrationWorkspaceTabChange={handleGuardedWorkspaceTabChange}
+                calibrationLeaveGuard={activeView === 'calibration' ? calibrationLeaveGuard : null}
+                onCalibrationLeaveGuardDismiss={dismissCalibrationLeaveGuard}
                 onDeviceSelect={handleDeviceChange}
                 onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDevice}
@@ -2049,6 +2531,24 @@ function createEmptyCalibrationPackage(): CalibrationPackage {
   }
 }
 
+function isRtdCalibrationSample(
+  sample: RtdCalibrationSample | VinCalibrationSample
+): sample is RtdCalibrationSample {
+  return 'referenceTempC' in sample
+}
+
+function formatRtdCalibrationReference(sample: RtdCalibrationSample) {
+  if (sample.referenceTempC != null) {
+    return `${sample.referenceTempC.toFixed(1)}℃`
+  }
+  return `${rtdTemperatureForAdcMv(sample.expectedMv).toFixed(1)}℃`
+}
+
+function formatRtdCalibrationTargetAdc(sample: RtdCalibrationSample) {
+  const targetAdcMv = sample.targetAdcMv ?? sample.expectedMv
+  return `${targetAdcMv}mV`
+}
+
 function cloneCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
   return {
     rtdAdc: calibrationPackage.rtdAdc.map((sample) => (sample ? { ...sample } : null)),
@@ -2108,12 +2608,10 @@ function createCalibrationFits(
 }
 
 function createCalibrationFit(
-  samples: Array<{ observedMv: number; expectedMv: number } | null>,
+  samples: Array<BaseCalibrationSample | null>,
   channel: CalibrationChannel
 ) {
-  const custom = samples.filter((sample): sample is { observedMv: number; expectedMv: number } =>
-    Boolean(sample)
-  )
+  const custom = samples.filter((sample): sample is BaseCalibrationSample => Boolean(sample))
   const defaults =
     channel === 'rtd_adc'
       ? [
@@ -2142,7 +2640,7 @@ function createCalibrationFit(
   }
 }
 
-function calibrationSampleKeys(samples: Array<{ observedMv: number; expectedMv: number } | null>) {
+function calibrationSampleKeys(samples: Array<BaseCalibrationSample | null>) {
   const seen = new Map<string, number>()
   return samples.map((sample) => {
     if (!sample) {
@@ -2185,14 +2683,25 @@ function applyLocalCalibrationRequest(
     if (slot < 0) {
       throw new Error('该标定通道已达到 8 个样本上限。')
     }
-    samples[slot] = {
-      observedMv: request.observedMv ?? (channel === 'rtd_adc' ? 1120 : 1670),
-      expectedMv:
-        request.expectedMv ??
-        (channel === 'rtd_adc'
-          ? rtdAdcMvForTemperature(request.referenceTempC ?? 0)
-          : vinAdcMvForInput(request.referenceVinMv ?? 0)),
-    }
+    const observedMv = request.observedMv ?? (channel === 'rtd_adc' ? 1120 : 1670)
+    const expectedMv =
+      request.expectedMv ??
+      (channel === 'rtd_adc'
+        ? rtdAdcMvForTemperature(request.referenceTempC ?? 0)
+        : vinAdcMvForInput(request.referenceVinMv ?? 0))
+    samples[slot] =
+      channel === 'rtd_adc'
+        ? {
+            observedMv,
+            expectedMv,
+            referenceTempC: request.referenceTempC,
+            targetAdcMv: request.targetAdcMv,
+          }
+        : {
+            observedMv,
+            expectedMv,
+            referenceVinMv: request.referenceVinMv,
+          }
   }
   const normalized = normalizeCalibrationPackage(draft)
   return {
@@ -2254,26 +2763,16 @@ function manualFitSamples(gain: number, offsetMv: number): CalibrationPackage['r
 }
 
 function normalizeCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
-  const normalize = (samples: Array<{ observedMv: number; expectedMv: number } | null>) => {
-    const compacted = samples.filter(Boolean) as Array<{ observedMv: number; expectedMv: number }>
+  const normalize = <TSample extends BaseCalibrationSample>(
+    samples: Array<TSample | null>
+  ): Array<TSample | null> => {
+    const compacted = samples.filter(Boolean) as TSample[]
     return Array.from({ length: 8 }, (_, index) => compacted[index] ?? null)
   }
   return {
     rtdAdc: normalize(calibrationPackage.rtdAdc),
     vinAdc: normalize(calibrationPackage.vinAdc),
   }
-}
-
-function rtdAdcMvForTemperature(tempC: number) {
-  const resistance =
-    tempC >= 0
-      ? 1000 * (1 + 3.9083e-3 * tempC - 5.775e-7 * tempC * tempC)
-      : 1000 *
-        (1 +
-          3.9083e-3 * tempC -
-          5.775e-7 * tempC * tempC -
-          4.183e-12 * (tempC - 100) * tempC * tempC * tempC)
-  return Math.round((3000 * resistance) / (2490 + resistance))
 }
 
 function vinAdcMvForInput(inputMv: number) {
@@ -2298,21 +2797,28 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '请求失败。'
 }
 
-function deviceControlBlockReason(device: DeviceTarget) {
-  if (device.severity === 'offline') {
-    return '目标设备当前离线。'
+function clearCalibrationLoadWarning(current: ActionFeedback): ActionFeedback {
+  if (current.title === 'Calibration unavailable' || current.title === 'Heater curve unavailable') {
+    return {
+      title: '标定数据已同步',
+      detail: '当前标定数据来自 devd 固件状态。',
+      tone: 'info',
+    }
   }
 
-  const networkState = device.networkState
-  if (networkState && BLOCKED_NETWORK_STATES.has(networkState)) {
-    return device.transportIssue ?? '当前传输尚未恢复，暂时无法下发控制。'
-  }
+  return current
+}
 
-  return null
+function isTransportBlockedFeedback(current: ActionFeedback) {
+  return (
+    current.title === '设备租约冲突' ||
+    current.title === '硬件连接受阻' ||
+    current.title === '目标温度更新被阻止'
+  )
 }
 
 function isNoLiveTargetDevice(device: DeviceTarget) {
-  return device.id === NO_LIVE_TARGET_ID
+  return device.id === NO_LIVE_TARGET_ID && device.transport === 'serial'
 }
 
 function isKnownDeviceChoice(device: DeviceTarget) {
@@ -2418,12 +2924,19 @@ function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
   }
 }
 
-function calibrationJobLabel(job: CalibrationRuntimeState['job']) {
-  if (!job.kind) {
-    return '手动'
+function consoleViewLabel(view: ConsoleView) {
+  switch (view) {
+    case 'dashboard':
+      return '总览'
+    case 'settings':
+      return '设置'
+    case 'calibration':
+      return '校准'
+    case 'update':
+      return '更新'
+    case 'add-device':
+      return '添加设备'
   }
-
-  return `${calibrationJobKindLabels[job.kind]} / ${calibrationJobStatusLabels[job.status]}`
 }
 
 function asWorkbenchMode(mode: CalibrationMode): CalibrationWorkbenchMode | null {
@@ -2617,6 +3130,8 @@ function ViewPanel({
   onHeaterCurveClearPreview,
   onHeaterCurveSave,
   onCalibrationWorkspaceTabChange,
+  calibrationLeaveGuard,
+  onCalibrationLeaveGuardDismiss,
 }: {
   view: ConsoleView
   device: DeviceTarget
@@ -2653,7 +3168,10 @@ function ViewPanel({
   onStartDryRun: () => void
   onStartFlash: () => void
   onCalibrationReferenceChange: (channel: CalibrationChannel, value: number) => void
-  onCalibrationCapture: (channel: CalibrationChannel) => void | Promise<void>
+  onCalibrationCapture: (
+    channel: CalibrationChannel,
+    options?: { targetAdcMv?: number }
+  ) => void | Promise<void>
   onCalibrationDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onCalibrationClear: (channel: CalibrationChannel) => void | Promise<void>
   onCalibrationManualFit: (
@@ -2667,7 +3185,7 @@ function ViewPanel({
     mode: CalibrationWorkbenchMode,
     request: CalibrationControlRequest
   ) => void | Promise<void>
-  onCalibrationModeExit: () => void | Promise<void>
+  onCalibrationModeExit: () => boolean | Promise<boolean>
   onCalibrationRuntimeChange: (
     request: Partial<CalibrationControlRequest>,
     failureMessage: string
@@ -2680,6 +3198,8 @@ function ViewPanel({
   onHeaterCurveClearPreview: () => void | Promise<void>
   onHeaterCurveSave: () => void | Promise<void>
   onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
+  calibrationLeaveGuard: CalibrationLeaveGuardState | null
+  onCalibrationLeaveGuardDismiss: () => void
 }) {
   if (showDeviceSelection) {
     return (
@@ -2764,6 +3284,8 @@ function ViewPanel({
         onHeaterCurveClearPreview={onHeaterCurveClearPreview}
         onHeaterCurveSave={onHeaterCurveSave}
         onCalibrationWorkspaceTabChange={onCalibrationWorkspaceTabChange}
+        calibrationLeaveGuard={calibrationLeaveGuard}
+        onCalibrationLeaveGuardDismiss={onCalibrationLeaveGuardDismiss}
       />
     )
   }
@@ -2942,14 +3464,7 @@ function DashboardView({
     setManualPpsDraftMv(manualPpsDefaultMv)
     setManualPpsDraftDirty(false)
   }, [advancedOpen, device.id, manualPpsDefaultMv, manualPpsDraftDirty])
-  const heaterState =
-    device.severity === 'offline'
-      ? 'offline'
-      : device.pdState === 'ready'
-        ? device.heaterOutputPercent > 0
-          ? 'holding'
-          : 'held'
-        : device.pdState
+  const heaterState = runtimeHeaterState(device)
   const powerCapabilityMa = effectivePpsCurrentCapabilityMa(device) ?? 0
   return (
     <div className="industrial-view-panel">
@@ -3016,7 +3531,7 @@ function DashboardView({
           onClick={onHeaterHoldToggle}
         >
           <Power size={16} aria-hidden="true" />
-          {device.heaterOutputPercent > 0 ? 'Hold heater' : 'Resume heater'}
+          {device.heaterEnabled ? 'Hold heater' : 'Resume heater'}
         </button>
         <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
       </div>
@@ -3291,6 +3806,7 @@ function CalibrationSliderInputField({
 function CalibrationModeControlPanel({
   title,
   modeToggle,
+  leaveGuard,
   capability,
   voltageText,
   onVoltageChange,
@@ -3302,6 +3818,11 @@ function CalibrationModeControlPanel({
 }: {
   title: string
   modeToggle?: ReactNode
+  leaveGuard?: {
+    nextLabel: string
+    onDismiss: () => void
+    onContinue: () => void
+  } | null
   capability: ReturnType<typeof calibrationPowerCapability>
   voltageText: string
   onVoltageChange: (value: string) => void
@@ -3319,6 +3840,15 @@ function CalibrationModeControlPanel({
     <CalibrationLiveCard
       title={title}
       modeToggle={modeToggle}
+      modeToggleHint={
+        leaveGuard ? (
+          <CalibrationLeaveGuardBubble
+            nextLabel={leaveGuard.nextLabel}
+            onDismiss={leaveGuard.onDismiss}
+            onContinue={leaveGuard.onContinue}
+          />
+        ) : null
+      }
       titleMeta={<CalibrationCapabilityHint capability={capability} />}
     >
       <PpsCalibrationFields
@@ -3362,6 +3892,9 @@ function RuntimeMiniStatus({
         {device.fanState}
       </span>
       <span>{artifact?.version ?? device.firmware}</span>
+      {device.heaterLockReason ? (
+        <span>{heaterLockReasonText(device.heaterLockReason)}</span>
+      ) : null}
     </div>
   )
 }
@@ -3385,6 +3918,7 @@ function CapabilityStrip({ device }: { device: DeviceTarget }) {
       ))}
       <strong>{device.networkState ?? 'unknown'}</strong>
       {device.transportIssue ? <em>{device.transportIssue}</em> : null}
+      {device.heaterLockReason ? <em>{heaterLockReasonText(device.heaterLockReason)}</em> : null}
     </section>
   )
 }
@@ -3488,6 +4022,8 @@ function CalibrationView({
   onHeaterCurveClearPreview,
   onHeaterCurveSave,
   onCalibrationWorkspaceTabChange,
+  calibrationLeaveGuard,
+  onCalibrationLeaveGuardDismiss,
 }: {
   device: DeviceTarget
   calibration: CalibrationState
@@ -3498,7 +4034,10 @@ function CalibrationView({
   calibrationWorkspaceTab: CalibrationWorkspaceTab
   onTargetTempChange: (nextTargetTemp: number) => void
   onReferenceChange: (channel: CalibrationChannel, value: number) => void
-  onCapture: (channel: CalibrationChannel) => void | Promise<void>
+  onCapture: (
+    channel: CalibrationChannel,
+    options?: { targetAdcMv?: number }
+  ) => void | Promise<void>
   onDelete: (channel: CalibrationChannel, sampleIndex: number) => void | Promise<void>
   onClear: (channel: CalibrationChannel) => void | Promise<void>
   onManualFit: (channel: CalibrationChannel, gain: number, offsetMv: number) => void | Promise<void>
@@ -3508,7 +4047,7 @@ function CalibrationView({
     mode: CalibrationWorkbenchMode,
     request: CalibrationControlRequest
   ) => void | Promise<void>
-  onModeExit: () => void | Promise<void>
+  onModeExit: () => boolean | Promise<boolean>
   onCalibrationRuntimeChange: (
     request: Partial<CalibrationControlRequest>,
     failureMessage: string
@@ -3521,6 +4060,8 @@ function CalibrationView({
   onHeaterCurveClearPreview: () => void | Promise<void>
   onHeaterCurveSave: () => void | Promise<void>
   onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
+  calibrationLeaveGuard: CalibrationLeaveGuardState | null
+  onCalibrationLeaveGuardDismiss: () => void
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [heaterCurveDraftText, setHeaterCurveDraftText] = useState('')
@@ -3529,7 +4070,13 @@ function CalibrationView({
   const [rtdTargetAdcText, setRtdTargetAdcText] = useState('')
   const [heaterPpsMvText, setHeaterPpsMvText] = useState('')
   const [pendingCalibrationAction, setPendingCalibrationAction] = useState<string | null>(null)
-  const applyBlocked = device.heaterEnabled || device.heaterOutputPercent !== 0
+  const lastRtdDraftDeviceIdRef = useRef<string | null>(null)
+  const lastLiveRtdTargetAdcMvRef = useRef<number | null>(null)
+  const rtdTargetAdcCommitTimerRef = useRef<number | null>(null)
+  const rtdTargetAdcCommitVersionRef = useRef(0)
+  const transportBlockedReason = deviceControlBlockReason(device)
+  const controlsBlocked = transportBlockedReason != null
+  const applyBlocked = controlsBlocked || device.heaterEnabled || device.heaterOutputPercent !== 0
   const requestedWorkbenchMode = calibrationWorkspaceTab
   const activeWorkbenchMode = asWorkbenchMode(runtimeCalibration.mode)
   const modeArmed = activeWorkbenchMode === requestedWorkbenchMode
@@ -3578,10 +4125,36 @@ function CalibrationView({
   }, [basePpsDraft.millivolts])
 
   useEffect(() => {
-    setRtdTargetAdcText(String(runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv ?? 0))
+    if (lastRtdDraftDeviceIdRef.current === device.id) {
+      return
+    }
+
+    if (rtdTargetAdcCommitTimerRef.current != null) {
+      window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      rtdTargetAdcCommitTimerRef.current = null
+    }
+    rtdTargetAdcCommitVersionRef.current = 0
+    lastRtdDraftDeviceIdRef.current = device.id
+    lastLiveRtdTargetAdcMvRef.current = runtimeCalibration.targetAdcMv ?? null
+    const nextTargetAdcMv = runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv
+    setRtdTargetAdcText(nextTargetAdcMv != null ? String(nextTargetAdcMv) : '')
+  }, [device.id, device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
+
+  useEffect(() => {
+    setRtdTargetAdcText((current) =>
+      syncCalibrationDraftText(
+        current,
+        runtimeCalibration.targetAdcMv ?? null,
+        device.rtdRawAdcMv ?? null,
+        lastLiveRtdTargetAdcMvRef
+      )
+    )
   }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
 
   const parseIntegerInput = (rawValue: string) => {
+    if (rawValue.trim() === '') {
+      return null
+    }
     const next = Number(rawValue)
     return Number.isFinite(next) ? Math.round(next) : null
   }
@@ -3611,12 +4184,67 @@ function CalibrationView({
 
   useEffect(
     () => () => {
+      if (rtdTargetAdcCommitTimerRef.current != null) {
+        window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      }
       if (actionLockTimerRef.current != null) {
         window.clearTimeout(actionLockTimerRef.current)
       }
     },
     []
   )
+
+  useEffect(() => {
+    if (rtdTargetAdcCommitTimerRef.current != null) {
+      window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      rtdTargetAdcCommitTimerRef.current = null
+    }
+
+    if (
+      controlsBlocked ||
+      pendingCalibrationAction != null ||
+      !modeArmed ||
+      runtimeCalibration.mode !== 'rtd_adc' ||
+      !runtimeCalibration.ppsEnabled ||
+      rtdTargetAdcMv == null ||
+      rtdTargetError != null ||
+      runtimeCalibration.targetAdcMv === rtdTargetAdcMv
+    ) {
+      return
+    }
+
+    const nextVersion = rtdTargetAdcCommitVersionRef.current + 1
+    rtdTargetAdcCommitVersionRef.current = nextVersion
+    rtdTargetAdcCommitTimerRef.current = window.setTimeout(() => {
+      rtdTargetAdcCommitTimerRef.current = null
+      if (rtdTargetAdcCommitVersionRef.current !== nextVersion) {
+        return
+      }
+      void onCalibrationRuntimeChange(
+        {
+          targetAdcMv: rtdTargetAdcMv,
+        },
+        '目标 ADC 更新失败。'
+      )
+    }, 180)
+
+    return () => {
+      if (rtdTargetAdcCommitTimerRef.current != null) {
+        window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+        rtdTargetAdcCommitTimerRef.current = null
+      }
+    }
+  }, [
+    controlsBlocked,
+    modeArmed,
+    onCalibrationRuntimeChange,
+    pendingCalibrationAction,
+    rtdTargetAdcMv,
+    rtdTargetError,
+    runtimeCalibration.mode,
+    runtimeCalibration.ppsEnabled,
+    runtimeCalibration.targetAdcMv,
+  ])
 
   const runCalibrationAction = useCallback(
     async (actionKey: string, action: () => void | Promise<void>) => {
@@ -3640,10 +4268,26 @@ function CalibrationView({
   )
 
   const calibrationActionPending = (actionKey: string) => pendingCalibrationAction === actionKey
+  const leaveGuardViewModel = calibrationLeaveGuard
+    ? {
+        nextLabel: calibrationLeaveGuard.nextLabel,
+        onDismiss: onCalibrationLeaveGuardDismiss,
+        onContinue: async () => {
+          const continueAction = calibrationLeaveGuard.continueAction
+          const exited = await onModeExit()
+          if (!exited) {
+            return
+          }
+          onCalibrationLeaveGuardDismiss()
+          await continueAction()
+        },
+      }
+    : null
 
   const adcApplyToolbar = (
     <AdcCalibrationToolbar
       applyBlocked={applyBlocked}
+      disabled={controlsBlocked}
       feedback={feedback}
       onApply={onApply}
       onExport={exportCalibration}
@@ -3686,549 +4330,599 @@ function CalibrationView({
 
           <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="加热曲线标定">
-              <div className="industrial-calibration-live-grid">
-                <CalibrationModeControlPanel
-                  title="校准控制"
-                  modeToggle={
-                    <CalibrationModeToggle
-                      active={modeArmed}
-                      onEnable={() =>
-                        void onModeEnter('heater_curve', {
-                          mode: 'heater_curve',
-                          ppsEnabled: false,
-                          heaterEnabled: false,
-                        })
-                      }
-                      onDisable={() => void onModeExit()}
-                    />
-                  }
-                  capability={powerCapability}
-                  voltageText={heaterPpsMvText}
-                  onVoltageChange={setHeaterPpsMvText}
-                  range={ppsRange}
-                  hasPpsCapability={hasPpsCapability}
-                  errors={
-                    heaterPpsError ? (
-                      <p className="industrial-calibration-inline-error">{heaterPpsError}</p>
-                    ) : null
-                  }
-                  actionSlots={[
-                    {
-                      id: 'heater-pps-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={
-                            pendingCalibrationAction != null ||
-                            (!runtimeCalibration.ppsEnabled && !heaterCanSubmitPps)
-                          }
-                          onClick={() =>
-                            void runCalibrationAction('heater-pps-toggle', () =>
-                              onCalibrationRuntimeChange(
-                                runtimeCalibration.ppsEnabled
-                                  ? {
-                                      mode: 'heater_curve',
-                                      ppsEnabled: false,
-                                    }
-                                  : {
-                                      mode: 'heater_curve',
-                                      ppsEnabled: true,
-                                      ppsMv: heaterPpsMv ?? undefined,
-                                    },
-                                runtimeCalibration.ppsEnabled
-                                  ? 'PPS 停止失败。'
-                                  : 'PPS 请求超出能力范围。'
+              <div className="industrial-calibration-live-grid industrial-calibration-live-grid--staggered">
+                <div className="industrial-calibration-live-stack">
+                  <CalibrationModeControlPanel
+                    title="校准控制"
+                    modeToggle={
+                      <CalibrationModeToggle
+                        active={modeArmed}
+                        disabled={controlsBlocked}
+                        onEnable={() =>
+                          void onModeEnter('heater_curve', {
+                            mode: 'heater_curve',
+                            ppsEnabled: false,
+                            heaterEnabled: false,
+                          })
+                        }
+                        onDisable={() => onModeExit()}
+                      />
+                    }
+                    leaveGuard={leaveGuardViewModel}
+                    capability={powerCapability}
+                    voltageText={heaterPpsMvText}
+                    onVoltageChange={setHeaterPpsMvText}
+                    range={ppsRange}
+                    hasPpsCapability={hasPpsCapability}
+                    errors={
+                      heaterPpsError ? (
+                        <p className="industrial-calibration-inline-error">{heaterPpsError}</p>
+                      ) : null
+                    }
+                    actionSlots={[
+                      {
+                        id: 'heater-pps-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked ||
+                              pendingCalibrationAction != null ||
+                              (!runtimeCalibration.ppsEnabled && !heaterCanSubmitPps)
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('heater-pps-toggle', () =>
+                                onCalibrationRuntimeChange(
+                                  runtimeCalibration.ppsEnabled
+                                    ? {
+                                        mode: 'heater_curve',
+                                        ppsEnabled: false,
+                                      }
+                                    : {
+                                        mode: 'heater_curve',
+                                        ppsEnabled: true,
+                                        ppsMv: heaterPpsMv ?? undefined,
+                                      },
+                                  runtimeCalibration.ppsEnabled
+                                    ? 'PPS 停止失败。'
+                                    : 'PPS 请求超出能力范围。'
+                                )
                               )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('heater-pps-toggle')
-                            ? '处理中...'
-                            : runtimeCalibration.ppsEnabled
-                              ? '关闭 PPS'
-                              : '申请 PPS'}
-                        </button>
-                      ),
-                    },
-                    {
-                      id: 'heater-job-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={
-                            pendingCalibrationAction != null ||
-                            (!jobRunning && (!modeArmed || !heaterCanSubmitPps))
-                          }
-                          onClick={() =>
-                            void runCalibrationAction('heater-job-toggle', () =>
-                              onCalibrationJobChange(
-                                jobRunning
-                                  ? { op: 'cancel' }
-                                  : { op: 'start', kind: 'heater_curve_auto' },
-                                jobRunning
-                                  ? '加热曲线自动采样取消失败。'
-                                  : '加热曲线自动采样启动失败。'
+                            }
+                          >
+                            {calibrationActionPending('heater-pps-toggle')
+                              ? '处理中...'
+                              : runtimeCalibration.ppsEnabled
+                                ? '关闭 PPS'
+                                : '申请 PPS'}
+                          </button>
+                        ),
+                      },
+                      {
+                        id: 'heater-job-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked ||
+                              pendingCalibrationAction != null ||
+                              (!jobRunning && (!modeArmed || !heaterCanSubmitPps))
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('heater-job-toggle', () =>
+                                onCalibrationJobChange(
+                                  jobRunning
+                                    ? { op: 'cancel' }
+                                    : { op: 'start', kind: 'heater_curve_auto' },
+                                  jobRunning
+                                    ? '加热曲线自动采样取消失败。'
+                                    : '加热曲线自动采样启动失败。'
+                                )
                               )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('heater-job-toggle')
-                            ? '处理中...'
-                            : jobRunning
-                              ? '取消校准'
-                              : '自动校准'}
-                        </button>
-                      ),
-                    },
-                    {
-                      id: 'heater-heater-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={!modeArmed || pendingCalibrationAction != null}
-                          onClick={() =>
-                            void runCalibrationAction('heater-heater-toggle', () =>
-                              onCalibrationRuntimeChange(
-                                {
-                                  mode: 'heater_curve',
-                                  heaterEnabled: !runtimeCalibration.heaterEnabled,
-                                },
-                                '加热切换失败。'
+                            }
+                          >
+                            {calibrationActionPending('heater-job-toggle')
+                              ? '处理中...'
+                              : jobRunning
+                                ? '取消校准'
+                                : '自动校准'}
+                          </button>
+                        ),
+                      },
+                      {
+                        id: 'heater-heater-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('heater-heater-toggle', () =>
+                                onCalibrationRuntimeChange(
+                                  {
+                                    mode: 'heater_curve',
+                                    heaterEnabled: !runtimeCalibration.heaterEnabled,
+                                  },
+                                  '加热切换失败。'
+                                )
                               )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('heater-heater-toggle')
-                            ? '处理中...'
-                            : runtimeCalibration.heaterEnabled
-                              ? '关闭加热'
-                              : '开启加热'}
-                        </button>
-                      ),
-                    },
-                  ]}
-                >
-                  <CalibrationSliderInputField
-                    label="目标温度"
-                    valueText={String(Math.round(device.targetTempC))}
-                    unit="℃"
-                    min={TARGET_TEMP_MIN}
-                    max={TARGET_TEMP_MAX}
-                    step={TARGET_TEMP_STEP}
-                    disabled={!modeArmed || pendingCalibrationAction != null}
-                    inputAriaLabel="加热曲线标定目标温度输入"
-                    sliderAriaLabel="加热曲线标定目标温度滑块"
-                    onChange={(value) => {
-                      const nextValue = Number(value)
-                      if (Number.isFinite(nextValue)) {
-                        onTargetTempChange(nextValue)
-                      }
-                    }}
-                    formatBound={(value) => `${value}℃`}
-                  />
-                </CalibrationModeControlPanel>
-                <CalibrationLiveCard title="加热状态">
-                  <PropertyList
-                    items={[
-                      ['目标温度', formatTemp(device.targetTempC)],
-                      [
-                        '当前 PPS',
-                        runtimeCalibration.ppsEnabled
-                          ? formatVolts(runtimeCalibration.ppsMv ?? 0)
-                          : '关闭',
-                      ],
-                      ['加热', runtimeCalibration.heaterEnabled ? '开启' : '关闭'],
-                      ['来源', calibrationJobLabel(runtimeCalibration.job)],
-                      [
-                        '进度',
-                        `${currentJob.progressPercent}% / ${currentJob.samplesCollected} 个样本`,
-                      ],
+                            }
+                          >
+                            {calibrationActionPending('heater-heater-toggle')
+                              ? '处理中...'
+                              : runtimeCalibration.heaterEnabled
+                                ? '关闭加热'
+                                : '开启加热'}
+                          </button>
+                        ),
+                      },
                     ]}
+                  >
+                    <CalibrationSliderInputField
+                      label="目标温度"
+                      valueText={String(Math.round(device.targetTempC))}
+                      unit="℃"
+                      min={TARGET_TEMP_MIN}
+                      max={TARGET_TEMP_MAX}
+                      step={TARGET_TEMP_STEP}
+                      disabled={controlsBlocked || !modeArmed || pendingCalibrationAction != null}
+                      inputAriaLabel="加热曲线标定目标温度输入"
+                      sliderAriaLabel="加热曲线标定目标温度滑块"
+                      onChange={(value) => {
+                        const nextValue = Number(value)
+                        if (Number.isFinite(nextValue)) {
+                          onTargetTempChange(nextValue)
+                        }
+                      }}
+                      formatBound={(value) => `${value}℃`}
+                    />
+                  </CalibrationModeControlPanel>
+                </div>
+                <div className="industrial-calibration-side-stack">
+                  <HeaterCurveWorkbenchCard
+                    device={device}
+                    heaterCurve={heaterCurve}
+                    draftText={heaterCurveDraftText}
+                    disabled={controlsBlocked}
+                    currentModeError={currentModeError}
+                    currentJobMessage={currentJob.message}
+                    runtimeCalibration={runtimeCalibration}
+                    onDraftTextChange={setHeaterCurveDraftText}
+                    onPreview={onHeaterCurvePreview}
+                    onClearPreview={onHeaterCurveClearPreview}
+                    onSave={onHeaterCurveSave}
                   />
-                  {currentModeError ? (
-                    <p className="industrial-calibration-inline-error">{currentModeError}</p>
-                  ) : null}
-                  {currentJob.message ? (
-                    <p className="industrial-calibration-inline-error">{currentJob.message}</p>
-                  ) : null}
-                </CalibrationLiveCard>
+                </div>
               </div>
+              {adcApplyToolbar}
               <HeaterCurvePanel
                 device={device}
                 heaterCurve={heaterCurve}
                 draftText={heaterCurveDraftText}
+                disabled={controlsBlocked}
                 onDraftTextChange={setHeaterCurveDraftText}
-                onPreview={onHeaterCurvePreview}
-                onClearPreview={onHeaterCurveClearPreview}
-                onSave={onHeaterCurveSave}
               />
             </section>
           </TabsContent>
           <TabsContent value="rtd_adc" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="温度标定">
-              <div className="industrial-calibration-live-grid">
-                <CalibrationModeControlPanel
-                  title="校准控制"
-                  modeToggle={
-                    <CalibrationModeToggle
-                      active={modeArmed}
-                      onEnable={() =>
-                        void onModeEnter('rtd_adc', {
-                          mode: 'rtd_adc',
-                          ppsEnabled: false,
-                          heaterEnabled: false,
-                          targetAdcMv: runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv,
+              <div className="industrial-calibration-live-grid industrial-calibration-live-grid--staggered">
+                <div className="industrial-calibration-live-stack">
+                  <CalibrationModeControlPanel
+                    title="校准控制"
+                    modeToggle={
+                      <CalibrationModeToggle
+                        active={modeArmed}
+                        disabled={controlsBlocked}
+                        onEnable={() =>
+                          void onModeEnter('rtd_adc', {
+                            mode: 'rtd_adc',
+                            ppsEnabled: false,
+                            heaterEnabled: false,
+                            targetAdcMv:
+                              rtdTargetAdcMv ??
+                              runtimeCalibration.targetAdcMv ??
+                              device.rtdRawAdcMv ??
+                              undefined,
+                          })
+                        }
+                        onDisable={() => onModeExit()}
+                      />
+                    }
+                    leaveGuard={leaveGuardViewModel}
+                    capability={powerCapability}
+                    voltageText={rtdPpsMvText}
+                    onVoltageChange={setRtdPpsMvText}
+                    range={ppsRange}
+                    hasPpsCapability={hasPpsCapability}
+                    errors={
+                      <>
+                        {rtdPpsError ? (
+                          <p className="industrial-calibration-inline-error">{rtdPpsError}</p>
+                        ) : null}
+                        {rtdTargetError ? (
+                          <p className="industrial-calibration-inline-error">{rtdTargetError}</p>
+                        ) : null}
+                      </>
+                    }
+                    actionSlots={[
+                      {
+                        id: 'rtd-pps-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked ||
+                              pendingCalibrationAction != null ||
+                              (!runtimeCalibration.ppsEnabled && !rtdCanSubmitRuntime)
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('rtd-hold-toggle', () =>
+                                onCalibrationRuntimeChange(
+                                  runtimeCalibration.ppsEnabled
+                                    ? {
+                                        mode: 'rtd_adc',
+                                        ppsEnabled: false,
+                                      }
+                                    : {
+                                        mode: 'rtd_adc',
+                                        ppsEnabled: true,
+                                        ppsMv: rtdPpsMv ?? undefined,
+                                        targetAdcMv: rtdTargetAdcMv ?? undefined,
+                                      },
+                                  runtimeCalibration.ppsEnabled
+                                    ? '温度保持停止失败。'
+                                    : '温度保持请求非法。'
+                                )
+                              )
+                            }
+                          >
+                            {calibrationActionPending('rtd-hold-toggle')
+                              ? '处理中...'
+                              : runtimeCalibration.ppsEnabled
+                                ? '关闭 PPS'
+                                : '申请 PPS'}
+                          </button>
+                        ),
+                      },
+                      {
+                        id: 'rtd-job-placeholder',
+                        node: (
+                          <span
+                            className="industrial-calibration-inline-actions__placeholder"
+                            aria-hidden="true"
+                          />
+                        ),
+                      },
+                      {
+                        id: 'rtd-heater-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('rtd-heater-toggle', () =>
+                                onCalibrationRuntimeChange(
+                                  {
+                                    mode: 'rtd_adc',
+                                    heaterEnabled: !runtimeCalibration.heaterEnabled,
+                                  },
+                                  '加热切换失败。'
+                                )
+                              )
+                            }
+                          >
+                            {calibrationActionPending('rtd-heater-toggle')
+                              ? '处理中...'
+                              : runtimeCalibration.heaterEnabled
+                                ? '关闭加热'
+                                : '开启加热'}
+                          </button>
+                        ),
+                      },
+                    ]}
+                  >
+                    <CalibrationSliderInputField
+                      label="目标 ADC"
+                      valueText={rtdTargetAdcText}
+                      unit="mV"
+                      min={RTD_TARGET_MIN_MV}
+                      max={RTD_TARGET_MAX_MV}
+                      step={RTD_TARGET_STEP_MV}
+                      disabled={controlsBlocked || !hasPpsCapability}
+                      inputAriaLabel="目标 ADC 输入"
+                      sliderAriaLabel="目标 ADC 滑块"
+                      onChange={setRtdTargetAdcText}
+                    />
+                  </CalibrationModeControlPanel>
+                </div>
+                <div className="industrial-calibration-side-stack">
+                  <CalibrationWorkbenchCard
+                    title="状态"
+                    summary={
+                      <CalibrationFitStatusSummary
+                        liveLabel="当前 ADC"
+                        liveValue={
+                          device.rtdRawAdcMv != null ? `${device.rtdRawAdcMv}mV` : '未采样'
+                        }
+                        activeFit={calibration.activeFit.rtdAdc}
+                        draftFit={calibration.draftFit.rtdAdc}
+                      />
+                    }
+                    guidance={
+                      rtdTargetError
+                        ? '先修正目标 ADC，再继续采集或调整草稿拟合。'
+                        : '先确认目标 ADC 稳定，再写入温度样本。'
+                    }
+                    messages={
+                      <>
+                        {rtdTargetError ? (
+                          <p className="industrial-calibration-inline-error">{rtdTargetError}</p>
+                        ) : null}
+                        {currentModeError ? (
+                          <p className="industrial-calibration-inline-error">{currentModeError}</p>
+                        ) : null}
+                      </>
+                    }
+                  >
+                    <CalibrationChannelControls
+                      title="温度 ADC"
+                      referenceLabel="参考温度"
+                      referenceValue={refs.rtdTempC}
+                      referenceUnit="℃"
+                      draftFit={calibration.draftFit.rtdAdc}
+                      samples={calibration.draft.rtdAdc}
+                      disabled={controlsBlocked}
+                      onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
+                      onCapture={() =>
+                        onCapture('rtd_adc', {
+                          targetAdcMv:
+                            rtdTargetAdcMv ??
+                            runtimeCalibration.targetAdcMv ??
+                            device.rtdRawAdcMv ??
+                            undefined,
                         })
                       }
-                      onDisable={() => void onModeExit()}
+                      onClear={() => onClear('rtd_adc')}
+                      onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
                     />
-                  }
-                  capability={powerCapability}
-                  voltageText={rtdPpsMvText}
-                  onVoltageChange={setRtdPpsMvText}
-                  range={ppsRange}
-                  hasPpsCapability={hasPpsCapability}
-                  errors={
-                    <>
-                      {rtdPpsError ? (
-                        <p className="industrial-calibration-inline-error">{rtdPpsError}</p>
-                      ) : null}
-                      {rtdTargetError ? (
-                        <p className="industrial-calibration-inline-error">{rtdTargetError}</p>
-                      ) : null}
-                    </>
-                  }
-                  actionSlots={[
-                    {
-                      id: 'rtd-pps-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={
-                            pendingCalibrationAction != null ||
-                            (!runtimeCalibration.ppsEnabled && !rtdCanSubmitRuntime)
-                          }
-                          onClick={() =>
-                            void runCalibrationAction('rtd-hold-toggle', () =>
-                              onCalibrationRuntimeChange(
-                                runtimeCalibration.ppsEnabled
-                                  ? {
-                                      mode: 'rtd_adc',
-                                      ppsEnabled: false,
-                                    }
-                                  : {
-                                      mode: 'rtd_adc',
-                                      ppsEnabled: true,
-                                      ppsMv: rtdPpsMv ?? undefined,
-                                      targetAdcMv: rtdTargetAdcMv ?? undefined,
-                                    },
-                                runtimeCalibration.ppsEnabled
-                                  ? '温度保持停止失败。'
-                                  : '温度保持请求非法。'
-                              )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('rtd-hold-toggle')
-                            ? '处理中...'
-                            : runtimeCalibration.ppsEnabled
-                              ? '关闭 PPS'
-                              : '申请 PPS'}
-                        </button>
-                      ),
-                    },
-                    {
-                      id: 'rtd-job-placeholder',
-                      node: (
-                        <span
-                          className="industrial-calibration-inline-actions__placeholder"
-                          aria-hidden="true"
-                        />
-                      ),
-                    },
-                    {
-                      id: 'rtd-heater-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={!modeArmed || pendingCalibrationAction != null}
-                          onClick={() =>
-                            void runCalibrationAction('rtd-heater-toggle', () =>
-                              onCalibrationRuntimeChange(
-                                {
-                                  mode: 'rtd_adc',
-                                  heaterEnabled: !runtimeCalibration.heaterEnabled,
-                                },
-                                '加热切换失败。'
-                              )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('rtd-heater-toggle')
-                            ? '处理中...'
-                            : runtimeCalibration.heaterEnabled
-                              ? '关闭加热'
-                              : '开启加热'}
-                        </button>
-                      ),
-                    },
-                  ]}
-                >
-                  <CalibrationSliderInputField
-                    label="目标 ADC"
-                    valueText={rtdTargetAdcText}
-                    unit="mV"
-                    min={RTD_TARGET_MIN_MV}
-                    max={RTD_TARGET_MAX_MV}
-                    step={RTD_TARGET_STEP_MV}
-                    disabled={!hasPpsCapability}
-                    inputAriaLabel="目标 ADC 输入"
-                    sliderAriaLabel="目标 ADC 滑块"
-                    onChange={setRtdTargetAdcText}
-                  />
-                </CalibrationModeControlPanel>
-                <CalibrationLiveCard title="稳定状态">
-                  <PropertyList
-                    items={[
-                      [
-                        '当前 ADC',
-                        device.rtdRawAdcMv != null ? `${device.rtdRawAdcMv}mV` : '未采样',
-                      ],
-                      [
-                        '目标 ADC',
-                        runtimeCalibration.targetAdcMv != null
-                          ? `${runtimeCalibration.targetAdcMv}mV`
-                          : '未设置',
-                      ],
-                      ['稳定', runtimeCalibration.stable ? '是' : '否'],
-                      [
-                        '误差',
-                        runtimeCalibration.stabilityErrorMv != null
-                          ? `${runtimeCalibration.stabilityErrorMv}mV`
-                          : '无',
-                      ],
-                    ]}
-                  />
-                  {currentModeError ? (
-                    <p className="industrial-calibration-inline-error">{currentModeError}</p>
-                  ) : null}
-                </CalibrationLiveCard>
+                  </CalibrationWorkbenchCard>
+                </div>
               </div>
               {adcApplyToolbar}
-              <CalibrationChannelPanel
-                channel="rtd_adc"
-                title="温度 ADC"
-                referenceLabel="参考温度"
-                referenceValue={refs.rtdTempC}
-                referenceUnit="℃"
-                activeFit={calibration.activeFit.rtdAdc}
-                draftFit={calibration.draftFit.rtdAdc}
-                samples={calibration.draft.rtdAdc}
-                onReferenceChange={(value) => onReferenceChange('rtd_adc', value)}
-                onCapture={() => onCapture('rtd_adc')}
-                onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
-                onClear={() => onClear('rtd_adc')}
-                onManualFit={(gain, offsetMv) => onManualFit('rtd_adc', gain, offsetMv)}
-              />
+              <section className="industrial-calibration-channel industrial-calibration-channel--samples">
+                <CalibrationChannelSamples
+                  channel="rtd_adc"
+                  title="温度 ADC"
+                  samples={calibration.draft.rtdAdc}
+                  disabled={controlsBlocked}
+                  onDelete={(sampleIndex) => onDelete('rtd_adc', sampleIndex)}
+                />
+              </section>
             </section>
           </TabsContent>
           <TabsContent value="vin_adc" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="电压读数标定">
-              <div className="industrial-calibration-live-grid">
-                <CalibrationModeControlPanel
-                  title="校准控制"
-                  modeToggle={
-                    <CalibrationModeToggle
-                      active={modeArmed}
-                      onEnable={() =>
-                        void onModeEnter('vin_adc', {
-                          mode: 'vin_adc',
-                          ppsEnabled: false,
-                          heaterEnabled: false,
-                        })
-                      }
-                      onDisable={() => void onModeExit()}
-                    />
-                  }
-                  capability={powerCapability}
-                  voltageText={vinPpsMvText}
-                  onVoltageChange={setVinPpsMvText}
-                  range={ppsRange}
-                  hasPpsCapability={hasPpsCapability}
-                  errors={
-                    vinPpsError ? (
-                      <p className="industrial-calibration-inline-error">{vinPpsError}</p>
-                    ) : null
-                  }
-                  actionSlots={[
-                    {
-                      id: 'vin-pps-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={
-                            pendingCalibrationAction != null ||
-                            (!runtimeCalibration.ppsEnabled && !vinCanSubmitPps)
-                          }
-                          onClick={() =>
-                            void runCalibrationAction('vin-pps-toggle', () =>
-                              onCalibrationRuntimeChange(
-                                runtimeCalibration.ppsEnabled
-                                  ? {
-                                      mode: 'vin_adc',
-                                      ppsEnabled: false,
-                                    }
-                                  : {
-                                      mode: 'vin_adc',
-                                      ppsEnabled: true,
-                                      ppsMv: vinPpsMv ?? undefined,
-                                    },
-                                runtimeCalibration.ppsEnabled
-                                  ? 'VIN 标定 PPS 停止失败。'
-                                  : 'VIN 标定 PPS 请求非法。'
+              <div className="industrial-calibration-live-grid industrial-calibration-live-grid--staggered">
+                <div className="industrial-calibration-live-stack">
+                  <CalibrationModeControlPanel
+                    title="校准控制"
+                    modeToggle={
+                      <CalibrationModeToggle
+                        active={modeArmed}
+                        disabled={controlsBlocked}
+                        onEnable={() =>
+                          void onModeEnter('vin_adc', {
+                            mode: 'vin_adc',
+                            ppsEnabled: false,
+                            heaterEnabled: false,
+                          })
+                        }
+                        onDisable={() => onModeExit()}
+                      />
+                    }
+                    leaveGuard={leaveGuardViewModel}
+                    capability={powerCapability}
+                    voltageText={vinPpsMvText}
+                    onVoltageChange={setVinPpsMvText}
+                    range={ppsRange}
+                    hasPpsCapability={hasPpsCapability}
+                    errors={
+                      vinPpsError ? (
+                        <p className="industrial-calibration-inline-error">{vinPpsError}</p>
+                      ) : null
+                    }
+                    actionSlots={[
+                      {
+                        id: 'vin-pps-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked ||
+                              pendingCalibrationAction != null ||
+                              (!runtimeCalibration.ppsEnabled && !vinCanSubmitPps)
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('vin-pps-toggle', () =>
+                                onCalibrationRuntimeChange(
+                                  runtimeCalibration.ppsEnabled
+                                    ? {
+                                        mode: 'vin_adc',
+                                        ppsEnabled: false,
+                                      }
+                                    : {
+                                        mode: 'vin_adc',
+                                        ppsEnabled: true,
+                                        ppsMv: vinPpsMv ?? undefined,
+                                      },
+                                  runtimeCalibration.ppsEnabled
+                                    ? 'VIN 标定 PPS 停止失败。'
+                                    : 'VIN 标定 PPS 请求非法。'
+                                )
                               )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('vin-pps-toggle')
-                            ? '处理中...'
-                            : runtimeCalibration.ppsEnabled
-                              ? '关闭 PPS'
-                              : '申请 PPS'}
-                        </button>
-                      ),
-                    },
-                    {
-                      id: 'vin-job-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={
-                            pendingCalibrationAction != null ||
-                            (!jobRunning && (!modeArmed || !vinCanSubmitPps))
-                          }
-                          onClick={() =>
-                            void runCalibrationAction('vin-job-toggle', () =>
-                              onCalibrationJobChange(
-                                jobRunning
-                                  ? { op: 'cancel' }
-                                  : { op: 'start', kind: 'vin_adc_auto' },
-                                jobRunning
-                                  ? '电压读数自动扫点取消失败。'
-                                  : '电压读数自动扫点启动失败。'
+                            }
+                          >
+                            {calibrationActionPending('vin-pps-toggle')
+                              ? '处理中...'
+                              : runtimeCalibration.ppsEnabled
+                                ? '关闭 PPS'
+                                : '申请 PPS'}
+                          </button>
+                        ),
+                      },
+                      {
+                        id: 'vin-job-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked ||
+                              pendingCalibrationAction != null ||
+                              (!jobRunning && (!modeArmed || !vinCanSubmitPps))
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('vin-job-toggle', () =>
+                                onCalibrationJobChange(
+                                  jobRunning
+                                    ? { op: 'cancel' }
+                                    : { op: 'start', kind: 'vin_adc_auto' },
+                                  jobRunning
+                                    ? '电压读数自动扫点取消失败。'
+                                    : '电压读数自动扫点启动失败。'
+                                )
                               )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('vin-job-toggle')
-                            ? '处理中...'
-                            : jobRunning
-                              ? '取消校准'
-                              : '自动校准'}
-                        </button>
-                      ),
-                    },
-                    {
-                      id: 'vin-heater-toggle',
-                      node: (
-                        <button
-                          type="button"
-                          className="industrial-button industrial-button--secondary"
-                          disabled={!modeArmed || pendingCalibrationAction != null}
-                          onClick={() =>
-                            void runCalibrationAction('vin-heater-toggle', () =>
-                              onCalibrationRuntimeChange(
-                                {
-                                  mode: 'vin_adc',
-                                  heaterEnabled: !runtimeCalibration.heaterEnabled,
-                                },
-                                '加热切换失败。'
+                            }
+                          >
+                            {calibrationActionPending('vin-job-toggle')
+                              ? '处理中...'
+                              : jobRunning
+                                ? '取消校准'
+                                : '自动校准'}
+                          </button>
+                        ),
+                      },
+                      {
+                        id: 'vin-heater-toggle',
+                        node: (
+                          <button
+                            type="button"
+                            className="industrial-button industrial-button--secondary"
+                            disabled={
+                              controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                            }
+                            onClick={() =>
+                              void runCalibrationAction('vin-heater-toggle', () =>
+                                onCalibrationRuntimeChange(
+                                  {
+                                    mode: 'vin_adc',
+                                    heaterEnabled: !runtimeCalibration.heaterEnabled,
+                                  },
+                                  '加热切换失败。'
+                                )
                               )
-                            )
-                          }
-                        >
-                          {calibrationActionPending('vin-heater-toggle')
-                            ? '处理中...'
-                            : runtimeCalibration.heaterEnabled
-                              ? '关闭加热'
-                              : '开启加热'}
-                        </button>
-                      ),
-                    },
-                  ]}
-                >
-                  <CalibrationSliderInputField
-                    label="目标温度"
-                    valueText={String(Math.round(device.targetTempC))}
-                    unit="℃"
-                    min={TARGET_TEMP_MIN}
-                    max={TARGET_TEMP_MAX}
-                    step={TARGET_TEMP_STEP}
-                    disabled={!modeArmed || pendingCalibrationAction != null}
-                    inputAriaLabel="电压读数标定目标温度输入"
-                    sliderAriaLabel="电压读数标定目标温度滑块"
-                    onChange={(value) => {
-                      const nextValue = Number(value)
-                      if (Number.isFinite(nextValue)) {
-                        onTargetTempChange(nextValue)
-                      }
-                    }}
-                    formatBound={(value) => `${value}℃`}
-                  />
-                </CalibrationModeControlPanel>
-                <CalibrationLiveCard title="实时读数">
-                  <PropertyList
-                    items={[
-                      [
-                        '申请 PPS',
-                        runtimeCalibration.ppsEnabled
-                          ? formatVolts(runtimeCalibration.ppsMv ?? 0)
-                          : '关闭',
-                      ],
-                      ['回读电压', formatVolts(device.voltageMv)],
-                      [
-                        '电压原始 ADC',
-                        device.vinRawAdcMv != null ? `${device.vinRawAdcMv}mV` : '未采样',
-                      ],
-                      ['稳定', runtimeCalibration.stable ? '是' : '否'],
-                      ['任务', calibrationJobLabel(currentJob)],
-                      [
-                        '进度',
-                        `${currentJob.progressPercent}% / ${currentJob.samplesCollected} 个样本`,
-                      ],
+                            }
+                          >
+                            {calibrationActionPending('vin-heater-toggle')
+                              ? '处理中...'
+                              : runtimeCalibration.heaterEnabled
+                                ? '关闭加热'
+                                : '开启加热'}
+                          </button>
+                        ),
+                      },
                     ]}
-                  />
-                  {currentModeError ? (
-                    <p className="industrial-calibration-inline-error">{currentModeError}</p>
-                  ) : null}
-                  {currentJob.message ? (
-                    <p className="industrial-calibration-inline-error">{currentJob.message}</p>
-                  ) : null}
-                </CalibrationLiveCard>
+                  >
+                    <CalibrationSliderInputField
+                      label="目标温度"
+                      valueText={String(Math.round(device.targetTempC))}
+                      unit="℃"
+                      min={TARGET_TEMP_MIN}
+                      max={TARGET_TEMP_MAX}
+                      step={TARGET_TEMP_STEP}
+                      disabled={controlsBlocked || !modeArmed || pendingCalibrationAction != null}
+                      inputAriaLabel="电压读数标定目标温度输入"
+                      sliderAriaLabel="电压读数标定目标温度滑块"
+                      onChange={(value) => {
+                        const nextValue = Number(value)
+                        if (Number.isFinite(nextValue)) {
+                          onTargetTempChange(nextValue)
+                        }
+                      }}
+                      formatBound={(value) => `${value}℃`}
+                    />
+                  </CalibrationModeControlPanel>
+                </div>
+                <div className="industrial-calibration-side-stack">
+                  <CalibrationWorkbenchCard
+                    title="状态"
+                    summary={
+                      <CalibrationFitStatusSummary
+                        liveLabel="当前 ADC"
+                        liveValue={
+                          device.vinRawAdcMv != null ? `${device.vinRawAdcMv}mV` : '未采样'
+                        }
+                        activeFit={calibration.activeFit.vinAdc}
+                        draftFit={calibration.draftFit.vinAdc}
+                      />
+                    }
+                    guidance={
+                      vinPpsError
+                        ? '先修正 PPS 电压，再开始自动扫点或采样。'
+                        : '右侧草稿样本会直接影响拟合结果。'
+                    }
+                    messages={
+                      <>
+                        {vinPpsError ? (
+                          <p className="industrial-calibration-inline-error">{vinPpsError}</p>
+                        ) : null}
+                        {currentModeError ? (
+                          <p className="industrial-calibration-inline-error">{currentModeError}</p>
+                        ) : null}
+                        {currentJob.message ? (
+                          <p className="industrial-calibration-inline-error">
+                            {currentJob.message}
+                          </p>
+                        ) : null}
+                      </>
+                    }
+                  >
+                    <CalibrationChannelControls
+                      title="电压 ADC"
+                      referenceLabel="参考电压"
+                      referenceValue={refs.vinMv}
+                      referenceUnit="mV"
+                      draftFit={calibration.draftFit.vinAdc}
+                      samples={calibration.draft.vinAdc}
+                      disabled={controlsBlocked}
+                      onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
+                      onCapture={() => onCapture('vin_adc')}
+                      onClear={() => onClear('vin_adc')}
+                      onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
+                    />
+                  </CalibrationWorkbenchCard>
+                </div>
               </div>
               {adcApplyToolbar}
-              <CalibrationChannelPanel
-                channel="vin_adc"
-                title="电压 ADC"
-                referenceLabel="参考电压"
-                referenceValue={refs.vinMv}
-                referenceUnit="mV"
-                activeFit={calibration.activeFit.vinAdc}
-                draftFit={calibration.draftFit.vinAdc}
-                samples={calibration.draft.vinAdc}
-                onReferenceChange={(value) => onReferenceChange('vin_adc', value)}
-                onCapture={() => onCapture('vin_adc')}
-                onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
-                onClear={() => onClear('vin_adc')}
-                onManualFit={(gain, offsetMv) => onManualFit('vin_adc', gain, offsetMv)}
-              />
+              <section className="industrial-calibration-channel industrial-calibration-channel--samples">
+                <CalibrationChannelSamples
+                  channel="vin_adc"
+                  title="电压 ADC"
+                  samples={calibration.draft.vinAdc}
+                  disabled={controlsBlocked}
+                  onDelete={(sampleIndex) => onDelete('vin_adc', sampleIndex)}
+                />
+              </section>
             </section>
           </TabsContent>
         </Tabs>
@@ -4239,17 +4933,20 @@ function CalibrationView({
 
 function CalibrationModeToggle({
   active,
+  disabled = false,
   onEnable,
   onDisable,
 }: {
   active: boolean
+  disabled?: boolean
   onEnable: () => void | Promise<void>
-  onDisable: () => void | Promise<void>
+  onDisable: () => boolean | Promise<boolean>
 }) {
   return (
     <Switch
       aria-label="标定模式"
       checked={active}
+      disabled={disabled}
       onCheckedChange={(checked) => void (checked ? onEnable() : onDisable())}
     />
   )
@@ -4259,17 +4956,26 @@ function CalibrationLiveCard({
   title,
   detail,
   modeToggle,
+  modeToggleHint,
   titleMeta,
+  compact = false,
   children,
 }: {
   title: string
   detail?: string
   modeToggle?: ReactNode
+  modeToggleHint?: ReactNode
   titleMeta?: ReactNode
+  compact?: boolean
   children: ReactNode
 }) {
   return (
-    <section className="industrial-calibration-live-card">
+    <section
+      className={cn(
+        'industrial-calibration-live-card',
+        compact && 'industrial-calibration-live-card--compact'
+      )}
+    >
       <div className="industrial-calibration-live-card__header">
         <div className="industrial-calibration-live-card__title-row">
           <div
@@ -4285,11 +4991,161 @@ function CalibrationLiveCard({
             </div>
             {detail ? <p>{detail}</p> : null}
           </div>
-          {modeToggle ?? null}
+          <div className="industrial-calibration-live-card__mode-control">
+            {modeToggleHint ?? null}
+            {modeToggle ?? null}
+          </div>
         </div>
       </div>
       {children}
     </section>
+  )
+}
+
+function CalibrationLeaveGuardBubble({
+  nextLabel,
+  onDismiss,
+  onContinue,
+}: {
+  nextLabel: string
+  onDismiss: () => void
+  onContinue: () => void
+}) {
+  const anchorRef = useRef<HTMLSpanElement | null>(null)
+  const bubbleRef = useRef<HTMLDivElement | null>(null)
+  const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({ visibility: 'hidden' })
+  const [bubbleSide, setBubbleSide] = useState<'left' | 'bottom' | 'top'>('left')
+
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current
+    if (!anchor) {
+      return
+    }
+
+    let frameId = 0
+    const gap = 12
+    const viewportMargin = 16
+
+    const updatePosition = () => {
+      const bubble = bubbleRef.current
+      if (!bubble) {
+        return
+      }
+
+      const anchorRect = anchor.getBoundingClientRect()
+      const bubbleRect = bubble.getBoundingClientRect()
+      let nextSide: 'left' | 'bottom' | 'top' = 'left'
+      let left = anchorRect.left - bubbleRect.width - gap
+      let top = anchorRect.top + anchorRect.height / 2 - bubbleRect.height / 2
+
+      if (left < viewportMargin) {
+        nextSide = 'bottom'
+        left = anchorRect.right - bubbleRect.width
+        top = anchorRect.bottom + gap
+
+        if (top + bubbleRect.height > window.innerHeight - viewportMargin) {
+          nextSide = 'top'
+          top = anchorRect.top - bubbleRect.height - gap
+        }
+      }
+
+      left = Math.min(
+        Math.max(viewportMargin, left),
+        Math.max(viewportMargin, window.innerWidth - bubbleRect.width - viewportMargin)
+      )
+      top = Math.min(
+        Math.max(viewportMargin, top),
+        Math.max(viewportMargin, window.innerHeight - bubbleRect.height - viewportMargin)
+      )
+
+      setBubbleSide(nextSide)
+      setBubbleStyle({
+        left,
+        top,
+        visibility: 'visible',
+      })
+    }
+
+    const scheduleUpdate = () => {
+      if (frameId !== 0) {
+        window.cancelAnimationFrame(frameId)
+      }
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0
+        updatePosition()
+      })
+    }
+
+    scheduleUpdate()
+    window.addEventListener('resize', scheduleUpdate)
+    window.addEventListener('scroll', scheduleUpdate, true)
+
+    const observer =
+      typeof ResizeObserver === 'function' ? new ResizeObserver(() => scheduleUpdate()) : null
+    observer?.observe(anchor)
+    if (bubbleRef.current) {
+      observer?.observe(bubbleRef.current)
+    }
+
+    return () => {
+      if (frameId !== 0) {
+        window.cancelAnimationFrame(frameId)
+      }
+      observer?.disconnect()
+      window.removeEventListener('resize', scheduleUpdate)
+      window.removeEventListener('scroll', scheduleUpdate, true)
+    }
+  }, [])
+
+  const bubble =
+    typeof document === 'undefined'
+      ? null
+      : createPortal(
+          <div
+            ref={bubbleRef}
+            className="industrial-calibration-leave-guard"
+            data-side={bubbleSide}
+            role="alert"
+            aria-live="polite"
+            style={bubbleStyle}
+          >
+            <div className="industrial-calibration-leave-guard__header">
+              <div className="industrial-calibration-leave-guard__badge">
+                <AlertTriangle size={12} strokeWidth={2.3} aria-hidden="true" />
+                <span>校准未关闭</span>
+              </div>
+              <div className="industrial-calibration-leave-guard__eyebrow">切换前提醒</div>
+            </div>
+            <p>校准控制仍开着，先关闭后再切到“{nextLabel}”。</p>
+            <div className="industrial-calibration-leave-guard__actions">
+              <button
+                type="button"
+                className="industrial-button industrial-button--secondary"
+                onClick={onContinue}
+              >
+                关闭并继续
+              </button>
+              <button
+                type="button"
+                className="industrial-button industrial-button--ghost"
+                onClick={onDismiss}
+              >
+                留在当前页
+              </button>
+            </div>
+          </div>,
+          document.body
+        )
+
+  return (
+    <>
+      <span
+        ref={anchorRef}
+        className="industrial-calibration-leave-guard-anchor"
+        aria-hidden="true"
+      />
+      {bubble}
+    </>
   )
 }
 
@@ -4410,12 +5266,14 @@ function PpsCalibrationFields({
 
 function AdcCalibrationToolbar({
   applyBlocked,
+  disabled = false,
   feedback,
   onApply,
   onExport,
   onImport,
 }: {
   applyBlocked: boolean
+  disabled?: boolean
   feedback: ActionFeedback
   onApply: () => void | Promise<void>
   onExport: () => void
@@ -4444,6 +5302,7 @@ function AdcCalibrationToolbar({
         <button
           type="button"
           className="industrial-button industrial-button--secondary industrial-calibration-command-bar__action"
+          disabled={disabled}
           onClick={onImport}
         >
           <Upload size={15} aria-hidden="true" />
@@ -4459,22 +5318,16 @@ function HeaterCurvePanel({
   device,
   heaterCurve,
   draftText,
+  disabled = false,
   onDraftTextChange,
-  onPreview,
-  onClearPreview,
-  onSave,
 }: {
   device: DeviceTarget
   heaterCurve: HeaterCurveState
   draftText: string
+  disabled?: boolean
   onDraftTextChange: (value: string) => void
-  onPreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
-  onClearPreview: () => void | Promise<void>
-  onSave: () => void | Promise<void>
 }) {
   const heaterCurveEditorRef = useRef<HTMLTextAreaElement | null>(null)
-  const activeCount = countHeaterCurvePoints(heaterCurve.active)
-  const previewCount = heaterCurve.preview ? countHeaterCurvePoints(heaterCurve.preview) : 0
   const heaterCurveTableColumns = heaterCurve.preview
     ? '3rem minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr)'
     : '3rem minmax(0, 1fr) minmax(0, 1fr)'
@@ -4483,15 +5336,6 @@ function HeaterCurvePanel({
     point,
     preview: heaterCurve.preview?.points[index] ?? null,
   }))
-
-  const parseDraft = () => {
-    const parsed = JSON.parse(draftText) as HeaterCurvePackage | { package?: HeaterCurvePackage }
-    const packageValue = 'points' in parsed ? parsed : parsed.package
-    if (!packageValue) {
-      throw new Error('加热曲线 JSON 必须包含 points 数组。')
-    }
-    return normalizeHeaterCurvePackage(packageValue)
-  }
 
   useLayoutEffect(() => {
     const editor = heaterCurveEditorRef.current
@@ -4507,65 +5351,12 @@ function HeaterCurvePanel({
     <section className="industrial-heater-curve-panel" aria-label="加热曲线">
       <div className="industrial-heater-curve-panel__header">
         <div>
-          <h3 className="industrial-section-title">加热曲线</h3>
+          <h3 className="industrial-section-title">曲线数据</h3>
           <p className="industrial-heater-curve-panel__subtitle">
-            当前曲线保存在 EEPROM 中；预览会立即生效，但不会持久保存。
+            预览与 EEPROM 数据统一在这里对照查看。
           </p>
         </div>
-        <div className="industrial-heater-curve-panel__meta">
-          <span>{activeCount}/8 已生效</span>
-          <span>{heaterCurve.preview ? `${previewCount}/8 预览` : '未加载预览'}</span>
-        </div>
       </div>
-
-      <div className="industrial-heater-curve-toolbar">
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary"
-          onClick={() => {
-            try {
-              onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
-            } catch {
-              onDraftTextChange(JSON.stringify(heaterCurve.active, null, 2))
-            }
-          }}
-        >
-          读取曲线
-        </button>
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary"
-          onClick={() => {
-            try {
-              void onPreview(parseDraft())
-            } catch {
-              onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
-            }
-          }}
-        >
-          导入预览
-        </button>
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary"
-          disabled={!heaterCurve.preview}
-          onClick={() => void onClearPreview()}
-        >
-          清除预览
-        </button>
-        <button
-          type="button"
-          className="industrial-button industrial-button--primary"
-          disabled={!heaterCurve.preview}
-          onClick={() => void onSave()}
-        >
-          保存曲线
-        </button>
-      </div>
-
-      <p className="industrial-heater-curve-note">
-        预览会立即更新当前曲线；保存后才会写入 EEPROM。
-      </p>
 
       <section className="industrial-heater-curve-table-wrap" aria-label="加热曲线点表">
         <table
@@ -4618,6 +5409,7 @@ function HeaterCurvePanel({
           id={`heater-curve-json-${device.id}`}
           ref={heaterCurveEditorRef}
           className="industrial-heater-curve-editor__textarea"
+          disabled={disabled}
           value={draftText}
           onChange={(event) => onDraftTextChange(event.currentTarget.value)}
         />
@@ -4626,47 +5418,156 @@ function HeaterCurvePanel({
   )
 }
 
-function CalibrationChannelPanel({
+function HeaterCurveWorkbenchCard({
+  device,
+  heaterCurve,
+  draftText,
+  disabled = false,
+  currentModeError,
+  currentJobMessage,
+  runtimeCalibration,
+  onDraftTextChange,
+  onPreview,
+  onClearPreview,
+  onSave,
+}: {
+  device: DeviceTarget
+  heaterCurve: HeaterCurveState
+  draftText: string
+  disabled?: boolean
+  currentModeError?: string | null
+  currentJobMessage?: string | null
+  runtimeCalibration: CalibrationRuntimeState
+  onDraftTextChange: (value: string) => void
+  onPreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
+  onClearPreview: () => void | Promise<void>
+  onSave: () => void | Promise<void>
+}) {
+  const activeCount = countHeaterCurvePoints(heaterCurve.active)
+  const previewCount = heaterCurve.preview ? countHeaterCurvePoints(heaterCurve.preview) : 0
+
+  const parseDraft = () => {
+    const parsed = JSON.parse(draftText) as HeaterCurvePackage | { package?: HeaterCurvePackage }
+    const packageValue = 'points' in parsed ? parsed : parsed.package
+    if (!packageValue) {
+      throw new Error('加热曲线 JSON 必须包含 points 数组。')
+    }
+    return normalizeHeaterCurvePackage(packageValue)
+  }
+
+  return (
+    <CalibrationWorkbenchCard
+      title="状态"
+      summary={
+        <PropertyList
+          items={[
+            ['目标温度', formatTemp(device.targetTempC)],
+            ['加热', runtimeCalibration.heaterEnabled ? '开启' : '关闭'],
+            ['EEPROM', `${activeCount}/8`],
+            ['预览', heaterCurve.preview ? `${previewCount}/8` : '无'],
+          ]}
+        />
+      }
+      guidance={
+        currentModeError == null && currentJobMessage == null
+          ? '预览立即生效；保存后才会写入 EEPROM。'
+          : null
+      }
+      messages={
+        <>
+          {currentModeError ? (
+            <p className="industrial-calibration-inline-error">{currentModeError}</p>
+          ) : null}
+          {currentJobMessage ? (
+            <p className="industrial-calibration-inline-error">{currentJobMessage}</p>
+          ) : null}
+        </>
+      }
+    >
+      <div className="industrial-heater-curve-toolbar">
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={disabled}
+          onClick={() => {
+            try {
+              onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
+            } catch {
+              onDraftTextChange(JSON.stringify(heaterCurve.active, null, 2))
+            }
+          }}
+        >
+          读取曲线
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={disabled}
+          onClick={() => {
+            try {
+              void onPreview(parseDraft())
+            } catch {
+              onDraftTextChange(JSON.stringify(heaterCurve.preview ?? heaterCurve.active, null, 2))
+            }
+          }}
+        >
+          导入预览
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--secondary"
+          disabled={disabled || !heaterCurve.preview}
+          onClick={() => void onClearPreview()}
+        >
+          清除预览
+        </button>
+        <button
+          type="button"
+          className="industrial-button industrial-button--primary"
+          disabled={disabled || !heaterCurve.preview}
+          onClick={() => void onSave()}
+        >
+          保存曲线
+        </button>
+      </div>
+    </CalibrationWorkbenchCard>
+  )
+}
+
+function CalibrationChannelControls({
   title,
   referenceLabel,
   referenceValue,
   referenceUnit,
-  activeFit,
   draftFit,
   samples,
+  disabled = false,
   onReferenceChange,
   onCapture,
-  onDelete,
   onClear,
   onManualFit,
 }: {
-  channel: CalibrationChannel
   title: string
   referenceLabel: string
   referenceValue: number
   referenceUnit: string
-  activeFit: CalibrationState['activeFit']['rtdAdc']
   draftFit: CalibrationState['draftFit']['rtdAdc']
-  samples: Array<{ observedMv: number; expectedMv: number } | null>
+  samples: Array<RtdCalibrationSample | VinCalibrationSample | null>
+  disabled?: boolean
   onReferenceChange: (value: number) => void
   onCapture: () => void | Promise<void>
-  onDelete: (sampleIndex: number) => void | Promise<void>
   onClear: () => void | Promise<void>
   onManualFit: (gain: number, offsetMv: number) => void | Promise<void>
 }) {
   const [manualGain, setManualGain] = useState(() => draftFit.gain.toFixed(5))
   const [manualOffsetMv, setManualOffsetMv] = useState(() => draftFit.offsetMv.toFixed(1))
   const sampleCount = samples.filter(Boolean).length
-  const sampleKeys = calibrationSampleKeys(samples)
-  const populatedSamples = samples
-    .map((sample, index) => (sample ? { ...sample, index } : null))
-    .filter((sample): sample is { observedMv: number; expectedMv: number; index: number } =>
-      Boolean(sample)
-    )
+
   useEffect(() => {
     setManualGain(draftFit.gain.toFixed(5))
     setManualOffsetMv(draftFit.offsetMv.toFixed(1))
   }, [draftFit.gain, draftFit.offsetMv])
+
   const parsedManualGain = Number(manualGain)
   const parsedManualOffsetMv = Number(manualOffsetMv)
   const manualFitInvalid =
@@ -4675,41 +5576,7 @@ function CalibrationChannelPanel({
     !Number.isFinite(parsedManualOffsetMv)
 
   return (
-    <section className="industrial-calibration-channel">
-      <div className="industrial-calibration-channel__header">
-        <h3 className="industrial-section-title">{title}</h3>
-        <span>{sampleCount}/8 个样本</span>
-      </div>
-
-      <table className="industrial-calibration-fit-table" aria-label={`${title} 拟合摘要`}>
-        <thead>
-          <tr>
-            <th scope="col">拟合</th>
-            <th scope="col">模式</th>
-            <th scope="col">增益</th>
-            <th scope="col">偏移</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <th scope="row">当前</th>
-            <td>{calibrationFitMode(activeFit)}</td>
-            <td>
-              <strong>{activeFit.gain.toFixed(5)}x</strong>
-            </td>
-            <td>{activeFit.offsetMv.toFixed(1)}mV</td>
-          </tr>
-          <tr>
-            <th scope="row">草稿</th>
-            <td>{calibrationFitMode(draftFit)}</td>
-            <td>
-              <strong>{draftFit.gain.toFixed(5)}x</strong>
-            </td>
-            <td>{draftFit.offsetMv.toFixed(1)}mV</td>
-          </tr>
-        </tbody>
-      </table>
-
+    <>
       <div className="industrial-calibration-manual-fit">
         <label>
           <span>草稿增益</span>
@@ -4718,6 +5585,7 @@ function CalibrationChannelPanel({
               type="number"
               inputMode="decimal"
               step="0.00001"
+              disabled={disabled}
               value={manualGain}
               onChange={(event) => setManualGain(event.currentTarget.value)}
             />
@@ -4731,6 +5599,7 @@ function CalibrationChannelPanel({
               type="number"
               inputMode="decimal"
               step="0.1"
+              disabled={disabled}
               value={manualOffsetMv}
               onChange={(event) => setManualOffsetMv(event.currentTarget.value)}
             />
@@ -4740,7 +5609,7 @@ function CalibrationChannelPanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
-          disabled={manualFitInvalid}
+          disabled={disabled || manualFitInvalid}
           onClick={() => onManualFit(parsedManualGain, parsedManualOffsetMv)}
         >
           设置草稿拟合
@@ -4753,6 +5622,8 @@ function CalibrationChannelPanel({
           <span className="industrial-calibration-input">
             <input
               type="number"
+              aria-label={referenceLabel}
+              disabled={disabled}
               value={Number.isFinite(referenceValue) ? referenceValue : 0}
               onChange={(event) => onReferenceChange(Number(event.currentTarget.value))}
             />
@@ -4762,6 +5633,7 @@ function CalibrationChannelPanel({
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
+          disabled={disabled}
           onClick={onCapture}
         >
           采集样本
@@ -4769,7 +5641,7 @@ function CalibrationChannelPanel({
         <button
           type="button"
           className="industrial-button industrial-button--danger-quiet"
-          disabled={sampleCount === 0}
+          disabled={disabled || sampleCount === 0}
           aria-label={`清空 ${title} 草稿样本`}
           onClick={onClear}
         >
@@ -4777,19 +5649,213 @@ function CalibrationChannelPanel({
           清空
         </button>
       </div>
-      {populatedSamples.length > 0 ? (
-        <section className="industrial-calibration-samples-scroll" aria-label={`${title} 样本列表`}>
-          <table className="industrial-calibration-samples" aria-label={`${title} 样本`}>
-            <thead>
-              <tr>
-                <th scope="col">槽位</th>
-                <th scope="col">观测值</th>
-                <th scope="col">目标值</th>
-                <th scope="col">操作</th>
+    </>
+  )
+}
+
+function CalibrationFitSummaryRow({
+  label,
+  fit,
+}: {
+  label: string
+  fit: CalibrationState['activeFit']['rtdAdc']
+}) {
+  return (
+    <div className="industrial-calibration-property-list__fit-group">
+      <dt>{label}</dt>
+      <dd>
+        <span className="industrial-calibration-fit-chip">{calibrationFitMode(fit)}</span>
+        <span>{fit.gain.toFixed(5)}x</span>
+        <span>{fit.offsetMv.toFixed(1)}mV</span>
+      </dd>
+    </div>
+  )
+}
+
+function CalibrationFitStatusSummary({
+  liveLabel,
+  liveValue,
+  activeFit,
+  draftFit,
+}: {
+  liveLabel: string
+  liveValue: string
+  activeFit: CalibrationState['activeFit']['rtdAdc']
+  draftFit: CalibrationState['draftFit']['rtdAdc']
+}) {
+  return (
+    <dl
+      className="industrial-calibration-property-list industrial-calibration-property-list--fit-card"
+      aria-label={`${liveLabel} 标定状态摘要`}
+    >
+      <div className="industrial-calibration-property-list__fit-group">
+        <dt>{liveLabel}</dt>
+        <dd>
+          <span>{liveValue}</span>
+        </dd>
+      </div>
+      <CalibrationFitSummaryRow label="当前" fit={activeFit} />
+      <CalibrationFitSummaryRow label="草稿" fit={draftFit} />
+    </dl>
+  )
+}
+
+function CalibrationWorkbenchCard({
+  title = '状态',
+  summary,
+  guidance,
+  messages,
+  children,
+}: {
+  title?: string
+  summary: ReactNode
+  guidance?: ReactNode
+  messages?: ReactNode
+  children?: ReactNode
+}) {
+  return (
+    <CalibrationLiveCard title={title} compact>
+      {summary}
+      {guidance ? <div className="industrial-calibration-guidance">{guidance}</div> : null}
+      {children ? <div className="industrial-calibration-work-body">{children}</div> : null}
+      {messages ? <div className="industrial-calibration-work-messages">{messages}</div> : null}
+    </CalibrationLiveCard>
+  )
+}
+
+function CalibrationChannelSamples({
+  channel,
+  title,
+  samples,
+  disabled = false,
+  onDelete,
+}: {
+  channel: CalibrationChannel
+  title: string
+  samples: Array<RtdCalibrationSample | VinCalibrationSample | null>
+  disabled?: boolean
+  onDelete: (sampleIndex: number) => void | Promise<void>
+}) {
+  const sampleCount = samples.filter(Boolean).length
+  const sampleKeys = calibrationSampleKeys(samples)
+  const isRtdChannel = channel === 'rtd_adc'
+  const populatedSamples = samples
+    .map((sample, index) => (sample ? { ...sample, index } : null))
+    .filter((sample): sample is (RtdCalibrationSample | VinCalibrationSample) & { index: number } =>
+      Boolean(sample)
+    )
+  const rtdSamplePairs = isRtdChannel
+    ? populatedSamples.reduce<Array<Array<RtdCalibrationSample & { index: number }>>>(
+        (rows, sample) => {
+          if (!isRtdCalibrationSample(sample)) {
+            return rows
+          }
+          const currentRow = rows[rows.length - 1]
+          if (!currentRow || currentRow.length === 2) {
+            rows.push([sample])
+          } else {
+            currentRow.push(sample)
+          }
+          return rows
+        },
+        []
+      )
+    : []
+
+  return (
+    <section className="industrial-calibration-samples-scroll" aria-label={`${title} 样本列表`}>
+      <div className="industrial-calibration-channel__header">
+        <h3 className="industrial-section-title">{title}</h3>
+        <span>{sampleCount}/8 个样本</span>
+      </div>
+      {isRtdChannel ? (
+        <table
+          className={cn(
+            'industrial-calibration-samples industrial-calibration-samples--paired',
+            populatedSamples.length === 0 && 'industrial-calibration-samples--empty'
+          )}
+          aria-label={`${title} 样本`}
+        >
+          <thead>
+            <tr>
+              <th scope="col">ADC 电压</th>
+              <th scope="col">温度</th>
+              <th scope="col">操作</th>
+              <th scope="col">ADC 电压</th>
+              <th scope="col">温度</th>
+              <th scope="col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {populatedSamples.length > 0 ? (
+              rtdSamplePairs.map((pair, pairIndex) => (
+                <tr
+                  key={
+                    pair.map((sample) => sampleKeys[sample.index]).join('-') || `rtd-${pairIndex}`
+                  }
+                >
+                  {pair.map((sample) => (
+                    <Fragment key={sampleKeys[sample.index]}>
+                      <td>
+                        <strong>{formatRtdCalibrationTargetAdc(sample)}</strong>
+                      </td>
+                      <td>
+                        <strong>{formatRtdCalibrationReference(sample)}</strong>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="industrial-button industrial-button--danger-quiet"
+                          disabled={disabled}
+                          aria-label={`删除 ${title} 样本 ${sample.index + 1}`}
+                          onClick={() => onDelete(sample.index)}
+                        >
+                          <Trash2 size={14} aria-hidden="true" />
+                          删除
+                        </button>
+                      </td>
+                    </Fragment>
+                  ))}
+                  {pair.length === 1 ? (
+                    <>
+                      <td aria-hidden="true" />
+                      <td aria-hidden="true" />
+                      <td aria-hidden="true" />
+                    </>
+                  ) : null}
+                </tr>
+              ))
+            ) : (
+              <tr className="industrial-calibration-samples__placeholder-row">
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
               </tr>
-            </thead>
-            <tbody>
-              {populatedSamples.map((sample) => (
+            )}
+          </tbody>
+        </table>
+      ) : (
+        <table
+          className={cn(
+            'industrial-calibration-samples',
+            populatedSamples.length === 0 && 'industrial-calibration-samples--empty'
+          )}
+          aria-label={`${title} 样本`}
+        >
+          <thead>
+            <tr>
+              <th scope="col">槽位</th>
+              <th scope="col">观测值</th>
+              <th scope="col">目标值</th>
+              <th scope="col">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {populatedSamples.length > 0 ? (
+              populatedSamples.map((sample) => (
                 <tr key={sampleKeys[sample.index]}>
                   <td>#{sample.index + 1}</td>
                   <td>
@@ -4800,6 +5866,7 @@ function CalibrationChannelPanel({
                     <button
                       type="button"
                       className="industrial-button industrial-button--danger-quiet"
+                      disabled={disabled}
                       aria-label={`删除 ${title} 样本 ${sample.index + 1}`}
                       onClick={() => onDelete(sample.index)}
                     >
@@ -4808,15 +5875,17 @@ function CalibrationChannelPanel({
                     </button>
                   </td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      ) : (
-        <p className="industrial-calibration-empty">
-          <span>接入物理参考后采集</span>
-          <small>还可写入 8 个草稿槽位</small>
-        </p>
+              ))
+            ) : (
+              <tr className="industrial-calibration-samples__placeholder-row">
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+                <td>—</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       )}
     </section>
   )

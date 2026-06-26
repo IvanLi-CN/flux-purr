@@ -6,6 +6,7 @@
 - `flux-purr` runtime 在 CH224Q 请求完成后读取 EEPROM，并在 UI 初始绘制前恢复可记忆字段。
 - 前面板接受交互后生成新的记忆配置；配置变化会触发约 `2s` debounce，再写入下一 EEPROM 槽。
 - ADC calibration active/draft packages 作为 `MemoryConfig` 字段持久化，并在启动后恢复给 RTD/VIN measurement path 和 control-plane response。
+- EEPROM calibration persistence now keeps the ADC-domain pairs and the owner-entered physical references in separate TLVs, so RTD/VIN sample tables can render the original `referenceTempC` / `referenceVinMv` after refresh, reboot, export/import, or devd reconnect.
 - EEPROM 读写失败只记录日志并回退默认/当前配置，不阻断 heater/fan 保护。
 
 ## Validation

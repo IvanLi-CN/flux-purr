@@ -1355,6 +1355,7 @@ impl Default for CalibrationHeaterCurveAutoJob {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CalibrationJobData {
     VinAdcAuto(CalibrationVinAutoJob),
@@ -1423,6 +1424,24 @@ fn calibration_runtime_state_to_wire(
             }),
         },
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn reconcile_runtime_heater_enabled(
+    current_heater_enabled: bool,
+    calibration_runtime_state: CalibrationRuntimeState,
+    current_rtd_fault: Option<HeaterFaultReason>,
+    cooling_disabled_lock_latched: bool,
+    heater_fault_latched: bool,
+) -> bool {
+    if calibration_runtime_state.mode == CalibrationMode::Off {
+        return current_heater_enabled;
+    }
+
+    let calibration_heater_allowed = !is_sensor_fault(current_rtd_fault)
+        && !cooling_disabled_lock_latched
+        && !heater_fault_latched;
+    calibration_runtime_state.heater_enabled && calibration_heater_allowed
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2597,6 +2616,7 @@ fn usb_runtime_status(
     status.pps_capability_max_mv = context.manual_pps.capability_max_mv;
     status.pps_capability_max_ma = context.manual_pps.capability_max_ma;
     status.manual_pps_error = context.manual_pps.error.map(manual_pps_error_code);
+    status.heater_lock_reason = ui_state.heater_lock_reason.map(Into::into);
     status.calibration = calibration_runtime_state_to_wire(context.calibration);
     status
 }
@@ -3144,6 +3164,9 @@ fn update_calibration_job_state(
                 job.samples[usize::from(job.sample_count)] = Some(AdcCalibrationSample {
                     observed_mv: latest_vin_raw_adc_mv,
                     expected_mv: vin_adc_mv_for_input_mv(u32::from(job.next_request_mv)),
+                    reference_temp_deci_c: None,
+                    target_adc_mv: None,
+                    reference_vin_mv: Some(job.next_request_mv),
                 });
                 job.sample_count = job.sample_count.saturating_add(1);
                 calibration.job.samples_collected =
@@ -3310,6 +3333,21 @@ fn usb_calibration_config_response(
                 .insert(AdcCalibrationSample {
                     observed_mv,
                     expected_mv,
+                    reference_temp_deci_c: config.reference_temp_c.map(|temp_c| {
+                        let scaled = if temp_c >= 0.0 {
+                            temp_c * 10.0 + 0.5
+                        } else {
+                            temp_c * 10.0 - 0.5
+                        };
+                        (scaled as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                    }),
+                    target_adc_mv: config
+                        .target_adc_mv
+                        .filter(|_| channel == CalibrationChannelWire::RtdAdc),
+                    reference_vin_mv: config
+                        .reference_vin_mv
+                        .and_then(|millivolts| u16::try_from(millivolts).ok())
+                        .filter(|_| channel == CalibrationChannelWire::VinAdc),
                 })
                 .ok_or(ApiError::new(
                     "calibration_samples_full",
@@ -3881,6 +3919,7 @@ fn handle_usb_control_line(
     line: &str,
     usb: &mut RawUsbSerialJtag,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    controller: &mut FrontPanelInputController,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
     preview_heater_curve: &mut Option<HeaterCurveConfig>,
@@ -3960,6 +3999,7 @@ fn handle_usb_control_line(
         }
         Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
             let previous_memory_config = memory_config.clone();
+            let heater_toggle_requested = config.heater_enabled.is_some();
             let (response, next_calibration_runtime_state) = usb_runtime_config_response(
                 request_id,
                 config,
@@ -3969,6 +4009,9 @@ fn handle_usb_control_line(
                 runtime_context,
             );
             *calibration_runtime_state = next_calibration_runtime_state;
+            if heater_toggle_requested {
+                controller.clear_pending_short_press(RawFrontPanelKey::CenterBoot);
+            }
             if *memory_config != previous_memory_config {
                 *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
@@ -4922,6 +4965,7 @@ async fn main(_spawner: Spawner) {
                         usb_rx_line.as_str(),
                         &mut usb_serial,
                         &mut usb_tx_buf,
+                        &mut controller,
                         &mut ui_state,
                         &mut memory_config,
                         &mut preview_heater_curve,
@@ -5298,17 +5342,16 @@ async fn main(_spawner: Spawner) {
                     heater_controller.clear_fault_latch();
                     info!("calibration heater re-arm -> cleared latched fault");
                 }
-                let calibration_heater_allowed = !is_sensor_fault(current_rtd_fault)
-                    && !cooling_disabled_lock_latched
-                    && heater_controller.fault_latched().is_none();
-                let desired_calibration_heater =
-                    calibration_runtime_state.heater_enabled && calibration_heater_allowed;
-                if ui_state.heater_enabled != desired_calibration_heater {
-                    ui_state.heater_enabled = desired_calibration_heater;
-                    needs_redraw = true;
-                }
-            } else if ui_state.heater_enabled {
-                ui_state.heater_enabled = false;
+            }
+            let desired_heater_enabled = reconcile_runtime_heater_enabled(
+                ui_state.heater_enabled,
+                calibration_runtime_state,
+                current_rtd_fault,
+                cooling_disabled_lock_latched,
+                heater_controller.fault_latched().is_some(),
+            );
+            if ui_state.heater_enabled != desired_heater_enabled {
+                ui_state.heater_enabled = desired_heater_enabled;
                 needs_redraw = true;
             }
             let next_pd_contract_mv = manual_pps_state
@@ -5738,12 +5781,46 @@ mod tests {
                 assert_eq!(status.target_temp_c, 240);
                 assert!(!status.active_cooling_enabled);
                 assert!(status.heater_enabled);
+                assert_eq!(status.heater_lock_reason, None);
                 assert_eq!(status.uptime_seconds, 12);
                 assert_eq!(memory_config.target_temp_c, 240);
                 assert!(!memory_config.active_cooling_enabled);
             }
             other => panic!("unexpected runtime config response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_status_exposes_heater_lock_reason_when_present() {
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        ui_state.heater_lock_reason = Some(HeaterLockReason::CoolingDisabledOvertemp);
+
+        let status = usb_runtime_status(
+            &ui_state,
+            &MemoryConfig::default(),
+            UsbRuntimeStatusContext {
+                elapsed_ms: 3_000,
+                last_pd_observation: None,
+                heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
+                    reason: HeaterPowerBackendReason::NoPps20vCapability,
+                    fixed_request_confirmed: true,
+                    fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                },
+                manual_pps: ManualPpsState::default(),
+                calibration: CalibrationRuntimeState::default(),
+                fan_command: FanHardwareCommand::disabled(),
+                current_rtd_fault: None,
+                last_raw_state: FrontPanelRawState::default(),
+                latest_rtd_raw_adc_mv: 0,
+                latest_vin_raw_adc_mv: 0,
+                vin_mv: 12_000,
+            },
+        );
+
+        assert_eq!(
+            status.heater_lock_reason.as_deref(),
+            Some("cooling-disabled-overtemp")
+        );
     }
 
     #[test]
@@ -5939,6 +6016,9 @@ mod tests {
             collected[index] = Some(AdcCalibrationSample {
                 observed_mv: 280 + (index as u16 * 40),
                 expected_mv: request_mv,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: Some(request_mv),
             });
         }
 
@@ -5973,6 +6053,9 @@ mod tests {
             .insert(AdcCalibrationSample {
                 observed_mv: 999,
                 expected_mv: 9_999,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: Some(9_999),
             });
         let mut preview_heater_curve = None;
         let mut manual_pps =
@@ -7041,5 +7124,35 @@ mod tests {
         let persisted = memory_config_from_ui(&state, &config);
         assert_eq!(persisted.target_temp_c, 180);
         assert!(!persisted.active_cooling_enabled);
+    }
+
+    #[test]
+    fn runtime_heater_reconcile_preserves_dashboard_heater_when_calibration_is_off() {
+        let desired = reconcile_runtime_heater_enabled(
+            true,
+            CalibrationRuntimeState::default(),
+            None,
+            false,
+            false,
+        );
+
+        assert!(desired);
+    }
+
+    #[test]
+    fn runtime_heater_reconcile_applies_calibration_gate_when_mode_is_active() {
+        let desired = reconcile_runtime_heater_enabled(
+            true,
+            CalibrationRuntimeState {
+                mode: CalibrationMode::RtdAdc,
+                heater_enabled: false,
+                ..CalibrationRuntimeState::default()
+            },
+            None,
+            false,
+            false,
+        );
+
+        assert!(!desired);
     }
 }

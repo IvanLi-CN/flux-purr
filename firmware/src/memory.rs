@@ -22,6 +22,7 @@ pub const ADC_CALIBRATION_RTD_DEFAULT_LOW_MV: u16 = 0;
 pub const ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV: u16 = 2_800;
 pub const ADC_CALIBRATION_VIN_DEFAULT_LOW_MV: u16 = 0;
 pub const ADC_CALIBRATION_VIN_DEFAULT_HIGH_MV: u16 = VIN_DEFAULT_ADC_HIGH_MV;
+pub const CALIBRATION_REFERENCE_NONE_WIRE_VALUE: i16 = i16::MIN;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const PRESET_NONE_WIRE_VALUE: i16 = i16::MIN;
@@ -38,6 +39,10 @@ const TLV_WIFI_AUTO_RECONNECT: u8 = 0x12;
 const TLV_TELEMETRY_INTERVAL_MS: u8 = 0x13;
 const TLV_ACTIVE_ADC_CALIBRATION: u8 = 0x20;
 const TLV_DRAFT_ADC_CALIBRATION: u8 = 0x21;
+const TLV_ACTIVE_ADC_CALIBRATION_REFERENCES: u8 = 0x22;
+const TLV_DRAFT_ADC_CALIBRATION_REFERENCES: u8 = 0x23;
+const TLV_ACTIVE_ADC_CALIBRATION_TARGETS: u8 = 0x24;
+const TLV_DRAFT_ADC_CALIBRATION_TARGETS: u8 = 0x25;
 const TLV_ACTIVE_HEATER_CURVE: u8 = 0x30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +70,9 @@ pub enum AdcCalibrationChannel {
 pub struct AdcCalibrationSample {
     pub observed_mv: u16,
     pub expected_mv: u16,
+    pub reference_temp_deci_c: Option<i16>,
+    pub target_adc_mv: Option<u16>,
+    pub reference_vin_mv: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,20 +319,32 @@ fn default_points(channel: AdcCalibrationChannel) -> [AdcCalibrationSample; 2] {
             AdcCalibrationSample {
                 observed_mv: ADC_CALIBRATION_RTD_DEFAULT_LOW_MV,
                 expected_mv: ADC_CALIBRATION_RTD_DEFAULT_LOW_MV,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
             AdcCalibrationSample {
                 observed_mv: ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV,
                 expected_mv: ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
         ],
         AdcCalibrationChannel::Vin => [
             AdcCalibrationSample {
                 observed_mv: ADC_CALIBRATION_VIN_DEFAULT_LOW_MV,
                 expected_mv: ADC_CALIBRATION_VIN_DEFAULT_LOW_MV,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
             AdcCalibrationSample {
                 observed_mv: ADC_CALIBRATION_VIN_DEFAULT_HIGH_MV,
                 expected_mv: ADC_CALIBRATION_VIN_DEFAULT_HIGH_MV,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: None,
             },
         ],
     }
@@ -628,10 +648,52 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
+    let mut calibration_reference_payload = [0u8; ADC_CALIBRATION_MAX_SAMPLES * 2 * 2 * 2];
+    encode_adc_calibration_references(
+        &config.active_adc_calibration,
+        &mut calibration_reference_payload,
+    );
+    push_tlv(
+        TLV_ACTIVE_ADC_CALIBRATION_REFERENCES,
+        &calibration_reference_payload,
+        out,
+        &mut cursor,
+    )?;
+    let mut calibration_target_payload = [0u8; ADC_CALIBRATION_MAX_SAMPLES * 2];
+    encode_adc_calibration_targets(
+        &config.active_adc_calibration,
+        &mut calibration_target_payload,
+    );
+    push_tlv(
+        TLV_ACTIVE_ADC_CALIBRATION_TARGETS,
+        &calibration_target_payload,
+        out,
+        &mut cursor,
+    )?;
     encode_adc_calibration(&config.draft_adc_calibration, &mut calibration_payload);
     push_tlv(
         TLV_DRAFT_ADC_CALIBRATION,
         &calibration_payload,
+        out,
+        &mut cursor,
+    )?;
+    encode_adc_calibration_references(
+        &config.draft_adc_calibration,
+        &mut calibration_reference_payload,
+    );
+    push_tlv(
+        TLV_DRAFT_ADC_CALIBRATION_REFERENCES,
+        &calibration_reference_payload,
+        out,
+        &mut cursor,
+    )?;
+    encode_adc_calibration_targets(
+        &config.draft_adc_calibration,
+        &mut calibration_target_payload,
+    );
+    push_tlv(
+        TLV_DRAFT_ADC_CALIBRATION_TARGETS,
+        &calibration_target_payload,
         out,
         &mut cursor,
     )?;
@@ -709,6 +771,22 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             TLV_DRAFT_ADC_CALIBRATION if len == ADC_CALIBRATION_MAX_SAMPLES * 2 * 2 * 2 => {
                 config.draft_adc_calibration = decode_adc_calibration(value);
             }
+            TLV_ACTIVE_ADC_CALIBRATION_REFERENCES
+                if len == ADC_CALIBRATION_MAX_SAMPLES * 2 * 2 * 2 =>
+            {
+                decode_adc_calibration_references(value, &mut config.active_adc_calibration);
+            }
+            TLV_DRAFT_ADC_CALIBRATION_REFERENCES
+                if len == ADC_CALIBRATION_MAX_SAMPLES * 2 * 2 * 2 =>
+            {
+                decode_adc_calibration_references(value, &mut config.draft_adc_calibration);
+            }
+            TLV_ACTIVE_ADC_CALIBRATION_TARGETS if len == ADC_CALIBRATION_MAX_SAMPLES * 2 => {
+                decode_adc_calibration_targets(value, &mut config.active_adc_calibration);
+            }
+            TLV_DRAFT_ADC_CALIBRATION_TARGETS if len == ADC_CALIBRATION_MAX_SAMPLES * 2 => {
+                decode_adc_calibration_targets(value, &mut config.draft_adc_calibration);
+            }
             TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
                 config.active_heater_curve = decode_heater_curve(value);
             }
@@ -735,6 +813,36 @@ fn encode_adc_calibration(config: &AdcCalibrationConfig, out: &mut [u8]) {
     }
 }
 
+fn encode_adc_calibration_references(config: &AdcCalibrationConfig, out: &mut [u8]) {
+    let mut cursor = 0;
+    for sample in config.rtd.samples {
+        let reference = sample
+            .and_then(|sample| sample.reference_temp_deci_c)
+            .unwrap_or(CALIBRATION_REFERENCE_NONE_WIRE_VALUE);
+        out[cursor..cursor + 2].copy_from_slice(&reference.to_le_bytes());
+        cursor += 2;
+    }
+    for sample in config.vin.samples {
+        let reference = sample
+            .and_then(|sample| sample.reference_vin_mv)
+            .and_then(|value| i16::try_from(value).ok())
+            .unwrap_or(CALIBRATION_REFERENCE_NONE_WIRE_VALUE);
+        out[cursor..cursor + 2].copy_from_slice(&reference.to_le_bytes());
+        cursor += 2;
+    }
+}
+
+fn encode_adc_calibration_targets(config: &AdcCalibrationConfig, out: &mut [u8]) {
+    let mut cursor = 0;
+    for sample in config.rtd.samples {
+        let target = sample
+            .and_then(|sample| sample.target_adc_mv)
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        out[cursor..cursor + 2].copy_from_slice(&target.to_le_bytes());
+        cursor += 2;
+    }
+}
+
 fn decode_adc_calibration(bytes: &[u8]) -> AdcCalibrationConfig {
     let mut config = AdcCalibrationConfig::default();
     let mut cursor = 0;
@@ -750,12 +858,50 @@ fn decode_adc_calibration(bytes: &[u8]) -> AdcCalibrationConfig {
                 Some(AdcCalibrationSample {
                     observed_mv: observed,
                     expected_mv: expected,
+                    reference_temp_deci_c: None,
+                    target_adc_mv: None,
+                    reference_vin_mv: None,
                 })
             };
             cursor += 4;
         }
     }
     config
+}
+
+fn decode_adc_calibration_references(bytes: &[u8], config: &mut AdcCalibrationConfig) {
+    let mut cursor = 0;
+    for slot in config.rtd.samples.iter_mut() {
+        let reference = i16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        if let Some(sample) = slot.as_mut() {
+            sample.reference_temp_deci_c =
+                (reference != CALIBRATION_REFERENCE_NONE_WIRE_VALUE).then_some(reference);
+            sample.target_adc_mv = None;
+            sample.reference_vin_mv = None;
+        }
+        cursor += 2;
+    }
+    for slot in config.vin.samples.iter_mut() {
+        let reference = i16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        if let Some(sample) = slot.as_mut() {
+            sample.reference_vin_mv =
+                (reference != CALIBRATION_REFERENCE_NONE_WIRE_VALUE).then_some(reference as u16);
+            sample.reference_temp_deci_c = None;
+            sample.target_adc_mv = None;
+        }
+        cursor += 2;
+    }
+}
+
+fn decode_adc_calibration_targets(bytes: &[u8], config: &mut AdcCalibrationConfig) {
+    let mut cursor = 0;
+    for slot in config.rtd.samples.iter_mut() {
+        let target = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        if let Some(sample) = slot.as_mut() {
+            sample.target_adc_mv = (target != CALIBRATION_NONE_WIRE_VALUE).then_some(target);
+        }
+        cursor += 2;
+    }
 }
 
 fn encode_heater_curve(config: &HeaterCurveConfig, out: &mut [u8]) {
@@ -862,6 +1008,9 @@ mod tests {
             .insert(AdcCalibrationSample {
                 observed_mv: 1_000,
                 expected_mv: 1_030,
+                reference_temp_deci_c: Some(250),
+                target_adc_mv: Some(970),
+                reference_vin_mv: None,
             })
             .unwrap();
         config
@@ -870,6 +1019,9 @@ mod tests {
             .insert(AdcCalibrationSample {
                 observed_mv: 1_800,
                 expected_mv: 1_760,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: Some(20_000),
             })
             .unwrap();
         config
@@ -897,6 +1049,76 @@ mod tests {
         let len = encode_memory_record(&record, &mut bytes).unwrap();
         let decoded = decode_memory_record(&bytes[..len]).unwrap();
         assert_eq!(decoded, record);
+        assert_eq!(
+            decoded.config.draft_adc_calibration.rtd.samples[0]
+                .and_then(|sample| sample.reference_temp_deci_c),
+            Some(250)
+        );
+        assert_eq!(
+            decoded.config.draft_adc_calibration.rtd.samples[0]
+                .and_then(|sample| sample.target_adc_mv),
+            Some(970)
+        );
+        assert_eq!(
+            decoded.config.active_adc_calibration.vin.samples[0]
+                .and_then(|sample| sample.reference_vin_mv),
+            Some(20_000)
+        );
+    }
+
+    #[test]
+    fn decode_legacy_adc_calibration_without_reference_tlvs_keeps_samples() {
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let record = MemoryRecord {
+            sequence: 43,
+            config: sample_config(),
+        };
+        let _len = encode_memory_record(&record, &mut bytes).unwrap();
+        let payload_len = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+        let payload_start = MEMORY_RECORD_HEADER_LEN;
+        let payload_end = payload_start + payload_len;
+        let payload = bytes[payload_start..payload_end].to_vec();
+        let mut filtered_payload = [0u8; MEMORY_RECORD_PAYLOAD_MAX];
+        let mut filtered_len = 0usize;
+        let mut cursor = 0usize;
+        while cursor < payload.len() {
+            let tag = payload[cursor];
+            let value_len = payload[cursor + 1] as usize;
+            let tlv_len = 2 + value_len;
+            if tag != TLV_ACTIVE_ADC_CALIBRATION_REFERENCES
+                && tag != TLV_DRAFT_ADC_CALIBRATION_REFERENCES
+                && tag != TLV_ACTIVE_ADC_CALIBRATION_TARGETS
+                && tag != TLV_DRAFT_ADC_CALIBRATION_TARGETS
+            {
+                filtered_payload[filtered_len..filtered_len + tlv_len]
+                    .copy_from_slice(&payload[cursor..cursor + tlv_len]);
+                filtered_len += tlv_len;
+            }
+            cursor += tlv_len;
+        }
+
+        bytes[6..8].copy_from_slice(&(filtered_len as u16).to_le_bytes());
+        bytes[payload_start..payload_start + filtered_len]
+            .copy_from_slice(&filtered_payload[..filtered_len]);
+        let crc = crc32_update(
+            crc32(&bytes[0..12]),
+            &bytes[payload_start..payload_start + filtered_len],
+        ) ^ 0xffff_ffff;
+        bytes[12..16].copy_from_slice(&crc.to_le_bytes());
+
+        let decoded = decode_memory_record(&bytes[..payload_start + filtered_len]).unwrap();
+        let draft_rtd = decoded.config.draft_adc_calibration.rtd.samples[0].unwrap();
+        let active_vin = decoded.config.active_adc_calibration.vin.samples[0].unwrap();
+        assert_eq!(draft_rtd.observed_mv, 1_000);
+        assert_eq!(draft_rtd.expected_mv, 1_030);
+        assert_eq!(draft_rtd.reference_temp_deci_c, None);
+        assert_eq!(draft_rtd.target_adc_mv, None);
+        assert_eq!(draft_rtd.reference_vin_mv, None);
+        assert_eq!(active_vin.observed_mv, 1_800);
+        assert_eq!(active_vin.expected_mv, 1_760);
+        assert_eq!(active_vin.reference_temp_deci_c, None);
+        assert_eq!(active_vin.target_adc_mv, None);
+        assert_eq!(active_vin.reference_vin_mv, None);
     }
 
     #[test]
@@ -921,6 +1143,9 @@ mod tests {
             .insert(AdcCalibrationSample {
                 observed_mv: 1_000,
                 expected_mv: 1_100,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: Some(12_000),
             })
             .unwrap();
         let fit = adc_calibration_fit(&config, AdcCalibrationChannel::Vin);
@@ -937,6 +1162,9 @@ mod tests {
             .insert(AdcCalibrationSample {
                 observed_mv: 1_000,
                 expected_mv: 1_100,
+                reference_temp_deci_c: Some(250),
+                target_adc_mv: Some(900),
+                reference_vin_mv: None,
             })
             .unwrap();
         config
@@ -944,6 +1172,9 @@ mod tests {
             .insert(AdcCalibrationSample {
                 observed_mv: 2_000,
                 expected_mv: 2_200,
+                reference_temp_deci_c: Some(500),
+                target_adc_mv: Some(1_700),
+                reference_vin_mv: None,
             })
             .unwrap();
         let fit = adc_calibration_fit(&config, AdcCalibrationChannel::Rtd);
@@ -961,6 +1192,9 @@ mod tests {
                 config.rtd.insert(AdcCalibrationSample {
                     observed_mv: index as u16,
                     expected_mv: index as u16,
+                    reference_temp_deci_c: Some(index as i16),
+                    target_adc_mv: Some(index as u16),
+                    reference_vin_mv: None,
                 }),
                 Some(index)
             );
@@ -969,6 +1203,9 @@ mod tests {
             config.rtd.insert(AdcCalibrationSample {
                 observed_mv: 9,
                 expected_mv: 9,
+                reference_temp_deci_c: Some(9),
+                target_adc_mv: Some(9),
+                reference_vin_mv: None,
             }),
             None
         );
