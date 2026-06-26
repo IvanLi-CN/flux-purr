@@ -5147,7 +5147,7 @@
 
   .industrial-calibration-manual-fit {
     display: grid;
-    grid-template-columns: minmax(6rem, 1fr) minmax(6rem, 1fr) minmax(7rem, auto);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     gap: 0.48rem;
     align-items: end;
     min-width: 0;
@@ -5222,6 +5222,9 @@
   .industrial-calibration-manual-fit .industrial-button {
     min-width: 0;
     padding-inline: 0.52rem;
+    justify-self: end;
+    max-width: 100%;
+    white-space: nowrap;
   }
 
   .industrial-calibration-samples-scroll {
@@ -5368,45 +5371,59 @@
   }
 
   .industrial-calibration-mode-switch[data-slot="switch"] {
-    width: 3.5rem;
-    height: 2rem;
-    border: 1px solid color-mix(in oklch, var(--industrial-slate) 22%, transparent);
-    border-radius: 999px;
-    background: color-mix(in oklch, var(--industrial-muted) 86%, var(--industrial-light) 14%);
+    position: relative;
+    width: 3.72rem;
+    height: 1.82rem;
+    border: 1px solid rgba(12, 23, 35, 0.42);
+    border-radius: 8px;
+    background:
+      linear-gradient(90deg, rgba(8, 17, 31, 0.92), rgba(33, 45, 58, 0.86)), var(--industrial-muted);
     box-shadow:
-      inset 1px 1px 2px color-mix(in oklch, var(--industrial-shadow) 28%, transparent),
-      inset -1px -1px 2px color-mix(in oklch, var(--industrial-light) 60%, transparent);
+      inset 2px 2px 4px rgba(0, 0, 0, 0.28),
+      inset -1px -1px 2px rgba(255, 255, 255, 0.12),
+      2px 2px 4px rgba(186, 190, 204, 0.48),
+      -2px -2px 4px rgba(255, 255, 255, 0.58);
   }
 
   .industrial-calibration-mode-switch[data-slot="switch"][data-state="checked"] {
     background:
-      linear-gradient(
-        145deg,
-        color-mix(in oklch, var(--industrial-accent-glow) 44%, var(--industrial-accent) 56%),
-        var(--industrial-accent)
-      ),
-      var(--industrial-accent);
+      linear-gradient(90deg, rgba(8, 17, 31, 0.92), rgba(33, 45, 58, 0.86)), var(--industrial-muted);
     box-shadow:
-      inset 1px 1px 0 color-mix(in oklch, var(--industrial-light) 26%, transparent),
-      0 0 0 1px color-mix(in oklch, var(--industrial-accent) 22%, transparent),
-      0 6px 12px color-mix(in oklch, var(--industrial-accent) 14%, transparent);
+      inset 2px 2px 4px rgba(0, 0, 0, 0.28),
+      inset -1px -1px 2px rgba(255, 255, 255, 0.12),
+      0 0 0 1px rgba(195, 22, 48, 0.18),
+      2px 2px 4px rgba(186, 190, 204, 0.48),
+      -2px -2px 4px rgba(255, 255, 255, 0.58);
   }
 
   .industrial-calibration-mode-switch[data-slot="switch"] [data-slot="switch-thumb"] {
-    width: 1.48rem;
-    height: 1.48rem;
-    margin-left: 0.14rem;
-    border-radius: 999px;
-    background: color-mix(in oklch, var(--industrial-light) 94%, var(--industrial-panel) 6%);
+    width: 1.42rem;
+    height: 1.24rem;
+    border-radius: 6px;
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.92), rgba(163, 177, 198, 0.92)),
+      var(--industrial-bg);
     box-shadow:
-      1px 2px 4px color-mix(in oklch, var(--industrial-shadow) 24%, transparent),
-      inset 1px 1px 0 color-mix(in oklch, var(--industrial-light) 84%, transparent);
+      2px 2px 4px rgba(0, 0, 0, 0.24),
+      inset 1px 1px 0 rgba(255, 255, 255, 0.76),
+      inset -1px -1px 0 rgba(74, 85, 104, 0.2);
+    transition:
+      transform 180ms ease,
+      background 180ms ease,
+      box-shadow 180ms ease;
   }
 
   .industrial-calibration-mode-switch[data-slot="switch"][data-state="checked"]
     [data-slot="switch-thumb"] {
-    transform: translateX(1.74rem);
-    background: color-mix(in oklch, var(--industrial-light) 94%, var(--industrial-accent) 6%);
+    transform: translateX(1.84rem);
+    background:
+      linear-gradient(145deg, rgba(255, 125, 135, 0.96), rgba(195, 22, 48, 0.96)),
+      var(--industrial-accent);
+    box-shadow:
+      0 0 10px rgba(255, 71, 87, 0.38),
+      2px 2px 4px rgba(0, 0, 0, 0.24),
+      inset 1px 1px 0 rgba(255, 255, 255, 0.34),
+      inset -1px -1px 0 rgba(95, 13, 28, 0.28);
   }
 
   @media (pointer: coarse) {
@@ -5416,19 +5433,18 @@
     }
 
     .industrial-calibration-mode-switch[data-slot="switch"] {
-      width: 4.8rem;
-      height: 2.75rem;
+      width: 4.6rem;
+      height: 2.2rem;
     }
 
     .industrial-calibration-mode-switch[data-slot="switch"] [data-slot="switch-thumb"] {
-      width: 2.1rem;
-      height: 2.1rem;
-      margin-left: 0.18rem;
+      width: 1.74rem;
+      height: 1.46rem;
     }
 
     .industrial-calibration-mode-switch[data-slot="switch"][data-state="checked"]
       [data-slot="switch-thumb"] {
-      transform: translateX(2.26rem);
+      transform: translateX(2.36rem);
     }
   }
 
