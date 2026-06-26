@@ -138,12 +138,17 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toBeVisible()
       await expect(await canvas.findByRole('table', { name: '加热曲线点表' })).toBeVisible()
-      await expect(await canvas.findByText(/0\/8 已生效/i)).toBeVisible()
+      const statusCard = await canvas.findByRole('heading', { name: '状态' })
+      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
+      expect(statusCardRoot).not.toBeNull()
+      await expect(within(statusCardRoot).findByText('EEPROM')).resolves.toBeVisible()
+      await expect(within(statusCardRoot).findByText('0/8')).resolves.toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '运行时追踪' })).toBeVisible()
       await expect(await canvas.findByText(/\d+ \/ \d+ 帧/)).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '导入预览' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
-      await expect(await canvas.findByText('未加载预览')).toBeVisible()
+      await expect(within(statusCardRoot).findByText('预览')).resolves.toBeVisible()
+      await expect(within(statusCardRoot).findByText('无')).resolves.toBeVisible()
       const heaterCurveTable = await canvas.findByRole('table', { name: '加热曲线点表' })
       expect(heaterCurveTable.scrollWidth).toBeLessThanOrEqual(heaterCurveTable.clientWidth + 1)
     })
@@ -218,10 +223,15 @@ export const DemoCalibrationTab: Story = {
         })
         await expect(await canvas.findByText(/1\/8 个样本/i)).toBeVisible()
         const rtdSampleTable = await canvas.findByRole('table', { name: '温度 ADC 样本' })
-        await expect(within(rtdSampleTable).getByText('标定温度')).toBeVisible()
+        expect(within(rtdSampleTable).getAllByText('ADC 电压').length).toBeGreaterThanOrEqual(1)
+        expect(within(rtdSampleTable).getAllByText('温度').length).toBeGreaterThanOrEqual(1)
         await expect(within(rtdSampleTable).getByText('21.6℃')).toBeVisible()
-        await expect(within(rtdSampleTable).getByText('目标 ADC')).toBeVisible()
         await expect(within(rtdSampleTable).getByText('970mV')).toBeVisible()
+        await userEvent.click((await canvas.findAllByRole('button', { name: '采集样本' }))[0])
+        await waitFor(() => {
+          expect(within(rtdSampleTable).getAllByText('970mV').length).toBeGreaterThanOrEqual(2)
+        })
+        await expect(within(rtdSampleTable).getAllByText('21.6℃').length).toBeGreaterThanOrEqual(2)
         await userEvent.click(await canvas.findByRole('tab', { name: '电压读数标定' }))
         await expect(await canvas.findByRole('heading', { name: '电压 ADC' })).toBeVisible()
         await expect(await canvas.findByRole('slider', { name: 'PPS 电压滑块' })).toBeVisible()
@@ -399,15 +409,24 @@ export const DemoCalibrationHeaterCurvePreview: Story = {
 
     await step('shows a previewed heater curve', async () => {
       await expect(await canvas.findByRole('table', { name: '加热曲线点表' })).toBeVisible()
-      await expect(await canvas.findByText(/8\/8 预览/i)).toBeVisible()
+      const statusCard = await canvas.findByRole('heading', { name: '状态' })
+      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
+      expect(statusCardRoot).not.toBeNull()
+      await expect(within(statusCardRoot).findByText('预览')).resolves.toBeVisible()
+      await waitFor(() => {
+        expect(within(statusCardRoot).getAllByText('8/8').length).toBeGreaterThanOrEqual(2)
+      })
       await expect(await canvas.findByRole('columnheader', { name: '预览温度' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeEnabled()
     })
 
     await step('save promotes preview to active curve', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: '保存曲线' }))
+      const statusCard = await canvas.findByRole('heading', { name: '状态' })
+      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
+      expect(statusCardRoot).not.toBeNull()
       await waitFor(() => {
-        expect(canvas.getByText('未加载预览')).toBeVisible()
+        expect(within(statusCardRoot).getByText('无')).toBeVisible()
       })
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
       await expect(canvas.getByRole('table', { name: '加热曲线点表' })).toBeVisible()

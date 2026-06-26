@@ -12,6 +12,8 @@
 - `flux-purr calibration` 支持 get/capture/delete/clear/import/export/apply。
 - Web 控制台包含 Calibration tab，并在 Storybook 中覆盖 Calibration 场景。
 - RTD/VIN calibration samples now persist owner-entered physical references alongside ADC-domain points, and RTD samples also persist the live hardware `targetAdcMv`, so refreshed/reloaded sample tables can render the original `referenceTempC` / `referenceVinMv` plus the captured RTD hold target instead of reverse-derived placeholders.
+- 温度标定 RTD sample table has been reduced to the only two allowed owner-facing data fields, `ADC 电压` and `温度`, rendered in a paired two-up layout with vertically centered values to cut list height roughly in half.
+- 温度标定右上 live card now uses the `状态` title, keeps only the live `当前 ADC` field from the old four-field status block, and embeds the EEPROM-backed 当前/草稿拟合摘要 into the same card instead of repeating a separate fit table above the sample workspace.
 - 页面内离开已加 owner-facing guard：当任一标定模式仍处于 armed 状态时，切换顶层视图、切换设备或切换标定子 tab 会先在开关附近显示自定义提示泡泡，要求先关闭开关，再允许继续跳转；本轮不拦截浏览器刷新或关页。
 
 ## Validation

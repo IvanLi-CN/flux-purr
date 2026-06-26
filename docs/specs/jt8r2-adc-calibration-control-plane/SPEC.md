@@ -67,7 +67,9 @@
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
 - `电压读数标定` 手动模式必须支持直接输入和 `1V` 步进；自动模式必须按 `1V` 步进在实时 PPS capability 内扫点，并以“请求 PPS 电压”作为 reference 写入 `vin_adc draft`。
 - `温度标定` 只能是手动/半自动；firmware 必须按目标 `RTD_ADC` 毫伏值持续控热并暴露稳定状态，最终 capture 继续写 `rtd_adc draft`。
-- `温度标定` 样本表必须让操作者同时看见目标 ADC 毫伏值和对应的标定温度，避免把物理参考温度完全折叠成纯 ADC 域数字。
+- `温度标定` 样本表必须只展示两项 owner-facing 数据：硬件目标 ADC 毫伏值与操作者输入的标定温度；不得混入额外技术字段或说明文案。
+- `温度标定` 样本表应优先使用双栏配对布局展示 RTD 样本，并保持数值垂直居中，以减少列表高度同时维持可读性。
+- `温度标定` 右上状态卡必须收口为 `状态`，其中旧四字段状态区只保留 `当前 ADC`；EEPROM 中的当前/草稿拟合摘要必须内嵌到同一卡片中展示，不再在样本区上方重复渲染独立拟合摘要表。
 - 当 RTD/VIN draft 或 active package 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
 - `加热曲线标定` 自动模式必须丢弃启动瞬态，在稳定温区内做分段统计和单调平滑，再生成 `heater_curve preview`；手动模式继续保留当前最终结果填写形态。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
@@ -208,7 +210,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration manual fit state](./assets/calibration-manual-fit.trimmed.png)
 
-`assets/calibration-layout-polish.trimmed.png` shows the final calibration header layout: a compact four-cell status bar for live RTD, live VIN, draft package readiness, and apply state, followed by a single-row command bar for Apply, Export, and Import without explanatory copy.
+`assets/calibration-layout-polish.trimmed.png` shows the compact calibration command bar and package actions without explanatory copy, keeping the operator controls visually compressed above the sample workspace.
 
 ![Calibration layout polish state](./assets/calibration-layout-polish.trimmed.png)
 
@@ -220,9 +222,13 @@ Arrays normalize to length `8`; empty slots are `null`.
 
 ![Calibration leave guard bubble](./assets/calibration-leave-guard-bubble.trimmed.png)
 
-`assets/calibration-rtd-sample-reference.trimmed.png` shows the RTD sample table rendering the persisted owner-entered calibration temperature and the hardware target ADC as two explicit values in the same cell after capture, proving the UI no longer relies on reverse-derived placeholder temperatures.
+`assets/calibration-rtd-sample-reference.trimmed.png` shows the RTD sample table reduced to the only two allowed owner-facing values, `ADC 电压` and `温度`, rendered in the paired two-column layout after capture so the workspace height stays compact without adding extra descriptive copy.
 
 ![Calibration RTD sample reference](./assets/calibration-rtd-sample-reference.trimmed.png)
+
+`assets/calibration-status-card-relocation.trimmed.png` shows the `温度标定` right-side `状态` card reduced to the single live `当前 ADC` field, with the EEPROM-backed 当前/草稿拟合摘要 embedded into the same card instead of occupying a separate full-width table above the sample list.
+
+![Calibration status card relocation](./assets/calibration-status-card-relocation.trimmed.png)
 
 ## 风险 / 开放问题 / 假设
 
