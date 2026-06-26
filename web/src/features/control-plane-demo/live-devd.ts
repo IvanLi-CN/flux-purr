@@ -158,6 +158,17 @@ export function useLiveDevdScenario(
           return
         }
 
+        if (liveRecord.connection === 'busy') {
+          activeLeaseRef.current = null
+          activeLeaseDeviceIdRef.current = null
+          if (!cancelled) {
+            setDevices(replaceDevice(baseDevices, devdRecordToReconnectingTarget(liveRecord)))
+            setRefreshState('ready')
+          }
+          refreshInFlightRef.current = false
+          return
+        }
+
         try {
           const lease = await resolveDevdLease({
             client,
@@ -435,60 +446,91 @@ function isReadyLiveDevdTarget(device: DeviceTarget) {
 export function createBootstrappingLiveDevdScenario(
   scenario: ControlPlaneScenario
 ): ControlPlaneScenario {
-  const bootstrappingDevice: DeviceTarget = {
+  const bootstrappingDevice = devdRecordToReconnectingTarget({
     id: 'live-devd-bootstrapping',
-    alias: 'Reconnecting devd target',
-    location: 'Waiting for authorized native serial probe',
-    transport: 'devd',
-    severity: 'warning',
-    baseUrl: 'devd://bootstrap',
-    firmware: 'unknown',
-    buildId: 'unknown',
-    uptime: 'connecting',
-    boardTempC: 0,
-    currentTempC: 0,
-    targetTempC: 30,
-    voltageMv: 0,
-    currentMa: 0,
-    pdRequestMv: 0,
-    pdContractMv: 0,
-    pdState: 'fault',
-    manualPpsEnabled: false,
-    manualPpsMv: null,
-    manualPpsMa: null,
-    ppsCapabilityMinMv: null,
-    ppsCapabilityMaxMv: null,
-    ppsCapabilityMaxMa: null,
-    manualPpsError: null,
-    calibration: {
-      mode: 'off',
-      ppsEnabled: false,
-      ppsMv: null,
-      ppsMa: null,
+    displayName: 'Reconnecting devd target',
+    portPath: 'Waiting for authorized native serial probe',
+    transport: 'native_serial',
+    connection: 'busy',
+    identity: {
+      deviceId: 'live-devd-bootstrapping',
+      firmwareVersion: 'unknown',
+      buildId: 'unknown',
+      gitSha: 'unknown',
+      board: 'esp32-s3',
+      apiVersion: 'unknown',
+      protocolVersion: 'flux-purr.usb.v1',
+      hostname: 'live-devd-bootstrapping',
+      capabilities: ['identity', 'status', 'monitor'],
+    },
+    network: {
+      state: 'connecting',
+      ssid: null,
+      ip: null,
+      gateway: null,
+      dns: [],
+      wifiRssi: null,
+      lastError: null,
+    },
+    status: {
+      uptimeSeconds: 0,
+      currentTempC: 0,
+      targetTempC: 30,
+      boardTempCenti: 0,
+      voltageMv: 0,
+      currentMa: 0,
+      pdRequestMv: 0,
+      pdContractMv: 0,
+      pdState: 'fault',
+      manualPpsEnabled: false,
+      manualPpsMv: null,
+      manualPpsMa: null,
+      ppsCapabilityMinMv: null,
+      ppsCapabilityMaxMv: null,
+      ppsCapabilityMaxMa: null,
+      manualPpsError: null,
+      calibration: {
+        mode: 'off',
+        ppsEnabled: false,
+        ppsMv: null,
+        ppsMa: null,
+        heaterEnabled: false,
+        targetAdcMv: null,
+        stable: false,
+        stabilityErrorMv: null,
+        error: null,
+        job: {
+          kind: null,
+          status: 'idle',
+          progressPercent: 0,
+          samplesCollected: 0,
+          nextRequestMv: null,
+          message: null,
+        },
+      },
       heaterEnabled: false,
-      targetAdcMv: null,
-      stable: false,
-      stabilityErrorMv: null,
-      error: null,
-      job: {
-        kind: null,
-        status: 'idle',
-        progressPercent: 0,
-        samplesCollected: 0,
-        nextRequestMv: null,
-        message: null,
+      heaterOutputPercent: 0,
+      activeCoolingEnabled: false,
+      fanDisplayState: 'OFF',
+      selectedPresetSlot: 0,
+      presetsC: [],
+      heaterLockReason: null,
+      frontpanelKey: null,
+      mode: 'idle',
+      fanEnabled: false,
+      fanPwmPermille: 0,
+      network: {
+        state: 'connecting',
+        ssid: null,
+        ip: null,
+        gateway: null,
+        dns: [],
+        wifiRssi: null,
+        lastError: null,
       },
     },
-    heaterEnabled: false,
-    heaterOutputPercent: 0,
-    activeCoolingEnabled: false,
-    fanState: 'OFF',
-    wifiRssi: null,
-    networkState: 'connecting',
-    leaseState: 'expired',
-    transportIssue: DEVD_RECONNECTING_MESSAGE,
-    capabilities: ['identity', 'status', 'monitor'],
-  }
+    events: [],
+  })
 
   const devdEvent: EventLogEntry = {
     time: 'live',
@@ -570,6 +612,18 @@ function createUnavailableLiveDevdTarget(issue: string): DeviceTarget {
     leaseState: 'none',
     transportIssue: issue,
     capabilities: ['identity', 'status', 'monitor'],
+  }
+}
+
+export function devdRecordToReconnectingTarget(record: DevdDeviceRecord): DeviceTarget {
+  const reconnecting = devdRecordToDeviceTarget(record)
+  return {
+    ...reconnecting,
+    severity: 'warning',
+    networkState: 'connecting',
+    leaseState: 'expired',
+    leaseId: undefined,
+    transportIssue: DEVD_RECONNECTING_MESSAGE,
   }
 }
 

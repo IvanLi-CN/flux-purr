@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { DevdEvent, DevdLease } from './contracts'
+import type { DevdDeviceRecord, DevdEvent, DevdLease } from './contracts'
 import {
   createBootstrappingLiveDevdScenario,
   degradeDevicesForRefreshError,
+  devdRecordToReconnectingTarget,
   preserveLastLiveDevdTarget,
   prioritizeLiveDevdDevices,
   readStoredDevdLeaseId,
@@ -228,6 +229,22 @@ describe('live devd selection', () => {
     })
   })
 
+  it('keeps a busy native record in reconnecting state without changing its device id', () => {
+    const reconnecting = devdRecordToReconnectingTarget(makeBusyRecord('native-1'))
+
+    expect(reconnecting).toMatchObject({
+      id: 'native-1',
+      alias: 'Authorized USB target',
+      location: '/dev/cu.usbmodem-native-1',
+      transport: 'devd',
+      severity: 'warning',
+      networkState: 'connecting',
+      leaseState: 'expired',
+      transportIssue: '正在重新接管本机 devd 租约，请稍候。',
+    })
+    expect(reconnecting.leaseId).toBeUndefined()
+  })
+
   it('ignores generic firmware log lines when surfacing the latest transport issue', async () => {
     const recordEvents: DevdEvent[] = [
       {
@@ -398,6 +415,94 @@ function makeDevice(
     wifiRssi: null,
     capabilities: [],
     leaseState,
+  }
+}
+
+function makeBusyRecord(id: string): DevdDeviceRecord {
+  return {
+    id,
+    displayName: 'Authorized USB target',
+    portPath: `/dev/cu.usbmodem-${id}`,
+    transport: 'native_serial',
+    connection: 'busy',
+    identity: {
+      deviceId: id,
+      firmwareVersion: '0.1.0',
+      buildId: 'build-1',
+      gitSha: 'abc',
+      board: 'esp32-s3',
+      apiVersion: '2026-05-29',
+      protocolVersion: 'flux-purr.usb.v1',
+      hostname: id,
+      capabilities: ['identity', 'status', 'network', 'monitor', 'flash'],
+    },
+    network: {
+      state: 'idle',
+      ssid: null,
+      ip: null,
+      gateway: null,
+      dns: [],
+      wifiRssi: null,
+      lastError: null,
+    },
+    status: {
+      uptimeSeconds: 0,
+      currentTempC: 0,
+      targetTempC: 30,
+      boardTempCenti: 0,
+      voltageMv: 0,
+      currentMa: 0,
+      pdRequestMv: 0,
+      pdContractMv: 0,
+      pdState: 'fault',
+      manualPpsEnabled: false,
+      manualPpsMv: null,
+      manualPpsMa: null,
+      ppsCapabilityMinMv: null,
+      ppsCapabilityMaxMv: null,
+      ppsCapabilityMaxMa: null,
+      manualPpsError: null,
+      calibration: {
+        mode: 'off',
+        ppsEnabled: false,
+        ppsMv: null,
+        ppsMa: null,
+        heaterEnabled: false,
+        targetAdcMv: null,
+        stable: false,
+        stabilityErrorMv: null,
+        error: null,
+        job: {
+          kind: null,
+          status: 'idle',
+          progressPercent: 0,
+          samplesCollected: 0,
+          nextRequestMv: null,
+          message: null,
+        },
+      },
+      heaterEnabled: false,
+      heaterOutputPercent: 0,
+      activeCoolingEnabled: false,
+      fanDisplayState: 'OFF',
+      selectedPresetSlot: 0,
+      presetsC: [],
+      heaterLockReason: null,
+      frontpanelKey: null,
+      mode: 'idle',
+      fanEnabled: false,
+      fanPwmPermille: 0,
+      network: {
+        state: 'idle',
+        ssid: null,
+        ip: null,
+        gateway: null,
+        dns: [],
+        wifiRssi: null,
+        lastError: null,
+      },
+    },
+    events: [],
   }
 }
 

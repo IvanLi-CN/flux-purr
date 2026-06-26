@@ -423,9 +423,10 @@ export function ControlPlaneDemo({
   const selectedDevice = useMemo(
     () =>
       deviceOptions.find((device) => device.id === selectedDeviceId) ??
+      deviceOptions.find((device) => device.id === activeScenario.selectedDeviceId) ??
       deviceOptions[0] ??
       activeScenario.devices[0],
-    [activeScenario.devices, deviceOptions, selectedDeviceId]
+    [activeScenario.devices, activeScenario.selectedDeviceId, deviceOptions, selectedDeviceId]
   )
 
   useEffect(() => {
@@ -2817,7 +2818,7 @@ function isTransportBlockedFeedback(current: ActionFeedback) {
 }
 
 function isNoLiveTargetDevice(device: DeviceTarget) {
-  return device.id === NO_LIVE_TARGET_ID
+  return device.id === NO_LIVE_TARGET_ID && device.transport === 'serial'
 }
 
 function isKnownDeviceChoice(device: DeviceTarget) {
