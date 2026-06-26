@@ -4190,10 +4190,14 @@
     min-width: 0;
     min-height: 0;
     height: 100%;
+    padding-top: 0.2rem;
   }
 
   .industrial-calibration-tabs__list {
     width: 100%;
+    min-height: 3.1rem;
+    height: auto;
+    align-items: end;
     justify-content: start;
     border: 0;
     border-bottom: 1px solid rgba(80, 67, 58, 0.18);
@@ -4224,6 +4228,20 @@
     background: color-mix(in oklch, var(--industrial-panel) 88%, var(--industrial-muted) 12%);
     color: var(--industrial-text);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.58);
+  }
+
+  .industrial-calibration-tab:focus-visible {
+    outline: none;
+    box-shadow:
+      inset 0 0 0 2px color-mix(in oklch, var(--industrial-accent) 68%, white 32%),
+      0 0 0 1px color-mix(in oklch, var(--industrial-panel) 90%, white 10%);
+  }
+
+  .industrial-calibration-tab[data-state="active"]:focus-visible {
+    box-shadow:
+      inset 0 0 0 2px color-mix(in oklch, var(--industrial-accent) 68%, white 32%),
+      inset 0 1px 0 rgba(255, 255, 255, 0.58),
+      0 0 0 1px color-mix(in oklch, var(--industrial-panel) 90%, white 10%);
   }
 
   .industrial-calibration-tabs__content {
