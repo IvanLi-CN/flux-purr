@@ -65,7 +65,6 @@ import {
   useLiveWebSerialScenario,
 } from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
-import { rtdAdcMvForTemperature } from '../rtd-calibration-display'
 import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
@@ -2718,9 +2717,10 @@ function applyLocalCalibrationRequest(
     const observedMv = request.observedMv ?? (channel === 'rtd_adc' ? 1120 : 1670)
     const expectedMv =
       request.expectedMv ??
-      (channel === 'rtd_adc'
-        ? rtdAdcMvForTemperature(request.referenceTempC ?? 0)
-        : vinAdcMvForInput(request.referenceVinMv ?? 0))
+      (channel === 'rtd_adc' ? request.targetAdcMv : vinAdcMvForInput(request.referenceVinMv ?? 0))
+    if (expectedMv == null) {
+      throw new Error(channel === 'rtd_adc' ? '缺少目标 ADC。' : '缺少标定参考。')
+    }
     samples[slot] =
       channel === 'rtd_adc'
         ? {

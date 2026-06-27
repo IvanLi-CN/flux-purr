@@ -47,12 +47,6 @@ const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const RTD_DEFAULT_HIGH_MV: u16 = 2_800;
 const VIN_DEFAULT_HIGH_MV: u16 = 2_337;
-const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
-const RTD_DIVIDER_SUPPLY_MV: f32 = 3_000.0;
-const PT1000_R0_OHMS: f32 = 1_000.0;
-const PT1000_A: f32 = 3.9083e-3;
-const PT1000_B: f32 = -5.775e-7;
-const PT1000_C: f32 = -4.183e-12;
 const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
 const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
 const USER_CONFIG_FILE: &str = "config.json";
@@ -919,20 +913,6 @@ fn default_calibration_samples(channel: CalibrationChannel) -> [CalibrationSampl
             },
         ],
     }
-}
-
-fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
-    let resistance = {
-        let polynomial = 1.0 + PT1000_A * temp_c + PT1000_B * temp_c * temp_c;
-        if temp_c >= 0.0 {
-            PT1000_R0_OHMS * polynomial
-        } else {
-            PT1000_R0_OHMS * (polynomial + PT1000_C * (temp_c - 100.0) * temp_c * temp_c * temp_c)
-        }
-    };
-    ((RTD_DIVIDER_SUPPLY_MV * resistance) / (RTD_REFERENCE_RESISTOR_OHMS + resistance))
-        .round()
-        .clamp(0.0, u16::MAX as f32) as u16
 }
 
 fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
@@ -2679,9 +2659,7 @@ fn expected_calibration_adc_mv(
         return Some(expected_mv);
     }
     match channel {
-        CalibrationChannel::RtdAdc => payload
-            .target_adc_mv
-            .or_else(|| payload.reference_temp_c.map(rtd_adc_mv_for_temperature_c)),
+        CalibrationChannel::RtdAdc => payload.target_adc_mv,
         CalibrationChannel::VinAdc => payload.reference_vin_mv.map(vin_adc_mv_for_input_mv),
     }
 }
@@ -5809,6 +5787,27 @@ mod tests {
         assert_eq!(
             expected_calibration_adc_mv(&payload, CalibrationChannel::RtdAdc),
             Some(1_000)
+        );
+    }
+
+    #[test]
+    fn rtd_capture_expected_mv_requires_target_adc_without_explicit_expected() {
+        let payload = CalibrationConfigRequest {
+            lease_id: "lease-1".to_string(),
+            op: CalibrationConfigOp::Capture,
+            channel: Some(CalibrationChannel::RtdAdc),
+            reference_temp_c: Some(49.0),
+            reference_vin_mv: None,
+            target_adc_mv: None,
+            observed_mv: None,
+            expected_mv: None,
+            sample_index: None,
+            package: None,
+        };
+
+        assert_eq!(
+            expected_calibration_adc_mv(&payload, CalibrationChannel::RtdAdc),
+            None
         );
     }
 

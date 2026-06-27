@@ -1646,14 +1646,6 @@ fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
     Ok(RTD_REFERENCE_RESISTOR_OHMS * adc_mv_f / (supply_mv_f - adc_mv_f))
 }
 
-#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
-    let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
-    let adc_mv = (RTD_DIVIDER_SUPPLY_MV as f32 * resistance_ohms)
-        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms);
-    (adc_mv + 0.5).clamp(0.0, u16::MAX as f32) as u16
-}
-
 #[cfg(any(target_arch = "xtensa", test))]
 fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
     let numerator = input_mv.saturating_mul(s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS);
@@ -3542,9 +3534,7 @@ fn expected_calibration_adc_mv(
     }
 
     match channel {
-        CalibrationChannelWire::RtdAdc => config
-            .target_adc_mv
-            .or_else(|| config.reference_temp_c.map(rtd_adc_mv_for_temperature_c)),
+        CalibrationChannelWire::RtdAdc => config.target_adc_mv,
         CalibrationChannelWire::VinAdc => config.reference_vin_mv.map(vin_adc_mv_for_input_mv),
     }
 }
@@ -5634,6 +5624,26 @@ mod tests {
         assert_eq!(
             expected_calibration_adc_mv(&config, CalibrationChannelWire::RtdAdc),
             Some(1_000)
+        );
+    }
+
+    #[test]
+    fn rtd_capture_expected_mv_requires_target_adc_without_explicit_expected() {
+        let config = CalibrationConfigCommand {
+            op: CalibrationConfigOp::Capture,
+            channel: Some(CalibrationChannelWire::RtdAdc),
+            reference_temp_c: Some(49.0),
+            reference_vin_mv: None,
+            target_adc_mv: None,
+            observed_mv: None,
+            expected_mv: None,
+            sample_index: None,
+            package: None,
+        };
+
+        assert_eq!(
+            expected_calibration_adc_mv(&config, CalibrationChannelWire::RtdAdc),
+            None
         );
     }
 
