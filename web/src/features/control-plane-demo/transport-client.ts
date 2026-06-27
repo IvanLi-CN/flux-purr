@@ -434,7 +434,7 @@ export function isMeaningfulDevdTransportIssueEvent(event: DevdEvent) {
     return false
   }
 
-  return /rst:|panic|abort|brownout|Guru Meditation/i.test(line)
+  return /panic|abort|brownout|Guru Meditation/i.test(line)
 }
 
 export function devdEventToTransportIssue(event: DevdEvent) {
@@ -463,9 +463,6 @@ export function devdEventToTransportIssue(event: DevdEvent) {
   const line = safeString(event.payload?.line)
   if (!line) {
     return null
-  }
-  if (/rst:/i.test(line)) {
-    return `串口日志检测到设备复位：${line}`
   }
   if (/panic|abort|brownout|Guru Meditation/i.test(line)) {
     return `串口日志检测到固件异常：${line}`

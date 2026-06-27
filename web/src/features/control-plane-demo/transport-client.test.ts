@@ -538,7 +538,7 @@ describe('control-plane transport client', () => {
     expect(target.transportIssue).not.toContain('native serial RPC failed')
   })
 
-  it('prefers reset and rpc failure serial events over generic firmware log noise', () => {
+  it('ignores normal reset firmware logs when selecting transport issues', () => {
     const event = selectLatestDevdTransportIssueEvent([
       {
         id: 'event-1',
@@ -564,14 +564,56 @@ describe('control-plane transport client', () => {
       },
     ])
 
-    expect(event?.id).toBe('event-2')
-    if (!event) {
-      throw new Error('Expected the latest transport issue event to be present')
-    }
-    expect(devdEventToLogEntry(event)).toMatchObject({
+    expect(event).toBeUndefined()
+    expect(
+      devdEventToLogEntry({
+        id: 'event-2',
+        timestamp: '2',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'native serial monitor line',
+        payload: {
+          code: 'firmware_log',
+          line: 'rst:0x15 (USB_UART_CHIP_RESET),boot:0x28 (SPI_FAST_FLASH_BOOT)',
+        },
+      })
+    ).toMatchObject({
       message:
         'native serial monitor line: rst:0x15 (USB_UART_CHIP_RESET),boot:0x28 (SPI_FAST_FLASH_BOOT) / firmware_log',
     })
+  })
+
+  it('surfaces fatal firmware logs when selecting transport issues', () => {
+    const event = selectLatestDevdTransportIssueEvent([
+      {
+        id: 'event-1',
+        timestamp: '1',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'native serial monitor line',
+        payload: {
+          code: 'firmware_log',
+          line: 'I (80) boot: End of partition table',
+        },
+      },
+      {
+        id: 'event-2',
+        timestamp: '2',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'native serial monitor line',
+        payload: {
+          code: 'firmware_log',
+          line: "Guru Meditation Error: Core  1 panic'ed (LoadProhibited). Exception was unhandled.",
+        },
+      },
+    ])
+
+    expect(event?.id).toBe('event-2')
+    if (!event) {
+      throw new Error('Expected the fatal transport issue event to be present')
+    }
+    expect(devdEventToLogEntry(event).message).toContain('Guru Meditation Error')
   })
 
   it('redacts wifi password before writing trace history', () => {
