@@ -52,12 +52,12 @@
 
 ### MUST
 
-- 每个 channel 最多保存 `8` 个 user samples；样本结构必须保存 ADC 域点位 `{ observedMv, expectedMv }`，并在 RTD/VIN channel 上分别原样保存操作者输入的 `referenceTempC` / `referenceVinMv`，避免 owner-facing physical reference 只能靠 ADC 反推恢复。
+- 每个 channel 最多保存 `8` 个 user samples；样本结构必须保存 ADC 域点位 `{ observedMv, expectedMv }`，并在 RTD/VIN channel 上分别原样保存操作者输入的 `referenceTempC` / `referenceVinMv`，避免 owner-facing physical reference 只能靠 ADC 反推恢复。RTD 温度标定样本还必须保存 capture 当下的硬件目标 `targetAdcMv`。
 - Channel 名称固定为 `rtd_adc` 与 `vin_adc`。
 - 加热曲线继续保存到 `heater_curve.active` / `heater_curve.preview`；`preview` 只在显式 `Save` 后才能写入 `active`。
 - `0` 个 custom point 时使用默认 identity points；`1` 个 custom point 时与默认 identity points 混合；`>=2` 个 custom points 时仅使用 custom points 拟合。
 - 拟合模型固定为 `expectedMv = gain * observedMv + offsetMv`。
-- RTD capture 必须把 `referenceTempC` 通过 PT1000 + divider 模型转换为 `expectedMv`。
+- RTD 温度标定 capture 必须把硬件目标 `targetAdcMv` 作为 `expectedMv` 写入 ADC-domain point，并把操作者输入的 `referenceTempC` 原样随样本保存；不得把 `referenceTempC` 通过 PT1000 + divider 模型反推成 `expectedMv`。
 - VIN capture 必须把 `referenceVinMv` / `referenceVinVolts` 通过 `56 kOhm / 5.1 kOhm` 分压模型转换为 `expectedMv`。
 - `observedMv` 可由固件当前 raw ADC 读数填充；调试路径可显式传入 `observedMv` / `expectedMv`。
 - Import 接收完整 calibration package 并替换 draft，不做 merge。
@@ -149,7 +149,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 - Given no custom samples, When fit is computed, Then both channels report identity gain/offset with two default points.
 - Given one custom sample, When fit is computed, Then default identity points remain in the fit.
 - Given two or more custom samples, When fit is computed, Then only custom samples define the fit.
-- Given RTD reference temperature, When capture runs, Then the stored expected ADC point is computed from the PT1000 divider model.
+- Given RTD target ADC and calibration temperature, When capture runs, Then the stored ADC point uses the target ADC as `expectedMv` and preserves the entered calibration temperature as `referenceTempC`.
 - Given VIN reference voltage, When capture runs, Then the stored expected ADC point is computed from the VIN divider model.
 - Given heater is active or output is nonzero, When apply is requested, Then active calibration is unchanged and the response is `calibration_apply_heater_active`.
 - Given draft samples are imported from JSON, When import succeeds, Then existing draft package is replaced and active package is unchanged.

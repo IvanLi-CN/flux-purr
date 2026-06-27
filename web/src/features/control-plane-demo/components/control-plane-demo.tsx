@@ -65,7 +65,7 @@ import {
   useLiveWebSerialScenario,
 } from '../live-web-serial'
 import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data'
-import { rtdAdcMvForTemperature, rtdTemperatureForAdcMv } from '../rtd-calibration-display'
+import { rtdAdcMvForTemperature } from '../rtd-calibration-display'
 import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
@@ -1998,6 +1998,7 @@ export function ControlPlaneDemo({
             channel,
             referenceTempC: options?.referenceValue ?? visibleCalibrationRefs.rtdTempC,
             targetAdcMv: options?.targetAdcMv,
+            expectedMv: options?.targetAdcMv,
           }
         : {
             op: 'capture' as const,
@@ -2569,12 +2570,14 @@ function formatRtdCalibrationReference(sample: RtdCalibrationSample) {
   if (sample.referenceTempC != null) {
     return `${sample.referenceTempC.toFixed(1)}℃`
   }
-  return `${rtdTemperatureForAdcMv(sample.expectedMv).toFixed(1)}℃`
+  return '—'
 }
 
 function formatRtdCalibrationTargetAdc(sample: RtdCalibrationSample) {
-  const targetAdcMv = sample.targetAdcMv ?? sample.expectedMv
-  return `${targetAdcMv}mV`
+  if (sample.targetAdcMv != null) {
+    return `${sample.targetAdcMv}mV`
+  }
+  return '—'
 }
 
 function cloneCalibrationPackage(calibrationPackage: CalibrationPackage): CalibrationPackage {
@@ -4733,7 +4736,7 @@ function CalibrationView({
                   >
                     <CalibrationChannelControls
                       title="温度 ADC"
-                      referenceLabel="参考温度"
+                      referenceLabel="标定温度"
                       referenceValue={refs.rtdTempC}
                       referenceUnit="℃"
                       draftFit={calibration.draftFit.rtdAdc}

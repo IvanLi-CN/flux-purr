@@ -55,9 +55,12 @@ use flux_purr_firmware::control_plane::{
     calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
     parse_usb_frame, write_usb_frame,
 };
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     CalibrationChannelWire, CalibrationConfigCommand, CalibrationConfigOp,
+};
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::{
     CalibrationJobCommandWire, CalibrationJobOpWire, HeaterCurveConfigCommand, HeaterCurveConfigOp,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -1643,7 +1646,7 @@ fn rtd_resistance_ohms_from_mv(adc_mv: u16) -> Result<f32, HeaterFaultReason> {
     Ok(RTD_REFERENCE_RESISTOR_OHMS * adc_mv_f / (supply_mv_f - adc_mv_f))
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn rtd_adc_mv_for_temperature_c(temp_c: f32) -> u16 {
     let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
     let adc_mv = (RTD_DIVIDER_SUPPLY_MV as f32 * resistance_ohms)
@@ -3529,7 +3532,7 @@ fn usb_calibration_job_response(
     }
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn expected_calibration_adc_mv(
     config: &CalibrationConfigCommand,
     channel: CalibrationChannelWire,
@@ -3539,7 +3542,9 @@ fn expected_calibration_adc_mv(
     }
 
     match channel {
-        CalibrationChannelWire::RtdAdc => config.reference_temp_c.map(rtd_adc_mv_for_temperature_c),
+        CalibrationChannelWire::RtdAdc => config
+            .target_adc_mv
+            .or_else(|| config.reference_temp_c.map(rtd_adc_mv_for_temperature_c)),
         CalibrationChannelWire::VinAdc => config.reference_vin_mv.map(vin_adc_mv_for_input_mv),
     }
 }
@@ -5610,6 +5615,26 @@ mod tests {
         assert!(line.contains(r#""requestId":"response-write""#));
         assert!(line.ends_with('\n'));
         assert!(response_tx.flush_count > 1);
+    }
+
+    #[test]
+    fn rtd_capture_expected_mv_uses_target_adc_before_temperature_curve() {
+        let config = CalibrationConfigCommand {
+            op: CalibrationConfigOp::Capture,
+            channel: Some(CalibrationChannelWire::RtdAdc),
+            reference_temp_c: Some(49.0),
+            reference_vin_mv: None,
+            target_adc_mv: Some(1_000),
+            observed_mv: None,
+            expected_mv: None,
+            sample_index: None,
+            package: None,
+        };
+
+        assert_eq!(
+            expected_calibration_adc_mv(&config, CalibrationChannelWire::RtdAdc),
+            Some(1_000)
+        );
     }
 
     #[test]

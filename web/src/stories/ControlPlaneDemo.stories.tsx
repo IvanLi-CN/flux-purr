@@ -212,7 +212,7 @@ export const DemoCalibrationTab: Story = {
         await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await expect(await canvas.findByRole('heading', { name: '温度 ADC' })).toBeVisible()
         const targetAdcInput = await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })
-        const referenceTempInput = await canvas.findByRole('spinbutton', { name: '参考温度' })
+        const referenceTempInput = await canvas.findByRole('spinbutton', { name: '标定温度' })
         await userEvent.clear(targetAdcInput)
         await userEvent.type(targetAdcInput, '970')
         await userEvent.clear(referenceTempInput)

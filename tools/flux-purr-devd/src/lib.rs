@@ -2679,7 +2679,9 @@ fn expected_calibration_adc_mv(
         return Some(expected_mv);
     }
     match channel {
-        CalibrationChannel::RtdAdc => payload.reference_temp_c.map(rtd_adc_mv_for_temperature_c),
+        CalibrationChannel::RtdAdc => payload
+            .target_adc_mv
+            .or_else(|| payload.reference_temp_c.map(rtd_adc_mv_for_temperature_c)),
         CalibrationChannel::VinAdc => payload.reference_vin_mv.map(vin_adc_mv_for_input_mv),
     }
 }
@@ -2917,8 +2919,11 @@ async fn serial_calibration_get(
     state: &AppState,
     target: &DeviceRecord,
 ) -> Result<CalibrationState, HttpError> {
-    serial_request_payload::<CalibrationState>(state, target, "get_calibration", "calibration")
-        .await
+    let mut calibration =
+        serial_request_payload::<CalibrationState>(state, target, "get_calibration", "calibration")
+            .await?;
+    merge_live_calibration_metadata(&mut calibration, &target.calibration);
+    Ok(calibration)
 }
 
 async fn serial_calibration_config(
@@ -2951,7 +2956,64 @@ async fn serial_calibration_config(
         SerialRetryPolicy::SingleShot,
     )
     .await?;
-    extract_usb_payload(result, "calibration")
+    let mut calibration = extract_usb_payload(result, "calibration")?;
+    backfill_live_calibration_capture(&mut calibration, payload);
+    merge_live_calibration_metadata(&mut calibration, &target.calibration);
+    Ok(calibration)
+}
+
+fn backfill_live_calibration_capture(
+    calibration: &mut CalibrationState,
+    payload: &CalibrationConfigRequest,
+) {
+    if payload.op != CalibrationConfigOp::Capture
+        || payload.channel != Some(CalibrationChannel::RtdAdc)
+    {
+        return;
+    }
+    let Some(sample) = calibration.draft.rtd_adc.iter_mut().flatten().last() else {
+        return;
+    };
+    if sample.reference_temp_c.is_none() {
+        sample.reference_temp_c = payload.reference_temp_c;
+    }
+    if sample.target_adc_mv.is_none() {
+        sample.target_adc_mv = payload.target_adc_mv;
+    }
+    if let Some(target_adc_mv) = payload.target_adc_mv {
+        sample.expected_mv = target_adc_mv;
+    }
+    calibration.refresh_fits();
+}
+
+fn merge_live_calibration_metadata(
+    calibration: &mut CalibrationState,
+    previous: &CalibrationState,
+) {
+    merge_live_rtd_sample_metadata(&mut calibration.active.rtd_adc, &previous.active.rtd_adc);
+    merge_live_rtd_sample_metadata(&mut calibration.draft.rtd_adc, &previous.draft.rtd_adc);
+}
+
+fn merge_live_rtd_sample_metadata(
+    samples: &mut [Option<CalibrationSample>],
+    previous: &[Option<CalibrationSample>],
+) {
+    for sample in samples.iter_mut().flatten() {
+        if sample.reference_temp_c.is_some() && sample.target_adc_mv.is_some() {
+            continue;
+        }
+        let Some(existing) = previous.iter().flatten().find(|existing| {
+            existing.observed_mv == sample.observed_mv && existing.expected_mv == sample.expected_mv
+        }) else {
+            continue;
+        };
+        if sample.reference_temp_c.is_none() {
+            sample.reference_temp_c = existing.reference_temp_c;
+        }
+        if sample.target_adc_mv.is_none() {
+            sample.target_adc_mv = existing.target_adc_mv;
+        }
+    }
 }
 
 async fn serial_calibration_apply(
@@ -5727,6 +5789,127 @@ mod tests {
         status.calibration.heater_enabled = false;
 
         assert!(!runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn rtd_capture_expected_mv_uses_target_adc_before_temperature_curve() {
+        let payload = CalibrationConfigRequest {
+            lease_id: "lease-1".to_string(),
+            op: CalibrationConfigOp::Capture,
+            channel: Some(CalibrationChannel::RtdAdc),
+            reference_temp_c: Some(49.0),
+            reference_vin_mv: None,
+            target_adc_mv: Some(1_000),
+            observed_mv: None,
+            expected_mv: None,
+            sample_index: None,
+            package: None,
+        };
+
+        assert_eq!(
+            expected_calibration_adc_mv(&payload, CalibrationChannel::RtdAdc),
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn backfills_live_rtd_capture_metadata_for_legacy_firmware_response() {
+        let mut calibration = CalibrationState::from_packages(
+            CalibrationPackage::default(),
+            CalibrationPackage {
+                rtd_adc: vec![
+                    Some(CalibrationSample {
+                        observed_mv: 1_001,
+                        expected_mv: 970,
+                        reference_temp_c: None,
+                        target_adc_mv: None,
+                        reference_vin_mv: None,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vin_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+            },
+        );
+        let payload = CalibrationConfigRequest {
+            lease_id: "lease-1".to_string(),
+            op: CalibrationConfigOp::Capture,
+            channel: Some(CalibrationChannel::RtdAdc),
+            reference_temp_c: Some(49.0),
+            reference_vin_mv: None,
+            target_adc_mv: Some(1_000),
+            observed_mv: None,
+            expected_mv: Some(1_000),
+            sample_index: None,
+            package: None,
+        };
+
+        backfill_live_calibration_capture(&mut calibration, &payload);
+
+        let sample = calibration.draft.rtd_adc[0].expect("sample should exist");
+        assert_eq!(sample.observed_mv, 1_001);
+        assert_eq!(sample.expected_mv, 1_000);
+        assert_eq!(sample.reference_temp_c, Some(49.0));
+        assert_eq!(sample.target_adc_mv, Some(1_000));
+    }
+
+    #[test]
+    fn merges_live_rtd_sample_metadata_on_refresh() {
+        let previous = CalibrationState::from_packages(
+            CalibrationPackage::default(),
+            CalibrationPackage {
+                rtd_adc: vec![
+                    Some(CalibrationSample {
+                        observed_mv: 1_001,
+                        expected_mv: 1_000,
+                        reference_temp_c: Some(49.0),
+                        target_adc_mv: Some(1_000),
+                        reference_vin_mv: None,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vin_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+            },
+        );
+        let mut refreshed = CalibrationState::from_packages(
+            CalibrationPackage::default(),
+            CalibrationPackage {
+                rtd_adc: vec![
+                    Some(CalibrationSample {
+                        observed_mv: 1_001,
+                        expected_mv: 1_000,
+                        reference_temp_c: None,
+                        target_adc_mv: None,
+                        reference_vin_mv: None,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vin_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+            },
+        );
+
+        merge_live_calibration_metadata(&mut refreshed, &previous);
+
+        let sample = refreshed.draft.rtd_adc[0].expect("sample should exist");
+        assert_eq!(sample.reference_temp_c, Some(49.0));
+        assert_eq!(sample.target_adc_mv, Some(1_000));
     }
 
     #[test]
