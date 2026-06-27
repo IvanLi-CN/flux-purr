@@ -2589,7 +2589,8 @@ function applyLocalCalibrationRuntimeRequest(
   request: CalibrationControlRequest
 ): CalibrationRuntimeState {
   const nextMode = request.mode ?? current.mode
-  const nextPpsEnabled = request.ppsEnabled ?? current.ppsEnabled
+  const nextPpsEnabled =
+    nextMode === 'off' ? false : (request.ppsEnabled ?? current.ppsEnabled ?? false)
   const nextHeaterEnabled =
     nextMode === 'off' ? false : (request.heaterEnabled ?? current.heaterEnabled)
   const nextTargetAdcMv = request.targetAdcMv ?? current.targetAdcMv ?? null
@@ -2598,8 +2599,8 @@ function applyLocalCalibrationRuntimeRequest(
     ...current,
     mode: nextMode,
     ppsEnabled: nextPpsEnabled,
-    ppsMv: request.ppsEnabled === false ? null : (request.ppsMv ?? current.ppsMv ?? null),
-    ppsMa: request.ppsEnabled === false ? null : current.ppsMa,
+    ppsMv: nextPpsEnabled ? (request.ppsMv ?? current.ppsMv ?? null) : null,
+    ppsMa: nextPpsEnabled ? current.ppsMa : null,
     heaterEnabled: nextHeaterEnabled,
     targetAdcMv: nextTargetAdcMv,
     stable:
@@ -4107,6 +4108,8 @@ function CalibrationView({
   const lastLiveRtdTargetAdcMvRef = useRef<number | null>(null)
   const rtdTargetAdcCommitTimerRef = useRef<number | null>(null)
   const rtdTargetAdcCommitVersionRef = useRef(0)
+  const ppsCommitTimerRef = useRef<number | null>(null)
+  const ppsCommitVersionRef = useRef(0)
   const transportBlockedReason = deviceControlBlockReason(device)
   const controlsBlocked = transportBlockedReason != null
   const applyBlocked = controlsBlocked || device.heaterEnabled || device.heaterOutputPercent !== 0
@@ -4192,6 +4195,11 @@ function CalibrationView({
     latestRtdTargetAdcTextRef.current = rtdTargetAdcText
   }, [rtdTargetAdcText])
 
+  const currentRtdTargetAdcMv = useCallback(() => {
+    const parsed = parseCalibrationIntegerInput(latestRtdTargetAdcTextRef.current)
+    return parsed ?? runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv ?? undefined
+  }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
+
   const currentModeError = runtimeCalibration.error ?? null
   const currentJob = runtimeCalibration.job
   const jobRunning = currentJob.status === 'running'
@@ -4208,18 +4216,32 @@ function CalibrationView({
     rtdPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, rtdPpsMv)
   const rtdTargetError =
     rtdTargetAdcMv == null || rtdTargetAdcMv < 0 ? '目标 ADC 必须是非负毫伏值。' : null
-  const rtdCanSubmitRuntime = hasPpsCapability && rtdPpsError == null && rtdTargetError == null
   const rtdHeaterToggleDisabled = controlsBlocked || !modeArmed || pendingCalibrationAction != null
 
   const heaterPpsMv = parseCalibrationIntegerInput(heaterPpsMvText)
   const heaterPpsError =
     heaterPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, heaterPpsMv)
   const heaterCanSubmitPps = hasPpsCapability && heaterPpsError == null
-
+  const activePpsMvText =
+    calibrationWorkspaceTab === 'heater_curve'
+      ? heaterPpsMvText
+      : calibrationWorkspaceTab === 'rtd_adc'
+        ? rtdPpsMvText
+        : vinPpsMvText
+  const activePpsMv = parseCalibrationIntegerInput(activePpsMvText)
+  const activePpsError =
+    calibrationWorkspaceTab === 'heater_curve'
+      ? heaterPpsError
+      : calibrationWorkspaceTab === 'rtd_adc'
+        ? rtdPpsError
+        : vinPpsError
   useEffect(
     () => () => {
       if (rtdTargetAdcCommitTimerRef.current != null) {
         window.clearTimeout(rtdTargetAdcCommitTimerRef.current)
+      }
+      if (ppsCommitTimerRef.current != null) {
+        window.clearTimeout(ppsCommitTimerRef.current)
       }
       if (actionLockTimerRef.current != null) {
         window.clearTimeout(actionLockTimerRef.current)
@@ -4280,10 +4302,97 @@ function CalibrationView({
     runtimeCalibration.targetAdcMv,
   ])
 
-  const currentRtdTargetAdcMv = useCallback(() => {
-    const parsed = parseCalibrationIntegerInput(latestRtdTargetAdcTextRef.current)
-    return parsed ?? runtimeCalibration.targetAdcMv ?? device.rtdRawAdcMv ?? undefined
-  }, [device.rtdRawAdcMv, runtimeCalibration.targetAdcMv])
+  useEffect(() => {
+    if (
+      controlsBlocked ||
+      pendingCalibrationAction != null ||
+      !modeArmed ||
+      runtimeCalibration.mode === 'off' ||
+      runtimeCalibration.ppsEnabled ||
+      activePpsMv == null ||
+      activePpsError != null
+    ) {
+      return
+    }
+
+    void onCalibrationRuntimeChange(
+      {
+        mode: runtimeCalibration.mode,
+        ppsEnabled: true,
+        ppsMv: activePpsMv,
+        ...(runtimeCalibration.mode === 'rtd_adc' ? { targetAdcMv: currentRtdTargetAdcMv() } : {}),
+      },
+      'PPS 接管失败。'
+    )
+  }, [
+    activePpsError,
+    activePpsMv,
+    controlsBlocked,
+    currentRtdTargetAdcMv,
+    modeArmed,
+    onCalibrationRuntimeChange,
+    pendingCalibrationAction,
+    runtimeCalibration.mode,
+    runtimeCalibration.ppsEnabled,
+  ])
+
+  useEffect(() => {
+    if (ppsCommitTimerRef.current != null) {
+      window.clearTimeout(ppsCommitTimerRef.current)
+      ppsCommitTimerRef.current = null
+    }
+
+    if (
+      controlsBlocked ||
+      pendingCalibrationAction != null ||
+      !modeArmed ||
+      runtimeCalibration.mode === 'off' ||
+      !runtimeCalibration.ppsEnabled ||
+      activePpsMv == null ||
+      activePpsError != null ||
+      runtimeCalibration.ppsMv === activePpsMv
+    ) {
+      return
+    }
+
+    const nextVersion = ppsCommitVersionRef.current + 1
+    ppsCommitVersionRef.current = nextVersion
+    ppsCommitTimerRef.current = window.setTimeout(() => {
+      ppsCommitTimerRef.current = null
+      if (ppsCommitVersionRef.current !== nextVersion) {
+        return
+      }
+      void onCalibrationRuntimeChange(
+        {
+          mode: runtimeCalibration.mode,
+          ppsEnabled: true,
+          ppsMv: activePpsMv,
+          ...(runtimeCalibration.mode === 'rtd_adc'
+            ? { targetAdcMv: currentRtdTargetAdcMv() }
+            : {}),
+        },
+        'PPS 电压更新失败。'
+      )
+    }, 180)
+
+    return () => {
+      if (ppsCommitTimerRef.current != null) {
+        window.clearTimeout(ppsCommitTimerRef.current)
+        ppsCommitTimerRef.current = null
+      }
+    }
+  }, [
+    activePpsError,
+    activePpsMv,
+    controlsBlocked,
+    currentRtdTargetAdcMv,
+    modeArmed,
+    onCalibrationRuntimeChange,
+    pendingCalibrationAction,
+    runtimeCalibration.mode,
+    runtimeCalibration.ppsEnabled,
+    runtimeCalibration.ppsMv,
+  ])
 
   const runCalibrationAction = useCallback(
     async (actionKey: string, action: () => void | Promise<void>) => {
@@ -4383,7 +4492,8 @@ function CalibrationView({
                         onEnable={() =>
                           void onModeEnter('heater_curve', {
                             mode: 'heater_curve',
-                            ppsEnabled: false,
+                            ppsEnabled: true,
+                            ppsMv: heaterPpsMv ?? basePpsDraft.millivolts,
                             heaterEnabled: false,
                           })
                         }
@@ -4402,45 +4512,6 @@ function CalibrationView({
                       ) : null
                     }
                     actionSlots={[
-                      {
-                        id: 'heater-pps-toggle',
-                        node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked ||
-                              pendingCalibrationAction != null ||
-                              (!runtimeCalibration.ppsEnabled && !heaterCanSubmitPps)
-                            }
-                            onClick={() =>
-                              void runCalibrationAction('heater-pps-toggle', () =>
-                                onCalibrationRuntimeChange(
-                                  runtimeCalibration.ppsEnabled
-                                    ? {
-                                        mode: 'heater_curve',
-                                        ppsEnabled: false,
-                                      }
-                                    : {
-                                        mode: 'heater_curve',
-                                        ppsEnabled: true,
-                                        ppsMv: heaterPpsMv ?? undefined,
-                                      },
-                                  runtimeCalibration.ppsEnabled
-                                    ? 'PPS 停止失败。'
-                                    : 'PPS 请求超出能力范围。'
-                                )
-                              )
-                            }
-                          >
-                            {calibrationActionPending('heater-pps-toggle')
-                              ? '处理中...'
-                              : runtimeCalibration.ppsEnabled
-                                ? '关闭 PPS'
-                                : '申请 PPS'}
-                          </button>
-                        ),
-                      },
                       {
                         id: 'heater-job-toggle',
                         node: (
@@ -4476,30 +4547,26 @@ function CalibrationView({
                       {
                         id: 'heater-heater-toggle',
                         node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
+                          <CalibrationActionToggle
+                            label="加热"
+                            active={runtimeCalibration.heaterEnabled}
                             disabled={
                               controlsBlocked || !modeArmed || pendingCalibrationAction != null
                             }
-                            onClick={() =>
+                            onCheckedChange={() =>
                               void runCalibrationAction('heater-heater-toggle', () =>
                                 onCalibrationRuntimeChange(
                                   {
                                     mode: 'heater_curve',
                                     heaterEnabled: !runtimeCalibration.heaterEnabled,
+                                    ppsEnabled: true,
+                                    ppsMv: heaterPpsMv ?? basePpsDraft.millivolts,
                                   },
                                   '加热切换失败。'
                                 )
                               )
                             }
-                          >
-                            {calibrationActionPending('heater-heater-toggle')
-                              ? '处理中...'
-                              : runtimeCalibration.heaterEnabled
-                                ? '关闭加热'
-                                : '开启加热'}
-                          </button>
+                          />
                         ),
                       },
                     ]}
@@ -4563,7 +4630,8 @@ function CalibrationView({
                         onEnable={() =>
                           void onModeEnter('rtd_adc', {
                             mode: 'rtd_adc',
-                            ppsEnabled: false,
+                            ppsEnabled: true,
+                            ppsMv: rtdPpsMv ?? basePpsDraft.millivolts,
                             heaterEnabled: false,
                             targetAdcMv: currentRtdTargetAdcMv(),
                           })
@@ -4589,79 +4657,27 @@ function CalibrationView({
                     }
                     actionSlots={[
                       {
-                        id: 'rtd-pps-toggle',
-                        node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked ||
-                              pendingCalibrationAction != null ||
-                              (!runtimeCalibration.ppsEnabled && !rtdCanSubmitRuntime)
-                            }
-                            onClick={() =>
-                              void runCalibrationAction('rtd-hold-toggle', () =>
-                                onCalibrationRuntimeChange(
-                                  runtimeCalibration.ppsEnabled
-                                    ? {
-                                        mode: 'rtd_adc',
-                                        ppsEnabled: false,
-                                      }
-                                    : {
-                                        mode: 'rtd_adc',
-                                        ppsEnabled: true,
-                                        ppsMv: rtdPpsMv ?? undefined,
-                                        targetAdcMv: currentRtdTargetAdcMv(),
-                                      },
-                                  runtimeCalibration.ppsEnabled
-                                    ? '温度保持停止失败。'
-                                    : '温度保持请求非法。'
-                                )
-                              )
-                            }
-                          >
-                            {calibrationActionPending('rtd-hold-toggle')
-                              ? '处理中...'
-                              : runtimeCalibration.ppsEnabled
-                                ? '关闭 PPS'
-                                : '申请 PPS'}
-                          </button>
-                        ),
-                      },
-                      {
-                        id: 'rtd-job-placeholder',
-                        node: (
-                          <span
-                            className="industrial-calibration-inline-actions__placeholder"
-                            aria-hidden="true"
-                          />
-                        ),
-                      },
-                      {
                         id: 'rtd-heater-toggle',
                         node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
+                          <CalibrationActionToggle
+                            label="加热"
+                            active={runtimeCalibration.heaterEnabled}
                             disabled={rtdHeaterToggleDisabled}
-                            onClick={() =>
+                            onCheckedChange={() =>
                               void runCalibrationAction('rtd-heater-toggle', () =>
                                 onCalibrationRuntimeChange(
                                   {
                                     mode: 'rtd_adc',
                                     heaterEnabled: !runtimeCalibration.heaterEnabled,
+                                    ppsEnabled: true,
+                                    ppsMv: rtdPpsMv ?? basePpsDraft.millivolts,
+                                    targetAdcMv: currentRtdTargetAdcMv(),
                                   },
                                   '加热切换失败。'
                                 )
                               )
                             }
-                          >
-                            {calibrationActionPending('rtd-heater-toggle')
-                              ? '处理中...'
-                              : runtimeCalibration.heaterEnabled
-                                ? '关闭加热'
-                                : '开启加热'}
-                          </button>
+                          />
                         ),
                       },
                     ]}
@@ -4761,7 +4777,8 @@ function CalibrationView({
                         onEnable={() =>
                           void onModeEnter('vin_adc', {
                             mode: 'vin_adc',
-                            ppsEnabled: false,
+                            ppsEnabled: true,
+                            ppsMv: vinPpsMv ?? basePpsDraft.millivolts,
                             heaterEnabled: false,
                           })
                         }
@@ -4780,45 +4797,6 @@ function CalibrationView({
                       ) : null
                     }
                     actionSlots={[
-                      {
-                        id: 'vin-pps-toggle',
-                        node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked ||
-                              pendingCalibrationAction != null ||
-                              (!runtimeCalibration.ppsEnabled && !vinCanSubmitPps)
-                            }
-                            onClick={() =>
-                              void runCalibrationAction('vin-pps-toggle', () =>
-                                onCalibrationRuntimeChange(
-                                  runtimeCalibration.ppsEnabled
-                                    ? {
-                                        mode: 'vin_adc',
-                                        ppsEnabled: false,
-                                      }
-                                    : {
-                                        mode: 'vin_adc',
-                                        ppsEnabled: true,
-                                        ppsMv: vinPpsMv ?? undefined,
-                                      },
-                                  runtimeCalibration.ppsEnabled
-                                    ? 'VIN 标定 PPS 停止失败。'
-                                    : 'VIN 标定 PPS 请求非法。'
-                                )
-                              )
-                            }
-                          >
-                            {calibrationActionPending('vin-pps-toggle')
-                              ? '处理中...'
-                              : runtimeCalibration.ppsEnabled
-                                ? '关闭 PPS'
-                                : '申请 PPS'}
-                          </button>
-                        ),
-                      },
                       {
                         id: 'vin-job-toggle',
                         node: (
@@ -4854,30 +4832,26 @@ function CalibrationView({
                       {
                         id: 'vin-heater-toggle',
                         node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
+                          <CalibrationActionToggle
+                            label="加热"
+                            active={runtimeCalibration.heaterEnabled}
                             disabled={
                               controlsBlocked || !modeArmed || pendingCalibrationAction != null
                             }
-                            onClick={() =>
+                            onCheckedChange={() =>
                               void runCalibrationAction('vin-heater-toggle', () =>
                                 onCalibrationRuntimeChange(
                                   {
                                     mode: 'vin_adc',
                                     heaterEnabled: !runtimeCalibration.heaterEnabled,
+                                    ppsEnabled: true,
+                                    ppsMv: vinPpsMv ?? basePpsDraft.millivolts,
                                   },
                                   '加热切换失败。'
                                 )
                               )
                             }
-                          >
-                            {calibrationActionPending('vin-heater-toggle')
-                              ? '处理中...'
-                              : runtimeCalibration.heaterEnabled
-                                ? '关闭加热'
-                                : '开启加热'}
-                          </button>
+                          />
                         ),
                       },
                     ]}
@@ -4994,6 +4968,32 @@ function CalibrationModeToggle({
       disabled={disabled}
       onCheckedChange={(checked) => void (checked ? onEnable() : onDisable())}
     />
+  )
+}
+
+function CalibrationActionToggle({
+  label,
+  active,
+  disabled = false,
+  onCheckedChange,
+}: {
+  label: string
+  active: boolean
+  disabled?: boolean
+  onCheckedChange: (checked: boolean) => void | Promise<void>
+}) {
+  return (
+    <div className="industrial-calibration-action-toggle">
+      <span>{label}</span>
+      <Switch
+        aria-label={`${label}开关`}
+        size="industrial"
+        className="industrial-calibration-action-toggle__switch"
+        checked={active}
+        disabled={disabled}
+        onCheckedChange={(checked) => void onCheckedChange(checked)}
+      />
+    </div>
   )
 }
 

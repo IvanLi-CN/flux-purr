@@ -194,9 +194,10 @@ export const DemoCalibrationTab: Story = {
             canvasElement.querySelector(
               '.industrial-calibration-inline-actions--single-row'
             ) as HTMLElement | null
-          )?.querySelectorAll('button') ?? []
+          )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['申请 PPS', '自动校准', '开启加热'])
+        expect(actionButtons).toEqual(['自动校准'])
+        await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
         await expect(await canvas.findByRole('slider', { name: '目标 ADC 滑块' })).toBeVisible()
         await expect(await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })).toBeVisible()
@@ -205,9 +206,10 @@ export const DemoCalibrationTab: Story = {
             canvasElement.querySelector(
               '.industrial-calibration-inline-actions--single-row'
             ) as HTMLElement | null
-          )?.querySelectorAll('button') ?? []
+          )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['申请 PPS', '开启加热'])
+        expect(actionButtons).toEqual([])
+        await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await expect(await canvas.findByRole('heading', { name: '温度 ADC' })).toBeVisible()
         const targetAdcInput = await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })
         const referenceTempInput = await canvas.findByRole('spinbutton', { name: '参考温度' })
@@ -245,16 +247,16 @@ export const DemoCalibrationTab: Story = {
         await expect(await canvas.findByRole('heading', { name: '电压 ADC' })).toBeVisible()
         await expect(await canvas.findByRole('slider', { name: 'PPS 电压滑块' })).toBeVisible()
         await expect(await canvas.findByRole('spinbutton', { name: 'PPS 电压输入' })).toBeVisible()
-        await expect(await canvas.findByRole('button', { name: '申请 PPS' })).toBeVisible()
         expect(canvas.queryByText('当前电流')).not.toBeInTheDocument()
         actionButtons = Array.from(
           (
             canvasElement.querySelector(
               '.industrial-calibration-inline-actions--single-row'
             ) as HTMLElement | null
-          )?.querySelectorAll('button') ?? []
+          )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['申请 PPS', '自动校准', '开启加热'])
+        expect(actionButtons).toEqual(['自动校准'])
+        await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         expect(canvas.queryByRole('button', { name: '+1V' })).not.toBeInTheDocument()
         expect(canvas.queryByText(/Range 5V/i)).not.toBeInTheDocument()
       }
@@ -275,17 +277,35 @@ export const DemoCalibrationTab: Story = {
       await waitFor(() => {
         expect(modeToggle).toHaveAttribute('aria-checked', 'true')
       })
+      await waitFor(() => {
+        expect(canvas.getByRole('switch', { name: '加热开关' })).toBeVisible()
+      })
     })
+
+    await step(
+      'arming calibration mode auto-enables PPS runtime without a separate button',
+      async () => {
+        const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+        await waitFor(() => {
+          expect(modeToggle).toHaveAttribute('aria-checked', 'true')
+        })
+        expect(canvas.queryByRole('button', { name: '申请 PPS' })).not.toBeInTheDocument()
+        expect(canvas.queryByRole('button', { name: '关闭 PPS' })).not.toBeInTheDocument()
+      }
+    )
 
     await step('voltage mode action buttons stay on one row', async () => {
       const actionRow = canvasElement.querySelector(
         '.industrial-calibration-inline-actions--single-row'
       ) as HTMLElement | null
       expect(actionRow).not.toBeNull()
-      const buttons = Array.from(actionRow?.querySelectorAll('button') ?? []) as HTMLElement[]
-      expect(buttons.length).toBeGreaterThanOrEqual(2)
-      const topOffsets = new Set(buttons.map((button) => Math.round(button.offsetTop)))
-      expect(topOffsets.size).toBe(1)
+      if (!actionRow) {
+        throw new Error('Expected calibration action row to exist')
+      }
+      expect(
+        actionRow.classList.contains('industrial-calibration-inline-actions--single-row')
+      ).toBe(true)
+      expect(actionRow.scrollWidth).toBeLessThanOrEqual(actionRow.clientWidth + 2)
     })
 
     await step('voltage mode toggle actions block rapid repeat clicks', async () => {
@@ -295,11 +315,9 @@ export const DemoCalibrationTab: Story = {
         throw new Error('Expected calibration mode toggle to exist')
       }
       await userEvent.click(modeToggle)
-      const applyPpsButton = await canvas.findByRole('button', { name: '申请 PPS' })
       const startAutoButton = await canvas.findByRole('button', { name: '自动校准' })
-      await userEvent.click(applyPpsButton)
+      await userEvent.click(startAutoButton)
       await waitFor(() => {
-        expect(applyPpsButton).toBeDisabled()
         expect(startAutoButton).toBeDisabled()
       })
     })
@@ -309,6 +327,9 @@ export const DemoCalibrationTab: Story = {
       async () => {
         const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
         const portalCanvas = within(canvasElement.ownerDocument.body)
+        if (modeToggle.getAttribute('aria-checked') !== 'true') {
+          await userEvent.click(modeToggle)
+        }
         await waitFor(() => {
           expect(modeToggle).toHaveAttribute('aria-checked', 'true')
         })
@@ -552,17 +573,17 @@ export const DemoTemperatureCalibrationHeatingFeedback: Story = {
         const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
         await expect(modeToggle).toHaveAttribute('aria-checked', 'true')
 
-        const heaterButton = await canvas.findByRole('button', { name: '开启加热' })
-        await expect(heaterButton).toBeEnabled()
+        const heaterToggle = await canvas.findByRole('switch', { name: '加热开关' })
+        await expect(heaterToggle).toBeEnabled()
         await expect(await canvas.findByRole('meter', { name: '加热强度' })).toHaveAttribute(
           'value',
           '0'
         )
 
-        await userEvent.click(heaterButton)
+        await userEvent.click(heaterToggle)
 
         await waitFor(() => {
-          expect(canvas.getByRole('button', { name: /开启加热|关闭加热/ })).toBeEnabled()
+          expect(canvas.getByRole('switch', { name: '加热开关' })).toBeEnabled()
         })
         await expect(await canvas.findByRole('meter', { name: '加热强度' })).toHaveAttribute(
           'value',
