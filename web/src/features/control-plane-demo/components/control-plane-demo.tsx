@@ -2565,6 +2565,38 @@ function isRtdCalibrationSample(
   return 'referenceTempC' in sample
 }
 
+function isValidRtdCalibrationSample(
+  sample: RtdCalibrationSample | VinCalibrationSample | null
+): sample is RtdCalibrationSample {
+  return (
+    !!sample &&
+    isRtdCalibrationSample(sample) &&
+    Number.isFinite(sample.targetAdcMv) &&
+    Number.isFinite(sample.referenceTempC)
+  )
+}
+
+function isValidVinCalibrationSample(
+  sample: RtdCalibrationSample | VinCalibrationSample | null
+): sample is VinCalibrationSample {
+  return !!sample && Number.isFinite(sample.observedMv) && Number.isFinite(sample.expectedMv)
+}
+
+function isValidCalibrationSample(
+  sample: RtdCalibrationSample | VinCalibrationSample | null,
+  channel: CalibrationChannel
+) {
+  return channel === 'rtd_adc'
+    ? isValidRtdCalibrationSample(sample)
+    : isValidVinCalibrationSample(sample)
+}
+
+function isFitCalibrationSample(
+  sample: BaseCalibrationSample | null
+): sample is BaseCalibrationSample {
+  return !!sample && Number.isFinite(sample.observedMv) && Number.isFinite(sample.expectedMv)
+}
+
 function formatRtdCalibrationReference(sample: RtdCalibrationSample) {
   if (sample.referenceTempC != null) {
     return `${sample.referenceTempC.toFixed(1)}℃`
@@ -2642,7 +2674,7 @@ function createCalibrationFit(
   samples: Array<BaseCalibrationSample | null>,
   channel: CalibrationChannel
 ) {
-  const custom = samples.filter((sample): sample is BaseCalibrationSample => Boolean(sample))
+  const custom = samples.filter(isFitCalibrationSample)
   const defaults =
     channel === 'rtd_adc'
       ? [
@@ -2798,7 +2830,7 @@ function normalizeCalibrationPackage(calibrationPackage: CalibrationPackage): Ca
   const normalize = <TSample extends BaseCalibrationSample>(
     samples: Array<TSample | null>
   ): Array<TSample | null> => {
-    const compacted = samples.filter(Boolean) as TSample[]
+    const compacted = samples.filter(isFitCalibrationSample) as TSample[]
     return Array.from({ length: 8 }, (_, index) => compacted[index] ?? null)
   }
   return {
@@ -5818,11 +5850,13 @@ function CalibrationChannelSamples({
   disabled?: boolean
   onDelete: (sampleIndex: number) => void | Promise<void>
 }) {
-  const sampleCount = samples.filter(Boolean).length
+  const sampleCount = samples.filter((sample) => isValidCalibrationSample(sample, channel)).length
   const sampleKeys = calibrationSampleKeys(samples)
   const isRtdChannel = channel === 'rtd_adc'
   const populatedSamples = samples
-    .map((sample, index) => (sample ? { ...sample, index } : null))
+    .map((sample, index) =>
+      isValidCalibrationSample(sample, channel) ? { ...sample, index } : null
+    )
     .filter((sample): sample is (RtdCalibrationSample | VinCalibrationSample) & { index: number } =>
       Boolean(sample)
     )

@@ -3,6 +3,7 @@ import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test'
 import { ControlPlaneDemo } from '@/features/control-plane-demo/components/control-plane-demo'
 import type {
   CalibrationRuntimeState,
+  CalibrationState,
   ControlPlaneStatus,
   DirectRuntimeConfigRequest,
   HeaterCurvePackage,
@@ -710,6 +711,34 @@ export const DemoCalibrationDenseLists: Story = {
   },
 }
 
+export const DemoCalibrationIncompleteRtdDraft: Story = {
+  name: 'Demo / Incomplete RTD draft',
+  args: {
+    scenario: createIncompleteRtdDraftScenario(),
+    initialView: 'calibration',
+    allowDemoControls: false,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('does not render legacy RTD fit samples as temperature samples', async () => {
+      await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
+
+      const rtdList = await canvas.findByRole('region', { name: '温度 ADC 样本列表' })
+      await expect(within(rtdList).getByText('0/8 个样本')).toBeVisible()
+      expect(within(rtdList).queryByRole('button', { name: /删除 温度 ADC 样本/ })).toBeNull()
+      expect(within(rtdList).queryByText('1/8 个样本')).toBeNull()
+    })
+  },
+}
+
 export const LiveWebSerialAddDevice: Story = {
   name: 'Live / Web Serial Add Device',
   play: async ({ canvasElement, step }) => {
@@ -1082,6 +1111,61 @@ function createCalibrationDenseScenario(): ControlPlaneScenario {
           ? `${event.message}; calibration draft and event stream remained bounded after dense operator sampling`
           : event.message,
     })),
+  }
+}
+
+function createIncompleteRtdDraftScenario(): ControlPlaneScenario {
+  const incompleteCalibration = {
+    active: {
+      rtdAdc: [null, null, null, null, null, null, null, null],
+      vinAdc: [null, null, null, null, null, null, null, null],
+    },
+    draft: {
+      rtdAdc: [
+        {
+          observedMv: 1_019,
+          expectedMv: 1_000,
+        },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+      vinAdc: [null, null, null, null, null, null, null, null],
+    },
+    activeFit: {
+      rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+      vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+    },
+    draftFit: {
+      rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+      vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+    },
+  } satisfies CalibrationState
+
+  return {
+    ...controlPlaneScenario,
+    devices: controlPlaneScenario.devices.map((device) =>
+      device.id === controlPlaneScenario.selectedDeviceId
+        ? {
+            ...device,
+            currentTempC: 72.6,
+            rtdRawAdcMv: 1_019,
+            storedCalibration: incompleteCalibration,
+            calibration: {
+              ...device.calibration,
+              mode: 'rtd_adc',
+              ppsEnabled: true,
+              ppsMv: 15_500,
+              heaterEnabled: true,
+              targetAdcMv: 1_000,
+            },
+          }
+        : device
+    ),
   }
 }
 

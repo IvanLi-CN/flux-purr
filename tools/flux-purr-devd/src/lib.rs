@@ -798,8 +798,14 @@ impl CalibrationState {
     }
 
     fn refresh_fits(&mut self) {
+        self.sanitize_web_facing_rtd_samples();
         self.active_fit = CalibrationFits::from_package(&self.active);
         self.draft_fit = CalibrationFits::from_package(&self.draft);
+    }
+
+    fn sanitize_web_facing_rtd_samples(&mut self) {
+        sanitize_web_facing_rtd_samples(&mut self.active.rtd_adc);
+        sanitize_web_facing_rtd_samples(&mut self.draft.rtd_adc);
     }
 }
 
@@ -825,7 +831,12 @@ fn fit_calibration_channel(
     samples: &[Option<CalibrationSample>],
     channel: CalibrationChannel,
 ) -> CalibrationFit {
-    let custom: Vec<CalibrationSample> = samples.iter().flatten().copied().collect();
+    let custom: Vec<CalibrationSample> = samples
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|sample| is_web_facing_calibration_sample(*sample, channel))
+        .collect();
     let defaults = default_calibration_samples(channel);
     let default_sample_count = if custom.len() < 2 { defaults.len() } else { 0 };
     let mut points = if custom.len() < 2 {
@@ -876,6 +887,30 @@ fn fit_calibration_channel(
         custom_sample_count: custom.len(),
         default_sample_count,
     }
+}
+
+fn is_web_facing_calibration_sample(
+    sample: CalibrationSample,
+    channel: CalibrationChannel,
+) -> bool {
+    match channel {
+        CalibrationChannel::RtdAdc => {
+            sample.reference_temp_c.is_some() && sample.target_adc_mv.is_some()
+        }
+        CalibrationChannel::VinAdc => true,
+    }
+}
+
+fn sanitize_web_facing_rtd_samples(samples: &mut Vec<Option<CalibrationSample>>) {
+    let mut compacted: Vec<Option<CalibrationSample>> = samples
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|sample| is_web_facing_calibration_sample(*sample, CalibrationChannel::RtdAdc))
+        .map(Some)
+        .collect();
+    compacted.resize(ADC_CALIBRATION_MAX_SAMPLES, None);
+    *samples = compacted;
 }
 
 fn default_calibration_samples(channel: CalibrationChannel) -> [CalibrationSample; 2] {
@@ -2970,6 +3005,7 @@ fn merge_live_calibration_metadata(
 ) {
     merge_live_rtd_sample_metadata(&mut calibration.active.rtd_adc, &previous.active.rtd_adc);
     merge_live_rtd_sample_metadata(&mut calibration.draft.rtd_adc, &previous.draft.rtd_adc);
+    calibration.refresh_fits();
 }
 
 fn merge_live_rtd_sample_metadata(
@@ -5909,6 +5945,39 @@ mod tests {
         let sample = refreshed.draft.rtd_adc[0].expect("sample should exist");
         assert_eq!(sample.reference_temp_c, Some(49.0));
         assert_eq!(sample.target_adc_mv, Some(1_000));
+    }
+
+    #[test]
+    fn incomplete_live_rtd_samples_are_not_web_facing_samples() {
+        let mut calibration = CalibrationState::from_packages(
+            CalibrationPackage::default(),
+            CalibrationPackage {
+                rtd_adc: vec![
+                    Some(CalibrationSample {
+                        observed_mv: 1_001,
+                        expected_mv: 970,
+                        reference_temp_c: None,
+                        target_adc_mv: None,
+                        reference_vin_mv: None,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                vin_adc: vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+            },
+        );
+
+        calibration.refresh_fits();
+
+        assert!(calibration.draft.rtd_adc.iter().all(Option::is_none));
+        assert_eq!(calibration.draft_fit.rtd_adc.custom_sample_count, 0);
+        assert_eq!(calibration.draft_fit.rtd_adc.gain, 1.0);
+        assert_eq!(calibration.draft_fit.rtd_adc.offset_mv, 0.0);
     }
 
     #[test]
