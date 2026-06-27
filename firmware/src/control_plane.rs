@@ -198,6 +198,11 @@ impl ControlPlaneStatus {
             network,
         }
     }
+
+    pub fn with_runtime_target_temp_c(mut self, target_temp_c: i16) -> Self {
+        self.target_temp_c = target_temp_c;
+        self
+    }
 }
 
 impl From<HeaterLockReason> for String<ERROR_CODE_MAX_LEN> {

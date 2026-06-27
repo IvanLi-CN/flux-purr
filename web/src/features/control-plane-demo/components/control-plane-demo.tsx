@@ -4204,11 +4204,32 @@ function CalibrationView({
 
   const rtdPpsMv = parseCalibrationIntegerInput(rtdPpsMvText)
   const rtdTargetAdcMv = parseCalibrationIntegerInput(rtdTargetAdcText)
+  const rtdObservedAdcMv = device.rtdRawAdcMv ?? null
   const rtdPpsError =
     rtdPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, rtdPpsMv)
   const rtdTargetError =
     rtdTargetAdcMv == null || rtdTargetAdcMv < 0 ? '目标 ADC 必须是非负毫伏值。' : null
   const rtdCanSubmitRuntime = hasPpsCapability && rtdPpsError == null && rtdTargetError == null
+  const rtdHeaterCanEnable =
+    modeArmed &&
+    runtimeCalibration.mode === 'rtd_adc' &&
+    runtimeCalibration.heaterEnabled === false &&
+    rtdTargetAdcMv != null &&
+    rtdObservedAdcMv != null &&
+    rtdTargetAdcMv > rtdObservedAdcMv
+  const rtdHeaterToggleDisabled =
+    controlsBlocked ||
+    !modeArmed ||
+    pendingCalibrationAction != null ||
+    (!runtimeCalibration.heaterEnabled && !rtdHeaterCanEnable)
+  const rtdHeaterHint =
+    !runtimeCalibration.heaterEnabled &&
+    modeArmed &&
+    rtdTargetAdcMv != null &&
+    rtdObservedAdcMv != null &&
+    rtdTargetAdcMv <= rtdObservedAdcMv
+      ? '目标 ADC 需要高于当前 ADC，开启加热才会实际出力。'
+      : null
 
   const heaterPpsMv = parseCalibrationIntegerInput(heaterPpsMvText)
   const heaterPpsError =
@@ -4584,6 +4605,9 @@ function CalibrationView({
                         {rtdTargetError ? (
                           <p className="industrial-calibration-inline-error">{rtdTargetError}</p>
                         ) : null}
+                        {rtdHeaterHint ? (
+                          <p className="industrial-calibration-inline-error">{rtdHeaterHint}</p>
+                        ) : null}
                       </>
                     }
                     actionSlots={[
@@ -4642,9 +4666,7 @@ function CalibrationView({
                           <button
                             type="button"
                             className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked || !modeArmed || pendingCalibrationAction != null
-                            }
+                            disabled={rtdHeaterToggleDisabled}
                             onClick={() =>
                               void runCalibrationAction('rtd-heater-toggle', () =>
                                 onCalibrationRuntimeChange(

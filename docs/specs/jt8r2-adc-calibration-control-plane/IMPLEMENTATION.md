@@ -15,6 +15,8 @@
 - 温度标定 RTD sample table has been reduced to the only two allowed owner-facing data fields, `ADC 电压` and `温度`, rendered in a paired two-up layout with vertically centered values to cut list height roughly in half.
 - 温度标定右上 live card now uses the `状态` title, keeps only the live `当前 ADC` field from the old four-field status block, and embeds the EEPROM-backed 当前/草稿拟合摘要 into the same card instead of repeating a separate fit table above the sample workspace.
 - 页面内离开已加 owner-facing guard：当任一标定模式仍处于 armed 状态时，切换顶层视图、切换设备或切换标定子 tab 会先在开关附近显示自定义提示泡泡，要求先关闭开关，再允许继续跳转；本轮不拦截浏览器刷新或关页。
+- 温度标定 live control 现在会在 `targetAdcMv <= 当前 RTD_ADC` 时阻断 `开启加热`，并以 inline 提示说明当前闭环不会实际出力；当操作者把目标 ADC 提高到高于当前 ADC 后，按钮恢复可用。
+- Firmware USB runtime status 现在把 calibration 模式下的实时 `ui_state.target_temp_c` 回传给 host/Web，而不是继续显示 EEPROM 常规目标温度，避免温度标定页把 `917mV` 这类接近室温的 ADC 目标误显示成普通热控目标温度。
 
 ## Validation
 
@@ -27,6 +29,7 @@
 - `bun run check:storybook`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web test:unit -- src/features/control-plane-demo/calibration-leave-guard.test.ts src/features/control-plane-demo/control-plane-demo.test.ts`
+- `bun run --cwd web test:unit -- src/features/control-plane-demo/rtd-calibration-display.test.ts`
 - `bun run --cwd web test:storybook -- src/stories/ControlPlaneDemo.stories.tsx`
 
 ## Remaining Work

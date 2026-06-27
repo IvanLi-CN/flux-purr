@@ -2606,7 +2606,8 @@ fn usb_runtime_status(
         memory_config,
         (context.elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
         network_from_memory(memory_config),
-    );
+    )
+    .with_runtime_target_temp_c(ui_state.target_temp_c);
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
     status.vin_raw_adc_mv = context.latest_vin_raw_adc_mv;
     status.manual_pps_enabled = context.manual_pps.enabled;
