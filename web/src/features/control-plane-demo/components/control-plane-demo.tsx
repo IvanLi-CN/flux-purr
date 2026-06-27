@@ -4204,32 +4204,12 @@ function CalibrationView({
 
   const rtdPpsMv = parseCalibrationIntegerInput(rtdPpsMvText)
   const rtdTargetAdcMv = parseCalibrationIntegerInput(rtdTargetAdcText)
-  const rtdObservedAdcMv = device.rtdRawAdcMv ?? null
   const rtdPpsError =
     rtdPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, rtdPpsMv)
   const rtdTargetError =
     rtdTargetAdcMv == null || rtdTargetAdcMv < 0 ? '目标 ADC 必须是非负毫伏值。' : null
   const rtdCanSubmitRuntime = hasPpsCapability && rtdPpsError == null && rtdTargetError == null
-  const rtdHeaterCanEnable =
-    modeArmed &&
-    runtimeCalibration.mode === 'rtd_adc' &&
-    runtimeCalibration.heaterEnabled === false &&
-    rtdTargetAdcMv != null &&
-    rtdObservedAdcMv != null &&
-    rtdTargetAdcMv > rtdObservedAdcMv
-  const rtdHeaterToggleDisabled =
-    controlsBlocked ||
-    !modeArmed ||
-    pendingCalibrationAction != null ||
-    (!runtimeCalibration.heaterEnabled && !rtdHeaterCanEnable)
-  const rtdHeaterHint =
-    !runtimeCalibration.heaterEnabled &&
-    modeArmed &&
-    rtdTargetAdcMv != null &&
-    rtdObservedAdcMv != null &&
-    rtdTargetAdcMv <= rtdObservedAdcMv
-      ? '目标 ADC 需要高于当前 ADC，开启加热才会实际出力。'
-      : null
+  const rtdHeaterToggleDisabled = controlsBlocked || !modeArmed || pendingCalibrationAction != null
 
   const heaterPpsMv = parseCalibrationIntegerInput(heaterPpsMvText)
   const heaterPpsError =
@@ -4605,9 +4585,6 @@ function CalibrationView({
                         {rtdTargetError ? (
                           <p className="industrial-calibration-inline-error">{rtdTargetError}</p>
                         ) : null}
-                        {rtdHeaterHint ? (
-                          <p className="industrial-calibration-inline-error">{rtdHeaterHint}</p>
-                        ) : null}
                       </>
                     }
                     actionSlots={[
@@ -4707,14 +4684,20 @@ function CalibrationView({
                   <CalibrationWorkbenchCard
                     title="状态"
                     summary={
-                      <CalibrationFitStatusSummary
-                        liveLabel="当前 ADC"
-                        liveValue={
-                          device.rtdRawAdcMv != null ? `${device.rtdRawAdcMv}mV` : '未采样'
-                        }
-                        activeFit={calibration.activeFit.rtdAdc}
-                        draftFit={calibration.draftFit.rtdAdc}
-                      />
+                      <>
+                        <CalibrationFitStatusSummary
+                          liveLabel="当前 ADC"
+                          liveValue={
+                            device.rtdRawAdcMv != null ? `${device.rtdRawAdcMv}mV` : '未采样'
+                          }
+                          activeFit={calibration.activeFit.rtdAdc}
+                          draftFit={calibration.draftFit.rtdAdc}
+                        />
+                        <CalibrationHeaterFeedback
+                          heaterEnabled={runtimeCalibration.heaterEnabled}
+                          heaterOutputPercent={device.heaterOutputPercent}
+                        />
+                      </>
                     }
                     guidance={
                       rtdTargetError
@@ -5766,6 +5749,33 @@ function CalibrationFitStatusSummary({
       <CalibrationFitSummaryRow label="当前" fit={activeFit} />
       <CalibrationFitSummaryRow label="草稿" fit={draftFit} />
     </dl>
+  )
+}
+
+function CalibrationHeaterFeedback({
+  heaterEnabled,
+  heaterOutputPercent,
+}: {
+  heaterEnabled: boolean
+  heaterOutputPercent: number
+}) {
+  const clampedOutput = Math.max(0, Math.min(heaterOutputPercent, 100))
+  return (
+    <div className="industrial-calibration-heater-feedback">
+      <div className="industrial-calibration-heater-feedback__header">
+        <span>{heaterEnabled ? '加热强度' : '加热已停'}</span>
+        <strong>{clampedOutput}%</strong>
+      </div>
+      <meter
+        className="industrial-heat-output industrial-calibration-heater-feedback__meter"
+        aria-label="加热强度"
+        value={clampedOutput}
+        min={0}
+        max={100}
+      >
+        <span style={{ width: `${clampedOutput}%` }} />
+      </meter>
+    </div>
   )
 }
 

@@ -502,6 +502,77 @@ export const DemoCalibrationApplyBlocked: Story = {
   },
 }
 
+export const DemoTemperatureCalibrationHeatingFeedback: Story = {
+  name: 'Demo / 温度标定 heating feedback',
+  args: {
+    scenario: {
+      ...controlPlaneScenario,
+      selectedDeviceId: 'fp-lab-01',
+      devices: controlPlaneScenario.devices.map((device) =>
+        device.id === 'fp-lab-01'
+          ? {
+              ...device,
+              transport: 'devd',
+              baseUrl: 'devd://fp-lab-01',
+              severity: 'nominal',
+              leaseState: 'active',
+              leaseId: 'story-lease',
+              rtdRawAdcMv: 1120,
+              heaterEnabled: false,
+              heaterOutputPercent: 0,
+              calibration: {
+                ...idleCalibrationRuntime,
+                mode: 'rtd_adc',
+                ppsEnabled: true,
+                ppsMv: 16000,
+                targetAdcMv: 970,
+              },
+            }
+          : device
+      ),
+    },
+    initialView: 'calibration',
+    allowDemoControls: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step(
+      'heater toggle stays available and status card follows hardware output',
+      async () => {
+        await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
+        await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
+
+        const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+        await expect(modeToggle).toHaveAttribute('aria-checked', 'true')
+
+        const heaterButton = await canvas.findByRole('button', { name: '开启加热' })
+        await expect(heaterButton).toBeEnabled()
+        await expect(await canvas.findByRole('meter', { name: '加热强度' })).toHaveAttribute(
+          'value',
+          '0'
+        )
+
+        await userEvent.click(heaterButton)
+
+        await waitFor(() => {
+          expect(canvas.getByRole('button', { name: /开启加热|关闭加热/ })).toBeEnabled()
+        })
+        await expect(await canvas.findByRole('meter', { name: '加热强度' })).toHaveAttribute(
+          'value',
+          '0'
+        )
+      }
+    )
+  },
+}
+
 export const DemoCalibrationManualFit: Story = {
   name: 'Demo / ADC draft fit',
   args: {

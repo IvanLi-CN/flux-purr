@@ -67,7 +67,8 @@
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
 - `电压读数标定` 手动模式必须支持直接输入和 `1V` 步进；自动模式必须按 `1V` 步进在实时 PPS capability 内扫点，并以“请求 PPS 电压”作为 reference 写入 `vin_adc draft`。
 - `温度标定` 只能是手动/半自动；firmware 必须按目标 `RTD_ADC` 毫伏值持续控热并暴露稳定状态，最终 capture 继续写 `rtd_adc draft`。
-- `温度标定` 的 `开启加热` 语义必须基于“目标 `RTD_ADC` 高于当前 `RTD_ADC`，闭环仍需要升温”这一前提；当目标 `RTD_ADC` 不高于当前 `RTD_ADC` 时，Web 必须阻断该动作并以 inline 提示说明当前不会实际出力，避免出现“开关已开但硬件不加热”的误导状态。
+- `温度标定` 的加热控制仅在 `温度标定` 校准模式已开启时可用；关闭该校准模式时必须同步停止加热。除校准模式本身外，Web 不得再对 `开启加热` 追加额外前置条件。
+- `温度标定` 是否实际出热必须以硬件返回的 `heaterOutputPercent` 为真相源；Web 必须把该反馈显示为 owner-facing 的能量强度图示，而不是根据 `targetAdcMv` 与当前 ADC 的比较自行推断“应当在加热”。
 - `温度标定` 样本表必须只展示两项 owner-facing 数据：硬件目标 ADC 毫伏值与操作者输入的标定温度；不得混入额外技术字段或说明文案。
 - `温度标定` 样本表应优先使用双栏配对布局展示 RTD 样本，并保持数值垂直居中，以减少列表高度同时维持可读性。
 - `温度标定` 右上状态卡必须收口为 `状态`，其中旧四字段状态区只保留 `当前 ADC`；EEPROM 中的当前/草稿拟合摘要必须内嵌到同一卡片中展示，不再在样本区上方重复渲染独立拟合摘要表。
@@ -155,8 +156,8 @@ Arrays normalize to length `8`; empty slots are `null`.
 - Given a PPS request falls outside `5V~28V` or the advertised capability, When any live control or auto job is started, Then Web blocks submit inline, CLI exits with an error, and firmware/devd refuse the request without issuing an illegal voltage request.
 - Given `电压读数标定` auto is started, When the device exposes PPS capability, Then the job walks `1V` steps within that capability and writes captured points to `vin_adc draft`.
 - Given `温度标定` mode is armed, When the target ADC and heater are enabled, Then runtime status reports whether the RTD ADC has stabilized so the operator can capture against an external thermometer.
-- Given `温度标定` mode is armed, When `targetAdcMv <= current RTD ADC`, Then Web must block `开启加热` and show an inline explanation that heating will only produce output when the target ADC is above the current ADC.
-- Given `温度标定` mode is armed, When the operator raises `targetAdcMv` above the current RTD ADC and enables both PPS and heater, Then real hardware must leave the zero-output idle state and report non-zero heater output until the RTD ADC approaches the requested target.
+- Given `温度标定` mode is armed, When the operator toggles `开启加热`, Then Web must accept the action without imposing extra ADC-comparison gates and leave actual heating behavior to hardware feedback.
+- Given `温度标定` mode is armed, When hardware reports `heaterOutputPercent`, Then the status card must reflect that percentage through an energy-intensity visualization even if the heater switch is already on.
 - Given `加热曲线标定` auto is started, When stable bins are collected after startup transient, Then the generated curve is monotonic-smoothed into `heater_curve preview` and requires an explicit `Save`.
 - Given any calibration mode switch is still on, When the operator attempts a page-internal view/device/calibration-tab change, Then Web blocks that navigation and shows an inline prompt near the switch to close calibration mode first before continuing.
 

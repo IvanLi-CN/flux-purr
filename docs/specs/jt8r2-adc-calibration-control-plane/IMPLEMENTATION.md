@@ -15,7 +15,8 @@
 - 温度标定 RTD sample table has been reduced to the only two allowed owner-facing data fields, `ADC 电压` and `温度`, rendered in a paired two-up layout with vertically centered values to cut list height roughly in half.
 - 温度标定右上 live card now uses the `状态` title, keeps only the live `当前 ADC` field from the old four-field status block, and embeds the EEPROM-backed 当前/草稿拟合摘要 into the same card instead of repeating a separate fit table above the sample workspace.
 - 页面内离开已加 owner-facing guard：当任一标定模式仍处于 armed 状态时，切换顶层视图、切换设备或切换标定子 tab 会先在开关附近显示自定义提示泡泡，要求先关闭开关，再允许继续跳转；本轮不拦截浏览器刷新或关页。
-- 温度标定 live control 现在会在 `targetAdcMv <= 当前 RTD_ADC` 时阻断 `开启加热`，并以 inline 提示说明当前闭环不会实际出力；当操作者把目标 ADC 提高到高于当前 ADC 后，按钮恢复可用。
+- 温度标定 live control 现在只在校准模式 armed 时允许 `开启加热`；关闭校准模式会同步下发 `heaterEnabled: false` 停止加热，不再基于 `targetAdcMv` 与当前 ADC 的比较额外阻断按钮。
+- 温度标定右上 `状态` 卡会把硬件回传的 `heaterOutputPercent` 渲染成能量强度图示，用来表达“实际是否正在加热”；开关状态本身不再被用作出力真相源。
 - Firmware USB runtime status 现在把 calibration 模式下的实时 `ui_state.target_temp_c` 回传给 host/Web，而不是继续显示 EEPROM 常规目标温度，避免温度标定页把 `917mV` 这类接近室温的 ADC 目标误显示成普通热控目标温度。
 
 ## Validation

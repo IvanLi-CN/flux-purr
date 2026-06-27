@@ -4342,6 +4342,41 @@
     line-height: 1.42;
   }
 
+  .industrial-calibration-heater-feedback {
+    display: grid;
+    gap: 0.4rem;
+    min-width: 0;
+    border: 1px solid var(--industrial-panel-border);
+    border-radius: 10px;
+    background: color-mix(in oklch, var(--industrial-panel) 68%, var(--industrial-muted) 32%);
+    padding: 0.58rem 0.62rem;
+  }
+
+  .industrial-calibration-heater-feedback__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    min-width: 0;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.72rem;
+    font-weight: 780;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .industrial-calibration-heater-feedback__header strong {
+    color: var(--industrial-accent);
+    font-size: 0.8rem;
+  }
+
+  .industrial-calibration-heater-feedback__meter {
+    width: 100%;
+    margin-top: 0;
+    height: 0.72rem;
+  }
+
   .industrial-calibration-live-card__header {
     min-width: 0;
   }
