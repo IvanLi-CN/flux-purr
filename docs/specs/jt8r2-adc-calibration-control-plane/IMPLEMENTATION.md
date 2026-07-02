@@ -2,41 +2,41 @@
 
 ## Coverage
 
-- 固件 `MemoryConfig` 保存 `active_adc_calibration` 与 `draft_adc_calibration`，TLV record 同时编码两份 calibration package。
-- `adc_calibration_fit` 按 `0/1/>=2` custom point 规则计算线性 gain/offset；`correct_adc_mv` 在 ADC 域修正 observed millivolts。
-- RTD raw ADC 先用于开路/短路故障判断，再对有效 ADC 读数应用 active calibration 并换算温度。
-- VIN ADC 由 `GPIO1` 采样，active calibration 后按分压比换算为 `status.voltageMv`。
-- Runtime status now also exposes latest raw RTD/VIN ADC millivolts so host-side calibration data packet collection can record uncalibrated samples alongside calibrated status.
-- USB JSONL 支持 `get_calibration`、`calibration_config` 与 `calibration_apply`；启动/恢复窗口对 mutating calibration frame 返回可重试 busy/error。
-- `devd` exposes `GET|PUT /api/v1/devices/:id/calibration` and `POST /api/v1/devices/:id/calibration/apply` with mock and native serial paths.
-- `flux-purr calibration` 支持 get/capture/delete/clear/import/export/apply。
-- Web 控制台包含 Calibration tab，并在 Storybook 中覆盖 Calibration 场景。
-- RTD/VIN calibration samples now persist owner-entered physical references alongside ADC-domain points. RTD temperature calibration captures use the live hardware `targetAdcMv` as the ADC-domain `expectedMv` and also persist that same hold target, so refreshed/reloaded sample tables render the original `referenceTempC` plus the captured RTD target instead of reverse-derived placeholders.
-- 温度标定 RTD sample table has been reduced to the only two allowed owner-facing data fields, `ADC 电压` and `温度`, rendered in a paired two-up layout with vertically centered values to cut list height roughly in half.
-- 温度标定右上 live card now uses the `状态` title, keeps only the live `当前 ADC` field from the old four-field status block, and embeds the EEPROM-backed 当前/草稿拟合摘要 into the same card instead of repeating a separate fit table above the sample workspace.
-- 页面内离开已加 owner-facing guard：当任一标定模式仍处于 armed 状态时，切换顶层视图、切换设备或切换标定子 tab 会先在开关附近显示自定义提示泡泡，要求先关闭开关，再允许继续跳转；本轮不拦截浏览器刷新或关页。
-- 三个校准模式现在都会在 `标定模式` 开启时自动接管 calibration-owned PPS；`PPS 电压` 滑块与数值输入以节流方式直接更新 runtime `ppsMv`，owner-facing 界面不再保留单独的 `申请 PPS` / `关闭 PPS` 按钮。
-- 校准页内的加热控制已统一为 Toggle 开关语义，桌面尺寸和圆角跟随现有工业主题缩放，不再使用 `开启加热` / `关闭加热` 按钮文案。
-- 温度标定 live control 现在只在校准模式 armed 时允许 `开启加热`；关闭校准模式会同步下发 `heaterEnabled: false` 停止加热，不再基于 `targetAdcMv` 与当前 ADC 的比较额外阻断按钮。
-- 温度标定右上 `状态` 卡会把硬件回传的 `heaterOutputPercent` 渲染成能量强度图示，用来表达“实际是否正在加热”；开关状态本身不再被用作出力真相源。
-- Firmware USB runtime status 现在把 calibration 模式下的实时 `ui_state.target_temp_c` 回传给 host/Web，而不是继续显示 EEPROM 常规目标温度，避免温度标定页把 `917mV` 这类接近室温的 ADC 目标误显示成普通热控目标温度。
+- 固件 `MemoryConfig` 已改为保存 channel-centered calibration state：共享样本、`slots.a` / `slots.b` 与 `active_slot`。
+- EEPROM 迁移规则已固定：
+  - 新共享样本集合取旧 `active` 样本
+  - 槽位 `A` 取旧 `active fit`
+  - 槽位 `B` 取旧 `draft fit`
+  - 默认激活 `A`
+  - 旧 `draft` 样本不迁移
+- `adc_calibration_fit` 已改为新规则：
+  - `0` 样本：`gain=1`、`offset=0`
+  - `1` 样本：固定 `gain=1`，只算 `offset`
+  - `>=2` 样本：共享样本线性拟合
+- RTD raw ADC 先用于开路/短路故障判断，再对有效 ADC 读数应用当前激活槽位并换算温度。
+- VIN ADC 由 `GPIO1` 采样，当前激活槽位校正后按分压比换算为 `status.voltageMv`。
+- USB JSONL 已移除 `calibration_apply`，改为 `get_calibration` + `calibration_config`，并支持 `capture`、`delete`、`clear`、`import`、`set_active_slot`、`set_slot_fit`。
+- `devd` 已暴露 `GET|PUT /api/v1/devices/:id/calibration`，不再保留 `POST /api/v1/devices/:id/calibration/apply`。
+- `flux-purr calibration` CLI 已支持 get/capture/delete/clear/import/export/set-slot-fit/set-active-slot。
+- Web 控制台已移除旧 `apply` 语义，状态卡与样本区改为“拟合建议值 + A/B 槽位 + 当前激活槽位”模型。
+- RTD/VIN calibration samples 继续持久化 owner-entered physical references。RTD capture 使用 live `targetAdcMv` 作为 `expectedMv`，并原样保存 `referenceTempC` 与 `targetAdcMv`。
+- `标定温度` 输入已经与硬件回读温度分离：硬件值只作为 placeholder/提示，不再自动写成 input value。
+- 页面内离开已加 owner-facing guard：当任一标定模式仍处于 armed 状态时，切换顶层视图、切换设备或切换标定子 tab 会先在开关附近显示自定义提示泡泡。
+- 三个校准模式现在都会在 `标定模式` 开启时自动接管 calibration-owned PPS；`PPS 电压` 滑块与数值输入以节流方式直接更新 runtime `ppsMv`。
+- 校准页内的加热控制已统一为 Toggle 开关语义。
+- 温度标定右上 `状态` 卡会把硬件回传的 `heaterOutputPercent` 渲染成能量强度图示，用来表达“实际是否正在加热”。
 
 ## Validation
 
-- `bun run check:firmware:fmt`
-- `bun run check:firmware:clippy`
-- `bun run check:firmware:build`
-- `bun run check:devd`
-- `bun run check:web`
-- `bun run check:web:build`
-- `bun run check:storybook`
-- `bun run --cwd web typecheck`
-- `bun run --cwd web test:unit -- src/features/control-plane-demo/calibration-leave-guard.test.ts src/features/control-plane-demo/control-plane-demo.test.ts`
-- `bun run --cwd web test:unit -- src/features/control-plane-demo/rtd-calibration-display.test.ts`
-- `bun run --cwd web test:storybook -- src/stories/ControlPlaneDemo.stories.tsx`
-- Live Chrome + devd verification against `/dev/cu.usbmodem21231401`: `温度标定` opened with calibration mode armed, `PPS 电压 12000mV`, `目标 ADC 1000mV`, `加热开关=开` drove hardware `heaterOutputPercent` from `0%` to `100%`; toggling `加热开关` off returned live output to `0%`.
+- `cargo check -p flux-purr-firmware --quiet`
+- `cargo test -p flux-purr-firmware --quiet`
+- `cargo check -p flux-purr-devd --quiet`
+- `cargo test -p flux-purr-devd --quiet`
+- `./node_modules/.bin/tsc --noEmit --pretty false`
+- `./node_modules/.bin/vitest --config vitest.unit.config.ts --run src/features/control-plane-demo/web-serial.test.ts src/features/control-plane-demo/transport-client.test.ts src/features/control-plane-demo/calibration-slider-value.test.ts`
 
 ## Remaining Work
 
-- 真机校准需要主人授权具体 USB 端口后执行 HIL smoke。
-- 前面板本机校准菜单不属于当前控制面。
+- 更新 Storybook 场景到完整的新 `A/B` 槽位语义。
+- 更新 Playwright 场景，去掉对旧 `active/draft/apply` 行为的假设。
+- 完成浏览器视觉证据与真机验收。

@@ -263,12 +263,8 @@ function responseFor(request: Record<string, unknown>) {
       ok: true,
       result: {
         calibration: {
-          active: {
-            rtdAdc: [null, null, null, null, null, null, null, null],
-            vinAdc: [null, null, null, null, null, null, null, null],
-          },
-          draft: {
-            rtdAdc: [
+          rtdAdc: {
+            samples: [
               request.channel === 'rtd_adc'
                 ? {
                     observedMv: 997,
@@ -285,15 +281,25 @@ function responseFor(request: Record<string, unknown>) {
               null,
               null,
             ],
-            vinAdc: [null, null, null, null, null, null, null, null],
+            fittedFit: {
+              gain: 1,
+              offsetMv: -27,
+              sampleCount: request.channel === 'rtd_adc' ? 1 : 0,
+            },
+            slots: {
+              a: { gain: 1, offsetMv: 0 },
+              b: { gain: 1, offsetMv: 0 },
+            },
+            activeSlot: 'a',
           },
-          activeFit: {
-            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
-            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
-          },
-          draftFit: {
-            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 1, defaultSampleCount: 2 },
-            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          vinAdc: {
+            samples: [null, null, null, null, null, null, null, null],
+            fittedFit: { gain: 1, offsetMv: 0, sampleCount: 0 },
+            slots: {
+              a: { gain: 1, offsetMv: 0 },
+              b: { gain: 1, offsetMv: 0 },
+            },
+            activeSlot: 'a',
           },
         },
       },

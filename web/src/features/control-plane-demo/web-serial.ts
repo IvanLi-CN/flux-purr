@@ -10,7 +10,6 @@ import type {
   HeaterCurveState,
   Identity,
   NetworkSummary,
-  UsbCalibrationApplyFrame,
   UsbCalibrationConfigFrame,
   UsbCalibrationJobFrame,
   UsbHeaterCurveConfigFrame,
@@ -214,13 +213,6 @@ export class WebSerialControlPlaneClient {
     }))
   }
 
-  async applyCalibration(): Promise<CalibrationState> {
-    return this.requestPayload<CalibrationState>('calibration', (requestId) => ({
-      type: 'calibration_apply',
-      requestId,
-    }))
-  }
-
   async getHeaterCurve(): Promise<HeaterCurveState> {
     return this.requestPayload<HeaterCurveState>(
       'heater_curve',
@@ -278,7 +270,6 @@ export class WebSerialControlPlaneClient {
       | UsbRuntimeConfigFrame
       | UsbCalibrationJobFrame
       | UsbCalibrationConfigFrame
-      | UsbCalibrationApplyFrame
       | UsbHeaterCurveConfigFrame
       | UsbHeaterCurveSaveFrame
   ): Promise<T> {
@@ -303,7 +294,6 @@ export class WebSerialControlPlaneClient {
       | UsbRuntimeConfigFrame
       | UsbCalibrationJobFrame
       | UsbCalibrationConfigFrame
-      | UsbCalibrationApplyFrame
       | UsbHeaterCurveConfigFrame
       | UsbHeaterCurveSaveFrame
   ) {

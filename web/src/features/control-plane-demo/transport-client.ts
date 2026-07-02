@@ -98,11 +98,6 @@ export interface ControlPlaneHttpClient {
     deviceId: string,
     request: CalibrationJobRequest
   ): Promise<CalibrationJobState>
-  applyCalibration(
-    devdBaseUrl: string,
-    deviceId: string,
-    request: { leaseId: string }
-  ): Promise<CalibrationState>
   getHeaterCurve(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<HeaterCurveState>
   configureHeaterCurve(
     devdBaseUrl: string,
@@ -257,17 +252,6 @@ export function createControlPlaneHttpClient(
       return requestJson<CalibrationJobState>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/job`,
-        {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(request),
-        }
-      )
-    },
-    applyCalibration(devdBaseUrl, deviceId, request) {
-      return requestJson<CalibrationState>(
-        fetcher,
-        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/apply`,
         {
           method: 'POST',
           headers: { 'content-type': 'application/json' },

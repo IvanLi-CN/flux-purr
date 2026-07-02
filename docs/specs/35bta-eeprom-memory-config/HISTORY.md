@@ -8,7 +8,7 @@
 
 ## 2026-06-02
 
-- 将 ADC calibration active/draft packages 纳入 `MemoryConfig` TLV payload。
+- 将 ADC calibration 纳入 `MemoryConfig` TLV payload，并作为后续共享样本 + A/B 槽位模型的持久化基础。
 - 保持实时 ADC sample、实时温度、电压与 fault latch 不进入 EEPROM。
 
 ## 2026-06-25

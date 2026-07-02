@@ -18,7 +18,7 @@
 
 - 在 `M24C64` 外部 EEPROM 中保存版本化记忆配置。
 - 保存并恢复 `target_temp_c`、`selected_preset_slot`、`presets_c[10]`、`active_cooling_enabled` 和 Wi-Fi 配置字段。
-- 保存并恢复 `active_adc_calibration` 与 `draft_adc_calibration`，供 ADC 校准控制面跨重启保留。
+- 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
 - 使用双槽 record、TLV payload 和 CRC，保证坏数据自动回退默认值、未知字段可跳过。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
 
@@ -27,7 +27,7 @@
 - 不保存 `heater_enabled`，重启后 heater 仍不得自动恢复加热。
 - 不保存实时温度、fan runtime、fault latch、页面 route、菜单位置或蜂鸣器 reminder。
 - 不实现运行时 PID 参数持久化。
-- 不保存实时 ADC sample、实时温度、实时输入电压或 fault latch；ADC calibration 只保存用户确认的 sample package。
+- 不保存实时 ADC sample、实时温度、实时输入电压或 fault latch；ADC calibration 只保存共享样本和显式确认写入的槽位参数。
 - 不对 Wi-Fi 密码做加密；但密码不得进入日志、前面板明文或状态输出。
 - 不新增前面板菜单或改变现有视觉布局。
 
@@ -84,7 +84,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
-- ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个 slot；`0x20/0x21` 继续保存每个 slot 的 `observed_mv + expected_mv` `u16le` pair，`u16::MAX` 表示空 slot；`0x22/0x23` 额外保存 owner-facing physical reference，RTD slot 为 `referenceTempC * 10` 的 `i16le`，VIN slot 为 `referenceVinMv` 的 `i16le`，`i16::MIN` 表示该 slot 没有保存 physical reference。
+- ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)
   - `0x02`: `selected_preset_slot` (`u8`)
@@ -94,10 +94,10 @@
   - `0x11`: `wifi_password` (`utf8 bytes`)
   - `0x12`: `wifi_auto_reconnect` (`u8 bool`)
   - `0x13`: `telemetry_interval_ms` (`u32le`)
-  - `0x20`: `active_adc_calibration`
-  - `0x21`: `draft_adc_calibration`
-  - `0x22`: `active_adc_calibration_references`
-  - `0x23`: `draft_adc_calibration_references`
+  - `0x20`: `adc_calibration_samples`
+  - `0x21`: `adc_calibration_references`
+  - `0x22`: `adc_calibration_slots`
+  - `0x23`: `adc_calibration_active_slot`
 
 ## 验收标准（Acceptance Criteria）
 
@@ -108,7 +108,7 @@
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
 - Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一 EEPROM 槽。
 - Given heater 曾在重启前开启，When 固件重启，Then heater 不因 EEPROM 配置自动开启。
-- Given ADC calibration active/draft packages 已写入 EEPROM，When 固件重启，Then active 与 draft packages 都恢复并重新计算 fit。
+- Given ADC calibration state 已写入 EEPROM，When 固件重启，Then 共享样本、A/B 槽位与当前激活槽位都恢复。
 - Given ADC calibration sample 在保存时带有 `referenceTempC` 或 `referenceVinMv`，When 固件重启或 control-plane 重新读取 calibration package，Then ADC-domain points 与原始 physical reference 都恢复，页面不需要靠 `expectedMv` 反推 owner-facing 标定值。
 - Given EEPROM record 来自旧格式且没有 `0x22/0x23` reference TLV，When 固件解码，Then calibration sample 仍恢复为同样的 `observed_mv/expected_mv`，只是 reference 字段为空。
 

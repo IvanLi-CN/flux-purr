@@ -37,9 +37,17 @@ describe('control-plane transport client', () => {
         wifiRssi: -54,
       },
       calibration: {
-        active: {
-          rtdAdc: [null, null, null, null, null, null, null, null],
-          vinAdc: [
+        rtdAdc: {
+          samples: [null, null, null, null, null, null, null, null],
+          fittedFit: { gain: 1, offsetMv: 0, sampleCount: 0 },
+          slots: {
+            a: { gain: 1, offsetMv: 0 },
+            b: { gain: 1, offsetMv: 0 },
+          },
+          activeSlot: 'a',
+        },
+        vinAdc: {
+          samples: [
             { observedMv: 1010, expectedMv: 20000, referenceVinMv: 20000 },
             null,
             null,
@@ -49,27 +57,12 @@ describe('control-plane transport client', () => {
             null,
             null,
           ],
-        },
-        draft: {
-          rtdAdc: [null, null, null, null, null, null, null, null],
-          vinAdc: [
-            { observedMv: 1010, expectedMv: 20000, referenceVinMv: 20000 },
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-          ],
-        },
-        activeFit: {
-          rtdAdc: { customSampleCount: 0, defaultSampleCount: 2, gain: 1, offsetMv: 0 },
-          vinAdc: { customSampleCount: 1, defaultSampleCount: 2, gain: 1.01, offsetMv: 3 },
-        },
-        draftFit: {
-          rtdAdc: { customSampleCount: 0, defaultSampleCount: 2, gain: 1, offsetMv: 0 },
-          vinAdc: { customSampleCount: 1, defaultSampleCount: 2, gain: 1.01, offsetMv: 3 },
+          fittedFit: { gain: 1, offsetMv: 18990, sampleCount: 1 },
+          slots: {
+            a: { gain: 1.01, offsetMv: 3 },
+            b: { gain: 1.01, offsetMv: 3 },
+          },
+          activeSlot: 'a',
         },
       },
       heaterCurve: {
@@ -144,7 +137,7 @@ describe('control-plane transport client', () => {
     expect(target.selectedPresetIndex).toBe(5)
     expect(target.presetsC?.[5]).toBe(220)
     expect(target.heaterLockReason).toBe('cooling-disabled-overtemp')
-    expect(target.storedCalibration?.active.vinAdc[0]).toEqual({
+    expect(target.storedCalibration?.vinAdc.samples[0]).toEqual({
       observedMv: 1010,
       expectedMv: 20000,
       referenceVinMv: 20000,
@@ -1303,12 +1296,8 @@ describe('control-plane transport client', () => {
       return {
         ok: true,
         json: async () => ({
-          active: {
-            rtdAdc: [null, null, null, null, null, null, null, null],
-            vinAdc: [null, null, null, null, null, null, null, null],
-          },
-          draft: {
-            rtdAdc: [
+          rtdAdc: {
+            samples: [
               {
                 observedMv: 997,
                 expectedMv: 970,
@@ -1323,15 +1312,21 @@ describe('control-plane transport client', () => {
               null,
               null,
             ],
-            vinAdc: [null, null, null, null, null, null, null, null],
+            fittedFit: { gain: 1, offsetMv: -27, sampleCount: 1 },
+            slots: {
+              a: { gain: 1, offsetMv: 0 },
+              b: { gain: 1, offsetMv: 0 },
+            },
+            activeSlot: 'a',
           },
-          activeFit: {
-            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
-            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
-          },
-          draftFit: {
-            rtdAdc: { gain: 1, offsetMv: 0, customSampleCount: 1, defaultSampleCount: 2 },
-            vinAdc: { gain: 1, offsetMv: 0, customSampleCount: 0, defaultSampleCount: 2 },
+          vinAdc: {
+            samples: [null, null, null, null, null, null, null, null],
+            fittedFit: { gain: 1, offsetMv: 0, sampleCount: 0 },
+            slots: {
+              a: { gain: 1, offsetMv: 0 },
+              b: { gain: 1, offsetMv: 0 },
+            },
+            activeSlot: 'a',
           },
         }),
       }
@@ -1350,7 +1345,7 @@ describe('control-plane transport client', () => {
       }
     )
 
-    expect(calibration.draft.rtdAdc[0]).toMatchObject({
+    expect(calibration.rtdAdc.samples[0]).toMatchObject({
       observedMv: 997,
       expectedMv: 970,
       referenceTempC: 21.6,

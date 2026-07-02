@@ -207,6 +207,7 @@ export interface CalibrationControlRequest {
 export type DirectRuntimeConfigRequest = Omit<RuntimeConfigRequest, 'leaseId'>
 
 export type CalibrationChannel = 'rtd_adc' | 'vin_adc'
+export type CalibrationSlotId = 'a' | 'b'
 
 export interface BaseCalibrationSample {
   observedMv: number
@@ -222,33 +223,37 @@ export interface VinCalibrationSample extends BaseCalibrationSample {
   referenceVinMv?: number
 }
 
-export interface CalibrationPackage {
-  rtdAdc: Array<RtdCalibrationSample | null>
-  vinAdc: Array<VinCalibrationSample | null>
-}
-
 export interface CalibrationFit {
   gain: number
   offsetMv: number
-  customSampleCount: number
-  defaultSampleCount: number
+  sampleCount: number
 }
 
-export interface CalibrationFits {
-  rtdAdc: CalibrationFit
-  vinAdc: CalibrationFit
+export interface CalibrationSlotFit {
+  gain: number
+  offsetMv: number
+}
+
+export interface CalibrationSlotSet {
+  a: CalibrationSlotFit
+  b: CalibrationSlotFit
+}
+
+export interface CalibrationChannelState {
+  samples: Array<RtdCalibrationSample | VinCalibrationSample | null>
+  fittedFit: CalibrationFit
+  slots: CalibrationSlotSet
+  activeSlot: CalibrationSlotId
 }
 
 export interface CalibrationState {
-  active: CalibrationPackage
-  draft: CalibrationPackage
-  activeFit: CalibrationFits
-  draftFit: CalibrationFits
+  rtdAdc: CalibrationChannelState
+  vinAdc: CalibrationChannelState
 }
 
 export interface CalibrationConfigRequest {
   leaseId: string
-  op: 'capture' | 'delete' | 'clear' | 'import'
+  op: 'capture' | 'delete' | 'clear' | 'import' | 'set_active_slot' | 'set_slot_fit'
   channel?: CalibrationChannel
   referenceTempC?: number
   referenceVinMv?: number
@@ -256,7 +261,9 @@ export interface CalibrationConfigRequest {
   observedMv?: number
   expectedMv?: number
   sampleIndex?: number
-  package?: CalibrationPackage
+  state?: CalibrationState
+  slot?: CalibrationSlotId
+  fit?: CalibrationSlotFit
 }
 
 export interface HeaterCurvePoint {
@@ -380,19 +387,17 @@ export interface UsbCalibrationJobFrame {
 export interface UsbCalibrationConfigFrame {
   type: 'calibration_config'
   requestId: string
-  op: 'capture' | 'delete' | 'clear' | 'import'
+  op: 'capture' | 'delete' | 'clear' | 'import' | 'set_active_slot' | 'set_slot_fit'
   channel?: CalibrationChannel
   referenceTempC?: number
   referenceVinMv?: number
+  targetAdcMv?: number
   observedMv?: number
   expectedMv?: number
   sampleIndex?: number
-  package?: CalibrationPackage
-}
-
-export interface UsbCalibrationApplyFrame {
-  type: 'calibration_apply'
-  requestId: string
+  state?: CalibrationState
+  slot?: CalibrationSlotId
+  fit?: CalibrationSlotFit
 }
 
 export interface UsbHeaterCurveConfigFrame {

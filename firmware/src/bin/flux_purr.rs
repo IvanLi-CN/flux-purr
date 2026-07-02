@@ -1722,7 +1722,7 @@ fn read_calibrated_vin_mv<'a>(
 ) -> Option<(u16, u16, u32)> {
     let raw_adc_mv = read_vin_adc_mv(adc, pin)?;
     let corrected_adc_mv = correct_adc_mv(
-        &memory_config.active_adc_calibration,
+        &memory_config.adc_calibration,
         AdcCalibrationChannel::Vin,
         raw_adc_mv,
     );
@@ -1764,7 +1764,7 @@ fn read_rtd_sample<'a>(
     }
 
     let adc_mv = correct_adc_mv(
-        &memory_config.active_adc_calibration,
+        &memory_config.adc_calibration,
         AdcCalibrationChannel::Rtd,
         raw_adc_mv,
     );
@@ -1878,6 +1878,40 @@ async fn write_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>, record: &Memo
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn commit_memory_config_now(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    memory_sequence: &mut u32,
+    memory_config: &MemoryConfig,
+) -> bool {
+    let next_sequence = memory_sequence.saturating_add(1);
+    let record = MemoryRecord {
+        sequence: next_sequence,
+        config: memory_config.clone(),
+    };
+    if !write_memory_record(i2c, &record).await {
+        return false;
+    }
+    let Some(verified) = load_memory_record(i2c) else {
+        info!(
+            "memory commit verify failed seq={=u32} reason=unreadable",
+            next_sequence
+        );
+        return false;
+    };
+    if verified.sequence != next_sequence || verified.config != *memory_config {
+        info!(
+            "memory commit verify failed seq={=u32} read_seq={=u32} config_match={=bool}",
+            next_sequence,
+            verified.sequence,
+            verified.config == *memory_config,
+        );
+        return false;
+    }
+    *memory_sequence = next_sequence;
+    true
+}
+
+#[cfg(target_arch = "xtensa")]
 const fn memory_slot_offset_for_sequence(sequence: u32) -> u16 {
     if sequence % 2 == 1 {
         MEMORY_SLOT_A_OFFSET
@@ -1906,8 +1940,7 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         wifi_password: previous.wifi_password.clone(),
         wifi_auto_reconnect: previous.wifi_auto_reconnect,
         telemetry_interval_ms: previous.telemetry_interval_ms,
-        active_adc_calibration: previous.active_adc_calibration,
-        draft_adc_calibration: previous.draft_adc_calibration,
+        adc_calibration: previous.adc_calibration,
         active_heater_curve: previous.active_heater_curve,
     }
 }
@@ -2891,7 +2924,7 @@ fn calibration_job_start(
                 next_request_mv,
                 Some(target_ma),
             )?;
-            memory_config.draft_adc_calibration.vin.clear();
+            memory_config.adc_calibration.vin.clear();
             memory_config.sanitize();
             calibration.pps_enabled = true;
             calibration.pps_mv = Some(next_request_mv);
@@ -3031,12 +3064,12 @@ fn commit_vin_auto_samples_to_draft(
     sample_count: usize,
 ) -> usize {
     let selected = select_vin_auto_draft_samples(collected, sample_count);
-    memory_config.draft_adc_calibration.vin.clear();
+    memory_config.adc_calibration.vin.clear();
     for sample in selected {
-        let _ = memory_config.draft_adc_calibration.vin.insert(sample);
+        let _ = memory_config.adc_calibration.vin.insert(sample);
     }
     memory_config.sanitize();
-    memory_config.draft_adc_calibration.vin.sample_count()
+    memory_config.adc_calibration.vin.sample_count()
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3324,7 +3357,7 @@ fn usb_calibration_config_response(
                 }
             };
             memory_config
-                .draft_adc_calibration
+                .adc_calibration
                 .channel_mut(channel.as_memory_channel())
                 .insert(AdcCalibrationSample {
                     observed_mv,
@@ -3367,7 +3400,7 @@ fn usb_calibration_config_response(
                 );
             };
             if memory_config
-                .draft_adc_calibration
+                .adc_calibration
                 .channel_mut(channel.as_memory_channel())
                 .delete(index)
             {
@@ -3389,20 +3422,69 @@ fn usb_calibration_config_response(
                 );
             };
             memory_config
-                .draft_adc_calibration
+                .adc_calibration
                 .channel_mut(channel.as_memory_channel())
                 .clear();
             Ok(0)
         }
         CalibrationConfigOp::Import => {
-            let Some(package) = config.package else {
+            let Some(state) = config.state else {
                 return usb_error_response(
                     request_id,
-                    "calibration_package_required",
-                    "Calibration import requires a package.",
+                    "calibration_state_required",
+                    "Calibration import requires a state.",
                 );
             };
-            memory_config.draft_adc_calibration = package.to_memory();
+            import_calibration_state(memory_config, state);
+            Ok(0)
+        }
+        CalibrationConfigOp::SetActiveSlot => {
+            let Some(channel) = config.channel else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_channel_required",
+                    "Calibration slot switch requires a channel.",
+                );
+            };
+            let Some(slot) = config.slot else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_slot_required",
+                    "Calibration slot switch requires a slot.",
+                );
+            };
+            memory_config
+                .adc_calibration
+                .channel_mut(channel.as_memory_channel())
+                .active_slot = slot.into();
+            Ok(0)
+        }
+        CalibrationConfigOp::SetSlotFit => {
+            let Some(channel) = config.channel else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_channel_required",
+                    "Calibration slot fit update requires a channel.",
+                );
+            };
+            let Some(slot) = config.slot else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_slot_required",
+                    "Calibration slot fit update requires a slot.",
+                );
+            };
+            let Some(fit) = config.fit else {
+                return usb_error_response(
+                    request_id,
+                    "calibration_fit_required",
+                    "Calibration slot fit update requires gain and offset.",
+                );
+            };
+            *memory_config
+                .adc_calibration
+                .channel_mut(channel.as_memory_channel())
+                .slot_fit_mut(slot.into()) = fit.to_memory();
             Ok(0)
         }
     };
@@ -3423,30 +3505,35 @@ fn usb_calibration_config_response(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn usb_calibration_apply_response(
-    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-    ui_state: &FrontPanelUiState,
-    memory_config: &mut MemoryConfig,
-) -> UsbFrame {
-    if ui_state.heater_enabled || ui_state.heater_output_percent != 0 {
-        return UsbFrame::Response {
-            request_id,
-            ok: false,
-            result: None,
-            error: Some(ApiError::new(
-                "calibration_apply_heater_active",
-                "Calibration cannot be applied while the heater is active.",
-                false,
-            )),
-        };
-    }
+fn import_calibration_state(memory_config: &mut MemoryConfig, state: CalibrationStateWire) {
+    import_calibration_channel_state(
+        &mut memory_config.adc_calibration.rtd,
+        state.rtd_adc.samples,
+        state.rtd_adc.slots.a,
+        state.rtd_adc.slots.b,
+        state.rtd_adc.active_slot,
+    );
+    import_calibration_channel_state(
+        &mut memory_config.adc_calibration.vin,
+        state.vin_adc.samples,
+        state.vin_adc.slots.a,
+        state.vin_adc.slots.b,
+        state.vin_adc.active_slot,
+    );
+}
 
-    memory_config.active_adc_calibration = memory_config.draft_adc_calibration;
-    memory_config.sanitize();
-    usb_response(
-        request_id,
-        UsbResponsePayload::Calibration(calibration_state_from_memory(memory_config)),
-    )
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn import_calibration_channel_state(
+    channel: &mut flux_purr_firmware::memory::AdcCalibrationChannelConfig,
+    samples: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
+    slot_a: CalibrationSlotFitWire,
+    slot_b: CalibrationSlotFitWire,
+    active_slot: CalibrationSlotIdWire,
+) {
+    channel.samples = samples_from_wire(samples);
+    channel.slots.a = slot_a.to_memory();
+    channel.slots.b = slot_b.to_memory();
+    channel.active_slot = active_slot.into();
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -3729,8 +3816,7 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
         | Ok(UsbFrame::CalibrationJob { request_id, .. })
-        | Ok(UsbFrame::CalibrationConfig { request_id, .. })
-        | Ok(UsbFrame::CalibrationApply { request_id }) => usb_error_response_with_retryable(
+        | Ok(UsbFrame::CalibrationConfig { request_id, .. }) => usb_error_response_with_retryable(
             request_id,
             "startup_busy",
             "Configuration writes are not available until hardware initialization completes.",
@@ -3879,8 +3965,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
         },
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
-        | Ok(UsbFrame::CalibrationConfig { request_id, .. })
-        | Ok(UsbFrame::CalibrationApply { request_id }) => usb_error_response_with_retryable(
+        | Ok(UsbFrame::CalibrationConfig { request_id, .. }) => usb_error_response_with_retryable(
             request_id,
             "hardware_bringup_failed",
             "Runtime writes are unavailable because hardware bring-up did not complete.",
@@ -3911,7 +3996,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn handle_usb_control_line(
+async fn handle_usb_control_line(
     line: &str,
     usb: &mut RawUsbSerialJtag,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
@@ -3920,6 +4005,8 @@ fn handle_usb_control_line(
     memory_config: &mut MemoryConfig,
     preview_heater_curve: &mut Option<HeaterCurveConfig>,
     memory_commit_due_ms: &mut Option<u64>,
+    memory_sequence: &mut u32,
+    pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
@@ -4017,22 +4104,28 @@ fn handle_usb_control_line(
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
             let previous_memory_config = memory_config.clone();
             let response = usb_calibration_config_response(
-                request_id,
+                request_id.clone(),
                 config,
                 memory_config,
                 latest_rtd_raw_adc_mv,
                 latest_vin_raw_adc_mv,
             );
             if *memory_config != previous_memory_config {
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-            }
-            response
-        }
-        Ok(UsbFrame::CalibrationApply { request_id }) => {
-            let previous_memory_config = memory_config.clone();
-            let response = usb_calibration_apply_response(request_id, ui_state, memory_config);
-            if *memory_config != previous_memory_config {
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                if commit_memory_config_now(pd_i2c, memory_sequence, memory_config).await {
+                    *memory_commit_due_ms = None;
+                } else {
+                    *memory_config = previous_memory_config;
+                    usb_write_response_frame(
+                        usb,
+                        &usb_error_response(
+                            request_id,
+                            "memory_commit_failed",
+                            "Calibration draft could not be persisted.",
+                        ),
+                        tx_buf,
+                    );
+                    return needs_redraw;
+                }
             }
             response
         }
@@ -4054,9 +4147,24 @@ fn handle_usb_control_line(
         ),
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
             if let Some(preview) = *preview_heater_curve {
+                let previous_memory_config = memory_config.clone();
                 memory_config.active_heater_curve = preview;
                 memory_config.sanitize();
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                if commit_memory_config_now(pd_i2c, memory_sequence, memory_config).await {
+                    *memory_commit_due_ms = None;
+                } else {
+                    *memory_config = previous_memory_config;
+                    usb_write_response_frame(
+                        usb,
+                        &usb_error_response(
+                            request_id,
+                            "memory_commit_failed",
+                            "Heater curve could not be persisted.",
+                        ),
+                        tx_buf,
+                    );
+                    return needs_redraw;
+                }
                 usb_response(
                     request_id,
                     UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
@@ -4966,6 +5074,8 @@ async fn main(_spawner: Spawner) {
                         &mut memory_config,
                         &mut preview_heater_curve,
                         &mut memory_commit_due_ms,
+                        &mut memory_sequence,
+                        &mut pd_i2c,
                         &mut calibration_runtime_state,
                         elapsed_ms,
                         last_pd_observation,
@@ -4977,7 +5087,8 @@ async fn main(_spawner: Spawner) {
                         latest_rtd_raw_adc_mv,
                         latest_vin_raw_adc_mv,
                         latest_vin_mv,
-                    );
+                    )
+                    .await;
                     usb_rx_line.clear();
                 }
                 Ok(b'\r') => {}
@@ -5618,7 +5729,9 @@ mod tests {
             observed_mv: None,
             expected_mv: None,
             sample_index: None,
-            package: None,
+            state: None,
+            slot: None,
+            fit: None,
         };
 
         assert_eq!(
@@ -5638,7 +5751,9 @@ mod tests {
             observed_mv: None,
             expected_mv: None,
             sample_index: None,
-            package: None,
+            state: None,
+            slot: None,
+            fit: None,
         };
 
         assert_eq!(
@@ -6084,7 +6199,7 @@ mod tests {
         };
         let mut memory_config = MemoryConfig::default();
         memory_config
-            .draft_adc_calibration
+            .adc_calibration
             .vin
             .insert(AdcCalibrationSample {
                 observed_mv: 999,
@@ -6124,7 +6239,7 @@ mod tests {
             &mut manual_pps,
         )
         .unwrap();
-        assert_eq!(memory_config.draft_adc_calibration.vin.sample_count(), 0);
+        assert_eq!(memory_config.adc_calibration.vin.sample_count(), 0);
 
         for step in 0..17u16 {
             let vin_raw_mv = 280 + (step * 45);
@@ -6147,13 +6262,13 @@ mod tests {
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
         assert_eq!(calibration.job.kind, Some(CalibrationJobKind::VinAdcAuto));
         assert_eq!(calibration.job.samples_collected, 17);
-        assert_eq!(memory_config.draft_adc_calibration.vin.sample_count(), 8);
+        assert_eq!(memory_config.adc_calibration.vin.sample_count(), 8);
         assert_eq!(
-            memory_config.draft_adc_calibration.vin.samples[0].map(|sample| sample.expected_mv),
+            memory_config.adc_calibration.vin.samples[0].map(|sample| sample.expected_mv),
             Some(vin_adc_mv_for_input_mv(5_000))
         );
         assert_eq!(
-            memory_config.draft_adc_calibration.vin.samples[7].map(|sample| sample.expected_mv),
+            memory_config.adc_calibration.vin.samples[7].map(|sample| sample.expected_mv),
             Some(vin_adc_mv_for_input_mv(21_000))
         );
     }
@@ -6234,7 +6349,7 @@ mod tests {
         }
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
-        assert_eq!(memory_config.draft_adc_calibration.vin.sample_count(), 8);
+        assert_eq!(memory_config.adc_calibration.vin.sample_count(), 8);
     }
 
     #[test]

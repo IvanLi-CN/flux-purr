@@ -2,9 +2,10 @@ import http from 'node:http'
 import { expect, test } from '@playwright/test'
 import type {
   CalibrationChannel,
+  CalibrationFit,
   CalibrationJobState,
-  CalibrationPackage,
   CalibrationRuntimeState,
+  CalibrationSlotFit,
   CalibrationState,
   ControlPlaneStatus,
   HeaterCurvePackage,
@@ -343,16 +344,6 @@ test.describe('control plane live devd bridge', () => {
         return
       }
 
-      if (method === 'POST' && url.pathname === `/api/v1/devices/${deviceId}/calibration/apply`) {
-        if (missingAuthorizedPort) {
-          sendMissingAuthorizedPortError(response)
-          return
-        }
-        calibrationState = applyCalibration(calibrationState)
-        sendJson(response, 200, cloneCalibrationState(calibrationState))
-        return
-      }
-
       if (method === 'PUT' && url.pathname === `/api/v1/devices/${deviceId}/heater-curve`) {
         if (missingAuthorizedPort) {
           sendMissingAuthorizedPortError(response)
@@ -484,17 +475,12 @@ test.describe('control plane live devd bridge', () => {
     await page.goto('/?demo=false')
 
     await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
-    await expect(
-      page.getByLabel('Transport capabilities').getByText('正在重新接管本机 devd 租约，请稍候。')
-    ).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
     await expect(page.getByText('No known devices')).toHaveCount(0)
 
     await page.waitForTimeout(2500)
-    await expect(
-      page.getByLabel('Transport capabilities').getByText('正在重新接管本机 devd 租约，请稍候。')
-    ).toHaveCount(0)
+    await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
     await expect(page.getByText('运行时已同步')).toBeVisible()
     await expect(page.getByText('有效')).toBeVisible()
   })
@@ -504,16 +490,20 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto('/?demo=false')
 
-    await page.getByRole('button', { name: /校准/i }).click()
-    await page.getByRole('tab', { name: '温度标定' }).click()
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
 
+    const targetAdcInput = page.getByLabel('目标 ADC 输入')
+    await expect(targetAdcInput).toBeVisible()
     const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
-    await expect(calibrationModeToggle).toBeDisabled()
-    await expect(page.getByRole('heading', { name: '温度 ADC' })).toBeVisible()
-
-    await expect(page.getByText('运行时已同步')).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
     await expect(page.getByText('有效')).toBeVisible({ timeout: 10_000 })
-    await expect(page.getByRole('heading', { name: '温度 ADC' })).toBeVisible()
+    await expect(targetAdcInput).toBeVisible()
     await expect(page.getByRole('heading', { name: '加热曲线' })).toHaveCount(0)
     await expect(calibrationModeToggle).toBeEnabled()
   })
@@ -523,22 +513,24 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto('/?demo=false')
 
-    await page.getByRole('button', { name: /校准/i }).click()
-    await page.getByRole('tab', { name: '温度标定' }).click()
-    await expect(page.getByText('运行时已同步')).toBeVisible({ timeout: 10_000 })
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+    const targetAdcInput = page.getByLabel('目标 ADC 输入')
+    await expect(targetAdcInput).toBeVisible()
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
 
     const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
     await expect(calibrationModeToggle).toBeEnabled()
-
-    const targetAdcInput = page.getByLabel('目标 ADC 输入')
     await targetAdcInput.fill('950')
     await calibrationModeToggle.click()
     await page.waitForTimeout(700)
 
-    await page.getByRole('button', { name: '申请 PPS' }).click()
-    await page.waitForTimeout(700)
-
-    await page.getByRole('button', { name: '开启加热' }).click()
+    await page.getByRole('switch', { name: '加热开关' }).click()
     await page.waitForTimeout(700)
 
     await targetAdcInput.fill('980')
@@ -554,7 +546,7 @@ test.describe('control plane live devd bridge', () => {
           ).length
       )
       .toBeGreaterThanOrEqual(1)
-    await expect(page.getByRole('heading', { name: '温度 ADC' })).toBeVisible()
+    await expect(targetAdcInput).toBeVisible()
     await expect(targetAdcInput).toHaveValue('980')
   })
 
@@ -563,26 +555,36 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto('/?demo=false')
 
-    await page.getByRole('button', { name: /校准/i }).click()
-    await page.getByRole('tab', { name: '温度标定' }).click()
-    await expect(page.getByText('运行时已同步')).toBeVisible({ timeout: 10_000 })
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+    const targetAdcInput = page.getByLabel('目标 ADC 输入')
+    await expect(targetAdcInput).toBeVisible()
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
 
     const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
-    const targetAdcInput = page.getByLabel('目标 ADC 输入')
 
     await targetAdcInput.fill('950')
     await calibrationModeToggle.click()
     await page.waitForTimeout(700)
-    await page.getByRole('button', { name: '申请 PPS' }).click()
-    await page.waitForTimeout(700)
-    await page.getByRole('button', { name: '开启加热' }).click()
+    await page.getByRole('switch', { name: '加热开关' }).click()
     await page.waitForTimeout(700)
 
-    await page.getByRole('button', { name: /总览/i }).click()
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /总览/i })
+      .click()
     await expect(page.getByText('请先关闭校准控制')).toBeVisible()
-    await page.getByRole('button', { name: '关闭并继续' }).click()
+    await page.getByRole('button', { name: '关闭并继续' }).click({ force: true })
     await page.waitForTimeout(500)
-    await page.getByRole('button', { name: /总览/i }).click()
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /总览/i })
+      .click()
     const dashboardTarget = page.getByLabel('Dashboard target temperature')
 
     await dashboardTarget.fill('50')
@@ -612,6 +614,31 @@ test.describe('control plane live devd bridge', () => {
       )
       .toBeGreaterThanOrEqual(1)
     await expect(dashboardTarget).toHaveValue('55')
+  })
+
+  test('keeps RTD slot fit after the devd calibration response is applied', async ({ page }) => {
+    await page.goto('/?demo=false')
+
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+    await expect(page.getByLabel('目标 ADC 输入')).toBeVisible()
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
+
+    const summary = page.getByLabel('当前 ADC 标定状态摘要')
+    await summary.getByRole('button', { name: '编辑' }).first().click()
+    const slotDialog = page.getByRole('dialog')
+    await slotDialog.getByLabel('增益').fill('0.99010')
+    await slotDialog.getByLabel('偏移').fill('10.9')
+    await slotDialog.getByRole('button', { name: '保存' }).click()
+
+    await expect(summary).toContainText('槽位 A')
+    await expect(summary).toContainText('0.99010x')
+    await expect(summary).toContainText('10.9mV')
   })
 
   test('sends runtime commands through the active devd lease', async ({ page }) => {
@@ -672,14 +699,12 @@ test.describe('control plane live devd bridge', () => {
 
       await page.reload()
       await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
-      await expect(
-        page.getByLabel('Transport capabilities').getByText('正在重新接管本机 devd 租约，请稍候。')
-      ).toBeVisible()
       await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
       await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
       await expect(page.getByText('No known devices')).toHaveCount(0)
       await expect(page.getByText('Failed to fetch')).toHaveCount(0)
       await page.waitForTimeout(2500)
+      await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
       await expect(page.getByText('运行时已同步')).toBeVisible()
       await expect(page.getByText('有效')).toBeVisible()
       await expect(page.getByText('Lease conflict')).toHaveCount(0)
@@ -900,33 +925,67 @@ function calibrationRuntimeState(): CalibrationRuntimeState {
 }
 
 function calibration(): CalibrationState {
-  const active: CalibrationPackage = {
-    rtdAdc: [
-      { observedMv: 1123, expectedMv: 980, referenceTempC: 25 },
-      { observedMv: 1188, expectedMv: 1120, referenceTempC: 60 },
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-    ],
-    vinAdc: [
-      { observedMv: 1678, expectedMv: 20000, referenceVinMv: 20000 },
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-      null,
-    ],
-  }
   return {
-    active: cloneCalibrationPackage(active),
-    draft: cloneCalibrationPackage(active),
-    activeFit: createCalibrationFits(active),
-    draftFit: createCalibrationFits(active),
+    rtdAdc: {
+      samples: [
+        { observedMv: 1123, expectedMv: 980, referenceTempC: 25, targetAdcMv: 980 },
+        { observedMv: 1188, expectedMv: 1120, referenceTempC: 60, targetAdcMv: 1120 },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+      fittedFit: createCalibrationFit(
+        [
+          { observedMv: 1123, expectedMv: 980, referenceTempC: 25, targetAdcMv: 980 },
+          { observedMv: 1188, expectedMv: 1120, referenceTempC: 60, targetAdcMv: 1120 },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        'rtd_adc'
+      ),
+      slots: {
+        a: { gain: 1, offsetMv: 0 },
+        b: { gain: 1, offsetMv: 0 },
+      },
+      activeSlot: 'a',
+    },
+    vinAdc: {
+      samples: [
+        { observedMv: 1678, expectedMv: 20000, referenceVinMv: 20000 },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+      fittedFit: createCalibrationFit(
+        [
+          { observedMv: 1678, expectedMv: 20000, referenceVinMv: 20000 },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        'vin_adc'
+      ),
+      slots: {
+        a: { gain: 1, offsetMv: 0 },
+        b: { gain: 1, offsetMv: 0 },
+      },
+      activeSlot: 'a',
+    },
   }
 }
 
@@ -1072,17 +1131,11 @@ function applyCalibrationRequest(
 ): CalibrationState {
   const op = bodyField(body, 'op')
   if (op === 'import') {
-    const packageValue = calibrationPackageValue(bodyField(body, 'package'))
-    if (!packageValue) {
+    const stateValue = calibrationStateValue(bodyField(body, 'state'))
+    if (!stateValue) {
       return cloneCalibrationState(current)
     }
-    const normalized = cloneCalibrationPackage(packageValue)
-    return {
-      active: cloneCalibrationPackage(current.active),
-      draft: normalized,
-      activeFit: cloneCalibrationFits(current.activeFit),
-      draftFit: createCalibrationFits(normalized),
-    }
+    return normalizeCalibrationState(stateValue)
   }
 
   const channel = calibrationChannelValue(bodyField(body, 'channel'))
@@ -1090,8 +1143,9 @@ function applyCalibrationRequest(
     return cloneCalibrationState(current)
   }
 
-  const nextDraft = cloneCalibrationPackage(current.draft)
-  const samples = channel === 'rtd_adc' ? nextDraft.rtdAdc : nextDraft.vinAdc
+  const next = cloneCalibrationState(current)
+  const channelState = channel === 'rtd_adc' ? next.rtdAdc : next.vinAdc
+  const samples = channelState.samples
 
   if (op === 'clear') {
     for (let index = 0; index < samples.length; index += 1) {
@@ -1103,43 +1157,44 @@ function applyCalibrationRequest(
       samples[sampleIndex] = null
     }
   } else if (op === 'capture') {
+    const referenceTempC = numberOrFallback(bodyField(body, 'referenceTempC'), null)
+    const referenceVinMv = numberOrFallback(
+      bodyField(body, 'referenceVinMv'),
+      currentStatus.voltageMv
+    )
+    const targetAdcMv = numberOrFallback(
+      bodyField(body, 'targetAdcMv'),
+      currentStatus.calibration.targetAdcMv ?? currentStatus.rtdRawAdcMv
+    )
     const nextSample =
       channel === 'rtd_adc'
         ? {
             observedMv: currentStatus.rtdRawAdcMv ?? 0,
-            expectedMv: Math.round(
-              (numberOrFallback(bodyField(body, 'referenceTempC'), 0) ?? 0) * 14 + 630
-            ),
-            referenceTempC: numberOrFallback(bodyField(body, 'referenceTempC'), null) ?? undefined,
+            expectedMv: targetAdcMv ?? 0,
+            ...(referenceTempC != null ? { referenceTempC } : {}),
+            ...(targetAdcMv != null ? { targetAdcMv } : {}),
           }
         : {
             observedMv: currentStatus.vinRawAdcMv ?? 0,
-            expectedMv:
-              numberOrFallback(bodyField(body, 'referenceVinMv'), currentStatus.voltageMv) ?? 0,
-            referenceVinMv:
-              numberOrFallback(bodyField(body, 'referenceVinMv'), currentStatus.voltageMv) ?? 0,
+            expectedMv: vinAdcMvForInput(referenceVinMv ?? 0),
+            ...(referenceVinMv != null ? { referenceVinMv } : {}),
           }
     const emptyIndex = samples.findIndex((sample) => sample == null)
     samples[emptyIndex === -1 ? samples.length - 1 : emptyIndex] = nextSample
+  } else if (op === 'set_active_slot') {
+    const slot = bodyField(body, 'slot')
+    if (slot === 'a' || slot === 'b') {
+      channelState.activeSlot = slot
+    }
+  } else if (op === 'set_slot_fit') {
+    const slot = bodyField(body, 'slot')
+    const fit = calibrationSlotFitValue(bodyField(body, 'fit'))
+    if ((slot === 'a' || slot === 'b') && fit) {
+      channelState.slots[slot] = fit
+    }
   }
 
-  return {
-    active: cloneCalibrationPackage(current.active),
-    draft: nextDraft,
-    activeFit: cloneCalibrationFits(current.activeFit),
-    draftFit: createCalibrationFits(nextDraft),
-  }
-}
-
-function applyCalibration(current: CalibrationState): CalibrationState {
-  const nextActive = cloneCalibrationPackage(current.draft)
-  const nextFit = createCalibrationFits(nextActive)
-  return {
-    active: nextActive,
-    draft: cloneCalibrationPackage(current.draft),
-    activeFit: nextFit,
-    draftFit: cloneCalibrationFits(current.draftFit),
-  }
+  return normalizeCalibrationState(next)
 }
 
 function applyCalibrationJobRequest(
@@ -1209,46 +1264,69 @@ function saveHeaterCurve(current: HeaterCurveState): HeaterCurveState {
   }
 }
 
-function createCalibrationFits(calibrationPackage: CalibrationPackage) {
-  return {
-    rtdAdc: createCalibrationFit(calibrationPackage.rtdAdc, 'rtd_adc'),
-    vinAdc: createCalibrationFit(calibrationPackage.vinAdc, 'vin_adc'),
-  }
-}
-
 function createCalibrationFit(
-  samples: Array<{ observedMv: number; expectedMv: number } | null>,
+  samples: Array<Record<string, unknown> | null>,
   channel: CalibrationChannel
 ) {
-  const customSampleCount = samples.filter((sample) => sample != null).length
+  const custom = samples.filter(
+    (sample): sample is { observedMv: number; expectedMv: number } =>
+      sample != null &&
+      Number.isFinite(sample.observedMv) &&
+      Number.isFinite(sample.expectedMv) &&
+      (channel !== 'rtd_adc' ||
+        (Number.isFinite(sample.referenceTempC) && Number.isFinite(sample.targetAdcMv)))
+  )
+  if (custom.length === 0) {
+    return {
+      gain: 1,
+      offsetMv: 0,
+      sampleCount: 0,
+    }
+  }
+  if (custom.length === 1) {
+    return {
+      gain: 1,
+      offsetMv: custom[0].expectedMv - custom[0].observedMv,
+      sampleCount: 1,
+    }
+  }
+  const points = custom
+  const n = points.length
+  const sumX = points.reduce((sum, sample) => sum + sample.observedMv, 0)
+  const sumY = points.reduce((sum, sample) => sum + sample.expectedMv, 0)
+  const sumXX = points.reduce((sum, sample) => sum + sample.observedMv * sample.observedMv, 0)
+  const sumXY = points.reduce((sum, sample) => sum + sample.observedMv * sample.expectedMv, 0)
+  const denominator = n * sumXX - sumX * sumX
+  const gain = Math.abs(denominator) < Number.EPSILON ? 1 : (n * sumXY - sumX * sumY) / denominator
+  const offsetMv =
+    Math.abs(denominator) < Number.EPSILON ? (sumY - sumX) / n : (sumY - gain * sumX) / n
   return {
-    gain: 1,
-    offsetMv: 0,
-    customSampleCount,
-    defaultSampleCount: channel === 'rtd_adc' ? 2 : 2,
+    gain,
+    offsetMv,
+    sampleCount: custom.length,
   }
 }
 
 function cloneCalibrationState(current: CalibrationState): CalibrationState {
   return {
-    active: cloneCalibrationPackage(current.active),
-    draft: cloneCalibrationPackage(current.draft),
-    activeFit: cloneCalibrationFits(current.activeFit),
-    draftFit: cloneCalibrationFits(current.draftFit),
-  }
-}
-
-function cloneCalibrationPackage(current: CalibrationPackage): CalibrationPackage {
-  return {
-    rtdAdc: current.rtdAdc.map((sample) => (sample ? { ...sample } : null)),
-    vinAdc: current.vinAdc.map((sample) => (sample ? { ...sample } : null)),
-  }
-}
-
-function cloneCalibrationFits(current: CalibrationState['activeFit']) {
-  return {
-    rtdAdc: { ...current.rtdAdc },
-    vinAdc: { ...current.vinAdc },
+    rtdAdc: {
+      samples: current.rtdAdc.samples.map((sample) => (sample ? { ...sample } : null)),
+      fittedFit: { ...current.rtdAdc.fittedFit },
+      slots: {
+        a: { ...current.rtdAdc.slots.a },
+        b: { ...current.rtdAdc.slots.b },
+      },
+      activeSlot: current.rtdAdc.activeSlot,
+    },
+    vinAdc: {
+      samples: current.vinAdc.samples.map((sample) => (sample ? { ...sample } : null)),
+      fittedFit: { ...current.vinAdc.fittedFit },
+      slots: {
+        a: { ...current.vinAdc.slots.a },
+        b: { ...current.vinAdc.slots.b },
+      },
+      activeSlot: current.vinAdc.activeSlot,
+    },
   }
 }
 
@@ -1287,17 +1365,6 @@ function normalizeHeaterCurvePackage(current: HeaterCurvePackage): HeaterCurvePa
   }
 }
 
-function calibrationPackageValue(value: unknown): CalibrationPackage | null {
-  const record = recordValue(value)
-  if (!record || !Array.isArray(record.rtdAdc) || !Array.isArray(record.vinAdc)) {
-    return null
-  }
-  return {
-    rtdAdc: record.rtdAdc.map(normalizeCalibrationSample),
-    vinAdc: record.vinAdc.map(normalizeCalibrationSample),
-  }
-}
-
 function normalizeCalibrationSample(value: unknown) {
   const record = recordValue(value)
   if (!record) {
@@ -1305,7 +1372,19 @@ function normalizeCalibrationSample(value: unknown) {
   }
   const observedMv = numberOrFallback(record.observedMv, null)
   const expectedMv = numberOrFallback(record.expectedMv, null)
-  return observedMv == null || expectedMv == null ? null : { observedMv, expectedMv }
+  if (observedMv == null || expectedMv == null) {
+    return null
+  }
+  const referenceTempC = numberOrFallback(record.referenceTempC, null)
+  const targetAdcMv = numberOrFallback(record.targetAdcMv, null)
+  const referenceVinMv = numberOrFallback(record.referenceVinMv, null)
+  return {
+    observedMv,
+    expectedMv,
+    ...(referenceTempC != null ? { referenceTempC } : {}),
+    ...(targetAdcMv != null ? { targetAdcMv } : {}),
+    ...(referenceVinMv != null ? { referenceVinMv } : {}),
+  }
 }
 
 function heaterCurvePackageValue(value: unknown): HeaterCurvePackage | null {
@@ -1326,6 +1405,138 @@ function heaterCurvePackageValue(value: unknown): HeaterCurvePackage | null {
         : { tempCentiC, resistanceMilliohms }
     }),
   }
+}
+
+function calibrationStateValue(value: unknown): CalibrationState | null {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const rtdAdc = calibrationChannelStateValue(record.rtdAdc)
+  const vinAdc = calibrationChannelStateValue(record.vinAdc)
+  if (!rtdAdc || !vinAdc) {
+    return null
+  }
+  return {
+    rtdAdc,
+    vinAdc,
+  }
+}
+
+function calibrationChannelStateValue(value: unknown) {
+  const record = recordValue(value)
+  if (!record || !Array.isArray(record.samples)) {
+    return null
+  }
+  const fittedFit = calibrationFitValue(record.fittedFit)
+  const slots = calibrationSlotSetValue(record.slots)
+  const activeSlot = calibrationSlotIdValue(record.activeSlot)
+  if (!fittedFit || !slots || !activeSlot) {
+    return null
+  }
+  return {
+    samples: record.samples.map(normalizeCalibrationSample),
+    fittedFit,
+    slots,
+    activeSlot,
+  }
+}
+
+function calibrationFitValue(value: unknown): CalibrationFit | null {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const gain = numberOrFallback(record.gain, null)
+  const offsetMv = numberOrFallback(record.offsetMv, null)
+  const sampleCount = numberOrFallback(record.sampleCount, null)
+  if (gain == null || offsetMv == null || sampleCount == null) {
+    return null
+  }
+  return {
+    gain,
+    offsetMv,
+    sampleCount,
+  }
+}
+
+function calibrationSlotFitValue(value: unknown): CalibrationSlotFit | null {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const gain = numberOrFallback(record.gain, null)
+  const offsetMv = numberOrFallback(record.offsetMv, null)
+  if (gain == null || offsetMv == null) {
+    return null
+  }
+  return {
+    gain,
+    offsetMv,
+  }
+}
+
+function calibrationSlotSetValue(value: unknown) {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const a = calibrationSlotFitValue(record.a)
+  const b = calibrationSlotFitValue(record.b)
+  if (!a || !b) {
+    return null
+  }
+  return { a, b }
+}
+
+function calibrationSlotIdValue(value: unknown) {
+  return value === 'a' || value === 'b' ? value : null
+}
+
+function normalizeCalibrationState(current: CalibrationState): CalibrationState {
+  return {
+    rtdAdc: normalizeCalibrationChannelState(current.rtdAdc, 'rtd_adc'),
+    vinAdc: normalizeCalibrationChannelState(current.vinAdc, 'vin_adc'),
+  }
+}
+
+function normalizeCalibrationChannelState(
+  current: CalibrationState['rtdAdc'] | CalibrationState['vinAdc'],
+  channel: CalibrationChannel
+) {
+  const samples = normalizeCalibrationChannelSamples(current.samples)
+  return {
+    samples,
+    fittedFit: createCalibrationFit(samples, channel),
+    slots: {
+      a: normalizeCalibrationSlotFit(current.slots.a),
+      b: normalizeCalibrationSlotFit(current.slots.b),
+    },
+    activeSlot: calibrationSlotIdValue(current.activeSlot) ?? 'a',
+  }
+}
+
+function normalizeCalibrationChannelSamples(
+  samples: Array<Record<string, unknown> | null>
+): Array<Record<string, unknown> | null> {
+  const compact = samples
+    .map(normalizeCalibrationSample)
+    .filter(
+      (sample): sample is NonNullable<ReturnType<typeof normalizeCalibrationSample>> =>
+        sample != null
+    )
+  return Array.from({ length: 8 }, (_, index) => compact[index] ?? null)
+}
+
+function normalizeCalibrationSlotFit(fit: CalibrationSlotFit): CalibrationSlotFit {
+  return {
+    gain: Number.isFinite(fit.gain) ? fit.gain : 1,
+    offsetMv: Number.isFinite(fit.offsetMv) ? fit.offsetMv : 0,
+  }
+}
+
+function vinAdcMvForInput(inputMv: number) {
+  return Math.round((inputMv * 5100) / (56_000 + 5100))
 }
 
 function calibrationChannelValue(value: unknown): CalibrationChannel | null {

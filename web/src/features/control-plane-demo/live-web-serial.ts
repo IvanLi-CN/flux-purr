@@ -40,7 +40,6 @@ export interface LiveWebSerialControls {
   configureCalibrationJob: (
     request: Omit<CalibrationJobRequest, 'leaseId'>
   ) => Promise<CalibrationJobState>
-  applyCalibration: () => Promise<CalibrationState>
   getHeaterCurve: () => Promise<HeaterCurveState>
   previewHeaterCurve: (heaterCurve: HeaterCurvePackage) => Promise<HeaterCurveState>
   clearHeaterCurvePreview: () => Promise<HeaterCurveState>
@@ -228,7 +227,7 @@ export function useLiveWebSerialScenario(
     async (request: Omit<CalibrationConfigRequest, 'leaseId'>) => {
       try {
         const calibration = await requireClient().configureCalibration(request)
-        appendEvent('adc calibration draft updated over browser Web Serial', 'success')
+        appendEvent('adc calibration state updated over browser Web Serial', 'success')
         return calibration
       } catch (error) {
         setError(error instanceof Error ? error.message : 'Web Serial calibration update failed.')
@@ -239,19 +238,6 @@ export function useLiveWebSerialScenario(
     },
     [appendEvent, requireClient]
   )
-
-  const applyCalibration = useCallback(async () => {
-    try {
-      const calibration = await requireClient().applyCalibration()
-      appendEvent('adc calibration applied over browser Web Serial', 'success')
-      return calibration
-    } catch (error) {
-      setError(error instanceof Error ? error.message : 'Web Serial calibration apply failed.')
-      setState('error')
-      appendEvent('browser Web Serial calibration apply failed', 'warning')
-      throw error
-    }
-  }, [appendEvent, requireClient])
 
   const getHeaterCurve = useCallback(async () => {
     try {
@@ -393,14 +379,12 @@ export function useLiveWebSerialScenario(
       getCalibrationJob,
       configureCalibration,
       configureCalibrationJob,
-      applyCalibration,
       getHeaterCurve,
       previewHeaterCurve,
       clearHeaterCurvePreview,
       saveHeaterCurve,
     }),
     [
-      applyCalibration,
       clearHeaterCurvePreview,
       configureCalibration,
       configureCalibrationJob,

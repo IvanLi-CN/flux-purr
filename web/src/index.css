@@ -1133,61 +1133,6 @@
       inset 0 1px 0 rgba(255, 255, 255, 0.12);
   }
 
-  .industrial-view-panel--calibration-workbench ~ .industrial-log-panel,
-  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
-    .industrial-log-panel {
-    grid-template-rows: auto auto minmax(0, 1fr);
-    gap: 0.56rem;
-    padding: 0.82rem;
-    border: 1px solid rgba(21, 35, 50, 0.58);
-    border-radius: 16px;
-    background:
-      linear-gradient(rgba(255, 255, 255, 0.02) 50%, rgba(0, 0, 0, 0.12) 50%),
-      linear-gradient(180deg, rgba(19, 29, 40, 0.96), rgba(12, 21, 31, 0.98));
-    background-size:
-      100% 4px,
-      auto;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.08),
-      0 10px 20px rgba(8, 14, 22, 0.2);
-  }
-
-  .industrial-view-panel--calibration-workbench
-    ~ .industrial-log-panel
-    .industrial-log-panel__header,
-  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
-    .industrial-log-panel__header {
-    gap: 0.58rem;
-  }
-
-  .industrial-view-panel--calibration-workbench
-    ~ .industrial-log-panel
-    .industrial-log-panel__header
-    h2,
-  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
-    .industrial-log-panel__header
-    h2 {
-    font-size: 1.05rem;
-  }
-
-  .industrial-view-panel--calibration-workbench ~ .industrial-log-panel .industrial-log-filters,
-  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
-    .industrial-log-filters {
-    gap: 0.22rem;
-  }
-
-  .industrial-view-panel--calibration-workbench
-    ~ .industrial-log-panel
-    .industrial-log-filters
-    button,
-  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
-    .industrial-log-filters
-    button {
-    min-height: 1.7rem;
-    padding: 0.22rem 0.42rem;
-    font-size: 0.58rem;
-  }
-
   .industrial-log-panel__header {
     display: flex;
     align-items: flex-start;
@@ -1361,6 +1306,12 @@
     position: relative;
     min-height: 100%;
     overflow-anchor: none;
+  }
+
+  .industrial-target-picker {
+    display: grid;
+    gap: 0;
+    min-width: min(100%, 16rem);
   }
 
   @media (max-width: 759px) {
@@ -1669,12 +1620,6 @@
     font-weight: 800;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-  }
-
-  .industrial-target-picker {
-    display: grid;
-    gap: 0;
-    min-width: min(100%, 16rem);
   }
 
   .industrial-device-select {
@@ -3521,10 +3466,6 @@
     min-width: 0;
   }
 
-  .industrial-target-picker {
-    gap: 0;
-  }
-
   .industrial-device-select {
     min-height: 40px;
     border-radius: 12px;
@@ -4172,7 +4113,7 @@
   .industrial-calibration-command-bar {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.44rem;
+    gap: 0.34rem;
     align-items: stretch;
     min-width: 0;
     border: 1px solid rgba(80, 67, 58, 0.14);
@@ -4181,7 +4122,7 @@
     box-shadow:
       inset 3px 3px 6px rgba(186, 190, 204, 0.48),
       inset -3px -3px 6px rgba(255, 255, 255, 0.76);
-    padding: 0.56rem;
+    padding: 0.44rem;
   }
 
   .industrial-calibration-tabs {
@@ -4250,12 +4191,13 @@
     min-width: 0;
     min-height: 0;
     overflow-y: auto;
-    padding-right: 0.22rem;
+    padding-right: 1.12rem;
+    scrollbar-gutter: stable;
   }
 
   .industrial-calibration-adc-toolbar {
     display: grid;
-    gap: 0.44rem;
+    gap: 0.36rem;
     min-width: 0;
   }
 
@@ -4268,7 +4210,7 @@
   .industrial-calibration-live-grid {
     display: grid;
     grid-template-columns: minmax(0, 1.26fr) minmax(21rem, 0.84fr);
-    gap: 0.78rem;
+    gap: 1rem;
     align-items: start;
     min-width: 0;
   }
@@ -4286,8 +4228,9 @@
   .industrial-calibration-side-stack {
     display: grid;
     align-content: start;
-    gap: 0.46rem;
+    gap: 0.58rem;
     min-width: 0;
+    padding-inline: 0.12rem 0.22rem;
   }
 
   .industrial-calibration-live-card {
@@ -4313,6 +4256,7 @@
     align-self: start;
     gap: 0.6rem;
     padding-block: 0.72rem;
+    padding-inline: 1.08rem;
   }
 
   .industrial-calibration-work-body {
@@ -4691,6 +4635,7 @@
   }
 
   .industrial-calibration-slider-field {
+    position: relative;
     gap: 0.44rem;
   }
 
@@ -4823,12 +4768,11 @@
     gap: 0.48rem;
     min-width: 0;
     border-bottom: 1px solid color-mix(in oklch, var(--industrial-muted-text) 14%, transparent);
-    padding: 0.5rem 0;
+    padding: 0.5rem 0.68rem;
   }
 
   .industrial-calibration-property-list > div:last-child {
     border-bottom: 0;
-    padding-bottom: 0;
   }
 
   .industrial-calibration-property-list dt,
@@ -4979,15 +4923,18 @@
   .industrial-calibration-capture-row .industrial-button,
   .industrial-calibration-manual-fit .industrial-button,
   .industrial-calibration-samples .industrial-button {
-    min-height: 2.85rem;
+    min-height: 2.65rem;
     border-radius: 10px;
-    padding: 0.62rem 0.82rem;
+    padding: 0.54rem 0.68rem;
     font-size: 0.7rem;
     letter-spacing: 0.035em;
   }
 
   .industrial-calibration-command-bar__apply,
   .industrial-calibration-command-bar__action {
+    gap: 0.28rem;
+    min-height: 2.45rem;
+    padding-inline: 0.42rem;
     width: 100%;
   }
 
@@ -5079,6 +5026,28 @@
     gap: 0.46rem;
   }
 
+  .industrial-calibration-sample-controls {
+    display: grid;
+    gap: 0.48rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-sample-control-row {
+    display: grid;
+    grid-template-columns: minmax(26rem, 1.28fr) minmax(16rem, 0.92fr);
+    gap: 0.5rem;
+    align-items: stretch;
+    min-width: 0;
+  }
+
+  .industrial-calibration-sample-control-row--capture-only {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-calibration-sample-control-row--capture-only .industrial-calibration-capture-row {
+    grid-template-columns: minmax(0, 1fr) minmax(7.5rem, auto);
+  }
+
   .industrial-calibration-channel--embedded {
     border-radius: 10px;
     background: color-mix(in oklch, var(--industrial-panel) 86%, var(--industrial-muted) 14%);
@@ -5164,6 +5133,14 @@
   .industrial-calibration-property-list--fit-card {
     gap: 0;
     margin-top: 0.16rem;
+    overflow: hidden;
+    border: 1px solid var(--industrial-panel-border);
+    border-radius: 10px;
+    background: color-mix(in oklch, var(--industrial-panel) 86%, var(--industrial-muted) 14%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.58),
+      0 1px 3px color-mix(in oklch, var(--industrial-shadow) 8%, transparent);
+    padding-inline: 0.12rem;
   }
 
   .industrial-calibration-property-list__fit-group {
@@ -5175,13 +5152,17 @@
     padding: 0.56rem 0.62rem;
   }
 
+  .industrial-calibration-property-list--fit-card
+    > .industrial-calibration-property-list__fit-group {
+    padding: 0.56rem 0.88rem;
+  }
+
   .industrial-calibration-property-list__fit-group:first-child {
     border-top: 0;
   }
 
   .industrial-calibration-property-list__fit-group:last-child {
     border-bottom: 0;
-    padding-bottom: 0;
   }
 
   .industrial-calibration-property-list__fit-group dt {
@@ -5221,17 +5202,122 @@
     text-transform: uppercase;
   }
 
+  .industrial-calibration-fit-chip.is-active {
+    border-color: color-mix(in oklch, var(--industrial-accent) 38%, var(--industrial-panel-border));
+    background: color-mix(in oklch, var(--industrial-panel) 58%, var(--industrial-accent) 42%);
+    color: var(--industrial-accent);
+  }
+
+  .industrial-calibration-slot-edit {
+    min-height: 1.8rem;
+    padding: 0.18rem 0.48rem;
+    font-size: 0.66rem;
+    white-space: nowrap;
+  }
+
+  .industrial-calibration-fit-suggestion-meta {
+    display: grid;
+    justify-items: end;
+    gap: 0.22rem;
+    min-width: 0;
+  }
+
+  .industrial-calibration-fit-suggestion-meta small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 750;
+  }
+
+  .industrial-slot-editor-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: grid;
+    place-items: center;
+  }
+
+  .industrial-slot-editor-backdrop {
+    position: absolute;
+    inset: 0;
+    border: 0;
+    background: rgba(24, 31, 43, 0.18);
+    backdrop-filter: blur(4px);
+    padding: 0;
+  }
+
+  .industrial-slot-editor-card {
+    position: relative;
+    display: grid;
+    gap: 0.72rem;
+    width: min(28rem, calc(100vw - 2rem));
+    border: 1px solid color-mix(in oklch, var(--industrial-panel-border) 88%, white 12%);
+    border-radius: 14px;
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in oklch, var(--industrial-panel) 92%, var(--industrial-light) 8%),
+        var(--industrial-panel-tint)
+      ),
+      var(--industrial-panel);
+    box-shadow:
+      0 18px 48px color-mix(in oklch, var(--industrial-shadow-deep) 20%, transparent),
+      inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    padding: 1rem;
+  }
+
+  .industrial-slot-editor-card__header strong {
+    color: var(--industrial-text);
+    font-size: 0.92rem;
+    font-weight: 850;
+  }
+
+  .industrial-slot-editor-card__body {
+    display: grid;
+    gap: 0.56rem;
+  }
+
+  .industrial-slot-editor-card__body label {
+    display: grid;
+    gap: 0.28rem;
+  }
+
+  .industrial-slot-editor-card__body label > span:first-child {
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 750;
+  }
+
+  .industrial-slot-editor-card__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.46rem;
+  }
+
   .industrial-calibration-capture-row {
     display: grid;
-    grid-template-columns: minmax(8rem, 1fr) minmax(6.5rem, auto) minmax(4.4rem, auto);
+    grid-template-columns: minmax(8rem, 1fr) minmax(6.5rem, auto);
     gap: 0.34rem;
     align-items: end;
     min-width: 0;
   }
 
+  .industrial-calibration-capture-row--without-clear {
+    grid-template-columns: minmax(8rem, 1fr) minmax(6.5rem, auto);
+  }
+
   .industrial-calibration-capture-row,
+  .industrial-calibration-sample-control-row,
   .industrial-calibration-manual-fit {
     min-width: 0;
+  }
+
+  .industrial-calibration-capture-row,
+  .industrial-calibration-manual-fit {
+    border: 1px dashed color-mix(in oklch, var(--industrial-muted-text) 24%, transparent);
+    border-radius: 10px;
+    background: color-mix(in oklch, var(--industrial-panel) 78%, var(--industrial-muted) 22%);
+    padding: 0.56rem;
   }
 
   .industrial-calibration-capture-row label {
@@ -5245,11 +5331,8 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     gap: 0.48rem;
     align-items: end;
+    min-inline-size: 0;
     min-width: 0;
-    border: 1px dashed color-mix(in oklch, var(--industrial-muted-text) 24%, transparent);
-    border-radius: 10px;
-    background: color-mix(in oklch, var(--industrial-panel) 78%, var(--industrial-muted) 22%);
-    padding: 0.56rem;
   }
 
   .industrial-calibration-manual-fit label {
@@ -5266,23 +5349,74 @@
   }
 
   .industrial-calibration-input {
+    position: relative;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.4rem;
-    min-height: 2.85rem;
+    min-height: 2.45rem;
     border: 1px solid var(--industrial-panel-border);
     border-radius: 10px;
     background: color-mix(in oklch, var(--industrial-panel) 88%, var(--industrial-light) 12%);
     box-shadow:
       inset 0 1px 0 rgba(255, 255, 255, 0.72),
       0 1px 3px color-mix(in oklch, var(--industrial-shadow) 8%, transparent);
-    padding: 0.44rem 0.56rem;
+    padding: 0.28rem 0.52rem;
   }
 
   .industrial-calibration-input--compact {
     min-width: 8.2rem;
     padding-block: 0.22rem;
+  }
+
+  .industrial-calibration-slider-field--invalid .industrial-calibration-input {
+    border-color: color-mix(in oklch, var(--industrial-accent) 44%, var(--industrial-panel-border));
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.72),
+      0 0 0 2px color-mix(in oklch, var(--industrial-accent) 16%, transparent),
+      0 2px 5px color-mix(in oklch, var(--industrial-shadow) 12%, transparent);
+  }
+
+  .industrial-calibration-input-tooltip {
+    position: absolute;
+    right: -0.12rem;
+    bottom: calc(100% + 0.42rem);
+    z-index: 8;
+    max-width: min(18rem, 72vw);
+    border: 1px solid color-mix(in oklch, var(--industrial-accent) 36%, var(--industrial-light));
+    border-radius: 10px;
+    background: linear-gradient(
+      145deg,
+      color-mix(in oklch, var(--industrial-light) 92%, var(--industrial-accent) 8%),
+      color-mix(in oklch, var(--industrial-panel) 82%, var(--industrial-accent) 18%)
+    );
+    box-shadow:
+      0 10px 24px color-mix(in oklch, var(--industrial-shadow-deep) 34%, transparent),
+      inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    padding: 0.46rem 0.58rem;
+    color: #9b3916;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 850;
+    line-height: 1.28;
+    text-align: left;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .industrial-calibration-input-tooltip::after {
+    position: absolute;
+    right: 1.1rem;
+    bottom: -0.34rem;
+    width: 0.6rem;
+    height: 0.6rem;
+    border-right: 1px solid
+      color-mix(in oklch, var(--industrial-accent) 32%, var(--industrial-light));
+    border-bottom: 1px solid
+      color-mix(in oklch, var(--industrial-accent) 32%, var(--industrial-light));
+    background: color-mix(in oklch, var(--industrial-panel) 82%, var(--industrial-accent) 18%);
+    content: "";
+    transform: rotate(45deg);
   }
 
   .industrial-calibration-input input {
@@ -5585,6 +5719,7 @@
     .industrial-calibration-live-grid,
     .industrial-calibration-command-bar,
     .industrial-heater-curve-toolbar,
+    .industrial-calibration-sample-control-row,
     .industrial-calibration-manual-fit,
     .industrial-calibration-capture-row,
     .industrial-calibration-samples tr {
@@ -5881,5 +6016,60 @@
   .industrial-console__workspace.industrial-console__workspace--selection {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
+  }
+
+  .industrial-view-panel--calibration-workbench ~ .industrial-log-panel,
+  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
+    .industrial-log-panel {
+    grid-template-rows: auto auto minmax(0, 1fr);
+    gap: 0.56rem;
+    padding: 0.82rem;
+    border: 1px solid rgba(21, 35, 50, 0.58);
+    border-radius: 16px;
+    background:
+      linear-gradient(rgba(255, 255, 255, 0.02) 50%, rgba(0, 0, 0, 0.12) 50%),
+      linear-gradient(180deg, rgba(19, 29, 40, 0.96), rgba(12, 21, 31, 0.98));
+    background-size:
+      100% 4px,
+      auto;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.08),
+      0 10px 20px rgba(8, 14, 22, 0.2);
+  }
+
+  .industrial-view-panel--calibration-workbench
+    ~ .industrial-log-panel
+    .industrial-log-panel__header,
+  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
+    .industrial-log-panel__header {
+    gap: 0.58rem;
+  }
+
+  .industrial-view-panel--calibration-workbench
+    ~ .industrial-log-panel
+    .industrial-log-panel__header
+    h2,
+  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
+    .industrial-log-panel__header
+    h2 {
+    font-size: 1.05rem;
+  }
+
+  .industrial-view-panel--calibration-workbench ~ .industrial-log-panel .industrial-log-filters,
+  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
+    .industrial-log-filters {
+    gap: 0.22rem;
+  }
+
+  .industrial-view-panel--calibration-workbench
+    ~ .industrial-log-panel
+    .industrial-log-filters
+    button,
+  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench)
+    .industrial-log-filters
+    button {
+    min-height: 1.7rem;
+    padding: 0.22rem 0.42rem;
+    font-size: 0.58rem;
   }
 }
