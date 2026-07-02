@@ -5191,21 +5191,27 @@
 
   .industrial-calibration-fit-chip {
     flex: 0 0 auto;
-    border: 1px solid rgba(80, 67, 58, 0.1);
+    border: 1px solid color-mix(in oklch, var(--industrial-panel-border) 78%, transparent);
     border-radius: 999px;
-    background: rgba(224, 229, 236, 0.48);
+    background: color-mix(in oklch, var(--industrial-panel) 70%, var(--industrial-muted) 30%);
     padding: 0.14rem 0.42rem;
     color: var(--industrial-muted-text);
     font-size: 0.64rem;
     font-weight: 820;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+    transition:
+      border-color 180ms ease-out,
+      background 180ms ease-out,
+      color 180ms ease-out,
+      box-shadow 180ms ease-out;
   }
 
   .industrial-calibration-fit-chip.is-active {
-    border-color: color-mix(in oklch, var(--industrial-accent) 38%, var(--industrial-panel-border));
-    background: color-mix(in oklch, var(--industrial-panel) 58%, var(--industrial-accent) 42%);
-    color: var(--industrial-accent);
+    border-color: color-mix(in oklch, var(--industrial-green) 42%, var(--industrial-panel-border));
+    background: color-mix(in oklch, var(--industrial-green) 16%, var(--industrial-panel) 84%);
+    color: color-mix(in oklch, var(--industrial-green) 72%, var(--industrial-text));
+    box-shadow: inset 0 1px 0 color-mix(in oklch, var(--industrial-light) 64%, transparent);
   }
 
   .industrial-calibration-slot-edit {
