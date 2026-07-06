@@ -93,7 +93,7 @@ pub struct AdcCalibrationSlotFit {
     pub offset_mv: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct AdcCalibrationSlots {
     pub a: AdcCalibrationSlotFit,
     pub b: AdcCalibrationSlotFit,
@@ -135,15 +135,6 @@ impl Default for AdcCalibrationSlotFit {
         Self {
             gain: 1.0,
             offset_mv: 0.0,
-        }
-    }
-}
-
-impl Default for AdcCalibrationSlots {
-    fn default() -> Self {
-        Self {
-            a: AdcCalibrationSlotFit::default(),
-            b: AdcCalibrationSlotFit::default(),
         }
     }
 }

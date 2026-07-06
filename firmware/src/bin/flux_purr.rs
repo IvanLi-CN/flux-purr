@@ -50,11 +50,10 @@ use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
-    CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire,
-    CalibrationSampleWire, CalibrationSlotFitWire, CalibrationSlotIdWire, CalibrationStateWire,
-    ControlPlaneStatus, Identity, RuntimeConfigCommand, UsbFrame, UsbFrameError, UsbRequestOp,
-    UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
-    network_from_memory, parse_usb_frame, samples_from_wire, write_usb_frame,
+    CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire, ControlPlaneStatus,
+    Identity, RuntimeConfigCommand, UsbFrame, UsbFrameError, UsbRequestOp, UsbResponsePayload,
+    calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
+    parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
