@@ -149,7 +149,6 @@ enum CalibrationCommand {
     Clear(CalibrationChannelArgs),
     Import(CalibrationImportArgs),
     Export(CalibrationExportArgs),
-    Apply(TargetSelector),
     Collect(CalibrationCollectArgs),
 }
 
@@ -876,14 +875,9 @@ async fn handle_calibration_command(
         }
         CalibrationCommand::Import(args) => {
             let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
-            let package = imported
-                .get("draft")
-                .cloned()
-                .or_else(|| imported.get("package").cloned())
-                .unwrap_or(imported);
             let body = json!({
                 "op": "import",
-                "package": package,
+                "state": imported,
             });
             request_with_lease(
                 client,
@@ -915,16 +909,6 @@ async fn handle_calibration_command(
                 "ok": true,
                 "path": args.file,
             }))
-        }
-        CalibrationCommand::Apply(selector) => {
-            request_with_lease(
-                client,
-                resolve_target(selector, default_devd)?,
-                Method::POST,
-                "/calibration/apply",
-                Some(json!({})),
-            )
-            .await
         }
         CalibrationCommand::Collect(args) => {
             collect_calibration_run(client, default_devd, args).await
@@ -2365,20 +2349,21 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
             payload.get("status").and_then(Value::as_str).unwrap_or("-")
         ));
     }
-    if payload.get("activeFit").is_some() && payload.get("draftFit").is_some() {
-        let draft = payload.get("draft").unwrap_or(&Value::Null);
-        let rtd_count = draft
+    if payload.get("rtdAdc").is_some() && payload.get("vinAdc").is_some() {
+        let rtd_count = payload
             .get("rtdAdc")
+            .and_then(|channel| channel.get("samples"))
             .and_then(Value::as_array)
             .map(|items| items.iter().filter(|item| !item.is_null()).count())
             .unwrap_or(0);
-        let vin_count = draft
+        let vin_count = payload
             .get("vinAdc")
+            .and_then(|channel| channel.get("samples"))
             .and_then(Value::as_array)
             .map(|items| items.iter().filter(|item| !item.is_null()).count())
             .unwrap_or(0);
         return Ok(format!(
-            "Calibration draft: rtd_adc={} samples vin_adc={} samples",
+            "Calibration: rtd_adc={} samples vin_adc={} samples",
             rtd_count, vin_count
         ));
     }

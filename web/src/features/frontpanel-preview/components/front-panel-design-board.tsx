@@ -21,7 +21,7 @@ const paletteEntries = [
   ['Info Cyan', frontPanelPalette.cyan],
 ] as const
 
-const fontFamily = '"Space Grotesk", system-ui, sans-serif'
+const fontFamily = '"JetBrains Mono", "Noto Sans SC", monospace'
 
 const cardStyle = {
   background: 'rgba(15, 23, 42, 0.92)',

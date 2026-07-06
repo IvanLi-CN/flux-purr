@@ -1,5 +1,17 @@
 import http from 'node:http'
 import { expect, test } from '@playwright/test'
+import type {
+  CalibrationChannel,
+  CalibrationFit,
+  CalibrationJobState,
+  CalibrationRuntimeState,
+  CalibrationSlotFit,
+  CalibrationState,
+  ControlPlaneStatus,
+  HeaterCurvePackage,
+  HeaterCurveState,
+  NetworkSummary,
+} from '../src/features/control-plane-demo/contracts'
 
 const devdPort = Number(process.env.E2E_DEVD_PORT ?? 30081)
 const devdBaseUrl = `http://127.0.0.1:${devdPort}`
@@ -11,6 +23,13 @@ test.describe('control plane live devd bridge', () => {
   let server: http.Server
   const requests: Array<{ method: string; path: string; body: unknown }> = []
   const sseClients = new Set<http.ServerResponse>()
+  let listDevicesCallCount = 0
+  let failDeviceList = false
+  let missingAuthorizedPort = false
+  let injectStatusTimeoutEvent = false
+  let runtimeStatus = status(network('connected'))
+  let calibrationState = calibration()
+  let heaterCurveState = heaterCurve()
 
   test.beforeAll(async () => {
     server = http.createServer(async (request, response) => {
@@ -25,6 +44,70 @@ test.describe('control plane live devd bridge', () => {
       }
 
       if (method === 'GET' && url.pathname === '/api/v1/devices') {
+        if (failDeviceList) {
+          sendJson(response, 503, {
+            error: { code: 'devd_unavailable', message: 'Failed to fetch', retryable: true },
+          })
+          return
+        }
+        listDevicesCallCount += 1
+        const nativeConnection = listDevicesCallCount === 1 ? 'busy' : 'disconnected'
+        if (missingAuthorizedPort) {
+          sendJson(response, 200, {
+            devices: [
+              {
+                id: deviceId,
+                displayName: 'Authorized serial device',
+                portPath: '/dev/cu.usbmodem21231401',
+                transport: 'native_serial',
+                connection: 'error',
+                identity: identity([
+                  'identity',
+                  'status',
+                  'network',
+                  'wifi_config',
+                  'monitor',
+                  'flash',
+                ]),
+                network: {
+                  state: 'error',
+                  ssid: null,
+                  ip: null,
+                  gateway: null,
+                  dns: [],
+                  wifiRssi: null,
+                  lastError:
+                    'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.',
+                },
+                status: status({
+                  state: 'error',
+                  ssid: null,
+                  ip: null,
+                  gateway: null,
+                  dns: [],
+                  wifiRssi: null,
+                  lastError:
+                    'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.',
+                }),
+                events: [
+                  {
+                    id: 'event-e2e-port-missing',
+                    timestamp: '1002',
+                    deviceId,
+                    kind: 'serial',
+                    message: 'authorized serial port missing',
+                    payload: {
+                      code: 'authorized_port_missing',
+                      portPath: '/dev/cu.usbmodem21231401',
+                      candidates: ['/dev/cu.usbmodem212101', '/dev/cu.usbmodem212201'],
+                    },
+                  },
+                ],
+              },
+            ],
+          })
+          return
+        }
         sendJson(response, 200, {
           devices: [
             {
@@ -47,7 +130,7 @@ test.describe('control plane live devd bridge', () => {
               displayName: 'E2E authorized USB target',
               portPath: '/dev/cu.usbmodem-e2e',
               transport: 'native_serial',
-              connection: 'disconnected',
+              connection: nativeConnection,
               identity: identity([
                 'identity',
                 'status',
@@ -57,7 +140,9 @@ test.describe('control plane live devd bridge', () => {
                 'flash',
               ]),
               network: network('idle'),
-              status: status(network('idle')),
+              status: withStatusNetwork(runtimeStatus, network('idle')),
+              calibration: cloneCalibrationState(calibrationState),
+              heaterCurve: cloneHeaterCurveState(heaterCurveState),
               events: [
                 {
                   id: 'event-e2e-flash',
@@ -118,6 +203,10 @@ test.describe('control plane live devd bridge', () => {
       }
 
       if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/identity`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
         sendJson(
           response,
           200,
@@ -127,32 +216,90 @@ test.describe('control plane live devd bridge', () => {
       }
 
       if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/network`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
         sendJson(response, 200, network('connected'))
         return
       }
 
       if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/status`) {
-        sendJson(response, 200, status(network('connected')))
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        sendJson(response, 200, runtimeStatus)
+        return
+      }
+
+      if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/calibration`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        sendJson(response, 200, cloneCalibrationState(calibrationState))
+        return
+      }
+
+      if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/calibration/job`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        sendJson(response, 200, cloneCalibrationJob(runtimeStatus.calibration.job))
+        return
+      }
+
+      if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/heater-curve`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        sendJson(response, 200, cloneHeaterCurveState(heaterCurveState))
         return
       }
 
       if (method === 'GET' && url.pathname === `/api/v1/devices/${deviceId}/events`) {
-        sendSse(response, sseClients, {
-          id: 'event-e2e-serial-timeout',
-          timestamp: '1001',
-          deviceId,
-          kind: 'serial',
-          message: 'native serial RPC failed',
-          payload: {
-            stage: 'status',
-            code: 'usb_response_timeout',
-            retryable: true,
-          },
-        })
+        if (missingAuthorizedPort) {
+          sendSse(response, sseClients, {
+            id: 'event-e2e-port-missing-stream',
+            timestamp: '1003',
+            deviceId,
+            kind: 'serial',
+            message: 'authorized serial port missing',
+            payload: {
+              code: 'authorized_port_missing',
+              portPath: '/dev/cu.usbmodem21231401',
+              candidates: ['/dev/cu.usbmodem212101', '/dev/cu.usbmodem212201'],
+            },
+          })
+          return
+        }
+        if (injectStatusTimeoutEvent) {
+          sendSse(response, sseClients, {
+            id: 'event-e2e-serial-timeout',
+            timestamp: '1001',
+            deviceId,
+            kind: 'serial',
+            message: 'native serial RPC failed',
+            payload: {
+              stage: 'status',
+              code: 'usb_response_timeout',
+              retryable: true,
+            },
+          })
+          return
+        }
+        sendSse(response, sseClients)
         return
       }
 
       if (method === 'PUT' && url.pathname === `/api/v1/devices/${deviceId}/wifi`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
         sendJson(response, 200, {
           network: {
             state: bodyField(body, 'op') === 'clear' ? 'disabled' : 'connected',
@@ -168,23 +315,52 @@ test.describe('control plane live devd bridge', () => {
       }
 
       if (method === 'PUT' && url.pathname === `/api/v1/devices/${deviceId}/runtime`) {
-        sendJson(response, 200, {
-          ...status(network('connected')),
-          targetTempC:
-            typeof bodyField(body, 'targetTempC') === 'number'
-              ? bodyField(body, 'targetTempC')
-              : 220,
-          activeCoolingEnabled:
-            typeof bodyField(body, 'activeCoolingEnabled') === 'boolean'
-              ? bodyField(body, 'activeCoolingEnabled')
-              : true,
-          fanDisplayState: bodyField(body, 'activeCoolingEnabled') === false ? 'OFF' : 'AUTO',
-          heaterEnabled:
-            typeof bodyField(body, 'heaterEnabled') === 'boolean'
-              ? bodyField(body, 'heaterEnabled')
-              : true,
-          heaterOutputPercent: bodyField(body, 'heaterEnabled') === false ? 0 : 18,
-        })
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        runtimeStatus = applyRuntimeRequest(runtimeStatus, body)
+        sendJson(response, 200, runtimeStatus)
+        return
+      }
+
+      if (method === 'PUT' && url.pathname === `/api/v1/devices/${deviceId}/calibration`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        calibrationState = applyCalibrationRequest(calibrationState, runtimeStatus, body)
+        sendJson(response, 200, cloneCalibrationState(calibrationState))
+        return
+      }
+
+      if (method === 'POST' && url.pathname === `/api/v1/devices/${deviceId}/calibration/job`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        runtimeStatus = applyCalibrationJobRequest(runtimeStatus, body)
+        sendJson(response, 200, cloneCalibrationJob(runtimeStatus.calibration.job))
+        return
+      }
+
+      if (method === 'PUT' && url.pathname === `/api/v1/devices/${deviceId}/heater-curve`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        heaterCurveState = applyHeaterCurveRequest(heaterCurveState, body)
+        sendJson(response, 200, cloneHeaterCurveState(heaterCurveState))
+        return
+      }
+
+      if (method === 'POST' && url.pathname === `/api/v1/devices/${deviceId}/heater-curve/save`) {
+        if (missingAuthorizedPort) {
+          sendMissingAuthorizedPortError(response)
+          return
+        }
+        heaterCurveState = saveHeaterCurve(heaterCurveState)
+        sendJson(response, 200, cloneHeaterCurveState(heaterCurveState))
         return
       }
 
@@ -230,6 +406,13 @@ test.describe('control plane live devd bridge', () => {
 
   test.beforeEach(() => {
     requests.length = 0
+    listDevicesCallCount = 0
+    failDeviceList = false
+    missingAuthorizedPort = false
+    injectStatusTimeoutEvent = false
+    runtimeStatus = status(network('connected'))
+    calibrationState = calibration()
+    heaterCurveState = heaterCurve()
   })
 
   test('discovers live devd target and completes artifact dry-check through HTTP bridge', async ({
@@ -246,9 +429,7 @@ test.describe('control plane live devd bridge', () => {
     await page.waitForTimeout(1800)
     await expect(page.getByText('181.5').first()).toBeVisible()
     await expect(page.getByText('Heater 18%')).toBeVisible()
-    await expect(
-      page.getByText('native serial RPC failed: status / usb_response_timeout').first()
-    ).toBeVisible()
+    await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
 
     await page.getByRole('button', { name: /更新/i }).click()
     await expect(page.getByRole('combobox', { name: 'Firmware artifact' })).toContainText(
@@ -288,10 +469,183 @@ test.describe('control plane live devd bridge', () => {
       .toBeGreaterThanOrEqual(1)
   })
 
+  test('keeps the live workspace visible while devd is still reclaiming the first native probe', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+
+    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
+    await expect(page.getByText('No known devices')).toHaveCount(0)
+
+    await page.waitForTimeout(2500)
+    await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
+    await expect(page.getByText('运行时已同步')).toBeVisible()
+    await expect(page.getByText('有效')).toBeVisible()
+  })
+
+  test('preserves the chosen calibration tab and blocks calibration controls while devd is still reacquiring the lease', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+
+    const targetAdcInput = page.getByLabel('目标 ADC 输入')
+    await expect(targetAdcInput).toBeVisible()
+    const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
+    await expect(page.getByText('有效')).toBeVisible({ timeout: 10_000 })
+    await expect(targetAdcInput).toBeVisible()
+    await expect(page.getByRole('heading', { name: '加热曲线' })).toHaveCount(0)
+    await expect(calibrationModeToggle).toBeEnabled()
+  })
+
+  test('updates the RTD calibration target after heater start instead of leaving the old target latched', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+    const targetAdcInput = page.getByLabel('目标 ADC 输入')
+    await expect(targetAdcInput).toBeVisible()
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
+
+    const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
+    await expect(calibrationModeToggle).toBeEnabled()
+    await targetAdcInput.fill('950')
+    await calibrationModeToggle.click()
+    await page.waitForTimeout(700)
+
+    await page.getByRole('switch', { name: '加热开关' }).click()
+    await page.waitForTimeout(700)
+
+    await targetAdcInput.fill('980')
+    await page.waitForTimeout(1_200)
+
+    await expect
+      .poll(
+        () =>
+          runtimeRequests().filter(
+            (request) =>
+              (request.body as { calibration?: { targetAdcMv?: number } } | null)?.calibration
+                ?.targetAdcMv === 980
+          ).length
+      )
+      .toBeGreaterThanOrEqual(1)
+    await expect(targetAdcInput).toBeVisible()
+    await expect(targetAdcInput).toHaveValue('980')
+  })
+
+  test('keeps dashboard target temperature writable after RTD calibration heater start', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+    const targetAdcInput = page.getByLabel('目标 ADC 输入')
+    await expect(targetAdcInput).toBeVisible()
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
+
+    const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
+
+    await targetAdcInput.fill('950')
+    await calibrationModeToggle.click()
+    await page.waitForTimeout(700)
+    await page.getByRole('switch', { name: '加热开关' }).click()
+    await page.waitForTimeout(700)
+
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /总览/i })
+      .click()
+    await expect(page.getByText('请先关闭校准控制')).toBeVisible()
+    await page.getByRole('button', { name: '关闭并继续' }).click({ force: true })
+    await page.waitForTimeout(500)
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /总览/i })
+      .click()
+    const dashboardTarget = page.getByLabel('Dashboard target temperature')
+
+    await dashboardTarget.fill('50')
+    await page.waitForTimeout(1_000)
+    await expect
+      .poll(
+        () =>
+          runtimeRequests().filter(
+            (request) =>
+              typeof (request.body as { targetTempC?: number } | null)?.targetTempC === 'number' &&
+              (request.body as { targetTempC?: number }).targetTempC === 50
+          ).length
+      )
+      .toBeGreaterThanOrEqual(1)
+    await expect(dashboardTarget).toHaveValue('50')
+
+    await dashboardTarget.fill('55')
+    await page.waitForTimeout(1_000)
+    await expect
+      .poll(
+        () =>
+          runtimeRequests().filter(
+            (request) =>
+              typeof (request.body as { targetTempC?: number } | null)?.targetTempC === 'number' &&
+              (request.body as { targetTempC?: number }).targetTempC === 55
+          ).length
+      )
+      .toBeGreaterThanOrEqual(1)
+    await expect(dashboardTarget).toHaveValue('55')
+  })
+
+  test('keeps RTD slot fit after the devd calibration response is applied', async ({ page }) => {
+    await page.goto('/?demo=false')
+
+    await page
+      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('button', { name: /校准/i })
+      .click()
+    await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
+    await expect(page.getByLabel('目标 ADC 输入')).toBeVisible()
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
+
+    const summary = page.getByLabel('当前 ADC 标定状态摘要')
+    await summary.getByRole('button', { name: '编辑' }).first().click()
+    const slotDialog = page.getByRole('dialog')
+    await slotDialog.getByLabel('增益').fill('0.99010')
+    await slotDialog.getByLabel('偏移').fill('10.9')
+    await slotDialog.getByRole('button', { name: '保存' }).click()
+
+    await expect(summary).toContainText('槽位 A')
+    await expect(summary).toContainText('0.99010x')
+    await expect(summary).toContainText('10.9mV')
+  })
+
   test('sends runtime commands through the active devd lease', async ({ page }) => {
     await page.goto('/?demo=false')
 
     await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByText('运行时已同步')).toBeVisible()
 
     await page.getByRole('button', { name: /总览/i }).click()
     await page.getByLabel('Dashboard target temperature').fill('235')
@@ -303,10 +657,18 @@ test.describe('control plane live devd bridge', () => {
 
     await page.getByRole('button', { name: /总览/i }).click()
     await page.getByRole('button', { name: 'Hold heater' }).click()
-    await expect(page.getByText('Heater held')).toBeVisible()
+    await expect(page.getByText('Heater hold requested')).toBeVisible()
 
     expect(wifiRequests()).toHaveLength(0)
     await expect.poll(() => runtimeRequests().length).toBeGreaterThanOrEqual(3)
+    await expect
+      .poll(() =>
+        page
+          .locator('.industrial-action-feedback strong')
+          .textContent()
+          .then((value) => value?.trim() ?? '')
+      )
+      .toBe('Heater held')
     expect(runtimeRequests()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -323,6 +685,88 @@ test.describe('control plane live devd bridge', () => {
         }),
       ])
     )
+  })
+
+  test('keeps the live devd workspace visible across repeated reloads', async ({ page }) => {
+    await page.goto('/?demo=false')
+
+    for (let reloadIndex = 0; reloadIndex < 3; reloadIndex += 1) {
+      await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+      await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
+      await expect(page.getByText('No known devices')).toHaveCount(0)
+      await expect(page.getByText('Failed to fetch')).toHaveCount(0)
+
+      await page.reload()
+      await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+      await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
+      await expect(page.getByText('No known devices')).toHaveCount(0)
+      await expect(page.getByText('Failed to fetch')).toHaveCount(0)
+      await page.waitForTimeout(2500)
+      await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
+      await expect(page.getByText('运行时已同步')).toBeVisible()
+      await expect(page.getByText('有效')).toBeVisible()
+      await expect(page.getByText('Lease conflict')).toHaveCount(0)
+      await expect(page.getByText('lease_conflict')).toHaveCount(0)
+    }
+  })
+
+  test('keeps a devd bridge placeholder when the device list refresh fails', async ({ page }) => {
+    injectStatusTimeoutEvent = true
+    failDeviceList = true
+
+    await page.goto('/?demo=false')
+
+    const targetRegion = page.getByRole('region', { name: '当前目标' })
+    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(targetRegion).toContainText('传输')
+    await expect(targetRegion).toContainText('DEVD')
+    await expect(targetRegion).toContainText('租约')
+    await expect(targetRegion).toContainText('无')
+    await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
+    await expect(page.getByText('No known devices')).toHaveCount(0)
+    await expect(
+      page.getByLabel('Transport capabilities').getByText('Failed to fetch')
+    ).toBeVisible()
+    injectStatusTimeoutEvent = false
+  })
+
+  test('surfaces the missing authorized serial port instead of falling back to the empty chooser', async ({
+    page,
+  }) => {
+    missingAuthorizedPort = true
+
+    await page.goto('/?demo=false')
+
+    const targetRegion = page.getByRole('region', { name: '当前目标' })
+    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(targetRegion).toContainText('传输')
+    await expect(targetRegion).toContainText('DEVD')
+    await expect(targetRegion).toContainText('租约')
+    await expect(targetRegion).toContainText('有效')
+    await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
+    await expect(page.getByText('No known devices')).toHaveCount(0)
+    await expect(page.getByText('Failed to fetch')).toHaveCount(0)
+    await expect(
+      page
+        .getByLabel('Transport capabilities')
+        .getByText('Authorized serial port /dev/cu.usbmodem21231401 is missing.')
+    ).toBeVisible()
+    await expect(
+      page
+        .getByLabel('Transport capabilities')
+        .getByText(
+          'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.'
+        )
+    ).toBeVisible()
+    await expect(
+      page.getByText(
+        'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.'
+      )
+    ).toHaveCount(2)
   })
 
   function wifiRequests() {
@@ -370,7 +814,7 @@ function sendJson(response: http.ServerResponse, statusCode: number, payload: un
 function sendSse(
   response: http.ServerResponse,
   clients: Set<http.ServerResponse>,
-  event: Record<string, unknown>
+  event?: Record<string, unknown>
 ) {
   response.writeHead(200, {
     'access-control-allow-origin': '*',
@@ -378,10 +822,22 @@ function sendSse(
     connection: 'keep-alive',
     'content-type': 'text/event-stream',
   })
-  response.write(`event: ${event.kind}\n`)
-  response.write(`data: ${JSON.stringify(event)}\n\n`)
+  if (event) {
+    response.write(`event: ${event.kind}\n`)
+    response.write(`data: ${JSON.stringify(event)}\n\n`)
+  }
   clients.add(response)
   response.on('close', () => clients.delete(response))
+}
+
+function sendMissingAuthorizedPortError(response: http.ServerResponse) {
+  sendJson(response, 503, {
+    error: {
+      code: 'serial_open_failed',
+      message: 'Failed to open serial port: No such file or directory',
+      retryable: true,
+    },
+  })
 }
 
 function identity(capabilities: string[]) {
@@ -410,25 +866,687 @@ function network(state: 'idle' | 'connected') {
   }
 }
 
-function status(networkSummary: ReturnType<typeof network>) {
+function status(networkSummary: NetworkSummary): ControlPlaneStatus {
   return {
     mode: 'sampling',
     uptimeSeconds: 42,
     currentTempC: 181.5,
     targetTempC: 220,
+    selectedPresetSlot: 5,
+    presetsC: [50, 100, 120, 150, 180, 220, 210, 230, 250, 300],
     heaterEnabled: true,
     heaterOutputPercent: 18,
     activeCoolingEnabled: true,
     fanDisplayState: 'AUTO',
     fanEnabled: true,
     fanPwmPermille: 500,
+    rtdRawAdcMv: 1123,
+    vinRawAdcMv: 1678,
     voltageMv: 20000,
     currentMa: 720,
     boardTempCenti: 3600,
     pdRequestMv: 20000,
     pdContractMv: 20000,
     pdState: 'ready',
+    manualPpsEnabled: false,
+    manualPpsMv: null,
+    manualPpsMa: null,
+    ppsCapabilityMinMv: 5000,
+    ppsCapabilityMaxMv: 20000,
+    ppsCapabilityMaxMa: 3000,
+    manualPpsError: null,
+    heaterLockReason: null,
+    calibration: calibrationRuntimeState(),
     frontpanelKey: null,
     network: networkSummary,
   }
+}
+
+function calibrationRuntimeState(): CalibrationRuntimeState {
+  return {
+    mode: 'off',
+    ppsEnabled: false,
+    ppsMv: null,
+    ppsMa: null,
+    heaterEnabled: false,
+    targetAdcMv: null,
+    stable: false,
+    stabilityErrorMv: null,
+    error: null,
+    job: {
+      kind: null,
+      status: 'idle',
+      progressPercent: 0,
+      samplesCollected: 0,
+      nextRequestMv: null,
+      message: null,
+    },
+  }
+}
+
+function calibration(): CalibrationState {
+  return {
+    rtdAdc: {
+      samples: [
+        { observedMv: 1123, expectedMv: 980, referenceTempC: 25, targetAdcMv: 980 },
+        { observedMv: 1188, expectedMv: 1120, referenceTempC: 60, targetAdcMv: 1120 },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+      fittedFit: createCalibrationFit(
+        [
+          { observedMv: 1123, expectedMv: 980, referenceTempC: 25, targetAdcMv: 980 },
+          { observedMv: 1188, expectedMv: 1120, referenceTempC: 60, targetAdcMv: 1120 },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        'rtd_adc'
+      ),
+      slots: {
+        a: { gain: 1, offsetMv: 0 },
+        b: { gain: 1, offsetMv: 0 },
+      },
+      activeSlot: 'a',
+    },
+    vinAdc: {
+      samples: [
+        { observedMv: 1678, expectedMv: 20000, referenceVinMv: 20000 },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+      fittedFit: createCalibrationFit(
+        [
+          { observedMv: 1678, expectedMv: 20000, referenceVinMv: 20000 },
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+        ],
+        'vin_adc'
+      ),
+      slots: {
+        a: { gain: 1, offsetMv: 0 },
+        b: { gain: 1, offsetMv: 0 },
+      },
+      activeSlot: 'a',
+    },
+  }
+}
+
+function heaterCurve(): HeaterCurveState {
+  return {
+    active: {
+      points: [
+        { tempCentiC: 2120, resistanceMilliohms: 4251 },
+        { tempCentiC: 5180, resistanceMilliohms: 4732 },
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      ],
+    },
+    preview: null,
+  }
+}
+
+function withStatusNetwork(
+  currentStatus: ControlPlaneStatus,
+  networkSummary: NetworkSummary
+): ControlPlaneStatus {
+  return {
+    ...currentStatus,
+    calibration: cloneCalibrationRuntimeState(currentStatus.calibration),
+    network: { ...networkSummary },
+  }
+}
+
+function applyRuntimeRequest(currentStatus: ControlPlaneStatus, body: unknown): ControlPlaneStatus {
+  const calibrationPatch = recordValue(bodyField(body, 'calibration'))
+  const nextCalibration = calibrationPatch
+    ? applyCalibrationRuntimeRequest(currentStatus.calibration, calibrationPatch)
+    : cloneCalibrationRuntimeState(currentStatus.calibration)
+  const topLevelHeaterEnabled =
+    typeof bodyField(body, 'heaterEnabled') === 'boolean'
+      ? (bodyField(body, 'heaterEnabled') as boolean)
+      : currentStatus.heaterEnabled
+  const calibrationHeaterEnabled =
+    calibrationPatch && typeof calibrationPatch.heaterEnabled === 'boolean'
+      ? calibrationPatch.heaterEnabled
+      : undefined
+  const heaterEnabled = calibrationHeaterEnabled ?? topLevelHeaterEnabled
+  const manualPpsEnabled =
+    typeof bodyField(body, 'manualPpsEnabled') === 'boolean'
+      ? (bodyField(body, 'manualPpsEnabled') as boolean)
+      : (currentStatus.manualPpsEnabled ?? false)
+  const manualPpsMv =
+    typeof bodyField(body, 'manualPpsMv') === 'number'
+      ? (bodyField(body, 'manualPpsMv') as number)
+      : manualPpsEnabled
+        ? (currentStatus.manualPpsMv ?? 9000)
+        : null
+  const manualPpsMa =
+    typeof bodyField(body, 'manualPpsMa') === 'number'
+      ? (bodyField(body, 'manualPpsMa') as number)
+      : manualPpsEnabled
+        ? (currentStatus.manualPpsMa ?? 2000)
+        : null
+
+  return {
+    ...currentStatus,
+    targetTempC:
+      typeof bodyField(body, 'targetTempC') === 'number'
+        ? (bodyField(body, 'targetTempC') as number)
+        : currentStatus.targetTempC,
+    selectedPresetSlot:
+      typeof bodyField(body, 'selectedPresetSlot') === 'number'
+        ? (bodyField(body, 'selectedPresetSlot') as number)
+        : currentStatus.selectedPresetSlot,
+    presetsC: Array.isArray(bodyField(body, 'presetsC'))
+      ? ((bodyField(body, 'presetsC') as Array<number | null>).map((value) =>
+          typeof value === 'number' || value === null ? value : null
+        ) as Array<number | null>)
+      : currentStatus.presetsC,
+    activeCoolingEnabled:
+      typeof bodyField(body, 'activeCoolingEnabled') === 'boolean'
+        ? (bodyField(body, 'activeCoolingEnabled') as boolean)
+        : currentStatus.activeCoolingEnabled,
+    fanDisplayState: bodyField(body, 'activeCoolingEnabled') === false ? 'OFF' : 'AUTO',
+    heaterEnabled,
+    heaterOutputPercent: heaterEnabled ? 18 : 0,
+    manualPpsEnabled,
+    manualPpsMv,
+    manualPpsMa,
+    calibration: nextCalibration,
+    network: network('connected'),
+  }
+}
+
+function applyCalibrationRuntimeRequest(
+  current: CalibrationRuntimeState,
+  patch: Record<string, unknown>
+): CalibrationRuntimeState {
+  const nextMode =
+    typeof patch.mode === 'string' ? (patch.mode as CalibrationRuntimeState['mode']) : current.mode
+  const nextPpsEnabled =
+    typeof patch.ppsEnabled === 'boolean' ? patch.ppsEnabled : current.ppsEnabled
+  const nextHeaterEnabled =
+    nextMode === 'off'
+      ? false
+      : typeof patch.heaterEnabled === 'boolean'
+        ? patch.heaterEnabled
+        : current.heaterEnabled
+  const nextTargetAdcMv =
+    typeof patch.targetAdcMv === 'number' ? patch.targetAdcMv : (current.targetAdcMv ?? null)
+  return {
+    ...current,
+    mode: nextMode,
+    ppsEnabled: nextPpsEnabled,
+    ppsMv: patch.ppsEnabled === false ? null : numberOrFallback(patch.ppsMv, current.ppsMv),
+    ppsMa: patch.ppsEnabled === false ? null : current.ppsMa,
+    heaterEnabled: nextHeaterEnabled,
+    targetAdcMv: nextTargetAdcMv,
+    stable:
+      nextMode === 'rtd_adc' && nextPpsEnabled && nextHeaterEnabled && nextTargetAdcMv != null,
+    stabilityErrorMv:
+      nextMode === 'rtd_adc' && nextPpsEnabled && nextHeaterEnabled && nextTargetAdcMv != null
+        ? 0
+        : null,
+    error: null,
+    job:
+      nextMode === 'off'
+        ? {
+            kind: null,
+            status: 'idle',
+            progressPercent: 0,
+            samplesCollected: 0,
+            nextRequestMv: null,
+            message: null,
+          }
+        : cloneCalibrationJob(current.job),
+  }
+}
+
+function applyCalibrationRequest(
+  current: CalibrationState,
+  currentStatus: ControlPlaneStatus,
+  body: unknown
+): CalibrationState {
+  const op = bodyField(body, 'op')
+  if (op === 'import') {
+    const stateValue = calibrationStateValue(bodyField(body, 'state'))
+    if (!stateValue) {
+      return cloneCalibrationState(current)
+    }
+    return normalizeCalibrationState(stateValue)
+  }
+
+  const channel = calibrationChannelValue(bodyField(body, 'channel'))
+  if (!channel) {
+    return cloneCalibrationState(current)
+  }
+
+  const next = cloneCalibrationState(current)
+  const channelState = channel === 'rtd_adc' ? next.rtdAdc : next.vinAdc
+  const samples = channelState.samples
+
+  if (op === 'clear') {
+    for (let index = 0; index < samples.length; index += 1) {
+      samples[index] = null
+    }
+  } else if (op === 'delete') {
+    const sampleIndex = numberOrFallback(bodyField(body, 'sampleIndex'), null)
+    if (sampleIndex != null && sampleIndex >= 0 && sampleIndex < samples.length) {
+      samples[sampleIndex] = null
+    }
+  } else if (op === 'capture') {
+    const referenceTempC = numberOrFallback(bodyField(body, 'referenceTempC'), null)
+    const referenceVinMv = numberOrFallback(
+      bodyField(body, 'referenceVinMv'),
+      currentStatus.voltageMv
+    )
+    const targetAdcMv = numberOrFallback(
+      bodyField(body, 'targetAdcMv'),
+      currentStatus.calibration.targetAdcMv ?? currentStatus.rtdRawAdcMv
+    )
+    const nextSample =
+      channel === 'rtd_adc'
+        ? {
+            observedMv: currentStatus.rtdRawAdcMv ?? 0,
+            expectedMv: targetAdcMv ?? 0,
+            ...(referenceTempC != null ? { referenceTempC } : {}),
+            ...(targetAdcMv != null ? { targetAdcMv } : {}),
+          }
+        : {
+            observedMv: currentStatus.vinRawAdcMv ?? 0,
+            expectedMv: vinAdcMvForInput(referenceVinMv ?? 0),
+            ...(referenceVinMv != null ? { referenceVinMv } : {}),
+          }
+    const emptyIndex = samples.findIndex((sample) => sample == null)
+    samples[emptyIndex === -1 ? samples.length - 1 : emptyIndex] = nextSample
+  } else if (op === 'set_active_slot') {
+    const slot = bodyField(body, 'slot')
+    if (slot === 'a' || slot === 'b') {
+      channelState.activeSlot = slot
+    }
+  } else if (op === 'set_slot_fit') {
+    const slot = bodyField(body, 'slot')
+    const fit = calibrationSlotFitValue(bodyField(body, 'fit'))
+    if ((slot === 'a' || slot === 'b') && fit) {
+      channelState.slots[slot] = fit
+    }
+  }
+
+  return normalizeCalibrationState(next)
+}
+
+function applyCalibrationJobRequest(
+  currentStatus: ControlPlaneStatus,
+  body: unknown
+): ControlPlaneStatus {
+  const op = bodyField(body, 'op')
+  const currentJob = currentStatus.calibration.job
+  const nextJob: CalibrationJobState =
+    op === 'start'
+      ? {
+          kind:
+            bodyField(body, 'kind') === 'heater_curve_auto' ||
+            bodyField(body, 'kind') === 'vin_adc_auto'
+              ? (bodyField(body, 'kind') as CalibrationJobState['kind'])
+              : null,
+          status: 'running',
+          progressPercent: 0,
+          samplesCollected: 0,
+          nextRequestMv: bodyField(body, 'kind') === 'vin_adc_auto' ? 12000 : 20000,
+          message: null,
+        }
+      : {
+          ...cloneCalibrationJob(currentJob),
+          status: 'canceled',
+          progressPercent: 0,
+          nextRequestMv: null,
+          message: 'Canceled by operator.',
+        }
+
+  return {
+    ...currentStatus,
+    calibration: {
+      ...cloneCalibrationRuntimeState(currentStatus.calibration),
+      job: nextJob,
+    },
+  }
+}
+
+function applyHeaterCurveRequest(current: HeaterCurveState, body: unknown): HeaterCurveState {
+  const op = bodyField(body, 'op')
+  if (op !== 'preview') {
+    return {
+      active: cloneHeaterCurvePackage(current.active),
+      preview: null,
+    }
+  }
+
+  const packageValue = heaterCurvePackageValue(bodyField(body, 'package'))
+  if (!packageValue) {
+    return cloneHeaterCurveState(current)
+  }
+
+  return {
+    active: cloneHeaterCurvePackage(current.active),
+    preview: normalizeHeaterCurvePackage(packageValue),
+  }
+}
+
+function saveHeaterCurve(current: HeaterCurveState): HeaterCurveState {
+  if (!current.preview) {
+    return cloneHeaterCurveState(current)
+  }
+  return {
+    active: cloneHeaterCurvePackage(current.preview),
+    preview: null,
+  }
+}
+
+function createCalibrationFit(
+  samples: Array<Record<string, unknown> | null>,
+  channel: CalibrationChannel
+) {
+  const custom = samples.filter(
+    (sample): sample is { observedMv: number; expectedMv: number } =>
+      sample != null &&
+      Number.isFinite(sample.observedMv) &&
+      Number.isFinite(sample.expectedMv) &&
+      (channel !== 'rtd_adc' ||
+        (Number.isFinite(sample.referenceTempC) && Number.isFinite(sample.targetAdcMv)))
+  )
+  if (custom.length === 0) {
+    return {
+      gain: 1,
+      offsetMv: 0,
+      sampleCount: 0,
+    }
+  }
+  if (custom.length === 1) {
+    return {
+      gain: 1,
+      offsetMv: custom[0].expectedMv - custom[0].observedMv,
+      sampleCount: 1,
+    }
+  }
+  const points = custom
+  const n = points.length
+  const sumX = points.reduce((sum, sample) => sum + sample.observedMv, 0)
+  const sumY = points.reduce((sum, sample) => sum + sample.expectedMv, 0)
+  const sumXX = points.reduce((sum, sample) => sum + sample.observedMv * sample.observedMv, 0)
+  const sumXY = points.reduce((sum, sample) => sum + sample.observedMv * sample.expectedMv, 0)
+  const denominator = n * sumXX - sumX * sumX
+  const gain = Math.abs(denominator) < Number.EPSILON ? 1 : (n * sumXY - sumX * sumY) / denominator
+  const offsetMv =
+    Math.abs(denominator) < Number.EPSILON ? (sumY - sumX) / n : (sumY - gain * sumX) / n
+  return {
+    gain,
+    offsetMv,
+    sampleCount: custom.length,
+  }
+}
+
+function cloneCalibrationState(current: CalibrationState): CalibrationState {
+  return {
+    rtdAdc: {
+      samples: current.rtdAdc.samples.map((sample) => (sample ? { ...sample } : null)),
+      fittedFit: { ...current.rtdAdc.fittedFit },
+      slots: {
+        a: { ...current.rtdAdc.slots.a },
+        b: { ...current.rtdAdc.slots.b },
+      },
+      activeSlot: current.rtdAdc.activeSlot,
+    },
+    vinAdc: {
+      samples: current.vinAdc.samples.map((sample) => (sample ? { ...sample } : null)),
+      fittedFit: { ...current.vinAdc.fittedFit },
+      slots: {
+        a: { ...current.vinAdc.slots.a },
+        b: { ...current.vinAdc.slots.b },
+      },
+      activeSlot: current.vinAdc.activeSlot,
+    },
+  }
+}
+
+function cloneCalibrationRuntimeState(current: CalibrationRuntimeState): CalibrationRuntimeState {
+  return {
+    ...current,
+    job: cloneCalibrationJob(current.job),
+  }
+}
+
+function cloneCalibrationJob(current: CalibrationJobState): CalibrationJobState {
+  return { ...current }
+}
+
+function cloneHeaterCurveState(current: HeaterCurveState): HeaterCurveState {
+  return {
+    active: cloneHeaterCurvePackage(current.active),
+    preview: current.preview ? cloneHeaterCurvePackage(current.preview) : null,
+  }
+}
+
+function cloneHeaterCurvePackage(current: HeaterCurvePackage): HeaterCurvePackage {
+  return {
+    points: current.points.map((point) => (point ? { ...point } : null)),
+  }
+}
+
+function normalizeHeaterCurvePackage(current: HeaterCurvePackage): HeaterCurvePackage {
+  const points = current.points
+    .filter((point): point is NonNullable<typeof point> => point != null)
+    .map((point) => ({ ...point }))
+    .sort((left, right) => left.tempCentiC - right.tempCentiC)
+
+  return {
+    points: Array.from({ length: 8 }, (_, index) => points[index] ?? null),
+  }
+}
+
+function normalizeCalibrationSample(value: unknown) {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const observedMv = numberOrFallback(record.observedMv, null)
+  const expectedMv = numberOrFallback(record.expectedMv, null)
+  if (observedMv == null || expectedMv == null) {
+    return null
+  }
+  const referenceTempC = numberOrFallback(record.referenceTempC, null)
+  const targetAdcMv = numberOrFallback(record.targetAdcMv, null)
+  const referenceVinMv = numberOrFallback(record.referenceVinMv, null)
+  return {
+    observedMv,
+    expectedMv,
+    ...(referenceTempC != null ? { referenceTempC } : {}),
+    ...(targetAdcMv != null ? { targetAdcMv } : {}),
+    ...(referenceVinMv != null ? { referenceVinMv } : {}),
+  }
+}
+
+function heaterCurvePackageValue(value: unknown): HeaterCurvePackage | null {
+  const record = recordValue(value)
+  if (!record || !Array.isArray(record.points)) {
+    return null
+  }
+  return {
+    points: record.points.map((point) => {
+      const currentPoint = recordValue(point)
+      if (!currentPoint) {
+        return null
+      }
+      const tempCentiC = numberOrFallback(currentPoint.tempCentiC, null)
+      const resistanceMilliohms = numberOrFallback(currentPoint.resistanceMilliohms, null)
+      return tempCentiC == null || resistanceMilliohms == null
+        ? null
+        : { tempCentiC, resistanceMilliohms }
+    }),
+  }
+}
+
+function calibrationStateValue(value: unknown): CalibrationState | null {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const rtdAdc = calibrationChannelStateValue(record.rtdAdc)
+  const vinAdc = calibrationChannelStateValue(record.vinAdc)
+  if (!rtdAdc || !vinAdc) {
+    return null
+  }
+  return {
+    rtdAdc,
+    vinAdc,
+  }
+}
+
+function calibrationChannelStateValue(value: unknown) {
+  const record = recordValue(value)
+  if (!record || !Array.isArray(record.samples)) {
+    return null
+  }
+  const fittedFit = calibrationFitValue(record.fittedFit)
+  const slots = calibrationSlotSetValue(record.slots)
+  const activeSlot = calibrationSlotIdValue(record.activeSlot)
+  if (!fittedFit || !slots || !activeSlot) {
+    return null
+  }
+  return {
+    samples: record.samples.map(normalizeCalibrationSample),
+    fittedFit,
+    slots,
+    activeSlot,
+  }
+}
+
+function calibrationFitValue(value: unknown): CalibrationFit | null {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const gain = numberOrFallback(record.gain, null)
+  const offsetMv = numberOrFallback(record.offsetMv, null)
+  const sampleCount = numberOrFallback(record.sampleCount, null)
+  if (gain == null || offsetMv == null || sampleCount == null) {
+    return null
+  }
+  return {
+    gain,
+    offsetMv,
+    sampleCount,
+  }
+}
+
+function calibrationSlotFitValue(value: unknown): CalibrationSlotFit | null {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const gain = numberOrFallback(record.gain, null)
+  const offsetMv = numberOrFallback(record.offsetMv, null)
+  if (gain == null || offsetMv == null) {
+    return null
+  }
+  return {
+    gain,
+    offsetMv,
+  }
+}
+
+function calibrationSlotSetValue(value: unknown) {
+  const record = recordValue(value)
+  if (!record) {
+    return null
+  }
+  const a = calibrationSlotFitValue(record.a)
+  const b = calibrationSlotFitValue(record.b)
+  if (!a || !b) {
+    return null
+  }
+  return { a, b }
+}
+
+function calibrationSlotIdValue(value: unknown) {
+  return value === 'a' || value === 'b' ? value : null
+}
+
+function normalizeCalibrationState(current: CalibrationState): CalibrationState {
+  return {
+    rtdAdc: normalizeCalibrationChannelState(current.rtdAdc, 'rtd_adc'),
+    vinAdc: normalizeCalibrationChannelState(current.vinAdc, 'vin_adc'),
+  }
+}
+
+function normalizeCalibrationChannelState(
+  current: CalibrationState['rtdAdc'] | CalibrationState['vinAdc'],
+  channel: CalibrationChannel
+) {
+  const samples = normalizeCalibrationChannelSamples(current.samples)
+  return {
+    samples,
+    fittedFit: createCalibrationFit(samples, channel),
+    slots: {
+      a: normalizeCalibrationSlotFit(current.slots.a),
+      b: normalizeCalibrationSlotFit(current.slots.b),
+    },
+    activeSlot: calibrationSlotIdValue(current.activeSlot) ?? 'a',
+  }
+}
+
+function normalizeCalibrationChannelSamples(
+  samples: Array<Record<string, unknown> | null>
+): Array<Record<string, unknown> | null> {
+  const compact = samples
+    .map(normalizeCalibrationSample)
+    .filter(
+      (sample): sample is NonNullable<ReturnType<typeof normalizeCalibrationSample>> =>
+        sample != null
+    )
+  return Array.from({ length: 8 }, (_, index) => compact[index] ?? null)
+}
+
+function normalizeCalibrationSlotFit(fit: CalibrationSlotFit): CalibrationSlotFit {
+  return {
+    gain: Number.isFinite(fit.gain) ? fit.gain : 1,
+    offsetMv: Number.isFinite(fit.offsetMv) ? fit.offsetMv : 0,
+  }
+}
+
+function vinAdcMvForInput(inputMv: number) {
+  return Math.round((inputMv * 5100) / (56_000 + 5100))
+}
+
+function calibrationChannelValue(value: unknown): CalibrationChannel | null {
+  return value === 'rtd_adc' || value === 'vin_adc' ? value : null
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : null
+}
+
+function numberOrFallback(value: unknown, fallback: number | null) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }

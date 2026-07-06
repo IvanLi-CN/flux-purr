@@ -94,8 +94,8 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
     "vinAdc": [null, null, null, null, null, null, null, null]
   },
   "draft": {
-    "rtdAdc": [{ "observedMv": 1120, "expectedMv": 1118 }, null, null, null, null, null, null, null],
-    "vinAdc": [{ "observedMv": 1670, "expectedMv": 1820 }, null, null, null, null, null, null, null]
+    "rtdAdc": [{ "observedMv": 1120, "expectedMv": 1118, "referenceTempC": 25.0 }, null, null, null, null, null, null, null],
+    "vinAdc": [{ "observedMv": 1670, "expectedMv": 1820, "referenceVinMv": 20000 }, null, null, null, null, null, null, null]
   },
   "activeFit": {
     "rtdAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 0, "defaultSampleCount": 2 },
@@ -108,7 +108,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 }
 ```
 
-Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples. Capture commands accept physical references (`referenceTempC` or `referenceVinMv`) and convert them into expected ADC millivolts using the RTD/PT1000 or VIN divider model. Import replaces the full draft package.
+Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples and also preserves the owner-entered physical reference (`referenceTempC` for RTD, `referenceVinMv` for VIN) whenever one was provided. Capture commands accept those physical references and convert them into expected ADC millivolts using the RTD/PT1000 or VIN divider model. Import replaces the full draft package.
 
 ### `CalibrationRuntimeState`
 
@@ -315,6 +315,8 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 ```
 
 `POST /api/v1/devices/:id/connect?lease_id=...` and `POST /api/v1/devices/:id/disconnect?lease_id=...` return the updated daemon-local `DeviceRecord`.
+
+`GET /api/v1/devices` is the bounded polling snapshot for the Web device picker and live summary. It returns summary device status plus a small inline event slice. For native serial targets, those inline events keep only the fields needed for polling and transport-issue surfacing; full redacted transport frame payloads stay on the device-scoped event stream so the polling response does not balloon during calibration or monitor-heavy sessions.
 
 `GET /api/v1/devices/:id/events` returns `text/event-stream`. The stream first replays that device's bounded event backlog, then continues with live events. Each SSE event name matches the `kind` field (`serial`, `lease`, `wifi`, `runtime`, `flash`, `transport`, etc.) and each `data` frame is a `DevdEvent` JSON object. Events are scoped to the requested device ID. Native USB JSONL exchanges emit paired `transport` events with direction, transport, request ID, frame type, and a redacted frame payload so the Web Runtime trace can show complete TX/RX data without leaking WiFi passwords.
 

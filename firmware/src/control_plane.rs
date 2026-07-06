@@ -3,11 +3,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DeviceMode, DeviceStatus, PdState,
-    frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey},
+    frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey, HeaterLockReason},
     memory::{
-        ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationConfig,
-        AdcCalibrationSample, HEATER_CURVE_MAX_POINTS, HeaterCurveConfig, HeaterCurvePoint,
-        MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, adc_calibration_fit,
+        ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationFit,
+        AdcCalibrationSample, AdcCalibrationSlotFit, AdcCalibrationSlotId, HEATER_CURVE_MAX_POINTS,
+        HeaterCurveConfig, HeaterCurvePoint, MEMORY_WIFI_PASSWORD_MAX_LEN,
+        MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, adc_calibration_fit,
     },
 };
 
@@ -142,6 +143,7 @@ pub struct ControlPlaneStatus {
     pub pps_capability_max_mv: Option<u16>,
     pub pps_capability_max_ma: Option<u16>,
     pub manual_pps_error: Option<String<ERROR_CODE_MAX_LEN>>,
+    pub heater_lock_reason: Option<String<ERROR_CODE_MAX_LEN>>,
     pub calibration: CalibrationRuntimeStateWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
@@ -191,10 +193,22 @@ impl ControlPlaneStatus {
             pps_capability_max_mv: None,
             pps_capability_max_ma: None,
             manual_pps_error: None,
+            heater_lock_reason: None,
             calibration: CalibrationRuntimeStateWire::default(),
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
         }
+    }
+
+    pub fn with_runtime_target_temp_c(mut self, target_temp_c: i16) -> Self {
+        self.target_temp_c = target_temp_c;
+        self
+    }
+}
+
+impl From<HeaterLockReason> for String<ERROR_CODE_MAX_LEN> {
+    fn from(value: HeaterLockReason) -> Self {
+        string(value.label())
     }
 }
 
@@ -487,11 +501,14 @@ impl CalibrationChannelWire {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationSampleWire {
     pub observed_mv: u16,
     pub expected_mv: u16,
+    pub reference_temp_c: Option<f32>,
+    pub target_adc_mv: Option<u16>,
+    pub reference_vin_mv: Option<u16>,
 }
 
 impl From<AdcCalibrationSample> for CalibrationSampleWire {
@@ -499,6 +516,9 @@ impl From<AdcCalibrationSample> for CalibrationSampleWire {
         Self {
             observed_mv: value.observed_mv,
             expected_mv: value.expected_mv,
+            reference_temp_c: value.reference_temp_deci_c.map(|value| value as f32 / 10.0),
+            target_adc_mv: value.target_adc_mv,
+            reference_vin_mv: value.reference_vin_mv,
         }
     }
 }
@@ -508,15 +528,18 @@ impl From<CalibrationSampleWire> for AdcCalibrationSample {
         Self {
             observed_mv: value.observed_mv,
             expected_mv: value.expected_mv,
+            reference_temp_deci_c: value.reference_temp_c.map(|temp_c| {
+                let scaled = if temp_c >= 0.0 {
+                    temp_c * 10.0 + 0.5
+                } else {
+                    temp_c * 10.0 - 0.5
+                };
+                (scaled as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+            }),
+            target_adc_mv: value.target_adc_mv,
+            reference_vin_mv: value.reference_vin_mv,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalibrationPackageWire {
-    pub rtd_adc: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
-    pub vin_adc: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -524,24 +547,44 @@ pub struct CalibrationPackageWire {
 pub struct CalibrationFitWire {
     pub gain: f32,
     pub offset_mv: f32,
-    pub custom_sample_count: usize,
-    pub default_sample_count: usize,
+    pub sample_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CalibrationFitsWire {
-    pub rtd_adc: CalibrationFitWire,
-    pub vin_adc: CalibrationFitWire,
+pub struct CalibrationSlotFitWire {
+    pub gain: f32,
+    pub offset_mv: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationSlotIdWire {
+    A,
+    B,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationSlotSetWire {
+    pub a: CalibrationSlotFitWire,
+    pub b: CalibrationSlotFitWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationChannelStateWire {
+    pub samples: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
+    pub fitted_fit: CalibrationFitWire,
+    pub slots: CalibrationSlotSetWire,
+    pub active_slot: CalibrationSlotIdWire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationStateWire {
-    pub active: CalibrationPackageWire,
-    pub draft: CalibrationPackageWire,
-    pub active_fit: CalibrationFitsWire,
-    pub draft_fit: CalibrationFitsWire,
+    pub rtd_adc: CalibrationChannelStateWire,
+    pub vin_adc: CalibrationChannelStateWire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -603,6 +646,8 @@ pub enum CalibrationConfigOp {
     Delete,
     Clear,
     Import,
+    SetActiveSlot,
+    SetSlotFit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -612,30 +657,13 @@ pub struct CalibrationConfigCommand {
     pub channel: Option<CalibrationChannelWire>,
     pub reference_temp_c: Option<f32>,
     pub reference_vin_mv: Option<u32>,
+    pub target_adc_mv: Option<u16>,
     pub observed_mv: Option<u16>,
     pub expected_mv: Option<u16>,
     pub sample_index: Option<usize>,
-    pub package: Option<CalibrationPackageWire>,
-}
-
-impl CalibrationPackageWire {
-    pub fn from_memory(config: &AdcCalibrationConfig) -> Self {
-        Self {
-            rtd_adc: samples_to_wire(config.rtd.samples),
-            vin_adc: samples_to_wire(config.vin.samples),
-        }
-    }
-
-    pub fn to_memory(self) -> AdcCalibrationConfig {
-        AdcCalibrationConfig {
-            rtd: crate::memory::AdcCalibrationChannelConfig {
-                samples: samples_from_wire(self.rtd_adc),
-            },
-            vin: crate::memory::AdcCalibrationChannelConfig {
-                samples: samples_from_wire(self.vin_adc),
-            },
-        }
-    }
+    pub state: Option<CalibrationStateWire>,
+    pub slot: Option<CalibrationSlotIdWire>,
+    pub fit: Option<CalibrationSlotFitWire>,
 }
 
 impl HeaterCurvePackageWire {
@@ -658,10 +686,18 @@ impl HeaterCurvePackageWire {
 
 pub fn calibration_state_from_memory(config: &MemoryConfig) -> CalibrationStateWire {
     CalibrationStateWire {
-        active: CalibrationPackageWire::from_memory(&config.active_adc_calibration),
-        draft: CalibrationPackageWire::from_memory(&config.draft_adc_calibration),
-        active_fit: CalibrationFitsWire::from_memory(&config.active_adc_calibration),
-        draft_fit: CalibrationFitsWire::from_memory(&config.draft_adc_calibration),
+        rtd_adc: CalibrationChannelStateWire::from_memory(
+            config.adc_calibration.rtd.samples,
+            adc_calibration_fit(&config.adc_calibration, AdcCalibrationChannel::Rtd),
+            config.adc_calibration.rtd.slots,
+            config.adc_calibration.rtd.active_slot,
+        ),
+        vin_adc: CalibrationChannelStateWire::from_memory(
+            config.adc_calibration.vin.samples,
+            adc_calibration_fit(&config.adc_calibration, AdcCalibrationChannel::Vin),
+            config.adc_calibration.vin.slots,
+            config.adc_calibration.vin.active_slot,
+        ),
     }
 }
 
@@ -675,23 +711,71 @@ pub fn heater_curve_state_from_memory(
     }
 }
 
-impl CalibrationFitsWire {
-    fn from_memory(config: &AdcCalibrationConfig) -> Self {
+impl CalibrationFitWire {
+    fn from_memory(fit: AdcCalibrationFit) -> Self {
         Self {
-            rtd_adc: CalibrationFitWire::from_memory(config, AdcCalibrationChannel::Rtd),
-            vin_adc: CalibrationFitWire::from_memory(config, AdcCalibrationChannel::Vin),
+            gain: fit.gain,
+            offset_mv: fit.offset_mv,
+            sample_count: fit.sample_count,
         }
     }
 }
 
-impl CalibrationFitWire {
-    fn from_memory(config: &AdcCalibrationConfig, channel: AdcCalibrationChannel) -> Self {
-        let fit = adc_calibration_fit(config, channel);
+impl CalibrationSlotFitWire {
+    fn from_memory(fit: AdcCalibrationSlotFit) -> Self {
         Self {
             gain: fit.gain,
             offset_mv: fit.offset_mv,
-            custom_sample_count: fit.custom_sample_count,
-            default_sample_count: fit.default_sample_count,
+        }
+    }
+
+    pub fn to_memory(self) -> AdcCalibrationSlotFit {
+        AdcCalibrationSlotFit {
+            gain: self.gain,
+            offset_mv: self.offset_mv,
+        }
+    }
+}
+
+impl From<AdcCalibrationSlotId> for CalibrationSlotIdWire {
+    fn from(value: AdcCalibrationSlotId) -> Self {
+        match value {
+            AdcCalibrationSlotId::A => Self::A,
+            AdcCalibrationSlotId::B => Self::B,
+        }
+    }
+}
+
+impl From<CalibrationSlotIdWire> for AdcCalibrationSlotId {
+    fn from(value: CalibrationSlotIdWire) -> Self {
+        match value {
+            CalibrationSlotIdWire::A => Self::A,
+            CalibrationSlotIdWire::B => Self::B,
+        }
+    }
+}
+
+impl CalibrationSlotSetWire {
+    fn from_memory(slots: crate::memory::AdcCalibrationSlots) -> Self {
+        Self {
+            a: CalibrationSlotFitWire::from_memory(slots.a),
+            b: CalibrationSlotFitWire::from_memory(slots.b),
+        }
+    }
+}
+
+impl CalibrationChannelStateWire {
+    fn from_memory(
+        samples: [Option<AdcCalibrationSample>; ADC_CALIBRATION_MAX_SAMPLES],
+        fitted_fit: AdcCalibrationFit,
+        slots: crate::memory::AdcCalibrationSlots,
+        active_slot: AdcCalibrationSlotId,
+    ) -> Self {
+        Self {
+            samples: samples_to_wire(samples),
+            fitted_fit: CalibrationFitWire::from_memory(fitted_fit),
+            slots: CalibrationSlotSetWire::from_memory(slots),
+            active_slot: active_slot.into(),
         }
     }
 }
@@ -706,7 +790,7 @@ fn samples_to_wire(
     out
 }
 
-fn samples_from_wire(
+pub fn samples_from_wire(
     samples: [Option<CalibrationSampleWire>; ADC_CALIBRATION_MAX_SAMPLES],
 ) -> [Option<AdcCalibrationSample>; ADC_CALIBRATION_MAX_SAMPLES] {
     let mut out = [None; ADC_CALIBRATION_MAX_SAMPLES];
@@ -716,6 +800,7 @@ fn samples_from_wire(
     out
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsbFrame {
     Hello {
@@ -739,9 +824,6 @@ pub enum UsbFrame {
     CalibrationConfig {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: CalibrationConfigCommand,
-    },
-    CalibrationApply {
-        request_id: String<REQUEST_ID_MAX_LEN>,
     },
     CalibrationJob {
         request_id: String<REQUEST_ID_MAX_LEN>,
@@ -802,12 +884,15 @@ struct UsbFrameWire {
     channel: Option<CalibrationChannelWire>,
     reference_temp_c: Option<f32>,
     reference_vin_mv: Option<u32>,
+    target_adc_mv: Option<u16>,
     observed_mv: Option<u16>,
     expected_mv: Option<u16>,
     sample_index: Option<usize>,
     #[serde(rename = "kind", alias = "jobKind")]
     job_kind: Option<CalibrationJobKindWire>,
-    package: Option<CalibrationPackageWire>,
+    state: Option<CalibrationStateWire>,
+    slot: Option<CalibrationSlotIdWire>,
+    fit: Option<CalibrationSlotFitWire>,
     heater_curve: Option<HeaterCurvePackageWire>,
     ok: Option<bool>,
     result: Option<UsbResponsePayload>,
@@ -863,14 +948,14 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     channel: value.channel,
                     reference_temp_c: value.reference_temp_c,
                     reference_vin_mv: value.reference_vin_mv,
+                    target_adc_mv: value.target_adc_mv,
                     observed_mv: value.observed_mv,
                     expected_mv: value.expected_mv,
                     sample_index: value.sample_index,
-                    package: value.package,
+                    state: value.state,
+                    slot: value.slot,
+                    fit: value.fit,
                 },
-            }),
-            "calibration_apply" => Ok(UsbFrame::CalibrationApply {
-                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
             }),
             "calibration_job" => Ok(UsbFrame::CalibrationJob {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
@@ -937,11 +1022,14 @@ impl From<&UsbFrame> for UsbFrameWire {
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
+            target_adc_mv: None,
             observed_mv: None,
             expected_mv: None,
             sample_index: None,
             job_kind: None,
-            package: None,
+            state: None,
+            slot: None,
+            fit: None,
             heater_curve: None,
             ok: None,
             result: None,
@@ -998,14 +1086,13 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.channel = config.channel;
                 wire.reference_temp_c = config.reference_temp_c;
                 wire.reference_vin_mv = config.reference_vin_mv;
+                wire.target_adc_mv = config.target_adc_mv;
                 wire.observed_mv = config.observed_mv;
                 wire.expected_mv = config.expected_mv;
                 wire.sample_index = config.sample_index;
-                wire.package = config.package;
-            }
-            UsbFrame::CalibrationApply { request_id } => {
-                wire.frame_type = string("calibration_apply");
-                wire.request_id = Some(request_id.clone());
+                wire.state = config.state;
+                wire.slot = config.slot;
+                wire.fit = config.fit;
             }
             UsbFrame::CalibrationJob {
                 request_id,
@@ -1100,6 +1187,8 @@ impl CalibrationConfigOp {
             Self::Delete => "delete",
             Self::Clear => "clear",
             Self::Import => "import",
+            Self::SetActiveSlot => "set_active_slot",
+            Self::SetSlotFit => "set_slot_fit",
         }
     }
 }
@@ -1266,6 +1355,8 @@ fn parse_calibration_config_op(value: Option<&str>) -> Result<CalibrationConfigO
         Some("delete") => Ok(CalibrationConfigOp::Delete),
         Some("clear") => Ok(CalibrationConfigOp::Clear),
         Some("import") => Ok(CalibrationConfigOp::Import),
+        Some("set_active_slot") => Ok(CalibrationConfigOp::SetActiveSlot),
+        Some("set_slot_fit") => Ok(CalibrationConfigOp::SetSlotFit),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -1323,6 +1414,7 @@ mod tests {
         assert_eq!(status.network.state, NetworkState::Idle);
         assert_eq!(status.network.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(status.frontpanel_key, Some(FrontPanelKeyWire::Center));
+        assert_eq!(status.heater_lock_reason, None);
     }
 
     #[test]
@@ -1344,6 +1436,7 @@ mod tests {
 
         assert!(json.contains(r#""pdState":"fallback_5v""#));
         assert!(json.contains(r#""manualPpsEnabled":false"#));
+        assert!(json.contains(r#""heaterLockReason":null"#));
         assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
         assert!(!json.contains("fallback5v"));
     }
@@ -1366,37 +1459,31 @@ mod tests {
     }
 
     #[test]
-    fn parses_calibration_apply_frame_type() {
-        let frame = parse_usb_frame(r#"{"type":"calibration_apply","requestId":"apply-001"}"#)
-            .expect("calibration_apply frame parses");
-
-        match frame {
-            UsbFrame::CalibrationApply { request_id } => {
-                assert_eq!(request_id.as_str(), "apply-001");
-            }
-            other => panic!("unexpected frame: {other:?}"),
-        }
-    }
-
-    #[test]
     fn full_calibration_state_response_fits_usb_line() {
         let mut memory = MemoryConfig::default();
         for index in 0..ADC_CALIBRATION_MAX_SAMPLES {
             let sample = AdcCalibrationSample {
                 observed_mv: 400 + index as u16 * 170,
                 expected_mv: 420 + index as u16 * 170,
+                reference_temp_deci_c: None,
+                target_adc_mv: None,
+                reference_vin_mv: Some(420 + index as u16 * 170),
             };
             memory
-                .active_adc_calibration
+                .adc_calibration
                 .vin
                 .insert(sample)
-                .expect("active sample slot exists");
-            memory
-                .draft_adc_calibration
-                .vin
-                .insert(sample)
-                .expect("draft sample slot exists");
+                .expect("sample slot exists");
         }
+        memory.adc_calibration.vin.slots.a = AdcCalibrationSlotFit {
+            gain: 0.97,
+            offset_mv: 12.5,
+        };
+        memory.adc_calibration.vin.slots.b = AdcCalibrationSlotFit {
+            gain: 1.03,
+            offset_mv: -8.0,
+        };
+        memory.adc_calibration.vin.active_slot = AdcCalibrationSlotId::B;
         let frame = UsbFrame::Response {
             request_id: string("cal-full"),
             ok: true,
@@ -1409,8 +1496,11 @@ mod tests {
         let json = write_usb_frame(&frame, &mut out).expect("full calibration state fits");
 
         assert!(json.contains(r#""requestId":"cal-full""#));
-        assert!(json.contains(r#""activeFit""#));
-        assert!(json.contains(r#""draftFit""#));
+        assert!(json.contains(r#""fittedFit""#));
+        assert!(json.contains(r#""activeSlot":"b""#));
+        assert!(json.contains(
+            r#""slots":{"a":{"gain":0.97,"offsetMv":12.5},"b":{"gain":1.03,"offsetMv":-8.0}}"#
+        ));
     }
 
     #[test]

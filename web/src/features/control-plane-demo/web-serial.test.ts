@@ -97,6 +97,29 @@ describe('web serial control-plane client', () => {
 
     await client.disconnect()
   })
+
+  it('sends RTD calibration samples with operator temperature and target ADC', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    await client.configureCalibration({
+      op: 'capture',
+      channel: 'rtd_adc',
+      referenceTempC: 21.6,
+      targetAdcMv: 970,
+    })
+
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'calibration_config',
+      op: 'capture',
+      channel: 'rtd_adc',
+      referenceTempC: 21.6,
+      targetAdcMv: 970,
+    })
+
+    await client.disconnect()
+  })
 })
 
 class FakeSerial implements BrowserSerial {
@@ -229,6 +252,55 @@ function responseFor(request: Record<string, unknown>) {
           samplesCollected: 0,
           nextRequestMv: request.kind === 'vin_adc_auto' ? 11000 : 20000,
           message: null,
+        },
+      },
+    }
+  }
+  if (request.type === 'calibration_config') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        calibration: {
+          rtdAdc: {
+            samples: [
+              request.channel === 'rtd_adc'
+                ? {
+                    observedMv: 997,
+                    expectedMv: 970,
+                    referenceTempC: request.referenceTempC,
+                    targetAdcMv: request.targetAdcMv,
+                  }
+                : null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+            ],
+            fittedFit: {
+              gain: 1,
+              offsetMv: -27,
+              sampleCount: request.channel === 'rtd_adc' ? 1 : 0,
+            },
+            slots: {
+              a: { gain: 1, offsetMv: 0 },
+              b: { gain: 1, offsetMv: 0 },
+            },
+            activeSlot: 'a',
+          },
+          vinAdc: {
+            samples: [null, null, null, null, null, null, null, null],
+            fittedFit: { gain: 1, offsetMv: 0, sampleCount: 0 },
+            slots: {
+              a: { gain: 1, offsetMv: 0 },
+              b: { gain: 1, offsetMv: 0 },
+            },
+            activeSlot: 'a',
+          },
         },
       },
     }

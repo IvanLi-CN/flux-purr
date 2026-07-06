@@ -89,7 +89,7 @@ export const DocsGallery: Story = {
           'radial-gradient(circle at top, rgba(23,37,84,0.92) 0%, rgba(8,17,31,1) 34%, rgba(2,6,23,1) 100%)',
         padding: '36px',
         color: '#f8fafc',
-        fontFamily: '"Space Grotesk", system-ui, sans-serif',
+        fontFamily: '"JetBrains Mono", "Noto Sans SC", monospace',
       }}
     >
       <section
