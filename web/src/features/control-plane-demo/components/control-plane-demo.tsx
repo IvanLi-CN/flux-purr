@@ -18,9 +18,22 @@ import {
   Zap,
 } from 'lucide-react'
 import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { createPortal } from 'react-dom'
 import SimpleBar from 'simplebar-react'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -5657,20 +5670,20 @@ function CalibrationChannelControls({
 function CalibrationFittedSuggestionCard({ title, fit }: { title: string; fit: CalibrationFit }) {
   return (
     <fieldset className="industrial-calibration-manual-fit" aria-label={`${title} 拟合建议`}>
-      <label>
+      <div className="industrial-calibration-fit-readout">
         <span>拟合增益</span>
-        <span className="industrial-calibration-input">
-          <input type="text" value={fit.gain.toFixed(5)} readOnly aria-label="拟合建议增益" />
+        <strong>
+          {fit.gain.toFixed(5)}
           <small>x</small>
-        </span>
-      </label>
-      <label>
+        </strong>
+      </div>
+      <div className="industrial-calibration-fit-readout">
         <span>拟合偏移</span>
-        <span className="industrial-calibration-input">
-          <input type="text" value={fit.offsetMv.toFixed(1)} readOnly aria-label="拟合建议偏移" />
+        <strong>
+          {fit.offsetMv.toFixed(1)}
           <small>mV</small>
-        </span>
-      </label>
+        </strong>
+      </div>
       <div className="industrial-calibration-fit-suggestion-meta">
         <span className="industrial-calibration-fit-chip">{calibrationFitMode(fit)}</span>
         <small>{fit.sampleCount}/8</small>
@@ -5699,76 +5712,126 @@ function CalibrationSlotEditOverlay({
   onClose: () => void
   onSubmit: () => void | Promise<void>
 }) {
+  const titleId = useId()
+  const gainInputId = useId()
+  const offsetInputId = useId()
+
   if (!slotEditor) {
     return null
   }
 
   return createPortal(
-    <div className="industrial-slot-editor-overlay" role="dialog" aria-modal="true">
+    <div
+      className="industrial-slot-editor-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+    >
       <button
         type="button"
         className="industrial-slot-editor-backdrop"
         aria-label="关闭槽位编辑"
         onClick={onClose}
       />
-      <div className="industrial-slot-editor-card">
-        <div className="industrial-slot-editor-card__header">
-          <strong>{`${channelLabel(slotEditor.channel)} 槽位 ${slotEditor.slot.toUpperCase()}`}</strong>
-        </div>
-        <div className="industrial-slot-editor-card__body">
-          <label>
-            <span>增益</span>
-            <span className="industrial-calibration-input">
-              <input
-                type="number"
-                aria-label="增益"
-                value={slotEditor.gainText}
-                onChange={(event) => onChange({ gainText: event.currentTarget.value })}
-              />
-              <small>x</small>
-            </span>
-          </label>
-          <label>
-            <span>偏移</span>
-            <span className="industrial-calibration-input">
-              <input
-                type="number"
-                aria-label="偏移"
-                value={slotEditor.offsetText}
-                onChange={(event) => onChange({ offsetText: event.currentTarget.value })}
-              />
-              <small>mV</small>
-            </span>
-          </label>
-          {fittedFit ? (
-            <button
+      <Card className="industrial-slot-editor-card" role="document">
+        <CardHeader className="industrial-slot-editor-card__header">
+          <div>
+            <span className="industrial-slot-editor-card__eyebrow">校准槽位</span>
+            <CardTitle className="industrial-slot-editor-card__title" id={titleId}>
+              {channelLabel(slotEditor.channel)}
+            </CardTitle>
+          </div>
+          <span className="industrial-slot-editor-card__slot">{slotEditor.slot.toUpperCase()}</span>
+        </CardHeader>
+        <CardContent className="industrial-slot-editor-card__body">
+          <CalibrationSlotEditorField
+            id={gainInputId}
+            label="增益"
+            unit="x"
+            value={slotEditor.gainText}
+            onValueChange={(gainText) => onChange({ gainText })}
+          />
+          <CalibrationSlotEditorField
+            id={offsetInputId}
+            label="偏移"
+            unit="mV"
+            value={slotEditor.offsetText}
+            onValueChange={(offsetText) => onChange({ offsetText })}
+          />
+        </CardContent>
+        <CardFooter className="industrial-slot-editor-card__actions">
+          <div className="industrial-slot-editor-card__actions-left">
+            {fittedFit ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="industrial-slot-editor-button industrial-slot-editor-button--fit"
+                onClick={onAdoptFit}
+              >
+                采用拟合
+              </Button>
+            ) : null}
+          </div>
+          <div className="industrial-slot-editor-card__actions-right">
+            <Button
               type="button"
-              className="industrial-button industrial-button--secondary"
-              onClick={onAdoptFit}
+              variant="outline"
+              size="sm"
+              className="industrial-slot-editor-button industrial-slot-editor-button--cancel"
+              onClick={onClose}
             >
-              采用拟合
-            </button>
-          ) : null}
-        </div>
-        <div className="industrial-slot-editor-card__actions">
-          <button
-            type="button"
-            className="industrial-button industrial-button--ghost"
-            onClick={onClose}
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            className="industrial-button industrial-button--primary"
-            onClick={() => void onSubmit()}
-          >
-            保存
-          </button>
-        </div>
-      </div>
+              取消
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="industrial-slot-editor-button industrial-slot-editor-button--save"
+              onClick={() => void onSubmit()}
+            >
+              保存
+            </Button>
+          </div>
+        </CardFooter>
+      </Card>
     </div>,
     document.body
+  )
+}
+
+function CalibrationSlotEditorField({
+  id,
+  label,
+  unit,
+  value,
+  onValueChange,
+}: {
+  id: string
+  label: string
+  unit: string
+  value: string
+  onValueChange: (value: string) => void
+}) {
+  return (
+    <div className="industrial-slot-editor-field">
+      <Label className="industrial-slot-editor-label" htmlFor={id}>
+        {label}
+      </Label>
+      <div className="industrial-slot-editor-control">
+        <Input
+          id={id}
+          type="text"
+          inputMode="decimal"
+          aria-label={label}
+          value={value}
+          className="industrial-slot-editor-text-input"
+          onChange={(event) => onValueChange(event.currentTarget.value)}
+        />
+        <span className="industrial-slot-editor-unit" aria-hidden="true">
+          {unit}
+        </span>
+      </div>
+    </div>
   )
 }
 
