@@ -419,6 +419,7 @@ impl DeviceRecord {
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
             calibration: CalibrationRuntimeState::default(),
+            thermal_control_profile_preview: false,
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -480,6 +481,7 @@ impl DeviceRecord {
             pps_capability_max_ma: None,
             manual_pps_error: None,
             calibration: CalibrationRuntimeState::default(),
+            thermal_control_profile_preview: false,
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -618,6 +620,8 @@ pub struct ControlPlaneStatus {
     pub manual_pps_error: Option<String>,
     #[serde(default)]
     pub calibration: CalibrationRuntimeState,
+    #[serde(default)]
+    pub thermal_control_profile_preview: bool,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
 }
@@ -1019,6 +1023,36 @@ pub struct RuntimeConfigRequest {
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
     pub calibration: Option<CalibrationControlRequest>,
+    pub thermal_control_profile: Option<ThermalControlProfileRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalControlProfileOp {
+    Preview,
+    ClearPreview,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfilePoint {
+    pub target_temp_c: i16,
+    pub brake_distance_centi_c: u16,
+    pub approach_power_permille: u16,
+    pub hold_power_permille: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfilePackage {
+    pub points: Vec<Option<ThermalControlProfilePoint>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileRequest {
+    pub op: ThermalControlProfileOp,
+    pub profile: Option<ThermalControlProfilePackage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1154,6 +1188,8 @@ struct UsbRuntimeConfigWire<'a> {
     manual_pps_ma: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<&'a CalibrationControlRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2308,6 +2344,10 @@ async fn configure_runtime(
     if let Some(calibration) = payload.calibration.as_ref() {
         apply_mock_calibration_runtime_config(&mut device.status, calibration);
     }
+    if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
+        device.status.thermal_control_profile_preview =
+            thermal_control_profile.op == ThermalControlProfileOp::Preview;
+    }
     let status = device.status.clone();
     drop(state_lock);
     emit_runtime_config_event(&state, &device_id, &payload, &status);
@@ -2422,6 +2462,50 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
     }
     if let Some(calibration) = payload.calibration.as_ref() {
         validate_calibration_control_request(calibration)?;
+    }
+    if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
+        validate_thermal_control_profile_request(thermal_control_profile)?;
+    }
+    Ok(())
+}
+
+fn validate_thermal_control_profile_request(
+    request: &ThermalControlProfileRequest,
+) -> Result<(), HttpError> {
+    match request.op {
+        ThermalControlProfileOp::Preview => {
+            let profile = request.profile.as_ref().ok_or_else(|| {
+                HttpError::bad_request(
+                    "thermal_profile_required",
+                    "thermalControlProfile.profile is required for preview.",
+                )
+            })?;
+            if profile.points.len() != FRONT_PANEL_PRESET_COUNT {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_profile",
+                    "thermalControlProfile.profile.points must contain exactly 10 values.",
+                ));
+            }
+            for point in profile.points.iter().flatten() {
+                if point.brake_distance_centi_c == 0
+                    || point.approach_power_permille > 1_000
+                    || point.hold_power_permille > 1_000
+                {
+                    return Err(HttpError::bad_request(
+                        "invalid_thermal_profile",
+                        "thermal profile points must use positive brake distance and 0..1000 permille power.",
+                    ));
+                }
+            }
+        }
+        ThermalControlProfileOp::ClearPreview => {
+            if request.profile.is_some() {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_profile",
+                    "thermalControlProfile.profile must be omitted for clear_preview.",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2868,6 +2952,7 @@ async fn serial_runtime_config(
         manual_pps_mv: payload.manual_pps_mv,
         manual_pps_ma: payload.manual_pps_ma,
         calibration: payload.calibration.as_ref(),
+        thermal_control_profile: payload.thermal_control_profile.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
     match serial_exchange(
@@ -3635,6 +3720,16 @@ fn runtime_config_matches_status(
             .is_some_and(|target_adc_mv| status.calibration.target_adc_mv != Some(target_adc_mv))
         {
             return false;
+        }
+    }
+    if let Some(profile) = payload.thermal_control_profile.as_ref() {
+        match profile.op {
+            ThermalControlProfileOp::Preview => return false,
+            ThermalControlProfileOp::ClearPreview => {
+                if status.thermal_control_profile_preview {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -5127,6 +5222,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5134,6 +5230,93 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::FORBIDDEN);
         assert_eq!(error.error.code, "lease_expired");
+    }
+
+    #[tokio::test]
+    async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let preview = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::Preview,
+                    profile: Some(ThermalControlProfilePackage {
+                        points: vec![
+                            Some(ThermalControlProfilePoint {
+                                target_temp_c: 100,
+                                brake_distance_centi_c: 700,
+                                approach_power_permille: 320,
+                                hold_power_permille: 220,
+                            }),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ],
+                    }),
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(preview.thermal_control_profile_preview);
+
+        let clear = configure_runtime(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::ClearPreview,
+                    profile: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!clear.thermal_control_profile_preview);
+    }
+
+    #[test]
+    fn thermal_profile_clear_preview_rejects_profile_payload() {
+        let error = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::ClearPreview,
+            profile: Some(ThermalControlProfilePackage {
+                points: vec![None; FRONT_PANEL_PRESET_COUNT],
+            }),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "invalid_thermal_profile");
     }
 
     #[tokio::test]
@@ -5229,6 +5412,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5277,6 +5461,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5303,6 +5488,7 @@ mod tests {
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5327,6 +5513,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5372,6 +5559,7 @@ mod tests {
                     heater_enabled: Some(false),
                     target_adc_mv: None,
                 }),
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5417,6 +5605,7 @@ mod tests {
                     heater_enabled: Some(false),
                     target_adc_mv: None,
                 }),
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5664,6 +5853,7 @@ mod tests {
                 heater_enabled: Some(true),
                 target_adc_mv: Some(930),
             }),
+            thermal_control_profile: None,
         };
         let status = ControlPlaneStatus {
             mode: "sampling".to_string(),
@@ -5693,6 +5883,7 @@ mod tests {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            thermal_control_profile_preview: false,
             calibration: CalibrationRuntimeState {
                 mode: CalibrationMode::RtdAdc,
                 pps_enabled: true,
@@ -5739,12 +5930,44 @@ mod tests {
                 heater_enabled: Some(false),
                 target_adc_mv: None,
             }),
+            thermal_control_profile: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.calibration.mode = CalibrationMode::VinAdc;
         status.calibration.pps_enabled = true;
         status.calibration.pps_mv = Some(12_000);
         status.calibration.heater_enabled = false;
+
+        assert!(!runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn runtime_config_matcher_does_not_reconcile_preview_by_boolean_only() {
+        let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
+        points[0] = Some(ThermalControlProfilePoint {
+            target_temp_c: 120,
+            brake_distance_centi_c: 700,
+            approach_power_permille: 320,
+            hold_power_permille: 220,
+        });
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileRequest {
+                op: ThermalControlProfileOp::Preview,
+                profile: Some(ThermalControlProfilePackage { points }),
+            }),
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.thermal_control_profile_preview = true;
 
         assert!(!runtime_config_matches_status(&payload, &status));
     }

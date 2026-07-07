@@ -145,6 +145,7 @@ pub struct ControlPlaneStatus {
     pub manual_pps_error: Option<String<ERROR_CODE_MAX_LEN>>,
     pub heater_lock_reason: Option<String<ERROR_CODE_MAX_LEN>>,
     pub calibration: CalibrationRuntimeStateWire,
+    pub thermal_control_profile_preview: bool,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
 }
@@ -195,6 +196,7 @@ impl ControlPlaneStatus {
             manual_pps_error: None,
             heater_lock_reason: None,
             calibration: CalibrationRuntimeStateWire::default(),
+            thermal_control_profile_preview: false,
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
         }
@@ -457,6 +459,7 @@ pub struct RuntimeConfigCommand {
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
     pub calibration: Option<CalibrationControlCommand>,
+    pub thermal_control_profile: Option<ThermalControlProfileCommand>,
 }
 
 impl RuntimeConfigCommand {
@@ -483,6 +486,35 @@ impl RuntimeConfigCommand {
         }
         config.sanitize();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalControlProfileOp {
+    Preview,
+    ClearPreview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfilePointWire {
+    pub target_temp_c: i16,
+    pub brake_distance_centi_c: u16,
+    pub approach_power_permille: u16,
+    pub hold_power_permille: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileWire {
+    pub points: [Option<ThermalControlProfilePointWire>; FRONTPANEL_PRESET_COUNT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileCommand {
+    pub op: ThermalControlProfileOp,
+    pub profile: Option<ThermalControlProfileWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -881,6 +913,7 @@ struct UsbFrameWire {
     manual_pps_mv: Option<u16>,
     manual_pps_ma: Option<u16>,
     calibration: Option<CalibrationControlCommand>,
+    thermal_control_profile: Option<ThermalControlProfileCommand>,
     channel: Option<CalibrationChannelWire>,
     reference_temp_c: Option<f32>,
     reference_vin_mv: Option<u32>,
@@ -939,6 +972,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     manual_pps_mv: value.manual_pps_mv,
                     manual_pps_ma: value.manual_pps_ma,
                     calibration: value.calibration,
+                    thermal_control_profile: value.thermal_control_profile,
                 },
             }),
             "calibration_config" => Ok(UsbFrame::CalibrationConfig {
@@ -1019,6 +1053,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_control_profile: None,
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
@@ -1078,6 +1113,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.manual_pps_mv = config.manual_pps_mv;
                 wire.manual_pps_ma = config.manual_pps_ma;
                 wire.calibration = config.calibration;
+                wire.thermal_control_profile = config.thermal_control_profile;
             }
             UsbFrame::CalibrationConfig { request_id, config } => {
                 wire.frame_type = string("calibration_config");
@@ -1583,6 +1619,7 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_control_profile: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -1615,6 +1652,7 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_control_profile: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -1686,6 +1724,7 @@ mod tests {
                     manual_pps_mv: Some(10_400),
                     manual_pps_ma: Some(2_500),
                     calibration: None,
+                    thermal_control_profile: None,
                 },
             }
         );
@@ -1723,9 +1762,36 @@ mod tests {
                     manual_pps_mv: None,
                     manual_pps_ma: None,
                     calibration: None,
+                    thermal_control_profile: None,
                 },
             }
         );
+    }
+
+    #[test]
+    fn parse_runtime_config_frame_with_thermal_profile_preview() {
+        let frame = parse_usb_frame(
+            r#"{"type":"runtime_config","requestId":"req-thermal","thermalControlProfile":{"op":"preview","profile":{"points":[{"targetTempC":100,"brakeDistanceCentiC":700,"approachPowerPermille":420,"holdPowerPermille":220},null,null,null,null,null,null,null,null,null]}}}"#,
+        )
+        .unwrap();
+
+        let UsbFrame::RuntimeConfig { request_id, config } = frame else {
+            panic!("expected runtime config frame");
+        };
+        assert_eq!(request_id.as_str(), "req-thermal");
+        let command = config.thermal_control_profile.unwrap();
+        assert_eq!(command.op, ThermalControlProfileOp::Preview);
+        let profile = command.profile.unwrap();
+        assert_eq!(
+            profile.points[0],
+            Some(ThermalControlProfilePointWire {
+                target_temp_c: 100,
+                brake_distance_centi_c: 700,
+                approach_power_permille: 420,
+                hold_power_permille: 220,
+            })
+        );
+        assert!(profile.points[1].is_none());
     }
 
     #[test]

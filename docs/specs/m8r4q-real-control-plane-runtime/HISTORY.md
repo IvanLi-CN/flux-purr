@@ -1,5 +1,11 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-07
+
+- Runtime contract 扩展 RAM-only `thermalControlProfile` preview：status 回传 `thermalControlProfilePreview`，runtime_config 可 `preview` 或 `clear_preview`，不写 EEPROM。
+- `flux-purr thermal profile preview|clear-preview` 和 `flux-purr thermal self-test` 接入 CLI/devd lease 路径；self-test 生成报告、样本和候选 profile，并把默认目标阶梯限制在 `50..250°C`，排除 `300°C`。
+- Thermal self-test 的外部电源边界固定为 released IsolaPurr CLI：真实 HIL 通过 `isolapurr power output manual --voltage-mv 20000 --current-limit-ma 3250 --usb-c-path disconnected` 设置 bench source，缺少精确 Flux Purr 端口或 IsolaPurr device id 时不运行真实阶梯测试。
+
 ## 2026-06-02
 
 - 授权端口 `/dev/cu.usbmodem21221401` 上完成手动 PPS 真机验证：新固件烧录后，`flux-purr pd pps set --volts 10.4 --amps 2.50` 回显 `manualPpsEnabled=true`、`manualPpsMv=10400`、`manualPpsMa=2500`、`pdContractMv=10400`，IsolaPurr `isolapurr-01-wifi` USB-C 外部遥测读到 `10425mV`；清除覆盖后回到自动控制与约 `12.03V`。

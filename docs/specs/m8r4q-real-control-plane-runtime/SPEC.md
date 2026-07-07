@@ -52,7 +52,7 @@
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
 - `hello` 必须返回 protocol version、framing、identity 和 capabilities。
 - WiFi config frame 和 devd WiFi endpoint 必须 redaction password/PSK。
-- runtime config frame 和 devd runtime endpoint 必须能更新目标温度、当前 preset slot、`presets_c[10]`、主动散热开关、heater hold 状态与调试用手动 PPS 覆盖。
+- runtime config frame 和 devd runtime endpoint 必须能更新目标温度、当前 preset slot、`presets_c[10]`、主动散热开关、heater hold 状态、调试用手动 PPS 覆盖与 RAM-only thermal control profile preview。
 - calibration frame 和 devd calibration endpoint 必须能读取 channel-centered calibration state、编辑共享样本、编辑 A/B 槽位、切换当前激活槽位，并导入完整 calibration state。
 - Web app 必须在目标下拉的底部只提供一个 `Add device` 入口；选择该入口后进入单独的 Add device 页面，并在该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型。
 - Web app 在 live 模式没有选中真实目标时，主工作区必须显示全宽设备选择页；该页上半部分显示 known devices 网格，空设备提示不得呈现为卡片，中间显示分隔线，下半部分以单行三卡片显示 WiFi、Web Serial 与 Bridge 三种新增类型，且不显示右侧全局日志列或额外的分区标题。
@@ -75,7 +75,7 @@
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
 - Calibration mode control 必须只支持 PPS；Web 的 mode 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定`，owner-facing 术语不得回退到旧命名。
 - Calibration mode live control 请求必须同时满足硬件 `5V~28V` 与实时 PPS capability。任何 transport 都不得实际发出不在该交集内的电压请求。
-- `runtime_config` 必须支持 `calibration` 子对象，表达 mode、mode-owned PPS 请求、heater on/off、温度模式 ADC-hold 目标与稳定状态；旧 `manualPps*` 调试字段继续保留，但不承载新模式产品语义。
+- `runtime_config` 必须支持 `calibration` 子对象，表达 mode、mode-owned PPS 请求、heater on/off、温度模式 ADC-hold 目标与稳定状态；旧 `manualPps*` 调试字段继续保留，但不承载新模式产品语义。`runtime_config.thermalControlProfile` 只承载热控 profile 的 RAM preview / clear-preview，不写 EEPROM。
 - first-class calibration auto jobs 必须支持 `vin_adc_auto` 与 `heater_curve_auto` 两种 `kind`，并通过 `calibration_job` frame / `/calibration/job` endpoint 暴露 `idle|running|completed|failed|canceled` 状态、进度、样本数、下一目标电压与错误信息。
 - Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
 - `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
@@ -102,7 +102,7 @@
 - `GET|POST /api/v1/devices/:id/calibration/job`：读取、启动或取消 calibration auto job；job 细节见 `../jt8r2-adc-calibration-control-plane/SPEC.md`。
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
-- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled`、`manual_pps_enabled`、`manual_pps_mv`、`manual_pps_ma` 与 `calibration` 的部分更新。
+- `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled`、`manual_pps_enabled`、`manual_pps_mv`、`manual_pps_ma`、`calibration` 与 `thermal_control_profile` 的部分更新。
 - `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file kind、path、size、sha256 与可选 flash address；本地 ESP32-S3 release ELF 必须作为 `elf` artifact 走 `espflash flash`。
 - `POST /api/v1/artifacts/verify`：校验 catalog/artifact 文件。
 - `POST /api/v1/devices/:id/flash`：`dry_run=true` 只校验；`dry_run=false` 必须先有同 artifact 的通过记录。
@@ -114,6 +114,8 @@
 - `flux-purr status --device <id>|--hardware <saved-id>`：通过 leased status endpoint 读取状态。
 - `flux-purr runtime get|set`：读取或部分更新目标温度、preset、主动散热与 heater hold。
 - `flux-purr pd pps set|clear`：设置或清除调试用手动 PPS 覆盖；设置路径要求 source status 已回报 PPS capability，且电压在硬件 `5V~28V` 与 capability 交集内，请求电流在 APDO current capability 内。
+- `flux-purr thermal profile preview|clear-preview`：通过 leased runtime endpoint 设置或清除 RAM-only thermal control profile。
+- `flux-purr thermal self-test`：通过 `devd` 控制 Flux Purr，并通过 released `isolapurr` 工具控制 IsolaPurr bench source，生成 thermal self-test 报告和候选 profile；默认目标阶梯只覆盖 `50..250°C` 工作范围，不包含 `300°C`。
 - `flux-purr calibration-mode ...`：提供 owner-facing 三模式入口；现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear`：通过 leased WiFi endpoint 写入或清除 WiFi 配置，输出必须 redaction password。
 - `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。
@@ -132,7 +134,7 @@
 - `hello`：device 主动或 host 请求；返回 protocol、framing、identity、capabilities。
 - `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
-- `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`、`manualPpsEnabled`、`manualPpsMv`、`manualPpsMa` 与 `calibration`；response 返回更新后的 status。`manualPpsEnabled=false` 清除调试覆盖；启用时 `manualPpsMv` 必须在硬件 `5V~28V` 与 PPS capability 交集内并按 `100mV` 对齐，`manualPpsMa` 必须在 APDO current capability 内并按 `50mA` 对齐。`calibration` 语义遵循 `#jt8r2`，用于 owner-facing 三模式控制。CH224Q 只通过 `0x53` 写 PPS 电压，`manualPpsMa` 是用于校验与回显的请求电流值。
+- `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`、`manualPpsEnabled`、`manualPpsMv`、`manualPpsMa`、`calibration` 与 `thermalControlProfile`；response 返回更新后的 status。`manualPpsEnabled=false` 清除调试覆盖；启用时 `manualPpsMv` 必须在硬件 `5V~28V` 与 PPS capability 交集内并按 `100mV` 对齐，`manualPpsMa` 必须在 APDO current capability 内并按 `50mA` 对齐。`calibration` 语义遵循 `#jt8r2`，用于 owner-facing 三模式控制。`thermalControlProfile.op=preview` 只把 profile 写入 RAM，`op=clear_preview` 清除 RAM preview；profile 由最多 10 个 `targetTempC` / `brakeDistanceCentiC` / `approachPowerPermille` / `holdPowerPermille` 点组成，不写 EEPROM。CH224Q 只通过 `0x53` 写 PPS 电压，`manualPpsMa` 是用于校验与回显的请求电流值。
 - `calibration_config`：`request_id` + calibration fields；response 返回 calibration state。校准领域契约见 `#jt8r2`。
 - `calibration_job`：`request_id` + `op=start|cancel` + optional `kind=vin_adc_auto|heater_curve_auto`；response 返回 calibration auto-job 状态。
 - `response`：回显 `request_id`，返回 result 或 error。
@@ -161,6 +163,8 @@
 - Given Web Serial 直连 target，When 打开 Update 页，Then artifact verify、dry-run 与 real flash 仍因缺少 `flash` capability 被禁用或要求切换到 `devd`。
 - Given CLI 指向 `devd` mock target，When 执行 devices/status/runtime/wifi/flash dry-run/monitor，Then CLI 自动 lease、输出可读 human 文本或 `--json`，且 secret 被 redaction。
 - Given CLI 或 Web live target 具备 PPS capability，When operator 设置 `10.4V / 2.50A` 手动 PPS 覆盖，Then runtime status 回显 `manualPpsEnabled=true`、`manualPpsMv=10400`、`manualPpsMa=2500`、capability 范围和更新后的 PD request/contract；When 清除覆盖，Then status 回到自动 PPS 控制。
+- Given CLI 对 thermal profile 执行 preview，When firmware 接受 runtime config，Then status 回显 `thermalControlProfilePreview=true`；When clear-preview，Then status 回显 `false`，且该 profile 不写入 EEPROM。
+- Given CLI 执行 thermal self-test dry-run 或 mock devd 测试，When 生成报告，Then `run.json`、`samples.ndjson`、`thermal-profile.candidate.json` 均存在，目标阶梯排除 `300°C`。
 - Given Web 或 CLI 打开 calibration workbench / mode commands，When operator 进入 `电压读数标定`、`温度标定` 或 `加热曲线标定`，Then runtime status、USB JSONL、devd HTTP、CLI 与 Web Serial 都表达相同的 mode live state。
 - Given calibration live control 请求超出硬件 `5V~28V` 或实时 PPS capability，When operator 通过 Web、CLI、devd HTTP 或 Web Serial 提交，Then Web 以受限控件和 inline error 阻止、CLI 报错退出、firmware/devd 拒绝请求，且不会发出非法电压请求。
 - Given `电压读数标定` auto job 启动，When runtime capability 允许，Then job 以 `1V` 步进扫点并把样本写入 `vin_adc draft`。

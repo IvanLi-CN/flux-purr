@@ -2,6 +2,7 @@ use std::{
     fs::{self, File},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -54,6 +55,10 @@ enum Command {
     HeaterCurve {
         #[command(subcommand)]
         command: HeaterCurveCommand,
+    },
+    Thermal {
+        #[command(subcommand)]
+        command: ThermalCommand,
     },
     Flash(FlashArgs),
     Monitor(MonitorArgs),
@@ -216,6 +221,60 @@ enum HeaterCurveCommand {
     ClearPreview(TargetSelector),
     Save(TargetSelector),
     Export(HeaterCurveFileArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ThermalCommand {
+    Profile {
+        #[command(subcommand)]
+        command: ThermalProfileCommand,
+    },
+    SelfTest(ThermalSelfTestArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ThermalProfileCommand {
+    Preview(ThermalProfileFileArgs),
+    ClearPreview(TargetSelector),
+}
+
+#[derive(Debug, Args)]
+struct ThermalProfileFileArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    file: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ThermalSelfTestArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(
+        long = "source-device-id",
+        help = "Released IsolaPurr device id used as the external bench source."
+    )]
+    source_device_id: String,
+    #[arg(long = "source-voltage-v", default_value = "20.0")]
+    source_voltage_v: String,
+    #[arg(long = "source-current-a", default_value = "3.25")]
+    source_current_a: String,
+    #[arg(long = "sample-interval-ms", default_value_t = 500)]
+    sample_interval_ms: u64,
+    #[arg(long = "hold-seconds", default_value_t = 60)]
+    hold_seconds: u64,
+    #[arg(long = "stage-timeout-seconds", default_value_t = 300)]
+    stage_timeout_seconds: u64,
+    #[arg(long = "runtime-rearm-attempts", default_value_t = 3)]
+    runtime_rearm_attempts: u8,
+    #[arg(long = "cooldown-temp-c", default_value_t = 40.0)]
+    cooldown_temp_c: f64,
+    #[arg(long = "cooldown-timeout-seconds", default_value_t = 7200)]
+    cooldown_timeout_seconds: u64,
+    #[arg(long = "output-dir", default_value = "thermal-self-test-runs")]
+    output_dir: PathBuf,
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -636,6 +695,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::HeaterCurve { command } => {
             handle_heater_curve_command(&client, &cli.devd, command).await?
         }
+        Command::Thermal { command } => handle_thermal_command(&client, &cli.devd, command).await?,
         Command::Flash(args) => {
             let resolved = resolve_target(args.target.clone(), &cli.devd)?;
             let artifact = resolve_artifact(
@@ -1332,6 +1392,960 @@ async fn handle_heater_curve_command(
             }))
         }
     }
+}
+
+const THERMAL_SELF_TEST_TARGETS_C: [i16; 9] = [50, 100, 120, 150, 180, 200, 210, 220, 250];
+
+async fn handle_thermal_command(
+    client: &Client,
+    default_devd: &str,
+    command: ThermalCommand,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    match command {
+        ThermalCommand::Profile { command } => match command {
+            ThermalProfileCommand::Preview(args) => {
+                let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
+                let profile = thermal_profile_package_from_value(imported);
+                request_with_lease(
+                    client,
+                    resolve_target(args.target, default_devd)?,
+                    Method::PUT,
+                    "/runtime",
+                    Some(json!({
+                        "thermalControlProfile": {
+                            "op": "preview",
+                            "profile": profile
+                        }
+                    })),
+                )
+                .await
+            }
+            ThermalProfileCommand::ClearPreview(selector) => {
+                request_with_lease(
+                    client,
+                    resolve_target(selector, default_devd)?,
+                    Method::PUT,
+                    "/runtime",
+                    Some(json!({
+                        "thermalControlProfile": {
+                            "op": "clear_preview"
+                        }
+                    })),
+                )
+                .await
+            }
+        },
+        ThermalCommand::SelfTest(args) => {
+            collect_thermal_self_test(client, default_devd, args).await
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ThermalStageResult {
+    target_temp_c: i16,
+    rise_time_ms: u64,
+    max_overshoot_c: f64,
+    hold_peak_to_peak_c: f64,
+    sample_count: usize,
+    stop_reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThermalHoldObservation {
+    Warmup,
+    Hold,
+    Completed,
+}
+
+struct ThermalHoldTracker {
+    target_temp_c: i16,
+    hold_duration: Duration,
+    entered_threshold_c: f64,
+    stable_band_c: f64,
+    started_at: Option<tokio::time::Instant>,
+    rise_time_ms: Option<u64>,
+    min_c: f64,
+    max_c: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThermalRuntimeDropReason {
+    UptimeReset,
+    HeaterDisarmed,
+    WrongMode,
+    WrongTarget,
+}
+
+impl ThermalRuntimeDropReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            ThermalRuntimeDropReason::UptimeReset => "uptime_reset",
+            ThermalRuntimeDropReason::HeaterDisarmed => "heater_disarmed",
+            ThermalRuntimeDropReason::WrongMode => "wrong_mode",
+            ThermalRuntimeDropReason::WrongTarget => "wrong_target",
+        }
+    }
+}
+
+impl ThermalHoldTracker {
+    fn new(target_temp_c: i16, hold_duration: Duration) -> Self {
+        Self {
+            target_temp_c,
+            hold_duration,
+            entered_threshold_c: 0.5,
+            stable_band_c: 3.0,
+            started_at: None,
+            rise_time_ms: None,
+            min_c: f64::INFINITY,
+            max_c: f64::NEG_INFINITY,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        current_temp_c: f64,
+        elapsed_ms: u64,
+        now: tokio::time::Instant,
+    ) -> ThermalHoldObservation {
+        let target_temp_c = f64::from(self.target_temp_c);
+        if current_temp_c < target_temp_c - self.entered_threshold_c {
+            self.started_at = None;
+            self.min_c = f64::INFINITY;
+            self.max_c = f64::NEG_INFINITY;
+            return ThermalHoldObservation::Warmup;
+        }
+        if (current_temp_c - target_temp_c).abs() > self.stable_band_c {
+            self.started_at = None;
+            self.min_c = f64::INFINITY;
+            self.max_c = f64::NEG_INFINITY;
+            return ThermalHoldObservation::Warmup;
+        }
+
+        let started_at = *self.started_at.get_or_insert_with(|| {
+            self.rise_time_ms.get_or_insert(elapsed_ms);
+            now
+        });
+        self.min_c = self.min_c.min(current_temp_c);
+        self.max_c = self.max_c.max(current_temp_c);
+        if now.duration_since(started_at) >= self.hold_duration {
+            ThermalHoldObservation::Completed
+        } else {
+            ThermalHoldObservation::Hold
+        }
+    }
+
+    fn rise_time_ms(&self) -> Option<u64> {
+        self.rise_time_ms
+    }
+
+    fn peak_to_peak_c(&self) -> f64 {
+        if self.min_c.is_finite() && self.max_c.is_finite() {
+            self.max_c - self.min_c
+        } else {
+            f64::INFINITY
+        }
+    }
+}
+
+fn thermal_runtime_drop_reason(
+    status: &Value,
+    target_temp_c: i16,
+    last_uptime_seconds: Option<u64>,
+) -> Option<ThermalRuntimeDropReason> {
+    let uptime_seconds = status.get("uptimeSeconds").and_then(Value::as_u64);
+    if let Some((last, current)) = last_uptime_seconds.zip(uptime_seconds)
+        && current < last
+    {
+        return Some(ThermalRuntimeDropReason::UptimeReset);
+    }
+    if status
+        .get("targetTempC")
+        .and_then(Value::as_i64)
+        .is_some_and(|target| target != i64::from(target_temp_c))
+    {
+        return Some(ThermalRuntimeDropReason::WrongTarget);
+    }
+    if status
+        .get("mode")
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode != "sampling")
+    {
+        return Some(ThermalRuntimeDropReason::WrongMode);
+    }
+    if status
+        .get("heaterEnabled")
+        .and_then(Value::as_bool)
+        .is_some_and(|heater_enabled| !heater_enabled)
+    {
+        return Some(ThermalRuntimeDropReason::HeaterDisarmed);
+    }
+    None
+}
+
+impl ThermalStageResult {
+    fn to_value(&self) -> Value {
+        json!({
+            "targetTempC": self.target_temp_c,
+            "riseTimeMs": self.rise_time_ms,
+            "maxOvershootC": self.max_overshoot_c,
+            "holdPeakToPeakC": self.hold_peak_to_peak_c,
+            "sampleCount": self.sample_count,
+            "stopReason": self.stop_reason,
+        })
+    }
+}
+
+fn thermal_profile_package_from_value(imported: Value) -> Value {
+    imported
+        .get("profile")
+        .cloned()
+        .or_else(|| {
+            imported
+                .get("thermalControlProfile")
+                .and_then(|thermal_control_profile| thermal_control_profile.get("profile"))
+                .cloned()
+        })
+        .unwrap_or(imported)
+}
+
+async fn collect_thermal_self_test(
+    client: &Client,
+    default_devd: &str,
+    args: ThermalSelfTestArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let resolved = resolve_target(args.target.clone(), default_devd)?;
+    let source_voltage_mv = parse_pps_volts(&args.source_voltage_v)?;
+    let source_current_ma = parse_pps_amps(&args.source_current_a)?;
+    let candidate_profile = default_thermal_candidate_profile();
+    let run_started_unix_ms = current_unix_millis();
+    let run_id = format!(
+        "thermal-{}-{}",
+        run_started_unix_ms,
+        slugify_path_component(&resolved.device)
+    );
+    let run_dir = args.output_dir.join(&run_id);
+    fs::create_dir_all(&run_dir)?;
+    let samples_path = run_dir.join("samples.ndjson");
+    let summary_path = run_dir.join("run.json");
+    let candidate_path = run_dir.join("thermal-profile.candidate.json");
+    fs::write(
+        &candidate_path,
+        serde_json::to_vec_pretty(&candidate_profile)?,
+    )?;
+    let mut samples_writer = BufWriter::new(File::create(&samples_path)?);
+
+    let mut sample_index = 0usize;
+    let mut baseline_results = Vec::new();
+    let mut preview_results = Vec::new();
+    let mut run_error = None::<String>;
+
+    if args.dry_run {
+        baseline_results = write_dry_thermal_ladder(
+            &mut samples_writer,
+            &run_id,
+            "baseline",
+            source_voltage_mv,
+            source_current_ma,
+            &mut sample_index,
+        )?;
+        preview_results = write_dry_thermal_ladder(
+            &mut samples_writer,
+            &run_id,
+            "preview",
+            source_voltage_mv,
+            source_current_ma,
+            &mut sample_index,
+        )?;
+    } else {
+        validate_isolapurr_tools()?;
+        let lease = create_lease(client, &resolved).await?;
+        let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+        let source_result = set_isolapurr_bench_output(
+            &args.source_device_id,
+            source_voltage_mv,
+            source_current_ma,
+        );
+
+        let test_result = async {
+            source_result?;
+            request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::PUT,
+                "/runtime",
+                Some(json!({
+                    "heaterEnabled": false,
+                    "thermalControlProfile": {
+                        "op": "clear_preview"
+                    }
+                })),
+            )
+            .await?;
+            wait_for_cooldown(
+                client,
+                &resolved,
+                &lease.lease_id,
+                args.cooldown_temp_c,
+                Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+            )
+            .await?;
+            baseline_results = run_thermal_ladder(
+                client,
+                &resolved,
+                &lease.lease_id,
+                &mut samples_writer,
+                &run_id,
+                "baseline",
+                source_voltage_mv,
+                source_current_ma,
+                &args,
+                &mut sample_index,
+            )
+            .await?;
+
+            request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::PUT,
+                "/runtime",
+                Some(json!({"heaterEnabled": false})),
+            )
+            .await?;
+            wait_for_cooldown(
+                client,
+                &resolved,
+                &lease.lease_id,
+                args.cooldown_temp_c,
+                Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+            )
+            .await?;
+            request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::PUT,
+                "/runtime",
+                Some(json!({
+                    "thermalControlProfile": {
+                        "op": "preview",
+                        "profile": candidate_profile.clone(),
+                    }
+                })),
+            )
+            .await?;
+            preview_results = run_thermal_ladder(
+                client,
+                &resolved,
+                &lease.lease_id,
+                &mut samples_writer,
+                &run_id,
+                "preview",
+                source_voltage_mv,
+                source_current_ma,
+                &args,
+                &mut sample_index,
+            )
+            .await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        }
+        .await;
+
+        if let Err(error) = test_result {
+            run_error = Some(error.to_string());
+        }
+        let _ = request_leased(
+            client,
+            &resolved,
+            &lease.lease_id,
+            Method::PUT,
+            "/runtime",
+            Some(json!({
+                "heaterEnabled": false,
+                "thermalControlProfile": {
+                    "op": "clear_preview"
+                }
+            })),
+        )
+        .await;
+        let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+        heartbeat.abort();
+        let _ = set_isolapurr_output_auto(&args.source_device_id);
+    }
+
+    samples_writer.flush()?;
+    let validation = validate_thermal_preview_results(&baseline_results, &preview_results);
+    let complete = run_error.is_none() && validation["passed"].as_bool() == Some(true);
+    let summary = json!({
+        "kind": "thermal_self_test",
+        "ok": complete,
+        "runId": run_id,
+        "dryRun": args.dry_run,
+        "target": {
+            "deviceId": resolved.device,
+            "hardwareId": resolved.hardware_id,
+            "devd": resolved.devd,
+        },
+        "source": {
+            "deviceId": args.source_device_id,
+            "mode": "isolapurr_manual_pps_bench",
+            "voltageMv": source_voltage_mv,
+            "currentLimitMa": source_current_ma,
+            "usbCPath": "disconnected",
+        },
+        "parameters": {
+            "targetsC": THERMAL_SELF_TEST_TARGETS_C,
+            "sampleIntervalMs": args.sample_interval_ms.max(1),
+            "holdSeconds": args.hold_seconds.max(1),
+            "stageTimeoutSeconds": args.stage_timeout_seconds.max(1),
+            "cooldownTempC": args.cooldown_temp_c,
+            "cooldownTimeoutSeconds": args.cooldown_timeout_seconds.max(1),
+            "limits": {
+                "overshootC": 3.0,
+                "holdPeakToPeakC": 3.0,
+                "riseTimeRegressionRatio": 1.15
+            }
+        },
+        "files": {
+            "runDir": run_dir,
+            "summaryPath": summary_path,
+            "samplesPath": samples_path,
+            "candidateProfilePath": candidate_path,
+        },
+        "candidateProfile": candidate_profile.clone(),
+        "baseline": baseline_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
+        "preview": preview_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
+        "validation": validation,
+        "sampleCount": sample_index,
+        "complete": complete,
+        "error": run_error,
+    });
+    fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
+    if let Some(id) = summary
+        .get("target")
+        .and_then(|target| target.get("hardwareId"))
+        .and_then(Value::as_str)
+    {
+        let _ = remember_usb(
+            id,
+            summary["target"]["deviceId"].as_str().unwrap_or_default(),
+            summary["target"]["devd"]
+                .as_str()
+                .unwrap_or(DEFAULT_DEVD_URL),
+        );
+    }
+    Ok(summary)
+}
+
+fn default_thermal_candidate_profile() -> Value {
+    let mut points = THERMAL_SELF_TEST_TARGETS_C
+        .iter()
+        .copied()
+        .map(|target_temp_c| {
+            let (brake_distance_centi_c, approach_power_permille, hold_power_permille) =
+                if target_temp_c <= 100 {
+                    (450, 380, 180)
+                } else if target_temp_c <= 180 {
+                    (700, 320, 220)
+                } else {
+                    (1_000, 260, 260)
+                };
+            json!({
+                "targetTempC": target_temp_c,
+                "brakeDistanceCentiC": brake_distance_centi_c,
+                "approachPowerPermille": approach_power_permille,
+                "holdPowerPermille": hold_power_permille,
+            })
+        })
+        .collect::<Vec<_>>();
+    points.push(Value::Null);
+    json!({ "points": points })
+}
+
+fn write_dry_thermal_ladder(
+    samples_writer: &mut BufWriter<File>,
+    run_id: &str,
+    test_phase: &'static str,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    sample_index: &mut usize,
+) -> Result<Vec<ThermalStageResult>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut results = Vec::new();
+    for target_temp_c in THERMAL_SELF_TEST_TARGETS_C {
+        let baseline = test_phase == "baseline";
+        let rise_time_ms = if baseline {
+            u64::from(target_temp_c as u16) * 1_000
+        } else {
+            u64::from(target_temp_c as u16) * 980
+        };
+        let max_overshoot_c = if baseline { 2.6 } else { 1.8 };
+        let hold_peak_to_peak_c = if baseline { 2.4 } else { 1.6 };
+        for phase in ["warmup", "hold"] {
+            let temp_c = if phase == "warmup" {
+                f64::from(target_temp_c) - 0.5
+            } else {
+                f64::from(target_temp_c) + max_overshoot_c / 2.0
+            };
+            let sample = json!({
+                "runId": run_id,
+                "sampleIndex": *sample_index,
+                "capturedAtUnixMs": current_unix_millis(),
+                "testPhase": test_phase,
+                "phase": phase,
+                "targetTempC": target_temp_c,
+                "source": {
+                    "voltageMv": source_voltage_mv,
+                    "currentLimitMa": source_current_ma,
+                },
+                "status": synthetic_thermal_status(target_temp_c, temp_c, source_voltage_mv, source_current_ma),
+            });
+            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+            *sample_index = sample_index.saturating_add(1);
+        }
+        results.push(ThermalStageResult {
+            target_temp_c,
+            rise_time_ms,
+            max_overshoot_c,
+            hold_peak_to_peak_c,
+            sample_count: 2,
+            stop_reason: "completed",
+        });
+    }
+    Ok(results)
+}
+
+fn synthetic_thermal_status(
+    target_temp_c: i16,
+    current_temp_c: f64,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+) -> Value {
+    json!({
+        "mode": "sampling",
+        "heaterEnabled": true,
+        "heaterOutputPercent": 26,
+        "currentTempC": current_temp_c,
+        "targetTempC": target_temp_c,
+        "voltageMv": source_voltage_mv,
+        "currentMa": source_current_ma,
+        "boardTempCenti": (current_temp_c * 100.0) as i32,
+        "rtdRawAdcMv": 1000,
+        "vinRawAdcMv": 1000,
+        "pdRequestMv": source_voltage_mv,
+        "pdContractMv": source_voltage_mv,
+        "pdState": "ready",
+        "manualPpsEnabled": false,
+        "fanEnabled": true,
+        "fanPwmPermille": 500,
+    })
+}
+
+async fn run_thermal_ladder(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    samples_writer: &mut BufWriter<File>,
+    run_id: &str,
+    test_phase: &'static str,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    args: &ThermalSelfTestArgs,
+    sample_index: &mut usize,
+) -> Result<Vec<ThermalStageResult>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut results = Vec::new();
+    for target_temp_c in THERMAL_SELF_TEST_TARGETS_C {
+        arm_thermal_self_test_target(client, resolved, lease_id, target_temp_c).await?;
+        let result = run_thermal_stage(
+            client,
+            resolved,
+            lease_id,
+            samples_writer,
+            run_id,
+            test_phase,
+            target_temp_c,
+            source_voltage_mv,
+            source_current_ma,
+            args,
+            sample_index,
+        )
+        .await?;
+        if result.stop_reason != "completed" {
+            arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
+            results.push(result);
+            break;
+        }
+        results.push(result);
+    }
+    Ok(results)
+}
+
+async fn arm_thermal_self_test_target(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    target_temp_c: i16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c).await
+}
+
+async fn arm_thermal_self_test_heater(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    heater_enabled: bool,
+    target_temp_c: i16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::PUT,
+        "/runtime",
+        Some(json!({
+            "heaterEnabled": heater_enabled,
+            "targetTempC": target_temp_c,
+        })),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_thermal_stage(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    samples_writer: &mut BufWriter<File>,
+    run_id: &str,
+    test_phase: &'static str,
+    target_temp_c: i16,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+    args: &ThermalSelfTestArgs,
+    sample_index: &mut usize,
+) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
+    let started = tokio::time::Instant::now();
+    let deadline = started + Duration::from_secs(args.stage_timeout_seconds.max(1));
+    let hold_duration = Duration::from_secs(args.hold_seconds.max(1));
+    let sample_interval = Duration::from_millis(args.sample_interval_ms.max(1));
+    let mut next_tick = started;
+    let mut hold_tracker = ThermalHoldTracker::new(target_temp_c, hold_duration);
+    let mut max_temp_c = f64::NEG_INFINITY;
+    let mut stage_sample_count = 0usize;
+    let mut stop_reason = "timeout";
+    let mut last_uptime_seconds = None::<u64>;
+    let mut runtime_rearm_attempts = args.runtime_rearm_attempts;
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let status =
+            request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+        let runtime_drop_reason =
+            thermal_runtime_drop_reason(&status, target_temp_c, last_uptime_seconds);
+        if let Some(reason) = runtime_drop_reason {
+            let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let sample = json!({
+                "runId": run_id,
+                "sampleIndex": *sample_index,
+                "capturedAtUnixMs": current_unix_millis(),
+                "elapsedMs": elapsed_ms,
+                "testPhase": test_phase,
+                "phase": "runtime_rearm",
+                "targetTempC": target_temp_c,
+                "source": {
+                    "voltageMv": source_voltage_mv,
+                    "currentLimitMa": source_current_ma,
+                },
+                "runtimeDropReason": reason.as_str(),
+                "runtimeRearmAttemptsRemaining": runtime_rearm_attempts,
+                "status": status,
+            });
+            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+            samples_writer.flush()?;
+            *sample_index = sample_index.saturating_add(1);
+            stage_sample_count = stage_sample_count.saturating_add(1);
+            if runtime_rearm_attempts == 0 {
+                stop_reason = "runtime_lost";
+                break;
+            }
+            runtime_rearm_attempts = runtime_rearm_attempts.saturating_sub(1);
+            arm_thermal_self_test_target(client, resolved, lease_id, target_temp_c).await?;
+            hold_tracker = ThermalHoldTracker::new(target_temp_c, hold_duration);
+            max_temp_c = f64::NEG_INFINITY;
+            last_uptime_seconds = None;
+            next_tick = tokio::time::Instant::now() + sample_interval;
+            tokio::time::sleep(sample_interval).await;
+            continue;
+        }
+        last_uptime_seconds = status.get("uptimeSeconds").and_then(Value::as_u64);
+        let current_temp_c = require_status_f64(&status, "currentTempC")?;
+        max_temp_c = max_temp_c.max(current_temp_c);
+        let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let observation = hold_tracker.observe(current_temp_c, elapsed_ms, now);
+        let phase = match observation {
+            ThermalHoldObservation::Warmup => "warmup",
+            ThermalHoldObservation::Hold | ThermalHoldObservation::Completed => {
+                if observation == ThermalHoldObservation::Completed {
+                    stop_reason = "completed";
+                }
+                "hold"
+            }
+        };
+        let sample = json!({
+            "runId": run_id,
+            "sampleIndex": *sample_index,
+            "capturedAtUnixMs": current_unix_millis(),
+            "elapsedMs": elapsed_ms,
+            "testPhase": test_phase,
+            "phase": phase,
+            "targetTempC": target_temp_c,
+            "source": {
+                "voltageMv": source_voltage_mv,
+                "currentLimitMa": source_current_ma,
+            },
+            "status": status,
+        });
+        writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+        samples_writer.flush()?;
+        *sample_index = sample_index.saturating_add(1);
+        stage_sample_count = stage_sample_count.saturating_add(1);
+        if stop_reason == "completed" {
+            break;
+        }
+        next_tick += sample_interval;
+        tokio::time::sleep_until(next_tick).await;
+    }
+    if stop_reason != "completed" {
+        arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
+    }
+
+    Ok(ThermalStageResult {
+        target_temp_c,
+        rise_time_ms: hold_tracker
+            .rise_time_ms()
+            .unwrap_or_else(|| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+        max_overshoot_c: (max_temp_c - f64::from(target_temp_c)).max(0.0),
+        hold_peak_to_peak_c: hold_tracker.peak_to_peak_c(),
+        sample_count: stage_sample_count,
+        stop_reason,
+    })
+}
+
+async fn wait_for_cooldown(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    cooldown_temp_c: f64,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let status =
+            request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+        let current_temp_c = require_status_f64(&status, "currentTempC")?;
+        if current_temp_c <= cooldown_temp_c {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "thermal self-test requires cooldown to <= {cooldown_temp_c:.1}C, got {current_temp_c:.1}C"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
+fn validate_thermal_preview_results(
+    baseline: &[ThermalStageResult],
+    preview: &[ThermalStageResult],
+) -> Value {
+    let mut failures = Vec::new();
+    for preview_stage in preview {
+        let Some(baseline_stage) = baseline
+            .iter()
+            .find(|stage| stage.target_temp_c == preview_stage.target_temp_c)
+        else {
+            failures.push(json!({
+                "targetTempC": preview_stage.target_temp_c,
+                "reason": "missing_baseline",
+            }));
+            continue;
+        };
+        if baseline_stage.stop_reason != "completed" {
+            failures.push(json!({
+                "targetTempC": baseline_stage.target_temp_c,
+                "phase": "baseline",
+                "reason": "incomplete_stage",
+                "stopReason": baseline_stage.stop_reason,
+            }));
+        }
+        if preview_stage.stop_reason != "completed" {
+            failures.push(json!({
+                "targetTempC": preview_stage.target_temp_c,
+                "phase": "preview",
+                "reason": "incomplete_stage",
+                "stopReason": preview_stage.stop_reason,
+            }));
+        }
+        if preview_stage.max_overshoot_c > 3.0 {
+            failures.push(json!({
+                "targetTempC": preview_stage.target_temp_c,
+                "reason": "overshoot",
+                "value": preview_stage.max_overshoot_c,
+                "limit": 3.0,
+            }));
+        }
+        if preview_stage.hold_peak_to_peak_c > 3.0 {
+            failures.push(json!({
+                "targetTempC": preview_stage.target_temp_c,
+                "reason": "hold_p2p",
+                "value": preview_stage.hold_peak_to_peak_c,
+                "limit": 3.0,
+            }));
+        }
+        let rise_limit_ms = (baseline_stage.rise_time_ms as f64 * 1.15).ceil() as u64;
+        if preview_stage.rise_time_ms > rise_limit_ms {
+            failures.push(json!({
+                "targetTempC": preview_stage.target_temp_c,
+                "reason": "rise_time_regression",
+                "valueMs": preview_stage.rise_time_ms,
+                "limitMs": rise_limit_ms,
+            }));
+        }
+    }
+    json!({
+        "passed": failures.is_empty() && !baseline.is_empty() && !preview.is_empty(),
+        "failures": failures,
+    })
+}
+
+fn validate_isolapurr_tools() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for tool in ["isolapurr", "isolapurr-devd"] {
+        let status = ProcessCommand::new(tool).arg("--help").status().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("{tool} --help failed to start; install released IsolaPurr host tools: {error}"),
+            )
+        })?;
+        if !status.success() {
+            return Err(format!("{tool} --help exited with {status}").into());
+        }
+    }
+    Ok(())
+}
+
+fn set_isolapurr_bench_output(
+    device_id: &str,
+    voltage_mv: u16,
+    current_limit_ma: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let status = ProcessCommand::new("isolapurr")
+        .args([
+            "power",
+            "output",
+            "manual",
+            "--device-id",
+            device_id,
+            "--voltage-mv",
+            &voltage_mv.to_string(),
+            "--current-limit-ma",
+            &current_limit_ma.to_string(),
+            "--usb-c-path",
+            "disconnected",
+        ])
+        .status()?;
+    if !status.success() {
+        if !isolapurr_power_config_matches_manual(device_id, voltage_mv, current_limit_ma) {
+            return Err(format!("isolapurr power output manual exited with {status}").into());
+        }
+    }
+    Ok(())
+}
+
+fn set_isolapurr_output_auto(
+    device_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let status = ProcessCommand::new("isolapurr")
+        .args(["power", "output", "auto", "--device-id", device_id])
+        .status()?;
+    if !status.success() {
+        if !isolapurr_power_config_is_auto(device_id) {
+            return Err(format!("isolapurr power output auto exited with {status}").into());
+        }
+    }
+    Ok(())
+}
+
+fn isolapurr_power_config_matches_manual(
+    device_id: &str,
+    voltage_mv: u16,
+    current_limit_ma: u16,
+) -> bool {
+    let Some(config) = read_isolapurr_power_config(device_id) else {
+        return false;
+    };
+    isolapurr_power_config_value_matches_manual(&config, voltage_mv, current_limit_ma)
+}
+
+fn isolapurr_power_config_value_matches_manual(
+    config: &Value,
+    voltage_mv: u16,
+    current_limit_ma: u16,
+) -> bool {
+    config
+        .get("manual")
+        .and_then(Value::as_object)
+        .is_some_and(|manual| {
+            json_u64_any(manual, &["voltage_mv", "voltageMv"]) == Some(u64::from(voltage_mv))
+                && json_u64_any(manual, &["current_limit_ma", "currentLimitMa"])
+                    == Some(u64::from(current_limit_ma))
+                && json_str_any(manual, &["usb_c_path_mode", "usbCPathMode"]) == Some("disconnect")
+        })
+}
+
+fn isolapurr_power_config_is_auto(device_id: &str) -> bool {
+    read_isolapurr_power_config(device_id)
+        .is_some_and(|config| isolapurr_power_config_value_is_auto(&config))
+}
+
+fn isolapurr_power_config_value_is_auto(config: &Value) -> bool {
+    config
+        .as_object()
+        .and_then(|config| json_str_any(config, &["tps_mode", "tpsMode"]))
+        .is_some_and(|mode| mode == "auto_follow" || mode == "autoFollow")
+}
+
+fn read_isolapurr_power_config(device_id: &str) -> Option<Value> {
+    let output = ProcessCommand::new("isolapurr")
+        .args([
+            "power",
+            "config",
+            "show",
+            "--device-id",
+            device_id,
+            "--json",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn json_u64_any<'a>(object: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_u64))
+}
+
+fn json_str_any<'a>(object: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(Value::as_str))
 }
 
 fn parse_calibration_channel(
@@ -2367,6 +3381,21 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
             rtd_count, vin_count
         ));
     }
+    if payload.get("kind").and_then(Value::as_str) == Some("thermal_self_test") {
+        return Ok(format!(
+            "Thermal self-test {}: {} samples passed={}",
+            payload.get("runId").and_then(Value::as_str).unwrap_or("-"),
+            payload
+                .get("sampleCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            payload
+                .get("validation")
+                .and_then(|validation| validation.get("passed"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ));
+    }
     if payload.get("runId").is_some() && payload.get("sampleCount").is_some() {
         return Ok(format!(
             "Calibration run {}: {} samples stop={} complete={}",
@@ -2480,6 +3509,194 @@ mod tests {
         assert!(rendered.contains(
             "Calibration run cal-1: 42 samples stop=temperature_threshold complete=true"
         ));
+    }
+
+    #[test]
+    fn renders_thermal_self_test_summary() {
+        let payload = json!({
+            "kind": "thermal_self_test",
+            "runId": "thermal-1",
+            "sampleCount": 36,
+            "validation": { "passed": true },
+        });
+        let rendered = render_human(&payload).unwrap();
+        assert!(rendered.contains("Thermal self-test thermal-1: 36 samples passed=true"));
+    }
+
+    #[test]
+    fn thermal_candidate_profile_excludes_300c() {
+        let profile = default_thermal_candidate_profile();
+        let targets = profile["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|point| point.get("targetTempC").and_then(Value::as_i64))
+            .collect::<Vec<_>>();
+        assert_eq!(targets, vec![50, 100, 120, 150, 180, 200, 210, 220, 250]);
+        assert_eq!(profile["points"].as_array().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn thermal_profile_preview_unwraps_runtime_wrapper() {
+        let profile = default_thermal_candidate_profile();
+        let imported = json!({
+            "thermalControlProfile": {
+                "op": "preview",
+                "profile": profile.clone(),
+            }
+        });
+
+        assert_eq!(thermal_profile_package_from_value(imported), profile);
+    }
+
+    #[test]
+    fn thermal_validation_rejects_incomplete_stages() {
+        let baseline = vec![ThermalStageResult {
+            target_temp_c: 120,
+            rise_time_ms: 120_000,
+            max_overshoot_c: 1.0,
+            hold_peak_to_peak_c: 1.0,
+            sample_count: 12,
+            stop_reason: "completed",
+        }];
+        let preview = vec![ThermalStageResult {
+            target_temp_c: 120,
+            rise_time_ms: 119_000,
+            max_overshoot_c: 1.0,
+            hold_peak_to_peak_c: 1.0,
+            sample_count: 12,
+            stop_reason: "timeout",
+        }];
+
+        let validation = validate_thermal_preview_results(&baseline, &preview);
+        assert_eq!(validation["passed"], false);
+        assert_eq!(validation["failures"][0]["reason"], "incomplete_stage");
+    }
+
+    #[test]
+    fn thermal_hold_tracker_resets_when_temperature_leaves_stable_band() {
+        let start = tokio::time::Instant::now();
+        let mut tracker = ThermalHoldTracker::new(120, Duration::from_secs(10));
+
+        assert_eq!(
+            tracker.observe(119.6, 1_000, start),
+            ThermalHoldObservation::Hold
+        );
+        assert_eq!(
+            tracker.observe(119.8, 5_000, start + Duration::from_secs(5)),
+            ThermalHoldObservation::Hold
+        );
+        assert_eq!(
+            tracker.observe(110.0, 6_000, start + Duration::from_secs(6)),
+            ThermalHoldObservation::Warmup
+        );
+        assert_eq!(tracker.rise_time_ms(), Some(1_000));
+        assert!(tracker.peak_to_peak_c().is_infinite());
+        assert_eq!(
+            tracker.observe(119.7, 7_000, start + Duration::from_secs(7)),
+            ThermalHoldObservation::Hold
+        );
+        assert_eq!(
+            tracker.observe(119.8, 16_000, start + Duration::from_secs(16)),
+            ThermalHoldObservation::Hold
+        );
+        assert_eq!(
+            tracker.observe(119.9, 18_000, start + Duration::from_secs(18)),
+            ThermalHoldObservation::Completed
+        );
+    }
+
+    #[test]
+    fn thermal_self_test_detects_runtime_drop_and_disarmed_heater() {
+        let running = json!({
+            "mode": "sampling",
+            "uptimeSeconds": 34,
+            "targetTempC": 210,
+            "heaterEnabled": true,
+        });
+        assert_eq!(thermal_runtime_drop_reason(&running, 210, Some(33)), None);
+
+        let reset = json!({
+            "mode": "idle",
+            "uptimeSeconds": 0,
+            "targetTempC": 210,
+            "heaterEnabled": false,
+        });
+        assert_eq!(
+            thermal_runtime_drop_reason(&reset, 210, Some(34)),
+            Some(ThermalRuntimeDropReason::UptimeReset)
+        );
+
+        let idle = json!({
+            "mode": "idle",
+            "uptimeSeconds": 35,
+            "targetTempC": 210,
+            "heaterEnabled": false,
+        });
+        assert_eq!(
+            thermal_runtime_drop_reason(&idle, 210, Some(34)),
+            Some(ThermalRuntimeDropReason::WrongMode)
+        );
+
+        let disarmed = json!({
+            "mode": "sampling",
+            "uptimeSeconds": 35,
+            "targetTempC": 210,
+            "heaterEnabled": false,
+        });
+        assert_eq!(
+            thermal_runtime_drop_reason(&disarmed, 210, Some(34)),
+            Some(ThermalRuntimeDropReason::HeaterDisarmed)
+        );
+    }
+
+    #[test]
+    fn isolapurr_power_config_matchers_validate_manual_target_and_auto_mode() {
+        let config = json!({
+            "tpsMode": "autoFollow",
+            "manual": {
+                "voltageMv": 20_000,
+                "currentLimitMa": 3_250,
+                "usbCPathMode": "disconnect",
+            }
+        });
+
+        assert!(isolapurr_power_config_value_matches_manual(
+            &config, 20_000, 3_250
+        ));
+        assert!(isolapurr_power_config_value_is_auto(&config));
+        assert!(!isolapurr_power_config_value_matches_manual(
+            &config, 20_000, 3_000
+        ));
+    }
+
+    #[test]
+    fn parses_thermal_self_test_command() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "--devd",
+            DEFAULT_DEVD_URL,
+            "thermal",
+            "self-test",
+            "--device",
+            "bench",
+            "--source-device-id",
+            "iso-1",
+            "--dry-run",
+            "--json",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Thermal {
+                command: ThermalCommand::SelfTest(args),
+            } => {
+                assert_eq!(args.target.device.as_deref(), Some("bench"));
+                assert_eq!(args.source_device_id, "iso-1");
+                assert!(args.dry_run);
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
     }
 
     #[test]
