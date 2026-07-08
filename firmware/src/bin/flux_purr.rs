@@ -4,7 +4,7 @@
 #[cfg(target_arch = "xtensa")]
 use core::panic::PanicInfo;
 #[cfg(target_arch = "xtensa")]
-use defmt::info;
+use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
 use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
@@ -202,6 +202,8 @@ const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS: u64 = 500;
 const HEATER_ADJUSTABLE_MIN_MV: u16 = 12_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_ADJUSTABLE_MAX_MV: u16 = 28_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const CH224Q_ADJUSTABLE_REQUEST_MIN_MV: u16 = 5_000;
 #[cfg(target_arch = "xtensa")]
 const HEATER_PPS_MOS_SETTLE_MS: u64 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1780,15 +1782,16 @@ impl ManualPpsState {
                 capabilities.pps_max_ma,
             )
         {
+            let bounded_min_mv = min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
             let bounded_max_mv = max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
-            if min_mv <= bounded_max_mv && max_ma > 0 {
-                state.capability_min_mv = Some(min_mv);
+            if bounded_min_mv <= bounded_max_mv && max_ma > 0 {
+                state.capability_min_mv = Some(bounded_min_mv);
                 state.capability_max_mv = Some(bounded_max_mv);
                 state.capability_max_ma = Some(max_ma);
                 state.capability_apdos = capabilities.pps_apdos;
                 if state.capability_apdos.iter().all(Option::is_none) {
                     state.capability_apdos[0] = Some(ch224q::PpsApdo {
-                        min_mv,
+                        min_mv: bounded_min_mv,
                         max_mv,
                         max_ma,
                     });
@@ -1821,8 +1824,9 @@ impl ManualPpsState {
 
     fn has_matching_pps_apdo(&self, target_mv: u16, target_ma: u16) -> bool {
         self.capability_apdos.iter().flatten().any(|apdo| {
+            let min_mv = apdo.min_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
             let max_mv = apdo.max_mv.min(ch224q::CH224Q_PPS_MAX_MV);
-            target_mv >= apdo.min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
+            target_mv >= min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
         })
     }
 
@@ -2390,8 +2394,10 @@ fn current_limit_fixed_pwm_duty_percent(
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling_mv: u16) -> u16 {
-    let bounded_min_mv = floor_mv.clamp(0, HEATER_ADJUSTABLE_MAX_MV);
-    let bounded_max_mv = ceiling_mv.clamp(bounded_min_mv, HEATER_ADJUSTABLE_MAX_MV);
+    let bounded_min_mv = floor_mv.clamp(CH224Q_ADJUSTABLE_REQUEST_MIN_MV, HEATER_ADJUSTABLE_MAX_MV);
+    let bounded_max_mv = ceiling_mv
+        .max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV)
+        .clamp(bounded_min_mv, HEATER_ADJUSTABLE_MAX_MV);
     if duty_percent == 0 {
         return bounded_min_mv;
     }
@@ -2439,6 +2445,11 @@ fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::Adju
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn clamp_ch224q_adjustable_request_mv(request_mv: u16) -> u16 {
+    request_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn select_heater_power_backend(
     capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     status: Option<Status>,
@@ -2462,7 +2473,7 @@ fn select_heater_power_backend(
     let pps_min_mv = capabilities
         .pps_min_mv
         .unwrap_or(HEATER_ADJUSTABLE_MIN_MV)
-        .clamp(0, ch224q::CH224Q_PPS_MAX_MV);
+        .clamp(CH224Q_ADJUSTABLE_REQUEST_MIN_MV, ch224q::CH224Q_PPS_MAX_MV);
     let pps_max_mv = capabilities
         .pps_max_mv
         .unwrap_or(ch224q::PPS_GATE_MV)
@@ -4743,6 +4754,15 @@ async fn request_ch224q_adjustable_voltage(
     mode: ch224q::AdjustableVoltageMode,
     mode_changed: bool,
 ) -> bool {
+    let original_request_mv = request_mv;
+    let request_mv = clamp_ch224q_adjustable_request_mv(request_mv);
+    if request_mv != original_request_mv {
+        warn!(
+            "ch224q adjustable request below hardware minimum requested_mv={=u16} clamped_mv={=u16}",
+            original_request_mv, request_mv,
+        );
+    }
+
     let voltage_written = match mode {
         ch224q::AdjustableVoltageMode::Pps => {
             let Some(payload) = ch224q::pps_voltage_payload(request_mv) else {
@@ -7292,6 +7312,19 @@ mod tests {
     }
 
     #[test]
+    fn heater_adjustable_voltage_never_requests_below_ch224q_hardware_floor() {
+        assert_eq!(clamp_ch224q_adjustable_request_mv(3_300), 5_000);
+        assert_eq!(
+            heater_request_mv_from_power_percent(0, 3_300, 21_000),
+            5_000
+        );
+        assert_eq!(
+            heater_request_mv_from_power_percent(100, 3_300, 4_800),
+            5_000
+        );
+    }
+
+    #[test]
     fn heater_safe_max_matches_65w_temperature_limits() {
         assert_eq!(
             heater_safe_max_mv_for_temp(0.0, 3_250, 21_000, None, &MemoryConfig::default()),
@@ -7442,7 +7475,7 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                pps_min_mv: 3_300,
+                pps_min_mv: 5_000,
                 idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 28_000,
@@ -7494,7 +7527,7 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                pps_min_mv: 3_300,
+                pps_min_mv: 5_000,
                 idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 21_000,
@@ -7532,7 +7565,7 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                pps_min_mv: 3_300,
+                pps_min_mv: 5_000,
                 idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 24_000,
@@ -7570,7 +7603,7 @@ mod tests {
         assert_eq!(
             backend,
             HeaterPowerBackend::PpsMos {
-                pps_min_mv: 3_300,
+                pps_min_mv: 5_000,
                 idle_request_mv: 12_000,
                 pps_max_mv: 21_000,
                 adjustable_max_mv: 21_000,

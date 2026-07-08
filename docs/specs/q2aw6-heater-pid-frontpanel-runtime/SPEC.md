@@ -72,7 +72,7 @@
 - RTD 开路、短路、ADC 读失败、`temp >= 420°C` 时，heater 必须立即关断并进入 fault-latch。
 - fault-latch 期间 heater 不得自动恢复；故障解除后必须由用户再次短按中键重臂。
 - CH224Q 在启动时默认请求 `20V`；`pd-request-12v` / `pd-request-28v` 仅改变默认固定请求值。随后必须读取 CH224Q power data 并只在 PPS APDO 覆盖 `20V` 时启用 `pps-mos`。固定 `20V` PDO 不得被当作 PPS 覆盖 `20V`。
-- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS，并请求 `12V` 或 source 宣告的更高 PPS 最小电压；控制输出 `1..100%` 必须映射到 `source PPS minimum .. safe_max_mv`，其中 `safe_max_mv = floor_100mV(min(V_source_max, I_source_max * R_estimated(T)))`，并继续受 PPS/AVS capability 上下限钳制。若加热时 `safe_max_mv < PPS minimum`，则必须临时请求固定 `9V` 并切回 `GPIO47` PWM，且 PWM duty 必须继续按 `I_source_max * R_estimated(T) / 9V` 钳制，直到 `safe_max_mv >= PPS minimum + 200mV` 才恢复 `pps-mos`；任一关键调压写入失败必须切回默认固定 PD + `GPIO47` PWM fallback。
+- `pps-mos` 后端中，控制输出 `0%` 必须关 MOS，并请求 `12V` 或 source 宣告的更高 PPS 最小电压；控制输出 `1..100%` 必须映射到 `source PPS minimum .. safe_max_mv`，其中 `safe_max_mv = floor_100mV(min(V_source_max, I_source_max * R_estimated(T)))`，并继续受 PPS/AVS capability 上下限钳制。所有 CH224Q 可调电压请求在最终写寄存器前都必须 clamp 到不低于 `5V`；若 source capability 或上层控制请求低于 `5V`，实际请求必须提升为 `5V` 并记录 warning 日志。若加热时 `safe_max_mv < PPS minimum`，则必须临时请求固定 `9V` 并切回 `GPIO47` PWM，且 PWM duty 必须继续按 `I_source_max * R_estimated(T) / 9V` 钳制，直到 `safe_max_mv >= PPS minimum + 200mV` 才恢复 `pps-mos`；任一关键调压写入失败必须切回默认固定 PD + `GPIO47` PWM fallback。
 - 手动 PPS 覆盖是非持久化调试状态，不写 EEPROM。启用时暂停自动 PPS/PID 电压写入，但 heater/PID 输出与 MOS gate 仍按既有逻辑运行；改压时不得主动干预 MOS gate。
 - 手动 PPS 覆盖不依赖 `pps_covers_20v`，但必须存在 PPS APDO capability，目标电压必须在 capability 内、按 `100mV` 对齐且不高于 `21.0V`。CH224Q 写入失败或 PD 状态丢失时必须自动清除覆盖，回到默认固定 PD 请求或既有 fallback，并通过 status/trace 暴露错误。
 - `active_cooling_enabled=true` 时，Dashboard fan line 必须只显示 `AUTO` 或 `RUN`；`active_cooling_enabled=false` 时必须显示 `OFF`，即使保护链路正在临时驱动真实风扇。
