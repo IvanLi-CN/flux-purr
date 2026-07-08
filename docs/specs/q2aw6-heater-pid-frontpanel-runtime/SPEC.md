@@ -161,7 +161,7 @@ None
 - Given `runtime_config.thermalControlProfile.op=preview`，When profile 含有 10 个槽位，Then firmware 只在 RAM 中启用 profile preview，目标温度落在点间时按 profile 线性插值；When `op=clear_preview`，Then status 回显 `thermalControlProfilePreview=false` 且控制器回到 EEPROM saved profile 或默认曲线。
 - Given `runtime_config.thermalControlProfile.op=save`，When profile 含有 10 个槽位，Then firmware 立即启用该 profile 并经现有 memory commit 路径写入 EEPROM；When 设备重启后，Then 控制器继续使用 saved profile；When `op=clear_saved`，Then EEPROM-backed active profile 被清除，RAM preview 不被隐式保存。
 - Given `flux-purr thermal self-test` dry-run 或 mock devd，When 生成候选 profile，Then `targetsC` 只包含 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250°C`，不得包含 `300°C`。
-- Given 真实 HIL self-test，When IsolaPurr 以 released `isolapurr` 工具设置 `20V / 3.25A` bench source 且 Flux Purr 端口已由主人明确授权，Then baseline 与 preview run 产生 `run.json`、`samples.ndjson`、`thermal-profile.candidate.json`；preview 必须满足最大过冲 `<=3.0°C`、连续保温峰峰值 `<=3.0°C`、升温时间不慢于 baseline `15%` 以上，否则报告失败温区和原始样本且不保存 profile；默认保温采样窗口为 `60s`，每个 stage 默认 `300s` 安全上限，超时或 runtime 连续丢失时必须主动关闭 heater 并停止 ladder；温度离开目标稳定带时必须重新开始保温窗口，不得把掉温样本计入有效 hold。
+- Given 真实 HIL self-test，When IsolaPurr 以 released `isolapurr` 工具设置 `20V / 3.25A / USB-C forced-on` bench source 且 Flux Purr 端口已由主人明确授权，Then source setup 必须先校验 IsolaPurr status 回报的 device id 与 `--source-device-id` 完全一致，并在写命令成功退出后读回 manual voltage/current/path 一致；任一命令非 0 退出、身份不一致或读回不一致都必须失败，不得用后续读回掩盖写命令失败。baseline 与 preview run 产生 `run.json`、`samples.ndjson`、`thermal-profile.candidate.json`；preview 必须满足最大过冲 `<=3.0°C`、连续保温峰峰值 `<=3.0°C`、升温时间不慢于 baseline `15%` 以上，否则报告失败温区和原始样本且不保存 profile；默认保温采样窗口为 `60s`，每个 stage 默认 `300s` 安全上限，超时或 runtime 连续丢失时必须主动关闭 heater 并停止 ladder；温度离开目标稳定带时必须重新开始保温窗口，不得把掉温样本计入有效 hold。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 

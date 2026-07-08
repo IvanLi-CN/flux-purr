@@ -1805,7 +1805,11 @@ async fn collect_thermal_self_test(
         .await;
         let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
         heartbeat.abort();
-        let _ = set_isolapurr_output_auto(&args.source_device_id);
+        if let Err(error) = set_isolapurr_output_auto(&args.source_device_id)
+            && run_error.is_none()
+        {
+            run_error = Some(format!("isolapurr cleanup failed: {error}"));
+        }
     }
 
     samples_writer.flush()?;
@@ -1826,7 +1830,7 @@ async fn collect_thermal_self_test(
             "mode": "isolapurr_manual_pps_bench",
             "voltageMv": source_voltage_mv,
             "currentLimitMa": source_current_ma,
-            "usbCPath": "disconnected",
+            "usbCPath": "forced-on",
         },
         "parameters": {
             "targetsC": THERMAL_SELF_TEST_TARGETS_C,
@@ -2291,7 +2295,8 @@ fn set_isolapurr_bench_output(
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let status = ProcessCommand::new("isolapurr")
+    validate_isolapurr_device_identity(device_id)?;
+    let output = ProcessCommand::new("isolapurr")
         .args([
             "power",
             "output",
@@ -2303,13 +2308,24 @@ fn set_isolapurr_bench_output(
             "--current-limit-ma",
             &current_limit_ma.to_string(),
             "--usb-c-path",
-            "disconnected",
+            "forced-on",
         ])
-        .status()?;
-    if !status.success() {
-        if !isolapurr_power_config_matches_manual(device_id, voltage_mv, current_limit_ma) {
-            return Err(format!("isolapurr power output manual exited with {status}").into());
-        }
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "isolapurr power output manual exited with {}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+
+    let config = read_isolapurr_power_config(device_id)?;
+    if !isolapurr_power_config_value_matches_manual(&config, voltage_mv, current_limit_ma) {
+        return Err(format!(
+            "isolapurr power output manual readback mismatch for device_id={device_id}"
+        )
+        .into());
     }
     Ok(())
 }
@@ -2317,26 +2333,52 @@ fn set_isolapurr_bench_output(
 fn set_isolapurr_output_auto(
     device_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let status = ProcessCommand::new("isolapurr")
+    validate_isolapurr_device_identity(device_id)?;
+    let output = ProcessCommand::new("isolapurr")
         .args(["power", "output", "auto", "--device-id", device_id])
-        .status()?;
-    if !status.success() {
-        if !isolapurr_power_config_is_auto(device_id) {
-            return Err(format!("isolapurr power output auto exited with {status}").into());
-        }
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "isolapurr power output auto exited with {}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+
+    let config = read_isolapurr_power_config(device_id)?;
+    if !isolapurr_power_config_value_is_auto(&config) {
+        return Err(format!(
+            "isolapurr power output auto readback mismatch for device_id={device_id}"
+        )
+        .into());
     }
     Ok(())
 }
 
-fn isolapurr_power_config_matches_manual(
+fn validate_isolapurr_device_identity(
     device_id: &str,
-    voltage_mv: u16,
-    current_limit_ma: u16,
-) -> bool {
-    let Some(config) = read_isolapurr_power_config(device_id) else {
-        return false;
-    };
-    isolapurr_power_config_value_matches_manual(&config, voltage_mv, current_limit_ma)
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let output = ProcessCommand::new("isolapurr")
+        .args(["status", "--device-id", device_id, "--json"])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "isolapurr status exited with {}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    let status: Value = serde_json::from_slice(&output.stdout)?;
+    if !isolapurr_status_identity_matches(&status, device_id) {
+        let actual = isolapurr_status_device_id(&status).unwrap_or("unknown");
+        return Err(format!(
+            "isolapurr identity mismatch requested_device_id={device_id} actual_device_id={actual}"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn isolapurr_power_config_value_matches_manual(
@@ -2351,13 +2393,20 @@ fn isolapurr_power_config_value_matches_manual(
             json_u64_any(manual, &["voltage_mv", "voltageMv"]) == Some(u64::from(voltage_mv))
                 && json_u64_any(manual, &["current_limit_ma", "currentLimitMa"])
                     == Some(u64::from(current_limit_ma))
-                && json_str_any(manual, &["usb_c_path_mode", "usbCPathMode"]) == Some("disconnect")
+                && json_str_any(manual, &["usb_c_path_mode", "usbCPathMode"]) == Some("force")
         })
 }
 
-fn isolapurr_power_config_is_auto(device_id: &str) -> bool {
-    read_isolapurr_power_config(device_id)
-        .is_some_and(|config| isolapurr_power_config_value_is_auto(&config))
+fn isolapurr_status_identity_matches(status: &Value, device_id: &str) -> bool {
+    isolapurr_status_device_id(status) == Some(device_id)
+}
+
+fn isolapurr_status_device_id(status: &Value) -> Option<&str> {
+    status
+        .get("device")
+        .or_else(|| status.get("result")?.get("device"))
+        .and_then(Value::as_object)
+        .and_then(|device| json_str_any(device, &["device_id", "deviceId"]))
 }
 
 fn isolapurr_power_config_value_is_auto(config: &Value) -> bool {
@@ -2367,7 +2416,9 @@ fn isolapurr_power_config_value_is_auto(config: &Value) -> bool {
         .is_some_and(|mode| mode == "auto_follow" || mode == "autoFollow")
 }
 
-fn read_isolapurr_power_config(device_id: &str) -> Option<Value> {
+fn read_isolapurr_power_config(
+    device_id: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let output = ProcessCommand::new("isolapurr")
         .args([
             "power",
@@ -2377,12 +2428,16 @@ fn read_isolapurr_power_config(device_id: &str) -> Option<Value> {
             device_id,
             "--json",
         ])
-        .output()
-        .ok()?;
+        .output()?;
     if !output.status.success() {
-        return None;
+        return Err(format!(
+            "isolapurr power config show exited with {}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
     }
-    serde_json::from_slice(&output.stdout).ok()
+    Ok(serde_json::from_slice(&output.stdout)?)
 }
 
 fn json_u64_any<'a>(object: &'a serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
@@ -3704,7 +3759,7 @@ mod tests {
             "manual": {
                 "voltageMv": 20_000,
                 "currentLimitMa": 3_250,
-                "usbCPathMode": "disconnect",
+                "usbCPathMode": "force",
             }
         });
 
@@ -3714,6 +3769,39 @@ mod tests {
         assert!(isolapurr_power_config_value_is_auto(&config));
         assert!(!isolapurr_power_config_value_matches_manual(
             &config, 20_000, 3_000
+        ));
+    }
+
+    #[test]
+    fn isolapurr_status_identity_must_match_requested_device() {
+        let status = json!({
+            "device": {
+                "device_id": "f293cc9c139e",
+                "firmware": {
+                    "name": "isolapurr-usb-hub",
+                    "version": "0.5.1"
+                }
+            }
+        });
+
+        assert!(isolapurr_status_identity_matches(&status, "f293cc9c139e"));
+        assert!(!isolapurr_status_identity_matches(&status, "856a141cdbd4"));
+
+        let wrapped_status = json!({
+            "ok": true,
+            "result": {
+                "device": {
+                    "device_id": "f293cc9c139e"
+                }
+            }
+        });
+        assert!(isolapurr_status_identity_matches(
+            &wrapped_status,
+            "f293cc9c139e"
+        ));
+        assert!(!isolapurr_status_identity_matches(
+            &wrapped_status,
+            "856a141cdbd4"
         ));
     }
 
