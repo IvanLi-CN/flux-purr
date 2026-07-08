@@ -18,6 +18,17 @@ pub const MEMORY_WIFI_PASSWORD_MAX_LEN: usize = 64;
 pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
+pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
+pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 450;
+pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
+pub const THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT: u16 = 90;
+pub const THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT: u16 = 200;
+pub const THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT: u16 = 30;
+pub const THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT: u16 = 5;
+pub const THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT: u16 = 25;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_DEFAULT: u16 = 5;
+pub const THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT: u16 = 120;
+pub const THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT: u16 = 12;
 pub const ADC_CALIBRATION_RTD_DEFAULT_LOW_MV: u16 = 0;
 pub const ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV: u16 = 2_800;
 pub const ADC_CALIBRATION_VIN_DEFAULT_LOW_MV: u16 = 0;
@@ -28,6 +39,10 @@ const ADC_CALIBRATION_REFERENCE_PAYLOAD_LEN: usize = ADC_CALIBRATION_MAX_SAMPLES
 const ADC_CALIBRATION_TARGET_PAYLOAD_LEN: usize = ADC_CALIBRATION_MAX_SAMPLES * 2;
 const ADC_CALIBRATION_SLOT_PAYLOAD_LEN: usize = 2 * 2 * (core::mem::size_of::<f32>() * 2);
 const ADC_CALIBRATION_ACTIVE_SLOT_PAYLOAD_LEN: usize = 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN: usize = 10 * 2;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS * 8;
+const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize =
+    THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const PRESET_NONE_WIRE_VALUE: i16 = i16::MIN;
@@ -51,6 +66,7 @@ const TLV_LEGACY_DRAFT_ADC_CALIBRATION_TARGETS: u8 = 0x25;
 const TLV_ADC_CALIBRATION_SLOTS: u8 = 0x26;
 const TLV_ADC_CALIBRATION_ACTIVE_SLOTS: u8 = 0x27;
 const TLV_ACTIVE_HEATER_CURVE: u8 = 0x30;
+const TLV_ACTIVE_THERMAL_CONTROL_PROFILE: u8 = 0x31;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryConfig {
@@ -64,6 +80,7 @@ pub struct MemoryConfig {
     pub telemetry_interval_ms: u32,
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
+    pub active_thermal_control_profile: ThermalControlProfileConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +127,34 @@ pub struct HeaterCurveConfig {
     pub points: [Option<HeaterCurvePoint>; HEATER_CURVE_MAX_POINTS],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalControlProfilePointConfig {
+    pub target_temp_c: i16,
+    pub brake_distance_centi_c: u16,
+    pub approach_power_permille: u16,
+    pub hold_power_permille: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalControlProfileConfig {
+    pub settings: ThermalControlProfileSettingsConfig,
+    pub points: [Option<ThermalControlProfilePointConfig>; THERMAL_CONTROL_PROFILE_MAX_POINTS],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalControlProfileSettingsConfig {
+    pub temp_filter_alpha_permille: u16,
+    pub warmup_reenter_centi_c: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub approach_max_ticks: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AdcCalibrationChannelConfig {
     pub samples: [Option<AdcCalibrationSample>; ADC_CALIBRATION_MAX_SAMPLES],
@@ -153,6 +198,33 @@ impl Default for HeaterCurveConfig {
     fn default() -> Self {
         Self {
             points: [None; HEATER_CURVE_MAX_POINTS],
+        }
+    }
+}
+
+impl Default for ThermalControlProfileConfig {
+    fn default() -> Self {
+        Self {
+            settings: ThermalControlProfileSettingsConfig::default(),
+            points: [None; THERMAL_CONTROL_PROFILE_MAX_POINTS],
+        }
+    }
+}
+
+impl Default for ThermalControlProfileSettingsConfig {
+    fn default() -> Self {
+        Self {
+            temp_filter_alpha_permille: THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT,
+            warmup_reenter_centi_c: THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT,
+            hold_entry_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+            hold_exit_centi_c: THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+            hold_on_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+            hold_off_centi_c: THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+            overshoot_cutoff_centi_c: THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+            approach_max_ticks: THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_DEFAULT,
+            hold_kp_permille_per_c: THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+            hold_ki_permille_per_c_tick:
+                THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
         }
     }
 }
@@ -247,6 +319,7 @@ impl Default for MemoryConfig {
             telemetry_interval_ms: 500,
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
+            active_thermal_control_profile: ThermalControlProfileConfig::default(),
         }
     }
 }
@@ -265,6 +338,7 @@ impl MemoryConfig {
         }
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
+        sanitize_thermal_control_profile(&mut self.active_thermal_control_profile);
     }
 }
 
@@ -362,6 +436,43 @@ fn sanitize_heater_curve(config: &mut HeaterCurveConfig) {
     for (index, point) in points.into_iter().enumerate() {
         config.points[index] = Some(point);
     }
+}
+
+fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
+    config.settings.temp_filter_alpha_permille =
+        config.settings.temp_filter_alpha_permille.clamp(1, 1_000);
+    config.settings.warmup_reenter_centi_c =
+        config.settings.warmup_reenter_centi_c.clamp(50, 5_000);
+    config.settings.hold_entry_centi_c = config.settings.hold_entry_centi_c.clamp(1, 5_000);
+    config.settings.hold_exit_centi_c = config.settings.hold_exit_centi_c.clamp(1, 5_000);
+    config.settings.hold_on_centi_c = config.settings.hold_on_centi_c.clamp(1, 5_000);
+    config.settings.hold_off_centi_c = config.settings.hold_off_centi_c.clamp(0, 5_000);
+    config.settings.overshoot_cutoff_centi_c =
+        config.settings.overshoot_cutoff_centi_c.clamp(1, 5_000);
+    config.settings.approach_max_ticks = config.settings.approach_max_ticks.clamp(1, 60);
+    config.settings.hold_kp_permille_per_c = config.settings.hold_kp_permille_per_c.min(10_000);
+    config.settings.hold_ki_permille_per_c_tick =
+        config.settings.hold_ki_permille_per_c_tick.min(10_000);
+
+    let mut compacted = [None; THERMAL_CONTROL_PROFILE_MAX_POINTS];
+    let mut points: heapless::Vec<
+        ThermalControlProfilePointConfig,
+        THERMAL_CONTROL_PROFILE_MAX_POINTS,
+    > = heapless::Vec::new();
+    for point in config.points.iter().flatten() {
+        let sanitized = ThermalControlProfilePointConfig {
+            target_temp_c: clamp_temp_c(point.target_temp_c),
+            brake_distance_centi_c: point.brake_distance_centi_c.clamp(100, 5_000),
+            approach_power_permille: point.approach_power_permille.min(1_000),
+            hold_power_permille: point.hold_power_permille.min(1_000),
+        };
+        let _ = points.push(sanitized);
+    }
+    points.sort_unstable_by_key(|point| point.target_temp_c);
+    for (index, point) in points.into_iter().enumerate() {
+        compacted[index] = Some(point);
+    }
+    config.points = compacted;
 }
 
 fn compact_channel(channel: &mut AdcCalibrationChannelConfig) {
@@ -798,6 +909,17 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
+    let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+    encode_thermal_control_profile(
+        &config.active_thermal_control_profile,
+        &mut thermal_profile_payload,
+    );
+    push_tlv(
+        TLV_ACTIVE_THERMAL_CONTROL_PROFILE,
+        &thermal_profile_payload,
+        out,
+        &mut cursor,
+    )?;
     Ok(cursor)
 }
 
@@ -907,6 +1029,12 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             }
             TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
                 config.active_heater_curve = decode_heater_curve(value);
+            }
+            TLV_ACTIVE_THERMAL_CONTROL_PROFILE
+                if len == THERMAL_CONTROL_PROFILE_PAYLOAD_LEN
+                    || len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN =>
+            {
+                config.active_thermal_control_profile = decode_thermal_control_profile(value);
             }
             _ => {}
         }
@@ -1162,6 +1290,108 @@ fn decode_heater_curve(bytes: &[u8]) -> HeaterCurveConfig {
     config
 }
 
+fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mut [u8]) {
+    encode_thermal_control_profile_settings(
+        &config.settings,
+        &mut out[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
+    );
+    let mut cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
+    for point in config.points {
+        let target = point
+            .map(|point| clamp_temp_c(point.target_temp_c))
+            .unwrap_or(PRESET_NONE_WIRE_VALUE);
+        let brake_distance = point
+            .map(|point| point.brake_distance_centi_c.clamp(100, 5_000))
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        let approach_power = point
+            .map(|point| point.approach_power_permille.min(1_000))
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        let hold_power = point
+            .map(|point| point.hold_power_permille.min(1_000))
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        out[cursor..cursor + 2].copy_from_slice(&target.to_le_bytes());
+        out[cursor + 2..cursor + 4].copy_from_slice(&brake_distance.to_le_bytes());
+        out[cursor + 4..cursor + 6].copy_from_slice(&approach_power.to_le_bytes());
+        out[cursor + 6..cursor + 8].copy_from_slice(&hold_power.to_le_bytes());
+        cursor += 8;
+    }
+}
+
+fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
+    let mut config = ThermalControlProfileConfig::default();
+    let mut cursor = 0;
+    if bytes.len() == THERMAL_CONTROL_PROFILE_PAYLOAD_LEN {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
+    }
+    for slot in config.points.iter_mut() {
+        let target = i16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+        let brake_distance = u16::from_le_bytes([bytes[cursor + 2], bytes[cursor + 3]]);
+        let approach_power = u16::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5]]);
+        let hold_power = u16::from_le_bytes([bytes[cursor + 6], bytes[cursor + 7]]);
+        *slot = if target == PRESET_NONE_WIRE_VALUE
+            || brake_distance == CALIBRATION_NONE_WIRE_VALUE
+            || approach_power == CALIBRATION_NONE_WIRE_VALUE
+            || hold_power == CALIBRATION_NONE_WIRE_VALUE
+        {
+            None
+        } else {
+            Some(ThermalControlProfilePointConfig {
+                target_temp_c: target,
+                brake_distance_centi_c: brake_distance,
+                approach_power_permille: approach_power,
+                hold_power_permille: hold_power,
+            })
+        };
+        cursor += 8;
+    }
+    config
+}
+
+fn encode_thermal_control_profile_settings(
+    settings: &ThermalControlProfileSettingsConfig,
+    out: &mut [u8],
+) {
+    let values = [
+        settings.temp_filter_alpha_permille,
+        settings.warmup_reenter_centi_c,
+        settings.hold_entry_centi_c,
+        settings.hold_exit_centi_c,
+        settings.hold_on_centi_c,
+        settings.hold_off_centi_c,
+        settings.overshoot_cutoff_centi_c,
+        settings.approach_max_ticks,
+        settings.hold_kp_permille_per_c,
+        settings.hold_ki_permille_per_c_tick,
+    ];
+    for (index, value) in values.into_iter().enumerate() {
+        let cursor = index * 2;
+        out[cursor..cursor + 2].copy_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn decode_thermal_control_profile_settings(bytes: &[u8]) -> ThermalControlProfileSettingsConfig {
+    let mut values = [0u16; 10];
+    for (index, value) in values.iter_mut().enumerate() {
+        let cursor = index * 2;
+        *value = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
+    }
+    ThermalControlProfileSettingsConfig {
+        temp_filter_alpha_permille: values[0],
+        warmup_reenter_centi_c: values[1],
+        hold_entry_centi_c: values[2],
+        hold_exit_centi_c: values[3],
+        hold_on_centi_c: values[4],
+        hold_off_centi_c: values[5],
+        overshoot_cutoff_centi_c: values[6],
+        approach_max_ticks: values[7],
+        hold_kp_permille_per_c: values[8],
+        hold_ki_permille_per_c_tick: values[9],
+    }
+}
+
 fn push_tlv(
     tag: u8,
     value: &[u8],
@@ -1266,6 +1496,18 @@ mod tests {
         };
         config.adc_calibration.rtd.active_slot = AdcCalibrationSlotId::B;
         config.adc_calibration.vin.active_slot = AdcCalibrationSlotId::A;
+        config.active_thermal_control_profile.points[0] = Some(ThermalControlProfilePointConfig {
+            target_temp_c: 100,
+            brake_distance_centi_c: 700,
+            approach_power_permille: 320,
+            hold_power_permille: 220,
+        });
+        config.active_thermal_control_profile.points[1] = Some(ThermalControlProfilePointConfig {
+            target_temp_c: 210,
+            brake_distance_centi_c: 1_000,
+            approach_power_permille: 260,
+            hold_power_permille: 180,
+        });
         config
     }
 
@@ -1317,6 +1559,15 @@ mod tests {
         assert_eq!(
             decoded.config.adc_calibration.vin.active_slot,
             AdcCalibrationSlotId::A
+        );
+        assert_eq!(
+            decoded.config.active_thermal_control_profile.points[1],
+            Some(ThermalControlProfilePointConfig {
+                target_temp_c: 210,
+                brake_distance_centi_c: 1_000,
+                approach_power_permille: 260,
+                hold_power_permille: 180,
+            })
         );
     }
 

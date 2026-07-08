@@ -236,6 +236,8 @@ enum ThermalCommand {
 enum ThermalProfileCommand {
     Preview(ThermalProfileFileArgs),
     ClearPreview(TargetSelector),
+    Save(ThermalProfileFileArgs),
+    ClearSaved(TargetSelector),
 }
 
 #[derive(Debug, Args)]
@@ -1434,6 +1436,37 @@ async fn handle_thermal_command(
                 )
                 .await
             }
+            ThermalProfileCommand::Save(args) => {
+                let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
+                let profile = thermal_profile_package_from_value(imported);
+                request_with_lease(
+                    client,
+                    resolve_target(args.target, default_devd)?,
+                    Method::PUT,
+                    "/runtime",
+                    Some(json!({
+                        "thermalControlProfile": {
+                            "op": "save",
+                            "profile": profile
+                        }
+                    })),
+                )
+                .await
+            }
+            ThermalProfileCommand::ClearSaved(selector) => {
+                request_with_lease(
+                    client,
+                    resolve_target(selector, default_devd)?,
+                    Method::PUT,
+                    "/runtime",
+                    Some(json!({
+                        "thermalControlProfile": {
+                            "op": "clear_saved"
+                        }
+                    })),
+                )
+                .await
+            }
         },
         ThermalCommand::SelfTest(args) => {
             collect_thermal_self_test(client, default_devd, args).await
@@ -1861,7 +1894,21 @@ fn default_thermal_candidate_profile() -> Value {
         })
         .collect::<Vec<_>>();
     points.push(Value::Null);
-    json!({ "points": points })
+    json!({
+        "settings": {
+            "tempFilterAlphaPermille": 450,
+            "warmupReenterCentiC": 400,
+            "holdEntryCentiC": 90,
+            "holdExitCentiC": 200,
+            "holdOnCentiC": 30,
+            "holdOffCentiC": 5,
+            "overshootCutoffCentiC": 25,
+            "approachMaxTicks": 5,
+            "holdKpPermillePerC": 120,
+            "holdKiPermillePerCTick": 12
+        },
+        "points": points
+    })
 }
 
 fn write_dry_thermal_ladder(

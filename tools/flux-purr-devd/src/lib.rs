@@ -1031,6 +1031,8 @@ pub struct RuntimeConfigRequest {
 pub enum ThermalControlProfileOp {
     Preview,
     ClearPreview,
+    Save,
+    ClearSaved,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1045,7 +1047,23 @@ pub struct ThermalControlProfilePoint {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalControlProfilePackage {
+    pub settings: Option<ThermalControlProfileSettings>,
     pub points: Vec<Option<ThermalControlProfilePoint>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileSettings {
+    pub temp_filter_alpha_permille: u16,
+    pub warmup_reenter_centi_c: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub approach_max_ticks: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2473,17 +2491,32 @@ fn validate_thermal_control_profile_request(
     request: &ThermalControlProfileRequest,
 ) -> Result<(), HttpError> {
     match request.op {
-        ThermalControlProfileOp::Preview => {
+        ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save => {
             let profile = request.profile.as_ref().ok_or_else(|| {
                 HttpError::bad_request(
                     "thermal_profile_required",
-                    "thermalControlProfile.profile is required for preview.",
+                    "thermalControlProfile.profile is required for preview/save.",
                 )
             })?;
             if profile.points.len() != FRONT_PANEL_PRESET_COUNT {
                 return Err(HttpError::bad_request(
                     "invalid_thermal_profile",
                     "thermalControlProfile.profile.points must contain exactly 10 values.",
+                ));
+            }
+            if let Some(settings) = profile.settings.as_ref()
+                && (settings.temp_filter_alpha_permille == 0
+                    || settings.temp_filter_alpha_permille > 1_000
+                    || settings.warmup_reenter_centi_c == 0
+                    || settings.hold_entry_centi_c == 0
+                    || settings.hold_exit_centi_c == 0
+                    || settings.hold_on_centi_c == 0
+                    || settings.overshoot_cutoff_centi_c == 0
+                    || !(1..=60).contains(&settings.approach_max_ticks))
+            {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_profile",
+                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, and 1..60 approach ticks.",
                 ));
             }
             for point in profile.points.iter().flatten() {
@@ -2498,11 +2531,11 @@ fn validate_thermal_control_profile_request(
                 }
             }
         }
-        ThermalControlProfileOp::ClearPreview => {
+        ThermalControlProfileOp::ClearPreview | ThermalControlProfileOp::ClearSaved => {
             if request.profile.is_some() {
                 return Err(HttpError::bad_request(
                     "invalid_thermal_profile",
-                    "thermalControlProfile.profile must be omitted for clear_preview.",
+                    "thermalControlProfile.profile must be omitted for clear operations.",
                 ));
             }
         }
@@ -3730,6 +3763,7 @@ fn runtime_config_matches_status(
                     return false;
                 }
             }
+            ThermalControlProfileOp::Save | ThermalControlProfileOp::ClearSaved => return false,
         }
     }
     true
@@ -5253,6 +5287,7 @@ mod tests {
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::Preview,
                     profile: Some(ThermalControlProfilePackage {
+                        settings: None,
                         points: vec![
                             Some(ThermalControlProfilePoint {
                                 target_temp_c: 100,
@@ -5305,11 +5340,86 @@ mod tests {
         assert!(!clear.thermal_control_profile_preview);
     }
 
+    #[tokio::test]
+    async fn runtime_endpoint_saves_and_clears_saved_thermal_control_profile() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let save = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::Save,
+                    profile: Some(ThermalControlProfilePackage {
+                        settings: None,
+                        points: vec![
+                            Some(ThermalControlProfilePoint {
+                                target_temp_c: 210,
+                                brake_distance_centi_c: 1_000,
+                                approach_power_permille: 260,
+                                hold_power_permille: 180,
+                            }),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ],
+                    }),
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!save.thermal_control_profile_preview);
+
+        let clear_saved = configure_runtime(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::ClearSaved,
+                    profile: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!clear_saved.thermal_control_profile_preview);
+    }
+
     #[test]
     fn thermal_profile_clear_preview_rejects_profile_payload() {
         let error = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
             op: ThermalControlProfileOp::ClearPreview,
             profile: Some(ThermalControlProfilePackage {
+                settings: None,
                 points: vec![None; FRONT_PANEL_PRESET_COUNT],
             }),
         })
@@ -5963,7 +6073,10 @@ mod tests {
             calibration: None,
             thermal_control_profile: Some(ThermalControlProfileRequest {
                 op: ThermalControlProfileOp::Preview,
-                profile: Some(ThermalControlProfilePackage { points }),
+                profile: Some(ThermalControlProfilePackage {
+                    settings: None,
+                    points,
+                }),
             }),
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;

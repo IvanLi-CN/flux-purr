@@ -8,7 +8,8 @@ use crate::{
         ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationFit,
         AdcCalibrationSample, AdcCalibrationSlotFit, AdcCalibrationSlotId, HEATER_CURVE_MAX_POINTS,
         HeaterCurveConfig, HeaterCurvePoint, MEMORY_WIFI_PASSWORD_MAX_LEN,
-        MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, adc_calibration_fit,
+        MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, ThermalControlProfileConfig,
+        ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, adc_calibration_fit,
     },
 };
 
@@ -484,6 +485,19 @@ impl RuntimeConfigCommand {
         if let Some(active_cooling_enabled) = self.active_cooling_enabled {
             config.active_cooling_enabled = active_cooling_enabled;
         }
+        if let Some(thermal_profile) = self.thermal_control_profile {
+            match thermal_profile.op {
+                ThermalControlProfileOp::Save => {
+                    if let Some(profile) = thermal_profile.profile {
+                        config.active_thermal_control_profile = profile.into();
+                    }
+                }
+                ThermalControlProfileOp::ClearSaved => {
+                    config.active_thermal_control_profile = ThermalControlProfileConfig::default();
+                }
+                ThermalControlProfileOp::Preview | ThermalControlProfileOp::ClearPreview => {}
+            }
+        }
         config.sanitize();
     }
 }
@@ -493,6 +507,8 @@ impl RuntimeConfigCommand {
 pub enum ThermalControlProfileOp {
     Preview,
     ClearPreview,
+    Save,
+    ClearSaved,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,7 +523,23 @@ pub struct ThermalControlProfilePointWire {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalControlProfileWire {
+    pub settings: Option<ThermalControlProfileSettingsWire>,
     pub points: [Option<ThermalControlProfilePointWire>; FRONTPANEL_PRESET_COUNT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileSettingsWire {
+    pub temp_filter_alpha_permille: u16,
+    pub warmup_reenter_centi_c: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub approach_max_ticks: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,6 +547,47 @@ pub struct ThermalControlProfileWire {
 pub struct ThermalControlProfileCommand {
     pub op: ThermalControlProfileOp,
     pub profile: Option<ThermalControlProfileWire>,
+}
+
+impl From<ThermalControlProfilePointWire> for ThermalControlProfilePointConfig {
+    fn from(value: ThermalControlProfilePointWire) -> Self {
+        Self {
+            target_temp_c: value.target_temp_c,
+            brake_distance_centi_c: value.brake_distance_centi_c,
+            approach_power_permille: value.approach_power_permille,
+            hold_power_permille: value.hold_power_permille,
+        }
+    }
+}
+
+impl From<ThermalControlProfileWire> for ThermalControlProfileConfig {
+    fn from(value: ThermalControlProfileWire) -> Self {
+        let mut config = ThermalControlProfileConfig::default();
+        if let Some(settings) = value.settings {
+            config.settings = settings.into();
+        }
+        for (index, point) in value.points.into_iter().enumerate() {
+            config.points[index] = point.map(Into::into);
+        }
+        config
+    }
+}
+
+impl From<ThermalControlProfileSettingsWire> for ThermalControlProfileSettingsConfig {
+    fn from(value: ThermalControlProfileSettingsWire) -> Self {
+        Self {
+            temp_filter_alpha_permille: value.temp_filter_alpha_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
+            hold_entry_centi_c: value.hold_entry_centi_c,
+            hold_exit_centi_c: value.hold_exit_centi_c,
+            hold_on_centi_c: value.hold_on_centi_c,
+            hold_off_centi_c: value.hold_off_centi_c,
+            overshoot_cutoff_centi_c: value.overshoot_cutoff_centi_c,
+            approach_max_ticks: value.approach_max_ticks,
+            hold_kp_permille_per_c: value.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: value.hold_ki_permille_per_c_tick,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1661,6 +1734,69 @@ mod tests {
         assert_eq!(config.presets_c[2], None);
         assert_eq!(config.presets_c[3], Some(155));
         assert_eq!(config.target_temp_c, 155);
+    }
+
+    #[test]
+    fn runtime_command_saves_and_clears_thermal_profile() {
+        let mut points = [None; FRONTPANEL_PRESET_COUNT];
+        points[0] = Some(ThermalControlProfilePointWire {
+            target_temp_c: 210,
+            brake_distance_centi_c: 1_000,
+            approach_power_permille: 260,
+            hold_power_permille: 180,
+        });
+        let mut config = MemoryConfig::default();
+        RuntimeConfigCommand {
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileCommand {
+                op: ThermalControlProfileOp::Save,
+                profile: Some(ThermalControlProfileWire {
+                    settings: None,
+                    points,
+                }),
+            }),
+        }
+        .apply_to(&mut config);
+
+        assert_eq!(
+            config.active_thermal_control_profile.points[0],
+            Some(ThermalControlProfilePointConfig {
+                target_temp_c: 210,
+                brake_distance_centi_c: 1_000,
+                approach_power_permille: 260,
+                hold_power_permille: 180,
+            })
+        );
+
+        RuntimeConfigCommand {
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileCommand {
+                op: ThermalControlProfileOp::ClearSaved,
+                profile: None,
+            }),
+        }
+        .apply_to(&mut config);
+
+        assert_eq!(
+            config.active_thermal_control_profile,
+            ThermalControlProfileConfig::default()
+        );
     }
 
     #[test]

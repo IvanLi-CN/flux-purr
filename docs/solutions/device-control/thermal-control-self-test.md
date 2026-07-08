@@ -9,14 +9,14 @@ related_specs:
 
 Thermal control tuning should be treated as a measured control workflow, not a fixed duty tweak.
 
-The firmware exposes a conservative default controller and a RAM-only profile preview. A profile point describes:
+The firmware exposes a conservative default controller, a RAM-only profile preview, and an explicit save path for the active thermal control profile. A profile point describes:
 
 - `targetTempC`
 - `brakeDistanceCentiC`
 - `approachPowerPermille`
 - `holdPowerPermille`
 
-The runtime interpolates between points. Missing points fall back to conservative defaults. Preview state is intentionally volatile; save-to-EEPROM belongs behind a separate acceptance gate after repeatable hardware data exists.
+The runtime interpolates between points. Missing points fall back to conservative defaults. Preview state is intentionally volatile. `thermalControlProfile.op=save` writes the active profile through the normal EEPROM-backed runtime config path; `op=clear_saved` removes the EEPROM-backed profile.
 
 ## Power abstraction
 
@@ -34,7 +34,7 @@ A useful thermal self-test packet has three files:
 
 - `run.json`: parameters, source identity, target ladder, per-target metrics, validation result, and file paths
 - `samples.ndjson`: raw time-series samples with phase, target, source request, status snapshot, and timestamps
-- `thermal-profile.candidate.json`: RAM preview profile proposed by the tooling
+- `thermal-profile.candidate.json`: preview/save-compatible profile proposed by the tooling
 
 The default ladder for Flux Purr covers the supported tuning range only:
 
@@ -52,7 +52,7 @@ The preview run is acceptable only when every target satisfies:
 
 Each stage has a default `300s` safety deadline. If the deadline expires or runtime state is lost too many times, the self-test actively sends `heaterEnabled=false` and stops the ladder instead of moving to the next target.
 
-Failures should report the target temperature and raw samples. The tooling should not save a profile automatically.
+Failures should report the target temperature and raw samples. The tooling should not save a profile automatically; saving requires an explicit API/CLI action after reviewing the report.
 
 ## Hardware boundary
 

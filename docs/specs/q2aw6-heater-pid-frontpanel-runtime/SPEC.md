@@ -18,7 +18,7 @@
 
 - 把 `GPIO47` 固定占空比加热替换为按 `target_temp_c` 驱动的正式闭环；当 CH224Q 读取到 PPS APDO 覆盖 `20V` 时，heater 后端使用 `PPS/AVS 调压 + MOS 静态通断`，否则回退原 `GPIO47` PWM 调功。
 - 加热闭环采用模型辅助 ramp/soak 与保温 PI 微调的混合控制器。控制器输出统一的等效热功率请求；PPS 后端映射为 `100mV` 对齐电压并静态控制 MOS，固定 PD 后端选择不低于目标等效电压的 PDO 并用 MOS PWM 合成等效功率。
-- 支持 RAM-only `ThermalControlProfile` preview。profile 最多 10 个目标点，包含 `targetTempC`、`brakeDistanceCentiC`、`approachPowerPermille`、`holdPowerPermille`，目标落在两个点之间时线性插值；清除 preview 后回到保守默认曲线。preview 不写 EEPROM。
+- 支持 `ThermalControlProfile` preview 与显式保存。profile 最多 10 个目标点，包含 `targetTempC`、`brakeDistanceCentiC`、`approachPowerPermille`、`holdPowerPermille`，目标落在两个点之间时线性插值；RAM preview 优先于 EEPROM 中的 saved profile；清除 preview 后回到 saved profile 或保守默认曲线；显式 save 写入 EEPROM。
 - 提供 CLI/devd 自测试入口，使用 IsolaPurr released CLI 作为 `20V / 3.25A` 外部 PPS bench source，输出 `run.json`、`samples.ndjson` 与 `thermal-profile.candidate.json`。
 - 让 Dashboard 稳定显示实时温度、设定温度、`OFF/AUTO/RUN` 三态风扇显示与实际 heater 输出强度。
 - 冻结正式风扇/保护包线：
@@ -32,8 +32,8 @@
 
 ### Non-goals
 
-- 不提供运行时 PID 参数调节入口。
-- 不把 thermal control profile 自动保存到 EEPROM。
+- 不提供未建模的底层 PID 内部常数调节入口；运行时调参通过 `ThermalControlProfile` 的目标温区参数完成。
+- 不把 thermal self-test 生成的 candidate profile 自动保存到 EEPROM。
 - 不把 `>250°C` 纳入 thermal self-test 或首版调参验收。
 - 不实现 fan tach 闭环、4 线 PWM、持久化风扇档位或按 VIN 自动切换固定 PD 请求。
 - 不修改外部 HTTP / RPC / 持久化字段结构。
@@ -66,7 +66,7 @@
 
 - heater 控制周期固定为 `1 Hz`。`pps-mos` 后端下 `GPIO47` 只允许静态 `0% / 100%` 输出，中间功率由受温度/电流合同限制的可调 PD 请求承担；fallback 后端继续使用 `2 kHz` PWM。
 - heater 控制器必须按目标温区选择 ramp/approach/hold 参数。远离目标时按 profile 的 approach power 加热，进入刹车距离后线性降到 hold power，保温阶段在 hold power 上叠加 PI 微调；过冲时必须立即把输出降到 `0%` 并限制积分累积。
-- profile preview 必须只驻留 RAM。`runtime_config.thermalControlProfile.op=preview` 需要完整 profile，`op=clear_preview` 清除 preview；状态回显必须暴露 `thermalControlProfilePreview`。
+- profile preview 必须只驻留 RAM。`runtime_config.thermalControlProfile.op=preview` 需要完整 profile，`op=clear_preview` 清除 preview；`op=save` 需要完整 profile 并写入 EEPROM-backed active thermal profile，`op=clear_saved` 清除 EEPROM-backed active profile；状态回显必须暴露 `thermalControlProfilePreview` 区分当前是否处于 RAM preview。
 - CH224Q PPS 电压请求只按 `0x53` 的 `100mV` 单位对齐；AVS `25mV` 不作为首版 PPS 保温细分路径。
 - 目标温度与 preset 写入都必须 clamp 到 `0~400°C`。
 - RTD 开路、短路、ADC 读失败、`temp >= 420°C` 时，heater 必须立即关断并进入 fault-latch。
@@ -136,7 +136,7 @@
 | `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `cooling-disabled-overtemp` / `hard-overtemp` |
 | `FrontPanelUiState.dashboard_warning_visible` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | SET 行告警闪烁相位 |
 | `FrontPanelUiState.manual_pps_enabled` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard `PPS*` 调试覆盖提示 |
-| `ThermalControlProfile` | USB/devd runtime config | external | New | `docs/interfaces/http-api.md` | firmware / devd | CLI / devd / Web Serial | RAM-only preview，最多 10 个点，不保存 EEPROM |
+| `ThermalControlProfile` | USB/devd runtime config + EEPROM config | external | New | `docs/interfaces/http-api.md` | firmware / devd | CLI / devd / Web Serial | RAM preview 与 EEPROM-backed saved profile，最多 10 个点 |
 | `FrontPanelRuntimeState` / `FrontPanelScreen` | TypeScript type | internal | Updated | None | web | Storybook / preview harness | 对齐 firmware 三态 fan 与告警关键帧 |
 
 ### 契约文档（按 Kind 拆分）
@@ -158,7 +158,8 @@ None
 - Given CH224Q power data 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`，`0%` 维持 MOS 关闭且请求 `12V` 或更高 PPS minimum；`1..100%` 只在 `min(V_source_max, I_source_max * R_estimated(T))` 允许的范围内请求 PPS/AVS 电压；对于 `3.25A` source，`0C / 20C` 下的自动加热不得直接请求 `12V` 或更高静态全开电压，必要时必须先关 MOS 再切到固定 `9V` + PWM fallback；对于更低电流 source，fallback duty 必须继续被压到不高于该电流合同对应的等效占空比，且 GPIO47 在 `pps-mos` 正常路径中仍只输出静态关/开。
 - Given CH224Q 只提供固定 `20V` PDO 或 PPS APDO 不覆盖 `20V`，When runtime 初始化 heater 后端，Then 选择 `fixed-pd-pwm-fallback`，不得把固定 `20V` 误判为 PPS 可调能力。
 - Given source 回报 PPS APDO capability，When 手动 PPS 覆盖启用为 `10.4V`，Then 自动 PPS/PID 电压写入暂停，MOS gate 不被设置动作额外改写，status 回显 manual/capability；When 覆盖清除、PD 丢失或写入失败，Then 自动控制恢复且错误码可见。
-- Given `runtime_config.thermalControlProfile.op=preview`，When profile 含有不超过 10 个有效点，Then firmware 只在 RAM 中启用 profile preview，目标温度落在点间时按 profile 线性插值；When `op=clear_preview`，Then status 回显 `thermalControlProfilePreview=false` 且控制器回到默认曲线。
+- Given `runtime_config.thermalControlProfile.op=preview`，When profile 含有 10 个槽位，Then firmware 只在 RAM 中启用 profile preview，目标温度落在点间时按 profile 线性插值；When `op=clear_preview`，Then status 回显 `thermalControlProfilePreview=false` 且控制器回到 EEPROM saved profile 或默认曲线。
+- Given `runtime_config.thermalControlProfile.op=save`，When profile 含有 10 个槽位，Then firmware 立即启用该 profile 并经现有 memory commit 路径写入 EEPROM；When 设备重启后，Then 控制器继续使用 saved profile；When `op=clear_saved`，Then EEPROM-backed active profile 被清除，RAM preview 不被隐式保存。
 - Given `flux-purr thermal self-test` dry-run 或 mock devd，When 生成候选 profile，Then `targetsC` 只包含 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250°C`，不得包含 `300°C`。
 - Given 真实 HIL self-test，When IsolaPurr 以 released `isolapurr` 工具设置 `20V / 3.25A` bench source 且 Flux Purr 端口已由主人明确授权，Then baseline 与 preview run 产生 `run.json`、`samples.ndjson`、`thermal-profile.candidate.json`；preview 必须满足最大过冲 `<=3.0°C`、连续保温峰峰值 `<=3.0°C`、升温时间不慢于 baseline `15%` 以上，否则报告失败温区和原始样本且不保存 profile；默认保温采样窗口为 `60s`，每个 stage 默认 `300s` 安全上限，超时或 runtime 连续丢失时必须主动关闭 heater 并停止 ladder；温度离开目标稳定带时必须重新开始保温窗口，不得把掉温样本计入有效 hold。
 

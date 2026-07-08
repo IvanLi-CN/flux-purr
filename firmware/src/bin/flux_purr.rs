@@ -54,9 +54,9 @@ use flux_purr_firmware::control_plane::{
     ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
     CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire, ControlPlaneStatus,
     Identity, RuntimeConfigCommand, ThermalControlProfileOp, ThermalControlProfilePointWire,
-    ThermalControlProfileWire, UsbFrame, UsbFrameError, UsbRequestOp, UsbResponsePayload,
-    calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
-    parse_usb_frame, write_usb_frame,
+    ThermalControlProfileSettingsWire, ThermalControlProfileWire, UsbFrame, UsbFrameError,
+    UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
+    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -87,7 +87,8 @@ use flux_purr_firmware::memory::{
 use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
-    HeaterCurveConfig, MemoryConfig, heater_resistance_ohms_from_curve,
+    HeaterCurveConfig, MemoryConfig, ThermalControlProfileConfig, ThermalControlProfilePointConfig,
+    ThermalControlProfileSettingsConfig, heater_resistance_ohms_from_curve,
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
@@ -225,28 +226,8 @@ const FAN_ACTIVE_COOLING_PWM_PERMILLE: u16 = 500;
 const FAN_HALF_SPEED_PWM_PERMILLE: u16 = 250;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE: u16 = 1_000;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_WARMUP_REENTER_ERROR_C: f32 = 4.0;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_ENTRY_ERROR_C: f32 = 0.9;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_EXIT_ERROR_C: f32 = 2.0;
 #[cfg(test)]
 const HEATER_APPROACH_DUTY_PERCENT: u8 = 32;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_APPROACH_MAX_TICKS: u8 = 5;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_ON_ERROR_C: f32 = 0.3;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_OFF_ERROR_C: f32 = 0.05;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_OVERSHOOT_CUTOFF_C: f32 = 0.25;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_TEMP_FILTER_ALPHA: f32 = 0.45;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_KP_PERMILLE_PER_C: f32 = 120.0;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_KI_PERMILLE_PER_C_TICK: f32 = 12.0;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PROFILE_R20_OHMS: f32 = 3.2;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -425,8 +406,9 @@ struct ThermalControlProfilePoint {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ThermalControlProfile {
+    settings: ThermalControlProfileSettings,
     points: [Option<ThermalControlProfilePoint>; FRONTPANEL_PRESET_COUNT],
 }
 
@@ -436,6 +418,22 @@ struct ThermalControlTarget {
     brake_distance_c: f32,
     approach_power_permille: u16,
     hold_power_permille: u16,
+    settings: ThermalControlProfileSettings,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ThermalControlProfileSettings {
+    temp_filter_alpha: f32,
+    warmup_reenter_error_c: f32,
+    hold_entry_error_c: f32,
+    hold_exit_error_c: f32,
+    hold_on_error_c: f32,
+    hold_off_error_c: f32,
+    overshoot_cutoff_c: f32,
+    approach_max_ticks: u8,
+    hold_kp_permille_per_c: f32,
+    hold_ki_permille_per_c_tick: f32,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -464,19 +462,115 @@ impl From<ThermalControlProfilePointWire> for ThermalControlProfilePoint {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+impl From<ThermalControlProfilePointConfig> for ThermalControlProfilePoint {
+    fn from(value: ThermalControlProfilePointConfig) -> Self {
+        Self {
+            target_temp_c: value.target_temp_c,
+            brake_distance_centi_c: value.brake_distance_centi_c,
+            approach_power_permille: value.approach_power_permille,
+            hold_power_permille: value.hold_power_permille,
+        }
+        .sanitized()
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl From<ThermalControlProfileSettingsConfig> for ThermalControlProfileSettings {
+    fn from(value: ThermalControlProfileSettingsConfig) -> Self {
+        Self {
+            temp_filter_alpha: f32::from(value.temp_filter_alpha_permille.clamp(1, 1_000))
+                / 1_000.0,
+            warmup_reenter_error_c: f32::from(value.warmup_reenter_centi_c) / 100.0,
+            hold_entry_error_c: f32::from(value.hold_entry_centi_c) / 100.0,
+            hold_exit_error_c: f32::from(value.hold_exit_centi_c) / 100.0,
+            hold_on_error_c: f32::from(value.hold_on_centi_c) / 100.0,
+            hold_off_error_c: f32::from(value.hold_off_centi_c) / 100.0,
+            overshoot_cutoff_c: f32::from(value.overshoot_cutoff_centi_c) / 100.0,
+            approach_max_ticks: value.approach_max_ticks.clamp(1, u16::from(u8::MAX)) as u8,
+            hold_kp_permille_per_c: f32::from(value.hold_kp_permille_per_c),
+            hold_ki_permille_per_c_tick: f32::from(value.hold_ki_permille_per_c_tick),
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl From<ThermalControlProfileSettingsWire> for ThermalControlProfileSettings {
+    fn from(value: ThermalControlProfileSettingsWire) -> Self {
+        ThermalControlProfileSettingsConfig {
+            temp_filter_alpha_permille: value.temp_filter_alpha_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
+            hold_entry_centi_c: value.hold_entry_centi_c,
+            hold_exit_centi_c: value.hold_exit_centi_c,
+            hold_on_centi_c: value.hold_on_centi_c,
+            hold_off_centi_c: value.hold_off_centi_c,
+            overshoot_cutoff_centi_c: value.overshoot_cutoff_centi_c,
+            approach_max_ticks: value.approach_max_ticks,
+            hold_kp_permille_per_c: value.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: value.hold_ki_permille_per_c_tick,
+        }
+        .into()
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl Default for ThermalControlProfileSettings {
+    fn default() -> Self {
+        ThermalControlProfileSettingsConfig::default().into()
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 impl From<ThermalControlProfileWire> for ThermalControlProfile {
     fn from(value: ThermalControlProfileWire) -> Self {
         let mut points = [None; FRONTPANEL_PRESET_COUNT];
         for (index, point) in value.points.into_iter().enumerate() {
             points[index] = point.map(Into::into);
         }
-        Self { points }.sanitized()
+        Self {
+            settings: value.settings.map(Into::into).unwrap_or_default(),
+            points,
+        }
+        .sanitized()
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl From<ThermalControlProfileConfig> for ThermalControlProfile {
+    fn from(value: ThermalControlProfileConfig) -> Self {
+        let mut points = [None; FRONTPANEL_PRESET_COUNT];
+        for (index, point) in value.points.into_iter().enumerate() {
+            points[index] = point.map(Into::into);
+        }
+        Self {
+            settings: value.settings.into(),
+            points,
+        }
+        .sanitized()
     }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl ThermalControlProfile {
+    fn from_saved_config(config: &ThermalControlProfileConfig) -> Option<Self> {
+        (config.points.iter().any(Option::is_some)
+            || config.settings != ThermalControlProfileSettingsConfig::default())
+        .then_some(Self::from(*config))
+    }
+
     fn sanitized(mut self) -> Self {
+        self.settings = ThermalControlProfileSettingsConfig {
+            temp_filter_alpha_permille: (self.settings.temp_filter_alpha * 1_000.0) as u16,
+            warmup_reenter_centi_c: (self.settings.warmup_reenter_error_c * 100.0) as u16,
+            hold_entry_centi_c: (self.settings.hold_entry_error_c * 100.0) as u16,
+            hold_exit_centi_c: (self.settings.hold_exit_error_c * 100.0) as u16,
+            hold_on_centi_c: (self.settings.hold_on_error_c * 100.0) as u16,
+            hold_off_centi_c: (self.settings.hold_off_error_c * 100.0) as u16,
+            overshoot_cutoff_centi_c: (self.settings.overshoot_cutoff_c * 100.0) as u16,
+            approach_max_ticks: u16::from(self.settings.approach_max_ticks),
+            hold_kp_permille_per_c: self.settings.hold_kp_permille_per_c as u16,
+            hold_ki_permille_per_c_tick: self.settings.hold_ki_permille_per_c_tick as u16,
+        }
+        .into();
         for point in self.points.iter_mut().flatten() {
             *point = point.sanitized();
         }
@@ -491,12 +585,12 @@ impl ThermalControlProfile {
         }
         dense.sort_unstable_by_key(|point| point.target_temp_c);
         if dense.is_empty() {
-            return default_thermal_control_target(target_temp_c);
+            return default_thermal_control_target_with_settings(target_temp_c, self.settings);
         }
 
         let target = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
         if target < dense[0].target_temp_c || target > dense[dense.len() - 1].target_temp_c {
-            return default_thermal_control_target(target);
+            return default_thermal_control_target_with_settings(target, self.settings);
         }
 
         let mut lower = dense[0];
@@ -510,12 +604,23 @@ impl ThermalControlProfile {
                 break;
             }
         }
-        interpolate_thermal_control_target(target, lower, upper)
+        interpolate_thermal_control_target(target, lower, upper, self.settings)
     }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
+    default_thermal_control_target_with_settings(
+        target_temp_c,
+        ThermalControlProfileSettings::default(),
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn default_thermal_control_target_with_settings(
+    target_temp_c: i16,
+    settings: ThermalControlProfileSettings,
+) -> ThermalControlTarget {
     let target = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
     let brake_distance_centi_c = if target <= 100 {
         450
@@ -548,6 +653,7 @@ fn default_thermal_control_target(target_temp_c: i16) -> ThermalControlTarget {
         brake_distance_c: brake_distance_centi_c as f32 / 100.0,
         approach_power_permille,
         hold_power_permille,
+        settings,
     }
 }
 
@@ -556,12 +662,14 @@ fn interpolate_thermal_control_target(
     target_temp_c: i16,
     lower: ThermalControlProfilePoint,
     upper: ThermalControlProfilePoint,
+    settings: ThermalControlProfileSettings,
 ) -> ThermalControlTarget {
     if lower.target_temp_c >= upper.target_temp_c {
         return ThermalControlTarget {
             brake_distance_c: lower.brake_distance_centi_c as f32 / 100.0,
             approach_power_permille: lower.approach_power_permille,
             hold_power_permille: lower.hold_power_permille,
+            settings,
         };
     }
 
@@ -583,6 +691,7 @@ fn interpolate_thermal_control_target(
             1_000,
         ),
         hold_power_permille: lerp_u16(lower.hold_power_permille, upper.hold_power_permille, 1_000),
+        settings,
     }
 }
 
@@ -687,21 +796,22 @@ impl HeaterController {
             self.hold_integral_c = 0.0;
         }
 
+        let control_target = thermal_profile
+            .map(|profile| profile.control_target(target_temp_c))
+            .unwrap_or_else(|| default_thermal_control_target(target_temp_c));
+        let settings = control_target.settings;
         let error_c = f32::from(target_temp_c) - measured_temp_c;
         let filtered_temp_c = if let Some(previous_filtered_temp_c) = self.filtered_temp_c {
             previous_filtered_temp_c
-                + HEATER_TEMP_FILTER_ALPHA * (measured_temp_c - previous_filtered_temp_c)
+                + settings.temp_filter_alpha * (measured_temp_c - previous_filtered_temp_c)
         } else {
             measured_temp_c
         };
         self.filtered_temp_c = Some(filtered_temp_c);
         let control_error_c = f32::from(target_temp_c) - filtered_temp_c;
-        let control_target = thermal_profile
-            .map(|profile| profile.control_target(target_temp_c))
-            .unwrap_or_else(|| default_thermal_control_target(target_temp_c));
         let brake_distance_c = control_target
             .brake_distance_c
-            .max(HEATER_HOLD_ENTRY_ERROR_C + 0.1);
+            .max(settings.hold_entry_error_c + 0.1);
 
         let mut next_phase = self.phase;
         let previous_phase = self.phase;
@@ -712,16 +822,16 @@ impl HeaterController {
                 }
             }
             HeaterControlPhase::Approach => {
-                if control_error_c >= brake_distance_c + HEATER_WARMUP_REENTER_ERROR_C {
+                if control_error_c >= brake_distance_c + settings.warmup_reenter_error_c {
                     next_phase = HeaterControlPhase::Warmup;
-                } else if control_error_c <= HEATER_HOLD_ENTRY_ERROR_C
-                    || self.phase_ticks >= HEATER_APPROACH_MAX_TICKS
+                } else if control_error_c <= settings.hold_entry_error_c
+                    || self.phase_ticks >= settings.approach_max_ticks
                 {
                     next_phase = HeaterControlPhase::Hold;
                 }
             }
             HeaterControlPhase::Hold => {
-                if control_error_c >= HEATER_HOLD_EXIT_ERROR_C {
+                if control_error_c >= settings.hold_exit_error_c {
                     next_phase = HeaterControlPhase::Approach;
                 }
             }
@@ -742,16 +852,16 @@ impl HeaterController {
                 self.duty_percent
             };
         let duty_percent =
-            if measured_temp_c >= f32::from(target_temp_c) + HEATER_OVERSHOOT_CUTOFF_C {
+            if measured_temp_c >= f32::from(target_temp_c) + settings.overshoot_cutoff_c {
                 self.hold_integral_c = self.hold_integral_c.min(0.0);
                 0
             } else {
                 match self.phase {
                     HeaterControlPhase::Warmup => 100,
                     HeaterControlPhase::Approach => {
-                        let span = (brake_distance_c - HEATER_HOLD_ENTRY_ERROR_C).max(0.1);
-                        let ratio =
-                            ((control_error_c - HEATER_HOLD_ENTRY_ERROR_C) / span).clamp(0.0, 1.0);
+                        let span = (brake_distance_c - settings.hold_entry_error_c).max(0.1);
+                        let ratio = ((control_error_c - settings.hold_entry_error_c) / span)
+                            .clamp(0.0, 1.0);
                         let hold = f32::from(control_target.hold_power_permille.min(1_000));
                         let approach = f32::from(control_target.approach_power_permille.min(1_000));
                         percent_from_permille((hold + ((approach - hold) * ratio)) as u16)
@@ -760,12 +870,12 @@ impl HeaterController {
                         self.hold_integral_c =
                             (self.hold_integral_c + control_error_c).clamp(-8.0, 8.0);
                         let pi_permille = f32::from(control_target.hold_power_permille)
-                            + (HEATER_HOLD_KP_PERMILLE_PER_C * control_error_c)
-                            + (HEATER_HOLD_KI_PERMILLE_PER_C_TICK * self.hold_integral_c);
+                            + (settings.hold_kp_permille_per_c * control_error_c)
+                            + (settings.hold_ki_permille_per_c_tick * self.hold_integral_c);
                         let hold_should_drive = (previous_duty_percent > 0
-                            && control_error_c > HEATER_HOLD_OFF_ERROR_C)
-                            || control_error_c >= HEATER_HOLD_ON_ERROR_C;
-                        if control_error_c < -HEATER_OVERSHOOT_CUTOFF_C {
+                            && control_error_c > settings.hold_off_error_c)
+                            || control_error_c >= settings.hold_on_error_c;
+                        if control_error_c < -settings.overshoot_cutoff_c {
                             0
                         } else if hold_should_drive {
                             percent_from_permille(pi_permille.clamp(0.0, 1_000.0) as u16)
@@ -2153,6 +2263,7 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         telemetry_interval_ms: previous.telemetry_interval_ms,
         adc_calibration: previous.adc_calibration,
         active_heater_curve: previous.active_heater_curve,
+        active_thermal_control_profile: previous.active_thermal_control_profile,
     }
 }
 
@@ -2903,7 +3014,9 @@ fn usb_runtime_config_response(
 ) -> (UsbFrame, CalibrationRuntimeState) {
     if let Some(command) = config.thermal_control_profile {
         match command.op {
-            ThermalControlProfileOp::Preview if command.profile.is_none() => {
+            ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save
+                if command.profile.is_none() =>
+            {
                 return (
                     UsbFrame::Response {
                         request_id,
@@ -2911,14 +3024,16 @@ fn usb_runtime_config_response(
                         result: None,
                         error: Some(ApiError::new(
                             "thermal_profile_required",
-                            "thermalControlProfile.profile is required for preview.",
+                            "thermalControlProfile.profile is required for preview/save.",
                             false,
                         )),
                     },
                     context.calibration,
                 );
             }
-            ThermalControlProfileOp::ClearPreview if command.profile.is_some() => {
+            ThermalControlProfileOp::ClearPreview | ThermalControlProfileOp::ClearSaved
+                if command.profile.is_some() =>
+            {
                 return (
                     UsbFrame::Response {
                         request_id,
@@ -2926,7 +3041,7 @@ fn usb_runtime_config_response(
                         result: None,
                         error: Some(ApiError::new(
                             "thermal_profile_clear_payload",
-                            "thermalControlProfile.profile must be omitted for clear_preview.",
+                            "thermalControlProfile.profile must be omitted for clear operations.",
                             false,
                         )),
                     },
@@ -2985,6 +3100,10 @@ fn usb_runtime_config_response(
             ThermalControlProfileOp::ClearPreview => {
                 *thermal_control_profile_preview = None;
             }
+            ThermalControlProfileOp::Save => {
+                *thermal_control_profile_preview = None;
+            }
+            ThermalControlProfileOp::ClearSaved => {}
         }
     }
     config.apply_to(memory_config);
@@ -5140,15 +5259,17 @@ async fn main(_spawner: Spawner) {
         );
         read_ch224q_status(&mut pd_i2c, ch224q_address)
     };
+    let active_thermal_settings =
+        ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
     info!(
         "heater control policy mode=hybrid interval_ms={=u64} warmup_reenter={=f32}C hold_entry={=f32}C hold_exit={=f32}C approach_max_s={=u8} hold_kp={=f32} hold_ki={=f32}",
         HEATER_CONTROL_INTERVAL_MS,
-        HEATER_WARMUP_REENTER_ERROR_C,
-        HEATER_HOLD_ENTRY_ERROR_C,
-        HEATER_HOLD_EXIT_ERROR_C,
-        HEATER_APPROACH_MAX_TICKS,
-        HEATER_HOLD_KP_PERMILLE_PER_C,
-        HEATER_HOLD_KI_PERMILLE_PER_C_TICK,
+        active_thermal_settings.warmup_reenter_error_c,
+        active_thermal_settings.hold_entry_error_c,
+        active_thermal_settings.hold_exit_error_c,
+        active_thermal_settings.approach_max_ticks,
+        active_thermal_settings.hold_kp_permille_per_c,
+        active_thermal_settings.hold_ki_permille_per_c_tick,
     );
     let power_data_capabilities = read_ch224q_power_data(&mut pd_i2c, ch224q_address)
         .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes));
@@ -5698,11 +5819,16 @@ async fn main(_spawner: Spawner) {
                 }
                 last_pd_observation = current_pd_observation;
             }
+            let saved_thermal_control_profile = ThermalControlProfile::from_saved_config(
+                &memory_config.active_thermal_control_profile,
+            );
+            let active_thermal_control_profile =
+                thermal_control_profile_preview.or(saved_thermal_control_profile);
             let pid_snapshot = heater_controller.update(
                 ui_state.target_temp_c,
                 latest_temp_c,
                 ui_state.heater_enabled,
-                thermal_control_profile_preview,
+                active_thermal_control_profile,
             );
             if ui_state.heater_output_percent != pid_snapshot.duty_percent {
                 ui_state.heater_output_percent = pid_snapshot.duty_percent;
@@ -6283,6 +6409,7 @@ mod tests {
                 thermal_control_profile: Some(ThermalControlProfileCommand {
                     op: ThermalControlProfileOp::Preview,
                     profile: Some(ThermalControlProfileWire {
+                        settings: None,
                         points: profile_points,
                     }),
                 }),
@@ -6355,6 +6482,7 @@ mod tests {
                 thermal_control_profile: Some(ThermalControlProfileCommand {
                     op: ThermalControlProfileOp::ClearPreview,
                     profile: Some(ThermalControlProfileWire {
+                        settings: None,
                         points: profile_points,
                     }),
                 }),
@@ -6394,6 +6522,110 @@ mod tests {
             }
             other => panic!("unexpected runtime config response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_config_saves_thermal_profile_to_memory() {
+        let mut request_id = heapless::String::new();
+        request_id.push_str("runtime-profile-save").unwrap();
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps = ManualPpsState::default();
+        let mut thermal_profile_preview = Some(ThermalControlProfile {
+            settings: ThermalControlProfileSettings::default(),
+            points: [None; FRONTPANEL_PRESET_COUNT],
+        });
+        let mut profile_points = [None; FRONTPANEL_PRESET_COUNT];
+        profile_points[0] = Some(ThermalControlProfilePointWire {
+            target_temp_c: 210,
+            brake_distance_centi_c: 1_000,
+            approach_power_permille: 260,
+            hold_power_permille: 180,
+        });
+
+        let (response, _) = usb_runtime_config_response(
+            request_id,
+            RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileCommand {
+                    op: ThermalControlProfileOp::Save,
+                    profile: Some(ThermalControlProfileWire {
+                        settings: None,
+                        points: profile_points,
+                    }),
+                }),
+            },
+            &mut ui_state,
+            &mut memory_config,
+            &mut manual_pps,
+            &mut thermal_profile_preview,
+            UsbRuntimeStatusContext {
+                elapsed_ms: 1_000,
+                last_pd_observation: None,
+                heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
+                    reason: HeaterPowerBackendReason::NoPps20vCapability,
+                    fixed_request_confirmed: true,
+                    fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                },
+                manual_pps: ManualPpsState::default(),
+                calibration: CalibrationRuntimeState::default(),
+                fan_command: FanHardwareCommand::disabled(),
+                current_rtd_fault: None,
+                thermal_control_profile_preview: true,
+                last_raw_state: FrontPanelRawState::default(),
+                latest_rtd_raw_adc_mv: 0,
+                latest_vin_raw_adc_mv: 0,
+                vin_mv: 20_000,
+            },
+        );
+
+        match response {
+            UsbFrame::Response {
+                ok: true,
+                result: Some(UsbResponsePayload::Status(status)),
+                error: None,
+                ..
+            } => {
+                assert!(!status.thermal_control_profile_preview);
+                assert!(thermal_profile_preview.is_none());
+                assert_eq!(
+                    memory_config.active_thermal_control_profile.points[0],
+                    Some(ThermalControlProfilePointConfig {
+                        target_temp_c: 210,
+                        brake_distance_centi_c: 1_000,
+                        approach_power_permille: 260,
+                        hold_power_permille: 180,
+                    })
+                );
+            }
+            other => panic!("unexpected runtime config response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saved_thermal_profile_converts_to_controller_profile() {
+        let mut config = ThermalControlProfileConfig::default();
+        config.points[0] = Some(ThermalControlProfilePointConfig {
+            target_temp_c: 210,
+            brake_distance_centi_c: 1_000,
+            approach_power_permille: 260,
+            hold_power_permille: 180,
+        });
+
+        let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+        let target = profile.control_target(210);
+
+        assert_eq!(target.brake_distance_c, 10.0);
+        assert_eq!(target.approach_power_permille, 260);
+        assert_eq!(target.hold_power_permille, 180);
     }
 
     #[test]
@@ -6944,6 +7176,7 @@ mod tests {
     #[test]
     fn thermal_control_profile_interpolates_between_target_points() {
         let profile = ThermalControlProfile {
+            settings: ThermalControlProfileSettings::default(),
             points: [
                 Some(ThermalControlProfilePoint {
                     target_temp_c: 100,
@@ -6977,6 +7210,7 @@ mod tests {
     #[test]
     fn thermal_control_profile_preserves_large_brake_distance_interpolation() {
         let profile = ThermalControlProfile {
+            settings: ThermalControlProfileSettings::default(),
             points: [
                 Some(ThermalControlProfilePoint {
                     target_temp_c: 180,
@@ -7010,6 +7244,7 @@ mod tests {
     #[test]
     fn thermal_control_profile_falls_back_outside_profile_range() {
         let profile = ThermalControlProfile {
+            settings: ThermalControlProfileSettings::default(),
             points: [
                 Some(ThermalControlProfilePoint {
                     target_temp_c: 50,

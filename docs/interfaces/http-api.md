@@ -84,7 +84,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
 `rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
-`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; reboot or `clear_preview` returns to the default curve.
+`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the EEPROM-backed saved profile or factory default curve.
 
 ### `CalibrationState`
 
@@ -360,7 +360,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile.op=preview` installs a RAM-only profile containing exactly 10 point slots, where each non-null point has `targetTempC`, `brakeDistanceCentiC`, `approachPowerPermille`, and `holdPowerPermille`; `op=clear_preview` clears the RAM preview and must omit `profile`. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile.op=preview` installs a RAM-only profile containing exactly 10 point slots, where each non-null point has `targetTempC`, `brakeDistanceCentiC`, `approachPowerPermille`, and `holdPowerPermille`; `op=clear_preview` clears the RAM preview and must omit `profile`; `op=save` writes the profile to EEPROM-backed active thermal control config; `op=clear_saved` clears that saved profile and must omit `profile`. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
 
 `PUT /api/v1/devices/:id/calibration` body:
 
@@ -515,7 +515,7 @@ Core commands:
 - `flux-purr runtime get|set --device <id> ...`
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
-- `flux-purr thermal profile preview|clear-preview --device <id>` or `--hardware <saved-id>`
+- `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal self-test --device <id> --source-device-id <isolapurr-id>`
 - `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
@@ -696,7 +696,7 @@ The response returns the updated status:
 }
 ```
 
-`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. Both paths must reject any PPS request outside the hardware `5V~28V` range, outside the advertised capability, or off the required `100mV / 50mA` steps. `thermalControlProfile` controls only RAM preview state and never saves to EEPROM.
+`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. Both paths must reject any PPS request outside the hardware `5V~28V` range, outside the advertised capability, or off the required `100mV / 50mA` steps. `thermalControlProfile` supports `preview` / `clear_preview` for RAM-only preview state and `save` / `clear_saved` for EEPROM-backed active thermal profile state.
 
 ### `calibration_config`
 
