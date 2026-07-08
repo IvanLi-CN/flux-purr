@@ -254,9 +254,14 @@ struct ThermalSelfTestArgs {
     target: TargetSelector,
     #[arg(
         long = "source-device-id",
-        help = "Released IsolaPurr device id used as the external bench source."
+        help = "Expected IsolaPurr device id returned by the external bench source URL."
     )]
     source_device_id: String,
+    #[arg(
+        long = "source-url",
+        help = "IsolaPurr LAN HTTP URL used as the external bench source; USB saved-hardware transports are not allowed."
+    )]
+    source_url: String,
     #[arg(long = "source-voltage-v", default_value = "20.0")]
     source_voltage_v: String,
     #[arg(long = "source-current-a", default_value = "3.25")]
@@ -1695,6 +1700,7 @@ async fn collect_thermal_self_test(
         let lease = create_lease(client, &resolved).await?;
         let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
         let source_result = set_isolapurr_bench_output(
+            &args.source_url,
             &args.source_device_id,
             source_voltage_mv,
             source_current_ma,
@@ -1805,7 +1811,7 @@ async fn collect_thermal_self_test(
         .await;
         let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
         heartbeat.abort();
-        if let Err(error) = set_isolapurr_output_auto(&args.source_device_id)
+        if let Err(error) = set_isolapurr_output_auto(&args.source_url, &args.source_device_id)
             && run_error.is_none()
         {
             run_error = Some(format!("isolapurr cleanup failed: {error}"));
@@ -1828,6 +1834,7 @@ async fn collect_thermal_self_test(
         "source": {
             "deviceId": args.source_device_id,
             "mode": "isolapurr_manual_pps_bench",
+            "url": args.source_url,
             "voltageMv": source_voltage_mv,
             "currentLimitMa": source_current_ma,
             "usbCPath": "forced-on",
@@ -2291,18 +2298,19 @@ fn validate_isolapurr_tools() -> Result<(), Box<dyn std::error::Error + Send + S
 }
 
 fn set_isolapurr_bench_output(
+    source_url: &str,
     device_id: &str,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    validate_isolapurr_device_identity(device_id)?;
+    validate_isolapurr_device_identity(source_url, device_id)?;
     let output = ProcessCommand::new("isolapurr")
         .args([
             "power",
             "output",
             "manual",
-            "--device-id",
-            device_id,
+            "--url",
+            source_url,
             "--voltage-mv",
             &voltage_mv.to_string(),
             "--current-limit-ma",
@@ -2320,10 +2328,10 @@ fn set_isolapurr_bench_output(
         .into());
     }
 
-    let config = read_isolapurr_power_config(device_id)?;
+    let config = read_isolapurr_power_config(source_url)?;
     if !isolapurr_power_config_value_matches_manual(&config, voltage_mv, current_limit_ma) {
         return Err(format!(
-            "isolapurr power output manual readback mismatch for device_id={device_id}"
+            "isolapurr power output manual readback mismatch for source_url={source_url}"
         )
         .into());
     }
@@ -2331,11 +2339,12 @@ fn set_isolapurr_bench_output(
 }
 
 fn set_isolapurr_output_auto(
+    source_url: &str,
     device_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    validate_isolapurr_device_identity(device_id)?;
+    validate_isolapurr_device_identity(source_url, device_id)?;
     let output = ProcessCommand::new("isolapurr")
-        .args(["power", "output", "auto", "--device-id", device_id])
+        .args(["power", "output", "auto", "--url", source_url])
         .output()?;
     if !output.status.success() {
         return Err(format!(
@@ -2346,10 +2355,10 @@ fn set_isolapurr_output_auto(
         .into());
     }
 
-    let config = read_isolapurr_power_config(device_id)?;
+    let config = read_isolapurr_power_config(source_url)?;
     if !isolapurr_power_config_value_is_auto(&config) {
         return Err(format!(
-            "isolapurr power output auto readback mismatch for device_id={device_id}"
+            "isolapurr power output auto readback mismatch for source_url={source_url}"
         )
         .into());
     }
@@ -2357,10 +2366,11 @@ fn set_isolapurr_output_auto(
 }
 
 fn validate_isolapurr_device_identity(
+    source_url: &str,
     device_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let output = ProcessCommand::new("isolapurr")
-        .args(["status", "--device-id", device_id, "--json"])
+        .args(["status", "--url", source_url, "--json"])
         .output()?;
     if !output.status.success() {
         return Err(format!(
@@ -2374,7 +2384,7 @@ fn validate_isolapurr_device_identity(
     if !isolapurr_status_identity_matches(&status, device_id) {
         let actual = isolapurr_status_device_id(&status).unwrap_or("unknown");
         return Err(format!(
-            "isolapurr identity mismatch requested_device_id={device_id} actual_device_id={actual}"
+            "isolapurr identity mismatch source_url={source_url} expected_device_id={device_id} actual_device_id={actual}"
         )
         .into());
     }
@@ -2417,17 +2427,10 @@ fn isolapurr_power_config_value_is_auto(config: &Value) -> bool {
 }
 
 fn read_isolapurr_power_config(
-    device_id: &str,
+    source_url: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let output = ProcessCommand::new("isolapurr")
-        .args([
-            "power",
-            "config",
-            "show",
-            "--device-id",
-            device_id,
-            "--json",
-        ])
+        .args(["power", "config", "show", "--url", source_url, "--json"])
         .output()?;
     if !output.status.success() {
         return Err(format!(
@@ -3817,6 +3820,8 @@ mod tests {
             "bench",
             "--source-device-id",
             "iso-1",
+            "--source-url",
+            "http://192.168.31.224",
             "--dry-run",
             "--json",
         ])
@@ -3828,6 +3833,7 @@ mod tests {
             } => {
                 assert_eq!(args.target.device.as_deref(), Some("bench"));
                 assert_eq!(args.source_device_id, "iso-1");
+                assert_eq!(args.source_url, "http://192.168.31.224");
                 assert!(args.dry_run);
             }
             other => panic!("unexpected command parsed: {other:?}"),

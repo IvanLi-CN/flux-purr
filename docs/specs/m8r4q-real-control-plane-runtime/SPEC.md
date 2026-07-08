@@ -115,7 +115,7 @@
 - `flux-purr runtime get|set`：读取或部分更新目标温度、preset、主动散热与 heater hold。
 - `flux-purr pd pps set|clear`：设置或清除调试用手动 PPS 覆盖；设置路径要求 source status 已回报 PPS capability，且电压在硬件 `5V~28V` 与 capability 交集内，请求电流在 APDO current capability 内。
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved`：通过 leased runtime endpoint 设置或清除 RAM thermal control profile preview，并可显式保存或清除 EEPROM-backed active profile。
-- `flux-purr thermal self-test`：通过 `devd` 控制 Flux Purr，并通过 released `isolapurr` 工具控制 IsolaPurr bench source，生成 thermal self-test 报告和候选 profile；默认目标阶梯只覆盖 `50..250°C` 工作范围，不包含 `300°C`。真实 HIL source setup 必须先校验 IsolaPurr status 回报的 device id 与 `--source-device-id` 完全一致，再用 `20V / 3.25A / USB-C forced-on` 设置输出；任一命令非 0 退出、身份不一致或读回配置不一致都必须使 self-test 失败，不得用后续读回掩盖写命令失败。
+- `flux-purr thermal self-test`：通过 `devd` 控制 Flux Purr，并通过 released `isolapurr` 工具的显式 LAN URL 路径控制 IsolaPurr bench source，生成 thermal self-test 报告和候选 profile；默认目标阶梯只覆盖 `50..250°C` 工作范围，不包含 `300°C`。真实 HIL source setup 必须使用 `--source-url`，不得使用 IsolaPurr saved hardware 的 USB transport；setup 必须先通过该 URL 校验 IsolaPurr status 回报的 device id 与 `--source-device-id` 完全一致，再用 `20V / 3.25A / USB-C forced-on` 设置输出；任一命令非 0 退出、身份不一致或读回配置不一致都必须使 self-test 失败，不得用后续读回掩盖写命令失败。
 - `flux-purr calibration-mode ...`：提供 owner-facing 三模式入口；现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear`：通过 leased WiFi endpoint 写入或清除 WiFi 配置，输出必须 redaction password。
 - `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。
