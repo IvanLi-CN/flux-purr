@@ -307,6 +307,8 @@ should therefore prefer target subsets over killing long full-ladder runs mid-fl
 
 Flux Purr self-test uses the repo-local `flux-purr` CLI through `flux-purr-devd` for the device under test. IsolaPurr is an external PD source and must be prepared through released `isolapurr` / `isolapurr-devd` tools, not source commands or raw local HTTP. Thermal HIL configures `65W`, enables PD Fixed and PPS, selects `auto_follow`, and checks one live USB-C reading above `5V` before testing. It does not manually control TPS, force a voltage, replug the source port, or test IsolaPurr behavior; Flux Purr owns subsequent PD/PPS requests.
 
+When an explicit `manual-forced` source mode is used, source preparation and Flux Purr lease acquisition form one rollback boundary. If the target never becomes ready or lease acquisition fails after the source was forced on, the CLI must restore IsolaPurr output to `auto` before returning the error; batch and single-run paths share this behavior.
+
 For banana-jack bench output, keep the IsolaPurr USB-C VBUS path disconnected unless the operator explicitly chooses shared USB-C output.
 
 ## Source-current headroom

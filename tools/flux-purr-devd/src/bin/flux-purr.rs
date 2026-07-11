@@ -2873,8 +2873,9 @@ async fn collect_batch_thermal_self_test(
         }
     } else {
         validate_isolapurr_tools()?;
-        let initial_source_telemetry = prepare_isolapurr_thermal_source(
+        let (initial_source_telemetry, lease) = prepare_thermal_source_and_lease(
             client,
+            &resolved,
             &args.source_url,
             &args.source_device_id,
             &args.source_mode,
@@ -2882,11 +2883,6 @@ async fn collect_batch_thermal_self_test(
             source_current_ma,
         )
         .await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let lease = match create_ready_thermal_lease(client, &resolved).await {
-            Ok((lease, _status)) => lease,
-            Err(error) => return Err(error),
-        };
         let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
         let test_future = async {
             let mut source_sampler =
@@ -3193,8 +3189,9 @@ async fn collect_single_thermal_self_test(
         )?;
     } else {
         validate_isolapurr_tools()?;
-        let initial_source_telemetry = prepare_isolapurr_thermal_source(
+        let (initial_source_telemetry, lease) = prepare_thermal_source_and_lease(
             client,
+            &resolved,
             &args.source_url,
             &args.source_device_id,
             &args.source_mode,
@@ -3202,11 +3199,6 @@ async fn collect_single_thermal_self_test(
             source_current_ma,
         )
         .await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let lease = match create_ready_thermal_lease(client, &resolved).await {
-            Ok((lease, _status)) => lease,
-            Err(error) => return Err(error),
-        };
         let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
 
         let test_future = async {
@@ -6127,6 +6119,37 @@ async fn prepare_isolapurr_thermal_source(
         let telemetry = ensure_isolapurr_live_telemetry_ready(source_url)?;
         validate_isolapurr_ready_voltage(&telemetry)?;
         Ok(telemetry)
+    }
+}
+
+async fn prepare_thermal_source_and_lease(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    source_url: &str,
+    device_id: &str,
+    source_mode: &str,
+    voltage_mv: u16,
+    current_limit_ma: u16,
+) -> Result<(IsolapurrLiveTelemetry, Lease), Box<dyn std::error::Error + Send + Sync>> {
+    let telemetry = prepare_isolapurr_thermal_source(
+        client,
+        source_url,
+        device_id,
+        source_mode,
+        voltage_mv,
+        current_limit_ma,
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    match create_ready_thermal_lease(client, resolved).await {
+        Ok((lease, _status)) => Ok((telemetry, lease)),
+        Err(error) => match set_isolapurr_output_auto(client, source_url, device_id).await {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(format!(
+                "{error}; isolapurr cleanup after lease failure also failed: {cleanup_error}"
+            )
+            .into()),
+        },
     }
 }
 
