@@ -5663,7 +5663,8 @@ async fn run_thermal_stage(
     sample_index: &mut usize,
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
     let mut started = tokio::time::Instant::now();
-    let deadline = started + Duration::from_secs(args.stage_timeout_seconds.max(1));
+    let stage_timeout = Duration::from_secs(args.stage_timeout_seconds.max(1));
+    let mut deadline = started + stage_timeout;
     let hold_duration = Duration::from_secs(args.hold_seconds.max(1));
     let sample_interval = Duration::from_millis(effective_thermal_sample_interval_ms(
         args.sample_interval_ms,
@@ -5729,6 +5730,7 @@ async fn run_thermal_stage(
                 arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c)
                     .await?;
                 started = tokio::time::Instant::now();
+                deadline = started + stage_timeout;
                 next_tick = started;
                 hold_tracker = ThermalHoldTracker::new(target_temp_c, hold_duration);
                 analyzer = ThermalStageAnalyzer::new(target_temp_c);
