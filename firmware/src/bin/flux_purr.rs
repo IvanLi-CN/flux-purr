@@ -90,6 +90,9 @@ use flux_purr_firmware::memory::{
     HeaterCurveConfig, MemoryConfig,
     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+    THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
+    THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
+    THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX,
     THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, ThermalControlProfileConfig,
     ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig,
     heater_resistance_ohms_from_curve,
@@ -533,7 +536,7 @@ impl ThermalControlProfilePoint {
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 impl From<ThermalControlProfilePointWire> for ThermalControlProfilePoint {
     fn from(value: ThermalControlProfilePointWire) -> Self {
         Self {
@@ -593,29 +596,37 @@ impl From<ThermalControlProfileSettingsConfig> for ThermalControlProfileSettings
         Self {
             temp_filter_alpha: f32::from(value.temp_filter_alpha_permille.clamp(1, 1_000))
                 / 1_000.0,
-            warmup_reenter_error_c: f32::from(value.warmup_reenter_centi_c) / 100.0,
-            hold_entry_error_c: f32::from(value.hold_entry_centi_c) / 100.0,
-            hold_exit_error_c: f32::from(value.hold_exit_centi_c) / 100.0,
-            hold_on_error_c: f32::from(value.hold_on_centi_c) / 100.0,
-            hold_off_error_c: f32::from(value.hold_off_centi_c) / 100.0,
-            overshoot_cutoff_c: f32::from(value.overshoot_cutoff_centi_c) / 100.0,
+            warmup_reenter_error_c: f32::from(value.warmup_reenter_centi_c.clamp(50, 5_000))
+                / 100.0,
+            hold_entry_error_c: f32::from(value.hold_entry_centi_c.clamp(1, 5_000)) / 100.0,
+            hold_exit_error_c: f32::from(value.hold_exit_centi_c.clamp(1, 5_000)) / 100.0,
+            hold_on_error_c: f32::from(value.hold_on_centi_c.clamp(1, 5_000)) / 100.0,
+            hold_off_error_c: f32::from(value.hold_off_centi_c.min(5_000)) / 100.0,
+            overshoot_cutoff_c: f32::from(value.overshoot_cutoff_centi_c.clamp(1, 5_000)) / 100.0,
             approach_max_ticks: value.approach_max_ticks.clamp(1, u16::from(u8::MAX)) as u8,
             approach_min_power_ratio: f32::from(value.approach_min_power_ratio_permille.min(1_000))
                 / 1_000.0,
-            hold_kp_permille_per_c: f32::from(value.hold_kp_permille_per_c),
-            hold_ki_permille_per_c_tick: f32::from(value.hold_ki_permille_per_c_tick),
+            hold_kp_permille_per_c: f32::from(value.hold_kp_permille_per_c.min(10_000)),
+            hold_ki_permille_per_c_tick: f32::from(value.hold_ki_permille_per_c_tick.min(10_000)),
             hold_blend_ticks: value.hold_blend_ticks.clamp(1, u16::from(u8::MAX)) as u8,
             hold_reheat_power_permille: value.hold_reheat_power_permille.min(1_000),
             approach_lead_ticks: value.approach_lead_ticks.min(u16::from(u8::MAX)) as u8,
             hold_lead_ticks: value.hold_lead_ticks.min(u16::from(u8::MAX)) as u8,
-            measurement_spike_reject_c: f32::from(value.measurement_spike_reject_centi_c) / 100.0,
-            auto_adjustable_working_floor_mv: value.auto_adjustable_working_floor_mv,
-            heater_current_reserve_ma: value.heater_current_reserve_ma,
+            measurement_spike_reject_c: f32::from(
+                value.measurement_spike_reject_centi_c.min(10_000),
+            ) / 100.0,
+            auto_adjustable_working_floor_mv: value.auto_adjustable_working_floor_mv.clamp(
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
+            ),
+            heater_current_reserve_ma: value
+                .heater_current_reserve_ma
+                .min(THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX),
         }
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 impl From<ThermalControlProfileSettingsWire> for ThermalControlProfileSettings {
     fn from(value: ThermalControlProfileSettingsWire) -> Self {
         ThermalControlProfileSettingsConfig {
@@ -649,7 +660,7 @@ impl Default for ThermalControlProfileSettings {
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 impl From<ThermalControlProfileWire> for ThermalControlProfile {
     fn from(value: ThermalControlProfileWire) -> Self {
         let mut points = [None; FRONTPANEL_PRESET_COUNT];
@@ -805,7 +816,7 @@ impl ThermalControlProfile {
     }
 }
 
-#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[cfg(any(target_arch = "xtensa", test))]
 fn active_thermal_control_profile(
     memory_config: &MemoryConfig,
     preview: Option<ThermalControlProfile>,
@@ -8006,6 +8017,37 @@ mod tests {
         assert_eq!(target.approach_floor_power_permille, 180);
         assert_eq!(target.hold_power_permille, 180);
         assert_eq!(target.hold_reheat_power_permille, 180);
+    }
+
+    #[test]
+    fn thermal_profile_settings_conversion_clamps_direct_preview_values() {
+        let settings = ThermalControlProfileSettings::from(ThermalControlProfileSettingsConfig {
+            temp_filter_alpha_permille: u16::MAX,
+            warmup_reenter_centi_c: u16::MAX,
+            hold_entry_centi_c: 0,
+            hold_exit_centi_c: u16::MAX,
+            hold_on_centi_c: 0,
+            hold_off_centi_c: u16::MAX,
+            overshoot_cutoff_centi_c: 0,
+            approach_max_ticks: u16::MAX,
+            approach_min_power_ratio_permille: u16::MAX,
+            hold_kp_permille_per_c: u16::MAX,
+            hold_ki_permille_per_c_tick: u16::MAX,
+            hold_blend_ticks: u16::MAX,
+            hold_reheat_power_permille: u16::MAX,
+            approach_lead_ticks: u16::MAX,
+            hold_lead_ticks: u16::MAX,
+            measurement_spike_reject_centi_c: u16::MAX,
+            auto_adjustable_working_floor_mv: u16::MAX,
+            heater_current_reserve_ma: u16::MAX,
+        });
+
+        assert_eq!(settings.temp_filter_alpha, 1.0);
+        assert_eq!(settings.warmup_reenter_error_c, 50.0);
+        assert_eq!(settings.hold_entry_error_c, 0.01);
+        assert_eq!(settings.measurement_spike_reject_c, 100.0);
+        assert_eq!(settings.auto_adjustable_working_floor_mv, 28_000);
+        assert_eq!(settings.heater_current_reserve_ma, 1_000);
     }
 
     #[test]
