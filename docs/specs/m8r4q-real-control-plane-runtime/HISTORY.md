@@ -1,10 +1,65 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-11
+
+- 最终完整 ladder 在 60°C 首点捕获 RTD discontinuity：`rtdRawAdcMv` 在约 `0.4s` 内从 `985` 跳到 `1014`，旧 runtime 限幅把该阶跃摊成持续假升温并最终报告 `20.18°C` 假过冲。首个超限样本现在只保持上一有效值，连续第二个同向超限样本生成 `sensor-discontinuity` fault-latch 并停热。控制器同时把经实际/滤波温度共同确认的升温斜率与 `approachLeadTicks` 用于 warmup 提前交接，并受 `warmupReenterCentiC` 滞回约束；参数仍通过 API/EEPROM 控制。
+- 固件状态温度不再从前面板 deci-Celsius 值反推；`boardTempCenti/currentTempC` 直接由内部 RTD 浮点测量值发布到 `0.01°C`。新固件在授权端口烧录后回读 `22.71°C / boardTempCenti=2271`，saved profile 与 `6100mV` working floor 同时完成重启恢复。
+
+## 2026-07-10
+
+- Thermal HIL source 前置收口为 IsolaPurr LAN 上的 `65W`、PD Fixed enabled、PPS enabled、`auto_follow` 与一次 USB-C `>5V` 实测；self-test 不再手动控制 TPS 或执行 port replug。
+- 自测试判定修复为：首次在 10 秒内进入 hold 后锁存通过，不被后续 hold/approach 相位回摆覆盖；首次 hold 后连续 60 秒按真实墙钟计时并纳入全部温度样本，不因相位回摆暂停。
+- PPS backend 在 heater armed 且控制输出为 `0%` 时保持当前 PPS 请求并关闭 MOS。旧固件在 140°C approach coast 从 `11.3V` 回到 `12V` 后出现 uptime reset；新固件真机复测未再出现该复位。
+- firmware heater control loop 固定为 `10Hz`；每个 tick 聚合 `32` 次 RTD ADC conversion，并保留分数毫伏均值完成 calibration 与 PT1000 转换。默认 thermal filter alpha 统一为 `700`，参数继续由 API/EEPROM profile 覆盖。
+- host 采样默认收口为 `300ms`，请求更慢值也 clamp 到 `300ms`。完整 status JSONL 约 `1.9KB`，该值提供标称 `3.33Hz`，避免 `5Hz` 饱和与 `333ms` 无调度余量两类失败。
+- retune 增加高温近目标功率受限分类：当 `>=180°C`、approach 输出 `>=90%`、斜率 `<=1°C/s` 且未进入 Hold 时，候选直接收敛到 stable-band edge handoff 与近饱和 hold baseline。饱和 Hold 两侧振荡时，按实测振幅加宽 overshoot taper，避免 PPS 从近满功率跌到低压后再全功率回升。
+- 正确 source 与授权端口上的最终稀疏 HIL 全部通过：60°C settle/overshoot/p2p 为 `7.534s / 1.2°C / 2.3°C`，140°C 为 `8.661s / 0.4°C / 2.3°C`，220°C 为 `0.905s / 1.1°C / 2.6°C`。三个 p2p 均为进入 Hold 后连续 `60s` 结果。
+- 最终 profile 已通过 API 写入 EEPROM；同一授权端口重启后回读 `profileSource=saved`、preview=false、alpha `700`、working floor `6100mV` 与最终 220°C 参数，证明参数更新不依赖替换固件。
+
+## HIL source identity correction
+
+- IsolaPurr `856a141cdbd4` 的授权 LAN endpoint 是 `http://192.168.31.122`。历史中标注 `http://192.168.31.224` 的 run 实际连接到设备 `f293cc9c139e`，不属于本项目指定 bench source；这些条目保留用于追溯，但其 thermal 数值不得作为算法验收依据。
+- 正确 source 上的 `60°C` HIL 证明旧 predictive coast 还被滞后滤波 gate 锁住：实际温度已进入 coast 区间、预测温度已越过目标时，控制器仍保持 approach floor。固件已移除该重复 gate，保留“预测越过 + 实际误差进入 point-level holdExit”的双重条件。
+- thermal self-test 支持重复 `--candidate-profile-file` 的同目标批测，候选共享一次 source/lease，会在 `max(40°C, target-30°C)` 以下开始下一组并分别输出图表，批测不保存 EEPROM。真实批次 `thermal-batch-1783673723491-serial-303a-1001-d0-cf-13-08-a1-48` 完成 3/3 组且无 lease/source 错误，证明批内不切换供电可避免候选间掉电。
+- IsolaPurr `manual-forced 20V` 会与 Flux Purr 启动时的 `12V` PD 请求冲突并触发 USB 重启，因此 thermal HIL source 默认改为 `auto_follow`；manual forced 仅保留给 source-only 测试。最后一次继续 HIL 前，授权端口 `/dev/cu.usbmodem21221401` 已有 `ls: No such file or directory` 且连续 30 秒未恢复的证据，未切换到其它 MCU 端口。
+
+## 2026-07-09
+
+- firmware runtime 温度拒跳已从“整段复用上一帧温度”改为“按 `measurementSpikeRejectCentiC` 限制单采样最大允许步进”。这直接修掉了真机 `220°C` 开发 HIL 中出现的一个实 bug：`rtdRawAdcMv` 继续上升，而 `currentTempC` 在加热使能期间卡死不动。
+- 同日真实 flash 还确认了一个 host-side artifact 边界：当前 worktree 的新固件在 `target/xtensa-esp32s3-none-elf/release/flux-purr`，对应 `artifactId=local-esp32s3-release-root-target`；旧的 `firmware/target/...` `local-esp32s3-release` 是陈旧产物，不带最新 `heaterControlPhase` status 字段，不能再作为本轮 HIL 的验收镜像。
+- 使用正确 artifact 后，聚焦 `220°C` 的真实 HIL 仍未达标。最佳 run `thermal-1783608810927-serial-303a-1001-d0-cf-13-08-a1-48` 与 `thermal-1783609283479-serial-303a-1001-d0-cf-13-08-a1-48` 都得到 `maxOvershootC=1.0`、`holdPeakToPeakC=3.4`；把 `holdPower / holdReheat / holdExit / holdKp` 一起抬高的 run `thermal-1783609087433-serial-303a-1001-d0-cf-13-08-a1-48` 反而恶化到 `maxOvershootC=2.3`、`holdPeakToPeakC=4.7`。
+- 去掉 `220°C` 点位 `approachLeadTicks` 的候选也没有形成可接受改进。run `thermal-1783609472418-serial-303a-1001-d0-cf-13-08-a1-48` 在 `132.3°C` 附近长时间平台，期间 `heaterOutputPercent=98`、`heaterPhysicalOutputPercent=100`、`pdContractMv≈17500`，但温度与 RTD 原始 ADC 都基本不再上升，说明当前高温功率请求映射在某些候选下仍会落入明显的供热平台。
+- 这批 rerun 给出了当前最明确的开发结论：`220°C` 的“温度锁死”问题已经修掉，但当前混合控制器和高温功率映射还没有通过开发期 `220°C` 验收；剩余 blocker 是 `holdPeakToPeakC` 仍稳定高于 `3.0°C`，并且某些 near-target 候选会触发中温平台。
+
+## 2026-07-08
+
+- firmware approach 段的 near-target sustain floor 现已直接受 `holdReheatPowerPermille` 约束，而不是只在 `Hold -> Approach` 回升路径上才抬高到 reheat floor；同时 predictive coast 现在要求“实际误差 + 滤波误差”都已落入该温区 `holdExit` 守门范围，避免在仍显著低于目标时被预测项提前打成 `0%`。这一步直接针对 `140°C` 真机 HIL 中“接近目标后卡在 ~139°C 且 5 分钟超时”的证据。
+- thermal self-test 的默认开发梯子已改为 `60 / 140 / 220°C`；`250°C` 保留给最终完整验收，不再作为开发期默认目标。
+- full-speed-to-stable 判定按 SPEC 恢复为 `±1.5°C`、连续 hold `10s` 的真实稳定窗口；首次进入 hold 不再直接算稳定。离线重放后 `140°C` 仍通过，旧 `60°C` 通过结论被撤销。
+- candidate tuner 会把首次 hold 后仍继续上冲、且高侧显著大于低侧的形状判为残余热主导，优先增加 `brakeDistance / approachDamping / approachLead`，避免误入普通 hold ripple 分支继续抬高功率。
+- thermal profile settings 增加 EEPROM/API 可控的 `heaterCurrentReserveMa`；heater safe-max 从 capability/live current 的较小值中扣除该余量，避免把 source 限流预算全部分配给加热器后造成板级复位。
+- `ThermalControlProfile` 每点已扩展为 power baseline + damping 数据：`holdEntryCentiC`、`holdExitCentiC`、`holdOffCentiC`、`overshootCutoffCentiC`、`holdKpPermillePerC`、`holdKiPermillePerCTick` 与 `holdBlendTicks` 现已随 preview/save、CLI/devd、report 和 EEPROM 持久化链路贯通。
+- thermal self-test 的保温验收窗口现已改为只累计固件真实 `heaterControlPhase=hold` 的驻留时间；host-side “接近目标” 样本不再提前进入 hold peak-to-peak 统计。
+- firmware hold handoff 现会 preload integral，并把最后一次 approach 输出在 `holdBlendTicks` 内平滑 blend 到 hold PI 输出；积分钳位也改成按 hold baseline 与 Ki 推导的动态范围。
+- EEPROM thermal profile 编码改为只写入实际已配置点位，而不是固定写满 10 个槽；这是为了在不改变现有 slot 容量的前提下容纳更宽的每点 damping 字段。
+- 同日完成两轮授权端口 `/dev/cu.usbmodem21221401` + IsolaPurr LAN source `http://192.168.31.224` 真机 HIL。第一轮结果：`60°C p2p 3.9`、`100°C overshoot 5.7 / p2p 8.5`、`140°C p2p 6.9`、`220°C p2p 4.7` 失败。第二轮回调后结果：`60°C overshoot 3.8 / p2p 5.4`、`100°C overshoot 4.6 / p2p 11.1`、`140°C p2p 4.6`、`180°C p2p 6.3`、`220°C p2p 5.4` 失败。两轮都证明高温段接近目标前的塌功率问题已收口，但低中温和高温保温仍受热惯性影响， acceptance 尚未达到 `<=3.0°C`。
+- `ThermalControlProfile` 点位扩展 `approachFloorPowerPermille`，用于显式表达各温区接近目标时允许保持的最小加热功率下限；该字段与现有 `targetTempC` / `brakeDistanceCentiC` / `approachPowerPermille` / `holdPowerPermille` 一起经 runtime_config、CLI/devd、report 与 EEPROM 持久化贯通。
+- Firmware hold control 改为围绕 `holdPowerPermille` 基线的连续 PI 微调；旧的全局 `approachMinPowerRatioPermille` 不再主导新 profile 的 approach floor，仅保留旧 EEPROM profile 的 decode fallback。
+- Real HIL 进一步证明 `approachMaxTicks=16` 在当前约 `20ms` 主循环下只提供亚秒级 approach 窗口，无法覆盖加热台的真实热惯性；self-test 候选 profile 已改为显式更长的 approach 窗口，并把低温/高温 `holdPowerPermille` 调整到更接近实测等效保温功率的温区曲线。
+- `approachMaxTicks` 的 runtime / EEPROM 验证上限已从 `60` 放宽到 `255`，避免 host 侧把 approach 窗口硬封在约 `1.2s`，使长 approach profile 能通过同一套 API 持久化到设备。
+- 真实 HIL 证明“一组全局接近目标功率比率”无法同时满足低温和高温：高温 timeout 问题可以通过提高近目标功率解决，但会把 `60~140°C` 的 overshoot / hold p2p 拉高；后续调参基线改为按温区显式建模 approach floor 与 hold baseline。
+- 授权端口 `/dev/cu.usbmodem21221401` 与 IsolaPurr LAN source `http://192.168.31.224` 的完整真机 HIL 已跑完整个 `60 / 100 / 140 / 180 / 220 / 250°C` 阶梯，说明 saved-profile 写入、按 EEPROM 生效、失败后 cleanup 清除这条链路已经打通；同时也确认高温段“不足功率导致接近目标前明显掉速”的旧问题已被消除，`180 / 220 / 250°C` 都能进入 hold。
+- 同一轮 HIL 也证明“只把各温区的 approach floor 和 hold baseline 拉开”仍然不够：Applied run 仍在 `60°C (p2p 3.9)`、`100°C (overshoot 6.8 / p2p 10.1)`、`180°C (p2p 5.0)`、`220°C (overshoot 3.7 / p2p 6.8)`、`250°C (p2p 4.4)` 上失败。后续实现必须继续把 near-target damping 做成温区相关的可持久化控制数据，而不是继续只拧一组全局 hold dynamics。
+- 同日后续实现把 `approachLeadTicks / holdLeadTicks` 接入 firmware、CLI/devd、report 与 EEPROM-backed profile，并完成完整真机 run `thermal-1783512058672-serial-303a-1001-d0-cf-13-08-a1-48`。该 run 的过冲已全部压到 `<=3.0°C`，但 hold peak-to-peak 仍在 `100°C 5.8`、`140°C 3.5`、`180°C 5.7`、`220°C 4.7`、`250°C 3.7` 失败，证明当前剩余 blocker 已经收敛到保温波动，而不是过冲本身。
+- 同日继续把 `holdReheatPowerPermille` 接入 firmware、control-plane、CLI/devd、report 与 EEPROM-backed profile，并把控制器回升路径改成 `Hold -> Approach` 时使用该温区 reheat floor。第一次 run `thermal-1783513996870-serial-303a-1001-d0-cf-13-08-a1-48` 因 IsolaPurr `GET /api/v1/ports` 单次 `curl 28` 超时而中断，随后 host side 为 IsolaPurr LAN 遥测加入有界重试。
+- 重跑后的完整真机 run `thermal-1783514578510-serial-303a-1001-d0-cf-13-08-a1-48` 把 `60 / 100 / 140 / 180 / 220 / 250°C` 全部跑完；最大过冲分别为 `1.8 / 0.9 / 2.0 / 2.1 / 1.7 / 1.4°C`，已全部满足阈值，但 hold peak-to-peak 分别为 `3.4 / 3.2 / 4.6 / 5.7 / 3.5 / 5.1°C`，因此 acceptance 仍失败于保温波动。
+
 ## 2026-07-07
 
 - Runtime contract 扩展 `thermalControlProfile`：status 回传 `thermalControlProfilePreview`，runtime_config 可 `preview` / `clear_preview` 控制 RAM preview，也可 `save` / `clear_saved` 管理 EEPROM-backed active profile。
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved` 和 `flux-purr thermal self-test` 接入 CLI/devd lease 路径；self-test 生成报告、样本和候选 profile，并把默认目标阶梯限制在 `50..250°C`，排除 `300°C`；candidate profile 不自动保存。
 - Thermal self-test 的外部电源边界固定为 released IsolaPurr CLI 的 LAN URL 路径：真实 HIL 通过显式 `--source-url` 调用 `isolapurr power output manual --url <url> --voltage-mv 20000 --current-limit-ma 3250 --usb-c-path forced-on` 设置 bench source，不使用 IsolaPurr saved hardware 的 USB transport；缺少精确 Flux Purr 端口、IsolaPurr source URL 或 expected device id 时不运行真实阶梯测试；IsolaPurr status identity、命令退出码与 power config readback 都必须可靠一致。
+- 授权端口 `/dev/cu.usbmodem21221401` 上继续完成两轮真实聚焦 HIL：先刷入带“actual hold-entry gate + constrained hold preload”的固件，再刷入加入 `predictive coast` 的固件。最新 run `thermal-1783566799182-serial-303a-1001-d0-cf-13-08-a1-48` 使用 IsolaPurr LAN source `http://192.168.31.122`，把 `100 / 180 / 220°C` 的最大过冲分别压到 `7.9 / 4.6 / 4.4°C`，相较上一轮 `thermal-1783565969037-serial-303a-1001-d0-cf-13-08-a1-48` 的 `9.5 / 6.5 / 5.1°C` 明显下降；但 `holdPeakToPeakC` 仍为 `7.5 / 3.8 / 4.1`，说明剩余 blocker 已经集中在“predictive coast 起得还不够早”，而不是 hold 入口继续继承 approach 输出。
 
 ## 2026-06-02
 
