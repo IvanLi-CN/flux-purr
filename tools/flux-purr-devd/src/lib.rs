@@ -2488,8 +2488,15 @@ async fn configure_runtime(
         apply_mock_calibration_runtime_config(&mut device.status, calibration);
     }
     if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
-        device.status.thermal_control_profile_preview =
-            thermal_control_profile.op == ThermalControlProfileOp::Preview;
+        match thermal_control_profile.op {
+            ThermalControlProfileOp::Preview => {
+                device.status.thermal_control_profile_preview = true;
+            }
+            ThermalControlProfileOp::ClearPreview | ThermalControlProfileOp::Save => {
+                device.status.thermal_control_profile_preview = false;
+            }
+            ThermalControlProfileOp::ClearSaved => {}
+        }
     }
     let status = device.status.clone();
     drop(state_lock);
@@ -2707,7 +2714,7 @@ const fn default_approach_damping_exponent_permille() -> u16 {
 }
 
 const fn default_measurement_spike_reject_centi_c() -> u16 {
-    3_000
+    300
 }
 
 const fn default_auto_adjustable_working_floor_mv() -> u16 {
@@ -5628,6 +5635,31 @@ mod tests {
         .unwrap()
         .0;
         assert!(preview.thermal_control_profile_preview);
+
+        let clear_saved = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::ClearSaved,
+                    profile: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(clear_saved.thermal_control_profile_preview);
 
         let clear = configure_runtime(
             State(state),
