@@ -203,6 +203,7 @@ const HEATER_PROFILE_TICK_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 const HEATER_CONTROL_INTERVAL_MS: u64 = 100;
+#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PHASE_HYSTERESIS_C: f32 = 0.10;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
@@ -267,6 +268,7 @@ const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_COUNT: usize = 32;
+#[cfg(any(target_arch = "xtensa", test))]
 const RTD_MIN_VALID_SAMPLE_COUNT: usize = 24;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
@@ -1020,10 +1022,6 @@ fn default_thermal_control_target_with_settings(
             2.0
         } else if target <= 140 {
             1.5
-        } else if target <= 180 {
-            1.0
-        } else if target <= 220 {
-            1.0
         } else {
             1.0
         },
@@ -1180,7 +1178,7 @@ fn control_cycles_from_profile_ticks(profile_ticks: u16) -> u16 {
     }
     let numerator = u32::from(profile_ticks) * HEATER_PROFILE_TICK_MS as u32;
     let denominator = HEATER_CONTROL_INTERVAL_MS as u32;
-    ((numerator + denominator - 1) / denominator).min(u32::from(u16::MAX)) as u16
+    numerator.div_ceil(denominator).min(u32::from(u16::MAX)) as u16
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1576,10 +1574,9 @@ impl HeaterController {
         {
             self.hold_coast_active = false;
         }
-        let duty_percent = if self.hold_coast_active {
-            self.hold_integral_c = 0.0;
-            0
-        } else if hold_guard_error_c <= -control_target.overshoot_cutoff_c {
+        let duty_percent = if self.hold_coast_active
+            || hold_guard_error_c <= -control_target.overshoot_cutoff_c
+        {
             self.hold_integral_c = 0.0;
             0
         } else {
@@ -3384,6 +3381,7 @@ fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[allow(clippy::too_many_arguments)]
 fn adjustable_floor_gate_duty_percent(
     duty_percent: u8,
     request_mv: u16,
@@ -3410,7 +3408,7 @@ fn adjustable_floor_gate_duty_percent(
     } else if heater_error_c <= 0.0 {
         0
     } else {
-        return 100;
+        100
     }
 }
 

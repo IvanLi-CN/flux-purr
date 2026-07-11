@@ -1514,6 +1514,7 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
     cursor
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     let mut config = ThermalControlProfileConfig::default();
     let mut cursor = 0;
@@ -1857,6 +1858,7 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     config
 }
 
+#[allow(clippy::manual_is_multiple_of)]
 fn is_supported_thermal_control_profile_len(len: usize) -> bool {
     let current_with_settings = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
         && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
