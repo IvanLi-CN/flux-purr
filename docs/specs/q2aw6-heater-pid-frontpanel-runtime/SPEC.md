@@ -275,6 +275,7 @@ PR: include
 - 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 CH224Q PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
 - CH224Q 仍作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
 - 六个正式温区锚点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 使用 `1 KiB` active 双槽，旧 `512 B` 双槽仅作只读迁移回退。
+- saved profile 与 USB/WebSerial direct preview 必须经过同一组 thermal settings 限幅；控制器不得依赖 devd 客户端校验来保护 spike-reject、工作电压下限或电流余量。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 

@@ -11,6 +11,7 @@
 ## Coverage / rollout summary
 
 - Thermal profile persistence accepts at most six populated anchors and verifies that the full six-point profile fits together with maximum Wi-Fi credentials and calibration state in the `1 KiB` active EEPROM slots. Legacy `512 B` slots remain read-only startup fallback state.
+- Direct USB/WebSerial previews and EEPROM-backed profiles share the firmware-side thermal settings clamp, including spike rejection, adjustable voltage floor, and heater current reserve.
 - IsolaPurr `856a141cdbd4` 的当前授权 LAN endpoint 为 `http://192.168.31.122`。所有使用 `http://192.168.31.224` 的历史 run 实际连接到另一台设备 `f293cc9c139e`，仅保留作故障追溯，不构成本项目 thermal HIL 或算法验收证据。
 - 共享领域契约由 firmware、devd 与 Web 各自的 typed adapter 实现。
 - firmware v1 先交付 host-testable status adapter、USB JSONL parser/encoder、WiFi redaction、runtime config 与 feature flags。
