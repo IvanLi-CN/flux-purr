@@ -7,6 +7,7 @@ use std::{
     io::{self, Read},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
+    process::Output,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
@@ -36,13 +37,15 @@ pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
 pub const DEVICE_LIST_EVENT_LIMIT: usize = 24;
 pub const DEVICE_EVENT_REPLAY_LIMIT: usize = 120;
-pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
+pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const PPS_HARDWARE_MIN_MV: u16 = 5_000;
 const PPS_HARDWARE_MAX_MV: u16 = 28_000;
+const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = 6_100;
+const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
@@ -53,6 +56,7 @@ const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const SERIAL_LINE_LIMIT: usize = 4_096;
@@ -399,6 +403,7 @@ impl DeviceRecord {
             ]),
             heater_enabled: true,
             heater_output_percent: 22,
+            heater_physical_output_percent: 22,
             active_cooling_enabled: true,
             fan_display_state: "AUTO".to_string(),
             fan_enabled: true,
@@ -418,8 +423,15 @@ impl DeviceRecord {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            heater_fault_reason: None,
+            heater_lock_reason: None,
+            heater_control_phase: None,
+            heater_error_c: None,
+            heater_control_error_c: None,
+            heater_filtered_temp_c: None,
             calibration: CalibrationRuntimeState::default(),
             thermal_control_profile_preview: false,
+            thermal_control: ThermalControlRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -461,6 +473,7 @@ impl DeviceRecord {
             presets_c: None,
             heater_enabled: false,
             heater_output_percent: 0,
+            heater_physical_output_percent: 0,
             active_cooling_enabled: true,
             fan_display_state: "OFF".to_string(),
             fan_enabled: false,
@@ -480,8 +493,15 @@ impl DeviceRecord {
             pps_capability_max_mv: None,
             pps_capability_max_ma: None,
             manual_pps_error: None,
+            heater_fault_reason: None,
+            heater_lock_reason: None,
+            heater_control_phase: None,
+            heater_error_c: None,
+            heater_control_error_c: None,
+            heater_filtered_temp_c: None,
             calibration: CalibrationRuntimeState::default(),
             thermal_control_profile_preview: false,
+            thermal_control: ThermalControlRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -590,6 +610,8 @@ pub struct ControlPlaneStatus {
     pub presets_c: Option<Vec<Option<i16>>>,
     pub heater_enabled: bool,
     pub heater_output_percent: u8,
+    #[serde(default)]
+    pub heater_physical_output_percent: u8,
     pub active_cooling_enabled: bool,
     pub fan_display_state: String,
     pub fan_enabled: bool,
@@ -618,12 +640,59 @@ pub struct ControlPlaneStatus {
     pub pps_capability_max_ma: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_pps_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_fault_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_lock_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_control_phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_error_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_control_error_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_filtered_temp_c: Option<f32>,
     #[serde(default)]
     pub calibration: CalibrationRuntimeState,
     #[serde(default)]
     pub thermal_control_profile_preview: bool,
+    #[serde(default)]
+    pub thermal_control: ThermalControlRuntime,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlRuntime {
+    pub profile_active: bool,
+    pub profile_covers_target: bool,
+    pub profile_source: String,
+    pub target_temp_c: i16,
+    pub brake_distance_centi_c: u16,
+    pub warmup_power_permille: u16,
+    pub approach_power_permille: u16,
+    pub approach_floor_power_permille: u16,
+    pub approach_damping_exponent_permille: u16,
+    pub hold_power_permille: u16,
+    pub hold_reheat_power_permille: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
+    pub hold_blend_ticks: u16,
+    pub approach_lead_ticks: u16,
+    pub hold_lead_ticks: u16,
+    pub temp_filter_alpha_permille: u16,
+    pub warmup_reenter_centi_c: u16,
+    pub approach_max_ticks: u16,
+    pub approach_min_power_ratio_permille: u16,
+    pub measurement_spike_reject_centi_c: u16,
+    pub auto_adjustable_working_floor_mv: u16,
+    pub heater_current_reserve_ma: u16,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1040,8 +1109,35 @@ pub enum ThermalControlProfileOp {
 pub struct ThermalControlProfilePoint {
     pub target_temp_c: i16,
     pub brake_distance_centi_c: u16,
+    #[serde(default)]
+    pub warmup_power_permille: u16,
     pub approach_power_permille: u16,
+    pub approach_floor_power_permille: u16,
+    #[serde(default = "default_approach_damping_exponent_permille")]
+    pub approach_damping_exponent_permille: u16,
     pub hold_power_permille: u16,
+    #[serde(default)]
+    pub hold_reheat_power_permille: u16,
+    #[serde(default)]
+    pub hold_entry_centi_c: u16,
+    #[serde(default)]
+    pub hold_exit_centi_c: u16,
+    #[serde(default)]
+    pub hold_on_centi_c: u16,
+    #[serde(default)]
+    pub hold_off_centi_c: u16,
+    #[serde(default)]
+    pub overshoot_cutoff_centi_c: u16,
+    #[serde(default)]
+    pub hold_kp_permille_per_c: u16,
+    #[serde(default)]
+    pub hold_ki_permille_per_c_tick: u16,
+    #[serde(default)]
+    pub hold_blend_ticks: u16,
+    #[serde(default)]
+    pub approach_lead_ticks: u16,
+    #[serde(default)]
+    pub hold_lead_ticks: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1062,8 +1158,23 @@ pub struct ThermalControlProfileSettings {
     pub hold_off_centi_c: u16,
     pub overshoot_cutoff_centi_c: u16,
     pub approach_max_ticks: u16,
+    pub approach_min_power_ratio_permille: u16,
     pub hold_kp_permille_per_c: u16,
     pub hold_ki_permille_per_c_tick: u16,
+    #[serde(default = "default_hold_blend_ticks")]
+    pub hold_blend_ticks: u16,
+    #[serde(default)]
+    pub hold_reheat_power_permille: u16,
+    #[serde(default)]
+    pub approach_lead_ticks: u16,
+    #[serde(default)]
+    pub hold_lead_ticks: u16,
+    #[serde(default = "default_measurement_spike_reject_centi_c")]
+    pub measurement_spike_reject_centi_c: u16,
+    #[serde(default = "default_auto_adjustable_working_floor_mv")]
+    pub auto_adjustable_working_floor_mv: u16,
+    #[serde(default = "default_heater_current_reserve_ma")]
+    pub heater_current_reserve_ma: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1376,6 +1487,18 @@ impl HttpError {
         )
     }
 
+    fn internal_with_details(code: &str, message: &str, details: Value) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: ApiError {
+                code: code.to_string(),
+                message: message.to_string(),
+                retryable: false,
+                details: Some(details),
+            },
+        }
+    }
+
     fn not_found(code: &str, message: &str) -> Self {
         Self::new(StatusCode::NOT_FOUND, code, message, false)
     }
@@ -1604,7 +1727,9 @@ async fn create_lease(
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<Json<WebLease>, HttpError> {
     let lease = {
+        let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
         let mut state_lock = state.lock()?;
+        refresh_serial_devices(&mut state_lock, serial_devices);
         state_lock.create_lease(&device_id)?
     };
     state.emit(event(
@@ -2512,21 +2637,43 @@ fn validate_thermal_control_profile_request(
                     || settings.hold_exit_centi_c == 0
                     || settings.hold_on_centi_c == 0
                     || settings.overshoot_cutoff_centi_c == 0
-                    || !(1..=60).contains(&settings.approach_max_ticks))
+                    || settings.measurement_spike_reject_centi_c > 10_000
+                    || !(AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN..=PPS_HARDWARE_MAX_MV)
+                        .contains(&settings.auto_adjustable_working_floor_mv)
+                    || settings.heater_current_reserve_ma > 1_000
+                    || settings.approach_min_power_ratio_permille > 1_000
+                    || !(1..=255).contains(&settings.approach_max_ticks)
+                    || !(1..=255).contains(&settings.hold_blend_ticks)
+                    || settings.approach_lead_ticks > 255
+                    || settings.hold_lead_ticks > 255)
             {
                 return Err(HttpError::bad_request(
                     "invalid_thermal_profile",
-                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, and 1..60 approach ticks.",
+                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, <=10000 spike reject, 6100..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, 1..255 approach/hold-blend ticks, and 0..255 predictive lead ticks.",
                 ));
             }
             for point in profile.points.iter().flatten() {
                 if point.brake_distance_centi_c == 0
+                    || point.warmup_power_permille > 1_000
                     || point.approach_power_permille > 1_000
+                    || point.approach_floor_power_permille > 1_000
+                    || !(100..=4_000).contains(&point.approach_damping_exponent_permille)
                     || point.hold_power_permille > 1_000
+                    || point.hold_reheat_power_permille > 1_000
+                    || point.hold_entry_centi_c > 5_000
+                    || point.hold_exit_centi_c > 5_000
+                    || point.hold_on_centi_c > 5_000
+                    || point.hold_off_centi_c > 5_000
+                    || point.overshoot_cutoff_centi_c > 5_000
+                    || point.hold_kp_permille_per_c > 10_000
+                    || point.hold_ki_permille_per_c_tick > 10_000
+                    || point.hold_blend_ticks > 255
+                    || point.approach_lead_ticks > 255
+                    || point.hold_lead_ticks > 255
                 {
                     return Err(HttpError::bad_request(
                         "invalid_thermal_profile",
-                        "thermal profile points must use positive brake distance and 0..1000 permille power.",
+                        "thermal profile points must use positive brake distance, 0..1000 permille power, 100..4000 approach damping, <=5000 centi-C damping thresholds, <=10000 PI gains, and <=255 blend/lead ticks.",
                     ));
                 }
             }
@@ -2541,6 +2688,26 @@ fn validate_thermal_control_profile_request(
         }
     }
     Ok(())
+}
+
+const fn default_hold_blend_ticks() -> u16 {
+    12
+}
+
+const fn default_approach_damping_exponent_permille() -> u16 {
+    1_000
+}
+
+const fn default_measurement_spike_reject_centi_c() -> u16 {
+    3_000
+}
+
+const fn default_auto_adjustable_working_floor_mv() -> u16 {
+    AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT
+}
+
+const fn default_heater_current_reserve_ma() -> u16 {
+    200
 }
 
 fn validate_calibration_control_request(
@@ -3309,13 +3476,17 @@ where
             true,
         )
     })?;
-    serde_json::from_value(payload).map_err(|_| {
-        HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "usb_payload_decode_failed",
-            "USB response payload could not be decoded.",
-            true,
-        )
+    serde_json::from_value(payload).map_err(|error| HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: ApiError {
+            code: "usb_payload_decode_failed".to_string(),
+            message: "USB response payload could not be decoded.".to_string(),
+            retryable: true,
+            details: Some(json!({
+                "payloadKey": payload_key,
+                "decodeError": error.to_string(),
+            })),
+        },
     })
 }
 
@@ -3602,10 +3773,35 @@ fn write_serial_request(
     port: &mut dyn serialport::SerialPort,
     request: &str,
 ) -> Result<(), HttpError> {
-    port.write_all(request.as_bytes())
+    validate_serial_request_len(request)?;
+    port.set_timeout(SERIAL_WRITE_TIMEOUT)
+        .map_err(serial_timeout_config_http_error)?;
+    let write_result = port
+        .write_all(request.as_bytes())
         .and_then(|_| port.write_all(b"\n"))
-        .and_then(|_| port.flush())
-        .map_err(serial_io_http_error)
+        .and_then(|_| port.flush());
+    let restore_result = port.set_timeout(SERIAL_READ_TIMEOUT);
+    write_result.map_err(serial_io_http_error)?;
+    restore_result.map_err(serial_timeout_config_http_error)
+}
+
+fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
+    if request.len().saturating_add(1) > SERIAL_LINE_LIMIT {
+        return Err(HttpError::bad_request(
+            "usb_request_too_large",
+            "USB JSONL request exceeds the firmware line limit.",
+        ));
+    }
+    Ok(())
+}
+
+fn serial_timeout_config_http_error(error: serialport::Error) -> HttpError {
+    HttpError::new(
+        StatusCode::BAD_GATEWAY,
+        "serial_timeout_config_failed",
+        &format!("Failed to configure serial timeout: {error}"),
+        true,
+    )
 }
 
 fn write_serial_request_with_reopen(
@@ -3757,7 +3953,11 @@ fn runtime_config_matches_status(
     }
     if let Some(profile) = payload.thermal_control_profile.as_ref() {
         match profile.op {
-            ThermalControlProfileOp::Preview => return false,
+            ThermalControlProfileOp::Preview => {
+                if !status.thermal_control_profile_preview {
+                    return false;
+                }
+            }
             ThermalControlProfileOp::ClearPreview => {
                 if status.thermal_control_profile_preview {
                     return false;
@@ -3776,6 +3976,22 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
     let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
         return Ok(None);
     };
+    if frame.frame_type == "error"
+        && frame
+            .request_id
+            .as_deref()
+            .is_none_or(|frame_request_id| frame_request_id == request_id)
+    {
+        return Err(HttpError {
+            status: StatusCode::BAD_GATEWAY,
+            error: frame.error.unwrap_or_else(|| ApiError {
+                code: "usb_error".to_string(),
+                message: "Firmware returned an unsuccessful USB error frame.".to_string(),
+                retryable: true,
+                details: None,
+            }),
+        });
+    }
     if frame.frame_type != "response" || frame.request_id.as_deref() != Some(request_id) {
         return Ok(None);
     }
@@ -4229,17 +4445,76 @@ async fn run_espflash(
     port_path: &str,
 ) -> Result<(), HttpError> {
     let args = build_espflash_args(artifact, root, port_path)?;
-    let status = Command::new("espflash")
-        .args(args)
-        .status()
+    let program = resolve_espflash_program();
+    let output = Command::new(&program)
+        .args(&args)
+        .output()
         .await
-        .map_err(|_| HttpError::internal("Failed to start espflash."))?;
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_unavailable",
+                "Failed to start espflash.",
+                json!({
+                    "program": program,
+                    "error": error.to_string(),
+                }),
+            )
+        })?;
 
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(HttpError::internal("espflash returned a non-zero status."))
+        Err(HttpError::internal_with_details(
+            "flash_tool_failed",
+            "espflash returned a non-zero status.",
+            espflash_failure_details(&program, &args, &output),
+        ))
     }
+}
+
+fn resolve_espflash_program() -> PathBuf {
+    if let Some(program) = env::var_os("FLUX_PURR_ESPFLASH").filter(|value| !value.is_empty()) {
+        return PathBuf::from(program);
+    }
+    if let Some(cargo_home) = env::var_os("CARGO_HOME").filter(|value| !value.is_empty()) {
+        let candidate = PathBuf::from(cargo_home).join("bin").join("espflash");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        let candidate = PathBuf::from(home)
+            .join(".cargo")
+            .join("bin")
+            .join("espflash");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("espflash")
+}
+
+fn espflash_failure_details(program: &Path, args: &[String], output: &Output) -> Value {
+    json!({
+        "program": program,
+        "args": args,
+        "exitCode": output.status.code(),
+        "stdout": bounded_espflash_output(&output.stdout),
+        "stderr": bounded_espflash_output(&output.stderr),
+    })
+}
+
+fn bounded_espflash_output(bytes: &[u8]) -> String {
+    const MAX_OUTPUT_BYTES: usize = 4_096;
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_OUTPUT_BYTES {
+        return text.trim().to_string();
+    }
+    let mut end = MAX_OUTPUT_BYTES;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{} [truncated]", text[..end].trim())
 }
 
 async fn run_espflash_with_exclusive_serial(
@@ -4284,7 +4559,6 @@ fn build_espflash_args(
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
-            "-S".to_string(),
             path.to_string_lossy().into_owned(),
         ]);
     }
@@ -4308,7 +4582,6 @@ fn build_espflash_args(
         "--non-interactive".to_string(),
         "--after".to_string(),
         "hard-reset".to_string(),
-        "-S".to_string(),
         flash_address.to_string(),
         path.to_string_lossy().into_owned(),
     ])
@@ -4859,6 +5132,26 @@ mod tests {
         assert_eq!(device.status.network.state, NetworkState::Idle);
     }
 
+    #[tokio::test]
+    async fn create_lease_refreshes_authorized_serial_device_before_lookup() {
+        let dir = tempdir().unwrap();
+        let port_path = dir.path().join("authorized-usbmodem");
+        fs::write(&port_path, b"placeholder").unwrap();
+        let mut config = AppConfig::default();
+        config.serial_port = Some(port_path.clone());
+        let state = AppState::new(config);
+        let device = serial_device_record(port_path.to_str().unwrap(), None);
+
+        let lease = create_lease(State(state.clone()), AxumPath(device.id.clone()))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(lease.device_id, device.id);
+        let state_lock = state.lock().unwrap();
+        assert!(state_lock.devices.contains_key(&lease.device_id));
+    }
+
     #[test]
     fn serial_refresh_removes_stale_native_devices_and_leases() {
         let mut state = DevdState::default();
@@ -5196,7 +5489,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
-        assert!(args.contains(&"-S".to_string()));
+        assert!(!args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
         assert!(!args.contains(&"65536".to_string()));
     }
@@ -5292,8 +5585,22 @@ mod tests {
                             Some(ThermalControlProfilePoint {
                                 target_temp_c: 100,
                                 brake_distance_centi_c: 700,
+                                warmup_power_permille: 320,
                                 approach_power_permille: 320,
+                                approach_floor_power_permille: 220,
+                                approach_damping_exponent_permille: 1_000,
                                 hold_power_permille: 220,
+                                hold_reheat_power_permille: 0,
+                                hold_entry_centi_c: 0,
+                                hold_exit_centi_c: 0,
+                                hold_on_centi_c: 0,
+                                hold_off_centi_c: 0,
+                                overshoot_cutoff_centi_c: 0,
+                                hold_kp_permille_per_c: 0,
+                                hold_ki_permille_per_c_tick: 0,
+                                hold_blend_ticks: 0,
+                                approach_lead_ticks: 0,
+                                hold_lead_ticks: 0,
                             }),
                             None,
                             None,
@@ -5366,8 +5673,22 @@ mod tests {
                             Some(ThermalControlProfilePoint {
                                 target_temp_c: 210,
                                 brake_distance_centi_c: 1_000,
+                                warmup_power_permille: 260,
                                 approach_power_permille: 260,
+                                approach_floor_power_permille: 180,
+                                approach_damping_exponent_permille: 1_000,
                                 hold_power_permille: 180,
+                                hold_reheat_power_permille: 0,
+                                hold_entry_centi_c: 0,
+                                hold_exit_centi_c: 0,
+                                hold_on_centi_c: 0,
+                                hold_off_centi_c: 0,
+                                overshoot_cutoff_centi_c: 0,
+                                hold_kp_permille_per_c: 0,
+                                hold_ki_permille_per_c_tick: 0,
+                                hold_blend_ticks: 0,
+                                approach_lead_ticks: 0,
+                                hold_lead_ticks: 0,
                             }),
                             None,
                             None,
@@ -5922,6 +6243,19 @@ mod tests {
     }
 
     #[test]
+    fn usb_response_decoder_surfaces_requestless_firmware_frame_errors() {
+        let error = decode_usb_response_line(
+            br#"{"type":"error","requestId":null,"error":{"code":"malformed_json","message":"Malformed USB JSONL frame.","retryable":false}}"#,
+            "req-1",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.error.code, "malformed_json");
+        assert!(!error.error.retryable);
+    }
+
+    #[test]
     fn usb_response_decoder_marks_startup_busy_retryable() {
         let error = decode_usb_response_line(
             br#"{"type":"response","requestId":"req-1","ok":false,"error":{"code":"startup_busy","message":"Runtime status is not available until hardware initialization completes.","retryable":true}}"#,
@@ -5974,6 +6308,7 @@ mod tests {
             presets_c: payload.presets_c.clone(),
             heater_enabled: true,
             heater_output_percent: 12,
+            heater_physical_output_percent: 12,
             active_cooling_enabled: false,
             fan_display_state: "AUTO".to_string(),
             fan_enabled: true,
@@ -5993,7 +6328,14 @@ mod tests {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            heater_fault_reason: None,
+            heater_lock_reason: None,
+            heater_control_phase: None,
+            heater_error_c: None,
+            heater_control_error_c: None,
+            heater_filtered_temp_c: None,
             thermal_control_profile_preview: false,
+            thermal_control: ThermalControlRuntime::default(),
             calibration: CalibrationRuntimeState {
                 mode: CalibrationMode::RtdAdc,
                 pps_enabled: true,
@@ -6052,13 +6394,27 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_matcher_does_not_reconcile_preview_by_boolean_only() {
+    fn runtime_config_matcher_reconciles_preview_from_status_flag() {
         let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
         points[0] = Some(ThermalControlProfilePoint {
             target_temp_c: 120,
             brake_distance_centi_c: 700,
+            warmup_power_permille: 320,
             approach_power_permille: 320,
+            approach_floor_power_permille: 220,
+            approach_damping_exponent_permille: 1_000,
             hold_power_permille: 220,
+            hold_reheat_power_permille: 0,
+            hold_entry_centi_c: 0,
+            hold_exit_centi_c: 0,
+            hold_on_centi_c: 0,
+            hold_off_centi_c: 0,
+            overshoot_cutoff_centi_c: 0,
+            hold_kp_permille_per_c: 0,
+            hold_ki_permille_per_c_tick: 0,
+            hold_blend_ticks: 0,
+            approach_lead_ticks: 0,
+            hold_lead_ticks: 0,
         });
         let payload = RuntimeConfigRequest {
             lease_id: "lease-1".to_string(),
@@ -6082,7 +6438,7 @@ mod tests {
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.thermal_control_profile_preview = true;
 
-        assert!(!runtime_config_matches_status(&payload, &status));
+        assert!(runtime_config_matches_status(&payload, &status));
     }
 
     #[test]
@@ -6277,17 +6633,25 @@ mod tests {
         assert!(!is_recoverable_write_http_error(&other_code));
     }
 
+    #[test]
+    fn serial_request_line_limit_accepts_full_line_and_rejects_overflow() {
+        assert!(validate_serial_request_len(&"x".repeat(SERIAL_LINE_LIMIT - 1)).is_ok());
+        let error = validate_serial_request_len(&"x".repeat(SERIAL_LINE_LIMIT)).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "usb_request_too_large");
+    }
+
     #[cfg(unix)]
     #[test]
     fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
         let port_path = "/tmp/flux-purr-devd-test-port";
-        let deadline = Instant::now() + Duration::from_millis(50);
+        let deadline = Instant::now() + Duration::from_millis(250);
 
         let first = SerialPortProcessLock::acquire(port_path, deadline).unwrap();
 
         let second = match SerialPortProcessLock::acquire(
             port_path,
-            Instant::now() + Duration::from_millis(50),
+            Instant::now() + Duration::from_millis(250),
         ) {
             Ok(_) => panic!("second serial lock should time out while first session is alive"),
             Err(error) => error,
@@ -6297,7 +6661,7 @@ mod tests {
         drop(first);
 
         let reopened =
-            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(50));
+            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(250));
         assert!(reopened.is_ok());
     }
 

@@ -19,7 +19,7 @@ pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
-pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 450;
+pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 700;
 pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
 pub const THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT: u16 = 90;
 pub const THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT: u16 = 200;
@@ -27,8 +27,22 @@ pub const THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT: u16 = 30;
 pub const THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT: u16 = 5;
 pub const THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT: u16 = 25;
 pub const THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_DEFAULT: u16 = 5;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX: u16 = 255;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_MIN_POWER_RATIO_PERMILLE_DEFAULT: u16 = 0;
 pub const THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT: u16 = 120;
 pub const THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT: u16 = 12;
+pub const THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT: u16 = 12;
+pub const THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT: u16 = 0;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT: u16 = 0;
+pub const THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT: u16 = 0;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT: u16 = 1_000;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
+pub const THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT: u16 = 300;
+pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
+pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = 6_100;
+pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX: u16 = 28_000;
+pub const THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT: u16 = 200;
+pub const THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
 pub const ADC_CALIBRATION_RTD_DEFAULT_LOW_MV: u16 = 0;
 pub const ADC_CALIBRATION_RTD_DEFAULT_HIGH_MV: u16 = 2_800;
 pub const ADC_CALIBRATION_VIN_DEFAULT_LOW_MV: u16 = 0;
@@ -39,10 +53,34 @@ const ADC_CALIBRATION_REFERENCE_PAYLOAD_LEN: usize = ADC_CALIBRATION_MAX_SAMPLES
 const ADC_CALIBRATION_TARGET_PAYLOAD_LEN: usize = ADC_CALIBRATION_MAX_SAMPLES * 2;
 const ADC_CALIBRATION_SLOT_PAYLOAD_LEN: usize = 2 * 2 * (core::mem::size_of::<f32>() * 2);
 const ADC_CALIBRATION_ACTIVE_SLOT_PAYLOAD_LEN: usize = 2;
-const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN: usize = 10 * 2;
-const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS * 8;
-const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize =
-    THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY: usize = 10 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_APPROACH_MIN_RATIO: usize = 11 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS: usize = 14 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT: usize = 15 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT: usize = 16 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_WORKING_FLOOR: usize = 17 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN: usize = 18 * 2;
+const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY: usize = 8;
+const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS: usize = 28;
+const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT: usize = 30;
+const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP: usize = 32;
+const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN: usize = 34;
+const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON: usize = 36;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_LEGACY: usize =
+    THERMAL_CONTROL_PROFILE_MAX_POINTS * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_LEAD_TICKS: usize =
+    THERMAL_CONTROL_PROFILE_MAX_POINTS * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_HOLD_REHEAT: usize =
+    THERMAL_CONTROL_PROFILE_MAX_POINTS * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_WARMUP: usize =
+    THERMAL_CONTROL_PROFILE_MAX_POINTS * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN: usize =
+    THERMAL_CONTROL_PROFILE_MAX_POINTS * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN;
+const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_HOLD_ON: usize =
+    THERMAL_CONTROL_PROFILE_MAX_POINTS
+        * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON;
+const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+    + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_HOLD_ON;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const PRESET_NONE_WIRE_VALUE: i16 = i16::MIN;
@@ -131,8 +169,22 @@ pub struct HeaterCurveConfig {
 pub struct ThermalControlProfilePointConfig {
     pub target_temp_c: i16,
     pub brake_distance_centi_c: u16,
+    pub warmup_power_permille: u16,
     pub approach_power_permille: u16,
+    pub approach_floor_power_permille: u16,
+    pub approach_damping_exponent_permille: u16,
     pub hold_power_permille: u16,
+    pub hold_reheat_power_permille: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
+    pub hold_blend_ticks: u16,
+    pub approach_lead_ticks: u16,
+    pub hold_lead_ticks: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,8 +203,16 @@ pub struct ThermalControlProfileSettingsConfig {
     pub hold_off_centi_c: u16,
     pub overshoot_cutoff_centi_c: u16,
     pub approach_max_ticks: u16,
+    pub approach_min_power_ratio_permille: u16,
     pub hold_kp_permille_per_c: u16,
     pub hold_ki_permille_per_c_tick: u16,
+    pub hold_blend_ticks: u16,
+    pub hold_reheat_power_permille: u16,
+    pub approach_lead_ticks: u16,
+    pub hold_lead_ticks: u16,
+    pub measurement_spike_reject_centi_c: u16,
+    pub auto_adjustable_working_floor_mv: u16,
+    pub heater_current_reserve_ma: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -222,9 +282,20 @@ impl Default for ThermalControlProfileSettingsConfig {
             hold_off_centi_c: THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
             overshoot_cutoff_centi_c: THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
             approach_max_ticks: THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_DEFAULT,
+            approach_min_power_ratio_permille:
+                THERMAL_CONTROL_PROFILE_APPROACH_MIN_POWER_RATIO_PERMILLE_DEFAULT,
             hold_kp_permille_per_c: THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
             hold_ki_permille_per_c_tick:
                 THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+            hold_blend_ticks: THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
+            hold_reheat_power_permille: THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
+            approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
+            hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
+            measurement_spike_reject_centi_c:
+                THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT,
+            auto_adjustable_working_floor_mv:
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT,
+            heater_current_reserve_ma: THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT,
         }
     }
 }
@@ -449,10 +520,40 @@ fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
     config.settings.hold_off_centi_c = config.settings.hold_off_centi_c.clamp(0, 5_000);
     config.settings.overshoot_cutoff_centi_c =
         config.settings.overshoot_cutoff_centi_c.clamp(1, 5_000);
-    config.settings.approach_max_ticks = config.settings.approach_max_ticks.clamp(1, 60);
+    config.settings.approach_max_ticks = config
+        .settings
+        .approach_max_ticks
+        .clamp(1, THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
+    config.settings.approach_min_power_ratio_permille =
+        config.settings.approach_min_power_ratio_permille.min(1_000);
     config.settings.hold_kp_permille_per_c = config.settings.hold_kp_permille_per_c.min(10_000);
     config.settings.hold_ki_permille_per_c_tick =
         config.settings.hold_ki_permille_per_c_tick.min(10_000);
+    config.settings.hold_blend_ticks = config
+        .settings
+        .hold_blend_ticks
+        .clamp(1, THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
+    config.settings.hold_reheat_power_permille =
+        config.settings.hold_reheat_power_permille.min(1_000);
+    config.settings.approach_lead_ticks = config
+        .settings
+        .approach_lead_ticks
+        .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
+    config.settings.hold_lead_ticks = config
+        .settings
+        .hold_lead_ticks
+        .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
+    config.settings.measurement_spike_reject_centi_c =
+        config.settings.measurement_spike_reject_centi_c.min(10_000);
+    config.settings.auto_adjustable_working_floor_mv =
+        config.settings.auto_adjustable_working_floor_mv.clamp(
+            THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
+            THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
+        );
+    config.settings.heater_current_reserve_ma = config
+        .settings
+        .heater_current_reserve_ma
+        .min(THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX);
 
     let mut compacted = [None; THERMAL_CONTROL_PROFILE_MAX_POINTS];
     let mut points: heapless::Vec<
@@ -463,8 +564,35 @@ fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
         let sanitized = ThermalControlProfilePointConfig {
             target_temp_c: clamp_temp_c(point.target_temp_c),
             brake_distance_centi_c: point.brake_distance_centi_c.clamp(100, 5_000),
+            warmup_power_permille: point.warmup_power_permille.min(1_000),
             approach_power_permille: point.approach_power_permille.min(1_000),
+            approach_floor_power_permille: point.approach_floor_power_permille.min(1_000),
+            approach_damping_exponent_permille: if point.approach_damping_exponent_permille == 0 {
+                THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT
+            } else {
+                point.approach_damping_exponent_permille.clamp(
+                    100,
+                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+                )
+            },
             hold_power_permille: point.hold_power_permille.min(1_000),
+            hold_reheat_power_permille: point.hold_reheat_power_permille.min(1_000),
+            hold_entry_centi_c: point.hold_entry_centi_c.min(5_000),
+            hold_exit_centi_c: point.hold_exit_centi_c.min(5_000),
+            hold_on_centi_c: point.hold_on_centi_c.min(5_000),
+            hold_off_centi_c: point.hold_off_centi_c.min(5_000),
+            overshoot_cutoff_centi_c: point.overshoot_cutoff_centi_c.min(5_000),
+            hold_kp_permille_per_c: point.hold_kp_permille_per_c.min(10_000),
+            hold_ki_permille_per_c_tick: point.hold_ki_permille_per_c_tick.min(10_000),
+            hold_blend_ticks: point
+                .hold_blend_ticks
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+            approach_lead_ticks: point
+                .approach_lead_ticks
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+            hold_lead_ticks: point
+                .hold_lead_ticks
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
         };
         let _ = points.push(sanitized);
     }
@@ -910,13 +1038,13 @@ fn encode_config_payload(
         &mut cursor,
     )?;
     let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
-    encode_thermal_control_profile(
+    let thermal_profile_len = encode_thermal_control_profile(
         &config.active_thermal_control_profile,
         &mut thermal_profile_payload,
     );
     push_tlv(
         TLV_ACTIVE_THERMAL_CONTROL_PROFILE,
-        &thermal_profile_payload,
+        &thermal_profile_payload[..thermal_profile_len],
         out,
         &mut cursor,
     )?;
@@ -1030,10 +1158,7 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
                 config.active_heater_curve = decode_heater_curve(value);
             }
-            TLV_ACTIVE_THERMAL_CONTROL_PROFILE
-                if len == THERMAL_CONTROL_PROFILE_PAYLOAD_LEN
-                    || len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN =>
-            {
+            TLV_ACTIVE_THERMAL_CONTROL_PROFILE if is_supported_thermal_control_profile_len(len) => {
                 config.active_thermal_control_profile = decode_thermal_control_profile(value);
             }
             _ => {}
@@ -1290,13 +1415,19 @@ fn decode_heater_curve(bytes: &[u8]) -> HeaterCurveConfig {
     config
 }
 
-fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mut [u8]) {
+fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mut [u8]) -> usize {
     encode_thermal_control_profile_settings(
         &config.settings,
         &mut out[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
     );
     let mut cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
-    for point in config.points {
+    let point_count = config
+        .points
+        .iter()
+        .rposition(Option::is_some)
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    for point in config.points.into_iter().take(point_count) {
         let target = point
             .map(|point| clamp_temp_c(point.target_temp_c))
             .unwrap_or(PRESET_NONE_WIRE_VALUE);
@@ -1306,34 +1437,396 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         let approach_power = point
             .map(|point| point.approach_power_permille.min(1_000))
             .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        let warmup_power = point
+            .map(|point| point.warmup_power_permille.min(1_000))
+            .unwrap_or(0);
+        let approach_floor_power = point
+            .map(|point| point.approach_floor_power_permille.min(1_000))
+            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        let approach_damping_exponent = point
+            .map(|point| {
+                point.approach_damping_exponent_permille.clamp(
+                    100,
+                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+                )
+            })
+            .unwrap_or(0);
         let hold_power = point
             .map(|point| point.hold_power_permille.min(1_000))
             .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
+        let hold_reheat_power = point
+            .map(|point| point.hold_reheat_power_permille.min(1_000))
+            .unwrap_or(0);
+        let hold_entry = point.map(|point| point.hold_entry_centi_c).unwrap_or(0);
+        let hold_exit = point.map(|point| point.hold_exit_centi_c).unwrap_or(0);
+        let hold_on = point.map(|point| point.hold_on_centi_c).unwrap_or(0);
+        let hold_off = point.map(|point| point.hold_off_centi_c).unwrap_or(0);
+        let overshoot_cutoff = point
+            .map(|point| point.overshoot_cutoff_centi_c)
+            .unwrap_or(0);
+        let hold_kp = point
+            .map(|point| point.hold_kp_permille_per_c.min(10_000))
+            .unwrap_or(0);
+        let hold_ki = point
+            .map(|point| point.hold_ki_permille_per_c_tick.min(10_000))
+            .unwrap_or(0);
+        let hold_blend = point
+            .map(|point| {
+                point
+                    .hold_blend_ticks
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+            })
+            .unwrap_or(0);
+        let approach_lead = point
+            .map(|point| {
+                point
+                    .approach_lead_ticks
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+            })
+            .unwrap_or(0);
+        let hold_lead = point
+            .map(|point| {
+                point
+                    .hold_lead_ticks
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+            })
+            .unwrap_or(0);
         out[cursor..cursor + 2].copy_from_slice(&target.to_le_bytes());
         out[cursor + 2..cursor + 4].copy_from_slice(&brake_distance.to_le_bytes());
-        out[cursor + 4..cursor + 6].copy_from_slice(&approach_power.to_le_bytes());
-        out[cursor + 6..cursor + 8].copy_from_slice(&hold_power.to_le_bytes());
-        cursor += 8;
+        out[cursor + 4..cursor + 6].copy_from_slice(&warmup_power.to_le_bytes());
+        out[cursor + 6..cursor + 8].copy_from_slice(&approach_power.to_le_bytes());
+        out[cursor + 8..cursor + 10].copy_from_slice(&approach_floor_power.to_le_bytes());
+        out[cursor + 10..cursor + 12].copy_from_slice(&approach_damping_exponent.to_le_bytes());
+        out[cursor + 12..cursor + 14].copy_from_slice(&hold_power.to_le_bytes());
+        out[cursor + 14..cursor + 16].copy_from_slice(&hold_reheat_power.to_le_bytes());
+        out[cursor + 16..cursor + 18].copy_from_slice(&hold_entry.to_le_bytes());
+        out[cursor + 18..cursor + 20].copy_from_slice(&hold_exit.to_le_bytes());
+        out[cursor + 20..cursor + 22].copy_from_slice(&hold_on.to_le_bytes());
+        out[cursor + 22..cursor + 24].copy_from_slice(&hold_off.to_le_bytes());
+        out[cursor + 24..cursor + 26].copy_from_slice(&overshoot_cutoff.to_le_bytes());
+        out[cursor + 26..cursor + 28].copy_from_slice(&hold_kp.to_le_bytes());
+        out[cursor + 28..cursor + 30].copy_from_slice(&hold_ki.to_le_bytes());
+        out[cursor + 30..cursor + 32].copy_from_slice(&hold_blend.to_le_bytes());
+        out[cursor + 32..cursor + 34].copy_from_slice(&approach_lead.to_le_bytes());
+        out[cursor + 34..cursor + 36].copy_from_slice(&hold_lead.to_le_bytes());
+        cursor += THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON;
     }
+    cursor
 }
 
 fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     let mut config = ThermalControlProfileConfig::default();
     let mut cursor = 0;
-    if bytes.len() == THERMAL_CONTROL_PROFILE_PAYLOAD_LEN {
+    let point_payload_len = if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
         config.settings = decode_thermal_control_profile_settings(
             &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
         );
         cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
-    }
-    for slot in config.points.iter_mut() {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+    } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_HOLD_ON {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+    } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+    } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_WARMUP {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+    } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_HOLD_REHEAT {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT
+    } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_LEAD_TICKS {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS
+    } else {
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+    };
+    let available_point_count = bytes.len().saturating_sub(cursor) / point_payload_len;
+    for slot in config.points.iter_mut().take(available_point_count) {
         let target = i16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
         let brake_distance = u16::from_le_bytes([bytes[cursor + 2], bytes[cursor + 3]]);
-        let approach_power = u16::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5]]);
-        let hold_power = u16::from_le_bytes([bytes[cursor + 6], bytes[cursor + 7]]);
+        let (warmup_power_permille, approach_power) = if point_payload_len
+            == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            || point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+        {
+            (
+                u16::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5]]),
+                u16::from_le_bytes([bytes[cursor + 6], bytes[cursor + 7]]),
+            )
+        } else {
+            let approach_power = u16::from_le_bytes([bytes[cursor + 4], bytes[cursor + 5]]);
+            (approach_power, approach_power)
+        };
+        let (approach_floor_power, approach_damping_exponent_permille, hold_power) =
+            if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+                || point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            {
+                (
+                    u16::from_le_bytes([bytes[cursor + 8], bytes[cursor + 9]]),
+                    u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]).clamp(
+                        100,
+                        THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+                    ),
+                    u16::from_le_bytes([bytes[cursor + 12], bytes[cursor + 13]]),
+                )
+            } else if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP {
+                (
+                    u16::from_le_bytes([bytes[cursor + 8], bytes[cursor + 9]]),
+                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                    u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]),
+                )
+            } else if point_payload_len
+                == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT
+            {
+                (
+                    u16::from_le_bytes([bytes[cursor + 6], bytes[cursor + 7]]),
+                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                    u16::from_le_bytes([bytes[cursor + 8], bytes[cursor + 9]]),
+                )
+            } else {
+                (
+                    legacy_approach_floor_power(
+                        approach_power,
+                        hold_power_from_legacy_bytes(&bytes[cursor + 6..cursor + 8]),
+                        config.settings.approach_min_power_ratio_permille,
+                    ),
+                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                    hold_power_from_legacy_bytes(&bytes[cursor + 6..cursor + 8]),
+                )
+            };
+        let (
+            hold_reheat_power_permille,
+            hold_entry_centi_c,
+            hold_exit_centi_c,
+            hold_on_centi_c,
+            hold_off_centi_c,
+            overshoot_cutoff_centi_c,
+            hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick,
+            hold_blend_ticks,
+            approach_lead_ticks,
+            hold_lead_ticks,
+        ) = if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON {
+            (
+                u16::from_le_bytes([bytes[cursor + 14], bytes[cursor + 15]]),
+                u16::from_le_bytes([bytes[cursor + 16], bytes[cursor + 17]]),
+                u16::from_le_bytes([bytes[cursor + 18], bytes[cursor + 19]]),
+                u16::from_le_bytes([bytes[cursor + 20], bytes[cursor + 21]]),
+                u16::from_le_bytes([bytes[cursor + 22], bytes[cursor + 23]]),
+                u16::from_le_bytes([bytes[cursor + 24], bytes[cursor + 25]]),
+                u16::from_le_bytes([bytes[cursor + 26], bytes[cursor + 27]]),
+                u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]),
+                u16::from_le_bytes([bytes[cursor + 30], bytes[cursor + 31]]),
+                u16::from_le_bytes([bytes[cursor + 32], bytes[cursor + 33]]),
+                u16::from_le_bytes([bytes[cursor + 34], bytes[cursor + 35]]),
+            )
+        } else if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN {
+            (
+                u16::from_le_bytes([bytes[cursor + 14], bytes[cursor + 15]]),
+                u16::from_le_bytes([bytes[cursor + 16], bytes[cursor + 17]]),
+                u16::from_le_bytes([bytes[cursor + 18], bytes[cursor + 19]]),
+                config.settings.hold_on_centi_c,
+                u16::from_le_bytes([bytes[cursor + 20], bytes[cursor + 21]]),
+                u16::from_le_bytes([bytes[cursor + 22], bytes[cursor + 23]]),
+                u16::from_le_bytes([bytes[cursor + 24], bytes[cursor + 25]]),
+                u16::from_le_bytes([bytes[cursor + 26], bytes[cursor + 27]]),
+                u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]),
+                u16::from_le_bytes([bytes[cursor + 30], bytes[cursor + 31]]),
+                u16::from_le_bytes([bytes[cursor + 32], bytes[cursor + 33]]),
+            )
+        } else if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP {
+            (
+                u16::from_le_bytes([bytes[cursor + 12], bytes[cursor + 13]]),
+                u16::from_le_bytes([bytes[cursor + 14], bytes[cursor + 15]]),
+                u16::from_le_bytes([bytes[cursor + 16], bytes[cursor + 17]]),
+                config.settings.hold_on_centi_c,
+                u16::from_le_bytes([bytes[cursor + 18], bytes[cursor + 19]]),
+                u16::from_le_bytes([bytes[cursor + 20], bytes[cursor + 21]]),
+                u16::from_le_bytes([bytes[cursor + 22], bytes[cursor + 23]]),
+                u16::from_le_bytes([bytes[cursor + 24], bytes[cursor + 25]]),
+                u16::from_le_bytes([bytes[cursor + 26], bytes[cursor + 27]]),
+                u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]),
+                u16::from_le_bytes([bytes[cursor + 30], bytes[cursor + 31]]),
+            )
+        } else if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT {
+            (
+                u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]),
+                u16::from_le_bytes([bytes[cursor + 12], bytes[cursor + 13]]),
+                u16::from_le_bytes([bytes[cursor + 14], bytes[cursor + 15]]),
+                config.settings.hold_on_centi_c,
+                u16::from_le_bytes([bytes[cursor + 16], bytes[cursor + 17]]),
+                u16::from_le_bytes([bytes[cursor + 18], bytes[cursor + 19]]),
+                u16::from_le_bytes([bytes[cursor + 20], bytes[cursor + 21]]),
+                u16::from_le_bytes([bytes[cursor + 22], bytes[cursor + 23]]),
+                u16::from_le_bytes([bytes[cursor + 24], bytes[cursor + 25]]),
+                u16::from_le_bytes([bytes[cursor + 26], bytes[cursor + 27]]),
+                u16::from_le_bytes([bytes[cursor + 28], bytes[cursor + 29]]),
+            )
+        } else if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS {
+            (
+                config.settings.hold_reheat_power_permille,
+                u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]),
+                u16::from_le_bytes([bytes[cursor + 12], bytes[cursor + 13]]),
+                config.settings.hold_on_centi_c,
+                u16::from_le_bytes([bytes[cursor + 14], bytes[cursor + 15]]),
+                u16::from_le_bytes([bytes[cursor + 16], bytes[cursor + 17]]),
+                u16::from_le_bytes([bytes[cursor + 18], bytes[cursor + 19]]),
+                u16::from_le_bytes([bytes[cursor + 20], bytes[cursor + 21]]),
+                u16::from_le_bytes([bytes[cursor + 22], bytes[cursor + 23]]),
+                u16::from_le_bytes([bytes[cursor + 24], bytes[cursor + 25]]),
+                u16::from_le_bytes([bytes[cursor + 26], bytes[cursor + 27]]),
+            )
+        } else {
+            (
+                config.settings.hold_reheat_power_permille,
+                config.settings.hold_entry_centi_c,
+                config.settings.hold_exit_centi_c,
+                config.settings.hold_on_centi_c,
+                config.settings.hold_off_centi_c,
+                config.settings.overshoot_cutoff_centi_c,
+                config.settings.hold_kp_permille_per_c,
+                config.settings.hold_ki_permille_per_c_tick,
+                config.settings.hold_blend_ticks,
+                config.settings.approach_lead_ticks,
+                config.settings.hold_lead_ticks,
+            )
+        };
         *slot = if target == PRESET_NONE_WIRE_VALUE
             || brake_distance == CALIBRATION_NONE_WIRE_VALUE
             || approach_power == CALIBRATION_NONE_WIRE_VALUE
+            || approach_floor_power == CALIBRATION_NONE_WIRE_VALUE
             || hold_power == CALIBRATION_NONE_WIRE_VALUE
         {
             None
@@ -1341,13 +1834,140 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
             Some(ThermalControlProfilePointConfig {
                 target_temp_c: target,
                 brake_distance_centi_c: brake_distance,
+                warmup_power_permille,
                 approach_power_permille: approach_power,
+                approach_floor_power_permille: approach_floor_power,
+                approach_damping_exponent_permille,
                 hold_power_permille: hold_power,
+                hold_reheat_power_permille,
+                hold_entry_centi_c,
+                hold_exit_centi_c,
+                hold_on_centi_c,
+                hold_off_centi_c,
+                overshoot_cutoff_centi_c,
+                hold_kp_permille_per_c,
+                hold_ki_permille_per_c_tick,
+                hold_blend_ticks,
+                approach_lead_ticks,
+                hold_lead_ticks,
             })
         };
-        cursor += 8;
+        cursor += point_payload_len;
     }
     config
+}
+
+fn is_supported_thermal_control_profile_len(len: usize) -> bool {
+    let current_with_settings = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let previous_current_with_settings = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let previous_current_with_previous_settings = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let current_with_previous_points = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let hold_reheat_with_matching_points = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let lead_ticks_with_matching_points = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let current_settings_legacy_points = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let hold_reheat_settings_legacy_points = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let lead_ticks_settings_legacy_points = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let legacy_with_legacy_points = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
+    let legacy_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_LEGACY;
+    let lead_ticks_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_LEAD_TICKS;
+    let hold_reheat_points_only =
+        len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_HOLD_REHEAT;
+    let current_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_HOLD_ON;
+    let previous_current_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN;
+    let current_previous_points_only =
+        len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_WARMUP;
+    current_with_settings
+        || previous_current_with_settings
+        || previous_current_with_previous_settings
+        || current_with_previous_points
+        || hold_reheat_with_matching_points
+        || lead_ticks_with_matching_points
+        || current_settings_legacy_points
+        || hold_reheat_settings_legacy_points
+        || lead_ticks_settings_legacy_points
+        || legacy_with_legacy_points
+        || legacy_points_only
+        || lead_ticks_points_only
+        || hold_reheat_points_only
+        || previous_current_points_only
+        || current_previous_points_only
+        || current_points_only
+}
+
+fn hold_power_from_legacy_bytes(bytes: &[u8]) -> u16 {
+    u16::from_le_bytes([bytes[0], bytes[1]])
+}
+
+fn legacy_approach_floor_power(approach_power: u16, hold_power: u16, ratio_permille: u16) -> u16 {
+    let scaled = ((u32::from(approach_power.min(1_000)) * u32::from(ratio_permille.min(1_000)))
+        + 500)
+        / 1_000;
+    hold_power.min(1_000).max(scaled.min(1_000) as u16)
 }
 
 fn encode_thermal_control_profile_settings(
@@ -1363,8 +1983,16 @@ fn encode_thermal_control_profile_settings(
         settings.hold_off_centi_c,
         settings.overshoot_cutoff_centi_c,
         settings.approach_max_ticks,
+        settings.approach_min_power_ratio_permille,
         settings.hold_kp_permille_per_c,
         settings.hold_ki_permille_per_c_tick,
+        settings.hold_blend_ticks,
+        settings.hold_reheat_power_permille,
+        settings.approach_lead_ticks,
+        settings.hold_lead_ticks,
+        settings.measurement_spike_reject_centi_c,
+        settings.auto_adjustable_working_floor_mv,
+        settings.heater_current_reserve_ma,
     ];
     for (index, value) in values.into_iter().enumerate() {
         let cursor = index * 2;
@@ -1373,11 +2001,16 @@ fn encode_thermal_control_profile_settings(
 }
 
 fn decode_thermal_control_profile_settings(bytes: &[u8]) -> ThermalControlProfileSettingsConfig {
-    let mut values = [0u16; 10];
+    let mut values = [0u16; 18];
     for (index, value) in values.iter_mut().enumerate() {
         let cursor = index * 2;
+        if cursor + 1 >= bytes.len() {
+            break;
+        }
         *value = u16::from_le_bytes([bytes[cursor], bytes[cursor + 1]]);
     }
+    let has_approach_min_ratio =
+        bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_APPROACH_MIN_RATIO;
     ThermalControlProfileSettingsConfig {
         temp_filter_alpha_permille: values[0],
         warmup_reenter_centi_c: values[1],
@@ -1387,8 +2020,75 @@ fn decode_thermal_control_profile_settings(bytes: &[u8]) -> ThermalControlProfil
         hold_off_centi_c: values[5],
         overshoot_cutoff_centi_c: values[6],
         approach_max_ticks: values[7],
-        hold_kp_permille_per_c: values[8],
-        hold_ki_permille_per_c_tick: values[9],
+        approach_min_power_ratio_permille: if has_approach_min_ratio {
+            values[8]
+        } else {
+            THERMAL_CONTROL_PROFILE_APPROACH_MIN_POWER_RATIO_PERMILLE_DEFAULT
+        },
+        hold_kp_permille_per_c: if has_approach_min_ratio {
+            values[9]
+        } else {
+            values[8]
+        },
+        hold_ki_permille_per_c_tick: if has_approach_min_ratio {
+            values[10]
+        } else {
+            values[9]
+        },
+        hold_blend_ticks: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS
+        {
+            values[11]
+        } else {
+            THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT
+        },
+        hold_reheat_power_permille: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        {
+            values[12].min(1_000)
+        } else {
+            THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT
+        },
+        approach_lead_ticks: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        {
+            values[13].min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+        } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS {
+            values[12].min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+        } else {
+            THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT
+        },
+        hold_lead_ticks: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT
+        {
+            values[14].min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+        } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS {
+            values[13].min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+        } else {
+            THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT
+        },
+        measurement_spike_reject_centi_c: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT
+        {
+            values[15].min(10_000)
+        } else {
+            THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT
+        },
+        auto_adjustable_working_floor_mv: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_WORKING_FLOOR
+        {
+            values[16].clamp(
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
+            )
+        } else {
+            THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT
+        },
+        heater_current_reserve_ma: if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN {
+            values[17].min(THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX)
+        } else {
+            THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT
+        },
     }
 }
 
@@ -1499,14 +2199,46 @@ mod tests {
         config.active_thermal_control_profile.points[0] = Some(ThermalControlProfilePointConfig {
             target_temp_c: 100,
             brake_distance_centi_c: 700,
+            warmup_power_permille: 320,
             approach_power_permille: 320,
+            approach_floor_power_permille: 220,
+            approach_damping_exponent_permille:
+                THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
             hold_power_permille: 220,
+            hold_reheat_power_permille: THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
+            hold_entry_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+            hold_exit_centi_c: THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+            hold_on_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+            hold_off_centi_c: THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+            overshoot_cutoff_centi_c: THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+            hold_kp_permille_per_c: THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+            hold_ki_permille_per_c_tick:
+                THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+            hold_blend_ticks: THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
+            approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
+            hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
         });
         config.active_thermal_control_profile.points[1] = Some(ThermalControlProfilePointConfig {
             target_temp_c: 210,
             brake_distance_centi_c: 1_000,
+            warmup_power_permille: 260,
             approach_power_permille: 260,
+            approach_floor_power_permille: 180,
+            approach_damping_exponent_permille:
+                THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
             hold_power_permille: 180,
+            hold_reheat_power_permille: THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
+            hold_entry_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+            hold_exit_centi_c: THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+            hold_on_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+            hold_off_centi_c: THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+            overshoot_cutoff_centi_c: THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+            hold_kp_permille_per_c: THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+            hold_ki_permille_per_c_tick:
+                THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+            hold_blend_ticks: THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
+            approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
+            hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
         });
         config
     }
@@ -1565,8 +2297,25 @@ mod tests {
             Some(ThermalControlProfilePointConfig {
                 target_temp_c: 210,
                 brake_distance_centi_c: 1_000,
+                warmup_power_permille: 260,
                 approach_power_permille: 260,
+                approach_floor_power_permille: 180,
+                approach_damping_exponent_permille:
+                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
                 hold_power_permille: 180,
+                hold_reheat_power_permille:
+                    THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
+                hold_entry_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+                hold_exit_centi_c: THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+                hold_on_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+                hold_off_centi_c: THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+                overshoot_cutoff_centi_c: THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+                hold_kp_permille_per_c: THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+                hold_ki_permille_per_c_tick:
+                    THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+                hold_blend_ticks: THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
+                approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
+                hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
             })
         );
     }

@@ -28,6 +28,9 @@ Cargo.lock
 # Local screenshots and scratch artifacts
 .tmp/
 
+# Local hardware-in-the-loop captures and generated reports
+thermal-self-test-runs/
+
 # Python cache
 __pycache__/
 *.pyc
