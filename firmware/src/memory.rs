@@ -7,9 +7,12 @@ use crate::frontpanel::{
 pub const M24C64_I2C_ADDRESS: u8 = 0x50;
 pub const M24C64_CAPACITY_BYTES: u16 = 8 * 1024;
 pub const M24C64_PAGE_SIZE: usize = 32;
-pub const MEMORY_SLOT_SIZE: usize = 512;
-pub const MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
-pub const MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
+pub const MEMORY_SLOT_SIZE: usize = 1024;
+pub const MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
+pub const MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
+pub const LEGACY_MEMORY_SLOT_SIZE: usize = 512;
+pub const LEGACY_MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
+pub const LEGACY_MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
 pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 1;
 pub const MEMORY_RECORD_HEADER_LEN: usize = 16;
 pub const MEMORY_RECORD_PAYLOAD_MAX: usize = MEMORY_SLOT_SIZE - MEMORY_RECORD_HEADER_LEN;
@@ -2315,6 +2318,38 @@ mod tests {
                 hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
             })
         );
+    }
+
+    #[test]
+    fn record_roundtrip_preserves_six_point_profile_at_max_credentials() {
+        let mut config = sample_config();
+        config.wifi_ssid.clear();
+        config
+            .wifi_ssid
+            .push_str("12345678901234567890123456789012")
+            .unwrap();
+        config.wifi_password.clear();
+        config
+            .wifi_password
+            .push_str("1234567890123456789012345678901234567890123456789012345678901234")
+            .unwrap();
+        let template = config.active_thermal_control_profile.points[0].unwrap();
+        for (slot, target_temp_c) in [60, 100, 140, 180, 220, 250].into_iter().enumerate() {
+            config.active_thermal_control_profile.points[slot] =
+                Some(ThermalControlProfilePointConfig {
+                    target_temp_c,
+                    ..template
+                });
+        }
+
+        let record = MemoryRecord {
+            sequence: 43,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).unwrap();
+        assert!(len <= MEMORY_SLOT_SIZE);
+        assert_eq!(decode_memory_record(&bytes[..len]).unwrap(), record);
     }
 
     #[test]

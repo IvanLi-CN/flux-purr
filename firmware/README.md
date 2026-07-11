@@ -73,7 +73,7 @@
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
-  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config with two `512 B` slots at `0x0000` and `0x0200`
+  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config in two `1 KiB` slots at `0x0400` and `0x0800`; the former `512 B` slots at `0x0000` and `0x0200` remain a read-only migration fallback
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended
   - accepted front-panel edits debounce for about `2s` before writing the next slot

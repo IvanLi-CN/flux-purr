@@ -41,7 +41,7 @@
 - `ThermalControlProfile` 每点已扩展为 power baseline + damping 数据：`holdEntryCentiC`、`holdExitCentiC`、`holdOffCentiC`、`overshootCutoffCentiC`、`holdKpPermillePerC`、`holdKiPermillePerCTick` 与 `holdBlendTicks` 现已随 preview/save、CLI/devd、report 和 EEPROM 持久化链路贯通。
 - thermal self-test 的保温验收窗口现已改为只累计固件真实 `heaterControlPhase=hold` 的驻留时间；host-side “接近目标” 样本不再提前进入 hold peak-to-peak 统计。
 - firmware hold handoff 现会 preload integral，并把最后一次 approach 输出在 `holdBlendTicks` 内平滑 blend 到 hold PI 输出；积分钳位也改成按 hold baseline 与 Ki 推导的动态范围。
-- EEPROM thermal profile 编码改为只写入实际已配置点位，而不是固定写满 10 个槽；这是为了在不改变现有 slot 容量的前提下容纳更宽的每点 damping 字段。
+- EEPROM thermal profile 编码只写入实际已配置点位，而不是固定写满 10 个槽；持久化上限为六点。EEPROM active record 使用 `1024 bytes` 新双槽，并保留旧 `512 bytes` 双槽只读回退，确保完整校准、最长 Wi-Fi 凭据和六点 profile 可同时保存。
 - 同日完成两轮授权端口 `/dev/cu.usbmodem21221401` + IsolaPurr LAN source `http://192.168.31.224` 真机 HIL。第一轮结果：`60°C p2p 3.9`、`100°C overshoot 5.7 / p2p 8.5`、`140°C p2p 6.9`、`220°C p2p 4.7` 失败。第二轮回调后结果：`60°C overshoot 3.8 / p2p 5.4`、`100°C overshoot 4.6 / p2p 11.1`、`140°C p2p 4.6`、`180°C p2p 6.3`、`220°C p2p 5.4` 失败。两轮都证明高温段接近目标前的塌功率问题已收口，但低中温和高温保温仍受热惯性影响， acceptance 尚未达到 `<=3.0°C`。
 - `ThermalControlProfile` 点位扩展 `approachFloorPowerPermille`，用于显式表达各温区接近目标时允许保持的最小加热功率下限；该字段与现有 `targetTempC` / `brakeDistanceCentiC` / `approachPowerPermille` / `holdPowerPermille` 一起经 runtime_config、CLI/devd、report 与 EEPROM 持久化贯通。
 - Firmware hold control 改为围绕 `holdPowerPermille` 基线的连续 PI 微调；旧的全局 `approachMinPowerRatioPermille` 不再主导新 profile 的 approach floor，仅保留旧 EEPROM profile 的 decode fallback。

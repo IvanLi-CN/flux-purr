@@ -96,6 +96,7 @@ use flux_purr_firmware::memory::{
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
+    LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
     M24C64_PAGE_SIZE, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
     MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, decode_memory_record, encode_memory_record,
     select_latest_memory_record,
@@ -3099,7 +3100,22 @@ fn load_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryReco
         .map(|_| decode_memory_record(&slot_b))
         .ok()
         .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
-    let selected = select_latest_memory_record(slot_a_read, slot_b_read);
+    let mut selected = select_latest_memory_record(slot_a_read, slot_b_read);
+    if selected.is_none() {
+        let mut legacy_slot_a = [0u8; LEGACY_MEMORY_SLOT_SIZE];
+        let mut legacy_slot_b = [0u8; LEGACY_MEMORY_SLOT_SIZE];
+        let legacy_slot_a_read = eeprom
+            .read_bytes(LEGACY_MEMORY_SLOT_A_OFFSET, &mut legacy_slot_a)
+            .map(|_| decode_memory_record(&legacy_slot_a))
+            .ok()
+            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+        let legacy_slot_b_read = eeprom
+            .read_bytes(LEGACY_MEMORY_SLOT_B_OFFSET, &mut legacy_slot_b)
+            .map(|_| decode_memory_record(&legacy_slot_b))
+            .ok()
+            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+        selected = select_latest_memory_record(legacy_slot_a_read, legacy_slot_b_read);
+    }
 
     if let Some(record) = &selected {
         info!(
