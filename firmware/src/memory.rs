@@ -19,6 +19,7 @@ pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
+pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = 6;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 700;
 pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
 pub const THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT: u16 = 90;
@@ -1421,13 +1422,7 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         &mut out[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
     );
     let mut cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
-    let point_count = config
-        .points
-        .iter()
-        .rposition(Option::is_some)
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    for point in config.points.into_iter().take(point_count) {
+    for point in config.points.into_iter().filter(Option::is_some) {
         let target = point
             .map(|point| clamp_temp_c(point.target_temp_c))
             .unwrap_or(PRESET_NONE_WIRE_VALUE);
@@ -2319,6 +2314,28 @@ mod tests {
                 approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
                 hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
             })
+        );
+    }
+
+    #[test]
+    fn thermal_profile_persistence_compacts_sparse_slots() {
+        let mut config = sample_config();
+        let point = config.active_thermal_control_profile.points[0].take();
+        config.active_thermal_control_profile.points = [None; THERMAL_CONTROL_PROFILE_MAX_POINTS];
+        config.active_thermal_control_profile.points[9] = point;
+        let record = MemoryRecord {
+            sequence: 43,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("sparse profile encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("sparse profile decodes");
+
+        assert!(decoded.config.active_thermal_control_profile.points[0].is_some());
+        assert!(
+            decoded.config.active_thermal_control_profile.points[1..]
+                .iter()
+                .all(Option::is_none)
         );
     }
 

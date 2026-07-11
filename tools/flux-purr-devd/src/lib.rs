@@ -2629,6 +2629,14 @@ fn validate_thermal_control_profile_request(
                     "thermalControlProfile.profile.points must contain exactly 10 values.",
                 ));
             }
+            if request.op == ThermalControlProfileOp::Save
+                && profile.points.iter().flatten().count() > 6
+            {
+                return Err(HttpError::bad_request(
+                    "thermal_profile_too_many_saved_points",
+                    "saved thermal profiles support at most 6 populated points.",
+                ));
+            }
             if let Some(settings) = profile.settings.as_ref()
                 && (settings.temp_filter_alpha_permille == 0
                     || settings.temp_filter_alpha_permille > 1_000

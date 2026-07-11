@@ -89,7 +89,8 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 use flux_purr_firmware::memory::{
     HeaterCurveConfig, MemoryConfig,
     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
-    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX, ThermalControlProfileConfig,
+    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+    THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, ThermalControlProfileConfig,
     ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig,
     heater_resistance_ohms_from_curve,
 };
@@ -4203,6 +4204,26 @@ fn usb_runtime_config_response(
                         error: Some(ApiError::new(
                             "thermal_profile_required",
                             "thermalControlProfile.profile is required for preview/save.",
+                            false,
+                        )),
+                    },
+                    context.calibration,
+                );
+            }
+            ThermalControlProfileOp::Save
+                if command.profile.is_some_and(|profile| {
+                    profile.points.iter().flatten().count()
+                        > THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS
+                }) =>
+            {
+                return (
+                    UsbFrame::Response {
+                        request_id,
+                        ok: false,
+                        result: None,
+                        error: Some(ApiError::new(
+                            "thermal_profile_too_many_saved_points",
+                            "saved thermal profiles support at most 6 populated points.",
                             false,
                         )),
                     },
