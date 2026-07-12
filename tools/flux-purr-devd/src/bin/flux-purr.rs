@@ -2015,8 +2015,11 @@ impl ThermalFullSpeedStableTracker {
             return ThermalFullSpeedStableObservation::Verified;
         }
 
-        let inside_stable_window = control_phase == Some("hold")
-            && (current_temp_c - self.target_temp_c).abs() <= Self::STABLE_BAND_C;
+        // Stability is a physical temperature requirement. The controller may briefly use
+        // Approach to recover heat loss while the plate remains inside the stable band; tying
+        // this window to the phase label turns successful recovery into a false timeout.
+        let inside_stable_window =
+            (current_temp_c - self.target_temp_c).abs() <= Self::STABLE_BAND_C;
         if inside_stable_window {
             let stable_window_started_at_ms =
                 *self.stable_window_started_at_ms.get_or_insert(elapsed_ms);
@@ -9692,7 +9695,7 @@ mod tests {
             ThermalFullSpeedStableObservation::Pending
         );
         assert_eq!(
-            tracker.observe(140.0, 12_000, Some("hold")),
+            tracker.observe(140.0, 12_000, Some("approach")),
             ThermalFullSpeedStableObservation::Verified
         );
         assert_eq!(
@@ -9706,6 +9709,33 @@ mod tests {
         assert_eq!(analysis.stable_window_started_at_ms, Some(2_000));
         assert_eq!(analysis.stable_window_verified_at_ms, Some(12_000));
         assert_eq!(analysis.settle_time_ms, Some(1_750));
+    }
+
+    #[test]
+    fn thermal_full_speed_tracker_keeps_window_across_active_control_phases() {
+        let mut tracker = ThermalFullSpeedStableTracker::new(180);
+
+        assert_eq!(
+            tracker.observe(173.0, 0, Some("warmup")),
+            ThermalFullSpeedStableObservation::Pending
+        );
+        assert_eq!(
+            tracker.observe(178.8, 1_000, Some("approach")),
+            ThermalFullSpeedStableObservation::Pending
+        );
+        assert_eq!(
+            tracker.observe(180.4, 6_000, Some("hold")),
+            ThermalFullSpeedStableObservation::Pending
+        );
+        assert_eq!(
+            tracker.observe(179.2, 11_000, Some("approach")),
+            ThermalFullSpeedStableObservation::Verified
+        );
+
+        let analysis = tracker.finalize();
+        assert_eq!(analysis.stable_window_started_at_ms, Some(1_000));
+        assert_eq!(analysis.stable_window_verified_at_ms, Some(11_000));
+        assert_eq!(analysis.settle_time_ms, Some(0));
     }
 
     #[test]
