@@ -180,7 +180,7 @@ The firmware control loop runs at `10Hz`. Each loop reads `32` RTD ADC conversio
 
 Static brake distance is not sufficient when heater assembly or thermal mass changes, so warmup handoff combines point-level brake distance with confirmed filtered rise rate times `approachLeadTicks`, capped below the `warmupReenterCentiC` boundary. Predictive expansion is accepted only when both actual and filtered temperatures have reached the expanded boundary; entering the ordinary static brake still follows actual temperature so filter lag cannot block normal handoff. This reuses API/EEPROM profile parameters instead of adding a hidden firmware tuning constant.
 
-Raw RTD samples must remain distinguishable from thermal momentum in the report, but temperature motion itself is not a sensor fault. The control loop consumes every valid temperature sample directly. RTD faults are limited to open, short, ADC read failure, and the explicit over-temperature limit; a fast rise, fall, or step is evidence to investigate in raw telemetry, not a reason to freeze the control signal or invent a new fault class.
+Raw RTD samples must remain distinguishable from thermal momentum in the report, but temperature motion itself is not a sensor fault. Every valid RTD batch independently runs the over-temperature check, while the control loop, front panel, and runtime status use the median of the most recent three valid batch temperatures. This rejects a single batch-level ADC shift without suppressing a sustained thermal change; any open, short, ADC read failure, or over-temperature condition immediately clears that short history and retains the existing heater shutdown path.
 
 Approach and hold tuning must remain independent. A pre-hold acquisition failure may adjust approach power, floor, tail window, brake distance, damping, and lead, but it must not raise hold baseline or reheat power without hold samples. Likewise, `holdReheatPowerPermille >= holdPowerPermille` and `approachPowerPermille >= approachFloorPowerPermille` are valid local invariants; coupling `holdReheatPowerPermille` to `approachFloorPowerPermille` causes low-temperature tuning to oscillate between overshoot and underpowered acquisition. When high early approach floor is required but that same floor creates a near-target residual-heat tail, `approachTailWindowCentiC` linearly tapers only the approach floor down to the existing `max(holdReheatPowerPermille, holdPowerPermille)` floor over its final error window. A zero window is the legacy behavior, so the new parameter cannot silently reshape already-saved points.
 
@@ -198,6 +198,16 @@ The accepted sparse HIL anchors on the authorized source are:
 - `60°C`: `thermal-1783699709933-serial-303a-1001-d0-cf-13-08-a1-48`, settle `7.534s`, overshoot `1.2°C`, full-`60s` hold peak-to-peak `2.3°C`
 - `140°C`: `thermal-1783700052289-serial-303a-1001-d0-cf-13-08-a1-48`, settle `8.661s`, overshoot `0.4°C`, full-`60s` hold peak-to-peak `2.3°C`
 - `220°C`: `thermal-1783702036504-serial-303a-1001-d0-cf-13-08-a1-48`, settle `0.905s`, overshoot `1.1°C`, full-`60s` hold peak-to-peak `2.6°C`, mean host sampling rate `3.33Hz`
+
+For a source that advertises a `5V` PPS minimum, down-ramp power accounting must use the active
+PPS request rather than only the requested floor. The PPS request is intentionally rate-limited,
+so a controller that has reduced its requested heat power can otherwise leave the MOS continuously
+open while voltage still walks down from the previous high request. In approach, static `50ms`
+`0%/100%` pulse-density gate ticks preserve the requested average power across that transition.
+On the authorized `856a141cdbd4` source, the `60°C` profile point `brake=850`,
+`approach=500/floor=170`, `hold=135/reheat=170`, `lead=5/6`, and a `5000mV` working floor passed
+two complete 60-second HIL holds: settle times were `9.600s` and `8.902s`, maximum overshoot was
+`1.13°C` and `1.49°C`, and hold peak-to-peak was `2.58°C` and `2.71°C`.
 
 The high-temperature result required a separate saturated-zone rule. When measured near-target output is already at least `90%`, slope remains at or below `1°C/s`, and hold is not reached, the tuner moves warmup/approach to the stable-band edge and generates a near-saturated hold baseline. If a saturated hold then oscillates on both sides of target, the tuner widens the existing `holdOffCentiC..overshootCutoffCentiC` taper from measured amplitude instead of cutting PPS voltage nearly to zero. At `220°C`, widening `overshootCutoffCentiC` from `180` to `383` reduced the observed hold range from `3.2°C` to `2.6°C` by removing the `~99% -> 22% -> 100%` power cycle.
 

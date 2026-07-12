@@ -2099,6 +2099,35 @@ fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16)
     *latest_temp_i16 = 0;
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RtdTemporalMedian {
+    samples_c: [f32; 3],
+    count: usize,
+    next: usize,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl RtdTemporalMedian {
+    fn push(&mut self, temp_c: f32) -> f32 {
+        self.samples_c[self.next] = temp_c;
+        self.next = (self.next + 1) % self.samples_c.len();
+        self.count = self.count.saturating_add(1).min(self.samples_c.len());
+        match self.count {
+            1 => self.samples_c[0],
+            2 => (self.samples_c[0] + self.samples_c[1]) * 0.5,
+            _ => {
+                let [a, b, c] = self.samples_c;
+                a.max(b).min(a.min(b).max(c))
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 fn should_clear_runtime_fault_latch(
     heater_rearm_requested: bool,
@@ -3427,6 +3456,26 @@ fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn floor_gate_pulse_density_duty_percent(
+    duty_percent: u8,
+    active_request_mv: u16,
+    ceiling_mv: u16,
+    now_ms: u64,
+) -> u8 {
+    let active_power = u64::from(active_request_mv).saturating_mul(u64::from(active_request_mv));
+    let target_percent = u64::from(duty_percent)
+        .saturating_mul(u64::from(ceiling_mv).saturating_mul(u64::from(ceiling_mv)))
+        / active_power.max(1);
+    let target_percent = target_percent.clamp(1, 100);
+    let tick = now_ms / HEATER_CONTROL_INTERVAL_MS;
+    if (tick.saturating_mul(target_percent) % 100) < target_percent {
+        100
+    } else {
+        0
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 #[allow(clippy::too_many_arguments)]
 fn adjustable_floor_gate_duty_percent(
     duty_percent: u8,
@@ -3437,11 +3486,24 @@ fn adjustable_floor_gate_duty_percent(
     heater_error_c: f32,
     hold_on_error_c: f32,
     previous_physical_duty_percent: u8,
+    now_ms: u64,
 ) -> u8 {
     if duty_percent == 0 {
         return 0;
     }
-    if !allow_subfloor_modulation || request_mv > floor_mv || ceiling_mv <= floor_mv {
+
+    // A 5V-capable profile may request sub-5V-equivalent power before the bounded PPS down-ramp
+    // reaches its floor. Compensate against the active request voltage so that transition energy
+    // does not exceed the controller's requested power. Each tick remains static 0% or 100%.
+    if floor_mv == CH224Q_ADJUSTABLE_REQUEST_MIN_MV && !allow_subfloor_modulation {
+        return floor_gate_pulse_density_duty_percent(duty_percent, request_mv, ceiling_mv, now_ms);
+    }
+
+    if request_mv > floor_mv || ceiling_mv <= floor_mv {
+        return 100;
+    }
+
+    if !allow_subfloor_modulation {
         return 100;
     }
 
@@ -3907,6 +3969,7 @@ where
                             heater_error_c,
                             hold_on_error_c,
                             *last_physical_duty_percent,
+                            now_ms,
                         )
                     };
                     apply_heater_duty(
@@ -3935,13 +3998,14 @@ where
             } else {
                 adjustable_floor_gate_duty_percent(
                     duty_percent,
-                    request_mv,
+                    current_request_mv,
                     control_floor_mv,
                     safe_max_mv,
                     heater_phase == HeaterControlPhase::Hold,
                     heater_error_c,
                     hold_on_error_c,
                     *last_physical_duty_percent,
+                    now_ms,
                 )
             };
 
@@ -4017,6 +4081,7 @@ where
                     heater_error_c,
                     hold_on_error_c,
                     *last_physical_duty_percent,
+                    now_ms,
                 )
             } else {
                 gate_duty_percent
@@ -6660,11 +6725,13 @@ async fn main(_spawner: Spawner) {
     let mut latest_rtd_raw_adc_mv = 0_u16;
     let mut latest_vin_raw_adc_mv = 0_u16;
     let mut latest_vin_mv = 0_u32;
+    let mut rtd_temporal_median = RtdTemporalMedian::default();
     match initial_rtd_sample {
         RtdSample::Valid(measurement) => {
+            let control_temp_c = rtd_temporal_median.push(measurement.temp_c);
             latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
-            latest_temp_c = measurement.temp_c;
-            latest_temp_i16 = measurement.current_temp_c;
+            latest_temp_c = control_temp_c;
+            latest_temp_i16 = temp_c_to_whole_c(control_temp_c);
             if is_overtemp_sample(measurement.temp_c) {
                 current_rtd_fault = Some(HeaterFaultReason::OverTemp);
                 let _ = heater_controller.latch_fault(HeaterFaultReason::OverTemp);
@@ -6673,8 +6740,8 @@ async fn main(_spawner: Spawner) {
                     HeaterFaultReason::OverTemp.label()
                 );
             }
-            ui_state.current_temp_c = measurement.current_temp_c;
-            ui_state.current_temp_deci_c = temp_c_to_deci_c(measurement.temp_c);
+            ui_state.current_temp_c = latest_temp_i16;
+            ui_state.current_temp_deci_c = temp_c_to_deci_c(control_temp_c);
             info!(
                 "rtd initial raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32}",
                 measurement.raw_adc_mv,
@@ -7087,19 +7154,20 @@ async fn main(_spawner: Spawner) {
 
             match read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config) {
                 RtdSample::Valid(measurement) => {
+                    let control_temp_c = rtd_temporal_median.push(measurement.temp_c);
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     current_rtd_fault = if is_overtemp_sample(measurement.temp_c) {
                         Some(HeaterFaultReason::OverTemp)
                     } else {
                         None
                     };
-                    latest_temp_c = measurement.temp_c;
-                    latest_temp_i16 = temp_c_to_whole_c(measurement.temp_c);
+                    latest_temp_c = control_temp_c;
+                    latest_temp_i16 = temp_c_to_whole_c(control_temp_c);
                     if ui_state.current_temp_c != latest_temp_i16 {
                         ui_state.current_temp_c = latest_temp_i16;
                         needs_redraw = true;
                     }
-                    let current_temp_deci_c = temp_c_to_deci_c(measurement.temp_c);
+                    let current_temp_deci_c = temp_c_to_deci_c(control_temp_c);
                     if ui_state.current_temp_deci_c != current_temp_deci_c {
                         ui_state.current_temp_deci_c = current_temp_deci_c;
                         needs_redraw = true;
@@ -7117,6 +7185,7 @@ async fn main(_spawner: Spawner) {
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
                     current_rtd_fault = Some(reason);
+                    rtd_temporal_median.clear();
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
                     if ui_state.current_temp_c != 0 || ui_state.current_temp_deci_c != 0 {
                         ui_state.current_temp_c = 0;
@@ -10447,11 +10516,11 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_coasts_after_crossing_target() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.1, 0.3, 100),
+            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.1, 0.3, 100, 0),
             100
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.0, 0.3, 100),
+            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.0, 0.3, 100, 0),
             0
         );
     }
@@ -10459,11 +10528,11 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_reheats_after_hold_on_error() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.2, 0.3, 0),
+            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.2, 0.3, 0, 0),
             0
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.3, 0.3, 0),
+            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.3, 0.3, 0, 0),
             100
         );
     }
@@ -10471,11 +10540,11 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_stays_static_once_request_leaves_floor() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_200, 6_100, 14_500, true, -0.5, 0.3, 100),
+            adjustable_floor_gate_duty_percent(17, 6_200, 6_100, 14_500, true, -0.5, 0.3, 100, 0),
             100
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(0, 6_100, 6_100, 14_500, true, 1.0, 0.3, 100),
+            adjustable_floor_gate_duty_percent(0, 6_100, 6_100, 14_500, true, 1.0, 0.3, 100, 0),
             0
         );
     }
@@ -10483,9 +10552,59 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_stays_static_outside_hold_phase() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(5, 6_100, 6_100, 14_500, false, -0.5, 0.3, 100),
+            adjustable_floor_gate_duty_percent(5, 6_100, 6_100, 14_500, false, -0.5, 0.3, 100, 0),
             100
         );
+    }
+
+    #[test]
+    fn adjustable_5v_approach_floor_distributes_requested_power_across_ticks() {
+        assert_eq!(
+            floor_gate_pulse_density_duty_percent(10, 5_000, 7_500, 0),
+            100
+        );
+        assert_eq!(
+            floor_gate_pulse_density_duty_percent(10, 5_000, 7_500, HEATER_CONTROL_INTERVAL_MS),
+            0
+        );
+        assert_eq!(
+            adjustable_floor_gate_duty_percent(10, 5_000, 5_000, 7_500, false, 2.0, 0.3, 0, 0),
+            100
+        );
+        assert_eq!(
+            adjustable_floor_gate_duty_percent(
+                10,
+                5_000,
+                5_000,
+                7_500,
+                false,
+                2.0,
+                0.3,
+                0,
+                HEATER_CONTROL_INTERVAL_MS,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn adjustable_5v_approach_compensates_during_pps_down_ramp() {
+        let physical_ticks = (0..100_u64)
+            .filter(|tick| {
+                adjustable_floor_gate_duty_percent(
+                    11,
+                    13_500,
+                    5_000,
+                    14_000,
+                    false,
+                    6.0,
+                    0.3,
+                    100,
+                    tick * HEATER_CONTROL_INTERVAL_MS,
+                ) == 100
+            })
+            .count();
+        assert_eq!(physical_ticks, 11);
     }
 
     #[test]
@@ -11304,6 +11423,27 @@ mod tests {
     fn overtemp_threshold_uses_unrounded_temperature() {
         assert!(!is_overtemp_sample(419.9));
         assert!(is_overtemp_sample(420.0));
+    }
+
+    #[test]
+    fn rtd_temporal_median_rejects_single_batch_shift() {
+        let mut median = RtdTemporalMedian::default();
+        assert!((median.push(60.0) - 60.0).abs() < f32::EPSILON);
+        assert!((median.push(60.2) - 60.1).abs() < f32::EPSILON);
+        assert!((median.push(58.7) - 60.0).abs() < f32::EPSILON);
+        assert!((median.push(60.3) - 60.2).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rtd_temporal_median_tracks_sustained_change_and_clears_after_fault() {
+        let mut median = RtdTemporalMedian::default();
+        median.push(59.8);
+        median.push(60.0);
+        assert!((median.push(60.2) - 60.0).abs() < f32::EPSILON);
+        assert!((median.push(60.4) - 60.2).abs() < f32::EPSILON);
+
+        median.clear();
+        assert!((median.push(42.0) - 42.0).abs() < f32::EPSILON);
     }
 
     #[test]
