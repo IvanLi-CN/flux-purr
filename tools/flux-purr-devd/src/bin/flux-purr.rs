@@ -4049,13 +4049,41 @@ fn thermal_interpolated_candidate_point(
         (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
             .clamp(0.0, f32::from(upper_bound)) as u16
     };
+    let linear_brake_distance = lerp(
+        lower.brake_distance_centi_c,
+        upper.brake_distance_centi_c,
+        5_000,
+    );
+    let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
+    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        -0.20
+    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
+        if upper.target_temp_c <= 140 {
+            0.55
+        } else {
+            0.20
+        }
+    } else {
+        0.0
+    };
+    let interpolated_brake_distance = (f32::from(linear_brake_distance)
+        * (1.0 - intermediate_brake_adjustment * midpoint_weight)
+        + 0.5) as u16;
+    let low_temp_hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.20 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let low_temp_reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.10 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let scale_low_temp_hold =
+        |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
     Some(ThermalCandidatePoint {
         target_temp_c,
-        brake_distance_centi_c: lerp(
-            lower.brake_distance_centi_c,
-            upper.brake_distance_centi_c,
-            5_000,
-        ),
+        brake_distance_centi_c: interpolated_brake_distance,
         warmup_power_permille: lerp(
             lower.warmup_power_permille,
             upper.warmup_power_permille,
@@ -4081,12 +4109,17 @@ fn thermal_interpolated_candidate_point(
             upper.approach_tail_window_centi_c,
             5_000,
         ),
-        hold_power_permille: lerp(lower.hold_power_permille, upper.hold_power_permille, 1_000),
-        hold_reheat_power_permille: lerp(
+        hold_power_permille: scale_low_temp_hold(lerp(
+            lower.hold_power_permille,
+            upper.hold_power_permille,
+            1_000,
+        )),
+        hold_reheat_power_permille: (f32::from(lerp(
             lower.hold_reheat_power_permille,
             upper.hold_reheat_power_permille,
             1_000,
-        ),
+        )) * low_temp_reheat_scale
+            + 0.5) as u16,
         hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
@@ -4101,11 +4134,18 @@ fn thermal_interpolated_candidate_point(
             upper.hold_kp_permille_per_c,
             10_000,
         ),
-        hold_ki_permille_per_c_tick: lerp(
-            lower.hold_ki_permille_per_c_tick,
-            upper.hold_ki_permille_per_c_tick,
-            10_000,
-        ),
+        hold_ki_permille_per_c_tick: {
+            let interpolated = lerp(
+                lower.hold_ki_permille_per_c_tick,
+                upper.hold_ki_permille_per_c_tick,
+                10_000,
+            );
+            if interpolated == 0 {
+                profile.settings.hold_ki_permille_per_c_tick
+            } else {
+                interpolated
+            }
+        },
         hold_blend_ticks: lerp(
             lower.hold_blend_ticks,
             upper.hold_blend_ticks,
@@ -7924,7 +7964,7 @@ mod tests {
             .expect("100C anchor")
             .approach_tail_window_centi_c = 280;
         let point = thermal_interpolated_candidate_point(&profile, 80).expect("80C point");
-        assert_eq!(point.brake_distance_centi_c, 950);
+        assert_eq!(point.brake_distance_centi_c, 1_140);
         assert_eq!(point.approach_tail_window_centi_c, 200);
         assert_eq!(
             point.approach_power_permille,
@@ -7934,7 +7974,7 @@ mod tests {
         let value = thermal_candidate_profile_to_value(&profile);
         let parameters = thermal_heater_parameters_value(80, Some(&value), "preview");
         assert_eq!(parameters["targetTempC"], 80);
-        assert_eq!(parameters["brakeDistanceCentiC"], 950);
+        assert_eq!(parameters["brakeDistanceCentiC"], 1_140);
         assert_eq!(parameters["approachTailWindowCentiC"], 200);
         assert_eq!(
             parameters["approachPowerPermille"],
