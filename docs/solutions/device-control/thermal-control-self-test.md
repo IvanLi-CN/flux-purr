@@ -180,9 +180,9 @@ The firmware control loop runs at `10Hz`. Each loop reads `32` RTD ADC conversio
 
 Static brake distance is not sufficient when heater assembly or thermal mass changes, so warmup handoff combines point-level brake distance with confirmed filtered rise rate times `approachLeadTicks`, capped below the `warmupReenterCentiC` boundary. Predictive expansion is accepted only when both actual and filtered temperatures have reached the expanded boundary; entering the ordinary static brake still follows actual temperature so filter lag cannot block normal handoff. This reuses API/EEPROM profile parameters instead of adding a hidden firmware tuning constant.
 
-Raw sensor discontinuity must be separated from thermal momentum before tuning. A final-ladder 60°C run reported apparent `6.6°C/s` rise and `20.18°C` overshoot, but `rtdRawAdcMv` had jumped from `985` to `1014` in about `0.4s`; the earlier accepted run never exceeded a `3mV` single-sample step. Slew-limiting that jump by one degree per control tick converted one electrical discontinuity into a plausible-looking ten-second ramp. The runtime guard now holds the previous value for the first outlier and latches `sensor-discontinuity` when the next sample remains beyond the API/EEPROM-controlled threshold in the same direction. Such runs are sensor failures and must not retune thermal parameters.
+Raw RTD samples must remain distinguishable from thermal momentum in the report, but temperature motion itself is not a sensor fault. The control loop consumes every valid temperature sample directly. RTD faults are limited to open, short, ADC read failure, and the explicit over-temperature limit; a fast rise, fall, or step is evidence to investigate in raw telemetry, not a reason to freeze the control signal or invent a new fault class.
 
-Approach and hold tuning must remain independent. A pre-hold acquisition failure may adjust approach power, floor, brake distance, damping, and lead, but it must not raise hold baseline or reheat power without hold samples. Likewise, `holdReheatPowerPermille >= holdPowerPermille` and `approachPowerPermille >= approachFloorPowerPermille` are valid local invariants; coupling `holdReheatPowerPermille` to `approachFloorPowerPermille` causes low-temperature tuning to oscillate between overshoot and underpowered acquisition.
+Approach and hold tuning must remain independent. A pre-hold acquisition failure may adjust approach power, floor, tail window, brake distance, damping, and lead, but it must not raise hold baseline or reheat power without hold samples. Likewise, `holdReheatPowerPermille >= holdPowerPermille` and `approachPowerPermille >= approachFloorPowerPermille` are valid local invariants; coupling `holdReheatPowerPermille` to `approachFloorPowerPermille` causes low-temperature tuning to oscillate between overshoot and underpowered acquisition. When high early approach floor is required but that same floor creates a near-target residual-heat tail, `approachTailWindowCentiC` linearly tapers only the approach floor down to the existing `max(holdReheatPowerPermille, holdPowerPermille)` floor over its final error window. A zero window is the legacy behavior, so the new parameter cannot silently reshape already-saved points.
 
 Failures should report the target temperature and raw samples. The current tooling runs the ladder in `thermalControlProfile.op=preview`, updates the candidate after each tuning stage, and only writes the final tuned profile through `thermalControlProfile.op=save` after the whole ladder passes. IsolaPurr LAN reads and writes should use bounded retry with readback so a single transient timeout does not invalidate an otherwise complete HIL ladder.
 
@@ -220,11 +220,10 @@ That run exercised profile persistence, but it cannot prove thermal performance 
 The current focused `220°C` development reruns on `2026-07-09` changed the picture again.
 Those reruns exposed two concrete truths that matter more than the older sparse-ladder pass:
 
-- the old runtime temperature spike filter could latch temperature indefinitely while heating if
-  consecutive RTD samples moved by more than `measurementSpikeRejectCentiC`; real HIL showed
-  `rtdRawAdcMv` continuing to rise while `currentTempC` stayed frozen. The firmware now limits the
-  per-sample accepted step to that configured bound instead of reusing the entire previous
-  temperature forever.
+- the old runtime temperature spike filter could latch temperature indefinitely while heating;
+  real HIL showed `rtdRawAdcMv` continuing to rise while `currentTempC` stayed frozen. That filter
+  is not part of the runtime control path: valid RTD samples now pass directly to the controller,
+  and raw telemetry remains available for diagnosis.
 - real flash verification must use the current root-target artifact. On this repo state the stale
   `local-esp32s3-release` entry at `firmware/target/...` did not contain the latest
   `heaterControlPhase` status fields, while the current build output was

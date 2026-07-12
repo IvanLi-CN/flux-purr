@@ -153,6 +153,14 @@ pub struct ControlPlaneStatus {
     pub heater_error_c: Option<f32>,
     pub heater_control_error_c: Option<f32>,
     pub heater_filtered_temp_c: Option<f32>,
+    #[serde(default)]
+    pub heater_filtered_slope_c_per_s: Option<f32>,
+    #[serde(default)]
+    pub heater_coast_active: bool,
+    #[serde(default)]
+    pub heater_control_interval_ms: u16,
+    #[serde(default)]
+    pub heater_control_cycle_ms: u16,
     pub calibration: CalibrationRuntimeStateWire,
     pub thermal_control_profile_preview: bool,
     #[serde(default)]
@@ -173,6 +181,8 @@ pub struct ThermalControlRuntimeWire {
     pub approach_power_permille: u16,
     pub approach_floor_power_permille: u16,
     pub approach_damping_exponent_permille: u16,
+    #[serde(default)]
+    pub approach_tail_window_centi_c: u16,
     pub hold_power_permille: u16,
     pub hold_reheat_power_permille: u16,
     pub hold_entry_centi_c: u16,
@@ -189,7 +199,6 @@ pub struct ThermalControlRuntimeWire {
     pub warmup_reenter_centi_c: u16,
     pub approach_max_ticks: u16,
     pub approach_min_power_ratio_permille: u16,
-    pub measurement_spike_reject_centi_c: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
 }
@@ -245,6 +254,10 @@ impl ControlPlaneStatus {
             heater_error_c: None,
             heater_control_error_c: None,
             heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeStateWire::default(),
             thermal_control_profile_preview: false,
             thermal_control: ThermalControlRuntimeWire::default(),
@@ -572,6 +585,8 @@ pub struct ThermalControlProfilePointWire {
     pub approach_floor_power_permille: u16,
     #[serde(default = "default_approach_damping_exponent_permille_wire")]
     pub approach_damping_exponent_permille: u16,
+    #[serde(default)]
+    pub approach_tail_window_centi_c: u16,
     pub hold_power_permille: u16,
     #[serde(default)]
     pub hold_reheat_power_permille: u16,
@@ -626,8 +641,6 @@ pub struct ThermalControlProfileSettingsWire {
     pub approach_lead_ticks: u16,
     #[serde(default)]
     pub hold_lead_ticks: u16,
-    #[serde(default = "default_measurement_spike_reject_centi_c_wire")]
-    pub measurement_spike_reject_centi_c: u16,
     #[serde(default = "default_auto_adjustable_working_floor_mv_wire")]
     pub auto_adjustable_working_floor_mv: u16,
     #[serde(default = "default_heater_current_reserve_ma_wire")]
@@ -650,6 +663,7 @@ impl From<ThermalControlProfilePointWire> for ThermalControlProfilePointConfig {
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
+            approach_tail_window_centi_c: value.approach_tail_window_centi_c,
             hold_power_permille: value.hold_power_permille,
             hold_reheat_power_permille: value.hold_reheat_power_permille,
             hold_entry_centi_c: value.hold_entry_centi_c,
@@ -697,7 +711,6 @@ impl From<ThermalControlProfileSettingsWire> for ThermalControlProfileSettingsCo
             hold_reheat_power_permille: value.hold_reheat_power_permille,
             approach_lead_ticks: value.approach_lead_ticks,
             hold_lead_ticks: value.hold_lead_ticks,
-            measurement_spike_reject_centi_c: value.measurement_spike_reject_centi_c,
             auto_adjustable_working_floor_mv: value.auto_adjustable_working_floor_mv,
             heater_current_reserve_ma: value.heater_current_reserve_ma,
         }
@@ -710,10 +723,6 @@ const fn default_hold_blend_ticks_wire() -> u16 {
 
 const fn default_approach_damping_exponent_permille_wire() -> u16 {
     crate::memory::THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT
-}
-
-const fn default_measurement_spike_reject_centi_c_wire() -> u16 {
-    crate::memory::THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT
 }
 
 const fn default_auto_adjustable_working_floor_mv_wire() -> u16 {
@@ -1766,6 +1775,7 @@ mod tests {
             approach_power_permille: 900,
             approach_floor_power_permille: 700,
             approach_damping_exponent_permille: 1_100,
+            approach_tail_window_centi_c: 150,
             hold_power_permille: 650,
             hold_reheat_power_permille: 800,
             hold_entry_centi_c: 15,
@@ -1782,7 +1792,6 @@ mod tests {
             warmup_reenter_centi_c: 1_000,
             approach_max_ticks: 250,
             approach_min_power_ratio_permille: 500,
-            measurement_spike_reject_centi_c: 100,
             auto_adjustable_working_floor_mv: 6_100,
             heater_current_reserve_ma: 200,
         };
@@ -1934,6 +1943,7 @@ mod tests {
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille:
                 crate::memory::THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 180,
             hold_reheat_power_permille: 0,
             hold_entry_centi_c: 0,
@@ -1978,6 +1988,7 @@ mod tests {
                 approach_floor_power_permille: 180,
                 approach_damping_exponent_permille:
                     crate::memory::THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                approach_tail_window_centi_c: 0,
                 hold_power_permille: 180,
                 hold_reheat_power_permille: 0,
                 hold_entry_centi_c: 0,
@@ -2145,6 +2156,7 @@ mod tests {
                 approach_floor_power_permille: 220,
                 approach_damping_exponent_permille:
                     crate::memory::THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                approach_tail_window_centi_c: 0,
                 hold_power_permille: 220,
                 hold_reheat_power_permille: 0,
                 hold_entry_centi_c: 0,

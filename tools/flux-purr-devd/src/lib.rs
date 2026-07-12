@@ -44,7 +44,7 @@ pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const PPS_HARDWARE_MIN_MV: u16 = 5_000;
 const PPS_HARDWARE_MAX_MV: u16 = 28_000;
-const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = 6_100;
+const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = PPS_HARDWARE_MIN_MV;
 const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
@@ -429,6 +429,10 @@ impl DeviceRecord {
             heater_error_c: None,
             heater_control_error_c: None,
             heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeState::default(),
             thermal_control_profile_preview: false,
             thermal_control: ThermalControlRuntime::default(),
@@ -499,6 +503,10 @@ impl DeviceRecord {
             heater_error_c: None,
             heater_control_error_c: None,
             heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeState::default(),
             thermal_control_profile_preview: false,
             thermal_control: ThermalControlRuntime::default(),
@@ -652,6 +660,14 @@ pub struct ControlPlaneStatus {
     pub heater_control_error_c: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_filtered_temp_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_filtered_slope_c_per_s: Option<f32>,
+    #[serde(default)]
+    pub heater_coast_active: bool,
+    #[serde(default)]
+    pub heater_control_interval_ms: u16,
+    #[serde(default)]
+    pub heater_control_cycle_ms: u16,
     #[serde(default)]
     pub calibration: CalibrationRuntimeState,
     #[serde(default)]
@@ -674,6 +690,8 @@ pub struct ThermalControlRuntime {
     pub approach_power_permille: u16,
     pub approach_floor_power_permille: u16,
     pub approach_damping_exponent_permille: u16,
+    #[serde(default)]
+    pub approach_tail_window_centi_c: u16,
     pub hold_power_permille: u16,
     pub hold_reheat_power_permille: u16,
     pub hold_entry_centi_c: u16,
@@ -690,7 +708,6 @@ pub struct ThermalControlRuntime {
     pub warmup_reenter_centi_c: u16,
     pub approach_max_ticks: u16,
     pub approach_min_power_ratio_permille: u16,
-    pub measurement_spike_reject_centi_c: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
 }
@@ -1115,6 +1132,8 @@ pub struct ThermalControlProfilePoint {
     pub approach_floor_power_permille: u16,
     #[serde(default = "default_approach_damping_exponent_permille")]
     pub approach_damping_exponent_permille: u16,
+    #[serde(default)]
+    pub approach_tail_window_centi_c: u16,
     pub hold_power_permille: u16,
     #[serde(default)]
     pub hold_reheat_power_permille: u16,
@@ -1169,8 +1188,6 @@ pub struct ThermalControlProfileSettings {
     pub approach_lead_ticks: u16,
     #[serde(default)]
     pub hold_lead_ticks: u16,
-    #[serde(default = "default_measurement_spike_reject_centi_c")]
-    pub measurement_spike_reject_centi_c: u16,
     #[serde(default = "default_auto_adjustable_working_floor_mv")]
     pub auto_adjustable_working_floor_mv: u16,
     #[serde(default = "default_heater_current_reserve_ma")]
@@ -2652,7 +2669,6 @@ fn validate_thermal_control_profile_request(
                     || settings.hold_exit_centi_c == 0
                     || settings.hold_on_centi_c == 0
                     || settings.overshoot_cutoff_centi_c == 0
-                    || settings.measurement_spike_reject_centi_c > 10_000
                     || !(AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN..=PPS_HARDWARE_MAX_MV)
                         .contains(&settings.auto_adjustable_working_floor_mv)
                     || settings.heater_current_reserve_ma > 1_000
@@ -2664,7 +2680,7 @@ fn validate_thermal_control_profile_request(
             {
                 return Err(HttpError::bad_request(
                     "invalid_thermal_profile",
-                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, <=10000 spike reject, 6100..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, 1..255 approach/hold-blend ticks, and 0..255 predictive lead ticks.",
+                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, 5000..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, 1..255 approach/hold-blend ticks, and 0..255 predictive lead ticks.",
                 ));
             }
             for point in profile.points.iter().flatten() {
@@ -2711,10 +2727,6 @@ const fn default_hold_blend_ticks() -> u16 {
 
 const fn default_approach_damping_exponent_permille() -> u16 {
     1_000
-}
-
-const fn default_measurement_spike_reject_centi_c() -> u16 {
-    300
 }
 
 const fn default_auto_adjustable_working_floor_mv() -> u16 {
@@ -5604,6 +5616,7 @@ mod tests {
                                 approach_power_permille: 320,
                                 approach_floor_power_permille: 220,
                                 approach_damping_exponent_permille: 1_000,
+                                approach_tail_window_centi_c: 0,
                                 hold_power_permille: 220,
                                 hold_reheat_power_permille: 0,
                                 hold_entry_centi_c: 0,
@@ -5717,6 +5730,7 @@ mod tests {
                                 approach_power_permille: 260,
                                 approach_floor_power_permille: 180,
                                 approach_damping_exponent_permille: 1_000,
+                                approach_tail_window_centi_c: 0,
                                 hold_power_permille: 180,
                                 hold_reheat_power_permille: 0,
                                 hold_entry_centi_c: 0,
@@ -5788,6 +5802,37 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.error.code, "invalid_thermal_profile");
+    }
+
+    #[test]
+    fn thermal_profile_preview_accepts_the_ch224q_5v_floor() {
+        let result = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::Preview,
+            profile: Some(ThermalControlProfilePackage {
+                settings: Some(ThermalControlProfileSettings {
+                    temp_filter_alpha_permille: 700,
+                    warmup_reenter_centi_c: 400,
+                    hold_entry_centi_c: 90,
+                    hold_exit_centi_c: 200,
+                    hold_on_centi_c: 30,
+                    hold_off_centi_c: 5,
+                    overshoot_cutoff_centi_c: 25,
+                    approach_max_ticks: 5,
+                    approach_min_power_ratio_permille: 0,
+                    hold_kp_permille_per_c: 120,
+                    hold_ki_permille_per_c_tick: 12,
+                    hold_blend_ticks: 12,
+                    hold_reheat_power_permille: 0,
+                    approach_lead_ticks: 0,
+                    hold_lead_ticks: 0,
+                    auto_adjustable_working_floor_mv: PPS_HARDWARE_MIN_MV,
+                    heater_current_reserve_ma: 200,
+                }),
+                points: vec![None; FRONT_PANEL_PRESET_COUNT],
+            }),
+        });
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -6374,6 +6419,10 @@ mod tests {
             heater_error_c: None,
             heater_control_error_c: None,
             heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
             thermal_control_profile_preview: false,
             thermal_control: ThermalControlRuntime::default(),
             calibration: CalibrationRuntimeState {
@@ -6443,6 +6492,7 @@ mod tests {
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 220,
             hold_reheat_power_permille: 0,
             hold_entry_centi_c: 0,

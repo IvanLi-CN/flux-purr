@@ -1666,7 +1666,6 @@ struct ThermalCandidateSettings {
     hold_reheat_power_permille: u16,
     approach_lead_ticks: u16,
     hold_lead_ticks: u16,
-    measurement_spike_reject_centi_c: u16,
     auto_adjustable_working_floor_mv: u16,
     heater_current_reserve_ma: u16,
 }
@@ -1679,6 +1678,7 @@ struct ThermalCandidatePoint {
     approach_power_permille: u16,
     approach_floor_power_permille: u16,
     approach_damping_exponent_permille: u16,
+    approach_tail_window_centi_c: u16,
     hold_power_permille: u16,
     hold_reheat_power_permille: u16,
     hold_entry_centi_c: u16,
@@ -2159,7 +2159,7 @@ fn thermal_runtime_drop_reason(
 fn thermal_recoverable_sensor_fault(status: &Value) -> bool {
     matches!(
         status.get("heaterFaultReason").and_then(Value::as_str),
-        Some("sensor-discontinuity" | "sensor-open" | "sensor-short" | "adc-read-failed")
+        Some("sensor-open" | "sensor-short" | "adc-read-failed")
     ) && status.get("mode").and_then(Value::as_str) != Some("fault")
 }
 
@@ -2549,6 +2549,11 @@ fn thermal_candidate_point_from_heater_parameters(
             .and_then(Value::as_u64)
             .map(|value| value as u16)
             .unwrap_or(default_point.approach_damping_exponent_permille),
+        approach_tail_window_centi_c: heater_parameters
+            .get("approachTailWindowCentiC")
+            .and_then(Value::as_u64)
+            .map(|value| value as u16)
+            .unwrap_or(default_point.approach_tail_window_centi_c),
         hold_power_permille: heater_parameters
             .get("holdPowerPermille")
             .and_then(Value::as_u64)
@@ -3549,7 +3554,6 @@ fn thermal_default_settings() -> ThermalCandidateSettings {
         hold_reheat_power_permille: 0,
         approach_lead_ticks: 0,
         hold_lead_ticks: 0,
-        measurement_spike_reject_centi_c: 100,
         auto_adjustable_working_floor_mv: 6_100,
         heater_current_reserve_ma: 200,
     }
@@ -3582,6 +3586,7 @@ fn thermal_default_target_point(target_temp_c: i16) -> ThermalCandidatePoint {
         approach_power_permille,
         approach_floor_power_permille,
         approach_damping_exponent_permille,
+        approach_tail_window_centi_c: 0,
         hold_power_permille,
         hold_reheat_power_permille,
         hold_entry_centi_c,
@@ -3610,6 +3615,7 @@ fn thermal_candidate_profile_to_value(profile: &ThermalCandidateProfile) -> Valu
                 "approachPowerPermille": point.approach_power_permille,
                 "approachFloorPowerPermille": point.approach_floor_power_permille,
                 "approachDampingExponentPermille": point.approach_damping_exponent_permille,
+                "approachTailWindowCentiC": point.approach_tail_window_centi_c,
                 "holdPowerPermille": point.hold_power_permille,
                 "holdReheatPowerPermille": point.hold_reheat_power_permille,
                 "holdEntryCentiC": point.hold_entry_centi_c,
@@ -3714,11 +3720,6 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
             .and_then(Value::as_u64)
             .map(|value| value as u16)
             .unwrap_or(default_settings.hold_lead_ticks),
-        measurement_spike_reject_centi_c: settings_value
-            .get("measurementSpikeRejectCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.measurement_spike_reject_centi_c),
         auto_adjustable_working_floor_mv: settings_value
             .get("autoAdjustableWorkingFloorMv")
             .and_then(Value::as_u64)
@@ -3786,6 +3787,11 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
                     .and_then(Value::as_u64)
                     .map(|value| value as u16)
                     .unwrap_or(default_point.approach_damping_exponent_permille),
+                approach_tail_window_centi_c: point_value
+                    .get("approachTailWindowCentiC")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u16)
+                    .unwrap_or(default_point.approach_tail_window_centi_c),
                 hold_power_permille: point_value
                     .get("holdPowerPermille")
                     .and_then(Value::as_u64)
@@ -3869,7 +3875,6 @@ fn thermal_candidate_settings_to_value(settings: ThermalCandidateSettings) -> Va
         "holdReheatPowerPermille": settings.hold_reheat_power_permille,
         "approachLeadTicks": settings.approach_lead_ticks,
         "holdLeadTicks": settings.hold_lead_ticks,
-        "measurementSpikeRejectCentiC": settings.measurement_spike_reject_centi_c,
         "autoAdjustableWorkingFloorMv": settings.auto_adjustable_working_floor_mv,
         "heaterCurrentReserveMa": settings.heater_current_reserve_ma,
     })
@@ -4067,6 +4072,11 @@ fn thermal_interpolated_candidate_point(
             lower.approach_damping_exponent_permille,
             upper.approach_damping_exponent_permille,
             4_000,
+        ),
+        approach_tail_window_centi_c: lerp(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            5_000,
         ),
         hold_power_permille: lerp(lower.hold_power_permille, upper.hold_power_permille, 1_000),
         hold_reheat_power_permille: lerp(
@@ -4291,6 +4301,14 @@ fn rebuild_thermal_candidate_point_from_anchor_relations(
             upper.approach_damping_exponent_permille,
             upper_default.approach_damping_exponent_permille,
             4_000,
+        ),
+        approach_tail_window_centi_c: shift_from_default(
+            default_point.approach_tail_window_centi_c,
+            lower.approach_tail_window_centi_c,
+            lower_default.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            upper_default.approach_tail_window_centi_c,
+            5_000,
         ),
         hold_power_permille,
         hold_reheat_power_permille,
@@ -4861,6 +4879,10 @@ fn thermal_heater_parameters_value(
             .clone()
     });
     let point = point_value.as_ref();
+    let approach_tail_window_centi_c = point
+        .and_then(|point| point.get("approachTailWindowCentiC"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u16;
     let warmup_power_permille = if thermal_profile.is_some() {
         point
             .and_then(|point| {
@@ -4979,6 +5001,7 @@ fn thermal_heater_parameters_value(
         "approachPowerPermille": approach_power_permille,
         "approachFloorPowerPermille": approach_floor_power_permille,
         "approachDampingExponentPermille": approach_damping_exponent_permille,
+        "approachTailWindowCentiC": approach_tail_window_centi_c,
         "holdPowerPermille": hold_power_permille,
         "holdReheatPowerPermille": hold_reheat_power_permille,
         "holdEntryCentiC": hold_entry_centi_c,
@@ -5025,6 +5048,30 @@ fn heater_telemetry_value(
             .get("heaterPhysicalOutputPercent")
             .and_then(Value::as_u64)
             .unwrap_or(heater_output_percent),
+        "heaterControlIntervalMs": status
+            .get("heaterControlIntervalMs")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        "heaterControlCycleMs": status
+            .get("heaterControlCycleMs")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        "heaterErrorC": status
+            .get("heaterErrorC")
+            .and_then(Value::as_f64),
+        "heaterControlErrorC": status
+            .get("heaterControlErrorC")
+            .and_then(Value::as_f64),
+        "heaterFilteredTempC": status
+            .get("heaterFilteredTempC")
+            .and_then(Value::as_f64),
+        "heaterFilteredSlopeCPerS": status
+            .get("heaterFilteredSlopeCPerS")
+            .and_then(Value::as_f64),
+        "heaterCoastActive": status
+            .get("heaterCoastActive")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         "thermalControl": status
             .get("thermalControl")
             .cloned()
@@ -5261,6 +5308,7 @@ fn render_thermal_self_test_report_html(
         ["Approach Power", params ? `${{params.approachPowerPermille}} permille` : "-"],
         ["Approach Floor", params ? `${{params.approachFloorPowerPermille}} permille` : "-"],
         ["Approach Damping", params ? `${{params.approachDampingExponentPermille}} permille` : "-"],
+        ["Approach Tail Window", params ? `${{params.approachTailWindowCentiC}} cC` : "-"],
         ["Hold Power", params ? `${{params.holdPowerPermille}} permille` : "-"],
         ["Hold Reheat", params ? `${{params.holdReheatPowerPermille}} permille` : "-"],
         ["Hold Entry", params ? `${{params.holdEntryCentiC}} cC` : "-"],
@@ -5531,6 +5579,7 @@ fn verify_thermal_control_readback(
         "approachPowerPermille",
         "approachFloorPowerPermille",
         "approachDampingExponentPermille",
+        "approachTailWindowCentiC",
         "holdPowerPermille",
         "holdReheatPowerPermille",
         "holdEntryCentiC",
@@ -5549,7 +5598,6 @@ fn verify_thermal_control_readback(
         "warmupReenterCentiC",
         "approachMaxTicks",
         "approachMinPowerRatioPermille",
-        "measurementSpikeRejectCentiC",
         "autoAdjustableWorkingFloorMv",
         "heaterCurrentReserveMa",
     ];
@@ -7866,8 +7914,15 @@ mod tests {
         thermal_candidate_point_mut(&mut profile, 100)
             .expect("100C anchor")
             .brake_distance_centi_c = 1_100;
+        thermal_candidate_point_mut(&mut profile, 60)
+            .expect("60C anchor")
+            .approach_tail_window_centi_c = 120;
+        thermal_candidate_point_mut(&mut profile, 100)
+            .expect("100C anchor")
+            .approach_tail_window_centi_c = 280;
         let point = thermal_interpolated_candidate_point(&profile, 80).expect("80C point");
         assert_eq!(point.brake_distance_centi_c, 950);
+        assert_eq!(point.approach_tail_window_centi_c, 200);
         assert_eq!(
             point.approach_power_permille,
             (lower.approach_power_permille + upper.approach_power_permille + 1) / 2
@@ -7877,6 +7932,7 @@ mod tests {
         let parameters = thermal_heater_parameters_value(80, Some(&value), "preview");
         assert_eq!(parameters["targetTempC"], 80);
         assert_eq!(parameters["brakeDistanceCentiC"], 950);
+        assert_eq!(parameters["approachTailWindowCentiC"], 200);
         assert_eq!(
             parameters["approachPowerPermille"],
             point.approach_power_permille
@@ -7914,7 +7970,6 @@ mod tests {
             "warmupReenterCentiC",
             "approachMaxTicks",
             "approachMinPowerRatioPermille",
-            "measurementSpikeRejectCentiC",
             "autoAdjustableWorkingFloorMv",
             "heaterCurrentReserveMa",
         ] {
@@ -8686,6 +8741,7 @@ mod tests {
             approach_power_permille: 181,
             approach_floor_power_permille: 99,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 58,
             hold_reheat_power_permille: 116,
             hold_entry_centi_c: 35,
@@ -8746,6 +8802,7 @@ mod tests {
             approach_power_permille: 160,
             approach_floor_power_permille: 40,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 0,
             hold_reheat_power_permille: 80,
             hold_entry_centi_c: 30,
@@ -8804,6 +8861,7 @@ mod tests {
             approach_power_permille: 140,
             approach_floor_power_permille: 20,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 0,
             hold_reheat_power_permille: 58,
             hold_entry_centi_c: 35,
@@ -8861,6 +8919,7 @@ mod tests {
             approach_power_permille: 900,
             approach_floor_power_permille: 900,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 980,
             hold_reheat_power_permille: 980,
             hold_entry_centi_c: 25,
@@ -8919,6 +8978,7 @@ mod tests {
             approach_power_permille: 260,
             approach_floor_power_permille: 275,
             approach_damping_exponent_permille: 975,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 59,
             hold_reheat_power_permille: 390,
             hold_entry_centi_c: 25,
@@ -8981,6 +9041,7 @@ mod tests {
             approach_power_permille: 940,
             approach_floor_power_permille: 760,
             approach_damping_exponent_permille: 250,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 720,
             hold_reheat_power_permille: 880,
             hold_entry_centi_c: 8,
@@ -9092,6 +9153,7 @@ mod tests {
             approach_power_permille: 920,
             approach_floor_power_permille: 730,
             approach_damping_exponent_permille: 250,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 740,
             hold_reheat_power_permille: 790,
             hold_entry_centi_c: 100,
@@ -9160,6 +9222,7 @@ mod tests {
             approach_power_permille: 260,
             approach_floor_power_permille: 275,
             approach_damping_exponent_permille: 975,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 59,
             hold_reheat_power_permille: 390,
             hold_entry_centi_c: 25,
@@ -9345,6 +9408,7 @@ mod tests {
             approach_damping_exponent_permille: lower_default
                 .approach_damping_exponent_permille
                 .saturating_add(150),
+            approach_tail_window_centi_c: lower_default.approach_tail_window_centi_c,
             hold_power_permille: scale_power(lower_default.hold_power_permille),
             hold_reheat_power_permille: scale_power(lower_default.hold_reheat_power_permille),
             hold_entry_centi_c: lower_default.hold_entry_centi_c.saturating_add(5),
@@ -9369,6 +9433,7 @@ mod tests {
             approach_damping_exponent_permille: upper_default
                 .approach_damping_exponent_permille
                 .saturating_add(150),
+            approach_tail_window_centi_c: upper_default.approach_tail_window_centi_c,
             hold_power_permille: scale_power(upper_default.hold_power_permille),
             hold_reheat_power_permille: scale_power(upper_default.hold_reheat_power_permille),
             hold_entry_centi_c: upper_default.hold_entry_centi_c.saturating_add(5),
@@ -9733,7 +9798,7 @@ mod tests {
             "uptimeSeconds": 34,
             "targetTempC": 210,
             "heaterEnabled": true,
-            "heaterFaultReason": "sensor-discontinuity",
+            "heaterFaultReason": "sensor-open",
         });
         assert_eq!(
             thermal_runtime_drop_reason(&latched_fault, 210, Some(33)),
@@ -9743,7 +9808,7 @@ mod tests {
 
         let active_fault = json!({
             "mode": "fault",
-            "heaterFaultReason": "sensor-discontinuity",
+            "heaterFaultReason": "sensor-open",
         });
         assert!(!thermal_recoverable_sensor_fault(&active_fault));
 

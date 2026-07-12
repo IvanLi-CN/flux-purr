@@ -8,7 +8,7 @@ use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
 use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
-use embassy_time::{Duration, Timer as EmbassyTimer, with_timeout};
+use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
 #[cfg(target_arch = "xtensa")]
 use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
@@ -90,6 +90,7 @@ use flux_purr_firmware::memory::{
     HeaterCurveConfig, MemoryConfig,
     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+    THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
     THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
     THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
     THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX,
@@ -207,7 +208,10 @@ const HEATER_HARD_CUTOFF_TEMP_C: i16 = 420;
 const HEATER_PROFILE_TICK_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-const HEATER_CONTROL_INTERVAL_MS: u64 = 100;
+// Keep the per-cycle RTD aggregate unchanged while doubling control and RTD update cadence.
+const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
+#[cfg(any(target_arch = "xtensa", test))]
+const RUNTIME_INPUT_POLL_MAX_INTERVAL_MS: u64 = 20;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PHASE_HYSTERESIS_C: f32 = 0.10;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -222,9 +226,11 @@ const CH224Q_ADJUSTABLE_REQUEST_MIN_MV: u16 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PPS_REQUEST_HYSTERESIS_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PPS_MOS_SETTLE_MS: u64 = 150;
+const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PPS_MOS_DOWNSTEP_SETTLE_MS: u64 = 500;
+const HEATER_PPS_SMALL_TRANSITION_MS: u64 = 25;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PPS_LARGE_TRANSITION_MS: u64 = 275;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_PULSE_PERIOD_MS: u64 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -272,9 +278,9 @@ const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(target_arch = "xtensa")]
-const RTD_SAMPLE_COUNT: usize = 32;
+const RTD_SAMPLE_COUNT: usize = 64;
 #[cfg(any(target_arch = "xtensa", test))]
-const RTD_MIN_VALID_SAMPLE_COUNT: usize = 24;
+const RTD_MIN_VALID_SAMPLE_COUNT: usize = 48;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -373,7 +379,6 @@ fn route_label(route: FrontPanelRoute) -> &'static str {
 enum HeaterFaultReason {
     SensorShort,
     SensorOpen,
-    SensorDiscontinuity,
     AdcReadFailed,
     OverTemp,
 }
@@ -384,7 +389,6 @@ impl HeaterFaultReason {
         match self {
             Self::SensorShort => "sensor-short",
             Self::SensorOpen => "sensor-open",
-            Self::SensorDiscontinuity => "sensor-discontinuity",
             Self::AdcReadFailed => "adc-read-failed",
             Self::OverTemp => "over-temp",
         }
@@ -418,7 +422,16 @@ struct HeaterPidSnapshot {
     error_c: f32,
     control_error_c: f32,
     filtered_temp_c: f32,
+    filtered_slope_c_per_s: f32,
+    coast_active: bool,
     phase: HeaterControlPhase,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Default)]
+struct HeaterControlTiming {
+    interval_ms: u16,
+    cycle_ms: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -430,6 +443,7 @@ struct ThermalControlProfilePoint {
     approach_power_permille: u16,
     approach_floor_power_permille: u16,
     approach_damping_exponent_permille: u16,
+    approach_tail_window_centi_c: u16,
     hold_power_permille: u16,
     hold_reheat_power_permille: u16,
     hold_entry_centi_c: u16,
@@ -459,6 +473,7 @@ struct ThermalControlTarget {
     approach_power_permille: u16,
     approach_floor_power_permille: u16,
     approach_damping_exponent: f32,
+    approach_tail_window_c: f32,
     hold_power_permille: u16,
     hold_reheat_power_permille: u16,
     hold_entry_error_c: f32,
@@ -492,7 +507,6 @@ struct ThermalControlProfileSettings {
     hold_reheat_power_permille: u16,
     approach_lead_ticks: u8,
     hold_lead_ticks: u8,
-    measurement_spike_reject_c: f32,
     auto_adjustable_working_floor_mv: u16,
     heater_current_reserve_ma: u16,
 }
@@ -517,6 +531,9 @@ impl ThermalControlProfilePoint {
                     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
                 )
             },
+            approach_tail_window_centi_c: self
+                .approach_tail_window_centi_c
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
             hold_power_permille: self.hold_power_permille.min(1_000),
             hold_reheat_power_permille: self.hold_reheat_power_permille.min(1_000),
             hold_entry_centi_c: sanitize_inherited(self.hold_entry_centi_c, 5_000),
@@ -546,6 +563,7 @@ impl From<ThermalControlProfilePointWire> for ThermalControlProfilePoint {
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
+            approach_tail_window_centi_c: value.approach_tail_window_centi_c,
             hold_power_permille: value.hold_power_permille,
             hold_reheat_power_permille: value.hold_reheat_power_permille,
             hold_entry_centi_c: value.hold_entry_centi_c,
@@ -573,6 +591,7 @@ impl From<ThermalControlProfilePointConfig> for ThermalControlProfilePoint {
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
+            approach_tail_window_centi_c: value.approach_tail_window_centi_c,
             hold_power_permille: value.hold_power_permille,
             hold_reheat_power_permille: value.hold_reheat_power_permille,
             hold_entry_centi_c: value.hold_entry_centi_c,
@@ -612,9 +631,6 @@ impl From<ThermalControlProfileSettingsConfig> for ThermalControlProfileSettings
             hold_reheat_power_permille: value.hold_reheat_power_permille.min(1_000),
             approach_lead_ticks: value.approach_lead_ticks.min(u16::from(u8::MAX)) as u8,
             hold_lead_ticks: value.hold_lead_ticks.min(u16::from(u8::MAX)) as u8,
-            measurement_spike_reject_c: f32::from(
-                value.measurement_spike_reject_centi_c.min(10_000),
-            ) / 100.0,
             auto_adjustable_working_floor_mv: value.auto_adjustable_working_floor_mv.clamp(
                 THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
                 THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
@@ -645,7 +661,6 @@ impl From<ThermalControlProfileSettingsWire> for ThermalControlProfileSettings {
             hold_reheat_power_permille: value.hold_reheat_power_permille,
             approach_lead_ticks: value.approach_lead_ticks,
             hold_lead_ticks: value.hold_lead_ticks,
-            measurement_spike_reject_centi_c: value.measurement_spike_reject_centi_c,
             auto_adjustable_working_floor_mv: value.auto_adjustable_working_floor_mv,
             heater_current_reserve_ma: value.heater_current_reserve_ma,
         }
@@ -716,8 +731,6 @@ impl ThermalControlProfile {
             hold_reheat_power_permille: self.settings.hold_reheat_power_permille,
             approach_lead_ticks: u16::from(self.settings.approach_lead_ticks),
             hold_lead_ticks: u16::from(self.settings.hold_lead_ticks),
-            measurement_spike_reject_centi_c: (self.settings.measurement_spike_reject_c * 100.0)
-                as u16,
             auto_adjustable_working_floor_mv: self.settings.auto_adjustable_working_floor_mv,
             heater_current_reserve_ma: self.settings.heater_current_reserve_ma,
         }
@@ -857,6 +870,9 @@ fn thermal_control_runtime_wire(
         approach_damping_exponent_permille: round_to_u16_nonnegative(
             target.approach_damping_exponent * 1_000.0,
         ),
+        approach_tail_window_centi_c: round_to_u16_nonnegative(
+            target.approach_tail_window_c * 100.0,
+        ),
         hold_power_permille: target.hold_power_permille,
         hold_reheat_power_permille: target.hold_reheat_power_permille,
         hold_entry_centi_c: round_to_u16_nonnegative(target.hold_entry_error_c * 100.0),
@@ -878,9 +894,6 @@ fn thermal_control_runtime_wire(
         approach_max_ticks: u16::from(target.settings.approach_max_ticks),
         approach_min_power_ratio_permille: round_to_u16_nonnegative(
             target.settings.approach_min_power_ratio * 1_000.0,
-        ),
-        measurement_spike_reject_centi_c: round_to_u16_nonnegative(
-            target.settings.measurement_spike_reject_c * 100.0,
         ),
         auto_adjustable_working_floor_mv: target.settings.auto_adjustable_working_floor_mv,
         heater_current_reserve_ma: target.settings.heater_current_reserve_ma,
@@ -963,6 +976,7 @@ fn default_thermal_control_target_with_settings(
         approach_power_permille,
         approach_floor_power_permille,
         approach_damping_exponent: f32::from(approach_damping_exponent_permille) / 1_000.0,
+        approach_tail_window_c: 0.0,
         hold_power_permille,
         hold_entry_error_c: if target <= 60 {
             0.35
@@ -1068,6 +1082,7 @@ fn interpolate_thermal_control_target(
             approach_floor_power_permille: lower.approach_floor_power_permille,
             approach_damping_exponent: f32::from(lower.approach_damping_exponent_permille)
                 / 1_000.0,
+            approach_tail_window_c: f32::from(lower.approach_tail_window_centi_c) / 100.0,
             hold_power_permille: lower.hold_power_permille,
             hold_reheat_power_permille: lower.hold_reheat_power_permille,
             hold_entry_error_c: f32::from(lower.hold_entry_centi_c) / 100.0,
@@ -1116,6 +1131,11 @@ fn interpolate_thermal_control_target(
             upper.approach_damping_exponent_permille,
             THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
         )) / 1_000.0,
+        approach_tail_window_c: f32::from(lerp_u16(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
+        )) / 100.0,
         hold_power_permille: lerp_u16(lower.hold_power_permille, upper.hold_power_permille, 1_000),
         hold_reheat_power_permille: lerp_u16(
             lower.hold_reheat_power_permille,
@@ -1211,6 +1231,27 @@ fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 
 fn scaled_hold_ki_for_control_interval(ki_per_profile_tick: f32) -> f32 {
     ki_per_profile_tick.max(0.0)
         * (HEATER_CONTROL_INTERVAL_MS as f32 / HEATER_PROFILE_TICK_MS as f32)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_control_poll_wait_ms(elapsed_ms: u64, next_deadline_ms: u64) -> u64 {
+    next_deadline_ms
+        .saturating_sub(elapsed_ms)
+        .clamp(1, RUNTIME_INPUT_POLL_MAX_INTERVAL_MS)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn next_heater_control_deadline_ms(deadline_ms: u64, control_started_ms: u64) -> u64 {
+    let next_deadline_ms = deadline_ms.saturating_add(HEATER_CONTROL_INTERVAL_MS);
+    if next_deadline_ms > control_started_ms {
+        return next_deadline_ms;
+    }
+
+    let missed_intervals = control_started_ms
+        .saturating_sub(next_deadline_ms)
+        .saturating_div(HEATER_CONTROL_INTERVAL_MS)
+        .saturating_add(1);
+    next_deadline_ms.saturating_add(missed_intervals.saturating_mul(HEATER_CONTROL_INTERVAL_MS))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1378,6 +1419,8 @@ impl HeaterController {
                 error_c: f32::from(target_temp_c) - measured_temp_c,
                 control_error_c: f32::from(target_temp_c) - measured_temp_c,
                 filtered_temp_c: measured_temp_c,
+                filtered_slope_c_per_s: 0.0,
+                coast_active: false,
                 phase: self.phase,
             };
         }
@@ -1435,10 +1478,12 @@ impl HeaterController {
             + (filtered_temp_slope_c_per_profile_tick * f32::from(control_target.hold_lead_ticks));
         let approach_control_error_c = f32::from(target_temp_c) - approach_projected_temp_c;
         let hold_control_error_c = f32::from(target_temp_c) - hold_projected_temp_c;
+        let hold_prediction_blocks_reheat = error_c > 0.0
+            && filtered_temp_slope_c_per_profile_tick > 0.0
+            && hold_control_error_c <= 0.0;
         let approach_guard_error_c = approach_control_error_c.min(error_c);
         let hold_entry_gate_c = control_target.hold_entry_error_c.max(0.05);
-        let hold_entry_measurement_margin_c =
-            (settings.measurement_spike_reject_c * 0.5).clamp(0.05, 0.5);
+        let hold_entry_measurement_margin_c = 0.5;
         let hold_state_ready = control_error_c <= control_target.hold_exit_error_c;
         let actual_crossed_target_ready =
             error_c <= 0.0 && previous_error_c <= 0.0 && approach_control_error_c <= 0.0;
@@ -1450,7 +1495,7 @@ impl HeaterController {
             let capped_filtered_under_target_error_c = hold_control_error_c
                 .max(0.0)
                 .min(error_c + filter_lag_allowance_c);
-            capped_filtered_under_target_error_c.max(error_c)
+            capped_filtered_under_target_error_c
         } else {
             // Above target, predictive lead was cutting hold power too aggressively and
             // creating wide bang-bang cycles. Keep actual-temperature guard on the
@@ -1461,6 +1506,12 @@ impl HeaterController {
             .hold_exit_error_c
             .max(control_target.hold_on_error_c)
             .max(hold_entry_gate_c + HEATER_HOLD_PHASE_HYSTERESIS_C);
+        // A projected crossing alone is not enough to coast. The physical sensor and the
+        // filtered controller state must both be inside the profile's Hold exit gate first.
+        // Otherwise a high rising slope can cut heating several degrees below target.
+        let approach_predictive_coast_ready = approach_control_error_c <= 0.0
+            && error_c <= control_target.hold_exit_error_c
+            && control_error_c <= control_target.hold_exit_error_c;
         // Phase residency follows the actual plate temperature. Filtered and projected errors
         // shape power, but using their lag to leave Hold creates rapid Hold/Approach oscillation.
         let hold_exit_error_c = error_c;
@@ -1528,7 +1579,9 @@ impl HeaterController {
         if previous_phase != self.phase {
             if self.phase == HeaterControlPhase::Hold {
                 self.hold_coast_active = filtered_temp_slope_c_per_profile_tick > 0.0
-                    && (self.duty_percent == 0 || approach_control_error_c <= 0.0);
+                    && (self.duty_percent == 0
+                        || approach_control_error_c <= 0.0
+                        || hold_control_error_c <= 0.0);
                 if actual_crossed_target_ready {
                     self.filtered_temp_c = Some(measured_temp_c);
                     self.previous_filtered_temp_c = Some(measured_temp_c);
@@ -1581,11 +1634,14 @@ impl HeaterController {
             }
         }
         if self.hold_coast_active
-            && (measured_temp_c + 0.05 < previous_measured_temp_c
-                || (error_c >= control_target.hold_on_error_c.max(0.05)
-                    && filtered_temp_slope_c_per_profile_tick <= 0.05))
+            && filtered_temp_slope_c_per_profile_tick <= -0.02
+            && measured_temp_c + 0.05 < previous_measured_temp_c
+            && error_c >= control_target.hold_on_error_c.max(0.05)
+            && control_error_c >= control_target.hold_on_error_c.max(0.05)
         {
             self.hold_coast_active = false;
+            self.phase_ticks = 0;
+            self.hold_entry_output_percent = 0;
         }
         let duty_percent = if self.hold_coast_active
             || hold_guard_error_c <= -control_target.overshoot_cutoff_c
@@ -1598,7 +1654,7 @@ impl HeaterController {
                     percent_from_permille(control_target.warmup_power_permille.min(1_000))
                 }
                 HeaterControlPhase::Approach => {
-                    if approach_control_error_c <= 0.0 {
+                    if approach_predictive_coast_ready {
                         0
                     } else {
                         let span = (brake_distance_c - control_target.hold_entry_error_c).max(0.1);
@@ -1606,14 +1662,8 @@ impl HeaterController {
                             / span)
                             .clamp(0.0, 1.0);
                         let shaped_ratio = ratio.powf(control_target.approach_damping_exponent);
-                        let hold = f32::from(control_target.hold_power_permille.min(1_000));
-                        let sustain_floor = hold
-                            .max(f32::from(
-                                control_target.approach_floor_power_permille.min(1_000),
-                            ))
-                            .max(f32::from(
-                                control_target.hold_reheat_power_permille.min(1_000),
-                            ));
+                        let sustain_floor =
+                            f32::from(approach_sustain_floor_permille(control_target, error_c));
                         let approach_ceiling =
                             f32::from(control_target.approach_power_permille.min(1_000))
                                 .max(sustain_floor);
@@ -1623,64 +1673,73 @@ impl HeaterController {
                     }
                 }
                 HeaterControlPhase::Hold => {
-                    let hold_base_permille = hold_effective_base_permille(
-                        hold_guard_error_c,
-                        hold_reenter_error_c,
-                        control_target,
-                    );
-                    let positive_integral_limit = if hold_ki > 0.0 {
-                        ((1_000.0 - hold_base_permille) / hold_ki).clamp(0.0, 255.0)
-                    } else {
-                        0.0
-                    };
-                    self.hold_integral_c = if hold_ki > 0.0 {
-                        // The integral term only represents missing equilibrium heat. Letting it
-                        // go negative turns a brief overshoot into a long zero-output valley.
-                        (self.hold_integral_c + hold_guard_error_c)
-                            .clamp(0.0, positive_integral_limit)
-                    } else {
-                        0.0
-                    };
-                    let mut requested_permille = hold_base_permille
-                        + (control_target.hold_kp_permille_per_c * hold_guard_error_c)
-                        + (hold_ki * self.hold_integral_c);
-                    if hold_guard_error_c <= -control_target.hold_off_error_c {
+                    if hold_prediction_blocks_reheat {
                         self.hold_integral_c = 0.0;
-                        let taper_span = (control_target.overshoot_cutoff_c
-                            - control_target.hold_off_error_c)
-                            .max(0.05);
-                        let overshoot_c =
-                            (-hold_guard_error_c).max(control_target.hold_off_error_c);
-                        let taper_ratio = ((control_target.overshoot_cutoff_c - overshoot_c)
-                            / taper_span)
-                            .clamp(0.0, 1.0);
-                        requested_permille = requested_permille.clamp(0.0, 1_000.0) * taper_ratio;
-                    }
-                    let pi_percent =
-                        percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-                    if hold_guard_error_c > 0.0 && self.phase_ticks < hold_blend_cycles {
-                        let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
-                            / f32::from(hold_blend_cycles.max(1));
-                        ((f32::from(self.hold_entry_output_percent)
-                            + ((f32::from(pi_percent)
-                                - f32::from(self.hold_entry_output_percent))
-                                * blend_ratio))
-                            .clamp(0.0, 100.0)
-                            + 0.5) as u8
+                        0
                     } else {
-                        pi_percent
+                        let hold_base_permille = hold_effective_base_permille(
+                            hold_guard_error_c,
+                            hold_reenter_error_c,
+                            control_target,
+                        );
+                        let positive_integral_limit = if hold_ki > 0.0 {
+                            ((1_000.0 - hold_base_permille) / hold_ki).clamp(0.0, 255.0)
+                        } else {
+                            0.0
+                        };
+                        self.hold_integral_c = if hold_ki > 0.0 {
+                            // The integral term only represents missing equilibrium heat. Letting it
+                            // go negative turns a brief overshoot into a long zero-output valley.
+                            (self.hold_integral_c + hold_guard_error_c)
+                                .clamp(0.0, positive_integral_limit)
+                        } else {
+                            0.0
+                        };
+                        let mut requested_permille = hold_base_permille
+                            + (control_target.hold_kp_permille_per_c * hold_guard_error_c)
+                            + (hold_ki * self.hold_integral_c);
+                        if hold_guard_error_c <= -control_target.hold_off_error_c {
+                            self.hold_integral_c = 0.0;
+                            let taper_span = (control_target.overshoot_cutoff_c
+                                - control_target.hold_off_error_c)
+                                .max(0.05);
+                            let overshoot_c =
+                                (-hold_guard_error_c).max(control_target.hold_off_error_c);
+                            let taper_ratio = ((control_target.overshoot_cutoff_c - overshoot_c)
+                                / taper_span)
+                                .clamp(0.0, 1.0);
+                            requested_permille =
+                                requested_permille.clamp(0.0, 1_000.0) * taper_ratio;
+                        }
+                        let pi_percent =
+                            percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
+                        if hold_guard_error_c > 0.0 && self.phase_ticks < hold_blend_cycles {
+                            let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
+                                / f32::from(hold_blend_cycles.max(1));
+                            ((f32::from(self.hold_entry_output_percent)
+                                + ((f32::from(pi_percent)
+                                    - f32::from(self.hold_entry_output_percent))
+                                    * blend_ratio))
+                                .clamp(0.0, 100.0)
+                                + 0.5) as u8
+                        } else {
+                            pi_percent
+                        }
                     }
                 }
             }
         };
         let predictive_coast_active = self.hold_coast_active
-            || (self.phase == HeaterControlPhase::Approach
-                && approach_control_error_c <= 0.0
-                && error_c <= control_target.hold_exit_error_c);
+            || (self.phase == HeaterControlPhase::Approach && approach_predictive_coast_ready);
         let duty_percent = if predictive_coast_active {
             duty_percent
         } else {
-            self.apply_under_target_reheat_floor(duty_percent, error_c, control_target)
+            self.apply_under_target_reheat_floor(
+                duty_percent,
+                error_c,
+                hold_control_error_c,
+                control_target,
+            )
         };
 
         self.duty_percent = duty_percent;
@@ -1690,6 +1749,8 @@ impl HeaterController {
             error_c,
             control_error_c,
             filtered_temp_c,
+            filtered_slope_c_per_s: filtered_temp_slope_c_per_profile_tick,
+            coast_active: self.hold_coast_active,
             phase: self.phase,
         }
     }
@@ -1698,6 +1759,7 @@ impl HeaterController {
         &self,
         duty_percent: u8,
         error_c: f32,
+        hold_control_error_c: f32,
         control_target: ThermalControlTarget,
     ) -> u8 {
         if duty_percent != 0 || error_c <= 0.0 {
@@ -1706,16 +1768,43 @@ impl HeaterController {
 
         let floor_permille = match self.phase {
             HeaterControlPhase::Warmup => return duty_percent,
-            HeaterControlPhase::Approach => control_target
-                .approach_floor_power_permille
-                .max(control_target.hold_reheat_power_permille)
-                .max(control_target.hold_power_permille),
-            HeaterControlPhase::Hold => control_target
-                .hold_reheat_power_permille
-                .max(control_target.hold_power_permille),
+            HeaterControlPhase::Approach => {
+                approach_sustain_floor_permille(control_target, error_c)
+            }
+            HeaterControlPhase::Hold => {
+                if hold_control_error_c <= 0.0 {
+                    return duty_percent;
+                }
+                control_target
+                    .hold_reheat_power_permille
+                    .max(control_target.hold_power_permille)
+            }
         };
         percent_from_permille(floor_permille.min(1_000))
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn approach_sustain_floor_permille(control_target: ThermalControlTarget, error_c: f32) -> u16 {
+    let full_floor = control_target
+        .approach_floor_power_permille
+        .max(control_target.hold_reheat_power_permille)
+        .max(control_target.hold_power_permille)
+        .min(1_000);
+    let tail_floor = control_target
+        .hold_reheat_power_permille
+        .max(control_target.hold_power_permille)
+        .min(full_floor);
+    let tail_window_c = control_target.approach_tail_window_c.max(0.0);
+    if tail_window_c <= f32::EPSILON || full_floor == tail_floor {
+        return full_floor;
+    }
+
+    let tail_progress =
+        ((error_c - control_target.hold_entry_error_c) / tail_window_c).clamp(0.0, 1.0);
+    (f32::from(tail_floor)
+        + ((f32::from(full_floor) - f32::from(tail_floor)) * tail_progress)
+        + 0.5) as u16
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1822,7 +1911,6 @@ fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
         Some(
             HeaterFaultReason::SensorShort
                 | HeaterFaultReason::SensorOpen
-                | HeaterFaultReason::SensorDiscontinuity
                 | HeaterFaultReason::AdcReadFailed
         )
     )
@@ -2011,84 +2099,13 @@ fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16)
     *latest_temp_i16 = 0;
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(target_arch = "xtensa")]
 fn should_clear_runtime_fault_latch(
     heater_rearm_requested: bool,
     current_rtd_fault: Option<HeaterFaultReason>,
     latched_fault: Option<HeaterFaultReason>,
 ) -> bool {
     heater_rearm_requested && current_rtd_fault.is_none() && latched_fault.is_some()
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum RuntimeTempSampleDecision {
-    Accepted(f32),
-    Rejected(f32),
-    Fault(f32),
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-impl RuntimeTempSampleDecision {
-    const fn accepted_temp_c(self) -> f32 {
-        match self {
-            Self::Accepted(temp_c) | Self::Rejected(temp_c) | Self::Fault(temp_c) => temp_c,
-        }
-    }
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct RuntimeTempSampleGuard {
-    pending_direction: i8,
-    pending_count: u8,
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-impl RuntimeTempSampleGuard {
-    fn reset(&mut self) {
-        self.pending_direction = 0;
-        self.pending_count = 0;
-    }
-
-    fn evaluate(
-        &mut self,
-        previous_temp_c: Option<f32>,
-        measured_temp_c: f32,
-        heater_enabled: bool,
-        settings: ThermalControlProfileSettings,
-    ) -> RuntimeTempSampleDecision {
-        let Some(previous_temp_c) = previous_temp_c else {
-            self.reset();
-            return RuntimeTempSampleDecision::Accepted(measured_temp_c);
-        };
-        let limit_c = settings.measurement_spike_reject_c.max(0.0);
-        if !heater_enabled || limit_c <= 0.0 || (measured_temp_c - previous_temp_c).abs() <= limit_c
-        {
-            self.reset();
-            return RuntimeTempSampleDecision::Accepted(measured_temp_c);
-        }
-
-        let direction = if measured_temp_c > previous_temp_c {
-            1
-        } else {
-            -1
-        };
-        if self.pending_direction == direction {
-            self.pending_count = self.pending_count.saturating_add(1);
-        } else {
-            self.pending_direction = direction;
-            self.pending_count = 1;
-        }
-
-        if self.pending_count >= 2 {
-            self.reset();
-            RuntimeTempSampleDecision::Fault(previous_temp_c)
-        } else {
-            RuntimeTempSampleDecision::Rejected(previous_temp_c)
-        }
-    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2299,6 +2316,7 @@ enum HeaterPowerBackend {
         current_mode: Option<ch224q::AdjustableVoltageMode>,
         current_request_mv: u16,
         settle_until_ms: Option<u64>,
+        next_request_at_ms: u64,
         current_limit_fixed_pwm_active: bool,
         current_limit_fixed_request_confirmed: bool,
     },
@@ -3473,19 +3491,24 @@ fn adjustable_mode_for_request(request_mv: u16, pps_max_mv: u16) -> ch224q::Adju
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn should_blank_heater_for_adjustable_request(
-    current_request_mv: u16,
-    next_request_mv: u16,
+    _current_request_mv: u16,
+    _next_request_mv: u16,
     mode_changed: bool,
 ) -> bool {
-    mode_changed || next_request_mv != current_request_mv
+    mode_changed
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn adjustable_request_settle_ms(current_request_mv: u16, next_request_mv: u16) -> u64 {
-    if next_request_mv < current_request_mv {
-        HEATER_PPS_MOS_DOWNSTEP_SETTLE_MS
+fn should_restore_gate_after_adjustable_request(blank_heater: bool, gate_duty_percent: u8) -> bool {
+    !blank_heater && gate_duty_percent > 0
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn pps_request_transition_ms(mode_changed: bool) -> u64 {
+    if mode_changed {
+        HEATER_PPS_LARGE_TRANSITION_MS
     } else {
-        HEATER_PPS_MOS_SETTLE_MS
+        HEATER_PPS_SMALL_TRANSITION_MS
     }
 }
 
@@ -3514,8 +3537,14 @@ fn heater_adjustable_request_mv(
             heater_request_mv_from_power_percent(duty_percent, control_floor_mv, safe_max_mv);
         if desired_request_mv.abs_diff(current_request_mv) < HEATER_PPS_REQUEST_HYSTERESIS_MV {
             current_request_mv
+        } else if desired_request_mv > current_request_mv {
+            current_request_mv
+                .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
+                .min(desired_request_mv)
         } else {
-            desired_request_mv
+            current_request_mv
+                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
+                .max(desired_request_mv)
         }
     }
 }
@@ -3579,6 +3608,7 @@ fn select_heater_power_backend(
         current_mode: None,
         current_request_mv: idle_request_mv,
         settle_until_ms: None,
+        next_request_at_ms: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
     }
@@ -3698,6 +3728,7 @@ where
                     current_mode: None,
                     current_request_mv: idle_request_mv,
                     settle_until_ms: None,
+                    next_request_at_ms: 0,
                     current_limit_fixed_pwm_active: false,
                     current_limit_fixed_request_confirmed: false,
                 };
@@ -3741,6 +3772,7 @@ where
             current_mode,
             current_request_mv,
             settle_until_ms,
+            next_request_at_ms,
             current_limit_fixed_pwm_active,
             current_limit_fixed_request_confirmed,
         } => {
@@ -3785,6 +3817,7 @@ where
                             current_mode: None,
                             current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
                             settle_until_ms: None,
+                            next_request_at_ms: 0,
                             current_limit_fixed_pwm_active: true,
                             current_limit_fixed_request_confirmed: true,
                         };
@@ -3809,7 +3842,10 @@ where
                             capability_max_ma,
                             current_mode: None,
                             current_request_mv: HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
-                            settle_until_ms: Some(now_ms.saturating_add(HEATER_PPS_MOS_SETTLE_MS)),
+                            settle_until_ms: Some(
+                                now_ms.saturating_add(HEATER_PPS_LARGE_TRANSITION_MS),
+                            ),
+                            next_request_at_ms: 0,
                             current_limit_fixed_pwm_active: true,
                             current_limit_fixed_request_confirmed: false,
                         };
@@ -3854,6 +3890,7 @@ where
                     current_mode,
                     current_request_mv,
                     settle_until_ms: None,
+                    next_request_at_ms,
                     current_limit_fixed_pwm_active: false,
                     current_limit_fixed_request_confirmed: false,
                 };
@@ -3892,6 +3929,7 @@ where
             let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
             let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
             let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
+            let request_transition_pending = !manual_pps_active && now_ms < next_request_at_ms;
             let gate_duty_percent = if duty_percent == 0 {
                 0
             } else {
@@ -3918,7 +3956,7 @@ where
                 apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
             }
 
-            if voltage_changed || mode_changed {
+            if (voltage_changed || mode_changed) && !request_transition_pending {
                 if !request_ch224q_adjustable_voltage(
                     i2c,
                     ch224q_address,
@@ -3948,6 +3986,9 @@ where
                     return true;
                 }
 
+                if should_restore_gate_after_adjustable_request(blank_heater, gate_duty_percent) {
+                    apply_heater_duty(heater_pwm, gate_duty_percent, last_physical_duty_percent);
+                }
                 *backend = HeaterPowerBackend::PpsMos {
                     pps_min_mv,
                     idle_request_mv,
@@ -3956,16 +3997,35 @@ where
                     capability_max_ma,
                     current_mode: Some(request_mode),
                     current_request_mv: request_mv,
-                    settle_until_ms: blank_heater.then_some(now_ms.saturating_add(
-                        adjustable_request_settle_ms(current_request_mv, request_mv),
-                    )),
+                    settle_until_ms: blank_heater
+                        .then_some(now_ms.saturating_add(pps_request_transition_ms(mode_changed))),
+                    next_request_at_ms: now_ms
+                        .saturating_add(pps_request_transition_ms(mode_changed)),
                     current_limit_fixed_pwm_active: false,
                     current_limit_fixed_request_confirmed: false,
                 };
                 return true;
             }
 
-            apply_heater_duty(heater_pwm, gate_duty_percent, last_physical_duty_percent);
+            let active_request_gate_duty_percent = if request_transition_pending {
+                adjustable_floor_gate_duty_percent(
+                    duty_percent,
+                    current_request_mv,
+                    control_floor_mv,
+                    safe_max_mv,
+                    heater_phase == HeaterControlPhase::Hold,
+                    heater_error_c,
+                    hold_on_error_c,
+                    *last_physical_duty_percent,
+                )
+            } else {
+                gate_duty_percent
+            };
+            apply_heater_duty(
+                heater_pwm,
+                active_request_gate_duty_percent,
+                last_physical_duty_percent,
+            );
             if voltage_changed || mode_changed {
                 info!(
                     "heater pps request temp_c={=f32} control={=u8}% current_limit_ma={=u16} safe_max_mv={=u16} control_floor_mv={=u16} request_mv={=u16}",
@@ -4097,6 +4157,7 @@ struct UsbRuntimeStatusContext {
     last_pd_observation: Option<PdStatusObservation>,
     heater_power_backend: HeaterPowerBackend,
     pid_snapshot: HeaterPidSnapshot,
+    heater_control_timing: HeaterControlTiming,
     heater_physical_output_percent: u8,
     manual_pps: ManualPpsState,
     calibration: CalibrationRuntimeState,
@@ -4198,6 +4259,10 @@ fn usb_runtime_status(
     status.heater_error_c = Some(context.pid_snapshot.error_c);
     status.heater_control_error_c = Some(context.pid_snapshot.control_error_c);
     status.heater_filtered_temp_c = Some(context.pid_snapshot.filtered_temp_c);
+    status.heater_filtered_slope_c_per_s = Some(context.pid_snapshot.filtered_slope_c_per_s);
+    status.heater_coast_active = context.pid_snapshot.coast_active;
+    status.heater_control_interval_ms = context.heater_control_timing.interval_ms;
+    status.heater_control_cycle_ms = context.heater_control_timing.cycle_ms;
     status.calibration = calibration_runtime_state_to_wire(context.calibration);
     status.thermal_control_profile_preview = context.thermal_control_profile_preview;
     status.thermal_control = thermal_control_runtime_wire(
@@ -5675,6 +5740,7 @@ async fn handle_usb_control_line(
     latest_vin_raw_adc_mv: u16,
     latest_vin_mv: u32,
     last_heater_duty: u8,
+    heater_control_timing: HeaterControlTiming,
 ) -> bool {
     let mut needs_redraw = false;
     let active_thermal_control_profile =
@@ -5684,6 +5750,7 @@ async fn handle_usb_control_line(
         last_pd_observation,
         heater_power_backend: *heater_power_backend,
         pid_snapshot,
+        heater_control_timing,
         heater_physical_output_percent: last_heater_duty,
         manual_pps: *manual_pps,
         calibration: *calibration_runtime_state,
@@ -6590,8 +6657,6 @@ async fn main(_spawner: Spawner) {
     let mut current_rtd_fault: Option<HeaterFaultReason> = None;
     let mut latest_temp_c = 0.0_f32;
     let mut latest_temp_i16 = 0_i16;
-    let mut last_valid_runtime_temp_c: Option<f32>;
-    let mut runtime_temp_sample_guard = RuntimeTempSampleGuard::default();
     let mut latest_rtd_raw_adc_mv = 0_u16;
     let mut latest_vin_raw_adc_mv = 0_u16;
     let mut latest_vin_mv = 0_u32;
@@ -6600,7 +6665,6 @@ async fn main(_spawner: Spawner) {
             latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
             latest_temp_c = measurement.temp_c;
             latest_temp_i16 = measurement.current_temp_c;
-            last_valid_runtime_temp_c = Some(measurement.temp_c);
             if is_overtemp_sample(measurement.temp_c) {
                 current_rtd_fault = Some(HeaterFaultReason::OverTemp);
                 let _ = heater_controller.latch_fault(HeaterFaultReason::OverTemp);
@@ -6622,7 +6686,6 @@ async fn main(_spawner: Spawner) {
         }
         RtdSample::Fault { adc_mv, reason } => {
             current_rtd_fault = Some(reason);
-            last_valid_runtime_temp_c = None;
             let _ = heater_controller.latch_fault(reason);
             ui_state.current_temp_c = 0;
             ui_state.current_temp_deci_c = 0;
@@ -6649,6 +6712,8 @@ async fn main(_spawner: Spawner) {
         error_c: 0.0,
         control_error_c: 0.0,
         filtered_temp_c: 0.0,
+        filtered_slope_c_per_s: 0.0,
+        coast_active: false,
         phase: HeaterControlPhase::Warmup,
     };
     let mut cooling_disabled_lock_latched = false;
@@ -6751,11 +6816,22 @@ async fn main(_spawner: Spawner) {
     );
     log_ui_state(&ui_state);
 
-    let mut elapsed_ms: u64 = 0;
+    let runtime_started_ms = Instant::now().as_millis();
     let mut last_control_ms: u64 = 0;
+    let mut next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
+    let mut heater_control_timing = HeaterControlTiming::default();
     loop {
-        EmbassyTimer::after_millis(20).await;
-        elapsed_ms = elapsed_ms.saturating_add(20);
+        let elapsed_before_wait_ms = Instant::now()
+            .as_millis()
+            .saturating_sub(runtime_started_ms);
+        EmbassyTimer::after_millis(heater_control_poll_wait_ms(
+            elapsed_before_wait_ms,
+            next_control_deadline_ms,
+        ))
+        .await;
+        let elapsed_ms = Instant::now()
+            .as_millis()
+            .saturating_sub(runtime_started_ms);
 
         let raw_state = inputs.sample();
         let sample = controller.sample_with_capabilities(
@@ -6795,6 +6871,7 @@ async fn main(_spawner: Spawner) {
                         latest_vin_raw_adc_mv,
                         latest_vin_mv,
                         last_heater_duty,
+                        heater_control_timing,
                     )
                     .await;
                     usb_rx_line.clear();
@@ -6994,8 +7071,14 @@ async fn main(_spawner: Spawner) {
             suppress_attention_ack_clear_after_ms = None;
         }
 
-        if elapsed_ms.saturating_sub(last_control_ms) >= HEATER_CONTROL_INTERVAL_MS {
+        if elapsed_ms >= next_control_deadline_ms {
+            let control_started_ms = elapsed_ms;
+            heater_control_timing.interval_ms = control_started_ms
+                .saturating_sub(last_control_ms)
+                .min(u64::from(u16::MAX)) as u16;
             last_control_ms = elapsed_ms;
+            next_control_deadline_ms =
+                next_heater_control_deadline_ms(next_control_deadline_ms, control_started_ms);
             let active_thermal_control_profile =
                 active_thermal_control_profile(&memory_config, thermal_control_profile_preview);
             let active_thermal_settings = active_thermal_control_profile
@@ -7005,68 +7088,35 @@ async fn main(_spawner: Spawner) {
             match read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config) {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
-                    let sample_decision = runtime_temp_sample_guard.evaluate(
-                        last_valid_runtime_temp_c,
-                        measurement.temp_c,
-                        ui_state.heater_enabled,
-                        active_thermal_settings,
-                    );
-                    let accepted_temp_c = sample_decision.accepted_temp_c();
-                    current_rtd_fault =
-                        if matches!(sample_decision, RuntimeTempSampleDecision::Fault(_)) {
-                            Some(HeaterFaultReason::SensorDiscontinuity)
-                        } else if is_overtemp_sample(accepted_temp_c) {
-                            Some(HeaterFaultReason::OverTemp)
-                        } else {
-                            None
-                        };
-                    latest_temp_c = accepted_temp_c;
-                    latest_temp_i16 = temp_c_to_whole_c(accepted_temp_c);
-                    last_valid_runtime_temp_c = Some(accepted_temp_c);
+                    current_rtd_fault = if is_overtemp_sample(measurement.temp_c) {
+                        Some(HeaterFaultReason::OverTemp)
+                    } else {
+                        None
+                    };
+                    latest_temp_c = measurement.temp_c;
+                    latest_temp_i16 = temp_c_to_whole_c(measurement.temp_c);
                     if ui_state.current_temp_c != latest_temp_i16 {
                         ui_state.current_temp_c = latest_temp_i16;
                         needs_redraw = true;
                     }
-                    let current_temp_deci_c = temp_c_to_deci_c(accepted_temp_c);
+                    let current_temp_deci_c = temp_c_to_deci_c(measurement.temp_c);
                     if ui_state.current_temp_deci_c != current_temp_deci_c {
                         ui_state.current_temp_deci_c = current_temp_deci_c;
                         needs_redraw = true;
                     }
-                    match sample_decision {
-                        RuntimeTempSampleDecision::Accepted(_) => {}
-                        RuntimeTempSampleDecision::Rejected(_) => warn!(
-                            "rtd discontinuity rejected raw_adc_mv={=u16} adc_mv={=u16} raw_temp_c={=f32} accepted_temp_c={=f32} limit_c={=f32}",
-                            measurement.raw_adc_mv,
-                            measurement.adc_mv,
-                            measurement.temp_c,
-                            accepted_temp_c,
-                            active_thermal_settings.measurement_spike_reject_c,
-                        ),
-                        RuntimeTempSampleDecision::Fault(_) => warn!(
-                            "rtd discontinuity fault raw_adc_mv={=u16} adc_mv={=u16} raw_temp_c={=f32} accepted_temp_c={=f32} limit_c={=f32}",
-                            measurement.raw_adc_mv,
-                            measurement.adc_mv,
-                            measurement.temp_c,
-                            accepted_temp_c,
-                            active_thermal_settings.measurement_spike_reject_c,
-                        ),
-                    }
                     info!(
-                        "rtd sample raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} raw_temp_c={=f32} accepted_temp_c={=f32} heater_arm={=bool}",
+                        "rtd sample raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32} heater_arm={=bool}",
                         measurement.raw_adc_mv,
                         measurement.adc_mv,
                         RTD_DIVIDER_SUPPLY_MV,
                         measurement.resistance_ohms,
                         measurement.temp_c,
-                        accepted_temp_c,
                         ui_state.heater_enabled,
                     );
                 }
                 RtdSample::Fault { adc_mv, reason } => {
-                    runtime_temp_sample_guard.reset();
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
                     current_rtd_fault = Some(reason);
-                    last_valid_runtime_temp_c = None;
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
                     if ui_state.current_temp_c != 0 || ui_state.current_temp_deci_c != 0 {
                         ui_state.current_temp_c = 0;
@@ -7145,8 +7195,9 @@ async fn main(_spawner: Spawner) {
                 active_thermal_control_profile,
             );
             last_pid_snapshot = pid_snapshot;
-            if ui_state.heater_output_percent != pid_snapshot.duty_percent {
-                ui_state.heater_output_percent = pid_snapshot.duty_percent;
+            let requested_duty_percent = pid_snapshot.duty_percent;
+            if ui_state.heater_output_percent != requested_duty_percent {
+                ui_state.heater_output_percent = requested_duty_percent;
                 needs_redraw = true;
             }
             if apply_heater_power_output(
@@ -7157,7 +7208,7 @@ async fn main(_spawner: Spawner) {
                 &mut manual_pps_state,
                 current_pd_observation,
                 latest_temp_c,
-                pid_snapshot.duty_percent,
+                requested_duty_percent,
                 ui_state.heater_enabled,
                 pid_snapshot.phase,
                 pid_snapshot.error_c,
@@ -7175,6 +7226,11 @@ async fn main(_spawner: Spawner) {
             {
                 needs_redraw = true;
             }
+            heater_control_timing.cycle_ms = Instant::now()
+                .as_millis()
+                .saturating_sub(runtime_started_ms)
+                .saturating_sub(control_started_ms)
+                .min(u64::from(u16::MAX)) as u16;
             if ui_state.manual_pps_enabled != manual_pps_state.enabled {
                 ui_state.manual_pps_enabled = manual_pps_state.enabled;
                 needs_redraw = true;
@@ -7231,8 +7287,8 @@ async fn main(_spawner: Spawner) {
                 "heater loop set_c={=i16} temp_c={=f32} control={=u8}% physical={=u8}% pd_mv={=u16} backend={=str} mos_gate={=u8}% error_c={=f32} control_error_c={=f32} temp_avg_c={=f32} phase={=str} arm={=bool} fault={=str}",
                 ui_state.target_temp_c,
                 latest_temp_c,
-                pid_snapshot.duty_percent,
-                pid_snapshot.duty_percent,
+                requested_duty_percent,
+                requested_duty_percent,
                 next_pd_contract_mv,
                 heater_power_backend.label(),
                 last_heater_duty,
@@ -7443,8 +7499,11 @@ mod tests {
                 error_c: 0.0,
                 control_error_c: 0.0,
                 filtered_temp_c: 0.0,
+                filtered_slope_c_per_s: 0.0,
+                coast_active: false,
                 phase: HeaterControlPhase::Warmup,
             },
+            heater_control_timing: HeaterControlTiming::default(),
             manual_pps: ManualPpsState::default(),
             calibration: CalibrationRuntimeState::default(),
             fan_command: FanHardwareCommand::disabled(),
@@ -7743,6 +7802,7 @@ mod tests {
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 220,
             hold_reheat_power_permille: 0,
             hold_entry_centi_c: 0,
@@ -7817,6 +7877,7 @@ mod tests {
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 220,
             hold_reheat_power_permille: 0,
             hold_entry_centi_c: 0,
@@ -7894,6 +7955,7 @@ mod tests {
             approach_power_permille: 260,
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 180,
             hold_reheat_power_permille: 0,
             hold_entry_centi_c: 0,
@@ -7966,6 +8028,7 @@ mod tests {
                         approach_power_permille: 260,
                         approach_floor_power_permille: 180,
                         approach_damping_exponent_permille: 1_000,
+                        approach_tail_window_centi_c: 0,
                         hold_power_permille: 180,
                         hold_reheat_power_permille: 0,
                         hold_entry_centi_c: 0,
@@ -7995,6 +8058,7 @@ mod tests {
             approach_power_permille: 260,
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 180,
             hold_reheat_power_permille: 0,
             hold_entry_centi_c: 0,
@@ -8037,7 +8101,6 @@ mod tests {
             hold_reheat_power_permille: u16::MAX,
             approach_lead_ticks: u16::MAX,
             hold_lead_ticks: u16::MAX,
-            measurement_spike_reject_centi_c: u16::MAX,
             auto_adjustable_working_floor_mv: u16::MAX,
             heater_current_reserve_ma: u16::MAX,
         });
@@ -8045,7 +8108,6 @@ mod tests {
         assert_eq!(settings.temp_filter_alpha, 1.0);
         assert_eq!(settings.warmup_reenter_error_c, 50.0);
         assert_eq!(settings.hold_entry_error_c, 0.01);
-        assert_eq!(settings.measurement_spike_reject_c, 100.0);
         assert_eq!(settings.auto_adjustable_working_floor_mv, 28_000);
         assert_eq!(settings.heater_current_reserve_ma, 1_000);
     }
@@ -8082,7 +8144,13 @@ mod tests {
                     error_c: -0.4,
                     control_error_c: -0.2,
                     filtered_temp_c: 140.2,
+                    filtered_slope_c_per_s: 0.6,
+                    coast_active: true,
                     phase: HeaterControlPhase::Hold,
+                },
+                heater_control_timing: HeaterControlTiming {
+                    interval_ms: 120,
+                    cycle_ms: 7,
                 },
                 ..test_usb_runtime_status_context()
             },
@@ -8092,6 +8160,10 @@ mod tests {
         assert_eq!(status.heater_error_c, Some(-0.4));
         assert_eq!(status.heater_control_error_c, Some(-0.2));
         assert_eq!(status.heater_filtered_temp_c, Some(140.2));
+        assert_eq!(status.heater_filtered_slope_c_per_s, Some(0.6));
+        assert!(status.heater_coast_active);
+        assert_eq!(status.heater_control_interval_ms, 120);
+        assert_eq!(status.heater_control_cycle_ms, 7);
     }
 
     #[test]
@@ -8126,6 +8198,7 @@ mod tests {
                     current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
                     current_request_mv: 12_000,
                     settle_until_ms: None,
+                    next_request_at_ms: 0,
                     current_limit_fixed_pwm_active: false,
                     current_limit_fixed_request_confirmed: false,
                 },
@@ -8186,6 +8259,7 @@ mod tests {
                     current_mode: None,
                     current_request_mv: 12_000,
                     settle_until_ms: None,
+                    next_request_at_ms: 0,
                     current_limit_fixed_pwm_active: false,
                     current_limit_fixed_request_confirmed: false,
                 },
@@ -8531,6 +8605,52 @@ mod tests {
     }
 
     #[test]
+    fn heater_control_poll_wait_lands_on_the_next_deadline() {
+        assert_eq!(
+            heater_control_poll_wait_ms(0, HEATER_CONTROL_INTERVAL_MS),
+            RUNTIME_INPUT_POLL_MAX_INTERVAL_MS.min(HEATER_CONTROL_INTERVAL_MS)
+        );
+        assert_eq!(
+            heater_control_poll_wait_ms(
+                HEATER_CONTROL_INTERVAL_MS
+                    .saturating_mul(2)
+                    .saturating_sub(17),
+                HEATER_CONTROL_INTERVAL_MS.saturating_mul(2),
+            ),
+            17
+        );
+        assert_eq!(
+            heater_control_poll_wait_ms(HEATER_CONTROL_INTERVAL_MS, HEATER_CONTROL_INTERVAL_MS),
+            1
+        );
+    }
+
+    #[test]
+    fn heater_control_deadline_preserves_cadence_without_catch_up_updates() {
+        assert_eq!(
+            next_heater_control_deadline_ms(
+                HEATER_CONTROL_INTERVAL_MS,
+                HEATER_CONTROL_INTERVAL_MS + 4
+            ),
+            HEATER_CONTROL_INTERVAL_MS * 2
+        );
+        assert_eq!(
+            next_heater_control_deadline_ms(
+                HEATER_CONTROL_INTERVAL_MS * 2,
+                HEATER_CONTROL_INTERVAL_MS * 2 + 1,
+            ),
+            HEATER_CONTROL_INTERVAL_MS * 3
+        );
+        assert_eq!(
+            next_heater_control_deadline_ms(
+                HEATER_CONTROL_INTERVAL_MS * 3,
+                HEATER_CONTROL_INTERVAL_MS * 4 + 17,
+            ),
+            HEATER_CONTROL_INTERVAL_MS * 5
+        );
+    }
+
+    #[test]
     fn warmup_handoff_expands_with_measured_thermal_momentum() {
         let handoff_error = warmup_handoff_error_c(5.0, 10.0, 6.6, 5);
 
@@ -8582,6 +8702,7 @@ mod tests {
                     approach_power_permille: 590,
                     approach_floor_power_permille: 510,
                     approach_damping_exponent_permille: 1_320,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 180,
                     hold_reheat_power_permille: 270,
                     hold_entry_centi_c: 200,
@@ -8662,6 +8783,7 @@ mod tests {
                     approach_power_permille: 100,
                     approach_floor_power_permille: 25,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 45,
                     hold_reheat_power_permille: 60,
                     hold_entry_centi_c: 20,
@@ -8706,6 +8828,7 @@ mod tests {
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 280,
                     hold_reheat_power_permille: 340,
                     hold_entry_centi_c: 10,
@@ -8759,6 +8882,7 @@ mod tests {
                     approach_power_permille: 760,
                     approach_floor_power_permille: 460,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 450,
                     hold_reheat_power_permille: 620,
                     hold_entry_centi_c: 20,
@@ -8890,6 +9014,7 @@ mod tests {
                     approach_power_permille: 100,
                     approach_floor_power_permille: 25,
                     approach_damping_exponent_permille: 1_500,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 60,
                     hold_reheat_power_permille: 100,
                     hold_entry_centi_c: 20,
@@ -8945,6 +9070,7 @@ mod tests {
                     approach_power_permille: 300,
                     approach_floor_power_permille: 150,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 180,
                     hold_reheat_power_permille: 260,
                     hold_entry_centi_c: 12,
@@ -8999,6 +9125,7 @@ mod tests {
                     approach_power_permille: 920,
                     approach_floor_power_permille: 780,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 800,
                     hold_reheat_power_permille: 900,
                     hold_entry_centi_c: 8,
@@ -9052,6 +9179,7 @@ mod tests {
                     approach_power_permille: 440,
                     approach_floor_power_permille: 240,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 360,
                     hold_reheat_power_permille: 420,
                     hold_entry_centi_c: 15,
@@ -9103,6 +9231,7 @@ mod tests {
                     approach_power_permille: 100,
                     approach_floor_power_permille: 25,
                     approach_damping_exponent_permille: 1_500,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 60,
                     hold_reheat_power_permille: 100,
                     hold_entry_centi_c: 20,
@@ -9152,6 +9281,7 @@ mod tests {
                     approach_power_permille: 590,
                     approach_floor_power_permille: 510,
                     approach_damping_exponent_permille: 1_370,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 60,
                     hold_reheat_power_permille: 60,
                     hold_entry_centi_c: 200,
@@ -9203,6 +9333,7 @@ mod tests {
                     approach_power_permille: 590,
                     approach_floor_power_permille: 510,
                     approach_damping_exponent_permille: 1_370,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 60,
                     hold_reheat_power_permille: 60,
                     hold_entry_centi_c: 200,
@@ -9238,15 +9369,26 @@ mod tests {
         assert_eq!(rising.duty_percent, 0);
 
         let falling_above_target = controller.update(60, 60.8, true, Some(profile));
-        assert!(!controller.hold_coast_active);
-        assert!(falling_above_target.duty_percent > 0);
+        assert!(controller.hold_coast_active);
+        assert_eq!(falling_above_target.duty_percent, 0);
 
-        controller.hold_coast_active = true;
-        controller.filtered_temp_c = Some(59.8);
+        controller.filtered_temp_c = Some(59.9);
         controller.previous_filtered_temp_c = Some(60.0);
-        let falling_under_target = controller.update(60, 59.5, true, Some(profile));
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        controller.previous_measured_temp_c = Some(60.0);
+        let raw_dip = controller.update(60, 59.5, true, Some(profile));
+        assert!(controller.hold_coast_active);
+        assert_eq!(raw_dip.duty_percent, 0);
+
+        controller.filtered_temp_c = Some(59.3);
+        controller.previous_filtered_temp_c = Some(59.4);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        controller.previous_measured_temp_c = Some(59.6);
+        let falling_under_target = controller.update(60, 59.4, true, Some(profile));
         assert!(!controller.hold_coast_active);
         assert!(falling_under_target.duty_percent > 0);
+        assert_eq!(controller.phase_ticks, 0);
+        assert_eq!(controller.hold_entry_output_percent, 0);
     }
 
     #[test]
@@ -9274,6 +9416,7 @@ mod tests {
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 340,
                     hold_reheat_power_permille: 420,
                     hold_entry_centi_c: 200,
@@ -9310,8 +9453,80 @@ mod tests {
         assert_eq!(rising_above_target.duty_percent, 0);
 
         let falling_above_target = controller.update(140, 140.8, true, Some(profile));
+        assert!(controller.hold_coast_active);
+        assert_eq!(falling_above_target.duty_percent, 0);
+
+        controller.filtered_temp_c = Some(139.9);
+        controller.previous_filtered_temp_c = Some(140.0);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        controller.previous_measured_temp_c = Some(140.0);
+        let raw_dip = controller.update(140, 139.5, true, Some(profile));
+        assert!(controller.hold_coast_active);
+        assert_eq!(raw_dip.duty_percent, 0);
+
+        controller.filtered_temp_c = Some(139.3);
+        controller.previous_filtered_temp_c = Some(139.4);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        controller.previous_measured_temp_c = Some(139.6);
+        let falling_under_target = controller.update(140, 139.4, true, Some(profile));
         assert!(!controller.hold_coast_active);
-        assert!(falling_above_target.duty_percent > 0);
+        assert!(falling_under_target.duty_percent > 0);
+    }
+
+    #[test]
+    fn heater_approach_projection_cannot_coast_outside_hold_exit_gate() {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 140;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(136.0);
+        controller.previous_filtered_temp_c = Some(135.0);
+        controller.filtered_slope_c_per_profile_tick = 1.0;
+        controller.previous_measured_temp_c = Some(136.0);
+
+        let profile = ThermalControlProfile {
+            settings: ThermalControlProfileSettings {
+                temp_filter_alpha: 1.0,
+                ..ThermalControlProfileSettings::default()
+            },
+            points: [
+                Some(ThermalControlProfilePoint {
+                    target_temp_c: 140,
+                    brake_distance_centi_c: 600,
+                    warmup_power_permille: 1_000,
+                    approach_power_permille: 700,
+                    approach_floor_power_permille: 260,
+                    approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
+                    hold_power_permille: 180,
+                    hold_reheat_power_permille: 320,
+                    hold_entry_centi_c: 50,
+                    hold_exit_centi_c: 100,
+                    hold_on_centi_c: 30,
+                    hold_off_centi_c: 160,
+                    overshoot_cutoff_centi_c: 220,
+                    hold_kp_permille_per_c: 24,
+                    hold_ki_permille_per_c_tick: 1,
+                    hold_blend_ticks: 1,
+                    approach_lead_ticks: 5,
+                    hold_lead_ticks: 0,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+
+        let snapshot = controller.update(140, 137.0, true, Some(profile));
+
+        assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+        assert!(snapshot.control_error_c > 1.0);
+        assert!(snapshot.duty_percent >= 32);
     }
 
     #[test]
@@ -9342,6 +9557,7 @@ mod tests {
                     approach_power_permille: 920,
                     approach_floor_power_permille: 730,
                     approach_damping_exponent_permille: 250,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 720,
                     hold_reheat_power_permille: 790,
                     hold_entry_centi_c: 28,
@@ -9404,6 +9620,7 @@ mod tests {
                     approach_power_permille: 920,
                     approach_floor_power_permille: 730,
                     approach_damping_exponent_permille: 250,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 720,
                     hold_reheat_power_permille: 790,
                     hold_entry_centi_c: 28,
@@ -9455,6 +9672,7 @@ mod tests {
                     approach_power_permille: 900,
                     approach_floor_power_permille: 740,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 820,
                     hold_reheat_power_permille: 900,
                     hold_entry_centi_c: 8,
@@ -9509,6 +9727,7 @@ mod tests {
                     approach_power_permille: 760,
                     approach_floor_power_permille: 600,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 620,
                     hold_reheat_power_permille: 700,
                     hold_entry_centi_c: 20,
@@ -9564,6 +9783,7 @@ mod tests {
                     approach_power_permille: 600,
                     approach_floor_power_permille: 360,
                     approach_damping_exponent_permille: 700,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 380,
                     hold_reheat_power_permille: 520,
                     hold_entry_centi_c: 10,
@@ -9617,6 +9837,7 @@ mod tests {
                     approach_power_permille: 361,
                     approach_floor_power_permille: 249,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 158,
                     hold_reheat_power_permille: 296,
                     hold_entry_centi_c: 25,
@@ -9670,6 +9891,7 @@ mod tests {
                     approach_power_permille: 361,
                     approach_floor_power_permille: 249,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 158,
                     hold_reheat_power_permille: 296,
                     hold_entry_centi_c: 25,
@@ -9701,7 +9923,7 @@ mod tests {
     }
 
     #[test]
-    fn heater_approach_predictive_coast_uses_projection_when_filter_lags_actual_plate() {
+    fn heater_approach_projection_keeps_reheat_when_filter_lags_actual_plate() {
         let mut controller = HeaterController::new();
         controller.last_target_temp_c = 60;
         controller.phase = HeaterControlPhase::Approach;
@@ -9724,6 +9946,7 @@ mod tests {
                     approach_power_permille: 520,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_540,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 90,
                     hold_reheat_power_permille: 140,
                     hold_entry_centi_c: 20,
@@ -9752,7 +9975,7 @@ mod tests {
         let snapshot = controller.update(60, 59.0, true, Some(profile));
         assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
         assert!(snapshot.control_error_c > 2.0);
-        assert_eq!(snapshot.duty_percent, 0);
+        assert!(snapshot.duty_percent >= 14);
     }
 
     #[test]
@@ -9780,6 +10003,7 @@ mod tests {
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 280,
                     hold_reheat_power_permille: 340,
                     hold_entry_centi_c: 200,
@@ -9831,6 +10055,7 @@ mod tests {
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 280,
                     hold_reheat_power_permille: 340,
                     hold_entry_centi_c: 200,
@@ -9890,6 +10115,7 @@ mod tests {
                     approach_power_permille: 940,
                     approach_floor_power_permille: 760,
                     approach_damping_exponent_permille: 250,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 720,
                     hold_reheat_power_permille: 880,
                     hold_entry_centi_c: 8,
@@ -9935,6 +10161,7 @@ mod tests {
             approach_power_permille: 900,
             approach_floor_power_permille: 740,
             approach_damping_exponent: 1.0,
+            approach_tail_window_c: 0.0,
             hold_power_permille: 820,
             hold_reheat_power_permille: 900,
             hold_entry_error_c: 0.08,
@@ -9951,7 +10178,7 @@ mod tests {
         };
 
         assert_eq!(
-            controller.apply_under_target_reheat_floor(0, 0.4, target),
+            controller.apply_under_target_reheat_floor(0, 0.4, 0.4, target),
             90
         );
     }
@@ -9964,6 +10191,7 @@ mod tests {
             approach_power_permille: 900,
             approach_floor_power_permille: 740,
             approach_damping_exponent: 1.0,
+            approach_tail_window_c: 0.0,
             hold_power_permille: 740,
             hold_reheat_power_permille: 900,
             hold_entry_error_c: 0.08,
@@ -10008,6 +10236,7 @@ mod tests {
                     approach_power_permille: 900,
                     approach_floor_power_permille: 740,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 740,
                     hold_reheat_power_permille: 900,
                     hold_entry_centi_c: 8,
@@ -10041,6 +10270,64 @@ mod tests {
     }
 
     #[test]
+    fn heater_hold_does_not_reheat_into_predicted_overshoot() {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 60;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = control_cycles_from_profile_ticks(4);
+        controller.filtered_temp_c = Some(59.5);
+        controller.previous_filtered_temp_c = Some(59.4);
+        controller.previous_measured_temp_c = Some(59.5);
+
+        let profile = ThermalControlProfile {
+            settings: ThermalControlProfileSettings {
+                temp_filter_alpha: 1.0,
+                ..ThermalControlProfileSettings::default()
+            },
+            points: [
+                Some(ThermalControlProfilePoint {
+                    target_temp_c: 60,
+                    brake_distance_centi_c: 1_050,
+                    warmup_power_permille: 1_000,
+                    approach_power_permille: 600,
+                    approach_floor_power_permille: 300,
+                    approach_damping_exponent_permille: 4_000,
+                    approach_tail_window_centi_c: 375,
+                    hold_power_permille: 170,
+                    hold_reheat_power_permille: 275,
+                    hold_entry_centi_c: 70,
+                    hold_exit_centi_c: 300,
+                    hold_on_centi_c: 30,
+                    hold_off_centi_c: 70,
+                    overshoot_cutoff_centi_c: 100,
+                    hold_kp_permille_per_c: 32,
+                    hold_ki_permille_per_c_tick: 1,
+                    hold_blend_ticks: 3,
+                    approach_lead_ticks: 5,
+                    hold_lead_ticks: 4,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+
+        assert_eq!(profile.control_target(60).hold_lead_ticks, 4);
+        let snapshot = controller.update(60, 59.8, true, Some(profile));
+
+        assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
+        assert!(snapshot.error_c > 0.0);
+        assert!(snapshot.filtered_slope_c_per_s > 0.0);
+        assert_eq!(snapshot.duty_percent, 0);
+    }
+
+    #[test]
     fn heater_approach_under_target_zero_output_uses_approach_floor() {
         let controller = HeaterController {
             phase: HeaterControlPhase::Approach,
@@ -10052,6 +10339,7 @@ mod tests {
             approach_power_permille: 900,
             approach_floor_power_permille: 740,
             approach_damping_exponent: 1.0,
+            approach_tail_window_c: 0.0,
             hold_power_permille: 620,
             hold_reheat_power_permille: 680,
             hold_entry_error_c: 0.08,
@@ -10068,8 +10356,47 @@ mod tests {
         };
 
         assert_eq!(
-            controller.apply_under_target_reheat_floor(0, 0.2, target),
+            controller.apply_under_target_reheat_floor(0, 0.2, 0.0, target),
             74
+        );
+    }
+
+    #[test]
+    fn approach_tail_window_tapers_only_the_near_target_floor() {
+        let target = ThermalControlTarget {
+            brake_distance_c: 4.5,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 900,
+            approach_floor_power_permille: 500,
+            approach_damping_exponent: 1.0,
+            approach_tail_window_c: 2.0,
+            hold_power_permille: 140,
+            hold_reheat_power_permille: 180,
+            hold_entry_error_c: 0.5,
+            hold_exit_error_c: 0.8,
+            hold_on_error_c: 0.3,
+            hold_off_error_c: 1.0,
+            overshoot_cutoff_c: 1.0,
+            hold_kp_permille_per_c: 28.0,
+            hold_ki_permille_per_c_tick: 1.0,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 4,
+            hold_lead_ticks: 8,
+            settings: ThermalControlProfileSettings::default(),
+        };
+
+        assert_eq!(approach_sustain_floor_permille(target, 3.0), 500);
+        assert_eq!(approach_sustain_floor_permille(target, 1.5), 340);
+        assert_eq!(approach_sustain_floor_permille(target, 0.5), 180);
+        assert_eq!(
+            approach_sustain_floor_permille(
+                ThermalControlTarget {
+                    approach_tail_window_c: 0.0,
+                    ..target
+                },
+                0.5,
+            ),
+            500
         );
     }
 
@@ -10113,7 +10440,7 @@ mod tests {
         );
         assert_eq!(
             heater_adjustable_request_mv(34, true, 10_000, 12_000, 6_100, 20_000),
-            heater_request_mv_from_power_percent(34, 6_100, 20_000)
+            10_500
         );
     }
 
@@ -10173,6 +10500,7 @@ mod tests {
                     approach_power_permille: 400,
                     approach_floor_power_permille: 220,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 200,
                     hold_reheat_power_permille: 240,
                     hold_entry_centi_c: 20,
@@ -10193,6 +10521,7 @@ mod tests {
                     approach_power_permille: 300,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 260,
                     hold_reheat_power_permille: 420,
                     hold_entry_centi_c: 10,
@@ -10246,6 +10575,7 @@ mod tests {
                     approach_power_permille: 300,
                     approach_floor_power_permille: 240,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 240,
                     hold_reheat_power_permille: 360,
                     hold_entry_centi_c: 18,
@@ -10266,6 +10596,7 @@ mod tests {
                     approach_power_permille: 260,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 260,
                     hold_reheat_power_permille: 520,
                     hold_entry_centi_c: 10,
@@ -10319,6 +10650,7 @@ mod tests {
                     approach_power_permille: 400,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 200,
                     hold_reheat_power_permille: 220,
                     hold_entry_centi_c: 25,
@@ -10339,6 +10671,7 @@ mod tests {
                     approach_power_permille: 260,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
                     hold_power_permille: 260,
                     hold_reheat_power_permille: 520,
                     hold_entry_centi_c: 10,
@@ -10399,16 +10732,23 @@ mod tests {
     }
 
     #[test]
-    fn adjustable_pps_voltage_changes_blank_heater_gate() {
-        assert!(should_blank_heater_for_adjustable_request(
+    fn adjustable_pps_same_mode_voltage_changes_keep_heater_gate_active() {
+        assert!(!should_blank_heater_for_adjustable_request(
             14_000, 14_100, false
         ));
-        assert!(should_blank_heater_for_adjustable_request(
+        assert!(!should_blank_heater_for_adjustable_request(
             14_100, 14_000, false
         ));
         assert!(should_blank_heater_for_adjustable_request(
             14_000, 14_100, true
         ));
+    }
+
+    #[test]
+    fn adjustable_pps_same_mode_request_restores_an_active_gate_before_returning() {
+        assert!(should_restore_gate_after_adjustable_request(false, 100));
+        assert!(!should_restore_gate_after_adjustable_request(false, 0));
+        assert!(!should_restore_gate_after_adjustable_request(true, 100));
     }
 
     #[test]
@@ -10421,14 +10761,26 @@ mod tests {
         assert!(material_request_mv.abs_diff(10_000) >= HEATER_PPS_REQUEST_HYSTERESIS_MV);
         assert_eq!(
             heater_adjustable_request_mv(60, true, 10_000, 12_000, 6_100, 14_000),
-            material_request_mv
+            10_500
         );
     }
 
     #[test]
-    fn adjustable_pps_downstep_uses_longer_settle_window() {
-        assert_eq!(adjustable_request_settle_ms(17_100, 12_700), 500);
-        assert_eq!(adjustable_request_settle_ms(12_700, 13_200), 150);
+    fn adjustable_pps_request_transition_distinguishes_same_mode_and_path_changes() {
+        assert_eq!(pps_request_transition_ms(false), 25);
+        assert_eq!(pps_request_transition_ms(true), 275);
+    }
+
+    #[test]
+    fn adjustable_pps_request_ramps_in_500mv_steps() {
+        assert_eq!(
+            heater_adjustable_request_mv(100, true, 10_000, 12_000, 6_100, 20_000),
+            10_500
+        );
+        assert_eq!(
+            heater_adjustable_request_mv(1, true, 12_000, 12_000, 6_100, 20_000),
+            11_500
+        );
     }
 
     #[test]
@@ -10550,6 +10902,19 @@ mod tests {
             effective_auto_adjustable_working_floor_mv(settings, 5_000, 6_000),
             6_000
         );
+
+        let minimum_settings = ThermalControlProfileSettings {
+            auto_adjustable_working_floor_mv: 5_000,
+            ..ThermalControlProfileSettings::default()
+        };
+        assert_eq!(
+            effective_auto_adjustable_working_floor_mv(minimum_settings, 5_000, 20_000),
+            5_000
+        );
+        assert_eq!(
+            effective_auto_adjustable_working_floor_mv(minimum_settings, 9_000, 20_000),
+            9_000
+        );
     }
 
     #[test]
@@ -10617,6 +10982,7 @@ mod tests {
                 current_mode: None,
                 current_request_mv: 12_000,
                 settle_until_ms: None,
+                next_request_at_ms: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
             }
@@ -10670,6 +11036,7 @@ mod tests {
                 current_mode: None,
                 current_request_mv: 12_000,
                 settle_until_ms: None,
+                next_request_at_ms: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
             }
@@ -10709,6 +11076,7 @@ mod tests {
                 current_mode: None,
                 current_request_mv: 12_000,
                 settle_until_ms: None,
+                next_request_at_ms: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
             }
@@ -10748,6 +11116,7 @@ mod tests {
                 current_mode: None,
                 current_request_mv: 12_000,
                 settle_until_ms: None,
+                next_request_at_ms: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
             }
@@ -10780,6 +11149,7 @@ mod tests {
                 current_mode: None,
                 current_request_mv: 15_000,
                 settle_until_ms: None,
+                next_request_at_ms: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
             }
@@ -10955,14 +11325,22 @@ mod tests {
 
     #[test]
     fn rtd_oversampling_accepts_partial_batch_with_enough_valid_conversions() {
-        let mean_mv = rtd_fractional_mean_mv(21_609, 24).unwrap();
+        let valid_samples = RTD_MIN_VALID_SAMPLE_COUNT;
+        let sum_mv = (900 * valid_samples) + ((valid_samples * 3) / 8);
+        let mean_mv = rtd_fractional_mean_mv(sum_mv as u32, valid_samples).unwrap();
 
         assert!((mean_mv - 900.375).abs() < 0.001);
     }
 
     #[test]
     fn rtd_oversampling_rejects_batch_below_valid_conversion_threshold() {
-        assert_eq!(rtd_fractional_mean_mv(20_700, 23), None);
+        assert_eq!(
+            rtd_fractional_mean_mv(
+                900 * RTD_MIN_VALID_SAMPLE_COUNT as u32,
+                RTD_MIN_VALID_SAMPLE_COUNT - 1
+            ),
+            None
+        );
     }
 
     #[test]
@@ -11090,79 +11468,6 @@ mod tests {
         clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
         assert_eq!(latest_temp_c, 0.0);
         assert_eq!(latest_temp_i16, 0);
-    }
-
-    #[test]
-    fn runtime_rearm_clears_only_recovered_latched_faults() {
-        assert!(should_clear_runtime_fault_latch(
-            true,
-            None,
-            Some(HeaterFaultReason::SensorDiscontinuity)
-        ));
-        assert!(!should_clear_runtime_fault_latch(
-            true,
-            Some(HeaterFaultReason::SensorOpen),
-            Some(HeaterFaultReason::SensorOpen)
-        ));
-        assert!(!should_clear_runtime_fault_latch(
-            false,
-            None,
-            Some(HeaterFaultReason::SensorDiscontinuity)
-        ));
-    }
-
-    #[test]
-    fn runtime_temp_guard_rejects_one_discontinuity_and_accepts_recovery() {
-        let settings = ThermalControlProfileSettings {
-            measurement_spike_reject_c: 3.0,
-            ..ThermalControlProfileSettings::default()
-        };
-        let mut guard = RuntimeTempSampleGuard::default();
-
-        let rejected = guard.evaluate(Some(71.6), 272.9, true, settings);
-        assert_eq!(rejected, RuntimeTempSampleDecision::Rejected(71.6));
-
-        let recovered = guard.evaluate(Some(71.6), 72.4, true, settings);
-        assert_eq!(recovered, RuntimeTempSampleDecision::Accepted(72.4));
-    }
-
-    #[test]
-    fn runtime_temp_guard_faults_on_persistent_same_direction_discontinuity() {
-        let settings = ThermalControlProfileSettings {
-            measurement_spike_reject_c: 3.0,
-            ..ThermalControlProfileSettings::default()
-        };
-        let mut guard = RuntimeTempSampleGuard::default();
-
-        let first = guard.evaluate(Some(37.3), 46.1, true, settings);
-        assert_eq!(first, RuntimeTempSampleDecision::Rejected(37.3));
-
-        let second = guard.evaluate(Some(37.3), 49.2, true, settings);
-        assert_eq!(second, RuntimeTempSampleDecision::Fault(37.3));
-    }
-
-    #[test]
-    fn runtime_temp_guard_accepts_valid_fast_heating_below_limit() {
-        let settings = ThermalControlProfileSettings {
-            measurement_spike_reject_c: 3.0,
-            ..ThermalControlProfileSettings::default()
-        };
-        let mut guard = RuntimeTempSampleGuard::default();
-
-        let accepted = guard.evaluate(Some(37.3), 39.9, true, settings);
-        assert_eq!(accepted, RuntimeTempSampleDecision::Accepted(39.9));
-    }
-
-    #[test]
-    fn runtime_temp_guard_accepts_large_cooling_jump_when_heater_is_disabled() {
-        let settings = ThermalControlProfileSettings {
-            measurement_spike_reject_c: 3.0,
-            ..ThermalControlProfileSettings::default()
-        };
-        let mut guard = RuntimeTempSampleGuard::default();
-
-        let accepted = guard.evaluate(Some(176.4), 22.9, false, settings);
-        assert_eq!(accepted, RuntimeTempSampleDecision::Accepted(22.9));
     }
 
     #[test]

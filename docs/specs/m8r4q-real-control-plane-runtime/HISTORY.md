@@ -2,7 +2,7 @@
 
 ## 2026-07-11
 
-- 最终完整 ladder 在 60°C 首点捕获 RTD discontinuity：`rtdRawAdcMv` 在约 `0.4s` 内从 `985` 跳到 `1014`，旧 runtime 限幅把该阶跃摊成持续假升温并最终报告 `20.18°C` 假过冲。首个超限样本现在只保持上一有效值，连续第二个同向超限样本生成 `sensor-discontinuity` fault-latch 并停热。控制器同时把经实际/滤波温度共同确认的升温斜率与 `approachLeadTicks` 用于 warmup 提前交接，并受 `warmupReenterCentiC` 滞回约束；参数仍通过 API/EEPROM 控制。
+- 最终完整 ladder 在 60°C 首点捕获 RTD 原始读数突变：`rtdRawAdcMv` 在约 `0.4s` 内从 `985` 跳到 `1014`，旧 runtime 限幅把该阶跃摊成持续假升温并最终报告 `20.18°C` 假过冲。运行时已删除该温度拒绝路径，所有有效样本直接进入控制环；控制器同时把经实际/滤波温度共同确认的升温斜率与 `approachLeadTicks` 用于 warmup 提前交接，并受 `warmupReenterCentiC` 滞回约束；参数仍通过 API/EEPROM 控制。
 - 固件状态温度不再从前面板 deci-Celsius 值反推；`boardTempCenti/currentTempC` 直接由内部 RTD 浮点测量值发布到 `0.01°C`。新固件在授权端口烧录后回读 `22.71°C / boardTempCenti=2271`，saved profile 与 `6100mV` working floor 同时完成重启恢复。
 
 ## 2026-07-10
@@ -25,7 +25,7 @@
 
 ## 2026-07-09
 
-- firmware runtime 温度拒跳已从“整段复用上一帧温度”改为“按 `measurementSpikeRejectCentiC` 限制单采样最大允许步进”。这直接修掉了真机 `220°C` 开发 HIL 中出现的一个实 bug：`rtdRawAdcMv` 继续上升，而 `currentTempC` 在加热使能期间卡死不动。
+- firmware runtime 温度拒跳路径已移除。真机 `220°C` 开发 HIL 中 `rtdRawAdcMv` 继续上升而 `currentTempC` 卡死不动的问题不再通过温度限幅或趋势故障处理；有效样本直接用于控制，保留的硬 RTD 故障仅为开路、短路、ADC 读失败与过温。
 - 同日真实 flash 还确认了一个 host-side artifact 边界：当前 worktree 的新固件在 `target/xtensa-esp32s3-none-elf/release/flux-purr`，对应 `artifactId=local-esp32s3-release-root-target`；旧的 `firmware/target/...` `local-esp32s3-release` 是陈旧产物，不带最新 `heaterControlPhase` status 字段，不能再作为本轮 HIL 的验收镜像。
 - 使用正确 artifact 后，聚焦 `220°C` 的真实 HIL 仍未达标。最佳 run `thermal-1783608810927-serial-303a-1001-d0-cf-13-08-a1-48` 与 `thermal-1783609283479-serial-303a-1001-d0-cf-13-08-a1-48` 都得到 `maxOvershootC=1.0`、`holdPeakToPeakC=3.4`；把 `holdPower / holdReheat / holdExit / holdKp` 一起抬高的 run `thermal-1783609087433-serial-303a-1001-d0-cf-13-08-a1-48` 反而恶化到 `maxOvershootC=2.3`、`holdPeakToPeakC=4.7`。
 - 去掉 `220°C` 点位 `approachLeadTicks` 的候选也没有形成可接受改进。run `thermal-1783609472418-serial-303a-1001-d0-cf-13-08-a1-48` 在 `132.3°C` 附近长时间平台，期间 `heaterOutputPercent=98`、`heaterPhysicalOutputPercent=100`、`pdContractMv≈17500`，但温度与 RTD 原始 ADC 都基本不再上升，说明当前高温功率请求映射在某些候选下仍会落入明显的供热平台。

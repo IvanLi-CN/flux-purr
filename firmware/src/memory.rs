@@ -41,9 +41,9 @@ pub const THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT: u16 = 0;
 pub const THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT: u16 = 0;
 pub const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT: u16 = 1_000;
 pub const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
-pub const THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT: u16 = 300;
+pub const THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
 pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
-pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = 6_100;
+pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = 5_000;
 pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX: u16 = 28_000;
 pub const THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT: u16 = 200;
 pub const THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
@@ -61,15 +61,17 @@ const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY: usize = 10 * 2;
 const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_APPROACH_MIN_RATIO: usize = 11 * 2;
 const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_LEAD_TICKS: usize = 14 * 2;
 const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_HOLD_REHEAT: usize = 15 * 2;
-const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT: usize = 16 * 2;
-const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_WORKING_FLOOR: usize = 17 * 2;
-const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN: usize = 18 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_PREVIOUS_FIELD: usize = 16 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS: usize = 18 * 2;
+const THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN: usize = 17 * 2;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY: usize = 8;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_LEAD_TICKS: usize = 28;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_HOLD_REHEAT: usize = 30;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP: usize = 32;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN: usize = 34;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON: usize = 36;
+const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_VALUE_MASK: u16 = 0x0fff;
+const THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C: u16 = 25;
 const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_LEGACY: usize =
     THERMAL_CONTROL_PROFILE_MAX_POINTS * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY;
 const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_LEAD_TICKS: usize =
@@ -177,6 +179,7 @@ pub struct ThermalControlProfilePointConfig {
     pub approach_power_permille: u16,
     pub approach_floor_power_permille: u16,
     pub approach_damping_exponent_permille: u16,
+    pub approach_tail_window_centi_c: u16,
     pub hold_power_permille: u16,
     pub hold_reheat_power_permille: u16,
     pub hold_entry_centi_c: u16,
@@ -214,7 +217,6 @@ pub struct ThermalControlProfileSettingsConfig {
     pub hold_reheat_power_permille: u16,
     pub approach_lead_ticks: u16,
     pub hold_lead_ticks: u16,
-    pub measurement_spike_reject_centi_c: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
 }
@@ -295,8 +297,6 @@ impl Default for ThermalControlProfileSettingsConfig {
             hold_reheat_power_permille: THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
             approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
             hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
-            measurement_spike_reject_centi_c:
-                THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT,
             auto_adjustable_working_floor_mv:
                 THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT,
             heater_current_reserve_ma: THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT,
@@ -547,8 +547,6 @@ fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
         .settings
         .hold_lead_ticks
         .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
-    config.settings.measurement_spike_reject_centi_c =
-        config.settings.measurement_spike_reject_centi_c.min(10_000);
     config.settings.auto_adjustable_working_floor_mv =
         config.settings.auto_adjustable_working_floor_mv.clamp(
             THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
@@ -579,6 +577,9 @@ fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
                     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
                 )
             },
+            approach_tail_window_centi_c: point
+                .approach_tail_window_centi_c
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
             hold_power_permille: point.hold_power_permille.min(1_000),
             hold_reheat_power_permille: point.hold_reheat_power_permille.min(1_000),
             hold_entry_centi_c: point.hold_entry_centi_c.min(5_000),
@@ -1449,6 +1450,19 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
                 )
             })
             .unwrap_or(0);
+        let approach_tail_window = point
+            .map(|point| {
+                point
+                    .approach_tail_window_centi_c
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX)
+            })
+            .unwrap_or(0);
+        let packed_approach_damping = (approach_damping_exponent
+            & THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_VALUE_MASK)
+            | (((approach_tail_window
+                + THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C / 2)
+                / THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C)
+                << 12);
         let hold_power = point
             .map(|point| point.hold_power_permille.min(1_000))
             .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
@@ -1494,7 +1508,7 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         out[cursor + 4..cursor + 6].copy_from_slice(&warmup_power.to_le_bytes());
         out[cursor + 6..cursor + 8].copy_from_slice(&approach_power.to_le_bytes());
         out[cursor + 8..cursor + 10].copy_from_slice(&approach_floor_power.to_le_bytes());
-        out[cursor + 10..cursor + 12].copy_from_slice(&approach_damping_exponent.to_le_bytes());
+        out[cursor + 10..cursor + 12].copy_from_slice(&packed_approach_damping.to_le_bytes());
         out[cursor + 12..cursor + 14].copy_from_slice(&hold_power.to_le_bytes());
         out[cursor + 14..cursor + 16].copy_from_slice(&hold_reheat_power.to_le_bytes());
         out[cursor + 16..cursor + 18].copy_from_slice(&hold_entry.to_le_bytes());
@@ -1516,7 +1530,22 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
 fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     let mut config = ThermalControlProfileConfig::default();
     let mut cursor = 0;
-    let point_payload_len = if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+    // Preserve the preceding on-device profile layout so an upgrade does not shift the
+    // working-voltage floor or current reserve into the wrong fields.
+    let point_payload_len = if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
         && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
             % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
             == 0
@@ -1692,12 +1721,15 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
             if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
                 || point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
             {
+                let packed_approach_damping =
+                    u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]);
                 (
                     u16::from_le_bytes([bytes[cursor + 8], bytes[cursor + 9]]),
-                    u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]).clamp(
-                        100,
-                        THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
-                    ),
+                    (packed_approach_damping & THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_VALUE_MASK)
+                        .clamp(
+                            100,
+                            THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+                        ),
                     u16::from_le_bytes([bytes[cursor + 12], bytes[cursor + 13]]),
                 )
             } else if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP {
@@ -1822,6 +1854,13 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
                 config.settings.hold_lead_ticks,
             )
         };
+        let approach_tail_window_centi_c =
+            if point_payload_len == THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON {
+                (u16::from_le_bytes([bytes[cursor + 10], bytes[cursor + 11]]) >> 12)
+                    * THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C
+            } else {
+                0
+            };
         *slot = if target == PRESET_NONE_WIRE_VALUE
             || brake_distance == CALIBRATION_NONE_WIRE_VALUE
             || approach_power == CALIBRATION_NONE_WIRE_VALUE
@@ -1837,6 +1876,7 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
                 approach_power_permille: approach_power,
                 approach_floor_power_permille: approach_floor_power,
                 approach_damping_exponent_permille,
+                approach_tail_window_centi_c,
                 hold_power_permille: hold_power,
                 hold_reheat_power_permille,
                 hold_entry_centi_c,
@@ -1858,6 +1898,14 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
 
 #[allow(clippy::manual_is_multiple_of)]
 fn is_supported_thermal_control_profile_len(len: usize) -> bool {
+    let previous_settings_with_current_points = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            == 0
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
     let current_with_settings = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
         && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
             % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON
@@ -1872,12 +1920,12 @@ fn is_supported_thermal_control_profile_len(len: usize) -> bool {
         && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN)
             / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
             <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
-    let previous_current_with_previous_settings = len
-        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT
-        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT)
+    let previous_current_with_previous_field = len
+        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_PREVIOUS_FIELD
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_PREVIOUS_FIELD)
             % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
             == 0
-        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT)
+        && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_PREVIOUS_FIELD)
             / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN
             <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
     let current_with_previous_points = len >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
@@ -1941,9 +1989,10 @@ fn is_supported_thermal_control_profile_len(len: usize) -> bool {
     let previous_current_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN;
     let current_previous_points_only =
         len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_WARMUP;
-    current_with_settings
+    previous_settings_with_current_points
+        || current_with_settings
         || previous_current_with_settings
-        || previous_current_with_previous_settings
+        || previous_current_with_previous_field
         || current_with_previous_points
         || hold_reheat_with_matching_points
         || lead_ticks_with_matching_points
@@ -1990,7 +2039,6 @@ fn encode_thermal_control_profile_settings(
         settings.hold_reheat_power_permille,
         settings.approach_lead_ticks,
         settings.hold_lead_ticks,
-        settings.measurement_spike_reject_centi_c,
         settings.auto_adjustable_working_floor_mv,
         settings.heater_current_reserve_ma,
     ];
@@ -2011,6 +2059,14 @@ fn decode_thermal_control_profile_settings(bytes: &[u8]) -> ThermalControlProfil
     }
     let has_approach_min_ratio =
         bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_APPROACH_MIN_RATIO;
+    // The former 17-word layout stored a removed field before the working floor. Current
+    // layouts have a 5V-or-higher floor followed by a <=1000mA reserve, which keeps 5.0-6.0V
+    // current records distinguishable without changing the persisted record version.
+    let previous_layout_with_extra_field = bytes.len()
+        == THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+        && (values[15] < THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN
+            || (values[15] < 6_100
+                && values[16] > THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX));
     ThermalControlProfileSettingsConfig {
         temp_filter_alpha_permille: values[0],
         warmup_reenter_centi_c: values[1],
@@ -2067,25 +2123,30 @@ fn decode_thermal_control_profile_settings(bytes: &[u8]) -> ThermalControlProfil
         } else {
             THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT
         },
-        measurement_spike_reject_centi_c: if bytes.len()
-            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_SPIKE_REJECT
-        {
-            values[15].min(10_000)
-        } else {
-            THERMAL_CONTROL_PROFILE_MEASUREMENT_SPIKE_REJECT_CENTI_C_DEFAULT
-        },
         auto_adjustable_working_floor_mv: if bytes.len()
-            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_WORKING_FLOOR
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS
+            || previous_layout_with_extra_field
         {
             values[16].clamp(
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
+                THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
+            )
+        } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN {
+            values[15].clamp(
                 THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
                 THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
             )
         } else {
             THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT
         },
-        heater_current_reserve_ma: if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN {
+        heater_current_reserve_ma: if bytes.len()
+            >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS
+        {
             values[17].min(THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX)
+        } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+            && !previous_layout_with_extra_field
+        {
+            values[16].min(THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX)
         } else {
             THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT
         },
@@ -2204,6 +2265,7 @@ mod tests {
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille:
                 THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 220,
             hold_reheat_power_permille: THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
             hold_entry_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
@@ -2226,6 +2288,7 @@ mod tests {
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille:
                 THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+            approach_tail_window_centi_c: 0,
             hold_power_permille: 180,
             hold_reheat_power_permille: THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
             hold_entry_centi_c: THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
@@ -2302,6 +2365,7 @@ mod tests {
                 approach_floor_power_permille: 180,
                 approach_damping_exponent_permille:
                     THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                approach_tail_window_centi_c: 0,
                 hold_power_permille: 180,
                 hold_reheat_power_permille:
                     THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT,
@@ -2318,6 +2382,85 @@ mod tests {
                 hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
             })
         );
+    }
+
+    #[test]
+    fn thermal_profile_tail_window_roundtrips_and_old_point_layout_defaults_to_zero() {
+        let mut config = sample_config();
+        config.active_thermal_control_profile.points[0]
+            .as_mut()
+            .expect("sample profile point")
+            .approach_tail_window_centi_c = 175;
+
+        let mut current = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+        let current_len =
+            encode_thermal_control_profile(&config.active_thermal_control_profile, &mut current);
+        let decoded_current = decode_thermal_control_profile(&current[..current_len]);
+        assert_eq!(
+            decoded_current.points[0]
+                .expect("current point")
+                .approach_tail_window_centi_c,
+            175
+        );
+
+        let mut legacy = current;
+        let damping_offset = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN + 10;
+        legacy[damping_offset..damping_offset + 2].copy_from_slice(&1_000u16.to_le_bytes());
+        let decoded_legacy = decode_thermal_control_profile(&legacy[..current_len]);
+        assert_eq!(
+            decoded_legacy.points[0]
+                .expect("legacy point")
+                .approach_tail_window_centi_c,
+            0
+        );
+    }
+
+    #[test]
+    fn thermal_profile_previous_layout_keeps_floor_and_reserve() {
+        let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS];
+        bytes[16 * 2..17 * 2].copy_from_slice(&7_200u16.to_le_bytes());
+        bytes[17 * 2..18 * 2].copy_from_slice(&350u16.to_le_bytes());
+
+        let decoded = decode_thermal_control_profile(&bytes);
+        assert_eq!(decoded.settings.auto_adjustable_working_floor_mv, 7_200);
+        assert_eq!(decoded.settings.heater_current_reserve_ma, 350);
+
+        let mut encoded = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+        let encoded_len = encode_thermal_control_profile(&decoded, &mut encoded);
+        assert_eq!(encoded_len, THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN);
+        assert_eq!(
+            u16::from_le_bytes([encoded[15 * 2], encoded[15 * 2 + 1]]),
+            7_200
+        );
+        assert_eq!(
+            u16::from_le_bytes([encoded[16 * 2], encoded[16 * 2 + 1]]),
+            350
+        );
+    }
+
+    #[test]
+    fn thermal_profile_previous_short_layout_keeps_working_floor() {
+        let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN];
+        bytes[15 * 2..16 * 2].copy_from_slice(&300u16.to_le_bytes());
+        bytes[16 * 2..17 * 2].copy_from_slice(&7_400u16.to_le_bytes());
+
+        let decoded = decode_thermal_control_profile(&bytes);
+        assert_eq!(decoded.settings.auto_adjustable_working_floor_mv, 7_400);
+        assert_eq!(
+            decoded.settings.heater_current_reserve_ma,
+            THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT
+        );
+    }
+
+    #[test]
+    fn thermal_profile_current_short_layout_preserves_5v_floor_and_reserve() {
+        let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN];
+        bytes[15 * 2..16 * 2].copy_from_slice(&5_000u16.to_le_bytes());
+        bytes[16 * 2..17 * 2].copy_from_slice(&350u16.to_le_bytes());
+
+        let decoded = decode_thermal_control_profile(&bytes);
+        assert_eq!(decoded.settings.auto_adjustable_working_floor_mv, 5_000);
+        assert_eq!(decoded.settings.heater_current_reserve_ma, 350);
     }
 
     #[test]
