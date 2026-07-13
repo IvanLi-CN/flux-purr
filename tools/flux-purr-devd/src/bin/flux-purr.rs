@@ -3049,6 +3049,7 @@ async fn collect_batch_thermal_self_test(
                     client,
                     &resolved,
                     &lease.lease_id,
+                    args.profile_mode,
                     &profile,
                     target_temp_c,
                     &heater_parameters,
@@ -3363,6 +3364,7 @@ async fn collect_single_thermal_self_test(
                     client,
                     &resolved,
                     &lease.lease_id,
+                    args.profile_mode,
                     &candidate_profile_value,
                     target_temp_c,
                     &heater_parameters,
@@ -3451,6 +3453,7 @@ async fn collect_single_thermal_self_test(
                         client,
                         &resolved,
                         &lease.lease_id,
+                        args.profile_mode,
                         &candidate_profile_value,
                         target_temp_c,
                         &heater_parameters,
@@ -4900,6 +4903,17 @@ fn tune_thermal_candidate_point(
                 1_000,
             );
         }
+        if result.target_temp_c <= 120
+            && residual_c > 5.0
+            && analysis
+                .approach_median_slope_c_per_s
+                .is_some_and(|slope_c_per_s| slope_c_per_s > 2.0)
+        {
+            tuned.warmup_power_permille = tuned
+                .warmup_power_permille
+                .saturating_sub(250)
+                .max(tuned.approach_power_permille);
+        }
         tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(3).max(1);
         tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_sub(4).max(8);
     } else if hold_ripple {
@@ -5724,6 +5738,7 @@ async fn preview_and_prepare_thermal_self_test_target(
     client: &Client,
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
+    profile_mode: ThermalProfileMode,
     profile: &Value,
     target_temp_c: i16,
     heater_parameters: &Value,
@@ -5734,14 +5749,10 @@ async fn preview_and_prepare_thermal_self_test_target(
         lease_id,
         Method::PUT,
         "/runtime",
-        Some(json!({
-            "thermalControlProfile": {
-                "op": "preview",
-                "profile": profile,
-            }
-        })),
+        Some(thermal_profile_preview_runtime_body(profile_mode, profile.clone())),
     )
     .await?;
+    verify_thermal_profile_mode_readback(&preview_status, profile_mode)?;
     if !require_status_bool(&preview_status, "thermalControlProfilePreview")? {
         return Err("thermal profile preview did not enable preview mode".into());
     }
@@ -5749,6 +5760,47 @@ async fn preview_and_prepare_thermal_self_test_target(
     arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
     let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
     verify_thermal_control_readback(&status, heater_parameters, "preview")
+}
+
+fn verify_thermal_profile_mode_readback(
+    status: &Value,
+    expected_mode: ThermalProfileMode,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let expected_mode = expected_mode.as_str();
+    let expected_bank = match expected_mode {
+        "100w" => "pps5a",
+        "65w" => "pps3a",
+        "auto" => status
+            .get("thermalProfileResolvedBank")
+            .and_then(Value::as_str)
+            .ok_or("status missing thermalProfileResolvedBank")?,
+        _ => return Err(format!("unsupported thermal profile mode: {expected_mode}").into()),
+    };
+    if status.get("thermalProfileMode").and_then(Value::as_str) != Some(expected_mode) {
+        return Err(format!(
+            "thermal profile mode readback mismatch: expected {expected_mode}, got {}",
+            status
+                .get("thermalProfileMode")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+        )
+        .into());
+    }
+    if status
+        .get("thermalProfileResolvedBank")
+        .and_then(Value::as_str)
+        != Some(expected_bank)
+    {
+        return Err(format!(
+            "thermal profile bank readback mismatch: expected {expected_bank}, got {}",
+            status
+                .get("thermalProfileResolvedBank")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn verify_thermal_control_readback(
@@ -6707,9 +6759,22 @@ fn isolapurr_power_config_value_matches_manual(
             .get("manual")
             .and_then(Value::as_object)
             .is_some_and(|manual| {
-                json_u64_any(manual, &["voltage_mv", "voltageMv"]) == Some(u64::from(voltage_mv))
-                    && json_u64_any(manual, &["current_limit_ma", "currentLimitMa"])
-                        == Some(u64::from(current_limit_ma))
+                let manual_current_ma =
+                    json_u64_any(manual, &["current_limit_ma", "currentLimitMa"]);
+                let current_matches = manual_current_ma == Some(u64::from(current_limit_ma))
+                    // A 100W source cannot sustain 21V * 5A (105W). The released
+                    // IsolaPurr firmware quantizes the resulting 100W limit to 4.75A.
+                    || (voltage_mv == 21_000
+                        && current_limit_ma == 5_000
+                        && manual_current_ma == Some(4_750)
+                        && isolapurr_power_config_has_thermal_capability(
+                            config,
+                            THERMAL_SOURCE_100W_POWER_WATTS,
+                            true,
+                        ));
+                json_u64_any(manual, &["voltage_mv", "voltageMv"])
+                    == Some(u64::from(voltage_mv))
+                    && current_matches
                     && matches!(
                         json_str_any(manual, &["usb_c_path_mode", "usbCPathMode"]),
                         Some("force" | "forced-on")
@@ -8774,6 +8839,36 @@ mod tests {
     }
 
     #[test]
+    fn thermal_fast_low_temp_residual_reduces_warmup_power() {
+        let mut previous = thermal_default_target_point(60);
+        previous.warmup_power_permille = 1_000;
+        previous.approach_power_permille = 500;
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 60,
+                rise_time_ms: 12_000,
+                max_overshoot_c: 9.0,
+                hold_peak_to_peak_c: 9.0,
+                sample_count: 120,
+                stop_reason: "completed",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    approach_median_slope_c_per_s: Some(3.0),
+                    hold_sample_count: 120,
+                    hold_max_above_target_c: Some(9.0),
+                    residual_heat_after_hold_entry_c: Some(6.0),
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis::default(),
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+            },
+        );
+
+        assert_eq!(tuned.warmup_power_permille, 750);
+    }
+
+    #[test]
     fn thermal_bounded_residual_heat_advances_coast_gate_without_moving_warmup_exit() {
         let mut previous = thermal_default_target_point(60);
         previous.brake_distance_centi_c = 1_910;
@@ -10319,6 +10414,27 @@ mod tests {
             20_000,
             3_000
         ));
+
+        let capped_100w_config = json!({
+            "tpsMode": "manual",
+            "manual": {
+                "voltageMv": 21_000,
+                "currentLimitMa": 4_750,
+                "usbCPathMode": "force",
+                "pathPolicy": "force_open",
+            },
+            "capability": {
+                "powerWatts": 100,
+                "protocols": { "pd": true },
+                "pd": { "pps": true, "fixedVoltagesMv": [9000, 12000, 15000, 20000] },
+                "current": { "pps3LimitMa": 5_000, "pdPps5a": true }
+            }
+        });
+        assert!(isolapurr_power_config_value_matches_manual(
+            &capped_100w_config,
+            21_000,
+            5_000
+        ));
     }
 
     #[test]
@@ -10538,6 +10654,21 @@ mod tests {
         assert_eq!(body["thermalProfileMode"], "100w");
         assert_eq!(body["thermalControlProfile"]["op"], "preview");
         assert!(body["thermalControlProfile"]["profile"].is_object());
+    }
+
+    #[test]
+    fn thermal_profile_preview_readback_requires_the_requested_bank() {
+        let matched = json!({
+            "thermalProfileMode": "100w",
+            "thermalProfileResolvedBank": "pps5a",
+        });
+        assert!(verify_thermal_profile_mode_readback(&matched, ThermalProfileMode::W100).is_ok());
+
+        let wrong_bank = json!({
+            "thermalProfileMode": "100w",
+            "thermalProfileResolvedBank": "pps3a",
+        });
+        assert!(verify_thermal_profile_mode_readback(&wrong_bank, ThermalProfileMode::W100).is_err());
     }
 
     #[test]
