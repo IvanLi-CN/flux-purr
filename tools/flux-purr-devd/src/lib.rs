@@ -45,7 +45,7 @@ const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const PPS_HARDWARE_MIN_MV: u16 = 5_000;
 const PPS_HARDWARE_MAX_MV: u16 = 28_000;
 const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = PPS_HARDWARE_MIN_MV;
-const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
+const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 5_000;
 const HEATER_PID_TARGET_MIN_C: i16 = 0;
 const HEATER_PID_TARGET_MAX_C: i16 = 400;
 const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
@@ -1425,6 +1425,26 @@ struct UsbRuntimeConfigWire<'a> {
     thermal_profile_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
+}
+
+#[cfg(test)]
+fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
+    serde_json::to_string(&UsbRuntimeConfigWire {
+        frame_type: "runtime_config",
+        request_id: "mode-test",
+        target_temp_c: None,
+        selected_preset_slot: None,
+        presets_c: None,
+        active_cooling_enabled: None,
+        heater_enabled: None,
+        manual_pps_enabled: None,
+        manual_pps_mv: None,
+        manual_pps_ma: None,
+        calibration: None,
+        thermal_profile_mode: Some(mode),
+        thermal_control_profile: None,
+    })
+    .expect("runtime mode wire must serialize")
 }
 
 #[derive(Debug, Serialize)]
@@ -5002,15 +5022,15 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
         (
             "local-esp32s3-release",
             "Local ESP32-S3 release",
-            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+            "target/xtensa-esp32s3-none-elf/release/flux-purr",
             "release + web_serial",
             vec!["web_serial".to_string()],
             "elf",
         ),
         (
-            "local-esp32s3-release-root-target",
-            "Local ESP32-S3 release (root target)",
-            "target/xtensa-esp32s3-none-elf/release/flux-purr",
+            "local-esp32s3-release-firmware-target",
+            "Local ESP32-S3 release (legacy firmware target)",
+            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
             "release + web_serial",
             vec!["web_serial".to_string()],
             "elf",
@@ -6104,9 +6124,7 @@ mod tests {
     #[test]
     fn artifact_catalog_discovers_local_build_outputs() {
         let dir = tempdir().unwrap();
-        let artifact_path = dir
-            .path()
-            .join("firmware/target/xtensa-esp32s3-none-elf/release");
+        let artifact_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
         fs::create_dir_all(&artifact_path).unwrap();
         fs::write(artifact_path.join("flux-purr"), b"firmware-image").unwrap();
 
@@ -6124,9 +6142,11 @@ mod tests {
     }
 
     #[test]
-    fn artifact_catalog_discovers_root_target_build_outputs() {
+    fn artifact_catalog_labels_legacy_firmware_target_explicitly() {
         let dir = tempdir().unwrap();
-        let artifact_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
+        let artifact_path = dir
+            .path()
+            .join("firmware/target/xtensa-esp32s3-none-elf/release");
         fs::create_dir_all(&artifact_path).unwrap();
         fs::write(artifact_path.join("flux-purr"), b"firmware-image-root").unwrap();
 
@@ -6135,8 +6155,15 @@ mod tests {
         assert!(
             artifacts
                 .iter()
-                .any(|artifact| artifact.artifact_id == "local-esp32s3-release-root-target")
+                .any(|artifact| artifact.artifact_id == "local-esp32s3-release-firmware-target")
         );
+    }
+
+    #[test]
+    fn usb_runtime_wire_serializes_thermal_profile_mode() {
+        let json = encode_usb_runtime_mode_for_test(&"100w".to_string());
+
+        assert!(json.contains(r#""thermalProfileMode":"100w""#));
     }
 
     #[test]

@@ -248,10 +248,10 @@ Those reruns exposed two concrete truths that matter more than the older sparse-
   real HIL showed `rtdRawAdcMv` continuing to rise while `currentTempC` stayed frozen. That filter
   is not part of the runtime control path: valid RTD samples now pass directly to the controller,
   and raw telemetry remains available for diagnosis.
-- real flash verification must use the current root-target artifact. On this repo state the stale
-  `local-esp32s3-release` entry at `firmware/target/...` did not contain the latest
-  `heaterControlPhase` status fields, while the current build output was
-  `local-esp32s3-release-root-target` at `target/...`.
+- real flash verification uses `local-esp32s3-release`, which resolves to the workspace build at
+  `target/xtensa-esp32s3-none-elf/release/flux-purr`. A legacy `firmware/target/...` build is
+  exposed only as `local-esp32s3-release-firmware-target`, so a stale nested target cannot silently
+  replace the current workspace artifact.
 
 With the corrected artifact flashed, focused real HIL at `220°C` still did not clear acceptance:
 

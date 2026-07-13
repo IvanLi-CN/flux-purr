@@ -158,7 +158,7 @@
 - Repo-local config: `mcu-agentd.toml`
 - MCU id: `esp32s3_frontpanel`
 - Configured ELF artifact:
-  - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
+  - `target/xtensa-esp32s3-none-elf/release/flux-purr`
 - Typical flow:
   - `source /Users/ivan/export-esp.sh`
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release` (default `20 V` + real control-plane transport)

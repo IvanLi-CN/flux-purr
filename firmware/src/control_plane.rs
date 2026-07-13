@@ -1395,6 +1395,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.manual_pps_mv = config.manual_pps_mv;
                 wire.manual_pps_ma = config.manual_pps_ma;
                 wire.calibration = config.calibration;
+                wire.thermal_profile_mode = config.thermal_profile_mode;
                 wire.thermal_control_profile = config.thermal_control_profile;
             }
             UsbFrame::CalibrationConfig { request_id, config } => {
@@ -2234,6 +2235,31 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn runtime_config_frame_round_trips_thermal_profile_mode() {
+        let frame = UsbFrame::RuntimeConfig {
+            request_id: string("req-mode"),
+            config: RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_profile_mode: Some(ThermalProfileModeWire::W100),
+                thermal_control_profile: None,
+            },
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).unwrap();
+
+        assert!(json.contains(r#""thermalProfileMode":"100w""#));
+        assert_eq!(parse_usb_frame(json).unwrap(), frame);
     }
 
     #[test]

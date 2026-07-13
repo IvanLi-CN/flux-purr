@@ -1538,6 +1538,16 @@ const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250]
 const THERMAL_SELF_TEST_DEFAULT_TARGETS_C: [i16; 3] = [60, 140, 220];
 const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = 10;
 
+fn thermal_profile_preview_runtime_body(mode: ThermalProfileMode, profile: Value) -> Value {
+    json!({
+        "thermalProfileMode": mode.as_str(),
+        "thermalControlProfile": {
+            "op": "preview",
+            "profile": profile,
+        }
+    })
+}
+
 async fn handle_thermal_command(
     client: &Client,
     default_devd: &str,
@@ -1553,12 +1563,10 @@ async fn handle_thermal_command(
                     resolve_target(args.target, default_devd)?,
                     Method::PUT,
                     "/runtime",
-                    Some(json!({
-                        "thermalControlProfile": {
-                            "op": "preview",
-                            "profile": profile
-                        }
-                    })),
+                    Some(thermal_profile_preview_runtime_body(
+                        args.profile_mode,
+                        profile,
+                    )),
                 )
                 .await
             }
@@ -3675,7 +3683,7 @@ fn thermal_default_settings() -> ThermalCandidateSettings {
         hold_reheat_power_permille: 0,
         approach_lead_ticks: 0,
         hold_lead_ticks: 0,
-        auto_adjustable_working_floor_mv: 6_100,
+        auto_adjustable_working_floor_mv: 5_000,
         heater_current_reserve_ma: 200,
     }
 }
@@ -6523,7 +6531,6 @@ fn ensure_isolapurr_thermal_capability(
         requires_pps_5a,
     ) {
         let power_watts = required_power_watts.to_string();
-        let pps3_limit_ma = if requires_pps_5a { "5000" } else { "3250" };
         let pd_pps_5a = if requires_pps_5a { "true" } else { "false" };
         let response = isolapurr_cli_json(
             source_url,
@@ -6536,7 +6543,7 @@ fn ensure_isolapurr_thermal_capability(
                 "--pd",
                 "true",
                 "--pps3-limit-ma",
-                pps3_limit_ma,
+                "5000",
                 "--pd-pps-5a",
                 pd_pps_5a,
                 "--pps",
@@ -6544,13 +6551,11 @@ fn ensure_isolapurr_thermal_capability(
             ],
         )?;
         if !isolapurr_cli_write_succeeded(&response)
-            && !response.get("config").is_some_and(|config| {
-                isolapurr_power_config_has_thermal_capability(
-                    config,
-                    required_power_watts,
-                    requires_pps_5a,
-                )
-            })
+            && !isolapurr_power_config_has_thermal_capability(
+                response.get("config").unwrap_or(&response),
+                required_power_watts,
+                requires_pps_5a,
+            )
         {
             return Err("isolapurr source capability command did not acknowledge success".into());
         }
@@ -6583,12 +6588,16 @@ fn isolapurr_power_config_has_thermal_capability(
     )
     .or_else(|| {
         capability
-            .pointer("/pd/pps3_limit_ma")
+            .pointer("/current/pps3_limit_ma")
+            .or_else(|| capability.pointer("/current/pps3LimitMa"))
+            .or_else(|| capability.pointer("/pd/pps3_limit_ma"))
             .or_else(|| capability.pointer("/pd/pps3LimitMa"))
             .and_then(Value::as_u64)
     });
     let pd_pps_5a = capability
-        .pointer("/pd/pd_pps_5a")
+        .pointer("/current/pd_pps_5a")
+        .or_else(|| capability.pointer("/current/pdPps5a"))
+        .or_else(|| capability.pointer("/pd/pd_pps_5a"))
         .or_else(|| capability.pointer("/pd/pdPps5a"))
         .or_else(|| capability.get("pd_pps_5a"))
         .or_else(|| capability.get("pdPps5a"))
@@ -10376,6 +10385,25 @@ mod tests {
             THERMAL_SOURCE_100W_POWER_WATTS,
             true,
         ));
+        let released_five_amp_config = json!({
+            "capability": {
+                "power_watts": 100,
+                "protocols": { "pd": true },
+                "pd": {
+                    "pps": true,
+                    "fixed_voltages_mv": [9000, 12000, 15000, 20000]
+                },
+                "current": {
+                    "pps3_limit_ma": 5000,
+                    "pd_pps_5a": true
+                }
+            }
+        });
+        assert!(isolapurr_power_config_has_thermal_capability(
+            &released_five_amp_config,
+            THERMAL_SOURCE_100W_POWER_WATTS,
+            true,
+        ));
 
         let ready = BenchSourceLiveTelemetry {
             voltage_mv: 12_034,
@@ -10498,6 +10526,18 @@ mod tests {
         assert_eq!(ThermalProfileMode::W100.source_defaults(), (21_000, 5_000));
         assert_eq!(ThermalProfileMode::Auto.resolved_bank(), "pps3a");
         assert_eq!(ThermalProfileMode::W100.resolved_bank(), "pps5a");
+    }
+
+    #[test]
+    fn thermal_profile_preview_body_preserves_selected_mode() {
+        let body = thermal_profile_preview_runtime_body(
+            ThermalProfileMode::W100,
+            json!({"points": [], "settings": {}}),
+        );
+
+        assert_eq!(body["thermalProfileMode"], "100w");
+        assert_eq!(body["thermalControlProfile"]["op"], "preview");
+        assert!(body["thermalControlProfile"]["profile"].is_object());
     }
 
     #[test]
