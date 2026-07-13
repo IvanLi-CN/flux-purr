@@ -116,6 +116,8 @@ A useful thermal self-test packet has four files:
 - `thermal-profile.candidate.json`: preview/save-compatible profile proposed by the tooling
 - `report.html`: self-contained chart report with per-stage temperature, voltage, and current/output plots
 
+For long-lived comparison and retuning, freeze an accepted baseline bundle instead of relying on a mutable latest-report directory. The frozen bundle should keep `index.html` as the canonical report, add a committed bundle manifest (`run.bundle.json`), keep the accepted preview/save-compatible profile (`thermal-profile.accepted.json`), and copy provenance summaries that tie the report back to the underlying accepted runs. Local MHTML browser snapshots are not a reliable primary delivery format because browser sandboxing can block chart scripts.
+
 The default ladder for Flux Purr now uses sparse coverage:
 
 `60, 140, 220°C`
@@ -174,9 +176,9 @@ The applied saved-profile run is acceptable only when every target satisfies:
 
 Each stage has a default `300s` safety deadline. If the deadline expires or runtime state is lost, the self-test actively sends `heaterEnabled=false`, forces `activeCoolingEnabled=true`, and stops the ladder instead of moving to the next target.
 
-The default sampling interval is `300ms`, giving a nominal `3.33Hz` rate and explicit scheduling margin above the `3Hz` acceptance floor. Full `/status` responses are about `1.9KB`; polling them at `5Hz` can saturate the 115200-baud JSONL path, while `333ms` leaves no margin for host jitter. Actual rate is computed over a fixed three-second window; an isolated host scheduling stall remains visible in `intervalMs` without being counted repeatedly by overlapping short windows. IsolaPurr CLI polling runs independently from the Flux Purr control sampler, each record carries source snapshot age, and source telemetry that does not advance for `2s` is rejected.
+The acceptance floor for host sampling remains `3Hz`, but the accepted full-range 20Hz baseline bundle uses `100ms` host sampling and records actual `intervalMs` plus rolling rate in every sample. Earlier tuning often used `300ms` sampling to leave more margin on the `115200`-baud JSONL path; the committed baseline keeps the denser cadence because the point of that artifact is later comparison, not just minimum acceptance proof. Full `/status` responses are about `1.9KB`; source polling runs independently from the Flux Purr control sampler, each record carries source snapshot age, and source telemetry that does not advance for `2s` is rejected.
 
-The firmware control loop runs at `10Hz`. Each loop reads `32` RTD ADC conversions, retains the fractional millivolt mean through calibration and PT1000 conversion, and then applies the profile-controlled temperature filter. This is roughly `320` ADC conversions per second and removes the old integer-millivolt temperature steps. With this oversampling in place, the default and tuned `tempFilterAlphaPermille` is `700`; the faster filter avoids turning measurement lag into a false full-speed-to-stable failure while remaining API/EEPROM adjustable. Increasing the whole control loop to `20Hz` is not justified by the current thermal bandwidth and would also double ADC, PD/I2C, and control-update load. The status path instead preserves the accepted floating-point measurement to centi-Celsius; only the front-panel rendering remains quantized to deci-Celsius.
+The firmware control loop now runs at `20Hz`. Each loop reads `64` RTD ADC conversions, retains the fractional millivolt mean through calibration and PT1000 conversion, and then applies the profile-controlled temperature filter. This is roughly `1280` ADC conversions per second and removes the old integer-millivolt temperature steps while preserving the accepted floating-point measurement path through runtime status. With this oversampling in place, the default and tuned `tempFilterAlphaPermille` is `700`; the faster filter avoids turning measurement lag into a false full-speed-to-stable failure while remaining API/EEPROM adjustable. The front-panel rendering remains quantized to deci-Celsius, but the HIL and status paths keep the centi-Celsius telemetry.
 
 Static brake distance is not sufficient when heater assembly or thermal mass changes, so warmup handoff combines point-level brake distance with confirmed filtered rise rate times `approachLeadTicks`, capped below the `warmupReenterCentiC` boundary. Predictive expansion is accepted only when both actual and filtered temperatures have reached the expanded boundary; entering the ordinary static brake still follows actual temperature so filter lag cannot block normal handoff. This reuses API/EEPROM profile parameters instead of adding a hidden firmware tuning constant.
 
@@ -198,6 +200,18 @@ The accepted sparse HIL anchors on the authorized source are:
 - `60°C`: `thermal-1783699709933-serial-303a-1001-d0-cf-13-08-a1-48`, settle `7.534s`, overshoot `1.2°C`, full-`60s` hold peak-to-peak `2.3°C`
 - `140°C`: `thermal-1783700052289-serial-303a-1001-d0-cf-13-08-a1-48`, settle `8.661s`, overshoot `0.4°C`, full-`60s` hold peak-to-peak `2.3°C`
 - `220°C`: `thermal-1783702036504-serial-303a-1001-d0-cf-13-08-a1-48`, settle `0.905s`, overshoot `1.1°C`, full-`60s` hold peak-to-peak `2.6°C`, mean host sampling rate `3.33Hz`
+
+## Accepted full-range baseline bundle
+
+For the `56mm x 56mm`, `3.2Ω` heater plate on the PD PPS `3A` class hardware path (`5-21V`, nominal `60-65W` envelope), the frozen comparison artifact is:
+
+`thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/`
+
+Use this bundle as the default regression and retuning reference only for the same hardware class. It contains the canonical interactive report (`index.html`), a committed manifest (`run.bundle.json`), aggregated raw samples (`samples.ndjson`), the accepted preview/save-compatible profile (`thermal-profile.accepted.json`), and copied provenance summaries for the underlying accepted runs.
+
+The validation coverage in this bundle is `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`. The accepted anchor profile inside the bundle remains `60 / 100 / 140 / 180 / 220 / 250°C`, so dense intermediate targets continue to be verified through the same interpolation rule that firmware uses at runtime.
+
+The authorized source remains IsolaPurr `856a141cdbd4` at `http://192.168.31.122` in `auto_follow` mode. In-run telemetry stayed inside the same `5-21V PPS / 3A` class, reaching `20.5V` contract, about `20.45V` measured source voltage, about `2.995A` measured source current, and about `58.1W` peak measured source power. Treat that artifact as the accepted `60-65W` PPS calibration envelope for this hardware path even though the run does not saturate the full advertised source envelope at every target.
 
 For a source that advertises a `5V` PPS minimum, down-ramp power accounting must use the active
 PPS request rather than only the requested floor. The PPS request is intentionally rate-limited,
