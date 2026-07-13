@@ -46,6 +46,12 @@ const PPS_HARDWARE_MIN_MV: u16 = 5_000;
 const PPS_HARDWARE_MAX_MV: u16 = 28_000;
 const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = PPS_HARDWARE_MIN_MV;
 const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
+const HEATER_PID_TARGET_MIN_C: i16 = 0;
+const HEATER_PID_TARGET_MAX_C: i16 = 400;
+const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
+const THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
+const THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
+const THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
@@ -344,6 +350,10 @@ pub struct DeviceRecord {
     pub identity: Identity,
     pub network: NetworkSummary,
     pub status: ControlPlaneStatus,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub preview_thermal_control_profile: Option<ThermalControlProfilePackage>,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub saved_thermal_control_profile: Option<ThermalControlProfilePackage>,
     pub calibration: CalibrationState,
     pub heater_curve: HeaterCurveState,
     pub selected_artifact_id: Option<String>,
@@ -449,6 +459,8 @@ impl DeviceRecord {
             identity,
             network,
             status,
+            preview_thermal_control_profile: None,
+            saved_thermal_control_profile: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
@@ -541,6 +553,8 @@ impl DeviceRecord {
             },
             network,
             status,
+            preview_thermal_control_profile: None,
+            saved_thermal_control_profile: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
@@ -710,6 +724,56 @@ pub struct ThermalControlRuntime {
     pub approach_min_power_ratio_permille: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MockThermalCandidateSettings {
+    temp_filter_alpha_permille: u16,
+    warmup_reenter_centi_c: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    approach_max_ticks: u16,
+    approach_min_power_ratio_permille: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    hold_reheat_power_permille: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+    auto_adjustable_working_floor_mv: u16,
+    heater_current_reserve_ma: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MockThermalCandidatePoint {
+    target_temp_c: i16,
+    brake_distance_centi_c: u16,
+    warmup_power_permille: u16,
+    approach_power_permille: u16,
+    approach_floor_power_permille: u16,
+    approach_damping_exponent_permille: u16,
+    approach_tail_window_centi_c: u16,
+    hold_power_permille: u16,
+    hold_reheat_power_permille: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MockThermalCandidateProfile {
+    settings: MockThermalCandidateSettings,
+    points: Vec<MockThermalCandidatePoint>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -2507,14 +2571,28 @@ async fn configure_runtime(
     if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
         match thermal_control_profile.op {
             ThermalControlProfileOp::Preview => {
-                device.status.thermal_control_profile_preview = true;
+                device.preview_thermal_control_profile = thermal_control_profile.profile.clone();
             }
-            ThermalControlProfileOp::ClearPreview | ThermalControlProfileOp::Save => {
-                device.status.thermal_control_profile_preview = false;
+            ThermalControlProfileOp::ClearPreview => {
+                device.preview_thermal_control_profile = None;
             }
-            ThermalControlProfileOp::ClearSaved => {}
+            ThermalControlProfileOp::Save => {
+                device.saved_thermal_control_profile = thermal_control_profile.profile.clone();
+                device.preview_thermal_control_profile = None;
+            }
+            ThermalControlProfileOp::ClearSaved => {
+                device.saved_thermal_control_profile = None;
+            }
         }
     }
+    let active_profile = device
+        .preview_thermal_control_profile
+        .as_ref()
+        .or(device.saved_thermal_control_profile.as_ref());
+    let preview_active = device.preview_thermal_control_profile.is_some();
+    device.status.thermal_control_profile_preview = preview_active;
+    device.status.thermal_control =
+        mock_thermal_runtime(device.status.target_temp_c, active_profile, preview_active);
     let status = device.status.clone();
     drop(state_lock);
     emit_runtime_config_event(&state, &device_id, &payload, &status);
@@ -2735,6 +2813,489 @@ const fn default_auto_adjustable_working_floor_mv() -> u16 {
 
 const fn default_heater_current_reserve_ma() -> u16 {
     200
+}
+
+fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
+    MockThermalCandidateSettings {
+        temp_filter_alpha_permille: 700,
+        warmup_reenter_centi_c: 1_000,
+        hold_entry_centi_c: 20,
+        hold_exit_centi_c: 80,
+        hold_on_centi_c: 15,
+        hold_off_centi_c: 80,
+        overshoot_cutoff_centi_c: 120,
+        approach_max_ticks: 250,
+        approach_min_power_ratio_permille: 500,
+        hold_kp_permille_per_c: 35,
+        hold_ki_permille_per_c_tick: 1,
+        hold_blend_ticks: 12,
+        hold_reheat_power_permille: 0,
+        approach_lead_ticks: 0,
+        hold_lead_ticks: 0,
+        auto_adjustable_working_floor_mv: AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT,
+        heater_current_reserve_ma: 200,
+    }
+}
+
+fn mock_thermal_default_target_values(
+    target_temp_c: i16,
+) -> (
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+) {
+    if target_temp_c <= 60 {
+        (
+            1_310, 1_000, 590, 510, 1_320, 60, 60, 200, 540, 30, 120, 150, 8, 2, 1, 4, 2,
+        )
+    } else if target_temp_c <= 100 {
+        (
+            1_100, 1_000, 420, 220, 1_400, 170, 260, 12, 60, 30, 180, 230, 55, 2, 6, 9, 0,
+        )
+    } else if target_temp_c <= 140 {
+        (
+            1_000, 1_000, 420, 200, 1_000, 280, 340, 10, 55, 30, 160, 220, 22, 1, 1, 4, 0,
+        )
+    } else if target_temp_c <= 180 {
+        (
+            650, 1_000, 760, 460, 800, 450, 620, 15, 70, 25, 240, 300, 20, 1, 3, 4, 0,
+        )
+    } else if target_temp_c <= 220 {
+        (
+            520, 1_000, 760, 600, 550, 620, 700, 8, 50, 14, 240, 320, 22, 1, 2, 2, 0,
+        )
+    } else {
+        (
+            500, 1_000, 960, 860, 350, 850, 930, 10, 55, 14, 320, 420, 12, 1, 1, 1, 0,
+        )
+    }
+}
+
+fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidatePoint {
+    let (
+        brake_distance_centi_c,
+        warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+    ) = mock_thermal_default_target_values(target_temp_c);
+    MockThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c,
+        warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        approach_tail_window_centi_c: 0,
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+    }
+}
+
+fn mock_thermal_profile_from_package(
+    package: &ThermalControlProfilePackage,
+) -> MockThermalCandidateProfile {
+    let default_settings = mock_thermal_default_settings();
+    let settings = package
+        .settings
+        .map(|settings| MockThermalCandidateSettings {
+            temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
+            warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
+            hold_entry_centi_c: settings.hold_entry_centi_c,
+            hold_exit_centi_c: settings.hold_exit_centi_c,
+            hold_on_centi_c: settings.hold_on_centi_c,
+            hold_off_centi_c: settings.hold_off_centi_c,
+            overshoot_cutoff_centi_c: settings.overshoot_cutoff_centi_c,
+            approach_max_ticks: settings.approach_max_ticks,
+            approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
+            hold_kp_permille_per_c: settings.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: settings.hold_ki_permille_per_c_tick,
+            hold_blend_ticks: settings.hold_blend_ticks,
+            hold_reheat_power_permille: settings.hold_reheat_power_permille,
+            approach_lead_ticks: settings.approach_lead_ticks,
+            hold_lead_ticks: settings.hold_lead_ticks,
+            auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
+            heater_current_reserve_ma: settings.heater_current_reserve_ma,
+        })
+        .unwrap_or(default_settings);
+    let point_targets = {
+        let explicit = package
+            .points
+            .iter()
+            .flatten()
+            .map(|point| point.target_temp_c)
+            .collect::<Vec<_>>();
+        if explicit.is_empty() {
+            THERMAL_PROFILE_ANCHOR_TARGETS_C.to_vec()
+        } else {
+            explicit
+        }
+    };
+    let points = point_targets
+        .into_iter()
+        .map(|target_temp_c| {
+            let default_point = mock_thermal_default_target_point(target_temp_c);
+            let point = package
+                .points
+                .iter()
+                .flatten()
+                .find(|point| point.target_temp_c == target_temp_c);
+            MockThermalCandidatePoint {
+                target_temp_c,
+                brake_distance_centi_c: point
+                    .map(|point| point.brake_distance_centi_c)
+                    .unwrap_or(default_point.brake_distance_centi_c),
+                warmup_power_permille: point
+                    .map(|point| point.warmup_power_permille)
+                    .unwrap_or(default_point.warmup_power_permille),
+                approach_power_permille: point
+                    .map(|point| point.approach_power_permille)
+                    .unwrap_or(default_point.approach_power_permille),
+                approach_floor_power_permille: point
+                    .map(|point| point.approach_floor_power_permille)
+                    .unwrap_or(default_point.approach_floor_power_permille),
+                approach_damping_exponent_permille: point
+                    .map(|point| point.approach_damping_exponent_permille)
+                    .unwrap_or(default_point.approach_damping_exponent_permille),
+                approach_tail_window_centi_c: point
+                    .map(|point| point.approach_tail_window_centi_c)
+                    .unwrap_or(default_point.approach_tail_window_centi_c),
+                hold_power_permille: point
+                    .map(|point| point.hold_power_permille)
+                    .unwrap_or(default_point.hold_power_permille),
+                hold_reheat_power_permille: point
+                    .map(|point| point.hold_reheat_power_permille)
+                    .unwrap_or(default_point.hold_reheat_power_permille),
+                hold_entry_centi_c: point
+                    .map(|point| point.hold_entry_centi_c)
+                    .unwrap_or(default_point.hold_entry_centi_c),
+                hold_exit_centi_c: point
+                    .map(|point| point.hold_exit_centi_c)
+                    .unwrap_or(default_point.hold_exit_centi_c),
+                hold_on_centi_c: point
+                    .map(|point| point.hold_on_centi_c)
+                    .unwrap_or(settings.hold_on_centi_c),
+                hold_off_centi_c: point
+                    .map(|point| point.hold_off_centi_c)
+                    .unwrap_or(default_point.hold_off_centi_c),
+                overshoot_cutoff_centi_c: point
+                    .map(|point| point.overshoot_cutoff_centi_c)
+                    .unwrap_or(default_point.overshoot_cutoff_centi_c),
+                hold_kp_permille_per_c: point
+                    .map(|point| point.hold_kp_permille_per_c)
+                    .unwrap_or(default_point.hold_kp_permille_per_c),
+                hold_ki_permille_per_c_tick: point
+                    .map(|point| point.hold_ki_permille_per_c_tick)
+                    .unwrap_or(default_point.hold_ki_permille_per_c_tick),
+                hold_blend_ticks: point
+                    .map(|point| point.hold_blend_ticks)
+                    .unwrap_or(default_point.hold_blend_ticks),
+                approach_lead_ticks: point
+                    .map(|point| point.approach_lead_ticks)
+                    .unwrap_or(default_point.approach_lead_ticks),
+                hold_lead_ticks: point
+                    .map(|point| point.hold_lead_ticks)
+                    .unwrap_or(default_point.hold_lead_ticks),
+            }
+        })
+        .collect();
+    MockThermalCandidateProfile { settings, points }
+}
+
+fn mock_thermal_candidate_point(
+    profile: &MockThermalCandidateProfile,
+    target_temp_c: i16,
+) -> Option<MockThermalCandidatePoint> {
+    profile
+        .points
+        .iter()
+        .copied()
+        .find(|point| point.target_temp_c == target_temp_c)
+}
+
+fn mock_thermal_interpolated_candidate_point(
+    profile: &MockThermalCandidateProfile,
+    target_temp_c: i16,
+) -> Option<MockThermalCandidatePoint> {
+    if let Some(point) = mock_thermal_candidate_point(profile, target_temp_c) {
+        return Some(point);
+    }
+    let mut points = profile.points.clone();
+    points.sort_by_key(|point| point.target_temp_c);
+    let lower = points
+        .iter()
+        .copied()
+        .rev()
+        .find(|point| point.target_temp_c < target_temp_c)?;
+    let upper = points
+        .iter()
+        .copied()
+        .find(|point| point.target_temp_c > target_temp_c)?;
+    let ratio = f32::from(target_temp_c - lower.target_temp_c)
+        / f32::from(upper.target_temp_c - lower.target_temp_c);
+    let lerp = |left: u16, right: u16, upper_bound: u16| {
+        (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
+            .clamp(0.0, f32::from(upper_bound)) as u16
+    };
+    let linear_brake_distance = lerp(
+        lower.brake_distance_centi_c,
+        upper.brake_distance_centi_c,
+        5_000,
+    );
+    let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
+    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        -0.20
+    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
+        if upper.target_temp_c <= 140 {
+            0.55
+        } else {
+            0.20
+        }
+    } else {
+        0.0
+    };
+    let interpolated_brake_distance = (f32::from(linear_brake_distance)
+        * (1.0 - intermediate_brake_adjustment * midpoint_weight)
+        + 0.5) as u16;
+    let low_temp_hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.20 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let low_temp_reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.10 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let scale_low_temp_hold =
+        |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
+    Some(MockThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c: interpolated_brake_distance,
+        warmup_power_permille: lerp(
+            lower.warmup_power_permille,
+            upper.warmup_power_permille,
+            1_000,
+        ),
+        approach_power_permille: lerp(
+            lower.approach_power_permille,
+            upper.approach_power_permille,
+            1_000,
+        ),
+        approach_floor_power_permille: lerp(
+            lower.approach_floor_power_permille,
+            upper.approach_floor_power_permille,
+            1_000,
+        ),
+        approach_damping_exponent_permille: lerp(
+            lower.approach_damping_exponent_permille,
+            upper.approach_damping_exponent_permille,
+            THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+        ),
+        approach_tail_window_centi_c: lerp(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
+        ),
+        hold_power_permille: scale_low_temp_hold(lerp(
+            lower.hold_power_permille,
+            upper.hold_power_permille,
+            1_000,
+        )),
+        hold_reheat_power_permille: (f32::from(lerp(
+            lower.hold_reheat_power_permille,
+            upper.hold_reheat_power_permille,
+            1_000,
+        )) * low_temp_reheat_scale
+            + 0.5) as u16,
+        hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
+        hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
+        hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
+        hold_off_centi_c: lerp(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
+        overshoot_cutoff_centi_c: lerp(
+            lower.overshoot_cutoff_centi_c,
+            upper.overshoot_cutoff_centi_c,
+            5_000,
+        ),
+        hold_kp_permille_per_c: lerp(
+            lower.hold_kp_permille_per_c,
+            upper.hold_kp_permille_per_c,
+            10_000,
+        ),
+        hold_ki_permille_per_c_tick: {
+            let interpolated = lerp(
+                lower.hold_ki_permille_per_c_tick,
+                upper.hold_ki_permille_per_c_tick,
+                10_000,
+            );
+            if interpolated == 0 {
+                profile.settings.hold_ki_permille_per_c_tick
+            } else {
+                interpolated
+            }
+        },
+        hold_blend_ticks: lerp(
+            lower.hold_blend_ticks,
+            upper.hold_blend_ticks,
+            u16::from(u8::MAX),
+        )
+        .clamp(1, u16::from(u8::MAX)),
+        approach_lead_ticks: lerp(
+            lower.approach_lead_ticks,
+            upper.approach_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+        hold_lead_ticks: lerp(
+            lower.hold_lead_ticks,
+            upper.hold_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+    })
+}
+
+fn mock_thermal_runtime(
+    target_temp_c: i16,
+    package: Option<&ThermalControlProfilePackage>,
+    preview_active: bool,
+) -> ThermalControlRuntime {
+    let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
+    let profile = package.map(mock_thermal_profile_from_package);
+    let profile_source = if preview_active {
+        "preview"
+    } else if profile.is_some() {
+        "saved"
+    } else {
+        "default"
+    };
+    let profile_covers_target = profile
+        .as_ref()
+        .and_then(|profile| mock_thermal_interpolated_candidate_point(profile, target_temp_c))
+        .is_some();
+    let point = profile
+        .as_ref()
+        .and_then(|profile| mock_thermal_interpolated_candidate_point(profile, target_temp_c));
+    let (
+        brake_distance_centi_c,
+        _default_warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+    ) = point
+        .map(|point| {
+            (
+                point.brake_distance_centi_c,
+                point.warmup_power_permille,
+                point.approach_power_permille,
+                point.approach_floor_power_permille,
+                point.approach_damping_exponent_permille,
+                point.hold_power_permille,
+                point.hold_reheat_power_permille,
+                point.hold_entry_centi_c,
+                point.hold_exit_centi_c,
+                point.hold_on_centi_c,
+                point.hold_off_centi_c,
+                point.overshoot_cutoff_centi_c,
+                point.hold_kp_permille_per_c,
+                point.hold_ki_permille_per_c_tick,
+                point.hold_blend_ticks,
+                point.approach_lead_ticks,
+                point.hold_lead_ticks,
+            )
+        })
+        .unwrap_or_else(|| mock_thermal_default_target_values(target_temp_c));
+    let warmup_power_permille = if let Some(point) = point {
+        point
+            .warmup_power_permille
+            .max(point.approach_power_permille)
+    } else {
+        1_000
+    };
+    let settings = profile
+        .as_ref()
+        .map(|profile| profile.settings)
+        .unwrap_or_else(mock_thermal_default_settings);
+    ThermalControlRuntime {
+        profile_active: profile.is_some(),
+        profile_covers_target,
+        profile_source: profile_source.to_string(),
+        target_temp_c,
+        brake_distance_centi_c,
+        warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        approach_tail_window_centi_c: point
+            .map(|point| point.approach_tail_window_centi_c)
+            .unwrap_or_default(),
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+        temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
+        warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
+        approach_max_ticks: settings.approach_max_ticks,
+        approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
+        auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
+        heater_current_reserve_ma: settings
+            .heater_current_reserve_ma
+            .min(THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX),
+    }
 }
 
 fn validate_calibration_control_request(
@@ -3981,16 +4542,34 @@ fn runtime_config_matches_status(
     if let Some(profile) = payload.thermal_control_profile.as_ref() {
         match profile.op {
             ThermalControlProfileOp::Preview => {
-                if !status.thermal_control_profile_preview {
+                let expected =
+                    mock_thermal_runtime(status.target_temp_c, profile.profile.as_ref(), true);
+                if !status.thermal_control_profile_preview || status.thermal_control != expected {
                     return false;
                 }
             }
             ThermalControlProfileOp::ClearPreview => {
-                if status.thermal_control_profile_preview {
+                if status.thermal_control_profile_preview
+                    || status.thermal_control.profile_source == "preview"
+                {
                     return false;
                 }
             }
-            ThermalControlProfileOp::Save | ThermalControlProfileOp::ClearSaved => return false,
+            ThermalControlProfileOp::Save => {
+                let expected =
+                    mock_thermal_runtime(status.target_temp_c, profile.profile.as_ref(), false);
+                if status.thermal_control_profile_preview
+                    || status.thermal_control.profile_source != "saved"
+                    || status.thermal_control != expected
+                {
+                    return false;
+                }
+            }
+            ThermalControlProfileOp::ClearSaved => {
+                if status.thermal_control.profile_source == "saved" {
+                    return false;
+                }
+            }
         }
     }
     true
@@ -5648,6 +6227,8 @@ mod tests {
         .unwrap()
         .0;
         assert!(preview.thermal_control_profile_preview);
+        assert!(preview.thermal_control.profile_active);
+        assert_eq!(preview.thermal_control.profile_source, "preview");
 
         let clear_saved = configure_runtime(
             State(state.clone()),
@@ -5673,6 +6254,8 @@ mod tests {
         .unwrap()
         .0;
         assert!(clear_saved.thermal_control_profile_preview);
+        assert!(clear_saved.thermal_control.profile_active);
+        assert_eq!(clear_saved.thermal_control.profile_source, "preview");
 
         let clear = configure_runtime(
             State(state),
@@ -5698,6 +6281,8 @@ mod tests {
         .unwrap()
         .0;
         assert!(!clear.thermal_control_profile_preview);
+        assert_eq!(clear.thermal_control.profile_source, "default");
+        assert!(!clear.thermal_control.profile_active);
     }
 
     #[tokio::test]
@@ -5762,6 +6347,8 @@ mod tests {
         .unwrap()
         .0;
         assert!(!save.thermal_control_profile_preview);
+        assert!(save.thermal_control.profile_active);
+        assert_eq!(save.thermal_control.profile_source, "saved");
 
         let clear_saved = configure_runtime(
             State(state),
@@ -5787,6 +6374,8 @@ mod tests {
         .unwrap()
         .0;
         assert!(!clear_saved.thermal_control_profile_preview);
+        assert_eq!(clear_saved.thermal_control.profile_source, "default");
+        assert!(!clear_saved.thermal_control.profile_active);
     }
 
     #[test]
@@ -6527,6 +7116,70 @@ mod tests {
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.thermal_control_profile_preview = true;
+        status.thermal_control = mock_thermal_runtime(
+            status.target_temp_c,
+            payload
+                .thermal_control_profile
+                .as_ref()
+                .and_then(|profile| profile.profile.as_ref()),
+            true,
+        );
+
+        assert!(runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn runtime_config_matcher_reconciles_saved_profile_runtime() {
+        let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
+        points[0] = Some(ThermalControlProfilePoint {
+            target_temp_c: 220,
+            brake_distance_centi_c: 520,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 760,
+            approach_floor_power_permille: 600,
+            approach_damping_exponent_permille: 550,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 620,
+            hold_reheat_power_permille: 700,
+            hold_entry_centi_c: 8,
+            hold_exit_centi_c: 50,
+            hold_on_centi_c: 14,
+            hold_off_centi_c: 240,
+            overshoot_cutoff_centi_c: 320,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 2,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 0,
+        });
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileRequest {
+                op: ThermalControlProfileOp::Save,
+                profile: Some(ThermalControlProfilePackage {
+                    settings: None,
+                    points,
+                }),
+            }),
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.thermal_control = mock_thermal_runtime(
+            status.target_temp_c,
+            payload
+                .thermal_control_profile
+                .as_ref()
+                .and_then(|profile| profile.profile.as_ref()),
+            false,
+        );
 
         assert!(runtime_config_matches_status(&payload, &status));
     }
