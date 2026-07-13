@@ -1525,10 +1525,9 @@ impl HeaterController {
                 .hold_on_error_c
                 .max(0.05)
                 .min(hold_entry_gate_c);
-            let capped_filtered_under_target_error_c = hold_control_error_c
+            hold_control_error_c
                 .max(0.0)
-                .min(error_c + filter_lag_allowance_c);
-            capped_filtered_under_target_error_c
+                .min(error_c + filter_lag_allowance_c)
         } else {
             // Above target, predictive lead was cutting hold power too aggressively and
             // creating wide bang-bang cycles. Keep actual-temperature guard on the
