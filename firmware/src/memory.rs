@@ -602,7 +602,11 @@ fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
         let _ = points.push(sanitized);
     }
     points.sort_unstable_by_key(|point| point.target_temp_c);
-    for (index, point) in points.into_iter().enumerate() {
+    for (index, point) in points
+        .into_iter()
+        .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
+        .enumerate()
+    {
         compacted[index] = Some(point);
     }
     config.points = compacted;

@@ -2028,6 +2028,73 @@ mod tests {
     }
 
     #[test]
+    fn runtime_command_save_caps_persisted_thermal_profile_points_to_six() {
+        let mut points = [None; FRONTPANEL_PRESET_COUNT];
+        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180].into_iter().enumerate() {
+            points[slot] = Some(ThermalControlProfilePointWire {
+                target_temp_c,
+                brake_distance_centi_c: 1_000,
+                warmup_power_permille: 260,
+                approach_power_permille: 260,
+                approach_floor_power_permille: 180,
+                approach_damping_exponent_permille:
+                    crate::memory::THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
+                approach_tail_window_centi_c: 0,
+                hold_power_permille: 180,
+                hold_reheat_power_permille: 0,
+                hold_entry_centi_c: 0,
+                hold_exit_centi_c: 0,
+                hold_on_centi_c: 0,
+                hold_off_centi_c: 0,
+                overshoot_cutoff_centi_c: 0,
+                hold_kp_permille_per_c: 0,
+                hold_ki_permille_per_c_tick: 0,
+                hold_blend_ticks: 0,
+                approach_lead_ticks: 0,
+                hold_lead_ticks: 0,
+            });
+        }
+
+        let mut config = MemoryConfig::default();
+        RuntimeConfigCommand {
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileCommand {
+                op: ThermalControlProfileOp::Save,
+                profile: Some(ThermalControlProfileWire {
+                    settings: None,
+                    points,
+                }),
+            }),
+        }
+        .apply_to(&mut config);
+
+        assert_eq!(
+            config
+                .active_thermal_control_profile
+                .points
+                .iter()
+                .flatten()
+                .count(),
+            crate::memory::THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS
+        );
+        assert_eq!(
+            config.active_thermal_control_profile.points[5]
+                .expect("sixth point")
+                .target_temp_c,
+            160
+        );
+        assert!(config.active_thermal_control_profile.points[6].is_none());
+    }
+
+    #[test]
     fn parse_usb_request_with_request_id() {
         let frame =
             parse_usb_frame(r#"{"type":"request","requestId":"req-001","op":"get_status"}"#)
