@@ -1426,83 +1426,48 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         &mut out[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN],
     );
     let mut cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN;
-    for point in config.points.into_iter().filter(Option::is_some) {
-        let target = point
-            .map(|point| clamp_temp_c(point.target_temp_c))
-            .unwrap_or(PRESET_NONE_WIRE_VALUE);
-        let brake_distance = point
-            .map(|point| point.brake_distance_centi_c.clamp(100, 5_000))
-            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
-        let approach_power = point
-            .map(|point| point.approach_power_permille.min(1_000))
-            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
-        let warmup_power = point
-            .map(|point| point.warmup_power_permille.min(1_000))
-            .unwrap_or(0);
-        let approach_floor_power = point
-            .map(|point| point.approach_floor_power_permille.min(1_000))
-            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
-        let approach_damping_exponent = point
-            .map(|point| {
-                point.approach_damping_exponent_permille.clamp(
-                    100,
-                    THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
-                )
-            })
-            .unwrap_or(0);
+    for point in config
+        .points
+        .into_iter()
+        .flatten()
+        .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
+    {
+        let target = clamp_temp_c(point.target_temp_c);
+        let brake_distance = point.brake_distance_centi_c.clamp(100, 5_000);
+        let approach_power = point.approach_power_permille.min(1_000);
+        let warmup_power = point.warmup_power_permille.min(1_000);
+        let approach_floor_power = point.approach_floor_power_permille.min(1_000);
+        let approach_damping_exponent = point.approach_damping_exponent_permille.clamp(
+            100,
+            THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+        );
         let approach_tail_window = point
-            .map(|point| {
-                point
-                    .approach_tail_window_centi_c
-                    .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX)
-            })
-            .unwrap_or(0);
+            .approach_tail_window_centi_c
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX);
         let packed_approach_damping = (approach_damping_exponent
             & THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_VALUE_MASK)
             | (((approach_tail_window
                 + THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C / 2)
                 / THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C)
                 << 12);
-        let hold_power = point
-            .map(|point| point.hold_power_permille.min(1_000))
-            .unwrap_or(CALIBRATION_NONE_WIRE_VALUE);
-        let hold_reheat_power = point
-            .map(|point| point.hold_reheat_power_permille.min(1_000))
-            .unwrap_or(0);
-        let hold_entry = point.map(|point| point.hold_entry_centi_c).unwrap_or(0);
-        let hold_exit = point.map(|point| point.hold_exit_centi_c).unwrap_or(0);
-        let hold_on = point.map(|point| point.hold_on_centi_c).unwrap_or(0);
-        let hold_off = point.map(|point| point.hold_off_centi_c).unwrap_or(0);
-        let overshoot_cutoff = point
-            .map(|point| point.overshoot_cutoff_centi_c)
-            .unwrap_or(0);
-        let hold_kp = point
-            .map(|point| point.hold_kp_permille_per_c.min(10_000))
-            .unwrap_or(0);
-        let hold_ki = point
-            .map(|point| point.hold_ki_permille_per_c_tick.min(10_000))
-            .unwrap_or(0);
+        let hold_power = point.hold_power_permille.min(1_000);
+        let hold_reheat_power = point.hold_reheat_power_permille.min(1_000);
+        let hold_entry = point.hold_entry_centi_c;
+        let hold_exit = point.hold_exit_centi_c;
+        let hold_on = point.hold_on_centi_c;
+        let hold_off = point.hold_off_centi_c;
+        let overshoot_cutoff = point.overshoot_cutoff_centi_c;
+        let hold_kp = point.hold_kp_permille_per_c.min(10_000);
+        let hold_ki = point.hold_ki_permille_per_c_tick.min(10_000);
         let hold_blend = point
-            .map(|point| {
-                point
-                    .hold_blend_ticks
-                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
-            })
-            .unwrap_or(0);
+            .hold_blend_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
         let approach_lead = point
-            .map(|point| {
-                point
-                    .approach_lead_ticks
-                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
-            })
-            .unwrap_or(0);
+            .approach_lead_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
         let hold_lead = point
-            .map(|point| {
-                point
-                    .hold_lead_ticks
-                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
-            })
-            .unwrap_or(0);
+            .hold_lead_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX);
         out[cursor..cursor + 2].copy_from_slice(&target.to_le_bytes());
         out[cursor + 2..cursor + 4].copy_from_slice(&brake_distance.to_le_bytes());
         out[cursor + 4..cursor + 6].copy_from_slice(&warmup_power.to_le_bytes());
@@ -2515,6 +2480,51 @@ mod tests {
                 .iter()
                 .all(Option::is_none)
         );
+    }
+
+    #[test]
+    fn thermal_profile_persistence_caps_legacy_dense_profiles_to_six_points() {
+        let mut config = sample_config();
+        let template = config.active_thermal_control_profile.points[0].unwrap();
+        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180].into_iter().enumerate() {
+            config.active_thermal_control_profile.points[slot] =
+                Some(ThermalControlProfilePointConfig {
+                    target_temp_c,
+                    ..template
+                });
+        }
+
+        let record = MemoryRecord {
+            sequence: 44,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("dense legacy profile encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("dense legacy profile decodes");
+
+        assert_eq!(
+            decoded
+                .config
+                .active_thermal_control_profile
+                .points
+                .iter()
+                .flatten()
+                .count(),
+            THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS
+        );
+        assert_eq!(
+            decoded.config.active_thermal_control_profile.points[0]
+                .expect("first point")
+                .target_temp_c,
+            60
+        );
+        assert_eq!(
+            decoded.config.active_thermal_control_profile.points[5]
+                .expect("sixth point")
+                .target_temp_c,
+            160
+        );
+        assert!(decoded.config.active_thermal_control_profile.points[6].is_none());
     }
 
     #[test]
