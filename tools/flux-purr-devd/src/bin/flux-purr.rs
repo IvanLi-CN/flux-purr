@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use flux_purr_devd::{
     DEFAULT_DEVD_URL, FirmwareArtifact, FirmwareArtifactCatalog, WifiConfigOp,
     hardware_registry_path, read_user_config, write_user_config,
@@ -78,6 +78,54 @@ struct TargetSelector {
     device: Option<String>,
     #[arg(long)]
     hardware: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum BenchSourceKind {
+    Isolapurr,
+}
+
+impl BenchSourceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Isolapurr => "isolapurr",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum ThermalProfileMode {
+    Auto,
+    #[value(name = "65w")]
+    W65,
+    #[value(name = "100w")]
+    W100,
+}
+
+impl ThermalProfileMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::W65 => "65w",
+            Self::W100 => "100w",
+        }
+    }
+
+    fn resolved_bank(self) -> &'static str {
+        match self {
+            Self::W100 => "pps5a",
+            Self::Auto | Self::W65 => "pps3a",
+        }
+    }
+
+    fn source_defaults(self) -> (u16, u16) {
+        match self {
+            Self::W100 => (21_000, 5_000),
+            Self::Auto | Self::W65 => (20_000, 3_250),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -241,7 +289,7 @@ enum ThermalProfileCommand {
     Preview(ThermalProfileFileArgs),
     ClearPreview(TargetSelector),
     Save(ThermalProfileFileArgs),
-    ClearSaved(TargetSelector),
+    ClearSaved(ThermalProfileClearArgs),
 }
 
 #[derive(Debug, Args)]
@@ -250,6 +298,16 @@ struct ThermalProfileFileArgs {
     target: TargetSelector,
     #[arg(long)]
     file: PathBuf,
+    #[arg(long = "profile-mode", value_enum, default_value = "65w")]
+    profile_mode: ThermalProfileMode,
+}
+
+#[derive(Debug, Args)]
+struct ThermalProfileClearArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long = "profile-mode", value_enum, default_value = "65w")]
+    profile_mode: ThermalProfileMode,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -257,24 +315,40 @@ struct ThermalSelfTestArgs {
     #[command(flatten)]
     target: TargetSelector,
     #[arg(
-        long = "source-device-id",
-        help = "Expected IsolaPurr device id returned by the external bench source URL."
+        long = "source-kind",
+        value_enum,
+        default_value = "isolapurr",
+        help = "Bench source provider used for thermal HIL. The current default is isolapurr."
     )]
-    source_device_id: String,
+    source_kind: BenchSourceKind,
+    #[arg(
+        long = "source-id",
+        alias = "source-device-id",
+        help = "Expected bench source identity returned by the selected source provider."
+    )]
+    source_id: String,
     #[arg(
         long = "source-url",
-        help = "IsolaPurr LAN HTTP URL used as the external bench source; USB saved-hardware transports are not allowed."
+        help = "Bench source URL used by the selected source provider. The default isolapurr provider uses LAN HTTP only."
     )]
     source_url: String,
-    #[arg(long = "source-voltage-v", default_value = "20.0")]
-    source_voltage_v: String,
-    #[arg(long = "source-current-a", default_value = "3.25")]
-    source_current_a: String,
+    #[arg(long = "profile-mode", value_enum, default_value = "auto")]
+    profile_mode: ThermalProfileMode,
+    #[arg(
+        long = "source-voltage-v",
+        help = "Optional low-level source-voltage override."
+    )]
+    source_voltage_v: Option<String>,
+    #[arg(
+        long = "source-current-a",
+        help = "Optional low-level source-current override."
+    )]
+    source_current_a: Option<String>,
     #[arg(
         long = "source-mode",
         default_value = "auto-follow",
         value_parser = ["auto-follow", "manual-forced"],
-        help = "Use PD auto-follow for thermal HIL, or explicitly force the IsolaPurr output for source-only tests."
+        help = "Bench source mode. The default isolapurr provider supports auto-follow or manual-forced."
     )]
     source_mode: String,
     #[arg(long = "sample-interval-ms", default_value_t = 300)]
@@ -1511,23 +1585,27 @@ async fn handle_thermal_command(
                     Method::PUT,
                     "/runtime",
                     Some(json!({
+                        "thermalProfileMode": args.profile_mode.as_str(),
                         "thermalControlProfile": {
                             "op": "save",
+                            "bank": args.profile_mode.resolved_bank(),
                             "profile": profile
                         }
                     })),
                 )
                 .await
             }
-            ThermalProfileCommand::ClearSaved(selector) => {
+            ThermalProfileCommand::ClearSaved(args) => {
                 request_with_lease(
                     client,
-                    resolve_target(selector, default_devd)?,
+                    resolve_target(args.target, default_devd)?,
                     Method::PUT,
                     "/runtime",
                     Some(json!({
+                        "thermalProfileMode": args.profile_mode.as_str(),
                         "thermalControlProfile": {
-                            "op": "clear_saved"
+                            "op": "clear_saved",
+                            "bank": args.profile_mode.resolved_bank(),
                         }
                     })),
                 )
@@ -1700,7 +1778,7 @@ struct ThermalCandidateProfile {
 }
 
 #[derive(Debug, Clone)]
-struct IsolapurrLiveTelemetry {
+struct BenchSourceLiveTelemetry {
     voltage_mv: u64,
     current_ma: u64,
     power_mw: u64,
@@ -1708,25 +1786,32 @@ struct IsolapurrLiveTelemetry {
     status: String,
 }
 
-const THERMAL_SOURCE_REQUIRED_POWER_WATTS: u64 = 65;
+const THERMAL_SOURCE_65W_POWER_WATTS: u64 = 65;
+const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
 const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
 
-struct IsolapurrTelemetrySampler {
+struct BenchSourceTelemetrySampler {
+    source_kind: BenchSourceKind,
     source_url: String,
-    latest: IsolapurrLiveTelemetry,
+    latest: BenchSourceLiveTelemetry,
     latest_sample_seen_at: tokio::time::Instant,
     pending: Option<
         tokio::task::JoinHandle<
-            Result<IsolapurrLiveTelemetry, Box<dyn std::error::Error + Send + Sync>>,
+            Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>>,
         >,
     >,
 }
 
-impl IsolapurrTelemetrySampler {
+impl BenchSourceTelemetrySampler {
     const MAX_STALE_DURATION: Duration = Duration::from_secs(2);
 
-    fn new(source_url: &str, initial: IsolapurrLiveTelemetry) -> Self {
+    fn new(
+        source_kind: BenchSourceKind,
+        source_url: &str,
+        initial: BenchSourceLiveTelemetry,
+    ) -> Self {
         let mut sampler = Self {
+            source_kind,
             source_url: source_url.to_string(),
             latest: initial,
             latest_sample_seen_at: tokio::time::Instant::now(),
@@ -1737,9 +1822,10 @@ impl IsolapurrTelemetrySampler {
     }
 
     fn start_poll(&mut self) {
+        let source_kind = self.source_kind;
         let source_url = self.source_url.clone();
         self.pending = Some(tokio::task::spawn_blocking(move || {
-            read_isolapurr_live_telemetry(&source_url)
+            read_bench_source_live_telemetry(source_kind, &source_url)
         }));
     }
 
@@ -1747,9 +1833,12 @@ impl IsolapurrTelemetrySampler {
         let telemetry = if let Some(pending) = self.pending.take() {
             pending.await??
         } else {
+            let source_kind = self.source_kind;
             let source_url = self.source_url.clone();
-            tokio::task::spawn_blocking(move || read_isolapurr_live_telemetry(&source_url))
-                .await??
+            tokio::task::spawn_blocking(move || {
+                read_bench_source_live_telemetry(source_kind, &source_url)
+            })
+            .await??
         };
         self.latest = telemetry;
         self.latest_sample_seen_at = tokio::time::Instant::now();
@@ -1759,7 +1848,7 @@ impl IsolapurrTelemetrySampler {
 
     async fn snapshot(
         &mut self,
-    ) -> Result<(IsolapurrLiveTelemetry, u64), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(BenchSourceLiveTelemetry, u64), Box<dyn std::error::Error + Send + Sync>> {
         if self
             .pending
             .as_ref()
@@ -2815,6 +2904,25 @@ fn thermal_batch_restart_temp_c(target_temp_c: i16) -> f64 {
     f64::from((target_temp_c - 30).max(40))
 }
 
+fn thermal_source_request(
+    args: &ThermalSelfTestArgs,
+) -> Result<(u16, u16), Box<dyn std::error::Error + Send + Sync>> {
+    let (default_voltage_mv, default_current_ma) = args.profile_mode.source_defaults();
+    let voltage_mv = args
+        .source_voltage_v
+        .as_deref()
+        .map(parse_pps_volts)
+        .transpose()?
+        .unwrap_or(default_voltage_mv);
+    let current_ma = args
+        .source_current_a
+        .as_deref()
+        .map(parse_pps_amps)
+        .transpose()?
+        .unwrap_or(default_current_ma);
+    Ok((voltage_mv, current_ma))
+}
+
 async fn collect_batch_thermal_self_test(
     client: &Client,
     default_devd: &str,
@@ -2822,8 +2930,7 @@ async fn collect_batch_thermal_self_test(
     target_temp_c: i16,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
-    let source_voltage_mv = parse_pps_volts(&args.source_voltage_v)?;
-    let source_current_ma = parse_pps_amps(&args.source_current_a)?;
+    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args)?;
     let restart_temp_c = thermal_batch_restart_temp_c(target_temp_c);
     let batch_id = format!(
         "thermal-batch-{}-{}",
@@ -2880,12 +2987,13 @@ async fn collect_batch_thermal_self_test(
             runs.push(summary);
         }
     } else {
-        validate_isolapurr_tools()?;
+        validate_thermal_bench_source_tools(args.source_kind)?;
         let (initial_source_telemetry, lease) = prepare_thermal_source_and_lease(
             client,
             &resolved,
+            args.source_kind,
             &args.source_url,
-            &args.source_device_id,
+            &args.source_id,
             &args.source_mode,
             source_voltage_mv,
             source_current_ma,
@@ -2893,8 +3001,11 @@ async fn collect_batch_thermal_self_test(
         .await?;
         let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
         let test_future = async {
-            let mut source_sampler =
-                IsolapurrTelemetrySampler::new(&args.source_url, initial_source_telemetry);
+            let mut source_sampler = BenchSourceTelemetrySampler::new(
+                args.source_kind,
+                &args.source_url,
+                initial_source_telemetry,
+            );
             for (candidate_index, candidate_file) in args.candidate_profile_files.iter().enumerate()
             {
                 let imported = serde_json::from_slice::<Value>(&fs::read(candidate_file)?)?;
@@ -3005,11 +3116,19 @@ async fn collect_batch_thermal_self_test(
             batch_error = Some(format!("thermal batch cleanup failed: {error}"));
         }
         let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-        if let Err(error) =
-            set_isolapurr_output_auto(client, &args.source_url, &args.source_device_id).await
+        if let Err(error) = set_thermal_bench_source_output_auto(
+            client,
+            args.source_kind,
+            &args.source_url,
+            &args.source_id,
+        )
+        .await
             && batch_error.is_none()
         {
-            batch_error = Some(format!("isolapurr cleanup failed: {error}"));
+            batch_error = Some(format!(
+                "{} cleanup failed: {error}",
+                args.source_kind.as_str()
+            ));
         }
     }
 
@@ -3068,14 +3187,7 @@ fn thermal_batch_candidate_summary(
             "hardwareId": resolved.hardware_id,
             "devd": resolved.devd,
         },
-        "source": {
-            "deviceId": args.source_device_id,
-            "mode": args.source_mode,
-            "url": args.source_url,
-            "voltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
-            "currentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
-            "usbCPath": if args.source_mode == "manual-forced" { "forced-on" } else { "pd-auto" },
-        },
+        "source": thermal_source_summary_value(args, source_voltage_mv, source_current_ma),
         "parameters": {
             "targetsC": [target_temp_c],
             "candidateProfileFile": candidate_file,
@@ -3145,8 +3257,7 @@ async fn collect_single_thermal_self_test(
     save_profile_on_pass: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
-    let source_voltage_mv = parse_pps_volts(&args.source_voltage_v)?;
-    let source_current_ma = parse_pps_amps(&args.source_current_a)?;
+    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args)?;
     let target_temps_c = parse_thermal_targets(args.targets_c.as_deref())?;
     let optimize_targets_c = if args.skip_optimize {
         Vec::new()
@@ -3196,12 +3307,13 @@ async fn collect_single_thermal_self_test(
             &mut sample_index,
         )?;
     } else {
-        validate_isolapurr_tools()?;
+        validate_thermal_bench_source_tools(args.source_kind)?;
         let (initial_source_telemetry, lease) = prepare_thermal_source_and_lease(
             client,
             &resolved,
+            args.source_kind,
             &args.source_url,
-            &args.source_device_id,
+            &args.source_id,
             &args.source_mode,
             source_voltage_mv,
             source_current_ma,
@@ -3210,8 +3322,11 @@ async fn collect_single_thermal_self_test(
         let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
 
         let test_future = async {
-            let mut source_sampler =
-                IsolapurrTelemetrySampler::new(&args.source_url, initial_source_telemetry);
+            let mut source_sampler = BenchSourceTelemetrySampler::new(
+                args.source_kind,
+                &args.source_url,
+                initial_source_telemetry,
+            );
             request_leased(
                 client,
                 &resolved,
@@ -3387,8 +3502,10 @@ async fn collect_single_thermal_self_test(
                     Some(json!({
                         "thermalControlProfile": {
                             "op": "save",
+                            "bank": args.profile_mode.resolved_bank(),
                             "profile": candidate_profile_value.clone(),
-                        }
+                        },
+                        "thermalProfileMode": args.profile_mode.as_str(),
                     })),
                 )
                 .await?;
@@ -3421,11 +3538,19 @@ async fn collect_single_thermal_self_test(
             run_error = Some(format!("thermal self-test cleanup failed: {error}"));
         }
         let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-        if let Err(error) =
-            set_isolapurr_output_auto(client, &args.source_url, &args.source_device_id).await
+        if let Err(error) = set_thermal_bench_source_output_auto(
+            client,
+            args.source_kind,
+            &args.source_url,
+            &args.source_id,
+        )
+        .await
             && run_error.is_none()
         {
-            run_error = Some(format!("isolapurr cleanup failed: {error}"));
+            run_error = Some(format!(
+                "{} cleanup failed: {error}",
+                args.source_kind.as_str()
+            ));
         }
     }
 
@@ -3442,14 +3567,7 @@ async fn collect_single_thermal_self_test(
             "hardwareId": resolved.hardware_id,
             "devd": resolved.devd,
         },
-        "source": {
-            "deviceId": args.source_device_id,
-            "mode": args.source_mode,
-            "url": args.source_url,
-            "voltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
-            "currentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
-            "usbCPath": if args.source_mode == "manual-forced" { "forced-on" } else { "pd-auto" },
-        },
+        "source": thermal_source_summary_value(&args, source_voltage_mv, source_current_ma),
         "parameters": {
             "targetsC": target_temps_c,
             "optimizeTargetsC": optimize_targets_c,
@@ -4908,15 +5026,17 @@ fn thermal_heater_parameters_value(
     let interpolated_profile = thermal_profile
         .cloned()
         .map(thermal_candidate_profile_from_value);
+    let effective_settings = interpolated_profile
+        .as_ref()
+        .map(|profile| profile.settings.clone())
+        .unwrap_or_else(thermal_default_settings);
     let interpolated_point = interpolated_profile
         .as_ref()
-        .and_then(|profile| thermal_interpolated_candidate_point(profile, target_temp_c));
+        .and_then(|profile| thermal_interpolated_candidate_point(profile, target_temp_c))
+        .map(|point| thermal_effective_candidate_point(point, &effective_settings));
     let point_value = interpolated_point.map(|point| {
         thermal_candidate_profile_to_value(&ThermalCandidateProfile {
-            settings: interpolated_profile
-                .as_ref()
-                .map(|profile| profile.settings)
-                .unwrap_or_else(thermal_default_settings),
+            settings: effective_settings.clone(),
             points: vec![point],
         })["points"][0]
             .clone()
@@ -5061,7 +5181,47 @@ fn thermal_heater_parameters_value(
     })
 }
 
-impl IsolapurrLiveTelemetry {
+fn thermal_effective_candidate_point(
+    mut point: ThermalCandidatePoint,
+    settings: &ThermalCandidateSettings,
+) -> ThermalCandidatePoint {
+    if point.hold_entry_centi_c == 0 {
+        point.hold_entry_centi_c = settings.hold_entry_centi_c;
+    }
+    if point.hold_exit_centi_c == 0 {
+        point.hold_exit_centi_c = settings.hold_exit_centi_c;
+    }
+    if point.hold_on_centi_c == 0 {
+        point.hold_on_centi_c = settings.hold_on_centi_c;
+    }
+    if point.hold_off_centi_c == 0 {
+        point.hold_off_centi_c = settings.hold_off_centi_c;
+    }
+    if point.overshoot_cutoff_centi_c == 0 {
+        point.overshoot_cutoff_centi_c = settings.overshoot_cutoff_centi_c;
+    }
+    if point.hold_kp_permille_per_c == 0 {
+        point.hold_kp_permille_per_c = settings.hold_kp_permille_per_c;
+    }
+    if point.hold_ki_permille_per_c_tick == 0 {
+        point.hold_ki_permille_per_c_tick = settings.hold_ki_permille_per_c_tick;
+    }
+    if point.hold_blend_ticks == 0 {
+        point.hold_blend_ticks = settings.hold_blend_ticks;
+    }
+    if point.hold_reheat_power_permille == 0 {
+        point.hold_reheat_power_permille = settings.hold_reheat_power_permille;
+    }
+    if point.hold_reheat_power_permille == 0 {
+        point.hold_reheat_power_permille = point.hold_power_permille;
+    }
+    if point.warmup_power_permille == 0 {
+        point.warmup_power_permille = point.approach_power_permille;
+    }
+    point
+}
+
+impl BenchSourceLiveTelemetry {
     fn to_value(&self) -> Value {
         json!({
             "voltageMv": self.voltage_mv,
@@ -5304,7 +5464,9 @@ fn render_thermal_self_test_report_html(
       ["Sample Interval", `${{summary.parameters?.effectiveSampleIntervalMs ?? summary.parameters?.sampleIntervalMs ?? 0}} ms`],
       ["Targets", (summary.parameters?.targetsC ?? []).join(", ")],
       ["Full-Speed Settle Limit", `${{summary.parameters?.limits?.fullSpeedToStableMs ?? "-"}} ms`],
-      ["Source", `${{summary.source?.voltageMv ?? "-"}} mV / ${{summary.source?.currentLimitMa ?? "-"}} mA`],
+      ["Thermal Profile", `${{summary.source?.selectedMode ?? "-"}} -> ${{summary.source?.resolvedBank ?? "-"}} (${{summary.source?.detectedSourceClass ?? "unknown"}})`],
+      ["Source", `${{summary.source?.kind ?? "unknown"}}:${{summary.source?.id ?? summary.source?.deviceId ?? "-"}}`],
+      ["Source Preset", `${{summary.source?.preset?.voltageMv ?? summary.source?.voltageMv ?? "-"}} mV / ${{summary.source?.preset?.currentLimitMa ?? summary.source?.currentLimitMa ?? "-"}} mA`],
     ];
     for (const [label, value] of summaryMetrics) {{
       const card = document.createElement("div");
@@ -5706,6 +5868,41 @@ fn thermal_self_test_runtime_body(heater_enabled: bool, target_temp_c: i16) -> V
     body
 }
 
+fn thermal_source_summary_value(
+    args: &ThermalSelfTestArgs,
+    source_voltage_mv: u16,
+    source_current_ma: u16,
+) -> Value {
+    json!({
+        "kind": args.source_kind.as_str(),
+        "id": args.source_id,
+        "deviceId": args.source_id,
+        "mode": args.source_mode,
+        "selectedMode": args.profile_mode.as_str(),
+        "resolvedBank": args.profile_mode.resolved_bank(),
+        "detectedSourceClass": thermal_source_class(source_voltage_mv, source_current_ma),
+        "detectedSourceClassBasis": "configured_capability",
+        "preset": {
+            "voltageMv": source_voltage_mv,
+            "currentLimitMa": source_current_ma,
+            "ppsEnabled": true,
+            "pdFixedEnabled": true,
+        },
+        "url": args.source_url,
+        "voltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
+        "currentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
+        "usbCPath": if args.source_mode == "manual-forced" { "forced-on" } else { "pd-auto" },
+    })
+}
+
+fn thermal_source_class(source_voltage_mv: u16, source_current_ma: u16) -> &'static str {
+    if source_voltage_mv >= 20_000 && source_current_ma >= 5_000 {
+        "pps5a"
+    } else {
+        "pps3a"
+    }
+}
+
 fn thermal_self_test_cooldown_runtime_body() -> Value {
     json!({
         "heaterEnabled": false,
@@ -5750,7 +5947,7 @@ async fn run_thermal_stage(
     source_current_ma: u16,
     heater_parameters: &Value,
     args: &ThermalSelfTestArgs,
-    source_sampler: &mut IsolapurrTelemetrySampler,
+    source_sampler: &mut BenchSourceTelemetrySampler,
     sample_index: &mut usize,
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
     let mut started = tokio::time::Instant::now();
@@ -6077,9 +6274,63 @@ fn validate_thermal_applied_results(
     })
 }
 
+fn read_bench_source_live_telemetry(
+    source_kind: BenchSourceKind,
+    source_url: &str,
+) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
+    match source_kind {
+        BenchSourceKind::Isolapurr => read_isolapurr_live_telemetry(source_url),
+    }
+}
+
+fn validate_thermal_bench_source_tools(
+    source_kind: BenchSourceKind,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match source_kind {
+        BenchSourceKind::Isolapurr => validate_isolapurr_tools(),
+    }
+}
+
+async fn set_thermal_bench_source_output_auto(
+    client: &Client,
+    source_kind: BenchSourceKind,
+    source_url: &str,
+    source_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match source_kind {
+        BenchSourceKind::Isolapurr => {
+            set_isolapurr_output_auto(client, source_url, source_id).await
+        }
+    }
+}
+
+async fn prepare_thermal_bench_source(
+    client: &Client,
+    source_kind: BenchSourceKind,
+    source_url: &str,
+    source_id: &str,
+    source_mode: &str,
+    voltage_mv: u16,
+    current_limit_ma: u16,
+) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
+    match source_kind {
+        BenchSourceKind::Isolapurr => {
+            prepare_isolapurr_thermal_source(
+                client,
+                source_url,
+                source_id,
+                source_mode,
+                voltage_mv,
+                current_limit_ma,
+            )
+            .await
+        }
+    }
+}
+
 fn read_isolapurr_live_telemetry(
     source_url: &str,
-) -> Result<IsolapurrLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
     let mut last_error = None::<String>;
     for attempt in 1..=3 {
         let result = isolapurr_cli_json_with_timeout(
@@ -6121,7 +6372,7 @@ fn validate_isolapurr_tools() -> Result<(), Box<dyn std::error::Error + Send + S
     Ok(())
 }
 
-fn parse_isolapurr_live_telemetry(ports: &Value) -> Result<IsolapurrLiveTelemetry, String> {
+fn parse_isolapurr_live_telemetry(ports: &Value) -> Result<BenchSourceLiveTelemetry, String> {
     let port_c = ports
         .get("ports")
         .and_then(Value::as_array)
@@ -6158,7 +6409,7 @@ fn parse_isolapurr_live_telemetry(ports: &Value) -> Result<IsolapurrLiveTelemetr
         .ok_or_else(|| {
             format!("isolapurr USB-C telemetry missing sample uptime status={status} state={state}")
         })?;
-    Ok(IsolapurrLiveTelemetry {
+    Ok(BenchSourceLiveTelemetry {
         voltage_mv,
         current_ma,
         power_mw,
@@ -6202,12 +6453,12 @@ async fn prepare_isolapurr_thermal_source(
     source_mode: &str,
     voltage_mv: u16,
     current_limit_ma: u16,
-) -> Result<IsolapurrLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
     if source_mode == "manual-forced" {
         set_isolapurr_output_manual(client, source_url, device_id, voltage_mv, current_limit_ma)
             .await
     } else {
-        ensure_isolapurr_thermal_capability(source_url, device_id)?;
+        ensure_isolapurr_thermal_capability(source_url, device_id, current_limit_ma)?;
         set_isolapurr_output_auto(client, source_url, device_id).await?;
         let telemetry = ensure_isolapurr_live_telemetry_ready(source_url)?;
         validate_isolapurr_ready_voltage(&telemetry)?;
@@ -6218,16 +6469,18 @@ async fn prepare_isolapurr_thermal_source(
 async fn prepare_thermal_source_and_lease(
     client: &Client,
     resolved: &ResolvedUsbTarget,
+    source_kind: BenchSourceKind,
     source_url: &str,
-    device_id: &str,
+    source_id: &str,
     source_mode: &str,
     voltage_mv: u16,
     current_limit_ma: u16,
-) -> Result<(IsolapurrLiveTelemetry, Lease), Box<dyn std::error::Error + Send + Sync>> {
-    let telemetry = prepare_isolapurr_thermal_source(
+) -> Result<(BenchSourceLiveTelemetry, Lease), Box<dyn std::error::Error + Send + Sync>> {
+    let telemetry = prepare_thermal_bench_source(
         client,
+        source_kind,
         source_url,
-        device_id,
+        source_id,
         source_mode,
         voltage_mv,
         current_limit_ma,
@@ -6236,23 +6489,42 @@ async fn prepare_thermal_source_and_lease(
     tokio::time::sleep(Duration::from_secs(2)).await;
     match create_ready_thermal_lease(client, resolved).await {
         Ok((lease, _status)) => Ok((telemetry, lease)),
-        Err(error) => match set_isolapurr_output_auto(client, source_url, device_id).await {
-            Ok(()) => Err(error),
-            Err(cleanup_error) => Err(format!(
-                "{error}; isolapurr cleanup after lease failure also failed: {cleanup_error}"
-            )
-            .into()),
-        },
+        Err(error) => {
+            match set_thermal_bench_source_output_auto(client, source_kind, source_url, source_id)
+                .await
+            {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(format!(
+                    "{error}; {} cleanup after lease failure also failed: {cleanup_error}",
+                    source_kind.as_str()
+                )
+                .into()),
+            }
+        }
     }
 }
 
 fn ensure_isolapurr_thermal_capability(
     source_url: &str,
     device_id: &str,
+    current_limit_ma: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_isolapurr_device_identity(source_url, device_id)?;
+    let required_power_watts = if current_limit_ma >= 5_000 {
+        THERMAL_SOURCE_100W_POWER_WATTS
+    } else {
+        THERMAL_SOURCE_65W_POWER_WATTS
+    };
+    let requires_pps_5a = required_power_watts == THERMAL_SOURCE_100W_POWER_WATTS;
     let mut config = read_isolapurr_power_config(source_url)?;
-    if !isolapurr_power_config_has_thermal_capability(&config) {
+    if !isolapurr_power_config_has_thermal_capability(
+        &config,
+        required_power_watts,
+        requires_pps_5a,
+    ) {
+        let power_watts = required_power_watts.to_string();
+        let pps3_limit_ma = if requires_pps_5a { "5000" } else { "3250" };
+        let pd_pps_5a = if requires_pps_5a { "true" } else { "false" };
         let response = isolapurr_cli_json(
             source_url,
             &[
@@ -6260,36 +6532,71 @@ fn ensure_isolapurr_thermal_capability(
                 "source-capability",
                 "set",
                 "--power-watts",
-                "65",
+                &power_watts,
                 "--pd",
                 "true",
+                "--pps3-limit-ma",
+                pps3_limit_ma,
+                "--pd-pps-5a",
+                pd_pps_5a,
                 "--pps",
                 "true",
             ],
         )?;
         if !isolapurr_cli_write_succeeded(&response)
-            && !response
-                .get("config")
-                .is_some_and(isolapurr_power_config_has_thermal_capability)
+            && !response.get("config").is_some_and(|config| {
+                isolapurr_power_config_has_thermal_capability(
+                    config,
+                    required_power_watts,
+                    requires_pps_5a,
+                )
+            })
         {
             return Err("isolapurr source capability command did not acknowledge success".into());
         }
         config = read_isolapurr_power_config(source_url)?;
     }
-    if !isolapurr_power_config_has_thermal_capability(&config) {
+    if !isolapurr_power_config_has_thermal_capability(
+        &config,
+        required_power_watts,
+        requires_pps_5a,
+    ) {
         return Err(
-            "isolapurr source capability readback must confirm 65W, PD Fixed, and PPS".into(),
+            format!(
+                "isolapurr source capability readback must confirm {required_power_watts}W, PD Fixed, and PPS"
+            )
+            .into(),
         );
     }
     Ok(())
 }
 
-fn isolapurr_power_config_has_thermal_capability(config: &Value) -> bool {
+fn isolapurr_power_config_has_thermal_capability(
+    config: &Value,
+    required_power_watts: u64,
+    requires_pps_5a: bool,
+) -> bool {
     let capability = config.get("capability").unwrap_or(config);
+    let pps3_limit_ma = json_u64_any(
+        capability.as_object().unwrap_or(&serde_json::Map::new()),
+        &["pps3_limit_ma", "pps3LimitMa"],
+    )
+    .or_else(|| {
+        capability
+            .pointer("/pd/pps3_limit_ma")
+            .or_else(|| capability.pointer("/pd/pps3LimitMa"))
+            .and_then(Value::as_u64)
+    });
+    let pd_pps_5a = capability
+        .pointer("/pd/pd_pps_5a")
+        .or_else(|| capability.pointer("/pd/pdPps5a"))
+        .or_else(|| capability.get("pd_pps_5a"))
+        .or_else(|| capability.get("pdPps5a"))
+        .and_then(Value::as_bool);
     json_u64_any(
         capability.as_object().unwrap_or(&serde_json::Map::new()),
         &["power_watts", "powerWatts"],
-    ) == Some(THERMAL_SOURCE_REQUIRED_POWER_WATTS)
+    ) == Some(required_power_watts)
         && capability.pointer("/protocols/pd").and_then(Value::as_bool) == Some(true)
         && capability.pointer("/pd/pps").and_then(Value::as_bool) == Some(true)
         && capability
@@ -6297,10 +6604,11 @@ fn isolapurr_power_config_has_thermal_capability(config: &Value) -> bool {
             .or_else(|| capability.pointer("/pd/fixedVoltagesMv"))
             .and_then(Value::as_array)
             .is_some_and(|voltages| !voltages.is_empty())
+        && (!requires_pps_5a || (pps3_limit_ma >= Some(5_000) && pd_pps_5a == Some(true)))
 }
 
 fn validate_isolapurr_ready_voltage(
-    telemetry: &IsolapurrLiveTelemetry,
+    telemetry: &BenchSourceLiveTelemetry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if telemetry.status != "ok" {
         return Err(format!(
@@ -6325,7 +6633,7 @@ async fn set_isolapurr_output_manual(
     device_id: &str,
     voltage_mv: u16,
     current_limit_ma: u16,
-) -> Result<IsolapurrLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
     validate_isolapurr_device_identity(source_url, device_id)?;
     let mut config = read_isolapurr_power_config(source_url)?;
     if !isolapurr_power_config_value_matches_manual(&config, voltage_mv, current_limit_ma) {
@@ -6432,7 +6740,7 @@ fn read_isolapurr_power_config(
 
 fn ensure_isolapurr_live_telemetry_ready(
     source_url: &str,
-) -> Result<IsolapurrLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
     let mut last_error = None::<String>;
     for attempt in 1..=6 {
         let power = isolapurr_cli_json(source_url, &["power", "show"])?;
@@ -7980,6 +8288,19 @@ mod tests {
             parameters["approachPowerPermille"],
             point.approach_power_permille
         );
+    }
+
+    #[test]
+    fn thermal_heater_parameters_apply_firmware_zero_value_inheritance() {
+        let mut profile = thermal_seed_candidate_profile();
+        profile.settings.hold_ki_permille_per_c_tick = 1;
+        thermal_candidate_point_mut(&mut profile, 60)
+            .expect("60C anchor")
+            .hold_ki_permille_per_c_tick = 0;
+
+        let value = thermal_candidate_profile_to_value(&profile);
+        let parameters = thermal_heater_parameters_value(60, Some(&value), "preview");
+        assert_eq!(parameters["holdKiPermillePerCTick"], 1);
     }
 
     #[test]
@@ -9547,7 +9868,7 @@ mod tests {
             "self-test",
             "--device",
             "mock-fp-lab-01",
-            "--source-device-id",
+            "--source-id",
             "iso-mock",
             "--source-url",
             "http://127.0.0.1:1",
@@ -9564,6 +9885,7 @@ mod tests {
         };
 
         assert_eq!(args.targets_c.as_deref(), Some("140,250"));
+        assert_eq!(args.source_kind, BenchSourceKind::Isolapurr);
         assert_eq!(args.sample_interval_ms, 300);
         assert_eq!(effective_thermal_sample_interval_ms(333), 300);
     }
@@ -9576,7 +9898,7 @@ mod tests {
             "self-test",
             "--device",
             "mock-fp-lab-01",
-            "--source-device-id",
+            "--source-id",
             "iso-mock",
             "--source-url",
             "http://127.0.0.1:1",
@@ -10026,9 +10348,36 @@ mod tests {
                 }
             }
         });
-        assert!(isolapurr_power_config_has_thermal_capability(&config));
+        assert!(isolapurr_power_config_has_thermal_capability(
+            &config,
+            THERMAL_SOURCE_65W_POWER_WATTS,
+            false,
+        ));
+        assert!(!isolapurr_power_config_has_thermal_capability(
+            &config,
+            THERMAL_SOURCE_100W_POWER_WATTS,
+            true,
+        ));
 
-        let ready = IsolapurrLiveTelemetry {
+        let five_amp_config = json!({
+            "capability": {
+                "powerWatts": 100,
+                "protocols": { "pd": true },
+                "pd": {
+                    "pps": true,
+                    "fixedVoltagesMv": [9000, 12000, 15000, 20000, 21000],
+                    "pps3LimitMa": 5000,
+                    "pdPps5a": true,
+                }
+            }
+        });
+        assert!(isolapurr_power_config_has_thermal_capability(
+            &five_amp_config,
+            THERMAL_SOURCE_100W_POWER_WATTS,
+            true,
+        ));
+
+        let ready = BenchSourceLiveTelemetry {
             voltage_mv: 12_034,
             current_ma: 119,
             power_mw: 1_431,
@@ -10037,13 +10386,13 @@ mod tests {
         };
         assert!(validate_isolapurr_ready_voltage(&ready).is_ok());
 
-        let undervoltage = IsolapurrLiveTelemetry {
+        let undervoltage = BenchSourceLiveTelemetry {
             voltage_mv: 5_000,
             ..ready.clone()
         };
         assert!(validate_isolapurr_ready_voltage(&undervoltage).is_err());
 
-        let disconnected = IsolapurrLiveTelemetry {
+        let disconnected = BenchSourceLiveTelemetry {
             status: "not_inserted".into(),
             ..ready
         };
@@ -10115,7 +10464,8 @@ mod tests {
                 command: ThermalCommand::SelfTest(args),
             } => {
                 assert_eq!(args.target.device.as_deref(), Some("bench"));
-                assert_eq!(args.source_device_id, "iso-1");
+                assert_eq!(args.source_kind, BenchSourceKind::Isolapurr);
+                assert_eq!(args.source_id, "iso-1");
                 assert_eq!(args.source_url, "http://192.168.31.122");
                 assert_eq!(args.source_mode, "auto-follow");
                 assert!(args.dry_run);
@@ -10140,6 +10490,20 @@ mod tests {
         assert_eq!(parse_pps_amps("3.00").unwrap(), 3_000);
         assert!(parse_pps_amps("2.53").is_err());
         assert!(parse_pps_amps("0").is_err());
+    }
+
+    #[test]
+    fn thermal_profile_modes_preserve_65w_and_define_100w_defaults() {
+        assert_eq!(ThermalProfileMode::W65.source_defaults(), (20_000, 3_250));
+        assert_eq!(ThermalProfileMode::W100.source_defaults(), (21_000, 5_000));
+        assert_eq!(ThermalProfileMode::Auto.resolved_bank(), "pps3a");
+        assert_eq!(ThermalProfileMode::W100.resolved_bank(), "pps5a");
+    }
+
+    #[test]
+    fn thermal_source_class_uses_the_configured_capability_not_selected_mode() {
+        assert_eq!(thermal_source_class(20_000, 3_250), "pps3a");
+        assert_eq!(thermal_source_class(21_000, 5_000), "pps5a");
     }
 
     #[test]

@@ -189,7 +189,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`, while other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
 
 ### `ApiError`
 
@@ -516,7 +516,7 @@ Core commands:
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`
-- `flux-purr thermal self-test --device <id> --source-device-id <isolapurr-id> --source-url <lan-url> [--source-mode auto-follow|manual-forced]`
+- `flux-purr thermal self-test --device <id> [--source-kind isolapurr] --source-id <bench-source-id> --source-url <lan-url> [--profile-mode auto|65w|100w] [--source-mode auto-follow|manual-forced]`
 - Batch profile comparison repeats `--candidate-profile-file <path>` for one `--targets-c` value; candidates share one source/lease session, use `max(40C, target-30C)` as the restart threshold, produce separate reports, and never write EEPROM.
 - `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`

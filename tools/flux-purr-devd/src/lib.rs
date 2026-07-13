@@ -354,6 +354,8 @@ pub struct DeviceRecord {
     pub preview_thermal_control_profile: Option<ThermalControlProfilePackage>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub saved_thermal_control_profile: Option<ThermalControlProfilePackage>,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub saved_thermal_control_profile_pps5a: Option<ThermalControlProfilePackage>,
     pub calibration: CalibrationState,
     pub heater_curve: HeaterCurveState,
     pub selected_artifact_id: Option<String>,
@@ -445,6 +447,8 @@ impl DeviceRecord {
             heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeState::default(),
             thermal_control_profile_preview: false,
+            thermal_profile_mode: "65w".to_string(),
+            thermal_profile_resolved_bank: "pps3a".to_string(),
             thermal_control: ThermalControlRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
@@ -461,6 +465,7 @@ impl DeviceRecord {
             status,
             preview_thermal_control_profile: None,
             saved_thermal_control_profile: None,
+            saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
@@ -521,6 +526,8 @@ impl DeviceRecord {
             heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeState::default(),
             thermal_control_profile_preview: false,
+            thermal_profile_mode: "65w".to_string(),
+            thermal_profile_resolved_bank: "pps3a".to_string(),
             thermal_control: ThermalControlRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
@@ -555,6 +562,7 @@ impl DeviceRecord {
             status,
             preview_thermal_control_profile: None,
             saved_thermal_control_profile: None,
+            saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
@@ -686,6 +694,10 @@ pub struct ControlPlaneStatus {
     pub calibration: CalibrationRuntimeState,
     #[serde(default)]
     pub thermal_control_profile_preview: bool,
+    #[serde(default = "default_thermal_profile_mode")]
+    pub thermal_profile_mode: String,
+    #[serde(default = "default_thermal_profile_resolved_bank")]
+    pub thermal_profile_resolved_bank: String,
     #[serde(default)]
     pub thermal_control: ThermalControlRuntime,
     pub frontpanel_key: Option<String>,
@@ -724,6 +736,14 @@ pub struct ThermalControlRuntime {
     pub approach_min_power_ratio_permille: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
+}
+
+fn default_thermal_profile_mode() -> String {
+    "65w".to_string()
+}
+
+fn default_thermal_profile_resolved_bank() -> String {
+    "pps3a".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1173,6 +1193,7 @@ pub struct RuntimeConfigRequest {
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
     pub calibration: Option<CalibrationControlRequest>,
+    pub thermal_profile_mode: Option<String>,
     pub thermal_control_profile: Option<ThermalControlProfileRequest>,
 }
 
@@ -1262,6 +1283,8 @@ pub struct ThermalControlProfileSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ThermalControlProfileRequest {
     pub op: ThermalControlProfileOp,
+    #[serde(default)]
+    pub bank: Option<String>,
     pub profile: Option<ThermalControlProfilePackage>,
 }
 
@@ -1398,6 +1421,8 @@ struct UsbRuntimeConfigWire<'a> {
     manual_pps_ma: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<&'a CalibrationControlRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thermal_profile_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
 }
@@ -2568,7 +2593,28 @@ async fn configure_runtime(
     if let Some(calibration) = payload.calibration.as_ref() {
         apply_mock_calibration_runtime_config(&mut device.status, calibration);
     }
+    if let Some(mode) = payload.thermal_profile_mode.as_deref() {
+        if matches!(mode, "auto" | "65w" | "100w") {
+            device.status.thermal_profile_mode = mode.to_string();
+            device.status.thermal_profile_resolved_bank = if mode == "100w"
+                || (mode == "auto"
+                    && device.status.pps_capability_min_mv.unwrap_or(u16::MAX) <= 20_000
+                    && device.status.pps_capability_max_mv.unwrap_or(0) >= 20_000
+                    && device.status.pps_capability_max_ma.unwrap_or(0) >= 5_000)
+            {
+                "pps5a".to_string()
+            } else {
+                "pps3a".to_string()
+            };
+        }
+    }
     if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
+        let bank = thermal_control_profile.bank.as_deref().unwrap_or_else(|| {
+            match device.status.thermal_profile_mode.as_str() {
+                "100w" => "pps5a",
+                _ => "pps3a",
+            }
+        });
         match thermal_control_profile.op {
             ThermalControlProfileOp::Preview => {
                 device.preview_thermal_control_profile = thermal_control_profile.profile.clone();
@@ -2577,18 +2623,30 @@ async fn configure_runtime(
                 device.preview_thermal_control_profile = None;
             }
             ThermalControlProfileOp::Save => {
-                device.saved_thermal_control_profile = thermal_control_profile.profile.clone();
+                if bank == "pps5a" {
+                    device.saved_thermal_control_profile_pps5a =
+                        thermal_control_profile.profile.clone();
+                } else {
+                    device.saved_thermal_control_profile = thermal_control_profile.profile.clone();
+                }
                 device.preview_thermal_control_profile = None;
             }
             ThermalControlProfileOp::ClearSaved => {
-                device.saved_thermal_control_profile = None;
+                if bank == "pps5a" {
+                    device.saved_thermal_control_profile_pps5a = None;
+                } else {
+                    device.saved_thermal_control_profile = None;
+                }
             }
         }
+        device.status.thermal_profile_resolved_bank = bank.to_string();
     }
-    let active_profile = device
-        .preview_thermal_control_profile
-        .as_ref()
-        .or(device.saved_thermal_control_profile.as_ref());
+    let active_profile = device.preview_thermal_control_profile.as_ref().or_else(|| {
+        match device.status.thermal_profile_resolved_bank.as_str() {
+            "pps5a" => device.saved_thermal_control_profile_pps5a.as_ref(),
+            _ => device.saved_thermal_control_profile.as_ref(),
+        }
+    });
     let preview_active = device.preview_thermal_control_profile.is_some();
     device.status.thermal_control_profile_preview = preview_active;
     device.status.thermal_control =
@@ -3740,6 +3798,7 @@ async fn serial_runtime_config(
         manual_pps_mv: payload.manual_pps_mv,
         manual_pps_ma: payload.manual_pps_ma,
         calibration: payload.calibration.as_ref(),
+        thermal_profile_mode: payload.thermal_profile_mode.as_ref(),
         thermal_control_profile: payload.thermal_control_profile.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
@@ -4466,6 +4525,13 @@ fn runtime_config_matches_status(
         return false;
     }
     if payload
+        .thermal_profile_mode
+        .as_deref()
+        .is_some_and(|mode| status.thermal_profile_mode != mode)
+    {
+        return false;
+    }
+    if payload
         .selected_preset_slot
         .is_some_and(|selected_preset_slot| {
             status.selected_preset_slot != Some(selected_preset_slot)
@@ -5162,6 +5228,8 @@ fn build_espflash_args(
             artifact.target_chip.clone(),
             "--port".to_string(),
             port_path.to_string(),
+            "--before".to_string(),
+            espflash_before_reset_mode(artifact, port_path).to_string(),
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
@@ -5185,12 +5253,22 @@ fn build_espflash_args(
         artifact.target_chip.clone(),
         "--port".to_string(),
         port_path.to_string(),
+        "--before".to_string(),
+        espflash_before_reset_mode(artifact, port_path).to_string(),
         "--non-interactive".to_string(),
         "--after".to_string(),
         "hard-reset".to_string(),
         flash_address.to_string(),
         path.to_string_lossy().into_owned(),
     ])
+}
+
+fn espflash_before_reset_mode(artifact: &FirmwareArtifact, port_path: &str) -> &'static str {
+    if artifact.target_chip == "esp32s3" && port_path.contains("usbmodem") {
+        "usb-reset"
+    } else {
+        "default-reset"
+    }
 }
 
 fn requires_lease(state: &DevdState, device_id: &str) -> bool {
@@ -6093,6 +6171,10 @@ mod tests {
         );
         assert!(
             args.windows(2)
+                .any(|pair| pair == ["--before", "usb-reset"])
+        );
+        assert!(
+            args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
         assert!(!args.contains(&"-S".to_string()));
@@ -6132,10 +6214,34 @@ mod tests {
         );
         assert!(
             args.windows(2)
+                .any(|pair| pair == ["--before", "usb-reset"])
+        );
+        assert!(
+            args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
         assert!(args.contains(&DEFAULT_APP_FLASH_ADDRESS.to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
+    }
+
+    #[test]
+    fn non_native_serial_ports_keep_the_default_reset_mode() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec![],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![],
+        };
+        assert_eq!(
+            espflash_before_reset_mode(&artifact, "/dev/cu.usbserial-1410"),
+            "default-reset"
+        );
     }
 
     #[tokio::test]
@@ -6155,6 +6261,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6183,8 +6290,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::Preview,
+                    bank: None,
                     profile: Some(ThermalControlProfilePackage {
                         settings: None,
                         points: vec![
@@ -6244,8 +6353,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::ClearSaved,
+                    bank: None,
                     profile: None,
                 }),
             }),
@@ -6271,8 +6382,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::ClearPreview,
+                    bank: None,
                     profile: None,
                 }),
             }),
@@ -6303,8 +6416,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::Save,
+                    bank: None,
                     profile: Some(ThermalControlProfilePackage {
                         settings: None,
                         points: vec![
@@ -6364,8 +6479,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::ClearSaved,
+                    bank: None,
                     profile: None,
                 }),
             }),
@@ -6382,6 +6499,7 @@ mod tests {
     fn thermal_profile_clear_preview_rejects_profile_payload() {
         let error = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
             op: ThermalControlProfileOp::ClearPreview,
+            bank: None,
             profile: Some(ThermalControlProfilePackage {
                 settings: None,
                 points: vec![None; FRONT_PANEL_PRESET_COUNT],
@@ -6397,6 +6515,7 @@ mod tests {
     fn thermal_profile_preview_accepts_the_ch224q_5v_floor() {
         let result = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
             op: ThermalControlProfileOp::Preview,
+            bank: None,
             profile: Some(ThermalControlProfilePackage {
                 settings: Some(ThermalControlProfileSettings {
                     temp_filter_alpha_permille: 700,
@@ -6517,6 +6636,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6566,6 +6686,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6593,6 +6714,7 @@ mod tests {
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6618,6 +6740,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6664,6 +6787,7 @@ mod tests {
                     heater_enabled: Some(false),
                     target_adc_mv: None,
                 }),
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6710,6 +6834,7 @@ mod tests {
                     heater_enabled: Some(false),
                     target_adc_mv: None,
                 }),
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6971,6 +7096,7 @@ mod tests {
                 heater_enabled: Some(true),
                 target_adc_mv: Some(930),
             }),
+            thermal_profile_mode: None,
             thermal_control_profile: None,
         };
         let status = ControlPlaneStatus {
@@ -7013,6 +7139,8 @@ mod tests {
             heater_control_interval_ms: 0,
             heater_control_cycle_ms: 0,
             thermal_control_profile_preview: false,
+            thermal_profile_mode: "65w".to_string(),
+            thermal_profile_resolved_bank: "pps3a".to_string(),
             thermal_control: ThermalControlRuntime::default(),
             calibration: CalibrationRuntimeState {
                 mode: CalibrationMode::RtdAdc,
@@ -7060,6 +7188,7 @@ mod tests {
                 heater_enabled: Some(false),
                 target_adc_mv: None,
             }),
+            thermal_profile_mode: None,
             thermal_control_profile: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
@@ -7106,8 +7235,10 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: Some(ThermalControlProfileRequest {
                 op: ThermalControlProfileOp::Preview,
+                bank: None,
                 profile: Some(ThermalControlProfilePackage {
                     settings: None,
                     points,
@@ -7163,8 +7294,10 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: Some(ThermalControlProfileRequest {
                 op: ThermalControlProfileOp::Save,
+                bank: None,
                 profile: Some(ThermalControlProfilePackage {
                     settings: None,
                     points,

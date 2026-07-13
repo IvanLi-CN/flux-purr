@@ -328,9 +328,15 @@ should therefore prefer target subsets over killing long full-ladder runs mid-fl
 
 ## Hardware boundary
 
-Flux Purr self-test uses the repo-local `flux-purr` CLI through `flux-purr-devd` for the device under test. IsolaPurr is an external PD source and must be prepared through released `isolapurr` / `isolapurr-devd` tools, not source commands or raw local HTTP. Thermal HIL configures `65W`, enables PD Fixed and PPS, selects `auto_follow`, and checks one live USB-C reading above `5V` before testing. It does not manually control TPS, force a voltage, replug the source port, or test IsolaPurr behavior; Flux Purr owns subsequent PD/PPS requests.
+Flux Purr self-test uses the repo-local `flux-purr` CLI through `flux-purr-devd` for the device under test. The host self-test path abstracts a bench source provider, with `isolapurr` as the current default and validated provider. IsolaPurr remains an external PD source and must be prepared through released `isolapurr` / `isolapurr-devd` tools, not source commands or raw local HTTP. Thermal HIL configures `65W`, enables PD Fixed and PPS, selects `auto_follow`, and checks one live USB-C reading above `5V` before testing. It does not manually control TPS, force a voltage, replug the source port, or test IsolaPurr behavior; Flux Purr owns subsequent PD/PPS requests.
 
 When an explicit `manual-forced` source mode is used, source preparation and Flux Purr lease acquisition form one rollback boundary. If the target never becomes ready or lease acquisition fails after the source was forced on, the CLI must restore IsolaPurr output to `auto` before returning the error; batch and single-run paths share this behavior.
+
+## Source and profile banks
+
+Thermal tuning has two fixed persistence banks: `pps3a` for the 65W path and `pps5a` for the 100W path. The host-facing choice is `auto|65w|100w`; only `auto` resolves from advertised PPS capability (`20V` coverage and at least `5A` select `pps5a`). Explicit choices are diagnostic and tuning intent, not a source-mismatch interlock, so reports must preserve both selected mode and detected capability class.
+
+The 65W source preset remains `20V / 3.25A`; this preserves accepted tuning semantics. The 100W preset is `21V / 5A`, with PPS and PD Fixed enabled. `preview` is always a single RAM overlay. A successful save or clear must contain the destination bank, and each frozen baseline bundle remains the committed seed for that bank.
 
 For banana-jack bench output, keep the IsolaPurr USB-C VBUS path disconnected unless the operator explicitly chooses shared USB-C output.
 

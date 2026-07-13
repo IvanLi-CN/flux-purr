@@ -95,15 +95,16 @@ use flux_purr_firmware::memory::{
     THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
     THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX,
     THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, ThermalControlProfileConfig,
-    ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig,
-    heater_resistance_ohms_from_curve,
+    ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, ThermalProfileBank,
+    ThermalProfileMode, heater_resistance_ohms_from_curve,
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
     M24C64_PAGE_SIZE, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
-    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, decode_memory_record, encode_memory_record,
-    select_latest_memory_record,
+    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
+    PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
+    encode_memory_record, select_latest_memory_record,
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
@@ -833,10 +834,38 @@ impl ThermalControlProfile {
 fn active_thermal_control_profile(
     memory_config: &MemoryConfig,
     preview: Option<ThermalControlProfile>,
+    pps_capability_min_mv: Option<u16>,
+    pps_capability_max_mv: Option<u16>,
+    pps_capability_max_ma: Option<u16>,
 ) -> Option<ThermalControlProfile> {
     preview.or_else(|| {
-        ThermalControlProfile::from_saved_config(&memory_config.active_thermal_control_profile)
+        ThermalControlProfile::from_saved_config(memory_config.thermal_profile(
+            resolve_thermal_profile_bank(
+                memory_config.thermal_profile_mode,
+                pps_capability_min_mv,
+                pps_capability_max_mv,
+                pps_capability_max_ma,
+            ),
+        ))
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn resolve_thermal_profile_bank(
+    mode: ThermalProfileMode,
+    pps_capability_min_mv: Option<u16>,
+    pps_capability_max_mv: Option<u16>,
+    pps_capability_max_ma: Option<u16>,
+) -> ThermalProfileBank {
+    if mode == ThermalProfileMode::Auto
+        && pps_capability_min_mv.is_some_and(|value| value <= 20_000)
+        && pps_capability_max_mv.is_some_and(|value| value >= 20_000)
+        && pps_capability_max_ma.is_some_and(|value| value >= 5_000)
+    {
+        ThermalProfileBank::Pps5a
+    } else {
+        mode.default_bank()
+    }
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -3192,6 +3221,21 @@ fn load_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryReco
         .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
     let mut selected = select_latest_memory_record(slot_a_read, slot_b_read);
     if selected.is_none() {
+        let mut previous_slot_a = [0u8; PREVIOUS_MEMORY_SLOT_SIZE];
+        let mut previous_slot_b = [0u8; PREVIOUS_MEMORY_SLOT_SIZE];
+        let previous_slot_a_read = eeprom
+            .read_bytes(PREVIOUS_MEMORY_SLOT_A_OFFSET, &mut previous_slot_a)
+            .map(|_| decode_memory_record(&previous_slot_a))
+            .ok()
+            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+        let previous_slot_b_read = eeprom
+            .read_bytes(PREVIOUS_MEMORY_SLOT_B_OFFSET, &mut previous_slot_b)
+            .map(|_| decode_memory_record(&previous_slot_b))
+            .ok()
+            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+        selected = select_latest_memory_record(previous_slot_a_read, previous_slot_b_read);
+    }
+    if selected.is_none() {
         let mut legacy_slot_a = [0u8; LEGACY_MEMORY_SLOT_SIZE];
         let mut legacy_slot_b = [0u8; LEGACY_MEMORY_SLOT_SIZE];
         let legacy_slot_a_read = eeprom
@@ -3325,6 +3369,8 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         adc_calibration: previous.adc_calibration,
         active_heater_curve: previous.active_heater_curve,
         active_thermal_control_profile: previous.active_thermal_control_profile,
+        thermal_control_profile_pps5a: previous.thermal_control_profile_pps5a,
+        thermal_profile_mode: previous.thermal_profile_mode,
     }
 }
 
@@ -4362,6 +4408,18 @@ fn usb_runtime_status(
     status.heater_control_cycle_ms = context.heater_control_timing.cycle_ms;
     status.calibration = calibration_runtime_state_to_wire(context.calibration);
     status.thermal_control_profile_preview = context.thermal_control_profile_preview;
+    let resolved_bank = resolve_thermal_profile_bank(
+        memory_config.thermal_profile_mode,
+        context.manual_pps.capability_min_mv,
+        context.manual_pps.capability_max_mv,
+        context.manual_pps.capability_max_ma,
+    );
+    let mut thermal_profile_mode = heapless::String::new();
+    let _ = thermal_profile_mode.push_str(memory_config.thermal_profile_mode.as_str());
+    status.thermal_profile_mode = thermal_profile_mode;
+    let mut thermal_profile_resolved_bank = heapless::String::new();
+    let _ = thermal_profile_resolved_bank.push_str(resolved_bank.as_str());
+    status.thermal_profile_resolved_bank = thermal_profile_resolved_bank;
     status.thermal_control = thermal_control_runtime_wire(
         ui_state.target_temp_c,
         context.active_thermal_control_profile,
@@ -4526,8 +4584,13 @@ fn usb_runtime_config_response(
     ui_state.manual_pps_enabled = manual_pps.enabled;
     context.manual_pps = *manual_pps;
     context.thermal_control_profile_preview = thermal_control_profile_preview.is_some();
-    context.active_thermal_control_profile =
-        active_thermal_control_profile(memory_config, *thermal_control_profile_preview);
+    context.active_thermal_control_profile = active_thermal_control_profile(
+        memory_config,
+        *thermal_control_profile_preview,
+        manual_pps.capability_min_mv,
+        manual_pps.capability_max_mv,
+        manual_pps.capability_max_ma,
+    );
 
     (
         usb_response(
@@ -5840,8 +5903,13 @@ async fn handle_usb_control_line(
     heater_control_timing: HeaterControlTiming,
 ) -> bool {
     let mut needs_redraw = false;
-    let active_thermal_control_profile =
-        active_thermal_control_profile(memory_config, *thermal_control_profile_preview);
+    let active_thermal_control_profile = active_thermal_control_profile(
+        memory_config,
+        *thermal_control_profile_preview,
+        manual_pps.capability_min_mv,
+        manual_pps.capability_max_mv,
+        manual_pps.capability_max_ma,
+    );
     let runtime_context = UsbRuntimeStatusContext {
         elapsed_ms,
         last_pd_observation,
@@ -7178,8 +7246,13 @@ async fn main(_spawner: Spawner) {
             last_control_ms = elapsed_ms;
             next_control_deadline_ms =
                 next_heater_control_deadline_ms(next_control_deadline_ms, control_started_ms);
-            let active_thermal_control_profile =
-                active_thermal_control_profile(&memory_config, thermal_control_profile_preview);
+            let active_thermal_control_profile = active_thermal_control_profile(
+                &memory_config,
+                thermal_control_profile_preview,
+                manual_pps_state.capability_min_mv,
+                manual_pps_state.capability_max_mv,
+                manual_pps_state.capability_max_ma,
+            );
             let active_thermal_settings = active_thermal_control_profile
                 .map(|profile| profile.settings)
                 .unwrap_or_default();
@@ -7854,6 +7927,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             },
             &mut ui_state,
@@ -7930,8 +8004,10 @@ mod tests {
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileCommand {
                     op: ThermalControlProfileOp::Preview,
+                    bank: None,
                     profile: Some(ThermalControlProfileWire {
                         settings: None,
                         points: profile_points,
@@ -8005,8 +8081,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileCommand {
                     op: ThermalControlProfileOp::ClearPreview,
+                    bank: None,
                     profile: Some(ThermalControlProfileWire {
                         settings: None,
                         points: profile_points,
@@ -8083,8 +8161,10 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileCommand {
                     op: ThermalControlProfileOp::Save,
+                    bank: None,
                     profile: Some(ThermalControlProfileWire {
                         settings: None,
                         points: profile_points,
@@ -8343,6 +8423,7 @@ mod tests {
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             },
             &mut ui_state,
@@ -8403,6 +8484,7 @@ mod tests {
                 manual_pps_mv: Some(10_450),
                 manual_pps_ma: Some(2_500),
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             },
             &mut manual_pps,
@@ -8421,6 +8503,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_profile_mode: None,
                 thermal_control_profile: None,
             },
             &mut manual_pps,
@@ -10850,6 +10933,32 @@ mod tests {
         assert_eq!(
             profile.control_target(300),
             default_thermal_control_target(300)
+        );
+    }
+
+    #[test]
+    fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
+        assert_eq!(
+            resolve_thermal_profile_bank(
+                ThermalProfileMode::Auto,
+                Some(5_000),
+                Some(21_000),
+                Some(5_000),
+            ),
+            ThermalProfileBank::Pps5a
+        );
+        assert_eq!(
+            resolve_thermal_profile_bank(
+                ThermalProfileMode::Auto,
+                Some(5_000),
+                Some(21_000),
+                Some(3_250),
+            ),
+            ThermalProfileBank::Pps3a
+        );
+        assert_eq!(
+            resolve_thermal_profile_bank(ThermalProfileMode::W100, None, None, Some(3_250)),
+            ThermalProfileBank::Pps5a
         );
     }
 

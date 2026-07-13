@@ -9,7 +9,8 @@ use crate::{
         AdcCalibrationSample, AdcCalibrationSlotFit, AdcCalibrationSlotId, HEATER_CURVE_MAX_POINTS,
         HeaterCurveConfig, HeaterCurvePoint, MEMORY_WIFI_PASSWORD_MAX_LEN,
         MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, ThermalControlProfileConfig,
-        ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, adc_calibration_fit,
+        ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, ThermalProfileBank,
+        ThermalProfileMode, adc_calibration_fit,
     },
 };
 
@@ -163,6 +164,10 @@ pub struct ControlPlaneStatus {
     pub heater_control_cycle_ms: u16,
     pub calibration: CalibrationRuntimeStateWire,
     pub thermal_control_profile_preview: bool,
+    #[serde(default = "default_thermal_profile_mode_wire")]
+    pub thermal_profile_mode: String<ERROR_CODE_MAX_LEN>,
+    #[serde(default = "default_thermal_profile_resolved_bank_wire")]
+    pub thermal_profile_resolved_bank: String<ERROR_CODE_MAX_LEN>,
     #[serde(default)]
     pub thermal_control: ThermalControlRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
@@ -260,6 +265,10 @@ impl ControlPlaneStatus {
             heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeStateWire::default(),
             thermal_control_profile_preview: false,
+            thermal_profile_mode: string(memory.thermal_profile_mode.as_str()),
+            thermal_profile_resolved_bank: string(
+                memory.thermal_profile_mode.default_bank().as_str(),
+            ),
             thermal_control: ThermalControlRuntimeWire::default(),
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
@@ -523,6 +532,7 @@ pub struct RuntimeConfigCommand {
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
     pub calibration: Option<CalibrationControlCommand>,
+    pub thermal_profile_mode: Option<ThermalProfileModeWire>,
     pub thermal_control_profile: Option<ThermalControlProfileCommand>,
 }
 
@@ -548,20 +558,63 @@ impl RuntimeConfigCommand {
         if let Some(active_cooling_enabled) = self.active_cooling_enabled {
             config.active_cooling_enabled = active_cooling_enabled;
         }
+        if let Some(mode) = self.thermal_profile_mode {
+            config.thermal_profile_mode = mode.into();
+        }
         if let Some(thermal_profile) = self.thermal_control_profile {
+            let bank = thermal_profile
+                .bank
+                .map(Into::into)
+                .unwrap_or_else(|| config.thermal_profile_mode.default_bank());
             match thermal_profile.op {
                 ThermalControlProfileOp::Save => {
                     if let Some(profile) = thermal_profile.profile {
-                        config.active_thermal_control_profile = profile.into();
+                        *config.thermal_profile_mut(bank) = profile.into();
                     }
                 }
                 ThermalControlProfileOp::ClearSaved => {
-                    config.active_thermal_control_profile = ThermalControlProfileConfig::default();
+                    *config.thermal_profile_mut(bank) = ThermalControlProfileConfig::default();
                 }
                 ThermalControlProfileOp::Preview | ThermalControlProfileOp::ClearPreview => {}
             }
         }
         config.sanitize();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThermalProfileModeWire {
+    Auto,
+    #[serde(rename = "65w")]
+    W65,
+    #[serde(rename = "100w")]
+    W100,
+}
+
+impl From<ThermalProfileModeWire> for ThermalProfileMode {
+    fn from(value: ThermalProfileModeWire) -> Self {
+        match value {
+            ThermalProfileModeWire::Auto => Self::Auto,
+            ThermalProfileModeWire::W65 => Self::W65,
+            ThermalProfileModeWire::W100 => Self::W100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThermalProfileBankWire {
+    Pps3a,
+    Pps5a,
+}
+
+impl From<ThermalProfileBankWire> for ThermalProfileBank {
+    fn from(value: ThermalProfileBankWire) -> Self {
+        match value {
+            ThermalProfileBankWire::Pps3a => Self::Pps3a,
+            ThermalProfileBankWire::Pps5a => Self::Pps5a,
+        }
     }
 }
 
@@ -651,7 +704,17 @@ pub struct ThermalControlProfileSettingsWire {
 #[serde(rename_all = "camelCase")]
 pub struct ThermalControlProfileCommand {
     pub op: ThermalControlProfileOp,
+    #[serde(default)]
+    pub bank: Option<ThermalProfileBankWire>,
     pub profile: Option<ThermalControlProfileWire>,
+}
+
+fn default_thermal_profile_mode_wire() -> String<ERROR_CODE_MAX_LEN> {
+    string("65w")
+}
+
+fn default_thermal_profile_resolved_bank_wire() -> String<ERROR_CODE_MAX_LEN> {
+    string("pps3a")
 }
 
 impl From<ThermalControlProfilePointWire> for ThermalControlProfilePointConfig {
@@ -1129,6 +1192,7 @@ struct UsbFrameWire {
     manual_pps_mv: Option<u16>,
     manual_pps_ma: Option<u16>,
     calibration: Option<CalibrationControlCommand>,
+    thermal_profile_mode: Option<ThermalProfileModeWire>,
     thermal_control_profile: Option<ThermalControlProfileCommand>,
     channel: Option<CalibrationChannelWire>,
     reference_temp_c: Option<f32>,
@@ -1188,6 +1252,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     manual_pps_mv: value.manual_pps_mv,
                     manual_pps_ma: value.manual_pps_ma,
                     calibration: value.calibration,
+                    thermal_profile_mode: value.thermal_profile_mode,
                     thermal_control_profile: value.thermal_control_profile,
                 },
             }),
@@ -1269,6 +1334,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: None,
             channel: None,
             reference_temp_c: None,
@@ -1888,6 +1954,7 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: None,
         };
         let mut config = MemoryConfig::default();
@@ -1921,6 +1988,7 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: None,
         };
         let mut config = MemoryConfig::default();
@@ -1968,8 +2036,10 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: Some(ThermalControlProfileCommand {
                 op: ThermalControlProfileOp::Save,
+                bank: None,
                 profile: Some(ThermalControlProfileWire {
                     settings: None,
                     points,
@@ -2014,8 +2084,10 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: Some(ThermalControlProfileCommand {
                 op: ThermalControlProfileOp::ClearSaved,
+                bank: None,
                 profile: None,
             }),
         }
@@ -2066,8 +2138,10 @@ mod tests {
             manual_pps_mv: None,
             manual_pps_ma: None,
             calibration: None,
+            thermal_profile_mode: None,
             thermal_control_profile: Some(ThermalControlProfileCommand {
                 op: ThermalControlProfileOp::Save,
+                bank: None,
                 profile: Some(ThermalControlProfileWire {
                     settings: None,
                     points,
@@ -2155,6 +2229,7 @@ mod tests {
                     manual_pps_mv: Some(10_400),
                     manual_pps_ma: Some(2_500),
                     calibration: None,
+                    thermal_profile_mode: None,
                     thermal_control_profile: None,
                 },
             }
@@ -2193,6 +2268,7 @@ mod tests {
                     manual_pps_mv: None,
                     manual_pps_ma: None,
                     calibration: None,
+                    thermal_profile_mode: None,
                     thermal_control_profile: None,
                 },
             }

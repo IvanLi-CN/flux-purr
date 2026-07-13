@@ -75,7 +75,7 @@
 - Web UI 必须在 capability 缺失、lease conflict、offline target、blocked artifact 时禁用危险操作并显示原因。
 - Calibration mode control 必须只支持 PPS；Web 的 mode 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定`，owner-facing 术语不得回退到旧命名。
 - Calibration mode live control 请求必须同时满足硬件 `5V~28V` 与实时 PPS capability。任何 transport 都不得实际发出不在该交集内的电压请求。
-- `runtime_config` 必须支持 `calibration` 子对象，表达 mode、mode-owned PPS 请求、heater on/off、温度模式 ADC-hold 目标与稳定状态；旧 `manualPps*` 调试字段继续保留，但不承载新模式产品语义。`runtime_config.thermalControlProfile` 承载热控 profile 的 RAM preview / clear-preview，以及显式 save / clear-saved EEPROM 持久化。
+- `runtime_config` 必须支持 `calibration` 子对象，表达 mode、mode-owned PPS 请求、heater on/off、温度模式 ADC-hold 目标与稳定状态；旧 `manualPps*` 调试字段继续保留，但不承载新模式产品语义。`thermalProfileMode` 固定为 `auto|65w|100w`；`thermalControlProfile` 的 preview 继续是单一 RAM overlay，save/clear_saved 必须可携带 `bank=pps3a|pps5a` 写入指定 EEPROM bank。
 - first-class calibration auto jobs 必须支持 `vin_adc_auto` 与 `heater_curve_auto` 两种 `kind`，并通过 `calibration_job` frame / `/calibration/job` endpoint 暴露 `idle|running|completed|failed|canceled` 状态、进度、样本数、下一目标电压与错误信息。
 - Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
 - `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
@@ -114,11 +114,11 @@
 - `flux-purr status --device <id>|--hardware <saved-id>`：通过 leased status endpoint 读取状态。
 - `flux-purr runtime get|set`：读取或部分更新目标温度、preset、主动散热与 heater hold。
 - `flux-purr pd pps set|clear`：设置或清除调试用手动 PPS 覆盖；设置路径要求 source status 已回报 PPS capability，且电压在硬件 `5V~28V` 与 capability 交集内，请求电流在 APDO current capability 内。
-- `flux-purr thermal profile preview|clear-preview|save|clear-saved`：通过 leased runtime endpoint 设置或清除 RAM thermal control profile preview，并可显式保存或清除 EEPROM-backed active profile。
-- `flux-purr thermal self-test`：通过 `devd` 控制 Flux Purr，并通过 released `isolapurr` 工具的显式 LAN URL 路径准备 IsolaPurr bench source，生成 thermal self-test 报告、候选 profile 和带图表的 `report.html`；默认目标阶梯为稀疏覆盖的 `60 / 140 / 220°C`，并允许通过 `--targets-c` 对支持阶梯 `60 / 100 / 140 / 180 / 220 / 250°C` 做聚焦子集验证，始终排除 `300°C`。`250°C` 仅保留给最终完整验收。真实 thermal HIL 固定使用 `auto-follow`，由 Flux Purr 自身发起 PD/PPS 请求；测试前只把 IsolaPurr source capability 收口为 `65W`、PD Fixed enabled、PPS enabled，确认 auto-mode readback，并读取一次 USB-C 实测电压 `>5V`。thermal self-test 不手动控制 TPS、不强制输出电压、不执行 port replug，也不把 source 功能本身作为测试对象。任一命令非 0 退出、身份不一致、配置读回不一致或准备时电压不满足条件都必须失败。单候选通过全部验收后才允许保存 EEPROM profile；批测通过重复 `--candidate-profile-file` 接受同一目标的多组 profile，整批共享一次 source 配置与一次 Flux lease，每组独立生成报告，组间在温度 `<= max(40°C, target-30°C)` 时开始，且批测始终不写 EEPROM。host 默认采样间隔为 `300ms`，请求更慢值也 clamp 到 `300ms`；实测频率必须至少 `3Hz`，并显式记录外部电源实时电压/电流、热台电压读数、PPS 请求/合同电压、当前温度与当前加热参数。
+- `flux-purr thermal profile preview|clear-preview|save|clear-saved`：通过 leased runtime endpoint 设置或清除 RAM thermal control profile preview；save/clear-saved 的 `--profile-mode 65w|100w` 总是显式下发对应 bank。
+- `flux-purr thermal self-test`：通过 `devd` 控制 Flux Purr，并通过 released `isolapurr` 工具的显式 LAN URL 路径准备 IsolaPurr bench source，生成 thermal self-test 报告、候选 profile 和带图表的 `report.html`。`--profile-mode auto|65w|100w` 保持低层 source 电压/电流覆盖，并使用默认 `20V/3.25A` 65W 或 `21V/5A` 100W preset；source capability 设置必须读回目标 watts、PD Fixed、PPS 与 auto-follow。报告和 samples 必须记录 selected mode、resolved bank、detected source class、source preset/readback 与 profile save provenance。auto 只在 PPS APDO 覆盖 `20V` 且 advertised `ppsMaxMa >= 5000` 时解析 `pps5a`；显式 `65w` / `100w` 不回退或形成运行互锁。
 - `flux-purr calibration-mode ...`：提供 owner-facing 三模式入口；现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear`：通过 leased WiFi endpoint 写入或清除 WiFi 配置，输出必须 redaction password。
-- `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。
+- `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。授权的 ESP32-S3 Native USB Serial/JTAG `cu.usbmodem*` 路径必须通过 `espflash --before usb-reset` 自动进入烧录流程，不得要求人工切换下载模式；其他串口保留 `default-reset`。
 - `flux-purr monitor`：读取 bounded event backlog，不拥有长期未释放 lease。
 - `flux-purr hardware available|recent|list|save|forget|path`：管理用户级 USB 硬件记忆。
 - `flux-purr usb-port show|set`：查看或保存默认 USB serial port。
@@ -134,7 +134,7 @@
 - `hello`：device 主动或 host 请求；返回 protocol、framing、identity、capabilities。
 - `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
-- `runtime_config`：`request_id` + runtime fields；支持 `targetTempC`、`selectedPresetSlot`、`presetsC`、`activeCoolingEnabled`、`heaterEnabled`、`manualPpsEnabled`、`manualPpsMv`、`manualPpsMa`、`calibration` 与 `thermalControlProfile`；response 返回更新后的 status。`manualPpsEnabled=false` 清除调试覆盖；启用时 `manualPpsMv` 必须在硬件 `5V~28V` 与 PPS capability 交集内并按 `100mV` 对齐，`manualPpsMa` 必须在 APDO current capability 内并按 `50mA` 对齐。`calibration` 语义遵循 `#jt8r2`，用于 owner-facing 三模式控制。`thermalControlProfile.op=preview` 只把 profile 写入 RAM，`op=clear_preview` 清除 RAM preview，`op=save` 写入 EEPROM-backed active profile，`op=clear_saved` 清除 EEPROM-backed active profile；profile 由 10 个 `targetTempC` / `brakeDistanceCentiC` / `approachPowerPermille` / `approachFloorPowerPermille` / `holdPowerPermille` 槽位组成。CH224Q 只通过 `0x53` 写 PPS 电压，`manualPpsMa` 是用于校验与回显的请求电流值。
+- `runtime_config`：`request_id` + runtime fields；支持 `thermalProfileMode` 与 `thermalControlProfile.bank`。status 返回 `thermalProfileMode` 与 `thermalProfileResolvedBank`；`auto` 的 resolved bank 只由 advertised PPS capability class 计算，不使用 live current。CH224Q 安全限压和 reserve 仍使用 live current。
 - `calibration_config`：`request_id` + calibration fields；response 返回 calibration state。校准领域契约见 `#jt8r2`。
 - `calibration_job`：`request_id` + `op=start|cancel` + optional `kind=vin_adc_auto|heater_curve_auto`；response 返回 calibration auto-job 状态。
 - `response`：回显 `request_id`，返回 result 或 error。

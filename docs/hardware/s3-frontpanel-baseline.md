@@ -169,6 +169,7 @@ Power-stage details are frozen in:
 ## 9) ESP32-S3FH4R2 bring-up constraints
 
 - Native USB uses `GPIO19` (`D-`) and `GPIO20` (`D+`).
+- Protected `devd` flashing on the authorized native USB Serial/JTAG `cu.usbmodem*` path uses `espflash --before usb-reset`; it does not require a manual boot-mode sequence.
 - Strapping pins on ESP32-S3 are `GPIO0`, `GPIO3`, `GPIO45`, and `GPIO46`.
 - Avoid using `GPIO3`, `GPIO45`, and `GPIO46` for front-panel or power-control signals.
 - `GPIO39` is reused here for `RGB_R_PWM`; this is acceptable as long as the design keeps the default built-in USB Serial/JTAG path and does not burn eFuses to move JTAG onto `GPIO39~42`.
