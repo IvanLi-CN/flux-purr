@@ -1,0 +1,162 @@
+{
+  "applied": [
+    {
+      "analysis": {
+        "approachMedianOutputPermille": 170,
+        "approachMedianSlopeCPerS": 2.5252525252525255,
+        "approachSampleCount": 87,
+        "firstHoldErrorC": 0.35999999999999943,
+        "firstHoldTempC": 59.64,
+        "holdMaxAboveTargetC": 1.490000000000002,
+        "holdMaxBelowTargetC": 1.2199999999999989,
+        "holdMeanErrorC": 0.13863560732113153,
+        "holdMedianOutputPermille": 130,
+        "holdP90OutputPermille": 160,
+        "holdSampleCount": 601,
+        "residualHeatAfterHoldEntryC": 1.8500000000000014
+      },
+      "fullSpeedToStable": {
+        "failureReason": null,
+        "limitMs": 10000,
+        "settleTimeMs": 8902,
+        "stableBandC": 1.5,
+        "stableWindowMs": 10000,
+        "stableWindowStartedAtMs": 21474,
+        "stableWindowVerifiedAtMs": 31518,
+        "warmupExitedAtMs": 12572
+      },
+      "guard": {
+        "approachStartedAtMs": 12572,
+        "firstHoldAtMs": 21474,
+        "holdThresholdCrossedAtMs": 21474,
+        "holdThresholdTempC": 59.3,
+        "warmupReenteredAtMs": null
+      },
+      "holdPeakToPeakC": 2.710000000000001,
+      "maxOvershootC": 1.490000000000002,
+      "riseTimeMs": 21474,
+      "sampleCount": 815,
+      "stopReason": "completed",
+      "targetTempC": 60,
+      "terminalRuntimeDropReason": null
+    }
+  ],
+  "batchCandidateIndex": 0,
+  "candidateProfile": {
+    "points": [
+      {
+        "approachDampingExponentPermille": 4000,
+        "approachFloorPowerPermille": 170,
+        "approachLeadTicks": 5,
+        "approachPowerPermille": 500,
+        "approachTailWindowCentiC": 375,
+        "brakeDistanceCentiC": 850,
+        "holdBlendTicks": 3,
+        "holdEntryCentiC": 70,
+        "holdExitCentiC": 350,
+        "holdKiPermillePerCTick": 0,
+        "holdKpPermillePerC": 20,
+        "holdLeadTicks": 6,
+        "holdOffCentiC": 70,
+        "holdOnCentiC": 30,
+        "holdPowerPermille": 135,
+        "holdReheatPowerPermille": 170,
+        "overshootCutoffCentiC": 100,
+        "targetTempC": 60,
+        "warmupPowerPermille": 1000
+      },
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ],
+    "settings": {
+      "approachLeadTicks": 5,
+      "approachMaxTicks": 250,
+      "approachMinPowerRatioPermille": 500,
+      "autoAdjustableWorkingFloorMv": 5000,
+      "heaterCurrentReserveMa": 300,
+      "holdBlendTicks": 3,
+      "holdEntryCentiC": 70,
+      "holdExitCentiC": 350,
+      "holdKiPermillePerCTick": 0,
+      "holdKpPermillePerC": 20,
+      "holdLeadTicks": 4,
+      "holdOffCentiC": 70,
+      "holdOnCentiC": 30,
+      "holdReheatPowerPermille": 170,
+      "overshootCutoffCentiC": 100,
+      "tempFilterAlphaPermille": 700,
+      "warmupReenterCentiC": 1000
+    }
+  },
+  "complete": true,
+  "dryRun": false,
+  "error": null,
+  "files": {
+    "candidateProfilePath": "thermal-self-test-runs/20hz-64sample-60/median3-transition-hold135-repeat2/thermal-batch-1783870316270-serial-303a-1001-d0-cf-13-08-a1-48/candidate-0/thermal-profile.candidate.json",
+    "reportHtmlPath": "thermal-self-test-runs/20hz-64sample-60/median3-transition-hold135-repeat2/thermal-batch-1783870316270-serial-303a-1001-d0-cf-13-08-a1-48/candidate-0/report.html",
+    "runDir": "thermal-self-test-runs/20hz-64sample-60/median3-transition-hold135-repeat2/thermal-batch-1783870316270-serial-303a-1001-d0-cf-13-08-a1-48/candidate-0",
+    "samplesPath": "thermal-self-test-runs/20hz-64sample-60/median3-transition-hold135-repeat2/thermal-batch-1783870316270-serial-303a-1001-d0-cf-13-08-a1-48/candidate-0/samples.ndjson",
+    "summaryPath": "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/source-run-summaries/60.run.json"
+  },
+  "kind": "thermal_self_test",
+  "ok": true,
+  "parameters": {
+    "batchCandidate": true,
+    "candidateProfileFile": "thermal-self-test-runs/20hz-64sample-60/candidates/floor5000-median-hold135.json",
+    "cooldownTempC": 40.0,
+    "cooldownTimeoutSeconds": 7200,
+    "effectiveSampleIntervalMs": 100,
+    "holdSeconds": 60,
+    "limits": {
+      "approachHoldTimeoutMs": 30000,
+      "approachThresholdTimeoutMs": 10000,
+      "approachWarmupReentry": "fail",
+      "fullSpeedStableBandC": 1.5,
+      "fullSpeedStableWindowMs": 10000,
+      "fullSpeedToStableMs": 10000,
+      "holdPeakToPeakC": 3.0,
+      "minimumSampleRateHz": 3.0,
+      "overshootC": 3.0,
+      "sampleRateWindowMs": 3000
+    },
+    "runtimeRearmAttempts": 1,
+    "sampleIntervalMs": 100,
+    "stageTimeoutSeconds": 300,
+    "targetsC": [
+      60
+    ]
+  },
+  "profilePersistence": "not_saved",
+  "runId": "thermal-batch-1783870316270-serial-303a-1001-d0-cf-13-08-a1-48-candidate-0",
+  "sampleCount": 815,
+  "source": {
+    "currentLimitMa": null,
+    "deviceId": "856a141cdbd4",
+    "mode": "auto-follow",
+    "url": "http://192.168.31.122",
+    "usbCPath": "pd-auto",
+    "voltageMv": null
+  },
+  "target": {
+    "devd": "http://127.0.0.1:28010",
+    "deviceId": "serial-303a-1001-D0:CF:13:08:A1:48",
+    "hardwareId": null
+  },
+  "tuningSteps": [],
+  "validation": {
+    "expectedTargetsC": [
+      60
+    ],
+    "failures": [],
+    "passed": true
+  },
+  "originSummaryPath": "thermal-self-test-runs/20hz-64sample-60/median3-transition-hold135-repeat2/thermal-batch-1783870316270-serial-303a-1001-d0-cf-13-08-a1-48/candidate-0/run.json",
+  "bundleNote": "This copied provenance summary keeps the per-run acceptance record. Use the bundle-level report and samples for the committed full-range baseline evidence."
+}

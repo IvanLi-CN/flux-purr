@@ -52,7 +52,7 @@
 ### MUST
 
 - EEPROM 设备默认为 `M24C64`，7-bit I2C 地址 `0x50`，容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
-- record 使用双槽：slot A `0x0000`、slot B `0x0200`，每槽 `512 bytes`。
+- record 使用双槽：slot A `0x0400`、slot B `0x0800`，每槽 `1024 bytes`。旧版 slot A `0x0000`、slot B `0x0200`（每槽 `512 bytes`）仅作为启动时的只读迁移回退；新写入不得继续覆盖旧槽。
 - 启动时读取两个槽，选择 CRC 合法且 `sequence` 最大的 record；两槽都无效时使用默认配置。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。

@@ -1,5 +1,7 @@
 # EEPROM 记忆配置演进记录（#35bta）
 
+- 双槽扩展为 `1024 bytes` 并迁移到 `0x0400` / `0x0800`，以保证完整校准、最长 Wi-Fi 凭据和六点热控 profile 能同时编码。启动恢复在新槽均无有效 record 时只读旧 `512 bytes` 双槽，后续提交自动写入新槽。
+
 ## 2026-04-27
 
 - 冻结 EEPROM 记忆配置为 `M24C64` 双槽 record + TLV payload + CRC。

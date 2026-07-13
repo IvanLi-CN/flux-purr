@@ -7,6 +7,7 @@ use std::{
     io::{self, Read},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
+    process::Output,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
@@ -36,13 +37,21 @@ pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
 pub const DEVICE_LIST_EVENT_LIMIT: usize = 24;
 pub const DEVICE_EVENT_REPLAY_LIMIT: usize = 120;
-pub const DEFAULT_LEASE_TTL_MS: u64 = 8_000;
+pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
 pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const PPS_HARDWARE_MIN_MV: u16 = 5_000;
 const PPS_HARDWARE_MAX_MV: u16 = 28_000;
+const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = PPS_HARDWARE_MIN_MV;
+const AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
+const HEATER_PID_TARGET_MIN_C: i16 = 0;
+const HEATER_PID_TARGET_MAX_C: i16 = 400;
+const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
+const THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
+const THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
+const THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
@@ -53,6 +62,7 @@ const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
 const SERIAL_LINE_LIMIT: usize = 4_096;
@@ -340,6 +350,10 @@ pub struct DeviceRecord {
     pub identity: Identity,
     pub network: NetworkSummary,
     pub status: ControlPlaneStatus,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub preview_thermal_control_profile: Option<ThermalControlProfilePackage>,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub saved_thermal_control_profile: Option<ThermalControlProfilePackage>,
     pub calibration: CalibrationState,
     pub heater_curve: HeaterCurveState,
     pub selected_artifact_id: Option<String>,
@@ -399,6 +413,7 @@ impl DeviceRecord {
             ]),
             heater_enabled: true,
             heater_output_percent: 22,
+            heater_physical_output_percent: 22,
             active_cooling_enabled: true,
             fan_display_state: "AUTO".to_string(),
             fan_enabled: true,
@@ -418,7 +433,19 @@ impl DeviceRecord {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            heater_fault_reason: None,
+            heater_lock_reason: None,
+            heater_control_phase: None,
+            heater_error_c: None,
+            heater_control_error_c: None,
+            heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeState::default(),
+            thermal_control_profile_preview: false,
+            thermal_control: ThermalControlRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -432,6 +459,8 @@ impl DeviceRecord {
             identity,
             network,
             status,
+            preview_thermal_control_profile: None,
+            saved_thermal_control_profile: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
@@ -460,6 +489,7 @@ impl DeviceRecord {
             presets_c: None,
             heater_enabled: false,
             heater_output_percent: 0,
+            heater_physical_output_percent: 0,
             active_cooling_enabled: true,
             fan_display_state: "OFF".to_string(),
             fan_enabled: false,
@@ -479,7 +509,19 @@ impl DeviceRecord {
             pps_capability_max_mv: None,
             pps_capability_max_ma: None,
             manual_pps_error: None,
+            heater_fault_reason: None,
+            heater_lock_reason: None,
+            heater_control_phase: None,
+            heater_error_c: None,
+            heater_control_error_c: None,
+            heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
             calibration: CalibrationRuntimeState::default(),
+            thermal_control_profile_preview: false,
+            thermal_control: ThermalControlRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -511,6 +553,8 @@ impl DeviceRecord {
             },
             network,
             status,
+            preview_thermal_control_profile: None,
+            saved_thermal_control_profile: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             selected_artifact_id: None,
@@ -588,6 +632,8 @@ pub struct ControlPlaneStatus {
     pub presets_c: Option<Vec<Option<i16>>>,
     pub heater_enabled: bool,
     pub heater_output_percent: u8,
+    #[serde(default)]
+    pub heater_physical_output_percent: u8,
     pub active_cooling_enabled: bool,
     pub fan_display_state: String,
     pub fan_enabled: bool,
@@ -616,10 +662,118 @@ pub struct ControlPlaneStatus {
     pub pps_capability_max_ma: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_pps_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_fault_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_lock_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_control_phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_error_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_control_error_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_filtered_temp_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_filtered_slope_c_per_s: Option<f32>,
+    #[serde(default)]
+    pub heater_coast_active: bool,
+    #[serde(default)]
+    pub heater_control_interval_ms: u16,
+    #[serde(default)]
+    pub heater_control_cycle_ms: u16,
     #[serde(default)]
     pub calibration: CalibrationRuntimeState,
+    #[serde(default)]
+    pub thermal_control_profile_preview: bool,
+    #[serde(default)]
+    pub thermal_control: ThermalControlRuntime,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlRuntime {
+    pub profile_active: bool,
+    pub profile_covers_target: bool,
+    pub profile_source: String,
+    pub target_temp_c: i16,
+    pub brake_distance_centi_c: u16,
+    pub warmup_power_permille: u16,
+    pub approach_power_permille: u16,
+    pub approach_floor_power_permille: u16,
+    pub approach_damping_exponent_permille: u16,
+    #[serde(default)]
+    pub approach_tail_window_centi_c: u16,
+    pub hold_power_permille: u16,
+    pub hold_reheat_power_permille: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
+    pub hold_blend_ticks: u16,
+    pub approach_lead_ticks: u16,
+    pub hold_lead_ticks: u16,
+    pub temp_filter_alpha_permille: u16,
+    pub warmup_reenter_centi_c: u16,
+    pub approach_max_ticks: u16,
+    pub approach_min_power_ratio_permille: u16,
+    pub auto_adjustable_working_floor_mv: u16,
+    pub heater_current_reserve_ma: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MockThermalCandidateSettings {
+    temp_filter_alpha_permille: u16,
+    warmup_reenter_centi_c: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    approach_max_ticks: u16,
+    approach_min_power_ratio_permille: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    hold_reheat_power_permille: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+    auto_adjustable_working_floor_mv: u16,
+    heater_current_reserve_ma: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MockThermalCandidatePoint {
+    target_temp_c: i16,
+    brake_distance_centi_c: u16,
+    warmup_power_permille: u16,
+    approach_power_permille: u16,
+    approach_floor_power_permille: u16,
+    approach_damping_exponent_permille: u16,
+    approach_tail_window_centi_c: u16,
+    hold_power_permille: u16,
+    hold_reheat_power_permille: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MockThermalCandidateProfile {
+    settings: MockThermalCandidateSettings,
+    points: Vec<MockThermalCandidatePoint>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1019,6 +1173,96 @@ pub struct RuntimeConfigRequest {
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
     pub calibration: Option<CalibrationControlRequest>,
+    pub thermal_control_profile: Option<ThermalControlProfileRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalControlProfileOp {
+    Preview,
+    ClearPreview,
+    Save,
+    ClearSaved,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfilePoint {
+    pub target_temp_c: i16,
+    pub brake_distance_centi_c: u16,
+    #[serde(default)]
+    pub warmup_power_permille: u16,
+    pub approach_power_permille: u16,
+    pub approach_floor_power_permille: u16,
+    #[serde(default = "default_approach_damping_exponent_permille")]
+    pub approach_damping_exponent_permille: u16,
+    #[serde(default)]
+    pub approach_tail_window_centi_c: u16,
+    pub hold_power_permille: u16,
+    #[serde(default)]
+    pub hold_reheat_power_permille: u16,
+    #[serde(default)]
+    pub hold_entry_centi_c: u16,
+    #[serde(default)]
+    pub hold_exit_centi_c: u16,
+    #[serde(default)]
+    pub hold_on_centi_c: u16,
+    #[serde(default)]
+    pub hold_off_centi_c: u16,
+    #[serde(default)]
+    pub overshoot_cutoff_centi_c: u16,
+    #[serde(default)]
+    pub hold_kp_permille_per_c: u16,
+    #[serde(default)]
+    pub hold_ki_permille_per_c_tick: u16,
+    #[serde(default)]
+    pub hold_blend_ticks: u16,
+    #[serde(default)]
+    pub approach_lead_ticks: u16,
+    #[serde(default)]
+    pub hold_lead_ticks: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfilePackage {
+    pub settings: Option<ThermalControlProfileSettings>,
+    pub points: Vec<Option<ThermalControlProfilePoint>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileSettings {
+    pub temp_filter_alpha_permille: u16,
+    pub warmup_reenter_centi_c: u16,
+    pub hold_entry_centi_c: u16,
+    pub hold_exit_centi_c: u16,
+    pub hold_on_centi_c: u16,
+    pub hold_off_centi_c: u16,
+    pub overshoot_cutoff_centi_c: u16,
+    pub approach_max_ticks: u16,
+    pub approach_min_power_ratio_permille: u16,
+    pub hold_kp_permille_per_c: u16,
+    pub hold_ki_permille_per_c_tick: u16,
+    #[serde(default = "default_hold_blend_ticks")]
+    pub hold_blend_ticks: u16,
+    #[serde(default)]
+    pub hold_reheat_power_permille: u16,
+    #[serde(default)]
+    pub approach_lead_ticks: u16,
+    #[serde(default)]
+    pub hold_lead_ticks: u16,
+    #[serde(default = "default_auto_adjustable_working_floor_mv")]
+    pub auto_adjustable_working_floor_mv: u16,
+    #[serde(default = "default_heater_current_reserve_ma")]
+    pub heater_current_reserve_ma: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalControlProfileRequest {
+    pub op: ThermalControlProfileOp,
+    pub profile: Option<ThermalControlProfilePackage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1154,6 +1398,8 @@ struct UsbRuntimeConfigWire<'a> {
     manual_pps_ma: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<&'a CalibrationControlRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1320,6 +1566,18 @@ impl HttpError {
             message,
             true,
         )
+    }
+
+    fn internal_with_details(code: &str, message: &str, details: Value) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error: ApiError {
+                code: code.to_string(),
+                message: message.to_string(),
+                retryable: false,
+                details: Some(details),
+            },
+        }
     }
 
     fn not_found(code: &str, message: &str) -> Self {
@@ -1550,7 +1808,9 @@ async fn create_lease(
     AxumPath(device_id): AxumPath<String>,
 ) -> Result<Json<WebLease>, HttpError> {
     let lease = {
+        let serial_devices = scan_serial_devices(state.config.serial_port.as_deref());
         let mut state_lock = state.lock()?;
+        refresh_serial_devices(&mut state_lock, serial_devices);
         state_lock.create_lease(&device_id)?
     };
     state.emit(event(
@@ -2308,6 +2568,31 @@ async fn configure_runtime(
     if let Some(calibration) = payload.calibration.as_ref() {
         apply_mock_calibration_runtime_config(&mut device.status, calibration);
     }
+    if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
+        match thermal_control_profile.op {
+            ThermalControlProfileOp::Preview => {
+                device.preview_thermal_control_profile = thermal_control_profile.profile.clone();
+            }
+            ThermalControlProfileOp::ClearPreview => {
+                device.preview_thermal_control_profile = None;
+            }
+            ThermalControlProfileOp::Save => {
+                device.saved_thermal_control_profile = thermal_control_profile.profile.clone();
+                device.preview_thermal_control_profile = None;
+            }
+            ThermalControlProfileOp::ClearSaved => {
+                device.saved_thermal_control_profile = None;
+            }
+        }
+    }
+    let active_profile = device
+        .preview_thermal_control_profile
+        .as_ref()
+        .or(device.saved_thermal_control_profile.as_ref());
+    let preview_active = device.preview_thermal_control_profile.is_some();
+    device.status.thermal_control_profile_preview = preview_active;
+    device.status.thermal_control =
+        mock_thermal_runtime(device.status.target_temp_c, active_profile, preview_active);
     let status = device.status.clone();
     drop(state_lock);
     emit_runtime_config_event(&state, &device_id, &payload, &status);
@@ -2423,7 +2708,594 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
     if let Some(calibration) = payload.calibration.as_ref() {
         validate_calibration_control_request(calibration)?;
     }
+    if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
+        validate_thermal_control_profile_request(thermal_control_profile)?;
+    }
     Ok(())
+}
+
+fn validate_thermal_control_profile_request(
+    request: &ThermalControlProfileRequest,
+) -> Result<(), HttpError> {
+    match request.op {
+        ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save => {
+            let profile = request.profile.as_ref().ok_or_else(|| {
+                HttpError::bad_request(
+                    "thermal_profile_required",
+                    "thermalControlProfile.profile is required for preview/save.",
+                )
+            })?;
+            if profile.points.len() != FRONT_PANEL_PRESET_COUNT {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_profile",
+                    "thermalControlProfile.profile.points must contain exactly 10 values.",
+                ));
+            }
+            if request.op == ThermalControlProfileOp::Save
+                && profile.points.iter().flatten().count() > 6
+            {
+                return Err(HttpError::bad_request(
+                    "thermal_profile_too_many_saved_points",
+                    "saved thermal profiles support at most 6 populated points.",
+                ));
+            }
+            if let Some(settings) = profile.settings.as_ref()
+                && (settings.temp_filter_alpha_permille == 0
+                    || settings.temp_filter_alpha_permille > 1_000
+                    || settings.warmup_reenter_centi_c == 0
+                    || settings.hold_entry_centi_c == 0
+                    || settings.hold_exit_centi_c == 0
+                    || settings.hold_on_centi_c == 0
+                    || settings.overshoot_cutoff_centi_c == 0
+                    || !(AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN..=PPS_HARDWARE_MAX_MV)
+                        .contains(&settings.auto_adjustable_working_floor_mv)
+                    || settings.heater_current_reserve_ma > 1_000
+                    || settings.approach_min_power_ratio_permille > 1_000
+                    || !(1..=255).contains(&settings.approach_max_ticks)
+                    || !(1..=255).contains(&settings.hold_blend_ticks)
+                    || settings.approach_lead_ticks > 255
+                    || settings.hold_lead_ticks > 255)
+            {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_profile",
+                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, 5000..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, 1..255 approach/hold-blend ticks, and 0..255 predictive lead ticks.",
+                ));
+            }
+            for point in profile.points.iter().flatten() {
+                if point.brake_distance_centi_c == 0
+                    || point.warmup_power_permille > 1_000
+                    || point.approach_power_permille > 1_000
+                    || point.approach_floor_power_permille > 1_000
+                    || !(100..=4_000).contains(&point.approach_damping_exponent_permille)
+                    || point.hold_power_permille > 1_000
+                    || point.hold_reheat_power_permille > 1_000
+                    || point.hold_entry_centi_c > 5_000
+                    || point.hold_exit_centi_c > 5_000
+                    || point.hold_on_centi_c > 5_000
+                    || point.hold_off_centi_c > 5_000
+                    || point.overshoot_cutoff_centi_c > 5_000
+                    || point.hold_kp_permille_per_c > 10_000
+                    || point.hold_ki_permille_per_c_tick > 10_000
+                    || point.hold_blend_ticks > 255
+                    || point.approach_lead_ticks > 255
+                    || point.hold_lead_ticks > 255
+                {
+                    return Err(HttpError::bad_request(
+                        "invalid_thermal_profile",
+                        "thermal profile points must use positive brake distance, 0..1000 permille power, 100..4000 approach damping, <=5000 centi-C damping thresholds, <=10000 PI gains, and <=255 blend/lead ticks.",
+                    ));
+                }
+            }
+        }
+        ThermalControlProfileOp::ClearPreview | ThermalControlProfileOp::ClearSaved => {
+            if request.profile.is_some() {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_profile",
+                    "thermalControlProfile.profile must be omitted for clear operations.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+const fn default_hold_blend_ticks() -> u16 {
+    12
+}
+
+const fn default_approach_damping_exponent_permille() -> u16 {
+    1_000
+}
+
+const fn default_auto_adjustable_working_floor_mv() -> u16 {
+    AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT
+}
+
+const fn default_heater_current_reserve_ma() -> u16 {
+    200
+}
+
+fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
+    MockThermalCandidateSettings {
+        temp_filter_alpha_permille: 700,
+        warmup_reenter_centi_c: 1_000,
+        hold_entry_centi_c: 20,
+        hold_exit_centi_c: 80,
+        hold_on_centi_c: 15,
+        hold_off_centi_c: 80,
+        overshoot_cutoff_centi_c: 120,
+        approach_max_ticks: 250,
+        approach_min_power_ratio_permille: 500,
+        hold_kp_permille_per_c: 35,
+        hold_ki_permille_per_c_tick: 1,
+        hold_blend_ticks: 12,
+        hold_reheat_power_permille: 0,
+        approach_lead_ticks: 0,
+        hold_lead_ticks: 0,
+        auto_adjustable_working_floor_mv: AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT,
+        heater_current_reserve_ma: 200,
+    }
+}
+
+fn mock_thermal_default_target_values(
+    target_temp_c: i16,
+) -> (
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+    u16,
+) {
+    if target_temp_c <= 60 {
+        (
+            1_310, 1_000, 590, 510, 1_320, 60, 60, 200, 540, 30, 120, 150, 8, 2, 1, 4, 2,
+        )
+    } else if target_temp_c <= 100 {
+        (
+            1_100, 1_000, 420, 220, 1_400, 170, 260, 12, 60, 30, 180, 230, 55, 2, 6, 9, 0,
+        )
+    } else if target_temp_c <= 140 {
+        (
+            1_000, 1_000, 420, 200, 1_000, 280, 340, 10, 55, 30, 160, 220, 22, 1, 1, 4, 0,
+        )
+    } else if target_temp_c <= 180 {
+        (
+            650, 1_000, 760, 460, 800, 450, 620, 15, 70, 25, 240, 300, 20, 1, 3, 4, 0,
+        )
+    } else if target_temp_c <= 220 {
+        (
+            520, 1_000, 760, 600, 550, 620, 700, 8, 50, 14, 240, 320, 22, 1, 2, 2, 0,
+        )
+    } else {
+        (
+            500, 1_000, 960, 860, 350, 850, 930, 10, 55, 14, 320, 420, 12, 1, 1, 1, 0,
+        )
+    }
+}
+
+fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidatePoint {
+    let (
+        brake_distance_centi_c,
+        warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+    ) = mock_thermal_default_target_values(target_temp_c);
+    MockThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c,
+        warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        approach_tail_window_centi_c: 0,
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+    }
+}
+
+fn mock_thermal_profile_from_package(
+    package: &ThermalControlProfilePackage,
+) -> MockThermalCandidateProfile {
+    let default_settings = mock_thermal_default_settings();
+    let settings = package
+        .settings
+        .map(|settings| MockThermalCandidateSettings {
+            temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
+            warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
+            hold_entry_centi_c: settings.hold_entry_centi_c,
+            hold_exit_centi_c: settings.hold_exit_centi_c,
+            hold_on_centi_c: settings.hold_on_centi_c,
+            hold_off_centi_c: settings.hold_off_centi_c,
+            overshoot_cutoff_centi_c: settings.overshoot_cutoff_centi_c,
+            approach_max_ticks: settings.approach_max_ticks,
+            approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
+            hold_kp_permille_per_c: settings.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: settings.hold_ki_permille_per_c_tick,
+            hold_blend_ticks: settings.hold_blend_ticks,
+            hold_reheat_power_permille: settings.hold_reheat_power_permille,
+            approach_lead_ticks: settings.approach_lead_ticks,
+            hold_lead_ticks: settings.hold_lead_ticks,
+            auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
+            heater_current_reserve_ma: settings.heater_current_reserve_ma,
+        })
+        .unwrap_or(default_settings);
+    let point_targets = {
+        let explicit = package
+            .points
+            .iter()
+            .flatten()
+            .map(|point| point.target_temp_c)
+            .collect::<Vec<_>>();
+        if explicit.is_empty() {
+            THERMAL_PROFILE_ANCHOR_TARGETS_C.to_vec()
+        } else {
+            explicit
+        }
+    };
+    let points = point_targets
+        .into_iter()
+        .map(|target_temp_c| {
+            let default_point = mock_thermal_default_target_point(target_temp_c);
+            let point = package
+                .points
+                .iter()
+                .flatten()
+                .find(|point| point.target_temp_c == target_temp_c);
+            MockThermalCandidatePoint {
+                target_temp_c,
+                brake_distance_centi_c: point
+                    .map(|point| point.brake_distance_centi_c)
+                    .unwrap_or(default_point.brake_distance_centi_c),
+                warmup_power_permille: point
+                    .map(|point| point.warmup_power_permille)
+                    .unwrap_or(default_point.warmup_power_permille),
+                approach_power_permille: point
+                    .map(|point| point.approach_power_permille)
+                    .unwrap_or(default_point.approach_power_permille),
+                approach_floor_power_permille: point
+                    .map(|point| point.approach_floor_power_permille)
+                    .unwrap_or(default_point.approach_floor_power_permille),
+                approach_damping_exponent_permille: point
+                    .map(|point| point.approach_damping_exponent_permille)
+                    .unwrap_or(default_point.approach_damping_exponent_permille),
+                approach_tail_window_centi_c: point
+                    .map(|point| point.approach_tail_window_centi_c)
+                    .unwrap_or(default_point.approach_tail_window_centi_c),
+                hold_power_permille: point
+                    .map(|point| point.hold_power_permille)
+                    .unwrap_or(default_point.hold_power_permille),
+                hold_reheat_power_permille: point
+                    .map(|point| point.hold_reheat_power_permille)
+                    .unwrap_or(default_point.hold_reheat_power_permille),
+                hold_entry_centi_c: point
+                    .map(|point| point.hold_entry_centi_c)
+                    .unwrap_or(default_point.hold_entry_centi_c),
+                hold_exit_centi_c: point
+                    .map(|point| point.hold_exit_centi_c)
+                    .unwrap_or(default_point.hold_exit_centi_c),
+                hold_on_centi_c: point
+                    .map(|point| point.hold_on_centi_c)
+                    .unwrap_or(settings.hold_on_centi_c),
+                hold_off_centi_c: point
+                    .map(|point| point.hold_off_centi_c)
+                    .unwrap_or(default_point.hold_off_centi_c),
+                overshoot_cutoff_centi_c: point
+                    .map(|point| point.overshoot_cutoff_centi_c)
+                    .unwrap_or(default_point.overshoot_cutoff_centi_c),
+                hold_kp_permille_per_c: point
+                    .map(|point| point.hold_kp_permille_per_c)
+                    .unwrap_or(default_point.hold_kp_permille_per_c),
+                hold_ki_permille_per_c_tick: point
+                    .map(|point| point.hold_ki_permille_per_c_tick)
+                    .unwrap_or(default_point.hold_ki_permille_per_c_tick),
+                hold_blend_ticks: point
+                    .map(|point| point.hold_blend_ticks)
+                    .unwrap_or(default_point.hold_blend_ticks),
+                approach_lead_ticks: point
+                    .map(|point| point.approach_lead_ticks)
+                    .unwrap_or(default_point.approach_lead_ticks),
+                hold_lead_ticks: point
+                    .map(|point| point.hold_lead_ticks)
+                    .unwrap_or(default_point.hold_lead_ticks),
+            }
+        })
+        .collect();
+    MockThermalCandidateProfile { settings, points }
+}
+
+fn mock_thermal_candidate_point(
+    profile: &MockThermalCandidateProfile,
+    target_temp_c: i16,
+) -> Option<MockThermalCandidatePoint> {
+    profile
+        .points
+        .iter()
+        .copied()
+        .find(|point| point.target_temp_c == target_temp_c)
+}
+
+fn mock_thermal_interpolated_candidate_point(
+    profile: &MockThermalCandidateProfile,
+    target_temp_c: i16,
+) -> Option<MockThermalCandidatePoint> {
+    if let Some(point) = mock_thermal_candidate_point(profile, target_temp_c) {
+        return Some(point);
+    }
+    let mut points = profile.points.clone();
+    points.sort_by_key(|point| point.target_temp_c);
+    let lower = points
+        .iter()
+        .copied()
+        .rev()
+        .find(|point| point.target_temp_c < target_temp_c)?;
+    let upper = points
+        .iter()
+        .copied()
+        .find(|point| point.target_temp_c > target_temp_c)?;
+    let ratio = f32::from(target_temp_c - lower.target_temp_c)
+        / f32::from(upper.target_temp_c - lower.target_temp_c);
+    let lerp = |left: u16, right: u16, upper_bound: u16| {
+        (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
+            .clamp(0.0, f32::from(upper_bound)) as u16
+    };
+    let linear_brake_distance = lerp(
+        lower.brake_distance_centi_c,
+        upper.brake_distance_centi_c,
+        5_000,
+    );
+    let midpoint_weight = 4.0 * ratio * (1.0 - ratio);
+    let intermediate_brake_adjustment = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        -0.20
+    } else if lower.target_temp_c >= 100 && upper.target_temp_c <= 180 {
+        if upper.target_temp_c <= 140 {
+            0.55
+        } else {
+            0.20
+        }
+    } else {
+        0.0
+    };
+    let interpolated_brake_distance = (f32::from(linear_brake_distance)
+        * (1.0 - intermediate_brake_adjustment * midpoint_weight)
+        + 0.5) as u16;
+    let low_temp_hold_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.20 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let low_temp_reheat_scale = if lower.target_temp_c >= 60 && upper.target_temp_c <= 100 {
+        1.0 - (0.10 * midpoint_weight)
+    } else {
+        1.0
+    };
+    let scale_low_temp_hold =
+        |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
+    Some(MockThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c: interpolated_brake_distance,
+        warmup_power_permille: lerp(
+            lower.warmup_power_permille,
+            upper.warmup_power_permille,
+            1_000,
+        ),
+        approach_power_permille: lerp(
+            lower.approach_power_permille,
+            upper.approach_power_permille,
+            1_000,
+        ),
+        approach_floor_power_permille: lerp(
+            lower.approach_floor_power_permille,
+            upper.approach_floor_power_permille,
+            1_000,
+        ),
+        approach_damping_exponent_permille: lerp(
+            lower.approach_damping_exponent_permille,
+            upper.approach_damping_exponent_permille,
+            THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+        ),
+        approach_tail_window_centi_c: lerp(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
+        ),
+        hold_power_permille: scale_low_temp_hold(lerp(
+            lower.hold_power_permille,
+            upper.hold_power_permille,
+            1_000,
+        )),
+        hold_reheat_power_permille: (f32::from(lerp(
+            lower.hold_reheat_power_permille,
+            upper.hold_reheat_power_permille,
+            1_000,
+        )) * low_temp_reheat_scale
+            + 0.5) as u16,
+        hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
+        hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
+        hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
+        hold_off_centi_c: lerp(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
+        overshoot_cutoff_centi_c: lerp(
+            lower.overshoot_cutoff_centi_c,
+            upper.overshoot_cutoff_centi_c,
+            5_000,
+        ),
+        hold_kp_permille_per_c: lerp(
+            lower.hold_kp_permille_per_c,
+            upper.hold_kp_permille_per_c,
+            10_000,
+        ),
+        hold_ki_permille_per_c_tick: {
+            let interpolated = lerp(
+                lower.hold_ki_permille_per_c_tick,
+                upper.hold_ki_permille_per_c_tick,
+                10_000,
+            );
+            if interpolated == 0 {
+                profile.settings.hold_ki_permille_per_c_tick
+            } else {
+                interpolated
+            }
+        },
+        hold_blend_ticks: lerp(
+            lower.hold_blend_ticks,
+            upper.hold_blend_ticks,
+            u16::from(u8::MAX),
+        )
+        .clamp(1, u16::from(u8::MAX)),
+        approach_lead_ticks: lerp(
+            lower.approach_lead_ticks,
+            upper.approach_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+        hold_lead_ticks: lerp(
+            lower.hold_lead_ticks,
+            upper.hold_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+    })
+}
+
+fn mock_thermal_runtime(
+    target_temp_c: i16,
+    package: Option<&ThermalControlProfilePackage>,
+    preview_active: bool,
+) -> ThermalControlRuntime {
+    let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
+    let profile = package.map(mock_thermal_profile_from_package);
+    let profile_source = if preview_active {
+        "preview"
+    } else if profile.is_some() {
+        "saved"
+    } else {
+        "default"
+    };
+    let profile_covers_target = profile
+        .as_ref()
+        .and_then(|profile| mock_thermal_interpolated_candidate_point(profile, target_temp_c))
+        .is_some();
+    let point = profile
+        .as_ref()
+        .and_then(|profile| mock_thermal_interpolated_candidate_point(profile, target_temp_c));
+    let (
+        brake_distance_centi_c,
+        _default_warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+    ) = point
+        .map(|point| {
+            (
+                point.brake_distance_centi_c,
+                point.warmup_power_permille,
+                point.approach_power_permille,
+                point.approach_floor_power_permille,
+                point.approach_damping_exponent_permille,
+                point.hold_power_permille,
+                point.hold_reheat_power_permille,
+                point.hold_entry_centi_c,
+                point.hold_exit_centi_c,
+                point.hold_on_centi_c,
+                point.hold_off_centi_c,
+                point.overshoot_cutoff_centi_c,
+                point.hold_kp_permille_per_c,
+                point.hold_ki_permille_per_c_tick,
+                point.hold_blend_ticks,
+                point.approach_lead_ticks,
+                point.hold_lead_ticks,
+            )
+        })
+        .unwrap_or_else(|| mock_thermal_default_target_values(target_temp_c));
+    let warmup_power_permille = if let Some(point) = point {
+        point
+            .warmup_power_permille
+            .max(point.approach_power_permille)
+    } else {
+        1_000
+    };
+    let settings = profile
+        .as_ref()
+        .map(|profile| profile.settings)
+        .unwrap_or_else(mock_thermal_default_settings);
+    ThermalControlRuntime {
+        profile_active: profile.is_some(),
+        profile_covers_target,
+        profile_source: profile_source.to_string(),
+        target_temp_c,
+        brake_distance_centi_c,
+        warmup_power_permille,
+        approach_power_permille,
+        approach_floor_power_permille,
+        approach_damping_exponent_permille,
+        approach_tail_window_centi_c: point
+            .map(|point| point.approach_tail_window_centi_c)
+            .unwrap_or_default(),
+        hold_power_permille,
+        hold_reheat_power_permille,
+        hold_entry_centi_c,
+        hold_exit_centi_c,
+        hold_on_centi_c,
+        hold_off_centi_c,
+        overshoot_cutoff_centi_c,
+        hold_kp_permille_per_c,
+        hold_ki_permille_per_c_tick,
+        hold_blend_ticks,
+        approach_lead_ticks,
+        hold_lead_ticks,
+        temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
+        warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
+        approach_max_ticks: settings.approach_max_ticks,
+        approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
+        auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
+        heater_current_reserve_ma: settings
+            .heater_current_reserve_ma
+            .min(THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX),
+    }
 }
 
 fn validate_calibration_control_request(
@@ -2868,6 +3740,7 @@ async fn serial_runtime_config(
         manual_pps_mv: payload.manual_pps_mv,
         manual_pps_ma: payload.manual_pps_ma,
         calibration: payload.calibration.as_ref(),
+        thermal_control_profile: payload.thermal_control_profile.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
     match serial_exchange(
@@ -3191,13 +4064,17 @@ where
             true,
         )
     })?;
-    serde_json::from_value(payload).map_err(|_| {
-        HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "usb_payload_decode_failed",
-            "USB response payload could not be decoded.",
-            true,
-        )
+    serde_json::from_value(payload).map_err(|error| HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: ApiError {
+            code: "usb_payload_decode_failed".to_string(),
+            message: "USB response payload could not be decoded.".to_string(),
+            retryable: true,
+            details: Some(json!({
+                "payloadKey": payload_key,
+                "decodeError": error.to_string(),
+            })),
+        },
     })
 }
 
@@ -3484,10 +4361,35 @@ fn write_serial_request(
     port: &mut dyn serialport::SerialPort,
     request: &str,
 ) -> Result<(), HttpError> {
-    port.write_all(request.as_bytes())
+    validate_serial_request_len(request)?;
+    port.set_timeout(SERIAL_WRITE_TIMEOUT)
+        .map_err(serial_timeout_config_http_error)?;
+    let write_result = port
+        .write_all(request.as_bytes())
         .and_then(|_| port.write_all(b"\n"))
-        .and_then(|_| port.flush())
-        .map_err(serial_io_http_error)
+        .and_then(|_| port.flush());
+    let restore_result = port.set_timeout(SERIAL_READ_TIMEOUT);
+    write_result.map_err(serial_io_http_error)?;
+    restore_result.map_err(serial_timeout_config_http_error)
+}
+
+fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
+    if request.len().saturating_add(1) > SERIAL_LINE_LIMIT {
+        return Err(HttpError::bad_request(
+            "usb_request_too_large",
+            "USB JSONL request exceeds the firmware line limit.",
+        ));
+    }
+    Ok(())
+}
+
+fn serial_timeout_config_http_error(error: serialport::Error) -> HttpError {
+    HttpError::new(
+        StatusCode::BAD_GATEWAY,
+        "serial_timeout_config_failed",
+        &format!("Failed to configure serial timeout: {error}"),
+        true,
+    )
 }
 
 fn write_serial_request_with_reopen(
@@ -3637,6 +4539,39 @@ fn runtime_config_matches_status(
             return false;
         }
     }
+    if let Some(profile) = payload.thermal_control_profile.as_ref() {
+        match profile.op {
+            ThermalControlProfileOp::Preview => {
+                let expected =
+                    mock_thermal_runtime(status.target_temp_c, profile.profile.as_ref(), true);
+                if !status.thermal_control_profile_preview || status.thermal_control != expected {
+                    return false;
+                }
+            }
+            ThermalControlProfileOp::ClearPreview => {
+                if status.thermal_control_profile_preview
+                    || status.thermal_control.profile_source == "preview"
+                {
+                    return false;
+                }
+            }
+            ThermalControlProfileOp::Save => {
+                let expected =
+                    mock_thermal_runtime(status.target_temp_c, profile.profile.as_ref(), false);
+                if status.thermal_control_profile_preview
+                    || status.thermal_control.profile_source != "saved"
+                    || status.thermal_control != expected
+                {
+                    return false;
+                }
+            }
+            ThermalControlProfileOp::ClearSaved => {
+                if status.thermal_control.profile_source == "saved" {
+                    return false;
+                }
+            }
+        }
+    }
     true
 }
 
@@ -3647,6 +4582,22 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
     let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
         return Ok(None);
     };
+    if frame.frame_type == "error"
+        && frame
+            .request_id
+            .as_deref()
+            .is_none_or(|frame_request_id| frame_request_id == request_id)
+    {
+        return Err(HttpError {
+            status: StatusCode::BAD_GATEWAY,
+            error: frame.error.unwrap_or_else(|| ApiError {
+                code: "usb_error".to_string(),
+                message: "Firmware returned an unsuccessful USB error frame.".to_string(),
+                retryable: true,
+                details: None,
+            }),
+        });
+    }
     if frame.frame_type != "response" || frame.request_id.as_deref() != Some(request_id) {
         return Ok(None);
     }
@@ -4100,17 +5051,76 @@ async fn run_espflash(
     port_path: &str,
 ) -> Result<(), HttpError> {
     let args = build_espflash_args(artifact, root, port_path)?;
-    let status = Command::new("espflash")
-        .args(args)
-        .status()
+    let program = resolve_espflash_program();
+    let output = Command::new(&program)
+        .args(&args)
+        .output()
         .await
-        .map_err(|_| HttpError::internal("Failed to start espflash."))?;
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_unavailable",
+                "Failed to start espflash.",
+                json!({
+                    "program": program,
+                    "error": error.to_string(),
+                }),
+            )
+        })?;
 
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(HttpError::internal("espflash returned a non-zero status."))
+        Err(HttpError::internal_with_details(
+            "flash_tool_failed",
+            "espflash returned a non-zero status.",
+            espflash_failure_details(&program, &args, &output),
+        ))
     }
+}
+
+fn resolve_espflash_program() -> PathBuf {
+    if let Some(program) = env::var_os("FLUX_PURR_ESPFLASH").filter(|value| !value.is_empty()) {
+        return PathBuf::from(program);
+    }
+    if let Some(cargo_home) = env::var_os("CARGO_HOME").filter(|value| !value.is_empty()) {
+        let candidate = PathBuf::from(cargo_home).join("bin").join("espflash");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        let candidate = PathBuf::from(home)
+            .join(".cargo")
+            .join("bin")
+            .join("espflash");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("espflash")
+}
+
+fn espflash_failure_details(program: &Path, args: &[String], output: &Output) -> Value {
+    json!({
+        "program": program,
+        "args": args,
+        "exitCode": output.status.code(),
+        "stdout": bounded_espflash_output(&output.stdout),
+        "stderr": bounded_espflash_output(&output.stderr),
+    })
+}
+
+fn bounded_espflash_output(bytes: &[u8]) -> String {
+    const MAX_OUTPUT_BYTES: usize = 4_096;
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= MAX_OUTPUT_BYTES {
+        return text.trim().to_string();
+    }
+    let mut end = MAX_OUTPUT_BYTES;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{} [truncated]", text[..end].trim())
 }
 
 async fn run_espflash_with_exclusive_serial(
@@ -4155,7 +5165,6 @@ fn build_espflash_args(
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
-            "-S".to_string(),
             path.to_string_lossy().into_owned(),
         ]);
     }
@@ -4179,7 +5188,6 @@ fn build_espflash_args(
         "--non-interactive".to_string(),
         "--after".to_string(),
         "hard-reset".to_string(),
-        "-S".to_string(),
         flash_address.to_string(),
         path.to_string_lossy().into_owned(),
     ])
@@ -4730,6 +5738,26 @@ mod tests {
         assert_eq!(device.status.network.state, NetworkState::Idle);
     }
 
+    #[tokio::test]
+    async fn create_lease_refreshes_authorized_serial_device_before_lookup() {
+        let dir = tempdir().unwrap();
+        let port_path = dir.path().join("authorized-usbmodem");
+        fs::write(&port_path, b"placeholder").unwrap();
+        let mut config = AppConfig::default();
+        config.serial_port = Some(port_path.clone());
+        let state = AppState::new(config);
+        let device = serial_device_record(port_path.to_str().unwrap(), None);
+
+        let lease = create_lease(State(state.clone()), AxumPath(device.id.clone()))
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(lease.device_id, device.id);
+        let state_lock = state.lock().unwrap();
+        assert!(state_lock.devices.contains_key(&lease.device_id));
+    }
+
     #[test]
     fn serial_refresh_removes_stale_native_devices_and_leases() {
         let mut state = DevdState::default();
@@ -5067,7 +6095,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
-        assert!(args.contains(&"-S".to_string()));
+        assert!(!args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
         assert!(!args.contains(&"65536".to_string()));
     }
@@ -5127,6 +6155,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5134,6 +6163,265 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::FORBIDDEN);
         assert_eq!(error.error.code, "lease_expired");
+    }
+
+    #[tokio::test]
+    async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let preview = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::Preview,
+                    profile: Some(ThermalControlProfilePackage {
+                        settings: None,
+                        points: vec![
+                            Some(ThermalControlProfilePoint {
+                                target_temp_c: 100,
+                                brake_distance_centi_c: 700,
+                                warmup_power_permille: 320,
+                                approach_power_permille: 320,
+                                approach_floor_power_permille: 220,
+                                approach_damping_exponent_permille: 1_000,
+                                approach_tail_window_centi_c: 0,
+                                hold_power_permille: 220,
+                                hold_reheat_power_permille: 0,
+                                hold_entry_centi_c: 0,
+                                hold_exit_centi_c: 0,
+                                hold_on_centi_c: 0,
+                                hold_off_centi_c: 0,
+                                overshoot_cutoff_centi_c: 0,
+                                hold_kp_permille_per_c: 0,
+                                hold_ki_permille_per_c_tick: 0,
+                                hold_blend_ticks: 0,
+                                approach_lead_ticks: 0,
+                                hold_lead_ticks: 0,
+                            }),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ],
+                    }),
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(preview.thermal_control_profile_preview);
+        assert!(preview.thermal_control.profile_active);
+        assert_eq!(preview.thermal_control.profile_source, "preview");
+
+        let clear_saved = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::ClearSaved,
+                    profile: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(clear_saved.thermal_control_profile_preview);
+        assert!(clear_saved.thermal_control.profile_active);
+        assert_eq!(clear_saved.thermal_control.profile_source, "preview");
+
+        let clear = configure_runtime(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::ClearPreview,
+                    profile: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!clear.thermal_control_profile_preview);
+        assert_eq!(clear.thermal_control.profile_source, "default");
+        assert!(!clear.thermal_control.profile_active);
+    }
+
+    #[tokio::test]
+    async fn runtime_endpoint_saves_and_clears_saved_thermal_control_profile() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let save = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::Save,
+                    profile: Some(ThermalControlProfilePackage {
+                        settings: None,
+                        points: vec![
+                            Some(ThermalControlProfilePoint {
+                                target_temp_c: 210,
+                                brake_distance_centi_c: 1_000,
+                                warmup_power_permille: 260,
+                                approach_power_permille: 260,
+                                approach_floor_power_permille: 180,
+                                approach_damping_exponent_permille: 1_000,
+                                approach_tail_window_centi_c: 0,
+                                hold_power_permille: 180,
+                                hold_reheat_power_permille: 0,
+                                hold_entry_centi_c: 0,
+                                hold_exit_centi_c: 0,
+                                hold_on_centi_c: 0,
+                                hold_off_centi_c: 0,
+                                overshoot_cutoff_centi_c: 0,
+                                hold_kp_permille_per_c: 0,
+                                hold_ki_permille_per_c_tick: 0,
+                                hold_blend_ticks: 0,
+                                approach_lead_ticks: 0,
+                                hold_lead_ticks: 0,
+                            }),
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        ],
+                    }),
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!save.thermal_control_profile_preview);
+        assert!(save.thermal_control.profile_active);
+        assert_eq!(save.thermal_control.profile_source, "saved");
+
+        let clear_saved = configure_runtime(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::ClearSaved,
+                    profile: None,
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!clear_saved.thermal_control_profile_preview);
+        assert_eq!(clear_saved.thermal_control.profile_source, "default");
+        assert!(!clear_saved.thermal_control.profile_active);
+    }
+
+    #[test]
+    fn thermal_profile_clear_preview_rejects_profile_payload() {
+        let error = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::ClearPreview,
+            profile: Some(ThermalControlProfilePackage {
+                settings: None,
+                points: vec![None; FRONT_PANEL_PRESET_COUNT],
+            }),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "invalid_thermal_profile");
+    }
+
+    #[test]
+    fn thermal_profile_preview_accepts_the_ch224q_5v_floor() {
+        let result = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::Preview,
+            profile: Some(ThermalControlProfilePackage {
+                settings: Some(ThermalControlProfileSettings {
+                    temp_filter_alpha_permille: 700,
+                    warmup_reenter_centi_c: 400,
+                    hold_entry_centi_c: 90,
+                    hold_exit_centi_c: 200,
+                    hold_on_centi_c: 30,
+                    hold_off_centi_c: 5,
+                    overshoot_cutoff_centi_c: 25,
+                    approach_max_ticks: 5,
+                    approach_min_power_ratio_permille: 0,
+                    hold_kp_permille_per_c: 120,
+                    hold_ki_permille_per_c_tick: 12,
+                    hold_blend_ticks: 12,
+                    hold_reheat_power_permille: 0,
+                    approach_lead_ticks: 0,
+                    hold_lead_ticks: 0,
+                    auto_adjustable_working_floor_mv: PPS_HARDWARE_MIN_MV,
+                    heater_current_reserve_ma: 200,
+                }),
+                points: vec![None; FRONT_PANEL_PRESET_COUNT],
+            }),
+        });
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -5229,6 +6517,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5277,6 +6566,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5303,6 +6593,7 @@ mod tests {
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5327,6 +6618,7 @@ mod tests {
                 manual_pps_mv: None,
                 manual_pps_ma: None,
                 calibration: None,
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5372,6 +6664,7 @@ mod tests {
                     heater_enabled: Some(false),
                     target_adc_mv: None,
                 }),
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5417,6 +6710,7 @@ mod tests {
                     heater_enabled: Some(false),
                     target_adc_mv: None,
                 }),
+                thermal_control_profile: None,
             }),
         )
         .await
@@ -5623,6 +6917,19 @@ mod tests {
     }
 
     #[test]
+    fn usb_response_decoder_surfaces_requestless_firmware_frame_errors() {
+        let error = decode_usb_response_line(
+            br#"{"type":"error","requestId":null,"error":{"code":"malformed_json","message":"Malformed USB JSONL frame.","retryable":false}}"#,
+            "req-1",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(error.error.code, "malformed_json");
+        assert!(!error.error.retryable);
+    }
+
+    #[test]
     fn usb_response_decoder_marks_startup_busy_retryable() {
         let error = decode_usb_response_line(
             br#"{"type":"response","requestId":"req-1","ok":false,"error":{"code":"startup_busy","message":"Runtime status is not available until hardware initialization completes.","retryable":true}}"#,
@@ -5664,6 +6971,7 @@ mod tests {
                 heater_enabled: Some(true),
                 target_adc_mv: Some(930),
             }),
+            thermal_control_profile: None,
         };
         let status = ControlPlaneStatus {
             mode: "sampling".to_string(),
@@ -5674,6 +6982,7 @@ mod tests {
             presets_c: payload.presets_c.clone(),
             heater_enabled: true,
             heater_output_percent: 12,
+            heater_physical_output_percent: 12,
             active_cooling_enabled: false,
             fan_display_state: "AUTO".to_string(),
             fan_enabled: true,
@@ -5693,6 +7002,18 @@ mod tests {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            heater_fault_reason: None,
+            heater_lock_reason: None,
+            heater_control_phase: None,
+            heater_error_c: None,
+            heater_control_error_c: None,
+            heater_filtered_temp_c: None,
+            heater_filtered_slope_c_per_s: None,
+            heater_coast_active: false,
+            heater_control_interval_ms: 0,
+            heater_control_cycle_ms: 0,
+            thermal_control_profile_preview: false,
+            thermal_control: ThermalControlRuntime::default(),
             calibration: CalibrationRuntimeState {
                 mode: CalibrationMode::RtdAdc,
                 pps_enabled: true,
@@ -5739,6 +7060,7 @@ mod tests {
                 heater_enabled: Some(false),
                 target_adc_mv: None,
             }),
+            thermal_control_profile: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.calibration.mode = CalibrationMode::VinAdc;
@@ -5747,6 +7069,119 @@ mod tests {
         status.calibration.heater_enabled = false;
 
         assert!(!runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn runtime_config_matcher_reconciles_preview_from_status_flag() {
+        let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
+        points[0] = Some(ThermalControlProfilePoint {
+            target_temp_c: 120,
+            brake_distance_centi_c: 700,
+            warmup_power_permille: 320,
+            approach_power_permille: 320,
+            approach_floor_power_permille: 220,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 220,
+            hold_reheat_power_permille: 0,
+            hold_entry_centi_c: 0,
+            hold_exit_centi_c: 0,
+            hold_on_centi_c: 0,
+            hold_off_centi_c: 0,
+            overshoot_cutoff_centi_c: 0,
+            hold_kp_permille_per_c: 0,
+            hold_ki_permille_per_c_tick: 0,
+            hold_blend_ticks: 0,
+            approach_lead_ticks: 0,
+            hold_lead_ticks: 0,
+        });
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileRequest {
+                op: ThermalControlProfileOp::Preview,
+                profile: Some(ThermalControlProfilePackage {
+                    settings: None,
+                    points,
+                }),
+            }),
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.thermal_control_profile_preview = true;
+        status.thermal_control = mock_thermal_runtime(
+            status.target_temp_c,
+            payload
+                .thermal_control_profile
+                .as_ref()
+                .and_then(|profile| profile.profile.as_ref()),
+            true,
+        );
+
+        assert!(runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn runtime_config_matcher_reconciles_saved_profile_runtime() {
+        let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
+        points[0] = Some(ThermalControlProfilePoint {
+            target_temp_c: 220,
+            brake_distance_centi_c: 520,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 760,
+            approach_floor_power_permille: 600,
+            approach_damping_exponent_permille: 550,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 620,
+            hold_reheat_power_permille: 700,
+            hold_entry_centi_c: 8,
+            hold_exit_centi_c: 50,
+            hold_on_centi_c: 14,
+            hold_off_centi_c: 240,
+            overshoot_cutoff_centi_c: 320,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 2,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 0,
+        });
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            calibration: None,
+            thermal_control_profile: Some(ThermalControlProfileRequest {
+                op: ThermalControlProfileOp::Save,
+                profile: Some(ThermalControlProfilePackage {
+                    settings: None,
+                    points,
+                }),
+            }),
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.thermal_control = mock_thermal_runtime(
+            status.target_temp_c,
+            payload
+                .thermal_control_profile
+                .as_ref()
+                .and_then(|profile| profile.profile.as_ref()),
+            false,
+        );
+
+        assert!(runtime_config_matches_status(&payload, &status));
     }
 
     #[test]
@@ -5941,17 +7376,25 @@ mod tests {
         assert!(!is_recoverable_write_http_error(&other_code));
     }
 
+    #[test]
+    fn serial_request_line_limit_accepts_full_line_and_rejects_overflow() {
+        assert!(validate_serial_request_len(&"x".repeat(SERIAL_LINE_LIMIT - 1)).is_ok());
+        let error = validate_serial_request_len(&"x".repeat(SERIAL_LINE_LIMIT)).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "usb_request_too_large");
+    }
+
     #[cfg(unix)]
     #[test]
     fn serial_lock_is_not_reentrant_until_previous_session_is_dropped() {
         let port_path = "/tmp/flux-purr-devd-test-port";
-        let deadline = Instant::now() + Duration::from_millis(50);
+        let deadline = Instant::now() + Duration::from_millis(250);
 
         let first = SerialPortProcessLock::acquire(port_path, deadline).unwrap();
 
         let second = match SerialPortProcessLock::acquire(
             port_path,
-            Instant::now() + Duration::from_millis(50),
+            Instant::now() + Duration::from_millis(250),
         ) {
             Ok(_) => panic!("second serial lock should time out while first session is alive"),
             Err(error) => error,
@@ -5961,7 +7404,7 @@ mod tests {
         drop(first);
 
         let reopened =
-            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(50));
+            SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(250));
         assert!(reopened.is_ok());
     }
 

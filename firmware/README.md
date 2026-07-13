@@ -73,16 +73,18 @@
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
-  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config with two `512 B` slots at `0x0000` and `0x0200`
+  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config in two `1 KiB` slots at `0x0400` and `0x0800`; the former `512 B` slots at `0x0000` and `0x0200` remain a read-only migration fallback
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
-  - the control loop runs at `1 Hz` and produces a normalized `0..100%` heater output
-  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum; `1..100%` maps from the source PPS minimum up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
+  - the control loop runs at `10 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
+  - the controller uses model-assisted ramp/soak plus hold PI trimming: far from target it uses an approach power, inside the target-specific brake distance it ramps toward hold power, and in hold it trims around hold power with a small PI term
+  - optional `ThermalControlProfile` preview is RAM-only and can tune up to 10 target points with `targetTempC`, `brakeDistanceCentiC`, `approachPowerPermille`, and `holdPowerPermille`; missing points fall back to conservative defaults, and interpolated targets use linear interpolation
+  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum; `1..100%` maps equivalent power into a `100 mV` aligned PPS voltage request from the source PPS minimum up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; WARMUP keeps this dynamic PPS control path; sub-`500 mV` target changes are suppressed and larger changes ramp by at most `500 mV` per request; same-APDO changes keep the MOS gate active and use a `25 ms` request transition gate, while APDO/AVS/fixed-PDO/fallback path changes blank the MOS and use a `275 ms` transition window; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
   - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
-  - control interval is `1 Hz`
+  - control interval is `100 ms (10 Hz)`
   - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
   - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
 - Fan control:
@@ -114,7 +116,7 @@
 - `GPIO8/9` host the shared I2C bus for `CH224Q` and `M24C64`.
 - The app runtime programs `CH224Q` register `0x0A` on boot and requests the feature-selected voltage (`20 V` by default, optional `12 V` / `28 V` build variants).
 - The runtime then reads CH224Q `0x60~0x8F` power data. If a PPS APDO covers `20 V`, heater control can switch to `pps-mos`; otherwise it remains on `fixed-pd-pwm-fallback`.
-- In `pps-mos`, CH224Q `0x53` is used for PPS voltage requests and `0x51/0x52` for AVS requests above the PPS range. The first request writes the voltage register before writing `0x0A = 6` or `0x0A = 7`.
+- In `pps-mos`, CH224Q `0x53` is used for PPS voltage requests in `100 mV` units and `0x51/0x52` for AVS requests above the PPS range. AVS `25 mV` resolution is not used for first-version hold-power trimming. The first request writes the voltage register before writing `0x0A = 6` or `0x0A = 7`.
 - Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the app runtime continues.
 - After boot request/settle, the runtime polls CH224Q status for observation and defmt logging only.
 
