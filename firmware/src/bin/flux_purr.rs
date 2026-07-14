@@ -1604,8 +1604,11 @@ impl HeaterController {
         // A projected crossing alone is not enough to coast. The physical sensor and the
         // filtered controller state must both be inside the profile's Hold exit gate first.
         // Otherwise a high rising slope can cut heating several degrees below target.
+        let approach_coast_gate_c = hold_entry_gate_c
+            .max(control_target.hold_exit_error_c)
+            + (hold_entry_measurement_margin_c * 2.0);
         let approach_predictive_coast_ready = approach_control_error_c <= 0.0
-            && error_c <= control_target.hold_exit_error_c
+            && error_c <= approach_coast_gate_c
             && control_error_c <= control_target.hold_exit_error_c;
         // Phase residency follows the actual plate temperature. Filtered and projected errors
         // shape power, but using their lag to leave Hold creates rapid Hold/Approach oscillation.
@@ -1673,10 +1676,18 @@ impl HeaterController {
 
         if previous_phase != self.phase {
             if self.phase == HeaterControlPhase::Hold {
-                self.hold_coast_active = filtered_temp_slope_c_per_profile_tick > 0.0
+                let hold_entry_coast_guard_c = control_target
+                    .hold_exit_error_c
+                    .max(control_target.hold_on_error_c.max(0.05) * 2.0);
+                let hold_entry_projection_or_zero_ready = error_c <= hold_entry_coast_guard_c
                     && (self.duty_percent == 0
                         || approach_control_error_c <= 0.0
                         || hold_control_error_c <= 0.0);
+                self.hold_coast_active = filtered_temp_slope_c_per_profile_tick > 0.0
+                    && (actual_crossed_target_ready
+                        || error_c <= 0.0
+                        || control_error_c <= 0.0
+                        || hold_entry_projection_or_zero_ready);
                 if actual_crossed_target_ready {
                     self.filtered_temp_c = Some(measured_temp_c);
                     self.previous_filtered_temp_c = Some(measured_temp_c);
@@ -1883,12 +1894,10 @@ impl HeaterController {
 fn approach_sustain_floor_permille(control_target: ThermalControlTarget, error_c: f32) -> u16 {
     let full_floor = control_target
         .approach_floor_power_permille
-        .max(control_target.hold_reheat_power_permille)
         .max(control_target.hold_power_permille)
         .min(1_000);
     let tail_floor = control_target
-        .hold_reheat_power_permille
-        .max(control_target.hold_power_permille)
+        .hold_power_permille
         .min(full_floor);
     let tail_window_c = control_target.approach_tail_window_c.max(0.0);
     if tail_window_c <= f32::EPSILON || full_floor == tail_floor {
@@ -9753,6 +9762,64 @@ mod tests {
     }
 
     #[test]
+    fn heater_hold_does_not_coast_below_target_just_because_previous_output_was_zero() {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 180;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.phase_ticks = 20;
+        controller.duty_percent = 0;
+        controller.filtered_temp_c = Some(177.8);
+        controller.previous_filtered_temp_c = Some(177.6);
+        controller.filtered_slope_c_per_profile_tick = 0.2;
+        controller.previous_measured_temp_c = Some(178.0);
+
+        let profile = ThermalControlProfile {
+            settings: ThermalControlProfileSettings {
+                temp_filter_alpha: 0.26,
+                ..ThermalControlProfileSettings::default()
+            },
+            points: [
+                None,
+                None,
+                None,
+                Some(ThermalControlProfilePoint {
+                    target_temp_c: 180,
+                    brake_distance_centi_c: 875,
+                    warmup_power_permille: 950,
+                    approach_power_permille: 710,
+                    approach_floor_power_permille: 410,
+                    approach_damping_exponent_permille: 1_000,
+                    approach_tail_window_centi_c: 0,
+                    hold_power_permille: 420,
+                    hold_reheat_power_permille: 560,
+                    hold_entry_centi_c: 180,
+                    hold_exit_centi_c: 70,
+                    hold_on_centi_c: 25,
+                    hold_off_centi_c: 225,
+                    overshoot_cutoff_centi_c: 250,
+                    hold_kp_permille_per_c: 20,
+                    hold_ki_permille_per_c_tick: 1,
+                    hold_blend_ticks: 3,
+                    approach_lead_ticks: 4,
+                    hold_lead_ticks: 0,
+                }),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+
+        let snapshot = controller.update(180, 178.3, true, Some(profile));
+
+        assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
+        assert!(!controller.hold_coast_active);
+        assert!(snapshot.duty_percent > 0);
+    }
+
+    #[test]
     fn heater_approach_projection_cannot_coast_outside_hold_exit_gate() {
         let mut controller = HeaterController::new();
         controller.last_target_temp_c = 140;
@@ -9805,7 +9872,8 @@ mod tests {
 
         assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
         assert!(snapshot.control_error_c > 1.0);
-        assert!(snapshot.duty_percent >= 32);
+        assert!(snapshot.duty_percent >= 26);
+        assert!(snapshot.duty_percent < 32);
     }
 
     #[test]
@@ -10040,7 +10108,7 @@ mod tests {
     }
 
     #[test]
-    fn heater_approach_keeps_reheat_floor_while_still_under_target() {
+    fn heater_approach_uses_hold_base_without_inheriting_reheat_floor() {
         let mut controller = HeaterController::new();
         controller.last_target_temp_c = 140;
         controller.phase = HeaterControlPhase::Approach;
@@ -10090,7 +10158,8 @@ mod tests {
 
         let snapshot = controller.update(140, 139.0, true, Some(profile));
         assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
-        assert!(snapshot.duty_percent >= 52);
+        assert!(snapshot.duty_percent >= 38);
+        assert!(snapshot.duty_percent < 52);
     }
 
     #[test]
@@ -10665,8 +10734,8 @@ mod tests {
         };
 
         assert_eq!(approach_sustain_floor_permille(target, 3.0), 500);
-        assert_eq!(approach_sustain_floor_permille(target, 1.5), 340);
-        assert_eq!(approach_sustain_floor_permille(target, 0.5), 180);
+        assert_eq!(approach_sustain_floor_permille(target, 1.5), 320);
+        assert_eq!(approach_sustain_floor_permille(target, 0.5), 140);
         assert_eq!(
             approach_sustain_floor_permille(
                 ThermalControlTarget {

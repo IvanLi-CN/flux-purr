@@ -5478,6 +5478,54 @@ fn render_thermal_self_test_report_html(
       return wrapper;
     }}
 
+    function formatProfileMode(mode) {{
+      switch (mode) {{
+        case "65w":
+          return "65W";
+        case "100w":
+          return "100W";
+        case "auto":
+          return "auto";
+        default:
+          return mode ?? "-";
+      }}
+    }}
+
+    function formatBank(bank) {{
+      switch (bank) {{
+        case "pps3a":
+          return "pps3a / 3A / 65W";
+        case "pps5a":
+          return "pps5a / 5A / 100W";
+        default:
+          return bank ?? "-";
+      }}
+    }}
+
+    function formatSourceClass(sourceClass) {{
+      switch (sourceClass) {{
+        case "pps3a":
+          return "pps3a / 3A class";
+        case "pps5a":
+          return "pps5a / 5A class";
+        default:
+          return sourceClass ?? "unknown";
+      }}
+    }}
+
+    function formatSourcePreset(source) {{
+      const voltageMv = source?.preset?.voltageMv ?? source?.voltageMv ?? null;
+      const currentMa = source?.preset?.currentLimitMa ?? source?.currentLimitMa ?? null;
+      const voltageLabel = voltageMv == null ? "-" : `${{(voltageMv / 1000).toFixed(1)}}V`;
+      const currentLabel = currentMa == null
+        ? "-"
+        : Number.isInteger(currentMa / 1000)
+          ? `${{(currentMa / 1000).toFixed(1)}}A`
+          : `${{(currentMa / 1000).toFixed(2)}}A`;
+      const rawLabel = `${{voltageMv ?? "-"}} mV / ${{currentMa ?? "-"}} mA`;
+      return `${{voltageLabel}} / ${{currentLabel}} (${{rawLabel}})`;
+    }}
+
     const summaryGrid = document.getElementById("summary-grid");
     const summaryMetrics = [
       ["Run ID", summary.runId],
@@ -5486,9 +5534,12 @@ fn render_thermal_self_test_report_html(
       ["Sample Interval", `${{summary.parameters?.effectiveSampleIntervalMs ?? summary.parameters?.sampleIntervalMs ?? 0}} ms`],
       ["Targets", (summary.parameters?.targetsC ?? []).join(", ")],
       ["Full-Speed Settle Limit", `${{summary.parameters?.limits?.fullSpeedToStableMs ?? "-"}} ms`],
-      ["Thermal Profile", `${{summary.source?.selectedMode ?? "-"}} -> ${{summary.source?.resolvedBank ?? "-"}} (${{summary.source?.detectedSourceClass ?? "unknown"}})`],
+      ["Selected Mode", formatProfileMode(summary.source?.selectedMode)],
+      ["Resolved Bank", formatBank(summary.source?.resolvedBank)],
+      ["Detected Source Class", formatSourceClass(summary.source?.detectedSourceClass)],
+      ["Thermal Profile", `${{formatProfileMode(summary.source?.selectedMode)}} -> ${{formatBank(summary.source?.resolvedBank)}}`],
       ["Source", `${{summary.source?.kind ?? "unknown"}}:${{summary.source?.id ?? summary.source?.deviceId ?? "-"}}`],
-      ["Source Preset", `${{summary.source?.preset?.voltageMv ?? summary.source?.voltageMv ?? "-"}} mV / ${{summary.source?.preset?.currentLimitMa ?? summary.source?.currentLimitMa ?? "-"}} mA`],
+      ["Source Preset", formatSourcePreset(summary.source)],
     ];
     for (const [label, value] of summaryMetrics) {{
       const card = document.createElement("div");
@@ -6140,21 +6191,24 @@ async fn run_thermal_stage(
         {
             stop_reason = "heater_no_output";
         }
-        if stop_reason == "timeout" {
-            if let ThermalFullSpeedStableObservation::Failed(reason) =
-                full_speed_tracker.observe(current_temp_c, elapsed_ms, control_phase)
-            {
-                if !args.calibration_run {
-                    stop_reason = reason;
-                }
+        let guard_stop_reason = if stop_reason == "timeout" {
+            approach_guard.observe(current_temp_c, elapsed_ms, control_phase)
+        } else {
+            None
+        };
+        let full_speed_stop_reason = if stop_reason == "timeout" {
+            match full_speed_tracker.observe(current_temp_c, elapsed_ms, control_phase) {
+                ThermalFullSpeedStableObservation::Failed(reason) => Some(reason),
+                _ => None,
             }
-        }
-        if stop_reason == "timeout"
-            && let Some(guard_stop_reason) =
-                approach_guard.observe(current_temp_c, elapsed_ms, control_phase)
-        {
-            if !args.calibration_run {
-                stop_reason = guard_stop_reason;
+        } else {
+            None
+        };
+        if stop_reason == "timeout" && !args.calibration_run {
+            if let Some(reason) = full_speed_stop_reason {
+                stop_reason = reason;
+            } else if let Some(reason) = guard_stop_reason {
+                stop_reason = reason;
             }
         }
         let sample = json!({
