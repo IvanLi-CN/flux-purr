@@ -1,4 +1,13 @@
 ---
+title: Thermal control profile preview and self-test
+module: device-control
+problem_type: thermal-hil
+component: firmware-cli-devd-isolapurr
+tags:
+  - thermal-control
+  - pd-pps
+  - isolapurr
+  - hil
 status: active
 related_specs:
   - docs/specs/q2aw6-heater-pid-frontpanel-runtime/SPEC.md
@@ -329,6 +338,109 @@ should therefore prefer target subsets over killing long full-ladder runs mid-fl
 ## Hardware boundary
 
 Flux Purr self-test uses the repo-local `flux-purr` CLI through `flux-purr-devd` for the device under test. The host self-test path abstracts a bench source provider, with `isolapurr` as the current default and validated provider. IsolaPurr remains an external PD source and must be prepared through released `isolapurr` / `isolapurr-devd` tools, not source commands or raw local HTTP. Thermal HIL configures `65W`, enables PD Fixed and PPS, selects `auto_follow`, and checks one live USB-C reading above `5V` before testing. It does not manually control TPS, force a voltage, replug the source port, or test IsolaPurr behavior; Flux Purr owns subsequent PD/PPS requests.
+
+### Recovering a source stuck at 5V
+
+Capability readback does not prove that the live USB-C output is following the sink. A source may
+correctly report `65W` or `100W`, PD Fixed and PPS enabled, and `auto_follow`, while its live USB-C
+telemetry remains near `5V` after Flux Purr requests a higher PPS voltage. Do not classify thermal
+results or tune a profile in that state. The source contract is stale and must be recovered first.
+
+Use an IsolaPurr runtime output restart when any of these conditions holds:
+
+- Flux Purr requests more than `5V`, but IsolaPurr USB-C telemetry remains near `5V`.
+- Flux Purr `pdRequestMv` / `pdContractMv`, IsolaPurr USB-C voltage, and Flux Purr VIN do not
+  converge after the normal negotiation interval.
+- A `65W` / `100W` capability change reads back successfully but the live output retains the old
+  contract.
+- Flux Purr resets during a failed negotiation and the recovered source remains at `5V`.
+
+The recovery sequence is:
+
+1. Stop the run and confirm Flux Purr reports `heaterEnabled=false` and
+   `heaterPhysicalOutputPercent=0`.
+2. Confirm the intended IsolaPurr capability and `auto_follow` configuration are already saved.
+3. Disable the IsolaPurr runtime output, wait about one second, then enable it again:
+
+   ```bash
+   isolapurr --json power runtime output \
+     --url http://192.168.31.122 \
+     --enabled false
+
+   sleep 1
+
+   isolapurr --json power runtime output \
+     --url http://192.168.31.122 \
+     --enabled true
+   ```
+
+4. Reassert automatic USB-C request tracking:
+
+   ```bash
+   isolapurr --json power output auto \
+     --url http://192.168.31.122
+   ```
+
+5. Wait for Flux Purr to boot on the same owner-authorized serial path. If the path changes or
+   disappears, stop; do not select another port automatically.
+   IsolaPurr CLI target selectors are mutually exclusive: use the explicit `--url` shown above or
+   `--device-id`, never both in one command.
+6. Before arming the heater, read both devices and require all three voltage views to agree within
+   the expected measurement tolerance: Flux Purr `pdRequestMv` / `pdContractMv`, IsolaPurr live
+   USB-C `voltage_mv`, and Flux Purr VIN `voltageMv`. When the requested contract is above `5V`, a
+   single healthy `>5V` reading is necessary but not sufficient; the readings must remain current
+   and follow the requested contract.
+
+This restart is an exception for a stuck or stale source contract. Do not cycle output for ordinary
+PPS steps, between healthy thermal stages, or as a way to hide a repeatable source or sink fault.
+Never cycle it while the heater is armed. A failed post-restart readback is an infrastructure
+failure, not thermal-profile evidence, and the run must remain unsaved.
+
+### Rejecting RTD samples during PPS transitions
+
+High-current PPS ramps can couple into the RTD ADC path even when the source contract and heater
+remain stable. The identifying trace is a physically impossible temperature staircase synchronized
+with each `500mV` PPS request step, such as a repeated `0.5°C` decrease every `100ms` while the
+heater is still delivering power. This is measurement interference, not plate cooling and not a
+thermal-profile response. Tightening the sensor connection can reduce it, but HIL must not assume
+the wiring change alone removes every transition transient.
+
+Firmware keeps the last trusted control temperature while the PPS request is changing. After the
+request has remained unchanged for `300ms`, it clears the temporal RTD window, seeds both the RTD
+estimate and controller filter from the new stable measurement, and resumes slope prediction. The
+raw sample still runs short, open, ADC-read, and over-temperature checks on every control cycle;
+the transition guard must never delay those safety paths. Re-seeding only the RTD median is
+insufficient because the controller's previous filtered value would turn the first stable sample
+into an impossible slope and trigger a false warmup handoff.
+
+Parameter tuning is valid only when the sample trace shows all of the following:
+
+- PPS request steps do not produce an opposite-direction temperature staircase.
+- `heaterFilteredSlopeCPerS` remains physically plausible when the request settles.
+- warmup, approach, and hold transitions follow the plate temperature rather than a voltage step.
+- the run starts below the selected cooldown threshold, so repeated focused trials do not compare
+  different heat-soak states.
+
+For the `56x56mm / 3.2ohm` plate, focused `pps5a` 60°C tuning uses a `6100mV` working floor,
+`11.0°C` brake distance, `85%` warmup power, `14%` approach floor, and six approach lead ticks.
+Run `thermal-1784007933933-serial-303a-1001-d0-cf-13-08-a1-48` resolved `100w -> pps5a`,
+completed the full hold, settled in `7.499s`, reached `1.35°C` maximum overshoot and `2.45°C`
+hold peak-to-peak, and measured a source peak of approximately `18.964V / 3.810A / 72.258W`.
+This single-target run is tuning evidence only. It must not be copied into `baselines/**`, renamed
+to `index.html` or `run.bundle.json`, or presented as a canonical report. A 100W baseline may be
+frozen only after the accepted full-range source runs are aggregated with the same manifest,
+provenance, hardware, cadence, and report-format fields used by the existing 65W canonical bundle.
+The saved EEPROM readback must report `profileSource=saved`, `thermalProfileMode=100w`, and
+`thermalProfileResolvedBank=pps5a` before the focused point is reused as a tuning seed.
+
+A repeatable drop to `5V` at the first low-power hold correction is a profile problem rather than
+a stale source contract. Check the active saved bank and the seed preset before repeating the run.
+For the accepted 65W heater plate, `autoAdjustableWorkingFloorMv` is `6100`; saving a stale
+`5000mV` seed overwrites that EEPROM guardrail and allows the controller to request `5V` during
+hold. The observed sequence is a healthy `6V` contract, a low-duty hold correction, a `5V`
+request, and then `core_usb_uart` reset while the source remains powered. Restore the committed
+`6100mV` preset to `pps3a`, restart IsolaPurr output once with the heater off, and verify a direct
+heating run keeps the minimum contract above `6V` before resuming thermal acceptance.
 
 When an explicit `manual-forced` source mode is used, source preparation and Flux Purr lease acquisition form one rollback boundary. If the target never becomes ready or lease acquisition fails after the source was forced on, the CLI must restore IsolaPurr output to `auto` before returning the error; batch and single-run paths share this behavior.
 

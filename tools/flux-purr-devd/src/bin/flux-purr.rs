@@ -5749,7 +5749,10 @@ async fn preview_and_prepare_thermal_self_test_target(
         lease_id,
         Method::PUT,
         "/runtime",
-        Some(thermal_profile_preview_runtime_body(profile_mode, profile.clone())),
+        Some(thermal_profile_preview_runtime_body(
+            profile_mode,
+            profile.clone(),
+        )),
     )
     .await?;
     verify_thermal_profile_mode_readback(&preview_status, profile_mode)?;
@@ -6772,8 +6775,7 @@ fn isolapurr_power_config_value_matches_manual(
                             THERMAL_SOURCE_100W_POWER_WATTS,
                             true,
                         ));
-                json_u64_any(manual, &["voltage_mv", "voltageMv"])
-                    == Some(u64::from(voltage_mv))
+                json_u64_any(manual, &["voltage_mv", "voltageMv"]) == Some(u64::from(voltage_mv))
                     && current_matches
                     && matches!(
                         json_str_any(manual, &["usb_c_path_mode", "usbCPathMode"]),
@@ -10668,7 +10670,9 @@ mod tests {
             "thermalProfileMode": "100w",
             "thermalProfileResolvedBank": "pps3a",
         });
-        assert!(verify_thermal_profile_mode_readback(&wrong_bank, ThermalProfileMode::W100).is_err());
+        assert!(
+            verify_thermal_profile_mode_readback(&wrong_bank, ThermalProfileMode::W100).is_err()
+        );
     }
 
     #[test]

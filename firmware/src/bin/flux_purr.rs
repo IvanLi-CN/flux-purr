@@ -1454,6 +1454,13 @@ impl HeaterController {
         self.hold_coast_active = false;
     }
 
+    fn reseed_measurement(&mut self, measured_temp_c: f32) {
+        self.filtered_temp_c = Some(measured_temp_c);
+        self.previous_filtered_temp_c = Some(measured_temp_c);
+        self.filtered_slope_c_per_profile_tick = 0.0;
+        self.previous_measured_temp_c = Some(measured_temp_c);
+    }
+
     fn latch_fault(&mut self, reason: HeaterFaultReason) -> bool {
         let changed = self.fault_latched != Some(reason);
         self.fault_latched = Some(reason);
@@ -2193,6 +2200,42 @@ struct RtdTemporalMedian {
     samples_c: [f32; 3],
     count: usize,
     next: usize,
+    last_output_c: Option<f32>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RtdPpsTransitionGuard {
+    request_mv: Option<u16>,
+    stable_after_ms: u64,
+    reseed_pending: bool,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl RtdPpsTransitionGuard {
+    const SETTLE_MS: u64 = 300;
+
+    fn new(request_mv: u16) -> Self {
+        Self {
+            request_mv: Some(request_mv),
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, request_mv: u16, now_ms: u64) -> (bool, bool) {
+        if self.request_mv != Some(request_mv) {
+            self.request_mv = Some(request_mv);
+            self.stable_after_ms = now_ms.saturating_add(Self::SETTLE_MS);
+            self.reseed_pending = true;
+            return (false, false);
+        }
+        if now_ms < self.stable_after_ms {
+            return (false, false);
+        }
+        let reseed = self.reseed_pending;
+        self.reseed_pending = false;
+        (true, reseed)
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2201,14 +2244,26 @@ impl RtdTemporalMedian {
         self.samples_c[self.next] = temp_c;
         self.next = (self.next + 1) % self.samples_c.len();
         self.count = self.count.saturating_add(1).min(self.samples_c.len());
-        match self.count {
-            1 => self.samples_c[0],
-            2 => (self.samples_c[0] + self.samples_c[1]) * 0.5,
-            _ => {
-                let [a, b, c] = self.samples_c;
-                a.max(b).min(a.min(b).max(c))
+        let mut sorted = self.samples_c;
+        for index in 1..self.count {
+            let value = sorted[index];
+            let mut insertion = index;
+            while insertion > 0 && sorted[insertion - 1] > value {
+                sorted[insertion] = sorted[insertion - 1];
+                insertion -= 1;
             }
+            sorted[insertion] = value;
         }
+        let median_c = if self.count % 2 == 0 {
+            (sorted[self.count / 2 - 1] + sorted[self.count / 2]) * 0.5
+        } else {
+            sorted[self.count / 2]
+        };
+        let output_c = self.last_output_c.map_or(median_c, |last_output_c| {
+            median_c.clamp(last_output_c - 0.25, last_output_c + 0.25)
+        });
+        self.last_output_c = Some(output_c);
+        output_c
     }
 
     fn clear(&mut self) {
@@ -6856,6 +6911,8 @@ async fn main(_spawner: Spawner) {
     let mut latest_vin_raw_adc_mv = 0_u16;
     let mut latest_vin_mv = 0_u32;
     let mut rtd_temporal_median = RtdTemporalMedian::default();
+    let mut rtd_pps_transition_guard =
+        RtdPpsTransitionGuard::new(heater_power_backend.pd_request_mv());
     match initial_rtd_sample {
         RtdSample::Valid(measurement) => {
             let control_temp_c = rtd_temporal_median.push(measurement.temp_c);
@@ -7289,33 +7346,41 @@ async fn main(_spawner: Spawner) {
 
             match read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config) {
                 RtdSample::Valid(measurement) => {
-                    let control_temp_c = rtd_temporal_median.push(measurement.temp_c);
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     current_rtd_fault = if is_overtemp_sample(measurement.temp_c) {
                         Some(HeaterFaultReason::OverTemp)
                     } else {
                         None
                     };
-                    latest_temp_c = control_temp_c;
-                    latest_temp_i16 = temp_c_to_whole_c(control_temp_c);
-                    if ui_state.current_temp_c != latest_temp_i16 {
-                        ui_state.current_temp_c = latest_temp_i16;
-                        needs_redraw = true;
+                    let (accept_control_sample, reseed_filter) = rtd_pps_transition_guard
+                        .observe(heater_power_backend.pd_request_mv(), elapsed_ms);
+                    if accept_control_sample {
+                        if reseed_filter {
+                            rtd_temporal_median.clear();
+                            heater_controller.reseed_measurement(measurement.temp_c);
+                        }
+                        let control_temp_c = rtd_temporal_median.push(measurement.temp_c);
+                        latest_temp_c = control_temp_c;
+                        latest_temp_i16 = temp_c_to_whole_c(control_temp_c);
+                        if ui_state.current_temp_c != latest_temp_i16 {
+                            ui_state.current_temp_c = latest_temp_i16;
+                            needs_redraw = true;
+                        }
+                        let current_temp_deci_c = temp_c_to_deci_c(control_temp_c);
+                        if ui_state.current_temp_deci_c != current_temp_deci_c {
+                            ui_state.current_temp_deci_c = current_temp_deci_c;
+                            needs_redraw = true;
+                        }
+                        info!(
+                            "rtd sample raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32} heater_arm={=bool}",
+                            measurement.raw_adc_mv,
+                            measurement.adc_mv,
+                            RTD_DIVIDER_SUPPLY_MV,
+                            measurement.resistance_ohms,
+                            measurement.temp_c,
+                            ui_state.heater_enabled,
+                        );
                     }
-                    let current_temp_deci_c = temp_c_to_deci_c(control_temp_c);
-                    if ui_state.current_temp_deci_c != current_temp_deci_c {
-                        ui_state.current_temp_deci_c = current_temp_deci_c;
-                        needs_redraw = true;
-                    }
-                    info!(
-                        "rtd sample raw_adc_mv={=u16} adc_mv={=u16} divider_mv={=u16} resistance_ohms={=f32} temp_c={=f32} heater_arm={=bool}",
-                        measurement.raw_adc_mv,
-                        measurement.adc_mv,
-                        RTD_DIVIDER_SUPPLY_MV,
-                        measurement.resistance_ohms,
-                        measurement.temp_c,
-                        ui_state.heater_enabled,
-                    );
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
@@ -11606,15 +11671,59 @@ mod tests {
     }
 
     #[test]
+    fn rtd_temporal_median_rejects_high_power_batch_burst() {
+        let mut median = RtdTemporalMedian::default();
+        median.push(36.2);
+        median.push(36.4);
+        median.push(36.6);
+        assert!((median.push(43.0) - 36.6).abs() < f32::EPSILON);
+        assert!((median.push(46.5) - 36.85).abs() < f32::EPSILON);
+        assert!((median.push(63.4) - 37.1).abs() < f32::EPSILON);
+        assert!((median.push(36.8) - 37.35).abs() < f32::EPSILON);
+        assert!((median.push(36.9) - 37.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn rtd_temporal_median_tracks_sustained_change_and_clears_after_fault() {
         let mut median = RtdTemporalMedian::default();
         median.push(59.8);
         median.push(60.0);
         assert!((median.push(60.2) - 60.0).abs() < f32::EPSILON);
         assert!((median.push(60.4) - 60.2).abs() < f32::EPSILON);
+        assert!((median.push(60.6) - 60.4).abs() < f32::EPSILON);
+        assert!((median.push(60.8) - 60.6).abs() < f32::EPSILON);
 
         median.clear();
         assert!((median.push(42.0) - 42.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rtd_pps_transition_guard_holds_until_request_is_stable() {
+        let mut guard = RtdPpsTransitionGuard::new(21_000);
+        assert_eq!(guard.observe(21_000, 0), (true, false));
+        assert_eq!(guard.observe(20_500, 40), (false, false));
+        assert_eq!(guard.observe(20_000, 240), (false, false));
+        assert_eq!(guard.observe(20_000, 539), (false, false));
+        assert_eq!(guard.observe(20_000, 540), (true, true));
+        assert_eq!(guard.observe(20_000, 580), (true, false));
+    }
+
+    #[test]
+    fn heater_controller_reseed_clears_measurement_slope_without_changing_phase() {
+        let mut controller = HeaterController::new();
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(40.0);
+        controller.previous_filtered_temp_c = Some(39.0);
+        controller.filtered_slope_c_per_profile_tick = 8.0;
+        controller.previous_measured_temp_c = Some(41.0);
+
+        controller.reseed_measurement(52.0);
+
+        assert_eq!(controller.phase, HeaterControlPhase::Approach);
+        assert_eq!(controller.filtered_temp_c, Some(52.0));
+        assert_eq!(controller.previous_filtered_temp_c, Some(52.0));
+        assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
+        assert_eq!(controller.previous_measured_temp_c, Some(52.0));
     }
 
     #[test]

@@ -4668,12 +4668,7 @@ fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Valu
     let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
         return Ok(None);
     };
-    if frame.frame_type == "error"
-        && frame
-            .request_id
-            .as_deref()
-            .is_none_or(|frame_request_id| frame_request_id == request_id)
-    {
+    if frame.frame_type == "error" && frame.request_id.as_deref() == Some(request_id) {
         return Err(HttpError {
             status: StatusCode::BAD_GATEWAY,
             error: frame.error.unwrap_or_else(|| ApiError {
@@ -7069,16 +7064,13 @@ mod tests {
     }
 
     #[test]
-    fn usb_response_decoder_surfaces_requestless_firmware_frame_errors() {
-        let error = decode_usb_response_line(
+    fn usb_response_decoder_ignores_requestless_firmware_frame_errors() {
+        assert!(decode_usb_response_line(
             br#"{"type":"error","requestId":null,"error":{"code":"malformed_json","message":"Malformed USB JSONL frame.","retryable":false}}"#,
             "req-1",
         )
-        .unwrap_err();
-
-        assert_eq!(error.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(error.error.code, "malformed_json");
-        assert!(!error.error.retryable);
+        .unwrap()
+        .is_none());
     }
 
     #[test]

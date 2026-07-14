@@ -6,9 +6,13 @@ This bundle is the committed real-HIL reference package for the `56mm x 56mm`, `
 
 - Heater plate: `56mm x 56mm`
 - Heater resistance: `3.2Ω`
+- Selected mode: `65w`
+- Resolved EEPROM bank: `pps3a`
+- Detected source class: `pps3a` / `3A (65W)`
+- Source preset: `20V / 3.25A`
 - Source class: USB PD PPS
 - PPS range: `5-21V`
-- Current limit: `3A max`
+- Current limit: `3.25A` configured preset (`3A` capability class)
 - Calibration envelope: nominal `60-65W`
 - Control cadence: `20Hz`
 - RTD conversions per control cycle: `64`

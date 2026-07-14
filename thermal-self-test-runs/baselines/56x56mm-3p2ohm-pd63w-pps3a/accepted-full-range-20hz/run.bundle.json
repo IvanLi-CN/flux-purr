@@ -11,9 +11,19 @@
     "hardwareId": null
   },
   "source": {
-    "currentLimitMa": null,
+    "currentLimitMa": 3250,
+    "selectedMode": "65w",
+    "resolvedBank": "pps3a",
+    "detectedSourceClass": "pps3a",
+    "detectedSourceClassBasis": "configured_capability",
     "deviceId": "856a141cdbd4",
     "mode": "auto-follow",
+    "preset": {
+      "currentLimitMa": 3250,
+      "pdFixedEnabled": true,
+      "ppsEnabled": true,
+      "voltageMv": 20000
+    },
     "url": "http://192.168.31.122",
     "usbCPath": "pd-auto",
     "voltageMv": null
@@ -622,7 +632,9 @@
         "min": 5,
         "max": 21
       },
-      "currentLimitA": 3
+      "currentLimitA": 3.25,
+      "capabilityClass": "pps3a",
+      "displayClass": "3A (65W)"
     }
   },
   "baselineCadence": {
