@@ -2831,6 +2831,48 @@ fn thermal_approach_curve_reference_temp_c(
     start_temp_c + (target_temp_c - start_temp_c) * progress
 }
 
+fn thermal_stage_approach_curve_sample_series(
+    samples: &[ThermalReplayStageSample],
+    target_temp_c: i16,
+    guard: &ThermalApproachGuardAnalysis,
+    analysis: &ThermalStageAnalysis,
+) -> Vec<Option<f64>> {
+    let Some(start_temp_c) = analysis.approach_curve_start_temp_c else {
+        return vec![None; samples.len()];
+    };
+    let Some(fitted_ms) = analysis.approach_curve_fitted_ms else {
+        return vec![None; samples.len()];
+    };
+    let Some(started_at_ms) = guard
+        .approach_started_at_ms
+        .or(guard.hold_threshold_crossed_at_ms)
+        .or(guard.first_hold_at_ms)
+        .or_else(|| samples.first().map(|sample| sample.elapsed_ms))
+    else {
+        return vec![None; samples.len()];
+    };
+    let stop_at_ms = guard
+        .first_hold_at_ms
+        .or(guard.hold_threshold_crossed_at_ms)
+        .unwrap_or_else(|| started_at_ms.saturating_add(fitted_ms));
+    let target_temp_c = f64::from(target_temp_c);
+
+    samples
+        .iter()
+        .map(|sample| {
+            if sample.elapsed_ms < started_at_ms || sample.elapsed_ms > stop_at_ms {
+                return None;
+            }
+            Some(thermal_approach_curve_reference_temp_c(
+                start_temp_c,
+                target_temp_c,
+                sample.elapsed_ms.saturating_sub(started_at_ms),
+                fitted_ms,
+            ))
+        })
+        .collect()
+}
+
 fn thermal_stage_populate_approach_curve_analysis(
     analysis: &mut ThermalStageAnalysis,
     samples: &[ThermalReplayStageSample],
@@ -5955,6 +5997,7 @@ fn render_thermal_self_test_report_html(
       --source-v: #0891b2;
       --source-i: #059669;
       --heater-out: #7c3aed;
+      --approach-curve: #111827;
     }}
     body {{ margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }}
     main {{ max-width: 1320px; margin: 0 auto; padding: 24px; }}
@@ -5989,6 +6032,7 @@ fn render_thermal_self_test_report_html(
     const colors = {{
       currentTempC: "var(--temp)",
       targetTempC: "var(--target)",
+      approachCurveTempC: "var(--approach-curve)",
       hotplateVoltageMv: "var(--hotplate)",
       ppsRequestMv: "var(--pps-request)",
       ppsContractMv: "var(--pps-contract)",
@@ -6017,6 +6061,22 @@ fn render_thermal_self_test_report_html(
       return legend;
     }}
 
+    function buildPathData(stageSamples, series) {{
+      let d = "";
+      let penDown = false;
+      for (const sample of stageSamples) {{
+        const rawValue = sample[series.key];
+        const value = typeof rawValue === "number" && Number.isFinite(rawValue) ? rawValue : null;
+        if (value == null) {{
+          penDown = false;
+          continue;
+        }}
+        d += `${{penDown ? " L" : "M"}}${{series.x(sample)}},${{series.y(value)}}`;
+        penDown = true;
+      }}
+      return d.trim();
+    }}
+
     function buildChart(title, stageSamples, seriesDefs) {{
       const wrapper = document.createElement("div");
       const heading = document.createElement("h3");
@@ -6033,7 +6093,10 @@ fn render_thermal_self_test_report_html(
       const values = [];
       for (const sample of stageSamples) {{
         for (const series of seriesDefs) {{
-          values.push(sample[series.key]);
+          const value = sample[series.key];
+          if (typeof value === "number" && Number.isFinite(value)) {{
+            values.push(value);
+          }}
         }}
       }}
       const yMin = Math.min(...values);
@@ -6055,11 +6118,17 @@ fn render_thermal_self_test_report_html(
       }}
       for (const series of seriesDefs) {{
         const path = document.createElementNS(svgNs, "path");
-        const d = stageSamples.map((sample, index) => `${{index === 0 ? "M" : "L"}}${{x(sample.elapsedMs)}},${{y(sample[series.key])}}`).join(" ");
+        series.x = x;
+        series.y = y;
+        const d = buildPathData(stageSamples, series);
+        if (!d) continue;
         path.setAttribute("d", d);
         path.setAttribute("fill", "none");
         path.setAttribute("stroke", colors[series.key]);
         path.setAttribute("stroke-width", "2");
+        if (series.dash) {{
+          path.setAttribute("stroke-dasharray", series.dash);
+        }}
         svg.appendChild(path);
       }}
       wrapper.appendChild(svg);
@@ -6166,6 +6235,29 @@ fn render_thermal_self_test_report_html(
         default:
           return value ?? "-";
       }}
+    }}
+
+    function attachApproachCurveSeries(stageSamples, result) {{
+      const analysis = result?.analysis ?? null;
+      const guard = result?.guard ?? null;
+      const startTempC = analysis?.approachCurveStartTempC;
+      const fittedMs = analysis?.approachCurveFittedMs;
+      const startAtMs = guard?.approachStartedAtMs ?? guard?.holdThresholdCrossedAtMs ?? guard?.firstHoldAtMs ?? stageSamples[0]?.elapsedMs ?? null;
+      const stopAtMs = guard?.firstHoldAtMs ?? guard?.holdThresholdCrossedAtMs ?? (startAtMs != null && fittedMs != null ? startAtMs + fittedMs : null);
+      if (![startTempC, fittedMs, startAtMs].every((value) => typeof value === "number" && Number.isFinite(value))) {{
+        return stageSamples.map((sample) => ({{ ...sample, approachCurveTempC: null }}));
+      }}
+      const targetTempC = Number(result.targetTempC);
+      return stageSamples.map((sample) => {{
+        const elapsedFromStartMs = sample.elapsedMs - startAtMs;
+        let approachCurveTempC = null;
+        if (elapsedFromStartMs >= 0 && (stopAtMs == null || sample.elapsedMs <= stopAtMs)) {{
+          const normalized = Math.max(0, Math.min(1, fittedMs === 0 ? 1 : elapsedFromStartMs / fittedMs));
+          const progress = 1 - Math.pow(1 - normalized, 2);
+          approachCurveTempC = startTempC + (targetTempC - startTempC) * progress;
+        }}
+        return {{ ...sample, approachCurveTempC }};
+      }});
     }}
 
     const summaryGrid = document.getElementById("summary-grid");
@@ -6281,9 +6373,14 @@ fn render_thermal_self_test_report_html(
       section.appendChild(meta);
       const charts = document.createElement("div");
       charts.className = "charts";
-      charts.appendChild(buildChart("Temperature", stageSamples.map((sample) => ({{ ...sample, targetTempC: result.targetTempC }})), [
+      const temperatureSamples = attachApproachCurveSeries(
+        stageSamples.map((sample) => ({{ ...sample, targetTempC: result.targetTempC }})),
+        result,
+      );
+      charts.appendChild(buildChart("Temperature", temperatureSamples, [
         {{ key: "currentTempC", label: "Current Temp C" }},
         {{ key: "targetTempC", label: "Target Temp C" }},
+        {{ key: "approachCurveTempC", label: "Ideal Approach Curve", dash: "6 4" }},
       ]));
       charts.appendChild(buildChart("Voltage", stageSamples, [
         {{ key: "hotplateVoltageMv", label: "Hotplate Voltage mV" }},
@@ -6323,6 +6420,7 @@ fn write_dry_thermal_ladder(
         let hold_peak_to_peak_c = 1.6;
         let heater_parameters =
             thermal_heater_parameters_value(target_temp_c, thermal_profile, heater_parameter_mode);
+        let mut synthetic_stage_samples = Vec::new();
         for phase in ["warmup", "hold"] {
             let temp_c = if phase == "warmup" {
                 f64::from(target_temp_c) - 0.5
@@ -6366,7 +6464,59 @@ fn write_dry_thermal_ladder(
                 "status": synthetic_thermal_status(target_temp_c, temp_c, source_voltage_mv, source_current_ma),
             });
             writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
+            synthetic_stage_samples.push(ThermalReplayStageSample {
+                elapsed_ms,
+                current_temp_c: temp_c,
+                heater_output_percent: 26,
+                control_phase: Some(if phase == "warmup" {
+                    "approach".to_string()
+                } else {
+                    "hold".to_string()
+                }),
+                control_phase_in_hold: phase == "hold",
+                source_voltage_mv: Some(u64::from(source_voltage_mv)),
+                source_current_ma: Some(0),
+                source_power_mw: Some(0),
+            });
             *sample_index = sample_index.saturating_add(1);
+        }
+        let mut analysis = thermal_replay_stage_analysis(&synthetic_stage_samples, target_temp_c);
+        let guard = ThermalApproachGuardAnalysis {
+            hold_threshold_temp_c: f64::from(target_temp_c) - 0.5,
+            approach_started_at_ms: Some(rise_time_ms.saturating_sub(1_000)),
+            hold_threshold_crossed_at_ms: Some(rise_time_ms),
+            first_hold_at_ms: Some(rise_time_ms),
+            warmup_reentered_at_ms: None,
+        };
+        let full_speed_to_stable = ThermalFullSpeedStableAnalysis {
+            warmup_exited_at_ms: Some(rise_time_ms.saturating_sub(7_500)),
+            stable_window_started_at_ms: Some(rise_time_ms),
+            stable_window_verified_at_ms: Some(rise_time_ms),
+            settle_time_ms: Some(7_500),
+            failure_reason: None,
+        };
+        let curve_samples = thermal_stage_approach_curve_sample_series(
+            &synthetic_stage_samples,
+            target_temp_c,
+            &guard,
+            &analysis,
+        );
+        if analysis.approach_curve_max_above_c.is_none()
+            || analysis.approach_curve_max_below_c.is_none()
+        {
+            let mut max_above_c = 0.0f64;
+            let mut max_below_c = 0.0f64;
+            for (sample, reference_temp_c) in
+                synthetic_stage_samples.iter().zip(curve_samples.iter())
+            {
+                if let Some(reference_temp_c) = reference_temp_c {
+                    let deviation_c = sample.current_temp_c - reference_temp_c;
+                    max_above_c = max_above_c.max(deviation_c.max(0.0));
+                    max_below_c = max_below_c.max((-deviation_c).max(0.0));
+                }
+            }
+            analysis.approach_curve_max_above_c = Some(max_above_c);
+            analysis.approach_curve_max_below_c = Some(max_below_c);
         }
         results.push(ThermalStageResult {
             target_temp_c,
@@ -6376,38 +6526,27 @@ fn write_dry_thermal_ladder(
             sample_count: 2,
             stop_reason: "completed",
             terminal_runtime_drop_reason: None,
-            analysis: ThermalStageAnalysis {
-                first_hold_temp_c: Some(f64::from(target_temp_c) - 0.1),
-                first_hold_error_c: Some(0.1),
-                residual_heat_after_hold_entry_c: Some(max_overshoot_c + 0.1),
-                approach_median_output_permille: heater_parameters
+            analysis: {
+                analysis.approach_median_output_permille = heater_parameters
                     .get("approachFloorPowerPermille")
                     .and_then(Value::as_u64)
-                    .map(|value| value as u16),
-                approach_median_slope_c_per_s: Some(0.35),
-                hold_median_output_permille: heater_parameters
+                    .map(|value| value as u16);
+                analysis.approach_median_slope_c_per_s = Some(0.35);
+                analysis.hold_median_output_permille = heater_parameters
                     .get("holdPowerPermille")
                     .and_then(Value::as_u64)
-                    .map(|value| value as u16),
-                hold_p90_output_permille: heater_parameters
+                    .map(|value| value as u16);
+                analysis.hold_p90_output_permille = heater_parameters
                     .get("holdReheatPowerPermille")
                     .and_then(Value::as_u64)
-                    .map(|value| value as u16),
-                hold_mean_error_c: Some(0.0),
-                hold_max_above_target_c: Some(max_overshoot_c / 2.0),
-                hold_max_below_target_c: Some(hold_peak_to_peak_c / 2.0),
-                approach_sample_count: 1,
-                hold_sample_count: 1,
-                ..ThermalStageAnalysis::default()
+                    .map(|value| value as u16);
+                analysis.hold_mean_error_c = Some(0.0);
+                analysis.hold_max_above_target_c = Some(max_overshoot_c / 2.0);
+                analysis.hold_max_below_target_c = Some(hold_peak_to_peak_c / 2.0);
+                analysis
             },
-            guard: ThermalApproachGuardAnalysis::default(),
-            full_speed_to_stable: ThermalFullSpeedStableAnalysis {
-                warmup_exited_at_ms: Some(rise_time_ms.saturating_sub(7_500)),
-                stable_window_started_at_ms: Some(rise_time_ms),
-                stable_window_verified_at_ms: Some(rise_time_ms),
-                settle_time_ms: Some(7_500),
-                failure_reason: None,
-            },
+            guard,
+            full_speed_to_stable,
         });
     }
     Ok(results)
@@ -12160,6 +12299,7 @@ mod tests {
         assert!(html.contains("Resolved Bank"));
         assert!(html.contains("Detected Source Class"));
         assert!(html.contains("Approach Curve Class"));
+        assert!(html.contains("Ideal Approach Curve"));
         assert!(html.contains("pps5a / 5A (100W)"));
         assert!(!html.contains("pps5a / 5A / 100W"));
     }
