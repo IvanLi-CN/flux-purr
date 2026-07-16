@@ -1550,6 +1550,10 @@ const THERMAL_PPS3A_PERSISTED_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250
 const THERMAL_PPS5A_PERSISTED_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 240];
 const THERMAL_SELF_TEST_DEFAULT_TARGETS_C: [i16; 3] = [60, 140, 220];
 const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = 10;
+const THERMAL_APPROACH_CURVE_PREFERRED_MS: u64 = 5_000;
+const THERMAL_APPROACH_CURVE_LIMIT_MS: u64 = 10_000;
+const THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C: f64 = 0.5;
+const THERMAL_APPROACH_CURVE_CLASS_MARGIN_C: f64 = 0.4;
 
 fn thermal_profile_preview_runtime_body(mode: ThermalProfileMode, profile: Value) -> Value {
     json!({
@@ -1730,6 +1734,17 @@ struct ThermalStageAnalysis {
     hold_mean_error_c: Option<f64>,
     hold_max_above_target_c: Option<f64>,
     hold_max_below_target_c: Option<f64>,
+    approach_curve_fit_basis: Option<&'static str>,
+    approach_curve_start_temp_c: Option<f64>,
+    approach_curve_fitted_ms: Option<u64>,
+    approach_curve_preferred_ms: Option<u64>,
+    approach_curve_limit_ms: Option<u64>,
+    approach_curve_max_above_c: Option<f64>,
+    approach_curve_max_below_c: Option<f64>,
+    approach_curve_mean_abs_error_c: Option<f64>,
+    approach_curve_oscillation_c: Option<f64>,
+    approach_curve_deviation_class: Option<&'static str>,
+    approach_curve_tail_uses_half_floor: Option<bool>,
     approach_sample_count: usize,
     hold_sample_count: usize,
 }
@@ -2107,6 +2122,7 @@ impl ThermalStageAnalyzer {
                 .then_some(hold_max_below_target_c),
             approach_sample_count: self.approach_output_permille.len(),
             hold_sample_count: self.hold_output_permille.len(),
+            ..ThermalStageAnalysis::default()
         }
     }
 }
@@ -2472,6 +2488,17 @@ impl ThermalStageResult {
                 "holdMeanErrorC": self.analysis.hold_mean_error_c,
                 "holdMaxAboveTargetC": self.analysis.hold_max_above_target_c,
                 "holdMaxBelowTargetC": self.analysis.hold_max_below_target_c,
+                "approachCurveFitBasis": self.analysis.approach_curve_fit_basis,
+                "approachCurveStartTempC": self.analysis.approach_curve_start_temp_c,
+                "approachCurveFittedMs": self.analysis.approach_curve_fitted_ms,
+                "approachCurvePreferredMs": self.analysis.approach_curve_preferred_ms,
+                "approachCurveLimitMs": self.analysis.approach_curve_limit_ms,
+                "approachCurveMaxAboveC": self.analysis.approach_curve_max_above_c,
+                "approachCurveMaxBelowC": self.analysis.approach_curve_max_below_c,
+                "approachCurveMeanAbsErrorC": self.analysis.approach_curve_mean_abs_error_c,
+                "approachCurveOscillationC": self.analysis.approach_curve_oscillation_c,
+                "approachCurveDeviationClass": self.analysis.approach_curve_deviation_class,
+                "approachCurveTailUsesHalfFloor": self.analysis.approach_curve_tail_uses_half_floor,
                 "approachSampleCount": self.analysis.approach_sample_count,
                 "holdSampleCount": self.analysis.hold_sample_count,
             },
@@ -2781,10 +2808,138 @@ fn thermal_replay_stage_analysis(
         );
     }
     if max_temp_c.is_finite() {
-        analyzer.finalize(max_temp_c)
+        let mut analysis = analyzer.finalize(max_temp_c);
+        thermal_stage_populate_approach_curve_analysis(&mut analysis, samples, target_temp_c);
+        analysis
     } else {
         ThermalStageAnalysis::default()
     }
+}
+
+fn thermal_approach_curve_reference_temp_c(
+    start_temp_c: f64,
+    target_temp_c: f64,
+    elapsed_from_start_ms: u64,
+    fitted_ms: u64,
+) -> f64 {
+    let normalized = if fitted_ms == 0 {
+        1.0
+    } else {
+        (elapsed_from_start_ms as f64 / fitted_ms as f64).clamp(0.0, 1.0)
+    };
+    let progress = 1.0 - (1.0 - normalized).powi(2);
+    start_temp_c + (target_temp_c - start_temp_c) * progress
+}
+
+fn thermal_stage_populate_approach_curve_analysis(
+    analysis: &mut ThermalStageAnalysis,
+    samples: &[ThermalReplayStageSample],
+    target_temp_c: i16,
+) {
+    let Some(start_index) = samples
+        .iter()
+        .position(|sample| sample.control_phase.as_deref() != Some("warmup"))
+    else {
+        return;
+    };
+    let Some(start_sample) = samples.get(start_index) else {
+        return;
+    };
+    let end_index = samples
+        .iter()
+        .position(|sample| sample.control_phase_in_hold)
+        .unwrap_or_else(|| samples.len().saturating_sub(1));
+    let Some(end_sample) = samples.get(end_index) else {
+        return;
+    };
+
+    analysis.approach_curve_fit_basis = Some("target_error_from_approach_start");
+    analysis.approach_curve_start_temp_c = Some(start_sample.current_temp_c);
+    analysis.approach_curve_preferred_ms = Some(THERMAL_APPROACH_CURVE_PREFERRED_MS);
+    analysis.approach_curve_limit_ms = Some(THERMAL_APPROACH_CURVE_LIMIT_MS);
+    analysis.approach_curve_tail_uses_half_floor = Some(true);
+
+    let raw_duration_ms = end_sample
+        .elapsed_ms
+        .saturating_sub(start_sample.elapsed_ms);
+    let fitted_ms = raw_duration_ms.clamp(
+        THERMAL_APPROACH_CURVE_PREFERRED_MS,
+        THERMAL_APPROACH_CURVE_LIMIT_MS,
+    );
+    analysis.approach_curve_fitted_ms = Some(fitted_ms);
+
+    let target_temp_c = f64::from(target_temp_c);
+    let target_delta_c = target_temp_c - start_sample.current_temp_c;
+    if raw_duration_ms == 0 || target_delta_c <= 0.0 {
+        analysis.approach_curve_deviation_class = Some("insufficient_evidence");
+        return;
+    }
+
+    let mut max_above_c = 0.0f64;
+    let mut max_below_c = 0.0f64;
+    let mut mean_abs_error_sum_c = 0.0f64;
+    let mut deviation_count = 0usize;
+    let mut last_sign = 0i8;
+    let mut sign_changes = 0usize;
+
+    for sample in samples
+        .iter()
+        .take(end_index.saturating_add(1))
+        .skip(start_index)
+    {
+        let elapsed_from_start_ms = sample.elapsed_ms.saturating_sub(start_sample.elapsed_ms);
+        let reference_temp_c = thermal_approach_curve_reference_temp_c(
+            start_sample.current_temp_c,
+            target_temp_c,
+            elapsed_from_start_ms,
+            fitted_ms,
+        );
+        let deviation_c = sample.current_temp_c - reference_temp_c;
+        max_above_c = max_above_c.max(deviation_c.max(0.0));
+        max_below_c = max_below_c.max((-deviation_c).max(0.0));
+        mean_abs_error_sum_c += deviation_c.abs();
+        deviation_count = deviation_count.saturating_add(1);
+
+        let sign = if deviation_c > THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C {
+            1
+        } else if deviation_c < -THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C {
+            -1
+        } else {
+            0
+        };
+        if sign != 0 {
+            if last_sign != 0 && sign != last_sign {
+                sign_changes = sign_changes.saturating_add(1);
+            }
+            last_sign = sign;
+        }
+    }
+
+    analysis.approach_curve_max_above_c = Some(max_above_c);
+    analysis.approach_curve_max_below_c = Some(max_below_c);
+    if deviation_count > 0 {
+        analysis.approach_curve_mean_abs_error_c =
+            Some(mean_abs_error_sum_c / deviation_count as f64);
+    }
+    let oscillation_c = max_above_c.min(max_below_c);
+    analysis.approach_curve_oscillation_c = Some(oscillation_c);
+
+    analysis.approach_curve_deviation_class = Some(
+        if max_above_c >= 1.0 && max_above_c > max_below_c + THERMAL_APPROACH_CURVE_CLASS_MARGIN_C {
+            "brake_late_or_residual"
+        } else if max_below_c >= 1.0
+            && max_below_c > max_above_c + THERMAL_APPROACH_CURVE_CLASS_MARGIN_C
+        {
+            "underpowered_or_early_coast"
+        } else if sign_changes >= 2
+            && max_above_c >= THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C
+            && max_below_c >= THERMAL_APPROACH_CURVE_SIGNIFICANT_DEVIATION_C
+        {
+            "oscillatory_near_target"
+        } else {
+            "on_curve"
+        },
+    );
 }
 
 fn thermal_replay_stage_source_analysis(
@@ -4991,13 +5146,23 @@ fn tune_thermal_candidate_point(
     let near_target_power = analysis
         .approach_median_output_permille
         .unwrap_or(previous.approach_floor_power_permille.max(equilibrium));
+    let curve_class = analysis.approach_curve_deviation_class;
+    let curve_needs_tuning = matches!(
+        curve_class,
+        Some("brake_late_or_residual" | "underpowered_or_early_coast" | "oscillatory_near_target")
+    );
+    let curve_overshoot = curve_class == Some("brake_late_or_residual");
+    let curve_underpowered = curve_class == Some("underpowered_or_early_coast");
+    let curve_oscillation = curve_class == Some("oscillatory_near_target");
     let entering_below_target = analysis.first_hold_error_c.unwrap_or(0.0).max(0.0);
     let entering_above_target = (-analysis.first_hold_error_c.unwrap_or(0.0)).max(0.0);
     let hold_gate_lag = full_speed_failed
         && analysis.hold_sample_count == 0
-        && result.guard.hold_threshold_crossed_at_ms.is_some();
+        && result.guard.hold_threshold_crossed_at_ms.is_some()
+        && !curve_underpowered;
     let approach_only_underpowered =
-        full_speed_failed && analysis.hold_sample_count == 0 && !hold_gate_lag;
+        (full_speed_failed && analysis.hold_sample_count == 0 && !hold_gate_lag)
+            || curve_underpowered;
     let high_temp_power_limited = approach_only_underpowered
         && result.target_temp_c >= 180
         && near_target_power >= 900
@@ -5020,11 +5185,12 @@ fn tune_thermal_candidate_point(
         && residual_c >= 1.5
         && over_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
         && over_c >= under_c + 0.4;
-    let overshoot_dominant = overshoot_c > 3.0
+    let overshoot_dominant = curve_overshoot
+        || overshoot_c > 3.0
         || stability_overshoot
         || entry_residual_dominant
         || (residual_c > 2.5 && entering_above_target > 0.5 && over_c > under_c);
-    let hold_ripple = !full_speed_failed && hold_p2p_c > 3.0;
+    let hold_ripple = curve_oscillation || (!full_speed_failed && hold_p2p_c > 3.0);
     let timely_hold_but_late_stability = full_speed_failed
         && result
             .guard
@@ -5054,7 +5220,8 @@ fn tune_thermal_candidate_point(
         && entering_below_target >= 0.4
         && residual_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
         && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C;
-    let underpowered = starved_low_temp_hold
+    let underpowered = curve_underpowered
+        || starved_low_temp_hold
         || (full_speed_failed && !overshoot_dominant)
         || (!hold_ripple
             && !overshoot_dominant
@@ -5068,7 +5235,7 @@ fn tune_thermal_candidate_point(
             .is_some_and(|mean_error_c| mean_error_c > 0.2);
     let mut tuned = previous;
 
-    if !full_speed_failed && overshoot_c <= 3.0 && hold_p2p_c <= 3.0 {
+    if !full_speed_failed && overshoot_c <= 3.0 && hold_p2p_c <= 3.0 && !curve_needs_tuning {
         return previous;
     }
 
@@ -5975,6 +6142,32 @@ fn render_thermal_self_test_report_html(
       return `${{voltage}} / ${{current}} / ${{power}}`;
     }}
 
+    function formatApproachCurveClass(value) {{
+      switch (value) {{
+        case "brake_late_or_residual":
+          return "Brake late / residual";
+        case "underpowered_or_early_coast":
+          return "Underpowered / early coast";
+        case "oscillatory_near_target":
+          return "Oscillatory near target";
+        case "on_curve":
+          return "On curve";
+        case "insufficient_evidence":
+          return "Insufficient evidence";
+        default:
+          return value ?? "-";
+      }}
+    }}
+
+    function formatApproachCurveFitBasis(value) {{
+      switch (value) {{
+        case "target_error_from_approach_start":
+          return "Target error from approach start";
+        default:
+          return value ?? "-";
+      }}
+    }}
+
     const summaryGrid = document.getElementById("summary-grid");
     const summaryMetrics = [
       ["Run ID", summary.runId],
@@ -6066,6 +6259,17 @@ fn render_thermal_self_test_report_html(
         ["Hold Source Avg", formatSourceWindowAverage(holdSource)],
         ["Hold Source Range", formatSourceWindowRange(holdSource)],
         ["Hold Source Samples", holdSource?.sampleCount != null ? String(holdSource.sampleCount) : "-"],
+        ["Approach Curve Class", formatApproachCurveClass(analysis?.approachCurveDeviationClass)],
+        ["Approach Curve Fit Basis", formatApproachCurveFitBasis(analysis?.approachCurveFitBasis)],
+        ["Approach Curve Start", analysis?.approachCurveStartTempC != null ? `${{formatNumber(analysis.approachCurveStartTempC, 2)}} C` : "-"],
+        ["Approach Curve Fitted", analysis?.approachCurveFittedMs != null ? `${{analysis.approachCurveFittedMs}} ms` : "-"],
+        ["Approach Curve Preferred", analysis?.approachCurvePreferredMs != null ? `${{analysis.approachCurvePreferredMs}} ms` : "-"],
+        ["Approach Curve Limit", analysis?.approachCurveLimitMs != null ? `${{analysis.approachCurveLimitMs}} ms` : "-"],
+        ["Approach Curve Above", analysis?.approachCurveMaxAboveC != null ? `${{formatNumber(analysis.approachCurveMaxAboveC, 2)}} C` : "-"],
+        ["Approach Curve Below", analysis?.approachCurveMaxBelowC != null ? `${{formatNumber(analysis.approachCurveMaxBelowC, 2)}} C` : "-"],
+        ["Approach Curve Mean |err|", analysis?.approachCurveMeanAbsErrorC != null ? `${{formatNumber(analysis.approachCurveMeanAbsErrorC, 2)}} C` : "-"],
+        ["Approach Curve Oscillation", analysis?.approachCurveOscillationC != null ? `${{formatNumber(analysis.approachCurveOscillationC, 2)}} C` : "-"],
+        ["Approach Tail Half Floor", analysis?.approachCurveTailUsesHalfFloor != null ? String(analysis.approachCurveTailUsesHalfFloor) : "-"],
         ["Samples", String(result.sampleCount ?? stageSamples.length)],
       ];
       for (const [label, value] of items) {{
@@ -6194,6 +6398,7 @@ fn write_dry_thermal_ladder(
                 hold_max_below_target_c: Some(hold_peak_to_peak_c / 2.0),
                 approach_sample_count: 1,
                 hold_sample_count: 1,
+                ..ThermalStageAnalysis::default()
             },
             guard: ThermalApproachGuardAnalysis::default(),
             full_speed_to_stable: ThermalFullSpeedStableAnalysis {
@@ -6560,6 +6765,7 @@ async fn run_thermal_stage(
     let mut full_speed_tracker = ThermalFullSpeedStableTracker::new(target_temp_c);
     let mut max_temp_c = f64::NEG_INFINITY;
     let mut stage_sample_count = 0usize;
+    let mut recorded_samples = Vec::<ThermalReplayStageSample>::new();
     let mut stop_reason = "timeout";
     let mut terminal_runtime_drop_reason = None::<&'static str>;
     let mut last_uptime_seconds = None::<u64>;
@@ -6628,6 +6834,7 @@ async fn run_thermal_stage(
                 );
                 full_speed_tracker = ThermalFullSpeedStableTracker::new(target_temp_c);
                 max_temp_c = f64::NEG_INFINITY;
+                recorded_samples.clear();
                 last_uptime_seconds = None;
                 sample_rate_tracker = ThermalSampleRateTracker::new();
                 heater_output_seen = false;
@@ -6725,6 +6932,16 @@ async fn run_thermal_stage(
         });
         writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
         samples_writer.flush()?;
+        recorded_samples.push(ThermalReplayStageSample {
+            elapsed_ms,
+            current_temp_c,
+            heater_output_percent,
+            control_phase: control_phase.map(ToOwned::to_owned),
+            control_phase_in_hold,
+            source_voltage_mv: Some(source_telemetry.voltage_mv),
+            source_current_ma: Some(source_telemetry.current_ma),
+            source_power_mw: Some(source_telemetry.power_mw),
+        });
         *sample_index = sample_index.saturating_add(1);
         stage_sample_count = stage_sample_count.saturating_add(1);
         // Every non-timeout reason is terminal. In particular, the ten-second full-speed
@@ -6740,6 +6957,15 @@ async fn run_thermal_stage(
             arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
     }
 
+    let guard = approach_guard.finalize();
+    let full_speed_to_stable = full_speed_tracker.finalize();
+    let mut analysis = if max_temp_c.is_finite() {
+        analyzer.finalize(max_temp_c)
+    } else {
+        ThermalStageAnalysis::default()
+    };
+    thermal_stage_populate_approach_curve_analysis(&mut analysis, &recorded_samples, target_temp_c);
+
     Ok(ThermalStageResult {
         target_temp_c,
         rise_time_ms: hold_tracker
@@ -6750,9 +6976,9 @@ async fn run_thermal_stage(
         sample_count: stage_sample_count,
         stop_reason,
         terminal_runtime_drop_reason,
-        analysis: analyzer.finalize(max_temp_c),
-        guard: approach_guard.finalize(),
-        full_speed_to_stable: full_speed_tracker.finalize(),
+        analysis,
+        guard,
+        full_speed_to_stable,
     })
 }
 
@@ -9821,6 +10047,7 @@ mod tests {
                     hold_max_below_target_c: Some(2.4),
                     approach_sample_count: 65,
                     hold_sample_count: 541,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10073,6 +10300,7 @@ mod tests {
                     hold_max_below_target_c: Some(0.0),
                     approach_sample_count: 20,
                     hold_sample_count: 240,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10131,6 +10359,7 @@ mod tests {
                     hold_max_below_target_c: Some(0.2),
                     approach_sample_count: 19,
                     hold_sample_count: 242,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10192,6 +10421,7 @@ mod tests {
                     hold_max_below_target_c: Some(0.9),
                     approach_sample_count: 138,
                     hold_sample_count: 248,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10251,6 +10481,7 @@ mod tests {
                     hold_max_below_target_c: Some(0.9),
                     approach_sample_count: 144,
                     hold_sample_count: 247,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10309,6 +10540,7 @@ mod tests {
                     hold_max_below_target_c: Some(4.0),
                     approach_sample_count: 40,
                     hold_sample_count: 240,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10368,6 +10600,7 @@ mod tests {
                     hold_max_below_target_c: Some(2.3),
                     approach_sample_count: 161,
                     hold_sample_count: 218,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10431,6 +10664,7 @@ mod tests {
                     hold_p90_output_permille: Some(890),
                     hold_sample_count: 242,
                     residual_heat_after_hold_entry_c: Some(2.0),
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10483,6 +10717,7 @@ mod tests {
                     hold_max_below_target_c: Some(1.7),
                     approach_sample_count: 30,
                     hold_sample_count: 201,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10543,6 +10778,7 @@ mod tests {
                     hold_max_below_target_c: Some(2.4),
                     approach_sample_count: 465,
                     hold_sample_count: 243,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10609,6 +10845,7 @@ mod tests {
                 hold_median_output_permille: Some(220),
                 hold_p90_output_permille: Some(230),
                 residual_heat_after_hold_entry_c: Some(0.0),
+                ..ThermalStageAnalysis::default()
             },
             guard: ThermalApproachGuardAnalysis::default(),
             full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
@@ -10648,6 +10885,7 @@ mod tests {
                     hold_max_below_target_c: Some(4.5),
                     approach_sample_count: 85,
                     hold_sample_count: 467,
+                    ..ThermalStageAnalysis::default()
                 },
                 guard: ThermalApproachGuardAnalysis::default(),
                 full_speed_to_stable: ThermalFullSpeedStableAnalysis {
@@ -10714,6 +10952,70 @@ mod tests {
         assert!(analysis.approach_median_slope_c_per_s.unwrap_or(0.0) > 0.5);
         assert_eq!(analysis.first_hold_temp_c, Some(100.4));
         assert!(analysis.residual_heat_after_hold_entry_c.unwrap_or(0.0) > 3.0);
+        assert_eq!(
+            analysis.approach_curve_fit_basis,
+            Some("target_error_from_approach_start")
+        );
+        assert_eq!(
+            analysis.approach_curve_preferred_ms,
+            Some(THERMAL_APPROACH_CURVE_PREFERRED_MS)
+        );
+        assert_eq!(
+            analysis.approach_curve_limit_ms,
+            Some(THERMAL_APPROACH_CURVE_LIMIT_MS)
+        );
+    }
+
+    #[test]
+    fn thermal_replay_analysis_classifies_underpowered_approach_curve() {
+        let samples = vec![
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 0,
+                "heaterTelemetry": { "currentTempC": 92.0, "heaterOutputPercent": 40 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 2_000,
+                "heaterTelemetry": { "currentTempC": 93.5, "heaterOutputPercent": 30 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 6_000,
+                "heaterTelemetry": { "currentTempC": 95.0, "heaterOutputPercent": 20 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 10_000,
+                "heaterTelemetry": { "currentTempC": 96.1, "heaterOutputPercent": 10 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+        ];
+
+        let stage_samples = thermal_replay_stage_samples(&samples, 100).unwrap();
+        let analysis = thermal_replay_stage_analysis(&stage_samples, 100);
+
+        assert_eq!(
+            analysis.approach_curve_deviation_class,
+            Some("underpowered_or_early_coast")
+        );
+        assert_eq!(
+            analysis.approach_curve_fitted_ms,
+            Some(THERMAL_APPROACH_CURVE_LIMIT_MS)
+        );
+        assert!(analysis.approach_curve_max_below_c.unwrap_or_default() > 3.0);
+        assert_eq!(analysis.approach_curve_tail_uses_half_floor, Some(true));
     }
 
     #[test]
@@ -11274,6 +11576,64 @@ mod tests {
     }
 
     #[test]
+    fn thermal_curve_oscillation_class_triggers_hold_ripple_tuning_even_below_legacy_p2p_limit() {
+        let previous = ThermalCandidatePoint {
+            target_temp_c: 100,
+            brake_distance_centi_c: 1_000,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 240,
+            approach_floor_power_permille: 130,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 60,
+            hold_reheat_power_permille: 120,
+            hold_entry_centi_c: 30,
+            hold_exit_centi_c: 90,
+            hold_on_centi_c: 30,
+            hold_off_centi_c: 160,
+            overshoot_cutoff_centi_c: 200,
+            hold_kp_permille_per_c: 10,
+            hold_ki_permille_per_c_tick: 2,
+            hold_blend_ticks: 8,
+            approach_lead_ticks: 4,
+            hold_lead_ticks: 0,
+        };
+
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 100,
+                rise_time_ms: 8_200,
+                max_overshoot_c: 1.0,
+                hold_peak_to_peak_c: 2.0,
+                sample_count: 140,
+                stop_reason: "completed",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    first_hold_error_c: Some(0.1),
+                    hold_median_output_permille: Some(120),
+                    hold_p90_output_permille: Some(200),
+                    hold_mean_error_c: Some(0.2),
+                    hold_max_above_target_c: Some(0.8),
+                    hold_max_below_target_c: Some(1.2),
+                    approach_curve_deviation_class: Some("oscillatory_near_target"),
+                    approach_curve_max_above_c: Some(0.8),
+                    approach_curve_max_below_c: Some(1.2),
+                    hold_sample_count: 40,
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis::default(),
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+            },
+        );
+
+        assert_eq!(tuned.hold_power_permille, 120);
+        assert_eq!(tuned.approach_floor_power_permille, 140);
+        assert_eq!(tuned.hold_reheat_power_permille, 200);
+        assert_eq!(tuned.hold_kp_permille_per_c, 13);
+    }
+
+    #[test]
     fn step_toward_u16_tolerates_reversed_bounds() {
         assert_eq!(step_toward_u16(1_000, 1_020, 40, 1_020, 1_000), 1_020);
         assert_eq!(step_toward_u16(980, 1_020, 40, 1_020, 1_000), 1_020);
@@ -11799,6 +12159,7 @@ mod tests {
         assert!(html.contains("Selected Mode"));
         assert!(html.contains("Resolved Bank"));
         assert!(html.contains("Detected Source Class"));
+        assert!(html.contains("Approach Curve Class"));
         assert!(html.contains("pps5a / 5A (100W)"));
         assert!(!html.contains("pps5a / 5A / 100W"));
     }

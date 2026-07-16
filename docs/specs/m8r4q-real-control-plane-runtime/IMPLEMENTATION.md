@@ -21,7 +21,7 @@
 - 当前温度链路已经收口为两条职责分离的路径：owner-facing `currentTempC` / `boardTempCenti` / front panel 直接反映当前有效 RTD 样本；controller EMA 与 slope 继续作为内部控制状态单独暴露。PPS transition guard 只能作用于 controller 内部状态，不得冻结 owner-facing 温度。
 - 控制环前不得再叠加任何多样本窗口、中位数、输出钳位或速率限制。当前实现只保留“当前 RTD 样本 -> EMA”这一条控制温度路径，避免把加热和降温速度人为钝化。
 - warmup handoff 现在要求实际温度步进确认，避免单个 RTD 批次跳变在滤波温度仍落后时提前退出 warmup。low-temp `Approach -> Hold` 零输出 seam 也已修正：只有当实际误差已进入 hold 释放带时才允许 predictive coast 维持零输出。
-- host-side retune 已区分 low-temp bounded residual 与 hold-entry carry。bounded residual 只做轻量 brake / cutoff / off 微调；只有明显 hold ripple 且 hold 输出高于基线时，才允许直接削减 hold sustain / reheat。
+- host-side retune 已把 `warmupExitedAtMs -> firstHoldAtMs` 区间的 ideal Approach 曲线偏差纳入当前真相：当前 fit basis 固定为 `target_error_from_approach_start`，即用 `approachStartTempC -> targetTempC` 的归一化 target-error 曲线做 first-pass 分类，再决定是 `brake_late_or_residual`、`underpowered_or_early_coast` 还是 `oscillatory_near_target`。ambient 目前不是硬依赖；在样本未提供稳定 ambient 字段时，retune 不得阻塞，而是必须显式记录这一 fit basis。完成曲线分类后，retune 才继续区分 low-temp bounded residual 与 hold-entry carry。bounded residual 只做轻量 brake / cutoff / off 微调；只有明显 hold ripple 且 hold 输出高于基线时，才允许直接削减 hold sustain / reheat。
 - `heaterCurrentReserveMa` 已进入 thermal profile settings、status 回显、preview/save API 与 EEPROM。heater safe-max 会在 source current capability 之上预留 reserve，而不是吃满整条 source 电流预算。
 - `devd` 提供 localhost daemon、授权端口 serial discovery、lease、bounded events、USB identity/network/status/WiFi/runtime bridge、artifact verify、dry-run 与 real flash command boundary。真实烧录路径固定为 repo-local `flux-purr -> devd -> espflash`，并继续受授权端口纪律保护。
 - `devd` 与相关 smoke 路径已固定几条 transport guardrail：显式 bind / serial / artifact root；授权串口缺失时拒绝自动切换到重新枚举端口；real flash 前释放 daemon-local serial session；浏览器与脚本通过 lease 复用同一设备会话而不是重复抢占串口。

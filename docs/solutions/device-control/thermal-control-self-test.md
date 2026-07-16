@@ -145,9 +145,12 @@ The candidate generator is deliberately not a general parameter search.
 
 A stage produces three classes of evidence, and each class should update only the fields that can explain it:
 
+- first classify the `warmupExitedAtMs -> firstHoldAtMs` approach trace against an ideal reference curve built from `approachStartTempC -> targetTempC`; the canonical fit object is target error / normalized progress, not a standalone `target - ambient` time series
 - insufficient near-target heat: raise `holdPowerPermille`, then `approachFloorPowerPermille` and `holdReheatPowerPermille` from measured sustain gap
 - excess stored heat: increase `brakeDistanceCentiC`, increase damping, and increase predictive lead
 - hold ripple: rebase hold power on measured equilibrium, narrow the reheat gap, and adjust hold-entry / reentry dynamics
+
+Ambient temperature is still useful, but only as an optional compensation term layered onto the same approach curve. If the sample stream does not carry a stable ambient field, tuning must continue from the approach-start baseline and record that fit basis explicitly in the run analysis.
 
 Use sparse focused tuning during iteration. Reserve the full supported ladder for final acceptance.
 
