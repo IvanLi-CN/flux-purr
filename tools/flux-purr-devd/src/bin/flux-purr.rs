@@ -3284,7 +3284,6 @@ fn retune_thermal_self_test_run(
     let validation = validate_thermal_applied_results(&applied_results, &target_temps_c);
     let replay_summary_path = args.run_dir.join("run.replayed.json");
     let replay_candidate_path = args.run_dir.join("thermal-profile.replayed.candidate.json");
-    let replay_report_path = args.run_dir.join("report.replayed.html");
     let mut replay_summary = json!({
         "kind": "thermal_self_test_replay",
         "ok": validation.get("passed").and_then(Value::as_bool) == Some(true),
@@ -3310,7 +3309,6 @@ fn retune_thermal_self_test_run(
             "summaryPath": replay_summary_path,
             "samplesPath": samples_path,
             "candidateProfilePath": replay_candidate_path,
-            "reportHtmlPath": replay_report_path,
         },
         "sampleCount": summary.get("sampleCount").cloned().unwrap_or(Value::Null),
         "candidateProfile": candidate_profile_value.clone(),
@@ -3327,10 +3325,6 @@ fn retune_thermal_self_test_run(
     fs::write(
         &replay_summary_path,
         serde_json::to_vec_pretty(&replay_summary)?,
-    )?;
-    fs::write(
-        &replay_report_path,
-        render_thermal_self_test_report_html(&replay_summary, &samples_path)?,
     )?;
     Ok(replay_summary)
 }
@@ -3489,7 +3483,7 @@ async fn collect_batch_thermal_self_test(
                 sample_index,
             );
             thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
-            write_thermal_batch_candidate_files(&summary, &run_dir, &samples_path)?;
+            write_thermal_batch_candidate_files(&summary, &run_dir)?;
             runs.push(summary);
         }
     } else {
@@ -3605,7 +3599,7 @@ async fn collect_batch_thermal_self_test(
                     sample_index,
                 );
                 thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
-                write_thermal_batch_candidate_files(&summary, &run_dir, &samples_path)?;
+                write_thermal_batch_candidate_files(&summary, &run_dir)?;
                 runs.push(summary);
             }
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -3735,7 +3729,6 @@ fn thermal_batch_candidate_summary(
             "summaryPath": run_dir.join("run.json"),
             "samplesPath": samples_path,
             "candidateProfilePath": run_dir.join("thermal-profile.candidate.json"),
-            "reportHtmlPath": run_dir.join("report.html"),
         },
         "candidateProfile": profile,
         "profilePersistence": if args.dry_run { "dry_run" } else { "not_saved" },
@@ -3751,15 +3744,10 @@ fn thermal_batch_candidate_summary(
 fn write_thermal_batch_candidate_files(
     summary: &Value,
     run_dir: &Path,
-    samples_path: &Path,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     fs::write(
         run_dir.join("thermal-profile.candidate.json"),
         serde_json::to_vec_pretty(&summary["candidateProfile"])?,
-    )?;
-    fs::write(
-        run_dir.join("report.html"),
-        render_thermal_self_test_report_html(summary, samples_path)?,
     )?;
     fs::write(
         run_dir.join("run.json"),
@@ -3805,7 +3793,6 @@ async fn collect_single_thermal_self_test(
     fs::create_dir_all(&run_dir)?;
     let samples_path = run_dir.join("samples.ndjson");
     let summary_path = run_dir.join("run.json");
-    let report_path = run_dir.join("report.html");
     let candidate_path = run_dir.join("thermal-profile.candidate.json");
     fs::write(
         &candidate_path,
@@ -4146,7 +4133,6 @@ async fn collect_single_thermal_self_test(
             "summaryPath": summary_path,
             "samplesPath": samples_path,
             "candidateProfilePath": candidate_path,
-            "reportHtmlPath": report_path,
         },
         "candidateProfile": candidate_profile_value.clone(),
         "profilePersistence": if args.dry_run {
@@ -4164,10 +4150,6 @@ async fn collect_single_thermal_self_test(
         "error": run_error,
     });
     thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
-    fs::write(
-        &report_path,
-        render_thermal_self_test_report_html(&summary, &samples_path)?,
-    )?;
     fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
     if let Some(id) = summary
         .get("target")
@@ -5932,474 +5914,6 @@ fn heater_telemetry_value(
             .cloned()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "status missing field: thermalControl"))?,
     }))
-}
-
-fn report_chart_samples_from_ndjson(
-    samples_path: &Path,
-) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut chart_samples = Vec::new();
-    for line in fs::read_to_string(samples_path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-    {
-        let sample: Value = serde_json::from_str(line)?;
-        chart_samples.push(json!({
-            "sampleIndex": sample.get("sampleIndex").and_then(Value::as_u64).unwrap_or_default(),
-            "elapsedMs": sample.get("elapsedMs").and_then(Value::as_u64).unwrap_or_default(),
-            "testPhase": sample.get("testPhase").and_then(Value::as_str).unwrap_or("unknown"),
-            "phase": sample.get("phase").and_then(Value::as_str).unwrap_or("unknown"),
-            "targetTempC": sample.get("targetTempC").and_then(Value::as_i64).unwrap_or_default(),
-            "currentTempC": sample.get("heaterTelemetry").and_then(|value| value.get("currentTempC")).and_then(Value::as_f64).unwrap_or_default(),
-            "hotplateVoltageMv": sample.get("heaterTelemetry").and_then(|value| value.get("hotplateVoltageMv")).and_then(Value::as_u64).unwrap_or_default(),
-            "ppsRequestMv": sample.get("heaterTelemetry").and_then(|value| value.get("ppsRequestMv")).and_then(Value::as_u64).unwrap_or_default(),
-            "ppsContractMv": sample.get("heaterTelemetry").and_then(|value| value.get("ppsContractMv")).and_then(Value::as_u64).unwrap_or_default(),
-            "heaterOutputPercent": sample.get("heaterTelemetry").and_then(|value| value.get("heaterOutputPercent")).and_then(Value::as_u64).unwrap_or_default(),
-            "heaterPhysicalOutputPercent": sample.get("heaterTelemetry").and_then(|value| value.get("heaterPhysicalOutputPercent")).and_then(Value::as_u64).unwrap_or_else(|| sample.get("heaterTelemetry").and_then(|value| value.get("heaterOutputPercent")).and_then(Value::as_u64).unwrap_or_default()),
-            "sourceActualVoltageMv": sample.get("sourceTelemetry").and_then(|value| value.get("voltageMv")).and_then(Value::as_u64).unwrap_or_default(),
-            "sourceActualCurrentMa": sample.get("sourceTelemetry").and_then(|value| value.get("currentMa")).and_then(Value::as_u64).unwrap_or_default(),
-            "sourceActualPowerMw": sample.get("sourceTelemetry").and_then(|value| value.get("powerMw")).and_then(Value::as_u64).unwrap_or_default(),
-            "sampleIntervalMs": sample.get("sampling").and_then(|value| value.get("intervalMs")).and_then(Value::as_u64),
-            "sampleRateViolation": sample.get("sampling").and_then(|value| value.get("rateViolation")).and_then(Value::as_bool).unwrap_or(false),
-            "heaterParameters": sample.get("heaterParameters").cloned().unwrap_or(Value::Null),
-            "effectiveThermalControl": sample.get("heaterTelemetry").and_then(|value| value.get("thermalControl")).cloned().unwrap_or(Value::Null),
-        }));
-    }
-    Ok(chart_samples)
-}
-
-fn render_thermal_self_test_report_html(
-    summary: &Value,
-    samples_path: &Path,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let chart_samples = report_chart_samples_from_ndjson(samples_path)?;
-    let summary_json = serde_json::to_string(summary)?;
-    let chart_samples_json = serde_json::to_string(&chart_samples)?;
-    Ok(format!(
-        r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flux Purr Thermal Self-Test Report</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      --bg: #f5f7fb;
-      --panel: #ffffff;
-      --text: #152033;
-      --muted: #52627a;
-      --grid: #d6dce8;
-      --temp: #d9485f;
-      --target: #f08c00;
-      --hotplate: #2563eb;
-      --pps-request: #0f766e;
-      --pps-contract: #6d28d9;
-      --source-v: #0891b2;
-      --source-i: #059669;
-      --heater-out: #7c3aed;
-      --approach-curve: #111827;
-    }}
-    body {{ margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }}
-    main {{ max-width: 1320px; margin: 0 auto; padding: 24px; }}
-    h1, h2, h3 {{ margin: 0; }}
-    .summary, .stage {{ background: var(--panel); border: 1px solid #e5eaf3; border-radius: 12px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04); }}
-    .summary {{ margin-bottom: 16px; }}
-    .summary-grid, .meta-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 16px; margin-top: 12px; }}
-    .metric {{ padding: 10px 12px; border-radius: 8px; background: #f8fafc; }}
-    .label {{ color: var(--muted); font-size: 12px; }}
-    .value {{ font-size: 18px; font-weight: 600; }}
-    .stages {{ display: grid; gap: 16px; }}
-    .stage-header {{ display: flex; justify-content: space-between; gap: 16px; align-items: baseline; margin-bottom: 12px; }}
-    .charts {{ display: grid; gap: 12px; }}
-    svg {{ width: 100%; height: 240px; background: #fff; border: 1px solid #e5eaf3; border-radius: 8px; }}
-    .legend {{ display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); margin: 6px 0 0; }}
-    .legend span::before {{ content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 999px; margin-right: 6px; vertical-align: -1px; background: var(--c); }}
-    pre {{ white-space: pre-wrap; background: #0f172a; color: #dbeafe; padding: 12px; border-radius: 8px; overflow: auto; }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class="summary">
-      <h1>Flux Purr Thermal Self-Test</h1>
-      <div class="summary-grid" id="summary-grid"></div>
-    </section>
-    <section class="stages" id="stages"></section>
-  </main>
-  <script>
-    const summary = {summary_json};
-    const samples = {chart_samples_json};
-    const svgNs = "http://www.w3.org/2000/svg";
-    const colors = {{
-      currentTempC: "var(--temp)",
-      targetTempC: "var(--target)",
-      approachCurveTempC: "var(--approach-curve)",
-      hotplateVoltageMv: "var(--hotplate)",
-      ppsRequestMv: "var(--pps-request)",
-      ppsContractMv: "var(--pps-contract)",
-      sourceActualVoltageMv: "var(--source-v)",
-      sourceActualCurrentMa: "var(--source-i)",
-      heaterOutputPercent: "var(--heater-out)",
-    }};
-
-    function stageKey(sample) {{
-      return `${{sample.testPhase}}:${{sample.targetTempC}}`;
-    }}
-
-    function formatNumber(value, digits = 1) {{
-      return Number.isFinite(value) ? value.toFixed(digits) : "-";
-    }}
-
-    function createLegend(items) {{
-      const legend = document.createElement("div");
-      legend.className = "legend";
-      for (const item of items) {{
-        const span = document.createElement("span");
-        span.style.setProperty("--c", item.color);
-        span.textContent = item.label;
-        legend.appendChild(span);
-      }}
-      return legend;
-    }}
-
-    function buildPathData(stageSamples, series) {{
-      let d = "";
-      let penDown = false;
-      for (const sample of stageSamples) {{
-        const rawValue = sample[series.key];
-        const value = typeof rawValue === "number" && Number.isFinite(rawValue) ? rawValue : null;
-        if (value == null) {{
-          penDown = false;
-          continue;
-        }}
-        d += `${{penDown ? " L" : "M"}}${{series.x(sample)}},${{series.y(value)}}`;
-        penDown = true;
-      }}
-      return d.trim();
-    }}
-
-    function buildChart(title, stageSamples, seriesDefs) {{
-      const wrapper = document.createElement("div");
-      const heading = document.createElement("h3");
-      heading.textContent = title;
-      wrapper.appendChild(heading);
-      wrapper.appendChild(createLegend(seriesDefs.map((series) => ({{ label: series.label, color: colors[series.key] }}))));
-      const svg = document.createElementNS(svgNs, "svg");
-      const width = 960;
-      const height = 240;
-      const margin = {{ top: 16, right: 18, bottom: 26, left: 52 }};
-      svg.setAttribute("viewBox", `0 0 ${{width}} ${{height}}`);
-      const xs = stageSamples.map((sample) => sample.elapsedMs);
-      const xMax = Math.max(...xs, 1);
-      const values = [];
-      for (const sample of stageSamples) {{
-        for (const series of seriesDefs) {{
-          const value = sample[series.key];
-          if (typeof value === "number" && Number.isFinite(value)) {{
-            values.push(value);
-          }}
-        }}
-      }}
-      const yMin = Math.min(...values);
-      const yMax = Math.max(...values, yMin + 1);
-      const plotWidth = width - margin.left - margin.right;
-      const plotHeight = height - margin.top - margin.bottom;
-      const x = (value) => margin.left + (value / xMax) * plotWidth;
-      const y = (value) => margin.top + plotHeight - ((value - yMin) / (yMax - yMin || 1)) * plotHeight;
-      for (let i = 0; i < 5; i += 1) {{
-        const gy = margin.top + (plotHeight / 4) * i;
-        const line = document.createElementNS(svgNs, "line");
-        line.setAttribute("x1", margin.left);
-        line.setAttribute("x2", width - margin.right);
-        line.setAttribute("y1", gy);
-        line.setAttribute("y2", gy);
-        line.setAttribute("stroke", "var(--grid)");
-        line.setAttribute("stroke-width", "1");
-        svg.appendChild(line);
-      }}
-      for (const series of seriesDefs) {{
-        const path = document.createElementNS(svgNs, "path");
-        series.x = x;
-        series.y = y;
-        const d = buildPathData(stageSamples, series);
-        if (!d) continue;
-        path.setAttribute("d", d);
-        path.setAttribute("fill", "none");
-        path.setAttribute("stroke", colors[series.key]);
-        path.setAttribute("stroke-width", "2");
-        if (series.dash) {{
-          path.setAttribute("stroke-dasharray", series.dash);
-        }}
-        svg.appendChild(path);
-      }}
-      wrapper.appendChild(svg);
-      return wrapper;
-    }}
-
-    function formatProfileMode(mode) {{
-      switch (mode) {{
-        case "65w":
-          return "65W";
-        case "100w":
-          return "100W";
-        case "auto":
-          return "auto";
-        default:
-          return mode ?? "-";
-      }}
-    }}
-
-    function formatBank(bank) {{
-      switch (bank) {{
-        case "pps3a":
-          return "pps3a / 3A (65W)";
-        case "pps5a":
-          return "pps5a / 5A (100W)";
-        default:
-          return bank ?? "-";
-      }}
-    }}
-
-    function formatSourceClass(sourceClass) {{
-      switch (sourceClass) {{
-        case "pps3a":
-          return "pps3a / 3A (65W)";
-        case "pps5a":
-          return "pps5a / 5A (100W)";
-        default:
-          return sourceClass ?? "unknown";
-      }}
-    }}
-
-    function formatSourcePreset(source) {{
-      const voltageMv = source?.preset?.voltageMv ?? source?.voltageMv ?? null;
-      const currentMa = source?.preset?.currentLimitMa ?? source?.currentLimitMa ?? null;
-      const voltageLabel = voltageMv == null ? "-" : `${{(voltageMv / 1000).toFixed(1)}}V`;
-      const currentLabel = currentMa == null
-        ? "-"
-        : Number.isInteger(currentMa / 1000)
-          ? `${{(currentMa / 1000).toFixed(1)}}A`
-          : `${{(currentMa / 1000).toFixed(2)}}A`;
-      const rawLabel = `${{voltageMv ?? "-"}} mV / ${{currentMa ?? "-"}} mA`;
-      return `${{voltageLabel}} / ${{currentLabel}} (${{rawLabel}})`;
-    }}
-
-    function formatSeriesAverage(stats, divisor, digits, suffix) {{
-      if (!stats || typeof stats.avg !== "number") return "-";
-      return `${{(stats.avg / divisor).toFixed(digits)}}${{suffix}}`;
-    }}
-
-    function formatSeriesRange(stats, divisor, digits, suffix) {{
-      if (!stats || typeof stats.min !== "number" || typeof stats.max !== "number") return "-";
-      return `${{(stats.min / divisor).toFixed(digits)}}-${{(stats.max / divisor).toFixed(digits)}}${{suffix}}`;
-    }}
-
-    function formatSourceWindowAverage(window) {{
-      if (!window) return "-";
-      const voltage = formatSeriesAverage(window.voltageMv, 1000, 2, "V");
-      const current = formatSeriesAverage(window.currentMa, 1000, 2, "A");
-      const power = formatSeriesAverage(window.powerMw, 1000, 1, "W");
-      if ([voltage, current, power].every((value) => value === "-")) return "-";
-      return `${{voltage}} / ${{current}} / ${{power}}`;
-    }}
-
-    function formatSourceWindowRange(window) {{
-      if (!window) return "-";
-      const voltage = formatSeriesRange(window.voltageMv, 1000, 2, "V");
-      const current = formatSeriesRange(window.currentMa, 1000, 2, "A");
-      const power = formatSeriesRange(window.powerMw, 1000, 1, "W");
-      if ([voltage, current, power].every((value) => value === "-")) return "-";
-      return `${{voltage}} / ${{current}} / ${{power}}`;
-    }}
-
-    function formatApproachCurveClass(value) {{
-      switch (value) {{
-        case "brake_late_or_residual":
-          return "Brake late / residual";
-        case "underpowered_or_early_coast":
-          return "Underpowered / early coast";
-        case "oscillatory_near_target":
-          return "Oscillatory near target";
-        case "on_curve":
-          return "On curve";
-        case "insufficient_evidence":
-          return "Insufficient evidence";
-        default:
-          return value ?? "-";
-      }}
-    }}
-
-    function formatApproachCurveFitBasis(value) {{
-      switch (value) {{
-        case "target_error_from_approach_start":
-          return "Target error from approach start";
-        default:
-          return value ?? "-";
-      }}
-    }}
-
-    function attachApproachCurveSeries(stageSamples, result) {{
-      const analysis = result?.analysis ?? null;
-      const guard = result?.guard ?? null;
-      const startTempC = analysis?.approachCurveStartTempC;
-      const fittedMs = analysis?.approachCurveFittedMs;
-      const startAtMs = guard?.approachStartedAtMs ?? guard?.holdThresholdCrossedAtMs ?? guard?.firstHoldAtMs ?? stageSamples[0]?.elapsedMs ?? null;
-      const stopAtMs = guard?.firstHoldAtMs ?? guard?.holdThresholdCrossedAtMs ?? (startAtMs != null && fittedMs != null ? startAtMs + fittedMs : null);
-      if (![startTempC, fittedMs, startAtMs].every((value) => typeof value === "number" && Number.isFinite(value))) {{
-        return stageSamples.map((sample) => ({{ ...sample, approachCurveTempC: null }}));
-      }}
-      const targetTempC = Number(result.targetTempC);
-      return stageSamples.map((sample) => {{
-        const elapsedFromStartMs = sample.elapsedMs - startAtMs;
-        let approachCurveTempC = null;
-        if (elapsedFromStartMs >= 0 && (stopAtMs == null || sample.elapsedMs <= stopAtMs)) {{
-          const normalized = Math.max(0, Math.min(1, fittedMs === 0 ? 1 : elapsedFromStartMs / fittedMs));
-          const progress = 1 - Math.pow(1 - normalized, 2);
-          approachCurveTempC = startTempC + (targetTempC - startTempC) * progress;
-        }}
-        return {{ ...sample, approachCurveTempC }};
-      }});
-    }}
-
-    const summaryGrid = document.getElementById("summary-grid");
-    const summaryMetrics = [
-      ["Run ID", summary.runId],
-      ["Passed", String(summary.validation?.passed ?? false)],
-      ["Samples", String(summary.sampleCount ?? 0)],
-      ["Sample Interval", `${{summary.parameters?.effectiveSampleIntervalMs ?? summary.parameters?.sampleIntervalMs ?? 0}} ms`],
-      ["Targets", (summary.parameters?.targetsC ?? []).join(", ")],
-      ["Full-Speed Settle Limit", `${{summary.parameters?.limits?.fullSpeedToStableMs ?? "-"}} ms`],
-      ["Selected Mode", formatProfileMode(summary.source?.selectedMode)],
-      ["Resolved Bank", formatBank(summary.source?.resolvedBank)],
-      ["Detected Source Class", formatSourceClass(summary.source?.detectedSourceClass)],
-      ["Thermal Profile", `${{formatProfileMode(summary.source?.selectedMode)}} -> ${{formatBank(summary.source?.resolvedBank)}}`],
-      ["Source", `${{summary.source?.kind ?? "unknown"}}:${{summary.source?.id ?? summary.source?.deviceId ?? "-"}}`],
-      ["Source Preset", formatSourcePreset(summary.source)],
-    ];
-    for (const [label, value] of summaryMetrics) {{
-      const card = document.createElement("div");
-      card.className = "metric";
-      card.innerHTML = `<div class="label">${{label}}</div><div class="value">${{value}}</div>`;
-      summaryGrid.appendChild(card);
-    }}
-
-    const stageResults = [];
-    for (const [phaseName, list] of [["applied", summary.applied ?? []]]) {{
-      for (const result of list) {{
-        stageResults.push({{ phaseName, ...result }});
-      }}
-    }}
-
-    const groupedSamples = new Map();
-    for (const sample of samples) {{
-      const key = stageKey(sample);
-      if (!groupedSamples.has(key)) groupedSamples.set(key, []);
-      groupedSamples.get(key).push(sample);
-    }}
-
-    const stages = document.getElementById("stages");
-    for (const result of stageResults) {{
-      const key = `${{result.phaseName}}:${{result.targetTempC}}`;
-      const stageSamples = (groupedSamples.get(key) ?? []).sort((left, right) => left.sampleIndex - right.sampleIndex);
-      const section = document.createElement("section");
-      section.className = "stage";
-      const params = stageSamples[0]?.heaterParameters ?? null;
-      const analysis = result.analysis ?? null;
-      const approachSource = analysis?.approachSource ?? null;
-      const holdSource = analysis?.holdSource ?? null;
-      section.innerHTML = `
-        <div class="stage-header">
-          <div>
-            <h2>${{result.phaseName}} / ${{result.targetTempC}}C</h2>
-            <div class="label">stop=${{result.stopReason}} rise=${{result.riseTimeMs}}ms overshoot=${{formatNumber(result.maxOvershootC, 2)}}C hold p2p=${{formatNumber(result.holdPeakToPeakC, 2)}}C</div>
-          </div>
-        </div>
-      `;
-      const meta = document.createElement("div");
-      meta.className = "meta-grid";
-      const guard = result.guard ?? null;
-      const fullSpeed = result.fullSpeedToStable ?? null;
-      const items = [
-        ["Brake Distance", params ? `${{params.brakeDistanceCentiC}} cC` : "-"],
-        ["Approach Power", params ? `${{params.approachPowerPermille}} permille` : "-"],
-        ["Approach Floor", params ? `${{params.approachFloorPowerPermille}} permille` : "-"],
-        ["Approach Damping", params ? `${{params.approachDampingExponentPermille}} permille` : "-"],
-        ["Approach Tail Window", params ? `${{params.approachTailWindowCentiC}} cC` : "-"],
-        ["Hold Power", params ? `${{params.holdPowerPermille}} permille` : "-"],
-        ["Hold Reheat", params ? `${{params.holdReheatPowerPermille}} permille` : "-"],
-        ["Hold Entry", params ? `${{params.holdEntryCentiC}} cC` : "-"],
-        ["Hold Threshold", guard ? `${{formatNumber(guard.holdThresholdTempC, 2)}} C` : "-"],
-        ["Hold Exit", params ? `${{params.holdExitCentiC}} cC` : "-"],
-        ["Hold Off", params ? `${{params.holdOffCentiC}} cC` : "-"],
-        ["Overshoot Cutoff", params ? `${{params.overshootCutoffCentiC}} cC` : "-"],
-        ["Hold Kp", params ? `${{params.holdKpPermillePerC}} permille/C` : "-"],
-        ["Hold Ki", params ? `${{params.holdKiPermillePerCTick}} permille/C/tick` : "-"],
-        ["Hold Blend", params ? `${{params.holdBlendTicks}} ticks` : "-"],
-        ["Approach Lead", params ? `${{params.approachLeadTicks}} ticks` : "-"],
-        ["Hold Lead", params ? `${{params.holdLeadTicks}} ticks` : "-"],
-        ["Approach Start", guard?.approachStartedAtMs != null ? `${{guard.approachStartedAtMs}} ms` : "-"],
-        ["Threshold Cross", guard?.holdThresholdCrossedAtMs != null ? `${{guard.holdThresholdCrossedAtMs}} ms` : "-"],
-        ["First Hold", guard?.firstHoldAtMs != null ? `${{guard.firstHoldAtMs}} ms` : "-"],
-        ["Warmup Reenter", guard?.warmupReenteredAtMs != null ? `${{guard.warmupReenteredAtMs}} ms` : "-"],
-        ["Warmup Exit", fullSpeed?.warmupExitedAtMs != null ? `${{fullSpeed.warmupExitedAtMs}} ms` : "-"],
-        ["Stable Window Start", fullSpeed?.stableWindowStartedAtMs != null ? `${{fullSpeed.stableWindowStartedAtMs}} ms` : "-"],
-        ["Stable Window Verified", fullSpeed?.stableWindowVerifiedAtMs != null ? `${{fullSpeed.stableWindowVerifiedAtMs}} ms` : "-"],
-        ["Full-Speed Settle", fullSpeed?.settleTimeMs != null ? `${{fullSpeed.settleTimeMs}} ms` : "-"],
-        ["Full-Speed Failure", fullSpeed?.failureReason ?? "-"],
-        ["Approach Source Avg", formatSourceWindowAverage(approachSource)],
-        ["Approach Source Range", formatSourceWindowRange(approachSource)],
-        ["Approach Source Samples", approachSource?.sampleCount != null ? String(approachSource.sampleCount) : "-"],
-        ["Hold Source Avg", formatSourceWindowAverage(holdSource)],
-        ["Hold Source Range", formatSourceWindowRange(holdSource)],
-        ["Hold Source Samples", holdSource?.sampleCount != null ? String(holdSource.sampleCount) : "-"],
-        ["Approach Curve Class", formatApproachCurveClass(analysis?.approachCurveDeviationClass)],
-        ["Approach Curve Fit Basis", formatApproachCurveFitBasis(analysis?.approachCurveFitBasis)],
-        ["Approach Curve Start", analysis?.approachCurveStartTempC != null ? `${{formatNumber(analysis.approachCurveStartTempC, 2)}} C` : "-"],
-        ["Approach Curve Fitted", analysis?.approachCurveFittedMs != null ? `${{analysis.approachCurveFittedMs}} ms` : "-"],
-        ["Approach Curve Preferred", analysis?.approachCurvePreferredMs != null ? `${{analysis.approachCurvePreferredMs}} ms` : "-"],
-        ["Approach Curve Limit", analysis?.approachCurveLimitMs != null ? `${{analysis.approachCurveLimitMs}} ms` : "-"],
-        ["Approach Curve Above", analysis?.approachCurveMaxAboveC != null ? `${{formatNumber(analysis.approachCurveMaxAboveC, 2)}} C` : "-"],
-        ["Approach Curve Below", analysis?.approachCurveMaxBelowC != null ? `${{formatNumber(analysis.approachCurveMaxBelowC, 2)}} C` : "-"],
-        ["Approach Curve Mean |err|", analysis?.approachCurveMeanAbsErrorC != null ? `${{formatNumber(analysis.approachCurveMeanAbsErrorC, 2)}} C` : "-"],
-        ["Approach Curve Oscillation", analysis?.approachCurveOscillationC != null ? `${{formatNumber(analysis.approachCurveOscillationC, 2)}} C` : "-"],
-        ["Approach Tail Half Floor", analysis?.approachCurveTailUsesHalfFloor != null ? String(analysis.approachCurveTailUsesHalfFloor) : "-"],
-        ["Samples", String(result.sampleCount ?? stageSamples.length)],
-      ];
-      for (const [label, value] of items) {{
-        const card = document.createElement("div");
-        card.className = "metric";
-        card.innerHTML = `<div class="label">${{label}}</div><div class="value">${{value}}</div>`;
-        meta.appendChild(card);
-      }}
-      section.appendChild(meta);
-      const charts = document.createElement("div");
-      charts.className = "charts";
-      const temperatureSamples = attachApproachCurveSeries(
-        stageSamples.map((sample) => ({{ ...sample, targetTempC: result.targetTempC }})),
-        result,
-      );
-      charts.appendChild(buildChart("Temperature", temperatureSamples, [
-        {{ key: "currentTempC", label: "Current Temp C" }},
-        {{ key: "targetTempC", label: "Target Temp C" }},
-        {{ key: "approachCurveTempC", label: "Ideal Approach Curve", dash: "6 4" }},
-      ]));
-      charts.appendChild(buildChart("Voltage", stageSamples, [
-        {{ key: "hotplateVoltageMv", label: "Hotplate Voltage mV" }},
-        {{ key: "ppsRequestMv", label: "Requested PPS mV" }},
-        {{ key: "ppsContractMv", label: "Contract PPS mV" }},
-        {{ key: "sourceActualVoltageMv", label: "Source Voltage mV" }},
-      ]));
-      charts.appendChild(buildChart("Current And Output", stageSamples, [
-        {{ key: "sourceActualCurrentMa", label: "Source Current mA" }},
-        {{ key: "heaterOutputPercent", label: "Heater Output %" }},
-        {{ key: "heaterPhysicalOutputPercent", label: "Heater Gate %" }},
-      ]));
-      section.appendChild(charts);
-      stages.appendChild(section);
-    }}
-  </script>
-</body>
-</html>"#
-    ))
 }
 
 fn write_dry_thermal_ladder(
@@ -12220,88 +11734,6 @@ mod tests {
             path.ends_with(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE)
                 || path.ends_with(THERMAL_PPS5A_TUNING_SEED_RELATIVE)
         }));
-    }
-
-    #[test]
-    fn thermal_report_html_uses_owner_facing_source_class_labels() {
-        let dir = tempfile::tempdir().unwrap();
-        let samples_path = dir.path().join("samples.ndjson");
-        fs::write(
-            &samples_path,
-            format!(
-                "{}\n",
-                serde_json::to_string(&json!({
-                    "sampleIndex": 0,
-                    "elapsedMs": 0,
-                    "testPhase": "applied",
-                    "phase": "hold",
-                    "targetTempC": 100,
-                    "heaterTelemetry": {
-                        "currentTempC": 100.2,
-                        "hotplateVoltageMv": 10000,
-                        "ppsRequestMv": 10000,
-                        "ppsContractMv": 10000,
-                        "heaterOutputPercent": 22,
-                        "heaterPhysicalOutputPercent": 100,
-                        "thermalControl": {}
-                    },
-                    "sourceTelemetry": {
-                        "voltageMv": 10000,
-                        "currentMa": 1200,
-                        "powerMw": 12000
-                    },
-                    "sampling": {
-                        "intervalMs": 100,
-                        "rateViolation": false
-                    }
-                }))
-                .unwrap()
-            ),
-        )
-        .unwrap();
-        let summary = json!({
-            "runId": "thermal-test",
-            "sampleCount": 1,
-            "parameters": {
-                "sampleIntervalMs": 100,
-                "targetsC": [100],
-                "limits": {
-                    "fullSpeedToStableMs": 10000
-                }
-            },
-            "source": {
-                "selectedMode": "100w",
-                "resolvedBank": "pps5a",
-                "detectedSourceClass": "pps5a",
-                "kind": "isolapurr",
-                "id": "856a141cdbd4",
-                "preset": {
-                    "voltageMv": 21000,
-                    "currentLimitMa": 5000
-                }
-            },
-            "validation": {
-                "passed": false
-            },
-            "applied": [{
-                "targetTempC": 100,
-                "stopReason": "completed",
-                "riseTimeMs": 1000,
-                "maxOvershootC": 0.5,
-                "holdPeakToPeakC": 1.0,
-                "sampleCount": 1,
-                "analysis": {}
-            }]
-        });
-
-        let html = render_thermal_self_test_report_html(&summary, &samples_path).unwrap();
-        assert!(html.contains("Selected Mode"));
-        assert!(html.contains("Resolved Bank"));
-        assert!(html.contains("Detected Source Class"));
-        assert!(html.contains("Approach Curve Class"));
-        assert!(html.contains("Ideal Approach Curve"));
-        assert!(html.contains("pps5a / 5A (100W)"));
-        assert!(!html.contains("pps5a / 5A / 100W"));
     }
 
     #[test]

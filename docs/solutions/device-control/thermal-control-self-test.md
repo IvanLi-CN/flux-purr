@@ -51,7 +51,8 @@ One live self-test run produces a transient working packet:
 - `run.json`
 - `samples.ndjson`
 - `thermal-profile.candidate.json`
-- `report.html`
+
+The live working packet must not generate or retain any extra local browser page. Transient run/replay/batch directories stay data-only.
 
 For long-lived comparison and retuning, freeze an accepted baseline bundle instead. The canonical browser-openable bundle layout is:
 
