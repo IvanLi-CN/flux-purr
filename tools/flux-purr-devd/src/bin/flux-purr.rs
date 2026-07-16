@@ -113,17 +113,19 @@ impl ThermalProfileMode {
         }
     }
 
-    fn resolved_bank(self) -> &'static str {
+    fn explicit_bank(self) -> Option<&'static str> {
         match self {
-            Self::W100 => "pps5a",
-            Self::Auto | Self::W65 => "pps3a",
+            Self::Auto => None,
+            Self::W65 => Some("pps3a"),
+            Self::W100 => Some("pps5a"),
         }
     }
 
-    fn source_defaults(self) -> (u16, u16) {
+    fn explicit_source_defaults(self) -> Option<(u16, u16)> {
         match self {
-            Self::W100 => (21_000, 5_000),
-            Self::Auto | Self::W65 => (20_000, 3_250),
+            Self::Auto => None,
+            Self::W65 => Some((20_000, 3_250)),
+            Self::W100 => Some((21_000, 5_000)),
         }
     }
 }
@@ -401,6 +403,15 @@ struct ThermalSelfTestArgs {
     output_dir: PathBuf,
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
     dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ThermalSourceSelection {
+    resolved_bank: &'static str,
+    detected_source_class: &'static str,
+    detected_source_class_basis: &'static str,
+    default_voltage_mv: u16,
+    default_current_ma: u16,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -1535,6 +1546,8 @@ async fn handle_heater_curve_command(
 const THERMAL_SUPPORTED_TARGETS_C: [i16; 11] =
     [60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250];
 const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
+const THERMAL_PPS3A_PERSISTED_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
+const THERMAL_PPS5A_PERSISTED_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 240];
 const THERMAL_SELF_TEST_DEFAULT_TARGETS_C: [i16; 3] = [60, 140, 220];
 const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = 10;
 
@@ -1546,6 +1559,83 @@ fn thermal_profile_preview_runtime_body(mode: ThermalProfileMode, profile: Value
             "profile": profile,
         }
     })
+}
+
+fn expected_thermal_profile_mode_bank<'a>(
+    status: &'a Value,
+    expected_mode: ThermalProfileMode,
+) -> Result<&'a str, Box<dyn std::error::Error + Send + Sync>> {
+    match expected_mode {
+        ThermalProfileMode::W65 => Ok("pps3a"),
+        ThermalProfileMode::W100 => Ok("pps5a"),
+        ThermalProfileMode::Auto => status
+            .get("thermalProfileResolvedBank")
+            .and_then(Value::as_str)
+            .ok_or("status missing thermalProfileResolvedBank".into()),
+    }
+}
+
+async fn resolve_thermal_profile_runtime_bank(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    expected_mode: ThermalProfileMode,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(bank) = expected_mode.explicit_bank() {
+        return Ok(bank.to_string());
+    }
+    let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+    Ok(expected_thermal_profile_mode_bank(&status, expected_mode)?.to_string())
+}
+
+async fn request_thermal_profile_persist_with_resolved_bank(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    profile_mode: ThermalProfileMode,
+    op: &'static str,
+    profile: Option<Value>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let bank =
+        resolve_thermal_profile_runtime_bank(client, &resolved, &lease.lease_id, profile_mode)
+            .await?;
+    let mut thermal_control_profile = json!({
+        "op": op,
+        "bank": bank,
+    });
+    if let Some(profile) = profile
+        && let Some(object) = thermal_control_profile.as_object_mut()
+    {
+        let profile = if op == "save" {
+            thermal_candidate_profile_to_value(&thermal_persisted_profile_for_bank(
+                &thermal_candidate_profile_from_value(profile),
+                &bank,
+            ))
+        } else {
+            profile
+        };
+        object.insert("profile".to_string(), profile);
+    }
+    let result = request_leased(
+        client,
+        &resolved,
+        &lease.lease_id,
+        Method::PUT,
+        "/runtime",
+        Some(json!({
+            "thermalProfileMode": profile_mode.as_str(),
+            "thermalControlProfile": thermal_control_profile,
+        })),
+    )
+    .await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    let payload = result?;
+    if let Some(id) = resolved.hardware_id.as_deref() {
+        let _ = remember_usb(id, &resolved.device, &resolved.devd);
+    }
+    Ok(payload)
 }
 
 async fn handle_thermal_command(
@@ -1587,35 +1677,22 @@ async fn handle_thermal_command(
             ThermalProfileCommand::Save(args) => {
                 let imported: Value = serde_json::from_slice(&fs::read(&args.file)?)?;
                 let profile = thermal_profile_package_from_value(imported);
-                request_with_lease(
+                request_thermal_profile_persist_with_resolved_bank(
                     client,
                     resolve_target(args.target, default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "thermalProfileMode": args.profile_mode.as_str(),
-                        "thermalControlProfile": {
-                            "op": "save",
-                            "bank": args.profile_mode.resolved_bank(),
-                            "profile": profile
-                        }
-                    })),
+                    args.profile_mode,
+                    "save",
+                    Some(profile),
                 )
                 .await
             }
             ThermalProfileCommand::ClearSaved(args) => {
-                request_with_lease(
+                request_thermal_profile_persist_with_resolved_bank(
                     client,
                     resolve_target(args.target, default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "thermalProfileMode": args.profile_mode.as_str(),
-                        "thermalControlProfile": {
-                            "op": "clear_saved",
-                            "bank": args.profile_mode.resolved_bank(),
-                        }
-                    })),
+                    args.profile_mode,
+                    "clear_saved",
+                    None,
                 )
                 .await
             }
@@ -1682,6 +1759,9 @@ struct ThermalReplayStageSample {
     heater_output_percent: u8,
     control_phase: Option<String>,
     control_phase_in_hold: bool,
+    source_voltage_mv: Option<u64>,
+    source_current_ma: Option<u64>,
+    source_power_mw: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1694,6 +1774,22 @@ struct ThermalStageAnalyzer {
     approach_slope_c_per_s: Vec<f64>,
     hold_output_permille: Vec<u16>,
     hold_error_c: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ThermalSourceWindowAnalysis {
+    sample_count: usize,
+    voltage_mv: Option<CalibrationSeriesStats>,
+    current_ma: Option<CalibrationSeriesStats>,
+    power_mw: Option<CalibrationSeriesStats>,
+}
+
+#[derive(Debug, Clone)]
+struct ThermalStageSourceAnalysisBuilder {
+    target_temp_c: f64,
+    first_hold_temp_c: Option<f64>,
+    approach: ThermalSourceWindowAnalysis,
+    hold: ThermalSourceWindowAnalysis,
 }
 
 #[derive(Debug, Clone)]
@@ -2074,6 +2170,81 @@ impl ThermalApproachGuardTracker {
             first_hold_at_ms: self.first_hold_at_ms,
             warmup_reentered_at_ms: self.warmup_reentered_at_ms,
         }
+    }
+}
+
+impl ThermalSourceWindowAnalysis {
+    fn observe(&mut self, sample: &ThermalReplayStageSample) {
+        self.sample_count = self.sample_count.saturating_add(1);
+        if let Some(voltage_mv) = sample.source_voltage_mv {
+            observe_series(&mut self.voltage_mv, voltage_mv as f64);
+        }
+        if let Some(current_ma) = sample.source_current_ma {
+            observe_series(&mut self.current_ma, current_ma as f64);
+        }
+        if let Some(power_mw) = sample.source_power_mw {
+            observe_series(&mut self.power_mw, power_mw as f64);
+        }
+    }
+
+    fn to_value(&self) -> Option<Value> {
+        if self.sample_count == 0 {
+            return None;
+        }
+        let mut object = serde_json::Map::new();
+        object.insert("sampleCount".into(), json!(self.sample_count));
+        if let Some(voltage_mv) = self.voltage_mv.as_ref() {
+            object.insert("voltageMv".into(), voltage_mv.to_value());
+        }
+        if let Some(current_ma) = self.current_ma.as_ref() {
+            object.insert("currentMa".into(), current_ma.to_value());
+        }
+        if let Some(power_mw) = self.power_mw.as_ref() {
+            object.insert("powerMw".into(), power_mw.to_value());
+        }
+        Some(Value::Object(object))
+    }
+}
+
+impl ThermalStageSourceAnalysisBuilder {
+    fn new(target_temp_c: i16) -> Self {
+        Self {
+            target_temp_c: f64::from(target_temp_c),
+            first_hold_temp_c: None,
+            approach: ThermalSourceWindowAnalysis::default(),
+            hold: ThermalSourceWindowAnalysis::default(),
+        }
+    }
+
+    fn observe(&mut self, sample: &ThermalReplayStageSample) {
+        let error_c = self.target_temp_c - sample.current_temp_c;
+        if sample.control_phase_in_hold {
+            self.first_hold_temp_c.get_or_insert(sample.current_temp_c);
+        }
+        let hold_window_started = self.first_hold_temp_c.is_some();
+        let near_target_approach_window = !hold_window_started
+            && !sample.control_phase_in_hold
+            && error_c >= 0.0
+            && error_c <= 8.0
+            && sample.current_temp_c <= self.target_temp_c + 0.5;
+
+        if near_target_approach_window {
+            self.approach.observe(sample);
+        }
+        if hold_window_started {
+            self.hold.observe(sample);
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        let mut object = serde_json::Map::new();
+        if let Some(approach) = self.approach.to_value() {
+            object.insert("approachSource".into(), approach);
+        }
+        if let Some(hold) = self.hold.to_value() {
+            object.insert("holdSource".into(), hold);
+        }
+        Value::Object(object)
     }
 }
 
@@ -2565,15 +2736,29 @@ fn thermal_replay_stage_samples(
             require_status_u64(heater, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
         let control_phase = status
             .get("heaterControlPhase")
+            .or_else(|| sample.get("phase"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         let control_phase_in_hold = control_phase.as_deref() == Some("hold");
+        let source_telemetry = sample.get("sourceTelemetry");
         stage_samples.push(ThermalReplayStageSample {
             elapsed_ms,
             current_temp_c,
             heater_output_percent,
             control_phase,
             control_phase_in_hold,
+            source_voltage_mv: source_telemetry
+                .and_then(|value| value.get("voltageMv"))
+                .and_then(Value::as_u64)
+                .or_else(|| sample.get("sourceActualVoltageMv").and_then(Value::as_u64)),
+            source_current_ma: source_telemetry
+                .and_then(|value| value.get("currentMa"))
+                .and_then(Value::as_u64)
+                .or_else(|| sample.get("sourceActualCurrentMa").and_then(Value::as_u64)),
+            source_power_mw: source_telemetry
+                .and_then(|value| value.get("powerMw"))
+                .and_then(Value::as_u64)
+                .or_else(|| sample.get("sourceActualPowerMw").and_then(Value::as_u64)),
         });
     }
     stage_samples.sort_by_key(|sample| sample.elapsed_ms);
@@ -2600,6 +2785,69 @@ fn thermal_replay_stage_analysis(
     } else {
         ThermalStageAnalysis::default()
     }
+}
+
+fn thermal_replay_stage_source_analysis(
+    samples: &[ThermalReplayStageSample],
+    target_temp_c: i16,
+) -> Value {
+    let mut builder = ThermalStageSourceAnalysisBuilder::new(target_temp_c);
+    for sample in samples {
+        builder.observe(sample);
+    }
+    builder.to_value()
+}
+
+fn thermal_stage_value_attach_source_analysis(
+    stage_value: &mut Value,
+    stage_samples: &[ThermalReplayStageSample],
+    target_temp_c: i16,
+) {
+    let Some(analysis) = stage_value
+        .get_mut("analysis")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let source_analysis = thermal_replay_stage_source_analysis(stage_samples, target_temp_c);
+    let Some(source_analysis) = source_analysis.as_object() else {
+        return;
+    };
+    for (key, value) in source_analysis {
+        analysis.insert(key.clone(), value.clone());
+    }
+}
+
+fn thermal_summary_attach_replay_source_analysis(
+    summary: &mut Value,
+    samples: &[Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(applied) = summary.get_mut("applied").and_then(Value::as_array_mut) else {
+        return Ok(());
+    };
+    for stage_value in applied.iter_mut() {
+        let target_temp_c = stage_value
+            .get("targetTempC")
+            .and_then(Value::as_i64)
+            .and_then(|value| i16::try_from(value).ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "thermal summary applied result missing targetTempC",
+                )
+            })?;
+        let stage_samples = thermal_replay_stage_samples(samples, target_temp_c)?;
+        thermal_stage_value_attach_source_analysis(stage_value, &stage_samples, target_temp_c);
+    }
+    Ok(())
+}
+
+fn thermal_summary_attach_source_analysis_from_ndjson(
+    summary: &mut Value,
+    samples_path: &Path,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let samples = read_ndjson_values(samples_path)?;
+    thermal_summary_attach_replay_source_analysis(summary, &samples)
 }
 
 fn thermal_replay_full_speed_to_stable(
@@ -2722,6 +2970,11 @@ fn thermal_replay_applied_profile(
     samples: &[Value],
     target_temps_c: &[i16],
 ) -> Result<ThermalCandidateProfile, Box<dyn std::error::Error + Send + Sync>> {
+    let fallback_bank = summary
+        .get("source")
+        .and_then(|source| source.get("resolvedBank"))
+        .and_then(Value::as_str)
+        .unwrap_or("pps3a");
     let seed_profile_path = summary
         .get("parameters")
         .and_then(|parameters| parameters.get("seedProfileFile"))
@@ -2734,7 +2987,7 @@ fn thermal_replay_applied_profile(
     {
         thermal_candidate_profile_from_value(serde_json::from_slice(&fs::read(seed_profile_path)?)?)
     } else {
-        thermal_seed_candidate_profile()
+        load_thermal_default_seed_candidate_profile(fallback_bank)?.0
     };
     if let Some(settings_value) = samples.iter().find_map(|sample| {
         sample
@@ -2835,7 +3088,7 @@ fn retune_thermal_self_test_run(
     let replay_summary_path = args.run_dir.join("run.replayed.json");
     let replay_candidate_path = args.run_dir.join("thermal-profile.replayed.candidate.json");
     let replay_report_path = args.run_dir.join("report.replayed.html");
-    let replay_summary = json!({
+    let mut replay_summary = json!({
         "kind": "thermal_self_test_replay",
         "ok": validation.get("passed").and_then(Value::as_bool) == Some(true),
         "runId": summary.get("runId").cloned().unwrap_or(Value::Null),
@@ -2869,6 +3122,7 @@ fn retune_thermal_self_test_run(
         "applied": applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
         "validation": validation,
     });
+    thermal_summary_attach_replay_source_analysis(&mut replay_summary, &samples)?;
     fs::write(
         &replay_candidate_path,
         serde_json::to_vec_pretty(&candidate_profile_value)?,
@@ -2912,22 +3166,66 @@ fn thermal_batch_restart_temp_c(target_temp_c: i16) -> f64 {
     f64::from((target_temp_c - 30).max(40))
 }
 
+fn thermal_source_defaults_for_class(source_class: &str) -> (u16, u16) {
+    match source_class {
+        "pps5a" => (21_000, 5_000),
+        _ => (20_000, 3_250),
+    }
+}
+
+fn read_thermal_bench_source_class(
+    source_kind: BenchSourceKind,
+    source_url: &str,
+    source_id: &str,
+) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>> {
+    match source_kind {
+        BenchSourceKind::Isolapurr => read_isolapurr_configured_source_class(source_url, source_id),
+    }
+}
+
+fn resolve_thermal_source_selection(
+    args: &ThermalSelfTestArgs,
+) -> Result<ThermalSourceSelection, Box<dyn std::error::Error + Send + Sync>> {
+    let detected_source_class = match args.profile_mode {
+        ThermalProfileMode::Auto => {
+            read_thermal_bench_source_class(args.source_kind, &args.source_url, &args.source_id)?
+        }
+        ThermalProfileMode::W65 => thermal_source_class(20_000, 3_250),
+        ThermalProfileMode::W100 => thermal_source_class(21_000, 5_000),
+    };
+    let resolved_bank = args
+        .profile_mode
+        .explicit_bank()
+        .unwrap_or(detected_source_class);
+    let (default_voltage_mv, default_current_ma) = args
+        .profile_mode
+        .explicit_source_defaults()
+        .unwrap_or_else(|| thermal_source_defaults_for_class(detected_source_class));
+    Ok(ThermalSourceSelection {
+        resolved_bank,
+        detected_source_class,
+        detected_source_class_basis: "configured_capability",
+        default_voltage_mv,
+        default_current_ma,
+    })
+}
+
 fn thermal_source_request(
     args: &ThermalSelfTestArgs,
+    selection: &ThermalSourceSelection,
 ) -> Result<(u16, u16), Box<dyn std::error::Error + Send + Sync>> {
-    let (default_voltage_mv, default_current_ma) = args.profile_mode.source_defaults();
     let voltage_mv = args
         .source_voltage_v
         .as_deref()
         .map(parse_pps_volts)
         .transpose()?
-        .unwrap_or(default_voltage_mv);
+        .unwrap_or(selection.default_voltage_mv);
     let current_ma = args
         .source_current_a
         .as_deref()
         .map(parse_pps_amps)
         .transpose()?
-        .unwrap_or(default_current_ma);
+        .unwrap_or(selection.default_current_ma);
     Ok((voltage_mv, current_ma))
 }
 
@@ -2938,7 +3236,8 @@ async fn collect_batch_thermal_self_test(
     target_temp_c: i16,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
-    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args)?;
+    let source_selection = resolve_thermal_source_selection(&args)?;
+    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args, &source_selection)?;
     let restart_temp_c = thermal_batch_restart_temp_c(target_temp_c);
     let batch_id = format!(
         "thermal-batch-{}-{}",
@@ -2974,10 +3273,11 @@ async fn collect_batch_thermal_self_test(
             )?;
             samples_writer.flush()?;
             let validation = validate_thermal_applied_results(&results, &[target_temp_c]);
-            let summary = thermal_batch_candidate_summary(
+            let mut summary = thermal_batch_candidate_summary(
                 &run_id,
                 &resolved,
                 &args,
+                &source_selection,
                 candidate_file,
                 candidate_index,
                 target_temp_c,
@@ -2991,6 +3291,7 @@ async fn collect_batch_thermal_self_test(
                 validation,
                 sample_index,
             );
+            thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
             write_thermal_batch_candidate_files(&summary, &run_dir, &samples_path)?;
             runs.push(summary);
         }
@@ -3003,6 +3304,7 @@ async fn collect_batch_thermal_self_test(
             &args.source_url,
             &args.source_id,
             &args.source_mode,
+            args.profile_mode,
             source_voltage_mv,
             source_current_ma,
         )
@@ -3056,8 +3358,9 @@ async fn collect_batch_thermal_self_test(
                 )
                 .await?;
                 source_sampler.refresh().await?;
-                arm_thermal_self_test_target(client, &resolved, &lease.lease_id, target_temp_c)
-                    .await?;
+                let arm_status =
+                    arm_thermal_self_test_target(client, &resolved, &lease.lease_id, target_temp_c)
+                        .await?;
                 let result = run_thermal_stage(
                     client,
                     &resolved,
@@ -3072,9 +3375,10 @@ async fn collect_batch_thermal_self_test(
                     &args,
                     &mut source_sampler,
                     &mut sample_index,
+                    Some(arm_status),
                 )
                 .await?;
-                arm_thermal_self_test_heater(
+                let _ = arm_thermal_self_test_heater(
                     client,
                     &resolved,
                     &lease.lease_id,
@@ -3085,10 +3389,11 @@ async fn collect_batch_thermal_self_test(
                 samples_writer.flush()?;
                 let results = vec![result];
                 let validation = validate_thermal_applied_results(&results, &[target_temp_c]);
-                let summary = thermal_batch_candidate_summary(
+                let mut summary = thermal_batch_candidate_summary(
                     &run_id,
                     &resolved,
                     &args,
+                    &source_selection,
                     candidate_file,
                     candidate_index,
                     target_temp_c,
@@ -3102,6 +3407,7 @@ async fn collect_batch_thermal_self_test(
                     validation,
                     sample_index,
                 );
+                thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
                 write_thermal_batch_candidate_files(&summary, &run_dir, &samples_path)?;
                 runs.push(summary);
             }
@@ -3171,6 +3477,7 @@ fn thermal_batch_candidate_summary(
     run_id: &str,
     resolved: &ResolvedUsbTarget,
     args: &ThermalSelfTestArgs,
+    source_selection: &ThermalSourceSelection,
     candidate_file: &Path,
     candidate_index: usize,
     target_temp_c: i16,
@@ -3196,7 +3503,12 @@ fn thermal_batch_candidate_summary(
             "hardwareId": resolved.hardware_id,
             "devd": resolved.devd,
         },
-        "source": thermal_source_summary_value(args, source_voltage_mv, source_current_ma),
+        "source": thermal_source_summary_value(
+            args,
+            source_selection,
+            source_voltage_mv,
+            source_current_ma,
+        ),
         "parameters": {
             "targetsC": [target_temp_c],
             "candidateProfileFile": candidate_file,
@@ -3266,18 +3578,25 @@ async fn collect_single_thermal_self_test(
     save_profile_on_pass: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
-    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args)?;
+    let source_selection = resolve_thermal_source_selection(&args)?;
+    let (source_voltage_mv, source_current_ma) = thermal_source_request(&args, &source_selection)?;
     let target_temps_c = parse_thermal_targets(args.targets_c.as_deref())?;
     let optimize_targets_c = if args.skip_optimize {
         Vec::new()
     } else {
         resolve_optimization_targets(&target_temps_c, args.optimize_targets_c.as_deref())?
     };
-    let mut candidate_profile = if let Some(seed_profile_file) = args.seed_profile_file.as_ref() {
-        thermal_candidate_profile_from_value(serde_json::from_slice(&fs::read(seed_profile_file)?)?)
-    } else {
-        thermal_seed_candidate_profile()
-    };
+    let (mut candidate_profile, effective_seed_profile_file) =
+        if let Some(seed_profile_file) = args.seed_profile_file.as_ref() {
+            (
+                thermal_candidate_profile_from_value(serde_json::from_slice(&fs::read(
+                    seed_profile_file,
+                )?)?),
+                Some(seed_profile_file.clone()),
+            )
+        } else {
+            load_thermal_default_seed_candidate_profile(source_selection.resolved_bank)?
+        };
     let mut candidate_profile_value = thermal_candidate_profile_to_value(&candidate_profile);
     let run_started_unix_ms = current_unix_millis();
     let run_id = format!(
@@ -3324,6 +3643,7 @@ async fn collect_single_thermal_self_test(
             &args.source_url,
             &args.source_id,
             &args.source_mode,
+            args.profile_mode,
             source_voltage_mv,
             source_current_ma,
         )
@@ -3371,8 +3691,9 @@ async fn collect_single_thermal_self_test(
                 )
                 .await?;
                 source_sampler.refresh().await?;
-                arm_thermal_self_test_target(client, &resolved, &lease.lease_id, target_temp_c)
-                    .await?;
+                let arm_status =
+                    arm_thermal_self_test_target(client, &resolved, &lease.lease_id, target_temp_c)
+                        .await?;
                 let result = run_thermal_stage(
                     client,
                     &resolved,
@@ -3387,6 +3708,7 @@ async fn collect_single_thermal_self_test(
                     &args,
                     &mut source_sampler,
                     &mut sample_index,
+                    Some(arm_status),
                 )
                 .await?;
                 if let Some(point) =
@@ -3410,7 +3732,7 @@ async fn collect_single_thermal_self_test(
                     "result": result.to_value(),
                     "candidateProfile": candidate_profile_value.clone(),
                 }));
-                arm_thermal_self_test_heater(
+                let _ = arm_thermal_self_test_heater(
                     client,
                     &resolved,
                     &lease.lease_id,
@@ -3460,8 +3782,13 @@ async fn collect_single_thermal_self_test(
                     )
                     .await?;
                     source_sampler.refresh().await?;
-                    arm_thermal_self_test_target(client, &resolved, &lease.lease_id, target_temp_c)
-                        .await?;
+                    let arm_status = arm_thermal_self_test_target(
+                        client,
+                        &resolved,
+                        &lease.lease_id,
+                        target_temp_c,
+                    )
+                    .await?;
                     let result = run_thermal_stage(
                         client,
                         &resolved,
@@ -3476,9 +3803,10 @@ async fn collect_single_thermal_self_test(
                         &args,
                         &mut source_sampler,
                         &mut sample_index,
+                        Some(arm_status),
                     )
                     .await?;
-                    arm_thermal_self_test_heater(
+                    let _ = arm_thermal_self_test_heater(
                         client,
                         &resolved,
                         &lease.lease_id,
@@ -3504,6 +3832,11 @@ async fn collect_single_thermal_self_test(
                     .as_bool()
                     == Some(true);
             if validation_passed && save_profile_on_pass {
+                let persisted_profile_value =
+                    thermal_candidate_profile_to_value(&thermal_persisted_profile_for_bank(
+                        &candidate_profile,
+                        source_selection.resolved_bank,
+                    ));
                 let save_status = request_leased(
                     client,
                     &resolved,
@@ -3513,8 +3846,8 @@ async fn collect_single_thermal_self_test(
                     Some(json!({
                         "thermalControlProfile": {
                             "op": "save",
-                            "bank": args.profile_mode.resolved_bank(),
-                            "profile": candidate_profile_value.clone(),
+                            "bank": source_selection.resolved_bank,
+                            "profile": persisted_profile_value,
                         },
                         "thermalProfileMode": args.profile_mode.as_str(),
                     })),
@@ -3568,7 +3901,7 @@ async fn collect_single_thermal_self_test(
     samples_writer.flush()?;
     let validation = validate_thermal_applied_results(&applied_results, &target_temps_c);
     let complete = run_error.is_none() && validation["passed"].as_bool() == Some(true);
-    let summary = json!({
+    let mut summary = json!({
         "kind": "thermal_self_test",
         "ok": complete,
         "runId": run_id,
@@ -3578,12 +3911,16 @@ async fn collect_single_thermal_self_test(
             "hardwareId": resolved.hardware_id,
             "devd": resolved.devd,
         },
-        "source": thermal_source_summary_value(&args, source_voltage_mv, source_current_ma),
+        "source": thermal_source_summary_value(
+            &args,
+            &source_selection,
+            source_voltage_mv,
+            source_current_ma,
+        ),
         "parameters": {
             "targetsC": target_temps_c,
             "optimizeTargetsC": optimize_targets_c,
-            "seedProfileFile": args
-                .seed_profile_file
+            "seedProfileFile": effective_seed_profile_file
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned()),
             "batchCandidate": !save_profile_on_pass,
@@ -3629,6 +3966,7 @@ async fn collect_single_thermal_self_test(
         "complete": complete,
         "error": run_error,
     });
+    thermal_summary_attach_source_analysis_from_ndjson(&mut summary, &samples_path)?;
     fs::write(
         &report_path,
         render_thermal_self_test_report_html(&summary, &samples_path)?,
@@ -3655,6 +3993,43 @@ fn default_thermal_candidate_profile() -> Value {
     thermal_candidate_profile_to_value(&thermal_seed_candidate_profile())
 }
 
+const THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE: &str = "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/thermal-profile.accepted.json";
+const THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE: &str = "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd100w-pps5a/accepted-full-range-20hz/thermal-profile.accepted.json";
+const THERMAL_PPS5A_TUNING_SEED_RELATIVE: &str =
+    "thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json";
+
+fn flux_purr_repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+        .to_path_buf()
+}
+
+fn thermal_default_seed_candidates_for_bank(bank: &str) -> Vec<PathBuf> {
+    let repo_root = flux_purr_repo_root();
+    match bank {
+        "pps5a" => vec![
+            repo_root.join(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE),
+            repo_root.join(THERMAL_PPS5A_TUNING_SEED_RELATIVE),
+        ],
+        "pps3a" => vec![repo_root.join(THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE)],
+        _ => Vec::new(),
+    }
+}
+
+fn load_thermal_default_seed_candidate_profile(
+    bank: &str,
+) -> Result<(ThermalCandidateProfile, Option<PathBuf>), Box<dyn std::error::Error + Send + Sync>> {
+    for path in thermal_default_seed_candidates_for_bank(bank) {
+        if path.exists() {
+            let imported = serde_json::from_slice::<Value>(&fs::read(&path)?)?;
+            return Ok((thermal_candidate_profile_from_value(imported), Some(path)));
+        }
+    }
+    Ok((thermal_seed_candidate_profile(), None))
+}
+
 fn thermal_seed_candidate_profile() -> ThermalCandidateProfile {
     ThermalCandidateProfile {
         settings: thermal_default_settings(),
@@ -3666,9 +4041,30 @@ fn thermal_seed_candidate_profile() -> ThermalCandidateProfile {
     }
 }
 
+fn thermal_persisted_targets_for_bank(bank: &str) -> &'static [i16] {
+    match bank {
+        "pps5a" => &THERMAL_PPS5A_PERSISTED_TARGETS_C,
+        _ => &THERMAL_PPS3A_PERSISTED_TARGETS_C,
+    }
+}
+
+fn thermal_persisted_profile_for_bank(
+    profile: &ThermalCandidateProfile,
+    bank: &str,
+) -> ThermalCandidateProfile {
+    let points = thermal_persisted_targets_for_bank(bank)
+        .iter()
+        .filter_map(|target_temp_c| thermal_interpolated_candidate_point(profile, *target_temp_c))
+        .collect::<Vec<_>>();
+    ThermalCandidateProfile {
+        settings: profile.settings,
+        points,
+    }
+}
+
 fn thermal_default_settings() -> ThermalCandidateSettings {
     ThermalCandidateSettings {
-        temp_filter_alpha_permille: 700,
+        temp_filter_alpha_permille: 750,
         // A noisy sub-second reading must not re-enter full-power warmup after the controller
         // has started braking. The threshold remains profile-controlled and is persisted with
         // the rest of the adaptive point data.
@@ -3899,11 +4295,7 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
                     .and_then(Value::as_u64)
                     .map(|value| value as u16)
                     .unwrap_or(default_point.brake_distance_centi_c),
-                warmup_power_permille: point_value
-                    .get("warmupPowerPermille")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.warmup_power_permille),
+                warmup_power_permille: 1_000,
                 approach_power_permille: point_value
                     .get("approachPowerPermille")
                     .and_then(Value::as_u64)
@@ -4020,6 +4412,7 @@ const THERMAL_MIN_SAMPLE_RATE_HZ: f64 = 3.0;
 const THERMAL_SAMPLE_RATE_WINDOW_MS: u64 = 3_000;
 const THERMAL_SAMPLE_RATE_FAILURE_GRACE_MS: u64 = 3_000;
 const THERMAL_HEATER_OUTPUT_START_TIMEOUT_MS: u64 = 2_000;
+const THERMAL_COOLDOWN_POLL_INTERVAL_MS: u64 = 1_000;
 
 impl ThermalSampleRateTracker {
     fn new() -> Self {
@@ -4611,9 +5004,18 @@ fn tune_thermal_candidate_point(
         && analysis
             .approach_median_slope_c_per_s
             .is_some_and(|slope_c_per_s| slope_c_per_s <= 1.0);
+    let starved_low_temp_hold = full_speed_failed
+        && result.target_temp_c <= 120
+        && analysis.hold_sample_count > 0
+        && hold_p90 == 0
+        && analysis
+            .hold_mean_error_c
+            .is_some_and(|mean_error_c| mean_error_c > 0.2)
+        && under_c > over_c + 0.4;
     let stability_overshoot = full_speed_failed
         && analysis.hold_sample_count > 0
-        && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C;
+        && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C
+        && !starved_low_temp_hold;
     let entry_residual_dominant = analysis.first_hold_error_c.is_some()
         && residual_c >= 1.5
         && over_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
@@ -4647,14 +5049,23 @@ fn tune_thermal_candidate_point(
         && analysis.hold_sample_count > 0
         && analysis
             .hold_p90_output_permille
-            .is_some_and(|output| output > 0)
+            .is_some_and(|output| output > previous.hold_power_permille)
+        && hold_p2p_c > ThermalFullSpeedStableTracker::STABLE_BAND_C + 0.5
         && entering_below_target >= 0.4
         && residual_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
         && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C;
-    let underpowered = (full_speed_failed && !overshoot_dominant)
+    let underpowered = starved_low_temp_hold
+        || (full_speed_failed && !overshoot_dominant)
         || (!hold_ripple
             && !overshoot_dominant
             && (under_c > over_c + 0.4 || entering_below_target > 0.4));
+    let bursty_low_temp_hold = result.target_temp_c <= 120
+        && analysis.hold_median_output_permille == Some(0)
+        && hold_p90 >= previous.hold_power_permille.saturating_add(20)
+        && under_c > over_c + 0.4
+        && analysis
+            .hold_mean_error_c
+            .is_some_and(|mean_error_c| mean_error_c > 0.2);
     let mut tuned = previous;
 
     if !full_speed_failed && overshoot_c <= 3.0 && hold_p2p_c <= 3.0 {
@@ -4688,10 +5099,15 @@ fn tune_thermal_candidate_point(
         let hold_exit_target = ((under_c + 0.2) * 100.0).round().clamp(80.0, 300.0) as u16;
         tuned.hold_exit_centi_c = tuned.hold_exit_centi_c.max(hold_exit_target);
     } else if low_temp_hold_entry_carry {
+        let previous_hold_lead_ticks = tuned.hold_lead_ticks;
         tuned.hold_lead_ticks = tuned
             .hold_lead_ticks
             .saturating_add(if residual_c >= 2.0 { 2 } else { 1 })
             .min(8);
+        if tuned.hold_lead_ticks == previous_hold_lead_ticks {
+            tuned.hold_power_permille = tuned.hold_power_permille.saturating_sub(20).max(40);
+            tuned.hold_off_centi_c = tuned.hold_off_centi_c.saturating_add(20).min(400);
+        }
         tuned.hold_reheat_power_permille = tuned
             .hold_reheat_power_permille
             .saturating_sub(30)
@@ -4780,7 +5196,7 @@ fn tune_thermal_candidate_point(
     } else if overshoot_dominant {
         let bounded_low_temp_entry_residual = result.target_temp_c <= 120
             && stability_overshoot
-            && residual_c <= 2.5
+            && residual_c <= 3.5
             && analysis.hold_sample_count > 0
             && result
                 .guard
@@ -4794,7 +5210,9 @@ fn tune_thermal_candidate_point(
             && result.target_temp_c <= 120
             && residual_c <= 3.5
             && analysis.hold_sample_count > 0;
-        let brake_step = if coast_gate_limited || bounded_low_temp_entry_residual {
+        let brake_step = if bounded_low_temp_entry_residual {
+            80
+        } else if coast_gate_limited {
             0
         } else {
             ((residual_c * 100.0) + (overshoot_c * 70.0))
@@ -4848,7 +5266,7 @@ fn tune_thermal_candidate_point(
                 })
                 .min(12);
         }
-        if coast_gate_limited && !entry_residual_dominant {
+        if coast_gate_limited && !entry_residual_dominant && !bounded_low_temp_entry_residual {
             let coast_step = ((residual_c - 0.8).max(overshoot_c - 1.5) * 100.0)
                 .round()
                 .clamp(50.0, 250.0) as u16;
@@ -4917,6 +5335,14 @@ fn tune_thermal_candidate_point(
         tuned.hold_blend_ticks = tuned.hold_blend_ticks.saturating_sub(3).max(1);
         tuned.hold_kp_permille_per_c = tuned.hold_kp_permille_per_c.saturating_sub(4).max(8);
     } else if hold_ripple {
+        let hold_ripple_equilibrium = if bursty_low_temp_hold {
+            previous
+                .hold_power_permille
+                .saturating_add(30)
+                .max(hold_p90.saturating_sub(100))
+        } else {
+            equilibrium
+        };
         let high_temp_entry_carry = result.target_temp_c >= 180
             && entering_below_target >= 0.2
             && residual_c >= 1.6
@@ -4926,14 +5352,23 @@ fn tune_thermal_candidate_point(
             && hold_p90 >= 990
             && over_c >= 1.0
             && under_c >= 1.0;
-        let reheat_gap = hold_p90.saturating_sub(equilibrium);
+        let reheat_gap = hold_p90.saturating_sub(if bursty_low_temp_hold {
+            hold_ripple_equilibrium
+        } else {
+            equilibrium
+        });
         let bounded_reheat_gap = if over_c >= under_c {
             (reheat_gap / 2).clamp(40, 100)
         } else {
             reheat_gap.clamp(80, 160)
         };
-        tuned.hold_power_permille =
-            step_toward_u16(tuned.hold_power_permille, equilibrium, 80, 0, 1_000);
+        tuned.hold_power_permille = step_toward_u16(
+            tuned.hold_power_permille,
+            hold_ripple_equilibrium,
+            80,
+            0,
+            1_000,
+        );
         let approach_floor_target = if under_c > over_c {
             previous
                 .approach_floor_power_permille
@@ -5068,19 +5503,7 @@ fn thermal_heater_parameters_value(
         .and_then(|point| point.get("approachTailWindowCentiC"))
         .and_then(Value::as_u64)
         .unwrap_or(0) as u16;
-    let warmup_power_permille = if thermal_profile.is_some() {
-        point
-            .and_then(|point| {
-                point
-                    .get("warmupPowerPermille")
-                    .or_else(|| point.get("approachPowerPermille"))
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-            })
-            .unwrap_or(1_000)
-    } else {
-        1_000
-    };
+    let warmup_power_permille = 1_000u16;
     let (
         brake_distance_centi_c,
         _default_warmup_power_permille,
@@ -5104,7 +5527,7 @@ fn thermal_heater_parameters_value(
             point
                 .get("brakeDistanceCentiC")
                 .and_then(Value::as_u64)
-                .unwrap_or(700) as u16,
+                .unwrap_or(750) as u16,
             point
                 .get("warmupPowerPermille")
                 .or_else(|| point.get("approachPowerPermille"))
@@ -5237,9 +5660,7 @@ fn thermal_effective_candidate_point(
     if point.hold_reheat_power_permille == 0 {
         point.hold_reheat_power_permille = point.hold_power_permille;
     }
-    if point.warmup_power_permille == 0 {
-        point.warmup_power_permille = point.approach_power_permille;
-    }
+    point.warmup_power_permille = 1_000;
     point
 }
 
@@ -5494,9 +5915,9 @@ fn render_thermal_self_test_report_html(
     function formatBank(bank) {{
       switch (bank) {{
         case "pps3a":
-          return "pps3a / 3A / 65W";
+          return "pps3a / 3A (65W)";
         case "pps5a":
-          return "pps5a / 5A / 100W";
+          return "pps5a / 5A (100W)";
         default:
           return bank ?? "-";
       }}
@@ -5505,9 +5926,9 @@ fn render_thermal_self_test_report_html(
     function formatSourceClass(sourceClass) {{
       switch (sourceClass) {{
         case "pps3a":
-          return "pps3a / 3A class";
+          return "pps3a / 3A (65W)";
         case "pps5a":
-          return "pps5a / 5A class";
+          return "pps5a / 5A (100W)";
         default:
           return sourceClass ?? "unknown";
       }}
@@ -5524,6 +5945,34 @@ fn render_thermal_self_test_report_html(
           : `${{(currentMa / 1000).toFixed(2)}}A`;
       const rawLabel = `${{voltageMv ?? "-"}} mV / ${{currentMa ?? "-"}} mA`;
       return `${{voltageLabel}} / ${{currentLabel}} (${{rawLabel}})`;
+    }}
+
+    function formatSeriesAverage(stats, divisor, digits, suffix) {{
+      if (!stats || typeof stats.avg !== "number") return "-";
+      return `${{(stats.avg / divisor).toFixed(digits)}}${{suffix}}`;
+    }}
+
+    function formatSeriesRange(stats, divisor, digits, suffix) {{
+      if (!stats || typeof stats.min !== "number" || typeof stats.max !== "number") return "-";
+      return `${{(stats.min / divisor).toFixed(digits)}}-${{(stats.max / divisor).toFixed(digits)}}${{suffix}}`;
+    }}
+
+    function formatSourceWindowAverage(window) {{
+      if (!window) return "-";
+      const voltage = formatSeriesAverage(window.voltageMv, 1000, 2, "V");
+      const current = formatSeriesAverage(window.currentMa, 1000, 2, "A");
+      const power = formatSeriesAverage(window.powerMw, 1000, 1, "W");
+      if ([voltage, current, power].every((value) => value === "-")) return "-";
+      return `${{voltage}} / ${{current}} / ${{power}}`;
+    }}
+
+    function formatSourceWindowRange(window) {{
+      if (!window) return "-";
+      const voltage = formatSeriesRange(window.voltageMv, 1000, 2, "V");
+      const current = formatSeriesRange(window.currentMa, 1000, 2, "A");
+      const power = formatSeriesRange(window.powerMw, 1000, 1, "W");
+      if ([voltage, current, power].every((value) => value === "-")) return "-";
+      return `${{voltage}} / ${{current}} / ${{power}}`;
     }}
 
     const summaryGrid = document.getElementById("summary-grid");
@@ -5569,6 +6018,9 @@ fn render_thermal_self_test_report_html(
       const section = document.createElement("section");
       section.className = "stage";
       const params = stageSamples[0]?.heaterParameters ?? null;
+      const analysis = result.analysis ?? null;
+      const approachSource = analysis?.approachSource ?? null;
+      const holdSource = analysis?.holdSource ?? null;
       section.innerHTML = `
         <div class="stage-header">
           <div>
@@ -5608,6 +6060,12 @@ fn render_thermal_self_test_report_html(
         ["Stable Window Verified", fullSpeed?.stableWindowVerifiedAtMs != null ? `${{fullSpeed.stableWindowVerifiedAtMs}} ms` : "-"],
         ["Full-Speed Settle", fullSpeed?.settleTimeMs != null ? `${{fullSpeed.settleTimeMs}} ms` : "-"],
         ["Full-Speed Failure", fullSpeed?.failureReason ?? "-"],
+        ["Approach Source Avg", formatSourceWindowAverage(approachSource)],
+        ["Approach Source Range", formatSourceWindowRange(approachSource)],
+        ["Approach Source Samples", approachSource?.sampleCount != null ? String(approachSource.sampleCount) : "-"],
+        ["Hold Source Avg", formatSourceWindowAverage(holdSource)],
+        ["Hold Source Range", formatSourceWindowRange(holdSource)],
+        ["Hold Source Samples", holdSource?.sampleCount != null ? String(holdSource.sampleCount) : "-"],
         ["Samples", String(result.sampleCount ?? stageSamples.length)],
       ];
       for (const [label, value] of items) {{
@@ -5781,7 +6239,7 @@ async fn arm_thermal_self_test_target(
     resolved: &ResolvedUsbTarget,
     lease_id: &str,
     target_temp_c: i16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c).await
 }
 
@@ -5811,8 +6269,8 @@ async fn preview_and_prepare_thermal_self_test_target(
         return Err("thermal profile preview did not enable preview mode".into());
     }
 
-    arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
-    let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+    let status =
+        arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
     verify_thermal_control_readback(&status, heater_parameters, "preview")
 }
 
@@ -5820,19 +6278,11 @@ fn verify_thermal_profile_mode_readback(
     status: &Value,
     expected_mode: ThermalProfileMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let expected_mode = expected_mode.as_str();
-    let expected_bank = match expected_mode {
-        "100w" => "pps5a",
-        "65w" => "pps3a",
-        "auto" => status
-            .get("thermalProfileResolvedBank")
-            .and_then(Value::as_str)
-            .ok_or("status missing thermalProfileResolvedBank")?,
-        _ => return Err(format!("unsupported thermal profile mode: {expected_mode}").into()),
-    };
-    if status.get("thermalProfileMode").and_then(Value::as_str) != Some(expected_mode) {
+    let expected_mode_value = expected_mode.as_str();
+    let expected_bank = expected_thermal_profile_mode_bank(status, expected_mode)?;
+    if status.get("thermalProfileMode").and_then(Value::as_str) != Some(expected_mode_value) {
         return Err(format!(
-            "thermal profile mode readback mismatch: expected {expected_mode}, got {}",
+            "thermal profile mode readback mismatch: expected {expected_mode_value}, got {}",
             status
                 .get("thermalProfileMode")
                 .and_then(Value::as_str)
@@ -5976,14 +6426,13 @@ fn thermal_self_test_runtime_body(heater_enabled: bool, target_temp_c: i16) -> V
         "heaterEnabled": heater_enabled,
         "targetTempC": target_temp_c,
     });
-    if !heater_enabled {
-        body["activeCoolingEnabled"] = json!(true);
-    }
+    body["activeCoolingEnabled"] = json!(!heater_enabled);
     body
 }
 
 fn thermal_source_summary_value(
     args: &ThermalSelfTestArgs,
+    selection: &ThermalSourceSelection,
     source_voltage_mv: u16,
     source_current_ma: u16,
 ) -> Value {
@@ -5993,9 +6442,9 @@ fn thermal_source_summary_value(
         "deviceId": args.source_id,
         "mode": args.source_mode,
         "selectedMode": args.profile_mode.as_str(),
-        "resolvedBank": args.profile_mode.resolved_bank(),
-        "detectedSourceClass": thermal_source_class(source_voltage_mv, source_current_ma),
-        "detectedSourceClassBasis": "configured_capability",
+        "resolvedBank": selection.resolved_bank,
+        "detectedSourceClass": selection.detected_source_class,
+        "detectedSourceClassBasis": selection.detected_source_class_basis,
         "preset": {
             "voltageMv": source_voltage_mv,
             "currentLimitMa": source_current_ma,
@@ -6033,8 +6482,8 @@ async fn arm_thermal_self_test_heater(
     lease_id: &str,
     heater_enabled: bool,
     target_temp_c: i16,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    request_leased(
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let status = request_leased(
         client,
         resolved,
         lease_id,
@@ -6046,7 +6495,37 @@ async fn arm_thermal_self_test_heater(
         )),
     )
     .await?;
-    Ok(())
+    let readback_target = require_status_i32(&status, "targetTempC")?;
+    if readback_target != i32::from(target_temp_c) {
+        return Err(format!(
+            "heater runtime readback target mismatch: expected {target_temp_c}, got {readback_target}"
+        )
+        .into());
+    }
+    if status.get("heaterEnabled").and_then(Value::as_bool) != Some(heater_enabled) {
+        return Err(format!(
+            "heater runtime readback enable mismatch: expected {heater_enabled}, got {}",
+            status
+                .get("heaterEnabled")
+                .and_then(Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "missing".to_string())
+        )
+        .into());
+    }
+    if status.get("activeCoolingEnabled").and_then(Value::as_bool) != Some(!heater_enabled) {
+        return Err(format!(
+            "heater runtime readback activeCooling mismatch: expected {}, got {}",
+            !heater_enabled,
+            status
+                .get("activeCoolingEnabled")
+                .and_then(Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "missing".to_string())
+        )
+        .into());
+    }
+    Ok(status)
 }
 
 async fn run_thermal_stage(
@@ -6063,6 +6542,7 @@ async fn run_thermal_stage(
     args: &ThermalSelfTestArgs,
     source_sampler: &mut BenchSourceTelemetrySampler,
     sample_index: &mut usize,
+    initial_status: Option<Value>,
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
     let mut started = tokio::time::Instant::now();
     let stage_timeout = Duration::from_secs(args.stage_timeout_seconds.max(1));
@@ -6086,6 +6566,7 @@ async fn run_thermal_stage(
     let mut sample_rate_tracker = ThermalSampleRateTracker::new();
     let mut heater_output_seen = false;
     let mut runtime_rearm_attempts_remaining = args.runtime_rearm_attempts;
+    let mut next_status = initial_status;
 
     loop {
         let now = tokio::time::Instant::now();
@@ -6093,8 +6574,11 @@ async fn run_thermal_stage(
             break;
         }
         let (source_telemetry, source_telemetry_stale_ms) = source_sampler.snapshot().await?;
-        let status =
-            request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
+        let status = if let Some(status) = next_status.take() {
+            status
+        } else {
+            request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?
+        };
         let runtime_drop_reason =
             thermal_runtime_drop_reason(&status, target_temp_c, last_uptime_seconds);
         if let Some(reason) = runtime_drop_reason {
@@ -6129,8 +6613,10 @@ async fn run_thermal_stage(
             if recoverable_sensor_fault {
                 runtime_rearm_attempts_remaining =
                     runtime_rearm_attempts_remaining.saturating_sub(1);
-                arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c)
-                    .await?;
+                next_status = Some(
+                    arm_thermal_self_test_heater(client, resolved, lease_id, true, target_temp_c)
+                        .await?,
+                );
                 started = tokio::time::Instant::now();
                 deadline = started + stage_timeout;
                 next_tick = started;
@@ -6250,7 +6736,8 @@ async fn run_thermal_stage(
         tokio::time::sleep_until(next_tick).await;
     }
     if stop_reason != "completed" {
-        arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
+        let _ =
+            arm_thermal_self_test_heater(client, resolved, lease_id, false, target_temp_c).await?;
     }
 
     Ok(ThermalStageResult {
@@ -6290,7 +6777,7 @@ async fn wait_for_cooldown(
             )
             .into());
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
+        tokio::time::sleep(Duration::from_millis(THERMAL_COOLDOWN_POLL_INTERVAL_MS)).await;
     }
 }
 
@@ -6427,6 +6914,7 @@ async fn prepare_thermal_bench_source(
     source_url: &str,
     source_id: &str,
     source_mode: &str,
+    profile_mode: ThermalProfileMode,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
@@ -6437,6 +6925,7 @@ async fn prepare_thermal_bench_source(
                 source_url,
                 source_id,
                 source_mode,
+                profile_mode,
                 voltage_mv,
                 current_limit_ma,
             )
@@ -6568,6 +7057,7 @@ async fn prepare_isolapurr_thermal_source(
     source_url: &str,
     device_id: &str,
     source_mode: &str,
+    profile_mode: ThermalProfileMode,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
@@ -6575,7 +7065,11 @@ async fn prepare_isolapurr_thermal_source(
         set_isolapurr_output_manual(client, source_url, device_id, voltage_mv, current_limit_ma)
             .await
     } else {
-        ensure_isolapurr_thermal_capability(source_url, device_id, current_limit_ma)?;
+        if profile_mode.explicit_bank().is_some() {
+            ensure_isolapurr_thermal_capability(source_url, device_id, current_limit_ma)?;
+        } else {
+            ensure_isolapurr_auto_thermal_capability(source_url, device_id)?;
+        }
         set_isolapurr_output_auto(client, source_url, device_id).await?;
         let telemetry = ensure_isolapurr_live_telemetry_ready(source_url)?;
         validate_isolapurr_ready_voltage(&telemetry)?;
@@ -6590,6 +7084,7 @@ async fn prepare_thermal_source_and_lease(
     source_url: &str,
     source_id: &str,
     source_mode: &str,
+    profile_mode: ThermalProfileMode,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<(BenchSourceLiveTelemetry, Lease), Box<dyn std::error::Error + Send + Sync>> {
@@ -6599,6 +7094,7 @@ async fn prepare_thermal_source_and_lease(
         source_url,
         source_id,
         source_mode,
+        profile_mode,
         voltage_mv,
         current_limit_ma,
     )
@@ -6683,6 +7179,72 @@ fn ensure_isolapurr_thermal_capability(
         );
     }
     Ok(())
+}
+
+fn ensure_isolapurr_auto_thermal_capability(
+    source_url: &str,
+    device_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    validate_isolapurr_device_identity(source_url, device_id)?;
+    let config = read_isolapurr_power_config(source_url)?;
+    let source_class = isolapurr_configured_thermal_source_class(&config).ok_or_else(|| {
+        format!(
+            "isolapurr source capability readback must advertise PPS with 20V coverage for auto thermal mode source_url={source_url}"
+        )
+    })?;
+    if source_class != "pps3a" && source_class != "pps5a" {
+        return Err(format!("unsupported isolapurr thermal source class: {source_class}").into());
+    }
+    Ok(())
+}
+
+fn read_isolapurr_configured_source_class(
+    source_url: &str,
+    device_id: &str,
+) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>> {
+    validate_isolapurr_device_identity(source_url, device_id)?;
+    let config = read_isolapurr_power_config(source_url)?;
+    isolapurr_configured_thermal_source_class(&config).ok_or_else(|| {
+        format!(
+            "isolapurr source capability readback must advertise PPS with 20V coverage source_url={source_url}"
+        )
+        .into()
+    })
+}
+
+fn isolapurr_configured_thermal_source_class(config: &Value) -> Option<&'static str> {
+    let capability = config.get("capability").unwrap_or(config);
+    let fixed_voltages = capability
+        .pointer("/pd/fixed_voltages_mv")
+        .or_else(|| capability.pointer("/pd/fixedVoltagesMv"))
+        .and_then(Value::as_array)?;
+    let pps_enabled = capability.pointer("/pd/pps").and_then(Value::as_bool) == Some(true);
+    let pd_enabled = capability.pointer("/protocols/pd").and_then(Value::as_bool) == Some(true);
+    let covers_20v = fixed_voltages
+        .iter()
+        .filter_map(Value::as_u64)
+        .any(|voltage_mv| voltage_mv >= 20_000);
+    if !pps_enabled || !pd_enabled || !covers_20v {
+        return None;
+    }
+    let pps_max_ma = json_u64_any(
+        capability.as_object().unwrap_or(&serde_json::Map::new()),
+        &["pps3_limit_ma", "pps3LimitMa"],
+    )
+    .or_else(|| {
+        capability
+            .pointer("/current/pps3_limit_ma")
+            .or_else(|| capability.pointer("/current/pps3LimitMa"))
+            .or_else(|| capability.pointer("/pd/pps3_limit_ma"))
+            .or_else(|| capability.pointer("/pd/pps3LimitMa"))
+            .and_then(Value::as_u64)
+    })
+    .unwrap_or(0);
+    Some(if pps_max_ma >= 5_000 {
+        "pps5a"
+    } else {
+        "pps3a"
+    })
 }
 
 fn isolapurr_power_config_has_thermal_capability(
@@ -8742,7 +9304,7 @@ mod tests {
 
         assert_eq!(
             tuned.brake_distance_centi_c,
-            previous.brake_distance_centi_c
+            previous.brake_distance_centi_c + 80
         );
         assert!(
             tuned.approach_damping_exponent_permille > previous.approach_damping_exponent_permille
@@ -8755,6 +9317,94 @@ mod tests {
             tuned.hold_reheat_power_permille,
             previous.hold_reheat_power_permille
         );
+    }
+
+    #[test]
+    fn thermal_low_temp_bursty_hold_ripple_does_not_collapse_hold_power_to_zero() {
+        let mut previous = thermal_default_target_point(60);
+        previous.approach_power_permille = 450;
+        previous.approach_floor_power_permille = 160;
+        previous.approach_lead_ticks = 6;
+        previous.brake_distance_centi_c = 1_100;
+        previous.hold_entry_centi_c = 220;
+        previous.hold_exit_centi_c = 400;
+        previous.hold_power_permille = 40;
+        previous.hold_reheat_power_permille = 200;
+        previous.hold_kp_permille_per_c = 12;
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 60,
+                rise_time_ms: 16_991,
+                max_overshoot_c: 0.8,
+                hold_peak_to_peak_c: 3.2,
+                sample_count: 770,
+                stop_reason: "completed",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    first_hold_error_c: Some(3.06),
+                    hold_median_output_permille: Some(0),
+                    hold_p90_output_permille: Some(130),
+                    hold_mean_error_c: Some(0.69),
+                    hold_max_above_target_c: Some(0.8),
+                    hold_max_below_target_c: Some(3.42),
+                    hold_sample_count: 640,
+                    residual_heat_after_hold_entry_c: Some(3.86),
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis::default(),
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+            },
+        );
+
+        assert_eq!(tuned.hold_power_permille, 70);
+        assert_eq!(tuned.hold_reheat_power_permille, 200);
+        assert_eq!(tuned.hold_kp_permille_per_c, 15);
+    }
+
+    #[test]
+    fn thermal_low_temp_bursty_hold_ripple_stays_near_current_seed_on_mild_under_target() {
+        let mut previous = thermal_default_target_point(60);
+        previous.approach_power_permille = 450;
+        previous.approach_floor_power_permille = 160;
+        previous.approach_lead_ticks = 6;
+        previous.brake_distance_centi_c = 1_100;
+        previous.hold_entry_centi_c = 220;
+        previous.hold_exit_centi_c = 400;
+        previous.hold_power_permille = 40;
+        previous.hold_reheat_power_permille = 200;
+        previous.hold_kp_permille_per_c = 12;
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 60,
+                rise_time_ms: 20_106,
+                max_overshoot_c: 1.05,
+                hold_peak_to_peak_c: 3.61,
+                sample_count: 802,
+                stop_reason: "completed",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    approach_median_output_permille: Some(130),
+                    first_hold_error_c: Some(1.68),
+                    hold_median_output_permille: Some(0),
+                    hold_p90_output_permille: Some(150),
+                    hold_mean_error_c: Some(0.895),
+                    hold_max_above_target_c: Some(1.05),
+                    hold_max_below_target_c: Some(2.78),
+                    hold_sample_count: 631,
+                    residual_heat_after_hold_entry_c: Some(2.73),
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis::default(),
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+            },
+        );
+
+        assert_eq!(tuned.hold_power_permille, 70);
+        assert_eq!(tuned.hold_reheat_power_permille, 200);
+        assert_eq!(tuned.hold_kp_permille_per_c, 15);
+        assert_eq!(tuned.approach_floor_power_permille, 160);
     }
 
     #[test]
@@ -8846,6 +9496,184 @@ mod tests {
         );
         assert_eq!(tuned.hold_lead_ticks, 2);
         assert_eq!(tuned.hold_reheat_power_permille, 60);
+    }
+
+    #[test]
+    fn thermal_low_temp_bounded_entry_residual_prefers_overshoot_cutoff_trim() {
+        let mut previous = thermal_default_target_point(100);
+        previous.brake_distance_centi_c = 1_000;
+        previous.approach_power_permille = 420;
+        previous.approach_floor_power_permille = 300;
+        previous.approach_damping_exponent_permille = 1_220;
+        previous.approach_lead_ticks = 7;
+        previous.hold_blend_ticks = 2;
+        previous.hold_entry_centi_c = 150;
+        previous.hold_exit_centi_c = 120;
+        previous.hold_kp_permille_per_c = 20;
+        previous.hold_lead_ticks = 8;
+        previous.hold_power_permille = 220;
+        previous.hold_reheat_power_permille = 220;
+        previous.hold_off_centi_c = 180;
+        previous.overshoot_cutoff_centi_c = 90;
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 100,
+                rise_time_ms: 22_294,
+                max_overshoot_c: 1.55,
+                hold_peak_to_peak_c: 1.73,
+                sample_count: 83,
+                stop_reason: "full_speed_to_stable_timeout",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    first_hold_error_c: Some(0.88),
+                    hold_max_above_target_c: Some(1.55),
+                    hold_max_below_target_c: Some(0.88),
+                    hold_p90_output_permille: Some(210),
+                    hold_sample_count: 11,
+                    residual_heat_after_hold_entry_c: Some(2.43),
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis {
+                    first_hold_at_ms: Some(21_652),
+                    ..ThermalApproachGuardAnalysis::default()
+                },
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis {
+                    failure_reason: Some("full_speed_to_stable_timeout"),
+                    warmup_exited_at_ms: Some(14_498),
+                    ..ThermalFullSpeedStableAnalysis::default()
+                },
+            },
+        );
+
+        assert_eq!(tuned.hold_lead_ticks, previous.hold_lead_ticks);
+        assert_eq!(tuned.hold_power_permille, previous.hold_power_permille);
+        assert_eq!(
+            tuned.hold_reheat_power_permille,
+            previous.hold_reheat_power_permille
+        );
+        assert_eq!(tuned.brake_distance_centi_c, 1080);
+        assert_eq!(tuned.overshoot_cutoff_centi_c, 70);
+        assert_eq!(tuned.hold_off_centi_c, 50);
+        assert_eq!(tuned.hold_blend_ticks, 1);
+        assert_eq!(tuned.hold_kp_permille_per_c, 16);
+    }
+
+    #[test]
+    fn thermal_low_temp_moderate_residual_keeps_hold_exit_and_adds_brake() {
+        let mut previous = thermal_default_target_point(60);
+        previous.brake_distance_centi_c = 1_700;
+        previous.approach_power_permille = 450;
+        previous.approach_floor_power_permille = 220;
+        previous.approach_damping_exponent_permille = 4_000;
+        previous.approach_lead_ticks = 6;
+        previous.hold_blend_ticks = 1;
+        previous.hold_entry_centi_c = 180;
+        previous.hold_exit_centi_c = 400;
+        previous.hold_kp_permille_per_c = 8;
+        previous.hold_power_permille = 135;
+        previous.hold_reheat_power_permille = 140;
+        previous.hold_off_centi_c = 50;
+        previous.overshoot_cutoff_centi_c = 50;
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 60,
+                rise_time_ms: 16_197,
+                max_overshoot_c: 1.68,
+                hold_peak_to_peak_c: 2.15,
+                sample_count: 215,
+                stop_reason: "full_speed_to_stable_timeout",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    first_hold_error_c: Some(1.75),
+                    hold_mean_error_c: Some(-0.041),
+                    hold_max_above_target_c: Some(1.68),
+                    hold_max_below_target_c: Some(1.86),
+                    hold_median_output_permille: Some(0),
+                    hold_p90_output_permille: Some(0),
+                    hold_sample_count: 74,
+                    residual_heat_after_hold_entry_c: Some(3.43),
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis {
+                    first_hold_at_ms: Some(14_203),
+                    ..ThermalApproachGuardAnalysis::default()
+                },
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis {
+                    failure_reason: Some("full_speed_to_stable_timeout"),
+                    warmup_exited_at_ms: Some(5_997),
+                    ..ThermalFullSpeedStableAnalysis::default()
+                },
+            },
+        );
+
+        assert_eq!(tuned.brake_distance_centi_c, 1_780);
+        assert_eq!(tuned.hold_exit_centi_c, previous.hold_exit_centi_c);
+        assert_eq!(tuned.approach_lead_ticks, previous.approach_lead_ticks);
+        assert_eq!(
+            tuned.approach_damping_exponent_permille,
+            previous.approach_damping_exponent_permille
+        );
+        assert_eq!(
+            tuned.overshoot_cutoff_centi_c,
+            previous.overshoot_cutoff_centi_c
+        );
+    }
+
+    #[test]
+    fn thermal_low_temp_hold_entry_carry_trims_hold_power_once_hold_lead_is_maxed() {
+        let mut previous = thermal_default_target_point(100);
+        previous.brake_distance_centi_c = 1_000;
+        previous.approach_power_permille = 420;
+        previous.approach_floor_power_permille = 300;
+        previous.approach_damping_exponent_permille = 1_220;
+        previous.approach_lead_ticks = 7;
+        previous.hold_blend_ticks = 2;
+        previous.hold_entry_centi_c = 150;
+        previous.hold_exit_centi_c = 120;
+        previous.hold_kp_permille_per_c = 20;
+        previous.hold_lead_ticks = 8;
+        previous.hold_power_permille = 180;
+        previous.hold_reheat_power_permille = 240;
+        previous.hold_off_centi_c = 180;
+        previous.overshoot_cutoff_centi_c = 90;
+        let tuned = tune_thermal_candidate_point(
+            previous,
+            &ThermalStageResult {
+                target_temp_c: 100,
+                rise_time_ms: 22_294,
+                max_overshoot_c: 2.1,
+                hold_peak_to_peak_c: 2.45,
+                sample_count: 83,
+                stop_reason: "full_speed_to_stable_timeout",
+                terminal_runtime_drop_reason: None,
+                analysis: ThermalStageAnalysis {
+                    first_hold_error_c: Some(0.88),
+                    hold_max_above_target_c: Some(2.1),
+                    hold_max_below_target_c: Some(0.88),
+                    hold_p90_output_permille: Some(260),
+                    hold_sample_count: 11,
+                    residual_heat_after_hold_entry_c: Some(2.43),
+                    ..ThermalStageAnalysis::default()
+                },
+                guard: ThermalApproachGuardAnalysis {
+                    first_hold_at_ms: Some(21_652),
+                    ..ThermalApproachGuardAnalysis::default()
+                },
+                full_speed_to_stable: ThermalFullSpeedStableAnalysis {
+                    failure_reason: Some("full_speed_to_stable_timeout"),
+                    warmup_exited_at_ms: Some(14_498),
+                    ..ThermalFullSpeedStableAnalysis::default()
+                },
+            },
+        );
+
+        assert_eq!(tuned.hold_lead_ticks, 8);
+        assert_eq!(tuned.hold_power_permille, 160);
+        assert_eq!(tuned.hold_reheat_power_permille, 210);
+        assert_eq!(tuned.hold_off_centi_c, 200);
+        assert_eq!(tuned.approach_lead_ticks, previous.approach_lead_ticks);
     }
 
     #[test]
@@ -9889,6 +10717,83 @@ mod tests {
     }
 
     #[test]
+    fn thermal_replay_source_analysis_summarizes_approach_and_hold_windows() {
+        let samples = vec![
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 0,
+                "sourceTelemetry": { "voltageMv": 21_000, "currentMa": 3_000, "powerMw": 63_000 },
+                "heaterTelemetry": { "currentTempC": 92.0, "heaterOutputPercent": 40 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 1_000,
+                "sourceTelemetry": { "voltageMv": 20_000, "currentMa": 2_500, "powerMw": 50_000 },
+                "heaterTelemetry": { "currentTempC": 94.0, "heaterOutputPercent": 30 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 2_000,
+                "sourceTelemetry": { "voltageMv": 15_000, "currentMa": 1_800, "powerMw": 27_000 },
+                "heaterTelemetry": { "currentTempC": 96.2, "heaterOutputPercent": 20 },
+                "status": { "heaterControlPhase": "approach" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "hold",
+                "elapsedMs": 3_000,
+                "sourceTelemetry": { "voltageMv": 11_000, "currentMa": 1_600, "powerMw": 17_600 },
+                "heaterTelemetry": { "currentTempC": 100.4, "heaterOutputPercent": 15 },
+                "status": { "heaterControlPhase": "hold" },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "hold",
+                "elapsedMs": 4_000,
+                "sourceTelemetry": { "voltageMv": 10_000, "currentMa": 1_400, "powerMw": 14_000 },
+                "heaterTelemetry": { "currentTempC": 103.8, "heaterOutputPercent": 0 },
+                "status": { "heaterControlPhase": "hold" },
+            }),
+        ];
+
+        let stage_samples = thermal_replay_stage_samples(&samples, 100).unwrap();
+        let source_analysis = thermal_replay_stage_source_analysis(&stage_samples, 100);
+
+        assert_eq!(source_analysis["approachSource"]["sampleCount"], json!(3));
+        assert_eq!(
+            source_analysis["approachSource"]["voltageMv"]["min"],
+            json!(15_000.0)
+        );
+        assert_eq!(
+            source_analysis["approachSource"]["voltageMv"]["max"],
+            json!(21_000.0)
+        );
+        assert_eq!(
+            source_analysis["approachSource"]["currentMa"]["last"],
+            json!(1_800.0)
+        );
+        assert_eq!(source_analysis["holdSource"]["sampleCount"], json!(2));
+        assert_eq!(
+            source_analysis["holdSource"]["powerMw"]["first"],
+            json!(17_600.0)
+        );
+        assert_eq!(
+            source_analysis["holdSource"]["powerMw"]["last"],
+            json!(14_000.0)
+        );
+    }
+
+    #[test]
     fn thermal_replay_preserves_full_batch_candidate_profile() {
         let mut original = thermal_seed_candidate_profile();
         thermal_candidate_point_mut(&mut original, 60)
@@ -10018,6 +10923,45 @@ mod tests {
         assert_eq!(point_250.hold_reheat_power_permille, 944);
         assert_eq!(point_220.target_temp_c, 220);
         assert_eq!(point_250.target_temp_c, 250);
+    }
+
+    #[test]
+    fn thermal_persisted_profile_projects_bank_specific_targets() {
+        let profile = thermal_candidate_profile_from_value(json!({
+            "points": [
+                {"targetTempC": 60, "brakeDistanceCentiC": 1100, "approachPowerPermille": 450, "approachFloorPowerPermille": 160, "approachDampingExponentPermille": 4000, "approachTailWindowCentiC": 375, "holdPowerPermille": 135, "holdReheatPowerPermille": 170, "holdEntryCentiC": 220, "holdExitCentiC": 400, "holdOnCentiC": 30, "holdOffCentiC": 40, "overshootCutoffCentiC": 50, "holdKpPermillePerC": 8, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1, "approachLeadTicks": 6, "holdLeadTicks": 6, "warmupPowerPermille": 760},
+                {"targetTempC": 80, "brakeDistanceCentiC": 980, "approachPowerPermille": 440, "approachFloorPowerPermille": 220, "approachDampingExponentPermille": 2610, "approachTailWindowCentiC": 375, "holdPowerPermille": 140, "holdReheatPowerPermille": 150, "holdEntryCentiC": 150, "holdExitCentiC": 230, "holdOnCentiC": 20, "holdOffCentiC": 115, "overshootCutoffCentiC": 140, "holdKpPermillePerC": 12, "holdKiPermillePerCTick": 1, "holdBlendTicks": 3, "approachLeadTicks": 7, "holdLeadTicks": 6, "warmupPowerPermille": 850},
+                {"targetTempC": 100, "brakeDistanceCentiC": 1340, "approachPowerPermille": 340, "approachFloorPowerPermille": 220, "approachDampingExponentPermille": 1500, "approachTailWindowCentiC": 375, "holdPowerPermille": 220, "holdReheatPowerPermille": 220, "holdEntryCentiC": 150, "holdExitCentiC": 120, "holdOnCentiC": 10, "holdOffCentiC": 50, "overshootCutoffCentiC": 50, "holdKpPermillePerC": 20, "holdKiPermillePerCTick": 1, "holdBlendTicks": 2, "approachLeadTicks": 9, "holdLeadTicks": 8, "warmupPowerPermille": 1000},
+                {"targetTempC": 140, "brakeDistanceCentiC": 940, "approachPowerPermille": 420, "approachFloorPowerPermille": 320, "approachDampingExponentPermille": 910, "approachTailWindowCentiC": 0, "holdPowerPermille": 335, "holdReheatPowerPermille": 400, "holdEntryCentiC": 150, "holdExitCentiC": 100, "holdOnCentiC": 10, "holdOffCentiC": 160, "overshootCutoffCentiC": 220, "holdKpPermillePerC": 22, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1, "approachLeadTicks": 2, "holdLeadTicks": 0, "warmupPowerPermille": 1000},
+                {"targetTempC": 180, "brakeDistanceCentiC": 650, "approachPowerPermille": 760, "approachFloorPowerPermille": 460, "approachDampingExponentPermille": 800, "approachTailWindowCentiC": 0, "holdPowerPermille": 450, "holdReheatPowerPermille": 620, "holdEntryCentiC": 120, "holdExitCentiC": 70, "holdOnCentiC": 25, "holdOffCentiC": 140, "overshootCutoffCentiC": 300, "holdKpPermillePerC": 20, "holdKiPermillePerCTick": 1, "holdBlendTicks": 3, "approachLeadTicks": 4, "holdLeadTicks": 0, "warmupPowerPermille": 1000},
+                {"targetTempC": 220, "brakeDistanceCentiC": 400, "approachPowerPermille": 900, "approachFloorPowerPermille": 800, "approachDampingExponentPermille": 400, "approachTailWindowCentiC": 0, "holdPowerPermille": 750, "holdReheatPowerPermille": 850, "holdEntryCentiC": 120, "holdExitCentiC": 50, "holdOnCentiC": 5, "holdOffCentiC": 240, "overshootCutoffCentiC": 320, "holdKpPermillePerC": 22, "holdKiPermillePerCTick": 1, "holdBlendTicks": 2, "approachLeadTicks": 2, "holdLeadTicks": 0, "warmupPowerPermille": 1000},
+                {"targetTempC": 250, "brakeDistanceCentiC": 200, "approachPowerPermille": 1000, "approachFloorPowerPermille": 1000, "approachDampingExponentPermille": 350, "approachTailWindowCentiC": 0, "holdPowerPermille": 850, "holdReheatPowerPermille": 930, "holdEntryCentiC": 150, "holdExitCentiC": 55, "holdOnCentiC": 14, "holdOffCentiC": 320, "overshootCutoffCentiC": 420, "holdKpPermillePerC": 12, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1, "approachLeadTicks": 1, "holdLeadTicks": 0, "warmupPowerPermille": 1000}
+            ],
+            "settings": {}
+        }));
+
+        let pps3a = thermal_persisted_profile_for_bank(&profile, "pps3a");
+        let pps5a = thermal_persisted_profile_for_bank(&profile, "pps5a");
+
+        assert_eq!(
+            pps3a
+                .points
+                .iter()
+                .map(|point| point.target_temp_c)
+                .collect::<Vec<_>>(),
+            vec![60, 100, 140, 180, 220, 250]
+        );
+        assert_eq!(
+            pps5a
+                .points
+                .iter()
+                .map(|point| point.target_temp_c)
+                .collect::<Vec<_>>(),
+            vec![60, 100, 140, 180, 220, 240]
+        );
+        let point_240 = thermal_candidate_point(&pps5a, 240).expect("240 point");
+        assert!(point_240.brake_distance_centi_c > 200);
+        assert!(point_240.brake_distance_centi_c < 400);
     }
 
     #[test]
@@ -10419,6 +11363,7 @@ mod tests {
             json!({
                 "heaterEnabled": true,
                 "targetTempC": 220,
+                "activeCoolingEnabled": false,
             })
         );
     }
@@ -10600,6 +11545,62 @@ mod tests {
     }
 
     #[test]
+    fn isolapurr_configured_thermal_source_class_detects_3a_and_5a_modes() {
+        let three_amp_config = json!({
+            "capability": {
+                "power_watts": 65,
+                "protocols": { "pd": true },
+                "pd": {
+                    "pps": true,
+                    "fixed_voltages_mv": [9000, 12000, 15000, 20000]
+                },
+                "current": {
+                    "pps3_limit_ma": 3250
+                }
+            }
+        });
+        assert_eq!(
+            isolapurr_configured_thermal_source_class(&three_amp_config),
+            Some("pps3a")
+        );
+
+        let five_amp_config = json!({
+            "capability": {
+                "power_watts": 100,
+                "protocols": { "pd": true },
+                "pd": {
+                    "pps": true,
+                    "fixed_voltages_mv": [9000, 12000, 15000, 20000]
+                },
+                "current": {
+                    "pps3_limit_ma": 5000
+                }
+            }
+        });
+        assert_eq!(
+            isolapurr_configured_thermal_source_class(&five_amp_config),
+            Some("pps5a")
+        );
+
+        let missing_20v = json!({
+            "capability": {
+                "protocols": { "pd": true },
+                "pd": {
+                    "pps": true,
+                    "fixed_voltages_mv": [9000, 12000, 15000]
+                },
+                "current": {
+                    "pps3_limit_ma": 5000
+                }
+            }
+        });
+        assert_eq!(
+            isolapurr_configured_thermal_source_class(&missing_20v),
+            None
+        );
+    }
+
+    #[test]
     fn isolapurr_write_response_requires_positive_acknowledgement() {
         assert!(isolapurr_cli_write_succeeded(&json!({"accepted": true})));
         assert!(isolapurr_cli_write_succeeded(&json!({"ok": true})));
@@ -10694,10 +11695,112 @@ mod tests {
 
     #[test]
     fn thermal_profile_modes_preserve_65w_and_define_100w_defaults() {
-        assert_eq!(ThermalProfileMode::W65.source_defaults(), (20_000, 3_250));
-        assert_eq!(ThermalProfileMode::W100.source_defaults(), (21_000, 5_000));
-        assert_eq!(ThermalProfileMode::Auto.resolved_bank(), "pps3a");
-        assert_eq!(ThermalProfileMode::W100.resolved_bank(), "pps5a");
+        assert_eq!(
+            ThermalProfileMode::W65.explicit_source_defaults(),
+            Some((20_000, 3_250))
+        );
+        assert_eq!(
+            ThermalProfileMode::W100.explicit_source_defaults(),
+            Some((21_000, 5_000))
+        );
+        assert_eq!(ThermalProfileMode::Auto.explicit_bank(), None);
+        assert_eq!(ThermalProfileMode::W100.explicit_bank(), Some("pps5a"));
+    }
+
+    #[test]
+    fn thermal_default_seed_candidates_follow_bank_current_truth() {
+        let (_, pps3a_seed_path) = load_thermal_default_seed_candidate_profile("pps3a").unwrap();
+        let (_, pps5a_seed_path) = load_thermal_default_seed_candidate_profile("pps5a").unwrap();
+
+        assert!(
+            pps3a_seed_path
+                .as_ref()
+                .is_some_and(|path| path.ends_with(THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE))
+        );
+        assert!(pps5a_seed_path.as_ref().is_some_and(|path| {
+            path.ends_with(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE)
+                || path.ends_with(THERMAL_PPS5A_TUNING_SEED_RELATIVE)
+        }));
+    }
+
+    #[test]
+    fn thermal_report_html_uses_owner_facing_source_class_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let samples_path = dir.path().join("samples.ndjson");
+        fs::write(
+            &samples_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "sampleIndex": 0,
+                    "elapsedMs": 0,
+                    "testPhase": "applied",
+                    "phase": "hold",
+                    "targetTempC": 100,
+                    "heaterTelemetry": {
+                        "currentTempC": 100.2,
+                        "hotplateVoltageMv": 10000,
+                        "ppsRequestMv": 10000,
+                        "ppsContractMv": 10000,
+                        "heaterOutputPercent": 22,
+                        "heaterPhysicalOutputPercent": 100,
+                        "thermalControl": {}
+                    },
+                    "sourceTelemetry": {
+                        "voltageMv": 10000,
+                        "currentMa": 1200,
+                        "powerMw": 12000
+                    },
+                    "sampling": {
+                        "intervalMs": 100,
+                        "rateViolation": false
+                    }
+                }))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+        let summary = json!({
+            "runId": "thermal-test",
+            "sampleCount": 1,
+            "parameters": {
+                "sampleIntervalMs": 100,
+                "targetsC": [100],
+                "limits": {
+                    "fullSpeedToStableMs": 10000
+                }
+            },
+            "source": {
+                "selectedMode": "100w",
+                "resolvedBank": "pps5a",
+                "detectedSourceClass": "pps5a",
+                "kind": "isolapurr",
+                "id": "856a141cdbd4",
+                "preset": {
+                    "voltageMv": 21000,
+                    "currentLimitMa": 5000
+                }
+            },
+            "validation": {
+                "passed": false
+            },
+            "applied": [{
+                "targetTempC": 100,
+                "stopReason": "completed",
+                "riseTimeMs": 1000,
+                "maxOvershootC": 0.5,
+                "holdPeakToPeakC": 1.0,
+                "sampleCount": 1,
+                "analysis": {}
+            }]
+        });
+
+        let html = render_thermal_self_test_report_html(&summary, &samples_path).unwrap();
+        assert!(html.contains("Selected Mode"));
+        assert!(html.contains("Resolved Bank"));
+        assert!(html.contains("Detected Source Class"));
+        assert!(html.contains("pps5a / 5A (100W)"));
+        assert!(!html.contains("pps5a / 5A / 100W"));
     }
 
     #[test]

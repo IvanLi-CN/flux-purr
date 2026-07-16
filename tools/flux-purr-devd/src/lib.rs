@@ -2895,7 +2895,7 @@ const fn default_heater_current_reserve_ma() -> u16 {
 
 fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
     MockThermalCandidateSettings {
-        temp_filter_alpha_permille: 700,
+        temp_filter_alpha_permille: 750,
         warmup_reenter_centi_c: 1_000,
         hold_entry_centi_c: 20,
         hold_exit_centi_c: 80,
