@@ -2263,34 +2263,44 @@ fn update_runtime_display_temperature(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+struct RuntimeDisplayTemperatureState<'a> {
+    ui_state: &'a mut FrontPanelUiState,
+    latest_display_temp_c: &'a mut f32,
+    latest_display_temp_i16: &'a mut i16,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+struct RuntimeControlTemperatureState<'a> {
+    latest_control_temp_c: &'a mut f32,
+    latest_control_temp_i16: &'a mut i16,
+    transition_guard: &'a mut RtdPpsTransitionGuard,
+    heater_controller: &'a mut HeaterController,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn apply_valid_rtd_measurement(
-    ui_state: &mut FrontPanelUiState,
-    latest_display_temp_c: &mut f32,
-    latest_display_temp_i16: &mut i16,
-    latest_control_temp_c: &mut f32,
-    latest_control_temp_i16: &mut i16,
-    transition_guard: &mut RtdPpsTransitionGuard,
-    heater_controller: &mut HeaterController,
+    display: RuntimeDisplayTemperatureState<'_>,
+    control: RuntimeControlTemperatureState<'_>,
     request_mv: u16,
     now_ms: u64,
     measurement_temp_c: f32,
 ) -> bool {
     let needs_redraw = update_runtime_display_temperature(
-        ui_state,
-        latest_display_temp_c,
-        latest_display_temp_i16,
+        display.ui_state,
+        display.latest_display_temp_c,
+        display.latest_display_temp_i16,
         measurement_temp_c,
     );
     if let Some(control_temp_c) = accept_rtd_control_sample_after_pps_transition(
-        transition_guard,
-        heater_controller,
-        *latest_control_temp_c,
+        control.transition_guard,
+        control.heater_controller,
+        *control.latest_control_temp_c,
         request_mv,
         now_ms,
         measurement_temp_c,
     ) {
-        *latest_control_temp_c = control_temp_c;
-        *latest_control_temp_i16 = temp_c_to_whole_c(control_temp_c);
+        *control.latest_control_temp_c = control_temp_c;
+        *control.latest_control_temp_i16 = temp_c_to_whole_c(control_temp_c);
     }
     needs_redraw
 }
@@ -7643,13 +7653,17 @@ async fn main(_spawner: Spawner) {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     needs_redraw |= apply_valid_rtd_measurement(
-                        &mut ui_state,
-                        &mut latest_display_temp_c,
-                        &mut latest_display_temp_i16,
-                        &mut latest_temp_c,
-                        &mut latest_temp_i16,
-                        &mut rtd_pps_transition_guard,
-                        &mut heater_controller,
+                        RuntimeDisplayTemperatureState {
+                            ui_state: &mut ui_state,
+                            latest_display_temp_c: &mut latest_display_temp_c,
+                            latest_display_temp_i16: &mut latest_display_temp_i16,
+                        },
+                        RuntimeControlTemperatureState {
+                            latest_control_temp_c: &mut latest_temp_c,
+                            latest_control_temp_i16: &mut latest_temp_i16,
+                            transition_guard: &mut rtd_pps_transition_guard,
+                            heater_controller: &mut heater_controller,
+                        },
                         current_request_mv,
                         elapsed_ms,
                         measurement.temp_c,
@@ -12610,13 +12624,17 @@ mod tests {
         let mut controller = HeaterController::new();
 
         assert!(apply_valid_rtd_measurement(
-            &mut ui_state,
-            &mut latest_display_temp_c,
-            &mut latest_display_temp_i16,
-            &mut latest_temp_c,
-            &mut latest_temp_i16,
-            &mut guard,
-            &mut controller,
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_temp_c,
+                latest_control_temp_i16: &mut latest_temp_i16,
+                transition_guard: &mut guard,
+                heater_controller: &mut controller,
+            },
             15_000,
             100,
             73.74,
@@ -12641,25 +12659,33 @@ mod tests {
         let mut controller = HeaterController::new();
 
         assert!(apply_valid_rtd_measurement(
-            &mut ui_state,
-            &mut latest_display_temp_c,
-            &mut latest_display_temp_i16,
-            &mut latest_temp_c,
-            &mut latest_temp_i16,
-            &mut guard,
-            &mut controller,
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_temp_c,
+                latest_control_temp_i16: &mut latest_temp_i16,
+                transition_guard: &mut guard,
+                heater_controller: &mut controller,
+            },
             15_000,
             100,
             73.74,
         ));
         assert!(apply_valid_rtd_measurement(
-            &mut ui_state,
-            &mut latest_display_temp_c,
-            &mut latest_display_temp_i16,
-            &mut latest_temp_c,
-            &mut latest_temp_i16,
-            &mut guard,
-            &mut controller,
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_temp_c,
+                latest_control_temp_i16: &mut latest_temp_i16,
+                transition_guard: &mut guard,
+                heater_controller: &mut controller,
+            },
             15_000,
             450,
             52.15,
