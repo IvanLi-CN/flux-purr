@@ -65,6 +65,28 @@ Do not treat local MHTML snapshots as the primary artifact. The canonical owner-
 
 For approach-curve fitting, use the same canonical bundle shape. A dedicated `thermal_approach_characterization` bundle may freeze per-target approach-only traces without turning the live run directory into another report format.
 
+When the bundle is a review-only checkpoint rather than a committed accepted baseline, keep the same four-file layout and mark it explicitly:
+
+- top-level `bundleDisposition=preliminary_review`
+- top-level `acceptedProfileRole=review_candidate_snapshot`
+- `thermal-profile.accepted.json` means the current review candidate snapshot only; it is not a committed accepted baseline and it is not evidence that EEPROM has been saved
+
+Merged preliminary review bundles may also attach a per-target `holdCheck` block to the same `thermal_approach_characterization` payload. That block should summarize the single-target `60s` hold confirm for the same target and carry:
+
+- `confirmRunId`
+- `passed`
+- `failureReason`
+- `holdSeconds`
+- `maxOvershootC`
+- `holdPeakToPeakC`
+- `firstHoldAtMs`
+- `holdMedianOutputPermille`
+- `holdP90OutputPermille`
+- `approachSource`
+- `holdSource`
+- `sourceRunPath`
+- `stopReason`
+
 The report and bundle must preserve source-aware metadata:
 
 - `selectedMode`
@@ -214,9 +236,14 @@ If the source remains at a stale low-voltage state or otherwise fails to follow 
 
 1. Stop heating and keep the run unsaved.
 2. Record the failure as a source-side issue, not as thermal-profile evidence.
-3. Power-cycle the source output or the upstream USB-C power path.
-4. Wait for source telemetry and capability readback to become current again.
-5. Recheck `selectedMode`, `resolvedBank`, and `detectedSourceClass` before resuming the thermal run.
+3. Restart the same IsolaPurr output path on the same authorized source:
+   - `isolapurr power output manual --url <source-url> --usb-c-path disconnected`
+   - `isolapurr power output auto --url <source-url>`
+4. If telemetry still shows the USB-C path latched or stale after the output restart, replug the same power path:
+   - `isolapurr ports --device-id <source-id> replug --port port_c`
+   - only if the host-side USB transport itself is the problem, use `port_a` instead of `port_c`
+5. Wait for source telemetry and capability readback to become current again.
+6. Recheck `selectedMode`, `resolvedBank`, and `detectedSourceClass` before resuming the thermal run.
 
 Use this procedure only when source telemetry proves the source is stuck or stale. Do not use it to mask a controller, sensor, or runtime defect.
 
@@ -245,4 +272,5 @@ If the local daemon stops serving the active hardware path:
 - `docs/specs/m8r4q-real-control-plane-runtime/SPEC.md`
 - `thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/`
 - `thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/`
+- `thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/`
 - `thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json`

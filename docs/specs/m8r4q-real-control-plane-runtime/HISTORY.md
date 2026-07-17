@@ -1,5 +1,10 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-17
+
+- 主人因旧 bench source 异常，更换当前 100W HIL source 为 IsolaPurr `f293cc9c139e` / `http://192.168.31.224`。当 source 遥测表现为低压卡死或 PPS 不再跟随请求时，当前可复用恢复流程固定为：先停止加热并保留 unsaved run，再对同一 source 执行 `isolapurr power output manual --usb-c-path disconnected`，随后 `isolapurr power output auto`；若 USB-C power path 仍卡住，再对 `port_c` 做 replug。该流程只用于 source-side stale / latched 输出，不得用来掩盖 controller、sensor 或 runtime 缺陷。
+- 完成 `100w / pps5a` 的三点 preliminary review bundle：`thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/`。该 bundle 固定为 canonical HTML 形态，并显式标记 `bundleDisposition=preliminary_review`、`acceptedProfileRole=review_candidate_snapshot`。三个目标的单点 `60s` hold confirm 结果为：`60°C => overshoot 0.75 / p2p 1.71`、`140°C => overshoot 1.73 / p2p 2.94`、`220°C => overshoot 1.11 / p2p 1.59`。这份证据只代表当前审查候选，不代表 committed accepted baseline，也不代表 EEPROM saved bank。
+
 ## 2026-07-11
 
 - 最终完整 ladder 在 60°C 首点捕获 RTD 原始读数突变：`rtdRawAdcMv` 在约 `0.4s` 内从 `985` 跳到 `1014`，旧 runtime 限幅把该阶跃摊成持续假升温并最终报告 `20.18°C` 假过冲。运行时已删除该温度拒绝路径，所有有效样本直接进入控制环；控制器同时把经实际/滤波温度共同确认的升温斜率与 `approachLeadTicks` 用于 warmup 提前交接，并受 `warmupReenterCentiC` 滞回约束；参数仍通过 API/EEPROM 控制。

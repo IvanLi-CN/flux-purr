@@ -922,6 +922,11 @@ canvas{{width:100%;height:100%;display:block}}
 .fact label{{display:block;color:var(--muted);font-size:11px;margin-bottom:3px}}
 .fact strong{{font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace}}
 .legend{{display:flex;gap:12px;align-items:center;color:var(--muted);font-size:12px;margin-top:8px}}
+.banner{{margin:0 0 18px;background:var(--amber-bg);border:1px solid #ead899;border-radius:var(--radius);padding:12px 14px;color:#6a5600}}
+.badge{{display:inline-block;border-radius:999px;padding:2px 8px;font:700 11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em}}
+.badge.pass{{background:rgba(24,121,78,.12);color:var(--green)}}
+.badge.fail{{background:rgba(194,59,50,.12);color:#c23b32}}
+.badge.info{{background:rgba(18,97,160,.1);color:var(--blue)}}
 .dot{{display:inline-block;width:10px;height:10px;border-radius:999px}}
 .line-swatch{{display:inline-block;width:14px;height:0;border-top:2px solid currentColor;vertical-align:middle;margin-right:4px}}
 .line-swatch.dashed{{border-top-style:dashed}}
@@ -945,6 +950,7 @@ canvas{{width:100%;height:100%;display:block}}
   </div>
   <div class="stamp">DEVICE {bundle["target"]["deviceId"]}<br>PORT {bundle["target"]["portPath"]}<br>REPORT {bundle["generatedAt"]}</div>
 </header>
+<div class="banner" id="bundleBanner" hidden></div>
 <section class="summary" id="summary"></section>
 <div class="section-head">
   <div>
@@ -970,7 +976,7 @@ canvas{{width:100%;height:100%;display:block}}
 <section class="panel" style="margin-top:12px">
   <div class="panel-title">
     <h3>Approach 用时对比</h3>
-    <span>0加热曲线作为及格门槛；50%最低功率曲线作为目标加热门槛</span>
+    <span>0加热曲线作为 hard-limit upper bound；50%最低功率曲线作为 preferred target</span>
   </div>
   <div class="chart-wrap compact"><canvas id="durationChart"></canvas></div>
 </section>
@@ -981,12 +987,30 @@ const DATA={data_json};
 const COLORS={{zero:'#1261a0',half:'#c23b32',band:'rgba(24,121,78,.12)',grid:'#e8ebed',text:'#66717a',ink:'#182026'}};
 const PRE_CONTEXT_SECONDS=3.0;
 function fmt(n,d=2){{return n==null?'—':Number(n).toFixed(d)}}
+function fmtInt(n){{return n==null?'—':String(Math.round(Number(n)))}}
+function escapeHtml(value){{return String(value??'').replace(/[&<>"]/g,ch=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[ch]||ch));}}
+function holdBadge(hold){{if(!hold)return '<span class="badge info">未提供</span>';return hold.passed?'<span class="badge pass">PASS</span>':'<span class="badge fail">FAIL</span>';}}
+function variantFor(target,id){{return target.variants.find(v=>v.variantId===id);}}
+function approachSeconds(variant){{return variant?.metrics?.approachDurationMs==null?null:variant.metrics.approachDurationMs/1000;}}
+function avgSourceWatts(source){{const avg=source?.powerMw?.avg;return avg==null?null:avg/1000;}}
+function rangeText(min,max,unit,digits=2){{if(min==null&&max==null)return '—';return `${{fmt(min,digits)}}${{unit}} → ${{fmt(max,digits)}}${{unit}}`;}}
+function sourceMetricText(source){{if(!source)return '—';const power=source?.powerMw;const voltage=source?.voltageMv;const current=source?.currentMa;const parts=[];if(power?.avg!=null)parts.push(`${{fmt(power.avg/1000,2)}} W avg`);if(power?.min!=null&&power?.max!=null)parts.push(`${{fmt(power.min/1000,2)}}-${{fmt(power.max/1000,2)}} W`);if(voltage?.avg!=null)parts.push(`${{fmt(voltage.avg/1000,2)}} V avg`);if(current?.avg!=null)parts.push(`${{fmt(current.avg/1000,0)}} mA avg`);return parts.length?parts.join(' · '):'—';}}
+function bundleBannerText(data){{if(data.bundleDisposition==='preliminary_review')return '当前产物是 preliminary 审查 bundle；其中 thermal-profile.accepted.json 仅表示当前三点候选快照，不代表 committed accepted baseline，也不代表 EEPROM saved bank。';if(data.acceptedProfileRole==='review_candidate_snapshot')return '当前 thermal-profile.accepted.json 仅用于回放/审查当前候选快照。';return '';}}
 const tabs=document.querySelector('#targetTabs');
 const summary=document.querySelector('#summary');
+const bannerText=bundleBannerText(DATA);
+if(bannerText){{const banner=document.querySelector('#bundleBanner');banner.hidden=false;banner.textContent=bannerText;}}
 summary.innerHTML=DATA.targets.map(target=>{{
-  const zero=target.variants.find(v=>v.variantId==='zero_coast');
-  const half=target.variants.find(v=>v.variantId==='half_floor_50');
-  return `<article class="card"><h3>${{target.targetTempC}}°C</h3><div class="metric">0加热 <strong>${{fmt(zero.metrics.approachDurationMs/1000,3)}}s</strong></div><div class="metric">50%最低功率 <strong>${{fmt(half.metrics.approachDurationMs/1000,3)}}s</strong></div><div class="metric">门槛差值 <strong>${{fmt((zero.metrics.approachDurationMs-half.metrics.approachDurationMs)/1000,3)}}s</strong></div></article>`;
+  const zero=variantFor(target,'zero_coast');
+  const half=variantFor(target,'half_floor_50');
+  const hold=target.holdCheck||null;
+  const zeroSeconds=approachSeconds(zero);
+  const halfSeconds=approachSeconds(half);
+  const gateDelta=(zeroSeconds==null||halfSeconds==null)?'—':fmt(zeroSeconds-halfSeconds,3)+' s';
+  const overshoot=hold?.maxOvershootC==null?'—':fmt(hold.maxOvershootC,2)+' °C';
+  const p2p=hold?.holdPeakToPeakC==null?'—':fmt(hold.holdPeakToPeakC,2)+' °C';
+  const failure=hold?.passed||!hold?.failureReason?'':`<div class="metric">失败原因 <strong>${{escapeHtml(hold.failureReason)}}</strong></div>`;
+  return `<article class="card"><h3>${{target.targetTempC}}°C</h3><div class="metric">0加热 <strong>${{zeroSeconds==null?'—':fmt(zeroSeconds,3)+' s'}}</strong></div><div class="metric">50%最低功率 <strong>${{halfSeconds==null?'—':fmt(halfSeconds,3)+' s'}}</strong></div><div class="metric">门槛差值 <strong>${{gateDelta}}</strong></div><div class="metric">Hold confirm <strong>${{holdBadge(hold)}}</strong></div><div class="metric">overshoot / p2p <strong>${{overshoot}} / ${{p2p}}</strong></div>${{failure}}</article>`;
 }}).join('');
 let active=DATA.targets[0].targetTempC;
 tabs.innerHTML=DATA.targets.map((target,index)=>`<button class="${{index===0?'active':''}}" data-target="${{target.targetTempC}}">${{target.targetTempC}}°C</button>`).join('');
@@ -994,7 +1018,7 @@ tabs.onclick=e=>{{if(!e.target.dataset.target)return;active=Number(e.target.data
 function currentTarget(){{return DATA.targets.find(target=>target.targetTempC===active);}}
 function frame(canvas){{const rect=canvas.getBoundingClientRect();const dpr=window.devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);return [c,rect.width,rect.height];}}
 function plotSeconds(sample,warmupExitElapsedMs){{if(sample.approachElapsedMs!=null)return sample.approachElapsedMs/1000;if(warmupExitElapsedMs==null||sample.elapsedMs==null)return null;return (sample.elapsedMs-warmupExitElapsedMs)/1000;}}
-function chartSeries(variant){{const warmupExitElapsedMs=variant.metrics?.warmupExit?.elapsedMs??null;return variant.samples.map(sample=>({{...sample,plotSeconds:plotSeconds(sample,warmupExitElapsedMs)}})).filter(sample=>sample.plotSeconds!=null&&sample.plotSeconds>=-PRE_CONTEXT_SECONDS);}}
+function chartSeries(variant){{if(!variant||!Array.isArray(variant.samples))return[];const warmupExitElapsedMs=variant.metrics?.warmupExit?.elapsedMs??null;return variant.samples.map(sample=>({{...sample,plotSeconds:plotSeconds(sample,warmupExitElapsedMs)}})).filter(sample=>sample.plotSeconds!=null&&sample.plotSeconds>=-PRE_CONTEXT_SECONDS);}}
 function drawApproach(){{const [c,w,h]=frame(document.querySelector('#approachChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const target=currentTarget();const zero=target.variants.find(v=>v.variantId==='zero_coast');const half=target.variants.find(v=>v.variantId==='half_floor_50');const zeroSeries=chartSeries(zero);const halfSeries=chartSeries(half);const all=[...zeroSeries,...halfSeries];let minX=Math.min(...all.map(sample=>sample.plotSeconds),-PRE_CONTEXT_SECONDS);let maxX=Math.max(...all.map(sample=>sample.plotSeconds),0.5);if(maxX-minX<1)maxX=minX+1;const temps=all.map(sample=>sample.currentTempC);const targetMin=target.targetTempC-1.5,targetMax=target.targetTempC+1.5;const yMin=Math.min(...temps,targetMin)-1;const yMax=Math.max(...temps,targetMax)+1;const x=seconds=>m.l+((seconds-minX)/(maxX-minX))*pw;const y=value=>m.t+((yMax-value)/(yMax-yMin))*ph;
 c.fillStyle='rgba(102,113,122,.05)';c.fillRect(m.l,m.t,Math.max(0,x(0)-m.l),ph);
 c.fillStyle=COLORS.band;c.fillRect(m.l,y(targetMax),pw,y(targetMin)-y(targetMax));
@@ -1010,18 +1034,31 @@ function drawDurations(){{const [c,w,h]=frame(document.querySelector('#durationC
 for(let i=0;i<=4;i++){{const yy=m.t+ph*i/4;c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(m.l,yy);c.lineTo(w-m.r,yy);c.stroke();const value=maxY-(maxY*i/4);c.fillStyle=COLORS.text;c.font='11px ui-monospace,monospace';c.fillText(fmt(value,1)+'s',8,yy+4);}}
 DATA.targets.forEach((target,index)=>{{const zero=target.variants.find(v=>v.variantId==='zero_coast').metrics.approachDurationMs/1000;const half=target.variants.find(v=>v.variantId==='half_floor_50').metrics.approachDurationMs/1000;const baseX=m.l+index*xStep+xStep/2;c.fillStyle=COLORS.zero;c.fillRect(baseX-barWidth-2,y(zero),barWidth,m.t+ph-y(zero));c.fillStyle=COLORS.half;c.fillRect(baseX+2,y(half),barWidth,m.t+ph-y(half));c.fillStyle=COLORS.text;c.fillText(target.targetTempC+'°C',baseX-16,h-10);}});
 }}
-function renderFacts(){{const target=currentTarget();const zero=target.variants.find(v=>v.variantId==='zero_coast');const half=target.variants.find(v=>v.variantId==='half_floor_50');document.querySelector('#facts').innerHTML=[
-['0加热用时',fmt(zero.metrics.approachDurationMs/1000,3)+' s'],
-['50%最低功率用时',fmt(half.metrics.approachDurationMs/1000,3)+' s'],
-['0加热 brake',String(zero.tunedPoint.brakeDistanceCentiC)],
-['50%最低功率 brake',String(half.tunedPoint.brakeDistanceCentiC)],
-['50%最低功率 half-floor',String(half.halfFloorPermille)+' ‰'],
-['0加热 warmup 退出温度',fmt(zero.metrics.warmupExit.tempC,2)+' °C'],
-['50%最低功率 warmup 退出温度',fmt(half.metrics.warmupExit.tempC,2)+' °C'],
-['0加热 source 平均功率',fmt(zero.metrics.sourceStats.powerMw.avg/1000,2)+' W'],
+function renderFacts(){{const target=currentTarget();const zero=variantFor(target,'zero_coast');const half=variantFor(target,'half_floor_50');const hold=target.holdCheck||null;const facts=[
+['0加热用时',zero?.metrics?.approachDurationMs==null?'—':fmt(zero.metrics.approachDurationMs/1000,3)+' s'],
+['50%最低功率用时',half?.metrics?.approachDurationMs==null?'—':fmt(half.metrics.approachDurationMs/1000,3)+' s'],
+['0加热 brake',zero?.tunedPoint?.brakeDistanceCentiC==null?'—':String(zero.tunedPoint.brakeDistanceCentiC)],
+['50%最低功率 brake',half?.tunedPoint?.brakeDistanceCentiC==null?'—':String(half.tunedPoint.brakeDistanceCentiC)],
+['50%最低功率 half-floor',half?.halfFloorPermille==null?'—':String(half.halfFloorPermille)+' ‰'],
+['0加热 warmup 退出温度',zero?.metrics?.warmupExit?.tempC==null?'—':fmt(zero.metrics.warmupExit.tempC,2)+' °C'],
+['50%最低功率 warmup 退出温度',half?.metrics?.warmupExit?.tempC==null?'—':fmt(half.metrics.warmupExit.tempC,2)+' °C'],
+['0加热 source 摘要',sourceMetricText(zero?.metrics?.sourceStats)],
+['50%最低功率 source 摘要',sourceMetricText(half?.metrics?.sourceStats)],
 ['warmup 参考窗口',fmt(PRE_CONTEXT_SECONDS,1)+' s'],
 ['0 秒虚线', 'warmup→approach'],
-].map(item=>`<div class="fact"><label>${{item[0]}}</label><strong>${{item[1]}}</strong></div>`).join('');}}
+];if(hold){{facts.push(
+['Hold confirm',hold.passed?'PASS':'FAIL'],
+['Hold failure reason',hold.failureReason||'—'],
+['Hold seconds',hold.holdSeconds==null?'—':fmtInt(hold.holdSeconds)+' s'],
+['firstHoldAtMs',hold.firstHoldAtMs==null?'—':fmtInt(hold.firstHoldAtMs)+' ms'],
+['maxOvershootC',hold.maxOvershootC==null?'—':fmt(hold.maxOvershootC,2)+' °C'],
+['holdPeakToPeakC',hold.holdPeakToPeakC==null?'—':fmt(hold.holdPeakToPeakC,2)+' °C'],
+['holdMedianOutputPermille',hold.holdMedianOutputPermille==null?'—':fmtInt(hold.holdMedianOutputPermille)+' ‰'],
+['holdP90OutputPermille',hold.holdP90OutputPermille==null?'—':fmtInt(hold.holdP90OutputPermille)+' ‰'],
+['confirm run id',hold.confirmRunId||'—'],
+['Approach source 摘要',sourceMetricText(hold.approachSource)],
+['Hold source 摘要',sourceMetricText(hold.holdSource)],
+);}}document.querySelector('#facts').innerHTML=facts.map(item=>`<div class="fact"><label>${{item[0]}}</label><strong>${{item[1]}}</strong></div>`).join('');}}
 function renderAll(){{drawApproach();drawDurations();renderFacts();}}
 new ResizeObserver(renderAll).observe(document.body);
 renderAll();
@@ -1200,6 +1237,7 @@ def main() -> int:
         "selectedMode": source_payload["selectedMode"],
         "resolvedBank": source_payload["resolvedBank"],
         "detectedSourceClass": source_payload["detectedSourceClass"],
+        "acceptedProfileRole": "seed_profile_snapshot",
         "target": target_payload,
         "source": source_payload,
         "seedProfileFile": str(args.profile_file),

@@ -33,6 +33,7 @@
 
 - `pps3a` / 65W 稀疏 acceptance bundle 已存在，并继续作为 3A 当前基准。
 - `pps5a` / 100W 路径已经具备 source-class 识别、bank 解析、preview seed、retune、approach characterization 与报告链路；`thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/` 已作为当前 5A approach-reference 当前真相。
+- `thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/` 已作为当前 5A preliminary review bundle：顶层回显 `bundleDisposition=preliminary_review`、`acceptedProfileRole=review_candidate_snapshot`、`selectedMode=100w`、`resolvedBank=pps5a`、`detectedSourceClass=pps5a`，并为 `60 / 140 / 220°C` 三个 tab 分别附带 `holdCheck`。当前三点单点 `60s` confirm 指标分别为：`60°C => overshoot 0.75 / p2p 1.71`、`140°C => overshoot 1.73 / p2p 2.94`、`220°C => overshoot 1.11 / p2p 1.59`。
 - 当前 100W 剩余工作不在 characterization 采集本身，而在后续把这些双曲线门槛进一步 materialize 到 retune / acceptance 判定与最终 accepted baseline。
 
 ## Remaining Gaps
