@@ -923,6 +923,8 @@ canvas{{width:100%;height:100%;display:block}}
 .fact strong{{font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace}}
 .legend{{display:flex;gap:12px;align-items:center;color:var(--muted);font-size:12px;margin-top:8px}}
 .dot{{display:inline-block;width:10px;height:10px;border-radius:999px}}
+.line-swatch{{display:inline-block;width:14px;height:0;border-top:2px solid currentColor;vertical-align:middle;margin-right:4px}}
+.line-swatch.dashed{{border-top-style:dashed}}
 .provenance{{margin-top:18px;color:var(--muted);font-size:12px}}
 @media(max-width:900px){{.shell{{padding:14px}}.topbar{{display:block}}.stamp{{text-align:left;margin-top:8px}}.summary{{grid-template-columns:1fr}}.facts{{grid-template-columns:1fr 1fr}}}}
 </style>
@@ -933,7 +935,7 @@ canvas{{width:100%;height:100%;display:block}}
   <div>
     <div class="eyebrow">Flux Purr / Approach Characterization</div>
     <h1>逼近阶段双曲线采样报告</h1>
-    <div class="subtitle">每个目标温度都给出两条实测 Approach 曲线：0加热滑行曲线，以及 50% 最低功率加热曲线。横轴从 warmup 退出开始归零，只显示 Approach 采样窗口，不混入 Hold 曲线。</div>
+    <div class="subtitle">每个目标温度都给出两条实测 Approach 曲线：0加热滑行曲线，以及 50% 最低功率加热曲线。横轴保留 warmup 退出前 3 秒参考窗口；0 秒垂直虚线标记 warmup → approach；曲线在进带并出现可见回落后截断，不混入 Hold 曲线。</div>
     <div class="meta">
       <span>选择模式 <b>{bundle["source"]["selectedMode"]}</b></span>
       <span>EEPROM bank <b>{bundle["source"]["resolvedBank"]}</b></span>
@@ -954,13 +956,14 @@ canvas{{width:100%;height:100%;display:block}}
 <section class="panel">
   <div class="panel-title">
     <h3>Approach 时间-温度曲线</h3>
-    <span>横轴从 warmup 退出开始；绿色带为 ±1.5°C 目标区间</span>
+    <span>保留 warmup 尾段 3 秒参考窗；0 秒虚线为 warmup → approach 分界；绿色带为 ±1.5°C 目标区间</span>
   </div>
   <div class="chart-wrap"><canvas id="approachChart"></canvas></div>
   <div class="legend">
     <span><i class="dot" style="background:#1261a0"></i> 0加热</span>
     <span><i class="dot" style="background:#c23b32"></i> 50%最低功率加热</span>
     <span><i class="dot" style="background:#18794e"></i> 目标区间</span>
+    <span><i class="line-swatch dashed" style="color:#66717a"></i> warmup → approach 分界</span>
   </div>
   <div class="facts" id="facts"></div>
 </section>
@@ -976,6 +979,7 @@ canvas{{width:100%;height:100%;display:block}}
 <script>
 const DATA={data_json};
 const COLORS={{zero:'#1261a0',half:'#c23b32',band:'rgba(24,121,78,.12)',grid:'#e8ebed',text:'#66717a',ink:'#182026'}};
+const PRE_CONTEXT_SECONDS=3.0;
 function fmt(n,d=2){{return n==null?'—':Number(n).toFixed(d)}}
 const tabs=document.querySelector('#targetTabs');
 const summary=document.querySelector('#summary');
@@ -989,13 +993,18 @@ tabs.innerHTML=DATA.targets.map((target,index)=>`<button class="${{index===0?'ac
 tabs.onclick=e=>{{if(!e.target.dataset.target)return;active=Number(e.target.dataset.target);tabs.querySelectorAll('button').forEach(button=>button.classList.toggle('active', Number(button.dataset.target)===active));renderAll();}};
 function currentTarget(){{return DATA.targets.find(target=>target.targetTempC===active);}}
 function frame(canvas){{const rect=canvas.getBoundingClientRect();const dpr=window.devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);return [c,rect.width,rect.height];}}
-function drawApproach(){{const [c,w,h]=frame(document.querySelector('#approachChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const target=currentTarget();const zero=target.variants.find(v=>v.variantId==='zero_coast');const half=target.variants.find(v=>v.variantId==='half_floor_50');const all=[...zero.samples,...half.samples].filter(sample=>sample.approachElapsedMs!=null);const maxX=Math.max(...all.map(sample=>sample.approachElapsedMs))/1000;const temps=all.map(sample=>sample.currentTempC);const targetMin=target.targetTempC-1.5,targetMax=target.targetTempC+1.5;const yMin=Math.min(...temps,targetMin)-1;const yMax=Math.max(...temps,targetMax)+1;const x=x=>m.l+(x/maxX)*pw;const y=value=>m.t+((yMax-value)/(yMax-yMin))*ph;
+function plotSeconds(sample,warmupExitElapsedMs){{if(sample.approachElapsedMs!=null)return sample.approachElapsedMs/1000;if(warmupExitElapsedMs==null||sample.elapsedMs==null)return null;return (sample.elapsedMs-warmupExitElapsedMs)/1000;}}
+function chartSeries(variant){{const warmupExitElapsedMs=variant.metrics?.warmupExit?.elapsedMs??null;return variant.samples.map(sample=>({{...sample,plotSeconds:plotSeconds(sample,warmupExitElapsedMs)}})).filter(sample=>sample.plotSeconds!=null&&sample.plotSeconds>=-PRE_CONTEXT_SECONDS);}}
+function drawApproach(){{const [c,w,h]=frame(document.querySelector('#approachChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const target=currentTarget();const zero=target.variants.find(v=>v.variantId==='zero_coast');const half=target.variants.find(v=>v.variantId==='half_floor_50');const zeroSeries=chartSeries(zero);const halfSeries=chartSeries(half);const all=[...zeroSeries,...halfSeries];let minX=Math.min(...all.map(sample=>sample.plotSeconds),-PRE_CONTEXT_SECONDS);let maxX=Math.max(...all.map(sample=>sample.plotSeconds),0.5);if(maxX-minX<1)maxX=minX+1;const temps=all.map(sample=>sample.currentTempC);const targetMin=target.targetTempC-1.5,targetMax=target.targetTempC+1.5;const yMin=Math.min(...temps,targetMin)-1;const yMax=Math.max(...temps,targetMax)+1;const x=seconds=>m.l+((seconds-minX)/(maxX-minX))*pw;const y=value=>m.t+((yMax-value)/(yMax-yMin))*ph;
+c.fillStyle='rgba(102,113,122,.05)';c.fillRect(m.l,m.t,Math.max(0,x(0)-m.l),ph);
 c.fillStyle=COLORS.band;c.fillRect(m.l,y(targetMax),pw,y(targetMin)-y(targetMax));
 for(let i=0;i<=4;i++){{const yy=m.t+ph*i/4;c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(m.l,yy);c.lineTo(w-m.r,yy);c.stroke();const value=yMax-((yMax-yMin)*i/4);c.fillStyle=COLORS.text;c.font='11px ui-monospace,monospace';c.fillText(fmt(value,1),8,yy+4);}}
-for(let i=0;i<=5;i++){{const xx=m.l+pw*i/5;c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(xx,m.t);c.lineTo(xx,m.t+ph);c.stroke();c.fillStyle=COLORS.text;c.fillText(fmt(maxX*i/5,1)+'s',xx-10,h-10);}}
-function line(samples,color){{c.beginPath();let started=false;for(const sample of samples){{if(sample.approachElapsedMs==null)continue;const xx=x(sample.approachElapsedMs/1000),yy=y(sample.currentTempC);if(!started){{c.moveTo(xx,yy);started=true;}}else{{c.lineTo(xx,yy);}}}}c.strokeStyle=color;c.lineWidth=2;c.stroke();}}
-line(zero.samples,COLORS.zero);line(half.samples,COLORS.half);
-c.strokeStyle=COLORS.ink;c.setLineDash([5,4]);c.beginPath();c.moveTo(m.l,y(target.targetTempC));c.lineTo(w-m.r,y(target.targetTempC));c.stroke();c.setLineDash([]);
+for(let i=0;i<=6;i++){{const seconds=minX+((maxX-minX)*i/6);const xx=x(seconds);c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(xx,m.t);c.lineTo(xx,m.t+ph);c.stroke();c.fillStyle=COLORS.text;c.fillText(fmt(seconds,1)+'s',xx-12,h-10);}}
+function line(samples,color){{c.beginPath();let started=false;for(const sample of samples){{const xx=x(sample.plotSeconds),yy=y(sample.currentTempC);if(!started){{c.moveTo(xx,yy);started=true;}}else{{c.lineTo(xx,yy);}}}}c.strokeStyle=color;c.lineWidth=2;c.stroke();}}
+line(zeroSeries,COLORS.zero);line(halfSeries,COLORS.half);
+c.strokeStyle='#18794e';c.lineWidth=1.5;c.beginPath();c.moveTo(m.l,y(target.targetTempC));c.lineTo(w-m.r,y(target.targetTempC));c.stroke();
+c.strokeStyle=COLORS.text;c.lineWidth=1.5;c.setLineDash([6,4]);c.beginPath();c.moveTo(x(0),m.t);c.lineTo(x(0),m.t+ph);c.stroke();c.setLineDash([]);
+c.fillStyle=COLORS.text;c.font='11px ui-sans-serif,system-ui';c.fillText('warmup→approach',Math.min(w-m.r-92,x(0)+6),m.t+12);
 }}
 function drawDurations(){{const [c,w,h]=frame(document.querySelector('#durationChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const durations=DATA.targets.flatMap(target=>target.variants.map(variant=>variant.metrics.approachDurationMs/1000));const maxY=Math.max(...durations,10);const xStep=pw/DATA.targets.length;const barWidth=xStep*0.28;const y=value=>m.t+((maxY-value)/maxY)*ph;
 for(let i=0;i<=4;i++){{const yy=m.t+ph*i/4;c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(m.l,yy);c.lineTo(w-m.r,yy);c.stroke();const value=maxY-(maxY*i/4);c.fillStyle=COLORS.text;c.font='11px ui-monospace,monospace';c.fillText(fmt(value,1)+'s',8,yy+4);}}
@@ -1010,6 +1019,8 @@ function renderFacts(){{const target=currentTarget();const zero=target.variants.
 ['0加热 warmup 退出温度',fmt(zero.metrics.warmupExit.tempC,2)+' °C'],
 ['50%最低功率 warmup 退出温度',fmt(half.metrics.warmupExit.tempC,2)+' °C'],
 ['0加热 source 平均功率',fmt(zero.metrics.sourceStats.powerMw.avg/1000,2)+' W'],
+['warmup 参考窗口',fmt(PRE_CONTEXT_SECONDS,1)+' s'],
+['0 秒虚线', 'warmup→approach'],
 ].map(item=>`<div class="fact"><label>${{item[0]}}</label><strong>${{item[1]}}</strong></div>`).join('');}}
 function renderAll(){{drawApproach();drawDurations();renderFacts();}}
 new ResizeObserver(renderAll).observe(document.body);
