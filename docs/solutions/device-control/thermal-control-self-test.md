@@ -63,6 +63,8 @@ For long-lived comparison and retuning, freeze an accepted baseline bundle inste
 
 Do not treat local MHTML snapshots as the primary artifact. The canonical owner-facing deliverable is the HTML bundle.
 
+For approach-curve fitting, use the same canonical bundle shape. A dedicated `thermal_approach_characterization` bundle may freeze per-target approach-only traces without turning the live run directory into another report format.
+
 The report and bundle must preserve source-aware metadata:
 
 - `selectedMode`
@@ -155,6 +157,19 @@ Ambient temperature is still useful, but only as an optional compensation term l
 
 Use sparse focused tuning during iteration. Reserve the full supported ladder for final acceptance.
 
+For dedicated approach characterization:
+
+- collect one `zero_coast` curve and one `half_floor_50` curve for each target temperature
+- start each curve at `warmup -> approach` handoff
+- stop the curve only after the sample stream shows both:
+  - first entry into the target band
+  - a visible rollback from the peak while still remaining in-band
+- reject any trace that reaches `hold` before that rollback evidence exists
+- use the `zero_coast` approach duration as the hard limit gate
+- use the `half_floor_50` approach duration as the preferred target gate
+
+If the brake search times out before entering the band, or never even reaches `approach`, classify the result as `more_heat`. Do not let those cases fall back to a neutral direction; otherwise high-temperature characterization can incorrectly jump back toward larger brake distances and waste real HIL time.
+
 ## Validation gates
 
 The saved-profile acceptance contract remains:
@@ -229,4 +244,5 @@ If the local daemon stops serving the active hardware path:
 - `docs/specs/q2aw6-heater-pid-frontpanel-runtime/SPEC.md`
 - `docs/specs/m8r4q-real-control-plane-runtime/SPEC.md`
 - `thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/`
+- `thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/`
 - `thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json`

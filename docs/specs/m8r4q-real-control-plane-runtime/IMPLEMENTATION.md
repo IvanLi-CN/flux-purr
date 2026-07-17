@@ -14,6 +14,8 @@
 - runtime status、runtime config、CLI 与 self-test 已统一支持 `thermalProfileMode=auto|65w|100w` 与 `thermalProfileResolvedBank`。显式 `65w` / `100w` 为强制档；`auto` 仅按 source capability class 在 `pps3a` / `pps5a` 间解析，不按 live current 自动回退。
 - `flux-purr thermal profile preview|save|clear-saved` 已是 bank-aware 路径。`preview` 仍是单一 RAM overlay；显式 `save` / `clear-saved` 会携带目标 bank，`auto` 下会先读取 runtime status 再解析当前 resolved bank。
 - `flux-purr thermal self-test` 已支持 source-aware `auto|65w|100w`。65W 维持 `20V / 3.25A` 语义，100W 使用 `21V / 5A` 语义。报告与 HTML 已保留 `selectedMode`、`resolvedBank`、`detectedSourceClass`、source preset/readback 以及 per-stage `analysis.approachSource` / `analysis.holdSource`。
+- `scripts/thermal_approach_characterization.py` 已支持 `100w / pps5a` 的 per-target dual-approach characterization：同一目标温度同时采集 `0加热` 与 `50%最低功率` 的 approach-only 曲线，并输出 canonical HTML bundle。当前冻结总报告位于 `thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/`，覆盖 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C` 九个目标温度。
+- approach characterization 的 brake 搜索当前真相是：`timeout_without_valid_rollback` 在未进入目标带时、以及 `never_entered_approach`，都必须继续归类为 `more_heat`。否则高温点会错误回跳到更大的 brake，浪费真机轮次。
 - `pps3a` 默认 seed 来自 committed 65W accepted bundle。`pps5a` 在 committed accepted bundle 缺失时回退到 repo-local tuning seed `thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json`。当前 100W 路径已具备 end-to-end bank、source metadata、preview/save/retune 语义，但 `pps5a` accepted EEPROM save 与 frozen baseline 仍未收口。
 - thermal self-test 默认调优阶梯为 `60 / 140 / 220°C`；支持的完整 ladder 为 `60 / 100 / 140 / 180 / 220 / 250°C`。`300°C` 不属于首版验收。默认 host sampling interval 为 `300ms`，持续采样下限为 `3Hz`；accepted comparison bundle 可以使用更高采样率。
 - 当前固件与 host 工具链已统一 warmup 语义：只要 heater state machine 仍在 `warmup`，输出就保持 `100%`，host readback / candidate import / replay / report 都必须把 `warmupPowerPermille=1000` 视为唯一有效运行值。
@@ -30,12 +32,12 @@
 ## Thermal acceptance state
 
 - `pps3a` / 65W 稀疏 acceptance bundle 已存在，并继续作为 3A 当前基准。
-- `pps5a` / 100W 路径已经具备 source-class 识别、bank 解析、preview seed、retune 与报告链路，但 accepted EEPROM save 与 frozen baseline 仍待完成。
-- 当前 100W 剩余 blocker 已收敛到 focused low-temperature stability，而不是 source capability、bank 解析、owner-facing 温度链路、warmup 功率语义或报告 schema。
+- `pps5a` / 100W 路径已经具备 source-class 识别、bank 解析、preview seed、retune、approach characterization 与报告链路；`thermal-self-test-runs/approach-characterization-pd100w-pps5a-20260717-final/` 已作为当前 5A approach-reference 当前真相。
+- 当前 100W 剩余工作不在 characterization 采集本身，而在后续把这些双曲线门槛进一步 materialize 到 retune / acceptance 判定与最终 accepted baseline。
 
 ## Remaining Gaps
 
-- `pps5a` accepted EEPROM save 与 frozen baseline bundle 仍未完成；100W 路径尚未形成 committed accepted bundle。
+- `pps5a` accepted EEPROM save 与 frozen baseline bundle 仍未完成；100W 路径虽已有 approach characterization current truth，但尚未形成 committed accepted bundle。
 - direct firmware HTTP / `net_http` server 仍未实现；当前真实硬件 runtime 控制路径仍以 browser Web Serial 或 Web / CLI -> `devd` -> USB JSONL 为准。
 - 完整 artifact catalog 管理页不属于本 spec 范围。
 - macOS 打开 ESP32-S3 USB Serial/JTAG port 仍可能触发一次设备 reset；`devd` 的稳定性契约仍是避免 Web / daemon polling 期间反复 open / close 造成持续重启。
