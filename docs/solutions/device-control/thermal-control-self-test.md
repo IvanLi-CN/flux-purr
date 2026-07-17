@@ -165,8 +165,8 @@ For dedicated approach characterization:
   - first entry into the target band
   - a visible rollback from the peak while still remaining in-band
 - reject any trace that reaches `hold` before that rollback evidence exists
-- use the `zero_coast` approach duration as the hard limit gate
-- use the `half_floor_50` approach duration as the preferred target gate
+- use the `zero_coast` approach duration as the pass/fail upper bound: an accepted tuned result must not be slower than this curve
+- use the `half_floor_50` approach duration as the preferred best target: when stability still holds, tuning should push as close as practical to this faster curve
 
 If the brake search times out before entering the band, or never even reaches `approach`, classify the result as `more_heat`. Do not let those cases fall back to a neutral direction; otherwise high-temperature characterization can incorrectly jump back toward larger brake distances and waste real HIL time.
 
