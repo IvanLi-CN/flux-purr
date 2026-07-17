@@ -313,6 +313,12 @@ const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 8;
 const RTD_MIN_VALID_SAMPLE_COUNT: usize = 48;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_CONTROL_SAMPLE_STABLE_AFTER_REQUEST_MS: u64 = 300;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_GLITCH_MAX_STEP_TEMP_C: f32 = 12.0;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_GLITCH_MAX_STEP_RAW_ADC_DELTA_MV: u16 = 60;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -412,6 +418,7 @@ enum HeaterFaultReason {
     SensorShort,
     SensorOpen,
     AdcReadFailed,
+    SensorGlitch,
     OverTemp,
 }
 
@@ -422,6 +429,7 @@ impl HeaterFaultReason {
             Self::SensorShort => "sensor-short",
             Self::SensorOpen => "sensor-open",
             Self::AdcReadFailed => "adc-read-failed",
+            Self::SensorGlitch => "sensor-glitch",
             Self::OverTemp => "over-temp",
         }
     }
@@ -1361,11 +1369,13 @@ fn warmup_handoff_ready(
     handoff_error_c: f32,
 ) -> bool {
     let predictive_actual_margin_c = 1.0;
+    let max_filtered_lag_for_static_brake_c = 3.0;
     let actual_handoff_delta_c = previous_actual_error_c - actual_error_c;
     let actual_step_confirmed = actual_handoff_delta_c <= handoff_error_c + 1.0;
     let previous_handoff_confirmed = previous_actual_error_c <= handoff_error_c + 1.0;
     let actual_brake_confirmed = actual_error_c <= brake_distance_c
         && previous_actual_error_c <= brake_distance_c + 0.5
+        && filtered_error_c <= brake_distance_c + max_filtered_lag_for_static_brake_c
         && actual_step_confirmed;
     let predictive_actual_confirmed = actual_error_c
         <= brake_distance_c + predictive_actual_margin_c
@@ -2034,6 +2044,7 @@ fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
             HeaterFaultReason::SensorShort
                 | HeaterFaultReason::SensorOpen
                 | HeaterFaultReason::AdcReadFailed
+                | HeaterFaultReason::SensorGlitch
         )
     )
 }
@@ -2299,6 +2310,7 @@ fn clear_runtime_display_temperature(
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct RtdPpsTransitionGuard {
     request_mv: Option<u16>,
+    blocked_until_ms: Option<u64>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2310,10 +2322,25 @@ impl RtdPpsTransitionGuard {
         }
     }
 
-    fn observe(&mut self, request_mv: u16, _now_ms: u64) -> (bool, bool) {
+    fn observe(&mut self, request_mv: u16, now_ms: u64) -> (bool, bool) {
         let request_changed = self.request_mv != Some(request_mv);
         self.request_mv = Some(request_mv);
-        (true, request_changed)
+        if request_changed {
+            self.blocked_until_ms =
+                Some(now_ms.saturating_add(RTD_CONTROL_SAMPLE_STABLE_AFTER_REQUEST_MS));
+            return (false, true);
+        }
+
+        let accept_control_sample = match self.blocked_until_ms {
+            Some(blocked_until_ms) if now_ms < blocked_until_ms => false,
+            Some(_) => {
+                self.blocked_until_ms = None;
+                true
+            }
+            None => true,
+        };
+
+        (accept_control_sample, false)
     }
 }
 
@@ -2326,11 +2353,11 @@ fn accept_rtd_control_sample_after_pps_transition(
     now_ms: u64,
     measurement_temp_c: f32,
 ) -> Option<f32> {
-    let (_accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
+    let (accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
     if reseed_filter {
         heater_controller.reseed_measurement(last_control_temp_c);
     }
-    Some(measurement_temp_c)
+    accept_control_sample.then_some(measurement_temp_c)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2343,6 +2370,62 @@ fn should_retry_rtd_sample_after_power_step(
     previous_request_mv != current_request_mv
         || previous_vin_raw_adc_mv.abs_diff(current_vin_raw_adc_mv)
             >= RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn is_implausible_rtd_step(
+    previous_temp_c: f32,
+    current_temp_c: f32,
+    previous_raw_adc_mv: u16,
+    current_raw_adc_mv: u16,
+) -> bool {
+    (current_temp_c - previous_temp_c).abs() >= RTD_GLITCH_MAX_STEP_TEMP_C
+        || previous_raw_adc_mv.abs_diff(current_raw_adc_mv) >= RTD_GLITCH_MAX_STEP_RAW_ADC_DELTA_MV
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn should_retry_rtd_sample_after_glitch(
+    previous_temp_c: f32,
+    previous_raw_adc_mv: u16,
+    sample: &RtdSample,
+) -> bool {
+    if previous_raw_adc_mv == 0 {
+        return false;
+    }
+    match sample {
+        RtdSample::Valid(measurement) => is_implausible_rtd_step(
+            previous_temp_c,
+            measurement.temp_c,
+            previous_raw_adc_mv,
+            measurement.raw_adc_mv,
+        ),
+        RtdSample::Fault { .. } => false,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn reconcile_rtd_sample_after_glitch_retry(
+    previous_temp_c: f32,
+    previous_raw_adc_mv: u16,
+    retry_sample: RtdSample,
+) -> RtdSample {
+    match retry_sample {
+        RtdSample::Valid(measurement)
+            if is_implausible_rtd_step(
+                previous_temp_c,
+                measurement.temp_c,
+                previous_raw_adc_mv,
+                measurement.raw_adc_mv,
+            ) =>
+        {
+            RtdSample::Fault {
+                adc_mv: Some(measurement.raw_adc_mv),
+                reason: HeaterFaultReason::SensorGlitch,
+            }
+        }
+        other => other,
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2498,7 +2581,7 @@ fn temp_c_to_whole_c(temp_c: f32) -> i16 {
     rounded.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RtdMeasurement {
     raw_adc_mv: u16,
@@ -2508,7 +2591,7 @@ struct RtdMeasurement {
     current_temp_c: i16,
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum RtdSample {
     Valid(RtdMeasurement),
@@ -7468,6 +7551,8 @@ async fn main(_spawner: Spawner) {
                 .unwrap_or_default();
 
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
+            let previous_rtd_raw_adc_mv = latest_rtd_raw_adc_mv;
+            let previous_temp_c = latest_temp_c;
             let current_request_mv = heater_power_backend.pd_request_mv();
             let mut rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
             let first_rtd_snapshot = match &rtd_sample {
@@ -7514,6 +7599,44 @@ async fn main(_spawner: Spawner) {
                         second_rtd_snapshot,
                     );
                 }
+            }
+
+            if should_retry_rtd_sample_after_glitch(
+                previous_temp_c,
+                previous_rtd_raw_adc_mv,
+                &rtd_sample,
+            ) {
+                let retry_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
+                let retry_rtd_snapshot = match &retry_sample {
+                    RtdSample::Valid(measurement) => {
+                        (measurement.raw_adc_mv, measurement.temp_c, "valid")
+                    }
+                    RtdSample::Fault { adc_mv, reason } => {
+                        (adc_mv.unwrap_or(0), 0.0, reason.label())
+                    }
+                };
+                let reconciled_rtd_sample = reconcile_rtd_sample_after_glitch_retry(
+                    previous_temp_c,
+                    previous_rtd_raw_adc_mv,
+                    retry_sample,
+                );
+                let reconciled_rtd_label = match &reconciled_rtd_sample {
+                    RtdSample::Valid(_) => "accepted",
+                    RtdSample::Fault { reason, .. } => reason.label(),
+                };
+                info!(
+                    "rtd glitch retry prev_raw_adc_mv={=u16} prev_temp_c={=f32} first_raw_adc_mv={=u16} first_temp_c={=f32} first_status={=str} retry_raw_adc_mv={=u16} retry_temp_c={=f32} retry_status={=str} resolved={=str}",
+                    previous_rtd_raw_adc_mv,
+                    previous_temp_c,
+                    first_rtd_snapshot.0,
+                    first_rtd_snapshot.1,
+                    first_rtd_snapshot.2,
+                    retry_rtd_snapshot.0,
+                    retry_rtd_snapshot.1,
+                    retry_rtd_snapshot.2,
+                    reconciled_rtd_label,
+                );
+                rtd_sample = reconciled_rtd_sample;
             }
 
             match rtd_sample {
@@ -9140,8 +9263,13 @@ mod tests {
     }
 
     #[test]
-    fn warmup_handoff_uses_actual_temperature_inside_static_brake() {
-        assert!(warmup_handoff_ready(4.9, 5.2, 20.4, 5.0, 14.9));
+    fn warmup_handoff_accepts_actual_temperature_inside_static_brake_with_bounded_filter_lag() {
+        assert!(warmup_handoff_ready(4.9, 5.2, 7.8, 5.0, 14.9));
+    }
+
+    #[test]
+    fn warmup_handoff_rejects_actual_temperature_inside_static_brake_when_filter_is_far_behind() {
+        assert!(!warmup_handoff_ready(4.9, 5.2, 20.4, 5.0, 14.9));
     }
 
     #[test]
@@ -12155,9 +12283,10 @@ mod tests {
     fn rtd_pps_transition_guard_accepts_immediately_and_reseeds_on_request_change() {
         let mut guard = RtdPpsTransitionGuard::new(21_000);
         assert_eq!(guard.observe(21_000, 0), (true, false));
-        assert_eq!(guard.observe(20_500, 40), (true, true));
-        assert_eq!(guard.observe(20_000, 240), (true, true));
-        assert_eq!(guard.observe(20_000, 539), (true, false));
+        assert_eq!(guard.observe(20_500, 40), (false, true));
+        assert_eq!(guard.observe(20_000, 240), (false, true));
+        assert_eq!(guard.observe(20_000, 520), (false, false));
+        assert_eq!(guard.observe(20_000, 540), (true, false));
         assert_eq!(guard.observe(20_000, 580), (true, false));
     }
 
@@ -12174,10 +12303,9 @@ mod tests {
             14_000,
             0,
             73.74,
-        )
-        .expect("request-step sample should stay on control path");
+        );
 
-        assert!((control_temp_c - 73.74).abs() < 0.001);
+        assert_eq!(control_temp_c, None);
         assert_eq!(controller.filtered_temp_c, Some(last_control_temp_c));
         assert_eq!(
             controller.previous_filtered_temp_c,
@@ -12205,6 +12333,57 @@ mod tests {
         assert!(!should_retry_rtd_sample_after_power_step(
             18_000, 18_000, 1_170, 1_200
         ));
+    }
+
+    #[test]
+    fn rtd_glitch_detection_rejects_large_temp_jump() {
+        assert!(is_implausible_rtd_step(62.49, 48.14, 997, 967));
+    }
+
+    #[test]
+    fn rtd_glitch_detection_rejects_large_raw_adc_jump() {
+        assert!(is_implausible_rtd_step(91.55, 158.89, 1_055, 1_176));
+    }
+
+    #[test]
+    fn rtd_glitch_detection_accepts_normal_heating_step() {
+        assert!(!is_implausible_rtd_step(60.81, 61.37, 980, 982));
+    }
+
+    #[test]
+    fn rtd_glitch_retry_promotes_persistent_jump_to_sensor_fault() {
+        let retry_sample = RtdSample::Valid(RtdMeasurement {
+            raw_adc_mv: 1_176,
+            adc_mv: 1_176,
+            resistance_ohms: 1_605.39,
+            temp_c: 158.89,
+            current_temp_c: 159,
+        });
+
+        let reconciled = reconcile_rtd_sample_after_glitch_retry(91.55, 1_055, retry_sample);
+
+        assert_eq!(
+            reconciled,
+            RtdSample::Fault {
+                adc_mv: Some(1_176),
+                reason: HeaterFaultReason::SensorGlitch,
+            }
+        );
+    }
+
+    #[test]
+    fn rtd_glitch_retry_accepts_recovered_second_sample() {
+        let retry_sample = RtdSample::Valid(RtdMeasurement {
+            raw_adc_mv: 985,
+            adc_mv: 985,
+            resistance_ohms: 1_217.20,
+            temp_c: 56.2,
+            current_temp_c: 56,
+        });
+
+        let reconciled = reconcile_rtd_sample_after_glitch_retry(62.49, 997, retry_sample);
+
+        assert_eq!(reconciled, retry_sample);
     }
 
     #[test]
@@ -12443,12 +12622,55 @@ mod tests {
             73.74,
         ));
 
-        assert_eq!(latest_temp_c, 73.74);
-        assert_eq!(latest_temp_i16, 74);
+        assert_eq!(latest_temp_c, 41.39);
+        assert_eq!(latest_temp_i16, 41);
         assert_eq!(latest_display_temp_c, 73.74);
         assert_eq!(latest_display_temp_i16, 74);
         assert_eq!(ui_state.current_temp_c, 74);
         assert_eq!(ui_state.current_temp_deci_c, 737);
+    }
+
+    #[test]
+    fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut latest_temp_c = 41.39;
+        let mut latest_temp_i16 = 41;
+        let mut latest_display_temp_c = latest_temp_c;
+        let mut latest_display_temp_i16 = latest_temp_i16;
+        let mut guard = RtdPpsTransitionGuard::new(12_000);
+        let mut controller = HeaterController::new();
+
+        assert!(apply_valid_rtd_measurement(
+            &mut ui_state,
+            &mut latest_display_temp_c,
+            &mut latest_display_temp_i16,
+            &mut latest_temp_c,
+            &mut latest_temp_i16,
+            &mut guard,
+            &mut controller,
+            15_000,
+            100,
+            73.74,
+        ));
+        assert!(apply_valid_rtd_measurement(
+            &mut ui_state,
+            &mut latest_display_temp_c,
+            &mut latest_display_temp_i16,
+            &mut latest_temp_c,
+            &mut latest_temp_i16,
+            &mut guard,
+            &mut controller,
+            15_000,
+            450,
+            52.15,
+        ));
+
+        assert_eq!(latest_temp_c, 52.15);
+        assert_eq!(latest_temp_i16, 52);
+        assert_eq!(latest_display_temp_c, 52.15);
+        assert_eq!(latest_display_temp_i16, 52);
+        assert_eq!(ui_state.current_temp_c, 52);
+        assert_eq!(ui_state.current_temp_deci_c, 522);
     }
 
     #[test]
