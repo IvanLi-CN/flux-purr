@@ -127,6 +127,21 @@ def samples_for_target(summary: dict[str, Any], target_temp_c: int) -> list[dict
     return [normalized_sample(sample) for sample in grouped.get(int(target_temp_c), [])]
 
 
+def warmup_output_is_full(summary: dict[str, Any], target_temp_c: int) -> bool:
+    warmup_outputs = [
+        sample.get("output")
+        for sample in samples_for_target(summary, target_temp_c)
+        if sample.get("phase") == "warmup" and isinstance(sample.get("output"), (int, float))
+    ]
+    first_full_index = next(
+        (index for index, output in enumerate(warmup_outputs) if float(output) >= 99.5),
+        None,
+    )
+    return first_full_index is not None and all(
+        float(output) >= 99.5 for output in warmup_outputs[first_full_index:]
+    )
+
+
 def tuning_rounds_for_target(summary: dict[str, Any], target_temp_c: int) -> list[dict[str, Any]]:
     rounds: list[dict[str, Any]] = []
     for index, step in enumerate(summary.get("tuningSteps") or [], start=1):

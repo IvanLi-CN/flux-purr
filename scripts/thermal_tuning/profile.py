@@ -105,42 +105,27 @@ def build_initial_sparse_seed(
     settings = pick_profile_settings(preliminary_profile, fallback_profile)
     preliminary_points = point_map(preliminary_profile)
     fallback_points = point_map(fallback_profile)
-    base_targets = [60, 140, 220]
-    base_points: list[dict[str, Any]] = []
-    for target_temp_c in base_targets:
+    requested_targets = [int(target) for target in anchors_c]
+    if not requested_targets or len(set(requested_targets)) != len(requested_targets):
+        raise RuntimeError("sparse seed targets must be a non-empty unique list")
+
+    points: list[dict[str, Any]] = []
+    for target_temp_c in requested_targets:
         point = preliminary_points.get(target_temp_c) or fallback_points.get(target_temp_c)
         if point is None:
-            raise RuntimeError(f"missing required base point {target_temp_c}°C for sparse seed")
-        base_points.append(dict(point))
-
-    point_240 = preliminary_points.get(240)
-    if point_240 is None:
-        materialized_240 = dry_run_materialized_points(
-            runner,
-            sparse_profile(settings, [fallback_points[220], fallback_points[250]]),
-            [240],
-            output_dir,
-            "materialize-240",
-        )
-        point_240 = materialized_240.get(240)
-    if point_240 is None:
-        raise RuntimeError("unable to derive initial 240°C anchor")
-
-    scaffold = sparse_profile(settings, [*base_points, dict(point_240)])
-    derived = dry_run_materialized_points(runner, scaffold, [100, 180], output_dir, "materialize-100-180")
-    points = [
-        dict(base_points[0]),
-        dict(derived[100]),
-        dict(base_points[1]),
-        dict(derived[180]),
-        dict(base_points[2]),
-        dict(point_240),
-    ]
-    by_target = {int(point["targetTempC"]): point for point in points}
-    for target_temp_c in anchors_c:
-        if target_temp_c not in by_target:
-            raise RuntimeError(f"initial sparse seed missing anchor {target_temp_c}°C")
-    return sparse_profile(settings, [by_target[target] for target in anchors_c])
+            source_profile = preliminary_profile if preliminary_points else fallback_profile
+            materialized = dry_run_materialized_points(
+                runner,
+                source_profile,
+                [target_temp_c],
+                output_dir,
+                f"materialize-{target_temp_c}",
+            )
+            point = materialized.get(target_temp_c)
+        if point is None:
+            raise RuntimeError(f"initial sparse seed missing target {target_temp_c}°C")
+        points.append(dict(point))
+    return sparse_profile(settings, points)
 
 
 def normalize_sparse_profile(
@@ -242,20 +227,10 @@ def build_candidate_variants(
     retuned_point = explicit_point(retuned_profile, target_temp_c)
     if current_point is None or retuned_point is None:
         raise RuntimeError(f"missing {target_temp_c}°C anchor while building variants")
-    metrics = stage_metrics(scout_stage)
     evidence = stability_evidence_for_stage(scout_stage, scout_samples or [], target_temp_c)
     predicted_point = predict_next_point(current_point, evidence)
 
     variants = [CandidateVariant("current", current_profile)]
     if predicted_point != current_point:
         variants.append(CandidateVariant(str(evidence["failureClass"]), merge_point(current_profile, predicted_point)))
-
-    hold_p2p = metrics.get("holdPeakToPeakC")
-    if isinstance(hold_p2p, (int, float)) and float(hold_p2p) > 3.0:
-        ripple_point = mutate_hold_ripple(current_point, metrics)
-        if ripple_point != current_point:
-            variants.append(CandidateVariant("hold_ripple", merge_point(current_profile, ripple_point)))
-
-    if len(variants) == 1 and retuned_point != current_point:
-        variants.append(CandidateVariant("retuned_fallback", retuned_profile))
-    return variants[:4]
+    return variants

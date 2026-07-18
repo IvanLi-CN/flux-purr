@@ -167,7 +167,7 @@ Until a committed `pps5a` accepted baseline exists, do not treat a stale saved `
 
 ## Candidate identification
 
-The candidate generator is deliberately not a general parameter search. Every valid scout, batch candidate, confirm, and confirm-recovery attempt is retained in the canonical review bundle; rejected candidates remain visible with their effective point, result classification, samples, and source telemetry so the tuning direction can be audited.
+The candidate generator is deliberately not a general parameter search. Every valid scout, batch candidate, and confirm is retained in the canonical review bundle; rejected candidates remain visible with their effective point, result classification, samples, and source telemetry so the tuning direction can be audited. An interrupted or environment-invalid attempt may be shown as excluded audit metadata but must not affect scoring or the valid test count.
 
 A stage produces three classes of evidence, and each class should update only the fields that can explain it:
 
@@ -183,10 +183,12 @@ Use sparse focused tuning during iteration. Reserve the full supported ladder fo
 For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow per target:
 
 1. tuning scout
-2. retune and candidate generation
-3. one batch candidate comparison
+2. target-local retune and one evidence-specific predicted point
+3. one batch comparison of `current` and the predicted point
 4. one optional second tuning round
 5. final `60s` hold confirm
+
+The `60 / 220°C` focused re-test uses the same workflow with only those two values passed as anchors, validation targets, and tuning targets. Its seed contains only the requested explicit points; it must not materialize an unrelated interpolation target. A short-scout p2p result cannot create a Hold candidate. Only a candidate with valid `100%` warmup output, the target-specific stable-window gate, and its confirmation margin may be promoted to a `60s` Hold confirm. If no candidate is promotable after the two allowed rounds, preserve the evidence as `not_converged` and skip the confirm.
 
 The flagship execution whitelist is fixed:
 
@@ -194,7 +196,7 @@ The flagship execution whitelist is fixed:
 - bind repo-local `flux-purr-devd` to the exact owner-authorized serial path only
 - confirm Flux Purr runtime readback shows `selectedMode=100w`, `resolvedBank=pps5a`, and `detectedSourceClass=pps5a` before heating
 - confirm IsolaPurr readback still shows `100W`, PD enabled, PPS enabled, `pd_pps_5a=true`, `pps3_limit_ma >= 5000`, and `tps_mode=auto_follow`
-- run only `60 -> 140 -> 220°C`, with at most three evidence-specific tuning rounds plus one `60s` confirm per target; a thermal confirm failure may use one directed short-scout/confirm recovery while budget remains
+- run only the explicit target order, with at most two evidence-specific tuning rounds plus one `60s` confirm per target; a target-local confirm failure ends that target without a recovery scout or another confirm
 - keep `warmupPowerPermille=1000` and require actual warmup output to stay at `100%`
 
 The flagship sprint must not:

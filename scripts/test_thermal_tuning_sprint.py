@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import sys
 import tempfile
@@ -87,6 +88,40 @@ def make_power_show_payload(
 
 
 class ThermalTuningSprintTests(unittest.TestCase):
+    def test_target_workflow_runs_at_most_one_hold_confirm_without_recovery_scout(self) -> None:
+        source = inspect.getsource(MODULE.tune_flagship_target)
+
+        self.assertEqual(source.count("evaluation_mode=EVALUATION_MODE_HOLD_CONFIRM"), 1)
+        self.assertNotIn("confirm-recovery", source)
+        self.assertNotIn("confirm_recovery", source)
+
+    def test_two_target_seed_uses_only_requested_explicit_points(self) -> None:
+        class NoMaterializeRunner:
+            def self_test(self, **_: object) -> object:
+                raise AssertionError("two-target seed must not materialize another temperature")
+
+        preliminary = MODULE.sparse_profile(
+            {"tempFilterAlphaPermille": 700},
+            [make_point(60), make_point(220)],
+        )
+        seed = MODULE.build_initial_sparse_seed(
+            NoMaterializeRunner(),
+            preliminary,
+            preliminary,
+            [60, 220],
+            Path("/tmp/two-target-seed"),
+        )
+
+        self.assertEqual(
+            [point["targetTempC"] for point in seed["points"] if point is not None],
+            [60, 220],
+        )
+
+    def test_default_bundle_directory_uses_the_explicit_target_set(self) -> None:
+        self.assertEqual(MODULE.DEFAULT_MAX_TUNING_ROUNDS, 2)
+        self.assertIn("preliminary-pd100w-pps5a-60-220-", str(MODULE.default_preliminary_bundle_dir([60, 220])))
+        self.assertIn("preliminary-pd100w-pps5a-60-140-220-", str(MODULE.default_preliminary_bundle_dir()))
+
     def test_predicts_target_local_fix_for_stable_window_breaking_high(self) -> None:
         point = make_point(
             60,
@@ -263,6 +298,90 @@ class ThermalTuningSprintTests(unittest.TestCase):
         self.assertEqual(predicted["holdPowerPermille"], current_point["holdPowerPermille"])
         self.assertEqual(predicted["holdReheatPowerPermille"], current_point["holdReheatPowerPermille"])
         self.assertEqual(predicted["holdKpPermillePerC"], current_point["holdKpPermillePerC"])
+
+    def test_short_scout_p2p_does_not_add_a_hold_candidate(self) -> None:
+        current = MODULE.sparse_profile({"tempFilterAlphaPermille": 700}, [make_point(60)])
+        stage = {
+            "targetTempC": 60,
+            "stopReason": "full_speed_to_stable_timeout",
+            "holdPeakToPeakC": 3.2,
+            "analysis": {},
+            "fullSpeedToStable": {"warmupExitedAtMs": 5_800, "limitMs": 10_000},
+        }
+        samples = [
+            {"t": 5.8, "temp": 49.2},
+            {"t": 11.5, "temp": 58.5},
+            {"t": 16.6, "temp": 61.93},
+        ]
+
+        variants = MODULE.build_candidate_variants(current, current, 60, stage, samples)
+
+        self.assertEqual([variant.name for variant in variants], ["current", "stable_window_broke_high"])
+
+    def test_promotion_requires_full_warmup_and_margin(self) -> None:
+        def samples_file(path: Path, output: int) -> None:
+            path.write_text(
+                json.dumps(
+                    {
+                        "targetTempC": 60,
+                        "elapsedMs": 100,
+                        "phase": "warmup",
+                        "status": {
+                            "currentTempC": 25.0,
+                            "heaterOutputPercent": 100,
+                            "heaterPhysicalOutputPercent": output,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        def candidate(run_id: str, path: Path, settle_time_ms: int, output: int) -> dict[str, object]:
+            return {
+                "runId": run_id,
+                "source": {
+                    "selectedMode": "100w",
+                    "resolvedBank": "pps5a",
+                    "detectedSourceClass": "pps5a",
+                },
+                "parameters": {"candidateProfileFile": str(path.with_suffix(".json"))},
+                "files": {"samplesPath": str(path), "summaryPath": str(path.with_suffix(".run.json"))},
+                "applied": [
+                    {
+                        "targetTempC": 60,
+                        "stopReason": "completed",
+                        "analysis": {},
+                        "fullSpeedToStable": {
+                            "warmupExitedAtMs": 1_000,
+                            "settleTimeMs": settle_time_ms,
+                            "limitMs": 10_000,
+                        },
+                    }
+                ],
+                "validation": {"failures": []},
+            }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            low_margin_path = directory / "low-margin.ndjson"
+            accepted_path = directory / "accepted.ndjson"
+            no_warmup_path = directory / "no-warmup.ndjson"
+            samples_file(low_margin_path, 100)
+            samples_file(accepted_path, 100)
+            samples_file(no_warmup_path, 90)
+            batch = {
+                "runs": [
+                    candidate("low-margin", low_margin_path, 9_500, 100),
+                    candidate("accepted", accepted_path, 8_500, 100),
+                    candidate("no-warmup", no_warmup_path, 8_000, 90),
+                ]
+            }
+
+            promoted = MODULE.choose_promotable_batch_run(batch, 60)
+
+        self.assertIsNotNone(promoted)
+        self.assertEqual(promoted["summary"]["runId"], "accepted")
 
     def test_merge_point_preserves_sparse_shape(self) -> None:
         profile = MODULE.sparse_profile(

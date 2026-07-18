@@ -30,7 +30,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=default_output_root())
     parser.add_argument("--preliminary-profile-file", type=Path, default=PRELIMINARY_PROFILE)
     parser.add_argument("--fallback-profile-file", type=Path, default=FALLBACK_PROFILE)
-    parser.add_argument("--bundle-dir", type=Path, default=default_preliminary_bundle_dir())
+    parser.add_argument("--bundle-dir", type=Path)
     parser.add_argument("--anchor-targets-c")
     parser.add_argument("--validation-targets-c")
     parser.add_argument("--tune-targets-c")
@@ -71,7 +71,8 @@ def main() -> int:
         output_root / "seed",
     )
     write_json(output_root / "seed" / "initial-sparse-profile.json", current_profile)
-    bundle_dir = args.bundle_dir if args.bundle_dir.is_absolute() else REPO_ROOT / args.bundle_dir
+    requested_bundle_dir = args.bundle_dir or default_preliminary_bundle_dir(tune_targets_c)
+    bundle_dir = requested_bundle_dir if requested_bundle_dir.is_absolute() else REPO_ROOT / requested_bundle_dir
 
     if args.plan_only:
         print(
@@ -99,34 +100,37 @@ def main() -> int:
         return 0
 
     review_entries = []
-    for target_temp_c in tune_targets_c:
-        current_profile, entry = tune_flagship_target(
-            runner,
-            current_profile,
-            target_temp_c,
-            anchors_c,
-            output_root / f"target-{target_temp_c}",
-            per_target_budget_seconds=args.per_target_budget_seconds,
-            max_tuning_rounds=args.max_tuning_rounds,
-            scout_hold_seconds=args.scout_hold_seconds,
-            confirm_hold_seconds=args.confirm_hold_seconds,
-        )
-        write_json(output_root / f"target-{target_temp_c}" / "review-entry.json", entry)
-        write_json(output_root / f"target-{target_temp_c}" / "accepted-sparse-profile.json", current_profile)
-        review_entries.append(entry)
-        write_json(output_root / "review-entries.json", review_entries)
+    try:
+        for target_temp_c in tune_targets_c:
+            current_profile, entry = tune_flagship_target(
+                runner,
+                current_profile,
+                target_temp_c,
+                anchors_c,
+                output_root / f"target-{target_temp_c}",
+                per_target_budget_seconds=args.per_target_budget_seconds,
+                max_tuning_rounds=args.max_tuning_rounds,
+                scout_hold_seconds=args.scout_hold_seconds,
+                confirm_hold_seconds=args.confirm_hold_seconds,
+            )
+            write_json(output_root / f"target-{target_temp_c}" / "review-entry.json", entry)
+            write_json(output_root / f"target-{target_temp_c}" / "accepted-sparse-profile.json", current_profile)
+            review_entries.append(entry)
+            write_json(output_root / "review-entries.json", review_entries)
 
-    accepted_profile_path = output_root / "review-candidate-profile.json"
-    write_json(accepted_profile_path, current_profile)
-    bundle = write_preliminary_review_bundle(
-        bundle_dir=bundle_dir,
-        accepted_profile=current_profile,
-        entries=review_entries,
-        source_id=args.source_id,
-        device_id=runner.resolve_device_id(args.dry_run),
-        port_path=args.authorized_port,
-        tuning_budget_seconds=args.per_target_budget_seconds,
-    )
+        accepted_profile_path = output_root / "review-candidate-profile.json"
+        write_json(accepted_profile_path, current_profile)
+        bundle = write_preliminary_review_bundle(
+            bundle_dir=bundle_dir,
+            accepted_profile=current_profile,
+            entries=review_entries,
+            source_id=args.source_id,
+            device_id=runner.resolve_device_id(args.dry_run),
+            port_path=args.authorized_port,
+            tuning_budget_seconds=args.per_target_budget_seconds,
+        )
+    finally:
+        runner.disarm_and_clear_preview()
     print(
         json.dumps(
             {

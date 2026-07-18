@@ -13,9 +13,29 @@ def stage_reference_gate_satisfied(summary: dict[str, Any], target_temp_c: int) 
     )
     return (
         not run_is_disqualified(summary, target_temp_c)
+        and warmup_output_is_full(summary, target_temp_c)
         and metrics.get("stopReason") == "completed"
         and evidence.get("failureClass") != "within_gate_low_margin"
     )
+
+
+def choose_promotable_batch_run(batch_summary: dict[str, Any], target_temp_c: int) -> dict[str, Any] | None:
+    ensure_batch_source(batch_summary)
+    promotable = []
+    for run in batch_summary.get("runs") or []:
+        if not isinstance(run, dict) or not stage_reference_gate_satisfied(run, target_temp_c):
+            continue
+        profile_file = value_at_path(run, "parameters", "candidateProfileFile")
+        if not isinstance(profile_file, str):
+            raise RuntimeError(f"promotable batch run for {target_temp_c}°C is missing candidateProfileFile")
+        promotable.append(
+            {
+                "summary": dict(run),
+                "score": candidate_score(run, target_temp_c),
+                "candidateProfileFile": Path(profile_file),
+            }
+        )
+    return min(promotable, key=lambda item: item["score"]) if promotable else None
 
 
 def round_record_from_summary(
@@ -62,6 +82,7 @@ def round_record_from_summary(
             "approachReferencePeakDeltaC": analysis.get("approachReferencePeakDeltaC"),
             "approachReferenceClass": analysis.get("approachReferenceClass"),
             "stabilityEvidence": stability_evidence,
+            "warmupOutputFull": warmup_output_is_full(summary, target_temp_c),
             "budgetElapsedSeconds": budget_elapsed_seconds_value,
             "score": score,
         },
@@ -154,8 +175,10 @@ def review_target_entry(
     }
 
 
-def default_preliminary_bundle_dir() -> Path:
-    return REPO_ROOT / f"thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-{today_slug()}"
+def default_preliminary_bundle_dir(targets_c: list[int] | None = None) -> Path:
+    targets = targets_c or list(DEFAULT_TUNE_TARGETS)
+    target_slug = "-".join(str(int(target)) for target in targets)
+    return REPO_ROOT / f"thermal-self-test-runs/preliminary-pd100w-pps5a-{target_slug}-{today_slug()}"
 
 
 def write_preliminary_review_bundle(
@@ -223,10 +246,11 @@ def write_preliminary_review_bundle(
         },
     }
     write_json(bundle_dir / "run.bundle.json", bundle)
+    target_label = " / ".join(f"{entry['target']}°C" for entry in entries)
     html_data = {
         "generatedAt": bundle["generatedAt"],
-        "title": "Flux Purr 100W / pps5a 旗舰三点 preliminary review",
-        "subtitle": "当前只收口 60 / 140 / 220°C 三个旗舰目标。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示真实调参轮次、预算结果与 hold confirm。",
+        "title": f"Flux Purr 100W / pps5a {target_label} preliminary review",
+        "subtitle": f"当前只收口 {target_label}。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示全部有效调参轮次、预算结果与 hold confirm。",
         "bundleDisposition": bundle["bundleDisposition"],
         "acceptedProfileRole": bundle["acceptedProfileRole"],
         "selectedMode": bundle["selectedMode"],
@@ -340,6 +364,7 @@ def tune_flagship_target(
     rounds: list[dict[str, Any]] = []
     last_summary = synthetic_failure_summary(target_temp_c, "no_round_completed")
     budget_outcome = "not_converged"
+    approach_promoted = False
 
     for round_index in range(max_tuning_rounds):
         if budget_exhausted(budget_started_at, per_target_budget_seconds):
@@ -377,6 +402,9 @@ def tune_flagship_target(
             if run_is_disqualified(scout.summary, target_temp_c):
                 budget_outcome = "environment_blocked"
                 break
+            if not warmup_output_is_full(scout.summary, target_temp_c):
+                budget_outcome = "not_converged"
+                break
 
             retuned_profile_raw, retuned_candidate_path = runner.retune(scout.run_dir, target_temp_c)
             retuned_profile = normalize_sparse_profile(
@@ -413,8 +441,10 @@ def tune_flagship_target(
                 budget_started_at=budget_started_at,
                 budget_seconds=per_target_budget_seconds,
             )
-            best = choose_best_batch_run(batch.summary, target_temp_c)
-            selected_run_id = str(best["summary"].get("runId") or "")
+            diagnostic_best = choose_best_batch_run(batch.summary, target_temp_c)
+            promoted_best = choose_promotable_batch_run(batch.summary, target_temp_c)
+            selected_best = promoted_best or diagnostic_best
+            selected_run_id = str(selected_best["summary"].get("runId") or "")
             score_by_run_id = {
                 str(run.get("runId") or ""): list(candidate_score(run, target_temp_c))
                 for run in batch.summary.get("runs") or []
@@ -431,7 +461,7 @@ def tune_flagship_target(
                     budget_elapsed_seconds_value=budget_elapsed_seconds(budget_started_at),
                 )
             )
-            chosen_profile = read_json(best["candidateProfileFile"])
+            chosen_profile = read_json(selected_best["candidateProfileFile"])
             updated_profile = normalize_sparse_profile(
                 runner,
                 chosen_profile,
@@ -440,9 +470,10 @@ def tune_flagship_target(
                 f"normalize-best-{target_temp_c}-{round_index + 1}",
             )
             write_json(round_dir / "accepted-sparse-profile.json", updated_profile)
-            chosen_summary = best["summary"]
+            chosen_summary = selected_best["summary"]
             last_summary = chosen_summary
-            if stage_reference_gate_satisfied(chosen_summary, target_temp_c):
+            if promoted_best is not None:
+                approach_promoted = True
                 break
         except Exception as exc:
             budget_outcome = (
@@ -454,12 +485,11 @@ def tune_flagship_target(
             )
             break
 
-    if budget_outcome != "environment_blocked":
-        for confirm_attempt in range(2):
-            if budget_exhausted(budget_started_at, per_target_budget_seconds):
-                budget_outcome = "budget_exhausted"
-                break
-            hold_seed = workspace_dir / f"hold-confirm-{confirm_attempt + 1}-seed.json"
+    if approach_promoted and budget_outcome != "environment_blocked":
+        if budget_exhausted(budget_started_at, per_target_budget_seconds):
+            budget_outcome = "budget_exhausted"
+        else:
+            hold_seed = workspace_dir / "hold-confirm-1-seed.json"
             write_json(hold_seed, updated_profile)
             try:
                 confirm = run_budgeted_self_test(
@@ -467,7 +497,7 @@ def tune_flagship_target(
                     seed_profile_file=hold_seed,
                     targets_c=[target_temp_c],
                     hold_seconds=confirm_hold_seconds,
-                    output_dir=workspace_dir / f"hold-confirm-{confirm_attempt + 1}",
+                    output_dir=workspace_dir / "hold-confirm-1",
                     evaluation_mode=EVALUATION_MODE_HOLD_CONFIRM,
                     cooldown_temp_c=cooldown_temp,
                     budget_started_at=budget_started_at,
@@ -480,7 +510,7 @@ def tune_flagship_target(
                         confirm.summary,
                         target_temp_c,
                         len(rounds) + 1,
-                        f"hold confirm {confirm_attempt + 1}",
+                        "hold confirm",
                         explicit_point(updated_profile, target_temp_c),
                         attempt_type="hold_confirm",
                         selected=True,
@@ -489,61 +519,10 @@ def tune_flagship_target(
                 )
                 if confirm.summary.get("validation", {}).get("passed") is True:
                     budget_outcome = "completed"
-                    break
-                if run_is_disqualified(confirm.summary, target_temp_c):
+                elif run_is_disqualified(confirm.summary, target_temp_c):
                     budget_outcome = "environment_blocked"
-                    break
-                budget_outcome = "not_converged"
-                if confirm_attempt > 0:
-                    break
-
-                confirm_stage = stage_for_target(confirm.summary, target_temp_c)
-                evidence = stability_evidence_for_stage(
-                    confirm_stage,
-                    samples_for_target(confirm.summary, target_temp_c),
-                    target_temp_c,
-                )
-                current_point = explicit_point(updated_profile, target_temp_c)
-                if current_point is None:
-                    break
-                predicted_point = predict_next_point(current_point, evidence)
-                if predicted_point == current_point:
-                    break
-                updated_profile = merge_point(updated_profile, predicted_point)
-                recovery_seed = workspace_dir / "confirm-recovery-scout-seed.json"
-                write_json(recovery_seed, updated_profile)
-                recovery = run_budgeted_self_test(
-                    runner,
-                    seed_profile_file=recovery_seed,
-                    targets_c=[target_temp_c],
-                    hold_seconds=scout_hold_seconds,
-                    output_dir=workspace_dir / "confirm-recovery-scout",
-                    evaluation_mode=EVALUATION_MODE_TUNING_SCOUT,
-                    cooldown_temp_c=cooldown_temp,
-                    budget_started_at=budget_started_at,
-                    budget_seconds=per_target_budget_seconds,
-                )
-                ensure_expected_source(recovery.summary)
-                last_summary = recovery.summary
-                rounds.append(
-                    round_record_from_summary(
-                        recovery.summary,
-                        target_temp_c,
-                        len(rounds) + 1,
-                        "confirm recovery / predicted",
-                        predicted_point,
-                        attempt_type="confirm_recovery_scout",
-                        candidate_name=str(evidence.get("failureClass") or "predicted"),
-                        selected=True,
-                        budget_elapsed_seconds_value=budget_elapsed_seconds(budget_started_at),
-                    )
-                )
-                if run_is_disqualified(recovery.summary, target_temp_c):
-                    budget_outcome = "environment_blocked"
-                    break
-                if not stage_reference_gate_satisfied(recovery.summary, target_temp_c):
+                else:
                     budget_outcome = "not_converged"
-                    break
             except Exception as exc:
                 budget_outcome = (
                     "budget_exhausted" if "target_budget_exhausted" in str(exc) else "environment_blocked"
@@ -552,7 +531,6 @@ def tune_flagship_target(
                     target_temp_c,
                     "target_budget_exhausted" if budget_outcome == "budget_exhausted" else "hold_confirm_failed",
                 )
-                break
 
     entry = review_target_entry(
         target_temp_c=target_temp_c,
@@ -765,16 +743,16 @@ def build_plan_payload(
             ],
             "perTargetWorkflow": [
                 f"Wait for cooldown gate, then run one {scout_hold_seconds}s tuning scout.",
-                "Classify the failure, then compare the current point with one evidence-specific predicted point; add a hold-ripple point only when hold p2p is over limit.",
+                "Classify the failure, then compare the current point with one evidence-specific predicted point.",
                 f"Allow at most {max_tuning_rounds} targeted tuning rounds while the per-target budget remains.",
-                f"Run one {confirm_hold_seconds}s hold confirm; after a target-local thermal failure, allow one predicted short scout and one final confirm while budget remains.",
+                f"Run one {confirm_hold_seconds}s hold confirm only after a candidate clears the promotion gate; a failed confirm ends the target.",
                 "Modify only the current target profile point; keep warmupPowerPermille fixed at 1000 and require 100% warmup output.",
             ],
             "dynamicApproachGate": [
-                "60°C and 140°C: warmup exit to stable-window start must be <= 10s.",
-                "220°C: warmup exit to stable-window start must be <= 5s.",
-                "Stable window means 10s continuous sampling at >=3Hz with abs(temp-target) <= 1.5°C.",
-            ],
+                f"{target}°C: warmup exit to stable-window start must be <= {'5' if int(target) > 150 else '10'}s."
+                for target in tune_targets_c
+            ]
+            + ["Stable window means 10s continuous sampling at >=3Hz with abs(temp-target) <= 1.5°C."],
             "allowedResults": ["completed", "not_converged", "budget_exhausted", "environment_blocked"],
         },
         "powerCycleRecovery": {

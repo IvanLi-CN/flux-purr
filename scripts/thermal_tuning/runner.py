@@ -267,3 +267,35 @@ class FluxPurrRunner:
         if not candidate_path.exists():
             raise RuntimeError(f"retune did not produce {candidate_path}")
         return read_json(candidate_path), candidate_path
+
+    def disarm_and_clear_preview(self) -> None:
+        if self.dry_run:
+            return
+        device_id = self.resolve_device_id(False)
+        self.run_json_command(
+            [
+                str(self.flux_purr_bin),
+                "--devd",
+                self.devd_url,
+                "--json",
+                "runtime",
+                "set",
+                "--device",
+                device_id,
+                "--heater-enabled",
+                "false",
+            ]
+        )
+        self.run_json_command(
+            [
+                str(self.flux_purr_bin),
+                "--devd",
+                self.devd_url,
+                "--json",
+                "thermal",
+                "profile",
+                "clear-preview",
+                "--device",
+                device_id,
+            ]
+        )

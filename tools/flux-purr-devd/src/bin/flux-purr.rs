@@ -5992,6 +5992,7 @@ fn write_dry_thermal_ladder(
             thermal_heater_parameters_value(target_temp_c, thermal_profile, heater_parameter_mode);
         let mut synthetic_stage_samples = Vec::new();
         for phase in ["warmup", "hold"] {
+            let heater_output_percent = if phase == "warmup" { 100 } else { 26 };
             let temp_c = if phase == "warmup" {
                 f64::from(target_temp_c) - 0.5
             } else {
@@ -6028,16 +6029,23 @@ fn write_dry_thermal_ladder(
                     "ppsRequestMv": source_voltage_mv,
                     "ppsContractMv": source_voltage_mv,
                     "heaterEnabled": true,
-                    "heaterOutputPercent": 26,
+                    "heaterOutputPercent": heater_output_percent,
+                    "heaterPhysicalOutputPercent": heater_output_percent,
                 },
                 "heaterParameters": heater_parameters,
-                "status": synthetic_thermal_status(target_temp_c, temp_c, source_voltage_mv, source_current_ma),
+                "status": synthetic_thermal_status(
+                    target_temp_c,
+                    temp_c,
+                    source_voltage_mv,
+                    source_current_ma,
+                    heater_output_percent,
+                ),
             });
             writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
             synthetic_stage_samples.push(ThermalReplayStageSample {
                 elapsed_ms,
                 current_temp_c: temp_c,
-                heater_output_percent: 26,
+                heater_output_percent,
                 control_phase: Some(if phase == "warmup" {
                     "approach".to_string()
                 } else {
@@ -6127,11 +6135,13 @@ fn synthetic_thermal_status(
     current_temp_c: f64,
     source_voltage_mv: u16,
     source_current_ma: u16,
+    heater_output_percent: u8,
 ) -> Value {
     json!({
         "mode": "sampling",
         "heaterEnabled": true,
-        "heaterOutputPercent": 26,
+        "heaterOutputPercent": heater_output_percent,
+        "heaterPhysicalOutputPercent": heater_output_percent,
         "currentTempC": current_temp_c,
         "targetTempC": target_temp_c,
         "voltageMv": source_voltage_mv,
