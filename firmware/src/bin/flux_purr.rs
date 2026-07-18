@@ -809,7 +809,10 @@ impl ThermalControlProfile {
             if sanitized.hold_reheat_power_permille == 0 {
                 sanitized.hold_reheat_power_permille = sanitized.hold_power_permille;
             }
-            sanitized.warmup_power_permille = 1_000;
+            sanitized.warmup_power_permille = sanitized
+                .warmup_power_permille
+                .max(sanitized.approach_power_permille)
+                .min(1_000);
             if sanitized.approach_lead_ticks == 0 {
                 sanitized.approach_lead_ticks = u16::from(self.settings.approach_lead_ticks);
             }
@@ -1135,7 +1138,7 @@ fn interpolate_thermal_control_target(
     if lower.target_temp_c >= upper.target_temp_c {
         return ThermalControlTarget {
             brake_distance_c: lower.brake_distance_centi_c as f32 / 100.0,
-            warmup_power_permille: lower.warmup_power_permille,
+            warmup_power_permille: 1_000,
             approach_power_permille: lower.approach_power_permille,
             approach_floor_power_permille: lower.approach_floor_power_permille,
             approach_damping_exponent: f32::from(lower.approach_damping_exponent_permille)
@@ -1197,11 +1200,7 @@ fn interpolate_thermal_control_target(
         |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
     ThermalControlTarget {
         brake_distance_c: f32::from(interpolated_brake_distance) / 100.0,
-        warmup_power_permille: lerp_u16(
-            lower.warmup_power_permille,
-            upper.warmup_power_permille,
-            1_000,
-        ),
+        warmup_power_permille: 1_000,
         approach_power_permille: lerp_u16(
             lower.approach_power_permille,
             upper.approach_power_permille,
@@ -1785,7 +1784,9 @@ impl HeaterController {
             0
         } else {
             match self.phase {
-                HeaterControlPhase::Warmup => 100,
+                HeaterControlPhase::Warmup => {
+                    percent_from_permille(control_target.warmup_power_permille)
+                }
                 HeaterControlPhase::Approach => {
                     if approach_predictive_coast_ready {
                         0
@@ -9382,7 +9383,7 @@ mod tests {
     }
 
     #[test]
-    fn heater_control_ignores_reduced_profile_warmup_during_warmup() {
+    fn heater_control_keeps_full_power_warmup_during_warmup() {
         let mut controller = HeaterController::new();
         controller.last_target_temp_c = 60;
         controller.phase = HeaterControlPhase::Warmup;

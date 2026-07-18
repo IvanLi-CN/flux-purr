@@ -40,6 +40,7 @@ The persisted profile is sparse by design:
 
 The current tuning and acceptance convention is:
 
+- flagship tuning targets: `60 / 140 / 220°C`
 - sparse tuning anchors: `60 / 140 / 220°C`
 - supported explicit ladder: `60 / 100 / 140 / 180 / 220 / 250°C`
 - `300°C` remains outside first-version acceptance
@@ -166,7 +167,7 @@ Until a committed `pps5a` accepted baseline exists, do not treat a stale saved `
 
 ## Candidate identification
 
-The candidate generator is deliberately not a general parameter search.
+The candidate generator is deliberately not a general parameter search. Every valid scout, batch candidate, confirm, and confirm-recovery attempt is retained in the canonical review bundle; rejected candidates remain visible with their effective point, result classification, samples, and source telemetry so the tuning direction can be audited.
 
 A stage produces three classes of evidence, and each class should update only the fields that can explain it:
 
@@ -179,23 +180,65 @@ Ambient temperature is still useful, but only as an optional compensation term l
 
 Use sparse focused tuning during iteration. Reserve the full supported ladder for final acceptance.
 
-For dedicated approach characterization:
+For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow per target:
 
-- collect one `zero_coast` curve and one `half_floor_50` curve for each target temperature
-- start each curve at `warmup -> approach` handoff
-- stop the curve only after the sample stream shows both:
-  - first entry into the target band
-  - a visible rollback from the peak while still remaining in-band
-- reject any trace that reaches `hold` before that rollback evidence exists
-- use the `zero_coast` approach duration as the pass/fail upper bound: an accepted tuned result must not be slower than this curve
-- use the `half_floor_50` approach duration as the preferred best target: when stability still holds, tuning should push as close as practical to this faster curve
+1. tuning scout
+2. retune and candidate generation
+3. one batch candidate comparison
+4. one optional second tuning round
+5. final `60s` hold confirm
 
-If the brake search times out before entering the band, or never even reaches `approach`, classify the result as `more_heat`. Do not let those cases fall back to a neutral direction; otherwise high-temperature characterization can incorrectly jump back toward larger brake distances and waste real HIL time.
+The flagship execution whitelist is fixed:
+
+- run host-side tuning/report/dynamic-gate tests before real HIL
+- bind repo-local `flux-purr-devd` to the exact owner-authorized serial path only
+- confirm Flux Purr runtime readback shows `selectedMode=100w`, `resolvedBank=pps5a`, and `detectedSourceClass=pps5a` before heating
+- confirm IsolaPurr readback still shows `100W`, PD enabled, PPS enabled, `pd_pps_5a=true`, `pps3_limit_ma >= 5000`, and `tps_mode=auto_follow`
+- run only `60 -> 140 -> 220°C`, with at most three evidence-specific tuning rounds plus one `60s` confirm per target; a thermal confirm failure may use one directed short-scout/confirm recovery while budget remains
+- keep `warmupPowerPermille=1000` and require actual warmup output to stay at `100%`
+
+The flagship sprint must not:
+
+- add `80 / 100 / 120 / 160 / 180 / 240 / 250°C` runs
+- run the full ladder
+- collect default `0% / 25% / 50%` approach-only curves
+- flash firmware, reset the MCU, change selector, or switch to another serial path
+- save `pps5a` EEPROM or freeze a committed accepted baseline
+- restart from `60°C` after a later target fails; only the failed sub-step may be retried
+
+The target-specific start condition is fixed:
+
+- when `target < 80°C`, start only after `currentTempC <= 35°C`
+- when `target >= 80°C`, start only after `currentTempC <= target - 40°C`
+
+Do not add extra soak time after the threshold is met.
+
+The flagship workflow uses a target-dependent full-speed-to-stable gate:
+
+- `target <= 150°C`: first stable window must start within `10s` after leaving `warmup`
+- `target > 150°C`: first stable window must start within `5s` after leaving `warmup`
+- the stable window is `10s` continuous sampling with `abs(currentTempC - targetTempC) <= 1.5°C`
+- every stage report must include `fullSpeedToStable.limitMs`, `settleTimeMs`, and `failureReason`
+
+Do not run default `0% / 25% / 50%` approach-only characterization inside the flagship sprint. Those curves are diagnostic-only artifacts and should not consume the per-target budget unless explicitly requested.
+
+For candidate tuning:
+
+- warmup itself remains fixed at `100%`
+- full-speed timeout without valid hold evidence is treated as approach power / early coast / near-target sustain evidence
+- if valid hold samples exist and hold p2p is above limit, do not let full-speed timeout hide hold ripple
+- high-temperature low-side deep hold drop must tune hold residency / sustain / lead instead of being classified as residual overshoot
+- source/runtime/sample-rate/measurement faults must not mutate the candidate
+- distinguish failure before generating a candidate: `missed_lower_band_before_limit`, `missed_upper_band_before_limit`, `stable_window_broke_low`, `stable_window_broke_high`, and `within_gate_low_margin` require different corrections
+- a low-side miss with approach already at full power moves only the warmup handoff; a high-side stable-window break changes only braking and approach-tail heat
+- require at least `1s` full-speed margin at or below `150°C` and `0.5s` above `150°C` before promoting a short scout result to confirm
+- if confirm fails thermally while budget remains, generate one evidence-specific correction, verify it with a short scout, and allow one more confirm; report `not_converged` rather than `budget_exhausted` when wall-clock budget remains
 
 ## Validation gates
 
 The saved-profile acceptance contract remains:
 
+- the flagship set `60 / 140 / 220°C` must pass in order before extending to interpolated non-flagship temperatures
 - maximum overshoot `<= 3.0°C`
 - once hold sampling starts, continuous `60s` hold peak-to-peak `<= 3.0°C`
 - each stage stops on runtime reset, heater disarm, target mismatch, mode mismatch, source fault, or deadline expiry
@@ -236,14 +279,22 @@ If the source remains at a stale low-voltage state or otherwise fails to follow 
 
 1. Stop heating and keep the run unsaved.
 2. Record the failure as a source-side issue, not as thermal-profile evidence.
-3. Restart the same IsolaPurr output path on the same authorized source:
-   - `isolapurr power output manual --url <source-url> --usb-c-path disconnected`
-   - `isolapurr power output auto --url <source-url>`
-4. If telemetry still shows the USB-C path latched or stale after the output restart, replug the same power path:
-   - `isolapurr ports --device-id <source-id> replug --port port_c`
-   - only if the host-side USB transport itself is the problem, use `port_a` instead of `port_c`
-5. Wait for source telemetry and capability readback to become current again.
-6. Recheck `selectedMode`, `resolvedBank`, and `detectedSourceClass` before resuming the thermal run.
+3. Restart the same IsolaPurr USB-C output path on the same authorized source:
+   - `isolapurr power output manual --url <source-url> --usb-c-path disconnected --json`
+   - `isolapurr power show --url <source-url> --json` and confirm `usb_c_power_enabled=false`
+   - wait `2s`
+   - `isolapurr power output auto --url <source-url> --json`
+4. Poll `isolapurr power show --url <source-url> --json` until all of the following are true again:
+   - `usb_c_power_enabled=true`
+   - `tps_mode=auto_follow`
+   - `power_watts=100`
+   - PD and PPS both enabled
+   - `pd_pps_5a=true`
+   - `pps3_limit_ma >= 5000`
+   - USB-C sample uptime keeps advancing
+5. Confirm the exact owner-authorized Flux Purr serial path still exists. If it disappeared or re-enumerated, stop; do not switch ports.
+6. Retry only the same failed sub-step, and only once. A second environment failure for the same target becomes `environment_blocked`.
+7. Count the recovery time inside the same per-target `20min` budget.
 
 Use this procedure only when source telemetry proves the source is stuck or stale. Do not use it to mask a controller, sensor, or runtime defect.
 

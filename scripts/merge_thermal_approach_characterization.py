@@ -35,7 +35,7 @@ def read_bundle(bundle_dir: Path) -> dict[str, Any]:
     if bundle.get("kind") != "thermal_approach_characterization":
         raise RuntimeError(f"unexpected bundle kind in {bundle_path}: {bundle.get('kind')}")
     if len(bundle.get("targets") or []) != 1:
-        raise RuntimeError(f"expected single-target bundle in {bundle_path}")
+        raise RuntimeError(f"expected exactly one target payload in {bundle_path}")
     return bundle
 
 
@@ -133,7 +133,7 @@ def load_hold_check(summary_ref: Path, target_temp_c: int) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Merge single-target Flux Purr approach characterization bundles")
+    parser = argparse.ArgumentParser(description="Merge per-target Flux Purr approach characterization bundles")
     parser.add_argument("--bundle-dir", action="append", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--accepted-profile-file", type=Path)

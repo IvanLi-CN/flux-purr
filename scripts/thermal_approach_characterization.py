@@ -47,6 +47,8 @@ SETTINGS_FIELDS = [
     "autoAdjustableWorkingFloorMv",
     "heaterCurrentReserveMa",
 ]
+DEFAULT_VARIANT_IDS = ["warmup_scout_25"]
+SUPPORTED_VARIANT_IDS = ["warmup_scout_25", "zero_coast", "half_floor_50"]
 
 
 class HttpError(RuntimeError):
@@ -306,7 +308,26 @@ def minimal_profile_with_point(
 
 
 def cooldown_threshold(target_temp_c: int) -> float:
-    return max(35.0, target_temp_c - 30.0)
+    return 35.0 if target_temp_c < 80 else float(target_temp_c - 40)
+
+
+def parse_variant_ids(value: str | None) -> list[str]:
+    if not value:
+        return list(DEFAULT_VARIANT_IDS)
+    variants: list[str] = []
+    for part in value.split(","):
+        variant_id = part.strip()
+        if not variant_id:
+            continue
+        if variant_id not in SUPPORTED_VARIANT_IDS:
+            raise ValueError(
+                f"unsupported variant '{variant_id}', expected one of: {', '.join(SUPPORTED_VARIANT_IDS)}"
+            )
+        if variant_id not in variants:
+            variants.append(variant_id)
+    if not variants:
+        raise ValueError("variants list is empty")
+    return variants
 
 
 def stats_from_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -335,8 +356,44 @@ def stats_from_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def variant_heat_fraction(variant_id: str) -> float:
+    if variant_id == "zero_coast":
+        return 0.0
+    if variant_id == "warmup_scout_25":
+        return 0.25
+    if variant_id == "half_floor_50":
+        return 0.5
+    raise ValueError(f"unsupported variant: {variant_id}")
+
+
 def variant_label(variant_id: str) -> str:
-    return "0加热" if variant_id == "zero_coast" else "50%最低功率加热"
+    if variant_id == "zero_coast":
+        return "0加热"
+    if variant_id == "warmup_scout_25":
+        return "25%最低功率 warmup scout"
+    if variant_id == "half_floor_50":
+        return "50%最低功率加热"
+    raise ValueError(f"unsupported variant: {variant_id}")
+
+
+def variant_floor_permille(point: dict[str, Any], variant_id: str) -> int:
+    sustain_min = max(int(point["holdPowerPermille"]), int(point["holdReheatPowerPermille"]))
+    heat_fraction = variant_heat_fraction(variant_id)
+    if heat_fraction <= 0:
+        return 0
+    return max(1, int(round(sustain_min * heat_fraction)))
+
+
+def variant_requires_approach_heat(variant_id: str) -> bool:
+    return variant_heat_fraction(variant_id) > 0.0
+
+
+def interpolate_variant_factor(zero_value: float, half_value: float, variant_id: str) -> float:
+    heat_fraction = variant_heat_fraction(variant_id)
+    if heat_fraction <= 0.0:
+        return zero_value
+    t = min(1.0, heat_fraction / 0.5)
+    return zero_value + (half_value - zero_value) * t
 
 
 def make_variant_point(
@@ -345,9 +402,8 @@ def make_variant_point(
     brake_distance_centi_c: int,
 ) -> tuple[dict[str, Any], int]:
     tuned = dict(point)
-    sustain_min = max(int(point["holdPowerPermille"]), int(point["holdReheatPowerPermille"]))
-    half_floor = max(1, int(round(sustain_min / 2.0)))
-    if variant_id == "zero_coast":
+    floor_permille = variant_floor_permille(point, variant_id)
+    if not variant_requires_approach_heat(variant_id):
         tuned.update(
             {
                 "brakeDistanceCentiC": brake_distance_centi_c,
@@ -366,8 +422,8 @@ def make_variant_point(
     tuned.update(
         {
             "brakeDistanceCentiC": brake_distance_centi_c,
-            "approachPowerPermille": half_floor,
-            "approachFloorPowerPermille": half_floor,
+            "approachPowerPermille": floor_permille,
+            "approachFloorPowerPermille": floor_permille,
             "approachTailWindowCentiC": 0,
             "holdPowerPermille": 0,
             "holdReheatPowerPermille": 0,
@@ -377,7 +433,7 @@ def make_variant_point(
             "holdLeadTicks": 0,
         }
     )
-    return tuned, half_floor
+    return tuned, floor_permille
 
 
 def unique_brakes(values: list[int]) -> list[int]:
@@ -390,14 +446,21 @@ def unique_brakes(values: list[int]) -> list[int]:
 
 
 def candidate_brake_plan(base_brake: int, variant_id: str) -> tuple[int, list[int], list[int]]:
-    if variant_id == "zero_coast":
-        seed_factor = 0.85
-        smaller_factors = [0.80, 0.75, 0.70, 0.65, 0.60, 0.55]
-        larger_factors = [0.90, 0.95, 1.00, 1.05]
-    else:
-        seed_factor = 0.93
-        smaller_factors = [0.88, 0.83, 0.78, 0.73, 0.68, 0.63]
-        larger_factors = [0.98, 1.03, 1.08, 1.13, 1.18]
+    zero_seed_factor = 0.85
+    half_seed_factor = 0.93
+    zero_smaller_factors = [0.80, 0.75, 0.70, 0.65, 0.60, 0.55]
+    half_smaller_factors = [0.88, 0.83, 0.78, 0.73, 0.68, 0.63]
+    zero_larger_factors = [0.90, 0.95, 1.00, 1.05]
+    half_larger_factors = [0.98, 1.03, 1.08, 1.13, 1.18]
+    seed_factor = interpolate_variant_factor(zero_seed_factor, half_seed_factor, variant_id)
+    smaller_factors = [
+        interpolate_variant_factor(zero_value, half_value, variant_id)
+        for zero_value, half_value in zip(zero_smaller_factors, half_smaller_factors)
+    ]
+    larger_factors = [
+        interpolate_variant_factor(zero_value, half_value, variant_id)
+        for zero_value, half_value in zip(zero_larger_factors, half_larger_factors)
+    ]
     seed = max(100, int(round(base_brake * seed_factor)))
     smaller = unique_brakes([int(round(base_brake * factor)) for factor in smaller_factors])
     larger = unique_brakes([int(round(base_brake * factor)) for factor in larger_factors])
@@ -443,6 +506,8 @@ def invalid_direction(
     )
     if reason == "entered_hold":
         return "less_heat"
+    if reason == "returned_to_warmup":
+        return "more_heat"
     if reason == "left_band_before_rollback":
         if sample_temp is None:
             return None
@@ -487,7 +552,7 @@ def serialize_sample(
     target_temp_c: int,
     variant_id: str,
     brake_distance_centi_c: int,
-    half_floor_permille: int,
+    variant_floor_permille: int,
     elapsed_ms: int,
     approach_elapsed_ms: int | None,
     status: dict[str, Any],
@@ -498,7 +563,8 @@ def serialize_sample(
         "targetTempC": target_temp_c,
         "variantId": variant_id,
         "brakeDistanceCentiC": brake_distance_centi_c,
-        "halfFloorPermille": half_floor_permille,
+        "variantFloorPermille": variant_floor_permille,
+        "halfFloorPermille": variant_floor_permille,
         "elapsedMs": elapsed_ms,
         "approachElapsedMs": approach_elapsed_ms,
         "currentTempC": float(status["currentTempC"]),
@@ -511,13 +577,60 @@ def serialize_sample(
     }
 
 
+def summarize_warmup_scout(result: dict[str, Any]) -> dict[str, Any]:
+    metrics = result.get("metrics") or {}
+    warmup_exit = metrics.get("warmupExit") or {}
+    first_band = metrics.get("firstBand") or {}
+    peak = metrics.get("peak") or {}
+    rollback = metrics.get("rollback") or {}
+    invalid = result.get("invalid") or {}
+    return {
+        "passed": bool(result.get("valid")),
+        "variantId": result.get("variantId"),
+        "variantLabel": result.get("variantLabel"),
+        "tunedPoint": result.get("tunedPoint"),
+        "variantFloorPermille": result.get("variantFloorPermille"),
+        "warmupExitTempC": warmup_exit.get("tempC"),
+        "warmupExitedAtMs": warmup_exit.get("elapsedMs"),
+        "approachDurationMs": metrics.get("approachDurationMs"),
+        "firstBandAtMs": first_band.get("approachElapsedMs"),
+        "peakTempC": peak.get("tempC"),
+        "peakAtMs": peak.get("approachElapsedMs"),
+        "rollbackTempC": rollback.get("tempC"),
+        "rollbackAtMs": rollback.get("approachElapsedMs"),
+        "failureReason": invalid.get("reason"),
+        "failureDetail": invalid.get("summary"),
+        "sourceSummary": metrics.get("sourceStats"),
+    }
+
+
+def build_target_result(
+    target_temp_c: int,
+    effective_point: dict[str, Any],
+    variant_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    target_result: dict[str, Any] = {
+        "targetTempC": target_temp_c,
+        "effectivePoint": effective_point,
+        "variants": variant_results,
+    }
+    warmup_scout = next(
+        (result for result in variant_results if result.get("variantId") == "warmup_scout_25"),
+        None,
+    )
+    if warmup_scout is not None:
+        target_result["warmupScout25"] = summarize_warmup_scout(warmup_scout)
+    return target_result
+
+
 def dry_run_target_result(target_temp_c: int, point: dict[str, Any], variant_id: str) -> dict[str, Any]:
-    half_floor = max(1, round(max(point["holdPowerPermille"], point["holdReheatPowerPermille"]) / 2))
-    brake = int(round(point["brakeDistanceCentiC"] * (0.85 if variant_id == "zero_coast" else 0.93)))
+    variant_floor = variant_floor_permille(point, variant_id)
+    brake, _, _ = candidate_brake_plan(int(point["brakeDistanceCentiC"]), variant_id)
     label = variant_label(variant_id)
-    start_temp = round(target_temp_c - brake / 100.0 + (1.2 if variant_id == "zero_coast" else 2.3), 2)
-    duration_ms = 8200 if variant_id == "zero_coast" else 5200
-    peak_temp = round(target_temp_c - 0.2 + (0.4 if variant_id == "half_floor_50" else -0.1), 2)
+    heat_fraction = variant_heat_fraction(variant_id)
+    start_temp = round(target_temp_c - brake / 100.0 + 1.2 + (heat_fraction * 4.4), 2)
+    duration_ms = int(round(8200 - (heat_fraction * 6000)))
+    peak_temp = round(target_temp_c - 0.3 + (heat_fraction * 1.0), 2)
     rollback_temp = round(target_temp_c - 0.9, 2)
     samples = []
     for index in range(32):
@@ -528,7 +641,7 @@ def dry_run_target_result(target_temp_c: int, point: dict[str, Any], variant_id:
         if index > 24:
             rollback_progress = (index - 24) / 7
             temp = peak_temp - (peak_temp - rollback_temp) * rollback_progress
-        output = 0 if variant_id == "zero_coast" else max(1, int(round(half_floor / 10)))
+        output = 0 if not variant_requires_approach_heat(variant_id) else max(1, int(round(variant_floor / 10)))
         if index >= 24:
             output = 0
         samples.append(
@@ -565,7 +678,8 @@ def dry_run_target_result(target_temp_c: int, point: dict[str, Any], variant_id:
         "variantLabel": label,
         "valid": True,
         "tunedPoint": make_variant_point(point, variant_id, brake)[0],
-        "halfFloorPermille": half_floor if variant_id != "zero_coast" else 0,
+        "variantFloorPermille": variant_floor,
+        "halfFloorPermille": variant_floor,
         "metrics": {
             "warmupExit": warmup_exit,
             "firstBand": first_band,
@@ -603,6 +717,7 @@ def characterize_variant(
     smaller_index = 0
     larger_index = 0
     extrapolation_step = max(40, int(round(base_brake * 0.05)))
+    last_failure_result: dict[str, Any] | None = None
     while pending_brakes:
         brake_distance = pending_brakes.pop(0)
         if brake_distance in attempted_brakes:
@@ -638,7 +753,7 @@ def characterize_variant(
                 break
             time.sleep(1.0)
             flux.heartbeat(lease_id)
-        armed = flux.runtime_put(
+        flux.runtime_put(
             device.device_id,
             lease_id,
             {
@@ -650,6 +765,7 @@ def characterize_variant(
         start = time.time()
         last_heartbeat = start
         last_source_telemetry_at = 0.0
+        last_source_telemetry_ok_at = 0.0
         last_source_telemetry: dict[str, Any] | None = None
         source_telemetry_warning_emitted = False
         warmup_exit = None
@@ -664,13 +780,12 @@ def characterize_variant(
                 if now - last_heartbeat > 5.0:
                     flux.heartbeat(lease_id)
                     last_heartbeat = now
-                status = armed if warmup_exit is None and not variant_samples else flux.leased_status(
-                    device.device_id, lease_id
-                )
+                status = flux.leased_status(device.device_id, lease_id)
                 if last_source_telemetry is None or now - last_source_telemetry_at >= 1.0:
                     try:
                         last_source_telemetry = read_source_telemetry(source_url)
                         last_source_telemetry_at = now
+                        last_source_telemetry_ok_at = now
                     except Exception as exc:
                         if not source_telemetry_warning_emitted:
                             log(
@@ -689,6 +804,15 @@ def characterize_variant(
                             stale = dict(last_source_telemetry)
                             stale["status"] = "stale"
                             last_source_telemetry = stale
+                if last_source_telemetry_ok_at == 0.0 and now - start > 2.0:
+                    invalid = {"reason": "source_telemetry_unavailable", "sample": sample if 'sample' in locals() else None}
+                    break
+                if last_source_telemetry_ok_at > 0.0 and now - last_source_telemetry_ok_at > 2.0:
+                    invalid = {
+                        "reason": "source_telemetry_stale",
+                        "sample": variant_samples[-1] if variant_samples else None,
+                    }
+                    break
                 source_telemetry = last_source_telemetry
                 elapsed_ms = int((now - start) * 1000)
                 phase = status.get("heaterControlPhase")
@@ -713,24 +837,30 @@ def characterize_variant(
                 samples_writer.flush()
                 temp_c = float(status["currentTempC"])
                 if warmup_exit is None:
+                    if phase == "warmup" and elapsed_ms >= 500 and output < 100:
+                        invalid = {"reason": "warmup_not_full_power", "sample": sample}
+                        break
                     if phase == "approach":
                         warmup_exit = {
                             "elapsedMs": elapsed_ms,
                             "approachElapsedMs": 0,
                             "tempC": round(temp_c, 2),
                         }
-                        if variant_id == "zero_coast" and output != 0:
+                        if not variant_requires_approach_heat(variant_id) and output != 0:
                             invalid = {"reason": "approach_nonzero_on_entry", "sample": sample}
                             break
-                        if variant_id == "half_floor_50" and output <= 0:
+                        if variant_requires_approach_heat(variant_id) and output <= 0:
                             invalid = {"reason": "approach_zero_on_entry", "sample": sample}
                             break
                 else:
                     in_band = band_low <= temp_c <= band_high
+                    if phase == "warmup":
+                        invalid = {"reason": "returned_to_warmup", "sample": sample}
+                        break
                     if phase == "hold":
                         invalid = {"reason": "entered_hold", "sample": sample}
                         break
-                    if variant_id == "zero_coast" and phase == "approach" and output != 0:
+                    if not variant_requires_approach_heat(variant_id) and phase == "approach" and output != 0:
                         invalid = {"reason": "approach_nonzero_after_warmup", "sample": sample}
                         break
                     if first_band is None:
@@ -800,6 +930,7 @@ def characterize_variant(
                 "variantLabel": variant_label(variant_id),
                 "valid": True,
                 "tunedPoint": tuned_point,
+                "variantFloorPermille": half_floor,
                 "halfFloorPermille": half_floor,
                 "metrics": {
                     "warmupExit": warmup_exit,
@@ -823,6 +954,43 @@ def characterize_variant(
             f"[target {target_temp_c}C] {variant_label(variant_id)} reject brake={brake_distance} "
             f"{invalid_reason_summary(invalid)}"
         )
+        valid_samples = [
+            sample
+            for sample in variant_samples
+            if sample["approachElapsedMs"] is not None and sample["approachElapsedMs"] >= 0
+        ]
+        last_failure_result = {
+            "targetTempC": target_temp_c,
+            "variantId": variant_id,
+            "variantLabel": variant_label(variant_id),
+            "valid": False,
+            "tunedPoint": tuned_point,
+            "variantFloorPermille": half_floor,
+            "halfFloorPermille": half_floor,
+            "invalid": {
+                "reason": invalid.get("reason"),
+                "summary": invalid_reason_summary(invalid),
+            },
+            "metrics": {
+                "warmupExit": warmup_exit,
+                "firstBand": first_band,
+                "peak": peak,
+                "rollback": rollback,
+                "approachDurationMs": first_band["approachElapsedMs"] if first_band else None,
+                "peakDelayMs": (
+                    peak["approachElapsedMs"] - first_band["approachElapsedMs"]
+                    if peak and first_band
+                    else None
+                ),
+                "rollbackDelayMs": (
+                    rollback["approachElapsedMs"] - peak["approachElapsedMs"]
+                    if rollback and peak
+                    else None
+                ),
+                "sourceStats": stats_from_samples(valid_samples),
+            },
+            "samples": variant_samples,
+        }
         direction = invalid_direction(invalid, target_temp_c, band_low, band_high)
         if direction == "more_heat":
             more_heat_brakes.add(brake_distance)
@@ -876,7 +1044,26 @@ def characterize_variant(
                     if candidate not in attempted_brakes:
                         pending_brakes.append(candidate)
                         break
-    raise RuntimeError(f"failed to characterize {target_temp_c}C {variant_label(variant_id)}")
+    if last_failure_result is not None:
+        return last_failure_result
+    variant_floor = variant_floor_permille(effective_point, variant_id)
+    return {
+        "targetTempC": target_temp_c,
+        "variantId": variant_id,
+        "variantLabel": variant_label(variant_id),
+        "valid": False,
+        "tunedPoint": make_variant_point(effective_point, variant_id, base_brake)[0],
+        "variantFloorPermille": variant_floor,
+        "halfFloorPermille": variant_floor,
+        "invalid": {
+            "reason": "no_attempt_completed",
+            "summary": f"failed to characterize {target_temp_c}C {variant_label(variant_id)}",
+        },
+        "metrics": {
+            "sourceStats": {},
+        },
+        "samples": [],
+    }
 
 
 def generate_html(bundle: dict[str, Any]) -> str:
@@ -939,8 +1126,8 @@ canvas{{width:100%;height:100%;display:block}}
 <header class="topbar">
   <div>
     <div class="eyebrow">Flux Purr / Approach Characterization</div>
-    <h1>逼近阶段双曲线采样报告</h1>
-    <div class="subtitle">每个目标温度都给出两条实测 Approach 曲线：0加热滑行曲线，以及 50% 最低功率加热曲线。横轴保留 warmup 退出前 3 秒参考窗口；0 秒垂直虚线标记 warmup → approach；曲线在进带并出现可见回落后截断，不混入 Hold 曲线。</div>
+    <h1>逼近阶段 25% 参考报告</h1>
+    <div class="subtitle">当前旗舰流程只采集并展示 `25%最低功率` warmup scout，把它作为 warmup handoff 与 approach 拟合参考。若 bundle 内附带历史 `0加热 / 50%最低功率` 边界曲线，它们只作为补充背景存在，不参与当前默认展示与执行流。横轴保留 warmup 退出前 3 秒参考窗口；0 秒垂直虚线标记 warmup → approach；曲线在进带并出现可见回落后截断，不混入 Hold 曲线。</div>
     <div class="meta">
       <span>选择模式 <b>{bundle["source"]["selectedMode"]}</b></span>
       <span>EEPROM bank <b>{bundle["source"]["resolvedBank"]}</b></span>
@@ -955,7 +1142,7 @@ canvas{{width:100%;height:100%;display:block}}
 <div class="section-head">
   <div>
     <h2>目标温度</h2>
-    <p>Tabs 切换目标温度；每个图表同时显示 0加热 与 50%最低功率加热 两条曲线</p>
+    <p>Tabs 切换目标温度；主图聚焦 25% 参考曲线，facts 区补充 Hold 与 candidate 参数</p>
   </div>
   <div class="segmented" id="targetTabs"></div>
 </div>
@@ -965,18 +1152,13 @@ canvas{{width:100%;height:100%;display:block}}
     <span>保留 warmup 尾段 3 秒参考窗；0 秒虚线为 warmup → approach 分界；绿色带为 ±1.5°C 目标区间</span>
   </div>
   <div class="chart-wrap"><canvas id="approachChart"></canvas></div>
-  <div class="legend">
-    <span><i class="dot" style="background:#1261a0"></i> 0加热</span>
-    <span><i class="dot" style="background:#c23b32"></i> 50%最低功率加热</span>
-    <span><i class="dot" style="background:#18794e"></i> 目标区间</span>
-    <span><i class="line-swatch dashed" style="color:#66717a"></i> warmup → approach 分界</span>
-  </div>
+  <div class="legend" id="legend"></div>
   <div class="facts" id="facts"></div>
 </section>
 <section class="panel" style="margin-top:12px">
   <div class="panel-title">
-    <h3>Approach 用时对比</h3>
-    <span>0加热曲线作为 hard-limit upper bound；50%最低功率曲线作为 preferred target</span>
+    <h3>25% 参考用时</h3>
+    <span>当前默认只汇总 25%最低功率 scout 的 warmup→rollback 用时</span>
   </div>
   <div class="chart-wrap compact"><canvas id="durationChart"></canvas></div>
 </section>
@@ -984,33 +1166,37 @@ canvas{{width:100%;height:100%;display:block}}
 </main>
 <script>
 const DATA={data_json};
-const COLORS={{zero:'#1261a0',half:'#c23b32',band:'rgba(24,121,78,.12)',grid:'#e8ebed',text:'#66717a',ink:'#182026'}};
+const COLORS={{zero:'#1261a0',scout:'#157a82',half:'#c23b32',band:'rgba(24,121,78,.12)',grid:'#e8ebed',text:'#66717a',ink:'#182026'}};
+const VARIANT_META={{
+  zero_coast:{{label:'0加热（历史边界）',color:COLORS.zero,preferred:false}},
+  warmup_scout_25:{{label:'25%最低功率 warmup scout',color:COLORS.scout,preferred:true}},
+  half_floor_50:{{label:'50%最低功率（历史边界）',color:COLORS.half,preferred:false}},
+}};
 const PRE_CONTEXT_SECONDS=3.0;
 function fmt(n,d=2){{return n==null?'—':Number(n).toFixed(d)}}
 function fmtInt(n){{return n==null?'—':String(Math.round(Number(n)))}}
 function escapeHtml(value){{return String(value??'').replace(/[&<>"]/g,ch=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}}[ch]||ch));}}
-function holdBadge(hold){{if(!hold)return '<span class="badge info">未提供</span>';return hold.passed?'<span class="badge pass">PASS</span>':'<span class="badge fail">FAIL</span>';}}
+function runBadge(run){{if(!run)return '<span class="badge info">未提供</span>';return run.passed?'<span class="badge pass">PASS</span>':'<span class="badge fail">FAIL</span>';}}
 function variantFor(target,id){{return target.variants.find(v=>v.variantId===id);}}
 function approachSeconds(variant){{return variant?.metrics?.approachDurationMs==null?null:variant.metrics.approachDurationMs/1000;}}
-function avgSourceWatts(source){{const avg=source?.powerMw?.avg;return avg==null?null:avg/1000;}}
-function rangeText(min,max,unit,digits=2){{if(min==null&&max==null)return '—';return `${{fmt(min,digits)}}${{unit}} → ${{fmt(max,digits)}}${{unit}}`;}}
 function sourceMetricText(source){{if(!source)return '—';const power=source?.powerMw;const voltage=source?.voltageMv;const current=source?.currentMa;const parts=[];if(power?.avg!=null)parts.push(`${{fmt(power.avg/1000,2)}} W avg`);if(power?.min!=null&&power?.max!=null)parts.push(`${{fmt(power.min/1000,2)}}-${{fmt(power.max/1000,2)}} W`);if(voltage?.avg!=null)parts.push(`${{fmt(voltage.avg/1000,2)}} V avg`);if(current?.avg!=null)parts.push(`${{fmt(current.avg/1000,0)}} mA avg`);return parts.length?parts.join(' · '):'—';}}
 function bundleBannerText(data){{if(data.bundleDisposition==='preliminary_review')return '当前产物是 preliminary 审查 bundle；其中 thermal-profile.accepted.json 仅表示当前三点候选快照，不代表 committed accepted baseline，也不代表 EEPROM saved bank。';if(data.acceptedProfileRole==='review_candidate_snapshot')return '当前 thermal-profile.accepted.json 仅用于回放/审查当前候选快照。';return '';}}
+function variantMeta(variantId){{return VARIANT_META[variantId]||{{label:variantId,color:COLORS.text,preferred:false}};}}
+function visibleVariants(target){{const scout=variantFor(target,'warmup_scout_25');if(scout)return [scout];return ['zero_coast','half_floor_50'].map(id=>variantFor(target,id)).filter(Boolean);}}
+function durationVariants(target){{const scout=variantFor(target,'warmup_scout_25');if(scout)return [scout];return ['zero_coast','half_floor_50'].map(id=>variantFor(target,id)).filter(Boolean);}}
+function renderLegend(){{const target=currentTarget();const items=visibleVariants(target).map(variant=>`<span><i class="dot" style="background:${{variantMeta(variant.variantId).color}}"></i> ${{variantMeta(variant.variantId).label}}</span>`);items.push('<span><i class="dot" style="background:#18794e"></i> 目标区间</span>');items.push('<span><i class="line-swatch dashed" style="color:#66717a"></i> warmup → approach 分界</span>');document.querySelector('#legend').innerHTML=items.join('');}}
 const tabs=document.querySelector('#targetTabs');
 const summary=document.querySelector('#summary');
 const bannerText=bundleBannerText(DATA);
 if(bannerText){{const banner=document.querySelector('#bundleBanner');banner.hidden=false;banner.textContent=bannerText;}}
 summary.innerHTML=DATA.targets.map(target=>{{
-  const zero=variantFor(target,'zero_coast');
-  const half=variantFor(target,'half_floor_50');
+  const scout=target.warmupScout25||null;
   const hold=target.holdCheck||null;
-  const zeroSeconds=approachSeconds(zero);
-  const halfSeconds=approachSeconds(half);
-  const gateDelta=(zeroSeconds==null||halfSeconds==null)?'—':fmt(zeroSeconds-halfSeconds,3)+' s';
   const overshoot=hold?.maxOvershootC==null?'—':fmt(hold.maxOvershootC,2)+' °C';
   const p2p=hold?.holdPeakToPeakC==null?'—':fmt(hold.holdPeakToPeakC,2)+' °C';
-  const failure=hold?.passed||!hold?.failureReason?'':`<div class="metric">失败原因 <strong>${{escapeHtml(hold.failureReason)}}</strong></div>`;
-  return `<article class="card"><h3>${{target.targetTempC}}°C</h3><div class="metric">0加热 <strong>${{zeroSeconds==null?'—':fmt(zeroSeconds,3)+' s'}}</strong></div><div class="metric">50%最低功率 <strong>${{halfSeconds==null?'—':fmt(halfSeconds,3)+' s'}}</strong></div><div class="metric">门槛差值 <strong>${{gateDelta}}</strong></div><div class="metric">Hold confirm <strong>${{holdBadge(hold)}}</strong></div><div class="metric">overshoot / p2p <strong>${{overshoot}} / ${{p2p}}</strong></div>${{failure}}</article>`;
+  const scoutSummary=!scout?'—':(scout.passed?`${{fmt(scout.warmupExitTempC,2)}} °C → ${{fmt((scout.approachDurationMs??0)/1000,3)}} s`:(scout.failureReason||'FAIL'));
+  const failure=hold?.passed||!hold?.failureReason?'':`<div class="metric">Hold 失败原因 <strong>${{escapeHtml(hold.failureReason)}}</strong></div>`;
+  return `<article class="card"><h3>${{target.targetTempC}}°C</h3><div class="metric">25% scout <strong>${{runBadge(scout)}}</strong></div><div class="metric">25% scout 摘要 <strong>${{escapeHtml(scoutSummary)}}</strong></div><div class="metric">Hold confirm <strong>${{runBadge(hold)}}</strong></div><div class="metric">overshoot / p2p <strong>${{overshoot}} / ${{p2p}}</strong></div>${{failure}}</article>`;
 }}).join('');
 let active=DATA.targets[0].targetTempC;
 tabs.innerHTML=DATA.targets.map((target,index)=>`<button class="${{index===0?'active':''}}" data-target="${{target.targetTempC}}">${{target.targetTempC}}°C</button>`).join('');
@@ -1019,35 +1205,42 @@ function currentTarget(){{return DATA.targets.find(target=>target.targetTempC===
 function frame(canvas){{const rect=canvas.getBoundingClientRect();const dpr=window.devicePixelRatio||1;canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);return [c,rect.width,rect.height];}}
 function plotSeconds(sample,warmupExitElapsedMs){{if(sample.approachElapsedMs!=null)return sample.approachElapsedMs/1000;if(warmupExitElapsedMs==null||sample.elapsedMs==null)return null;return (sample.elapsedMs-warmupExitElapsedMs)/1000;}}
 function chartSeries(variant){{if(!variant||!Array.isArray(variant.samples))return[];const warmupExitElapsedMs=variant.metrics?.warmupExit?.elapsedMs??null;return variant.samples.map(sample=>({{...sample,plotSeconds:plotSeconds(sample,warmupExitElapsedMs)}})).filter(sample=>sample.plotSeconds!=null&&sample.plotSeconds>=-PRE_CONTEXT_SECONDS);}}
-function drawApproach(){{const [c,w,h]=frame(document.querySelector('#approachChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const target=currentTarget();const zero=target.variants.find(v=>v.variantId==='zero_coast');const half=target.variants.find(v=>v.variantId==='half_floor_50');const zeroSeries=chartSeries(zero);const halfSeries=chartSeries(half);const all=[...zeroSeries,...halfSeries];let minX=Math.min(...all.map(sample=>sample.plotSeconds),-PRE_CONTEXT_SECONDS);let maxX=Math.max(...all.map(sample=>sample.plotSeconds),0.5);if(maxX-minX<1)maxX=minX+1;const temps=all.map(sample=>sample.currentTempC);const targetMin=target.targetTempC-1.5,targetMax=target.targetTempC+1.5;const yMin=Math.min(...temps,targetMin)-1;const yMax=Math.max(...temps,targetMax)+1;const x=seconds=>m.l+((seconds-minX)/(maxX-minX))*pw;const y=value=>m.t+((yMax-value)/(yMax-yMin))*ph;
+function drawApproach(){{const [c,w,h]=frame(document.querySelector('#approachChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const target=currentTarget();const visible=visibleVariants(target);const seriesList=visible.map(variant=>({{variant,series:chartSeries(variant)}}));const all=seriesList.flatMap(item=>item.series);let minX=Math.min(...all.map(sample=>sample.plotSeconds),-PRE_CONTEXT_SECONDS);let maxX=Math.max(...all.map(sample=>sample.plotSeconds),0.5);if(!Number.isFinite(minX))minX=-PRE_CONTEXT_SECONDS;if(!Number.isFinite(maxX))maxX=6.0;if(maxX-minX<1)maxX=minX+1;const temps=all.map(sample=>sample.currentTempC);const targetMin=target.targetTempC-1.5,targetMax=target.targetTempC+1.5;const yMin=(temps.length?Math.min(...temps,targetMin):targetMin)-1;const yMax=(temps.length?Math.max(...temps,targetMax):targetMax)+1;const x=seconds=>m.l+((seconds-minX)/(maxX-minX))*pw;const y=value=>m.t+((yMax-value)/(yMax-yMin))*ph;
 c.fillStyle='rgba(102,113,122,.05)';c.fillRect(m.l,m.t,Math.max(0,x(0)-m.l),ph);
 c.fillStyle=COLORS.band;c.fillRect(m.l,y(targetMax),pw,y(targetMin)-y(targetMax));
 for(let i=0;i<=4;i++){{const yy=m.t+ph*i/4;c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(m.l,yy);c.lineTo(w-m.r,yy);c.stroke();const value=yMax-((yMax-yMin)*i/4);c.fillStyle=COLORS.text;c.font='11px ui-monospace,monospace';c.fillText(fmt(value,1),8,yy+4);}}
 for(let i=0;i<=6;i++){{const seconds=minX+((maxX-minX)*i/6);const xx=x(seconds);c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(xx,m.t);c.lineTo(xx,m.t+ph);c.stroke();c.fillStyle=COLORS.text;c.fillText(fmt(seconds,1)+'s',xx-12,h-10);}}
 function line(samples,color){{c.beginPath();let started=false;for(const sample of samples){{const xx=x(sample.plotSeconds),yy=y(sample.currentTempC);if(!started){{c.moveTo(xx,yy);started=true;}}else{{c.lineTo(xx,yy);}}}}c.strokeStyle=color;c.lineWidth=2;c.stroke();}}
-line(zeroSeries,COLORS.zero);line(halfSeries,COLORS.half);
+for(const item of seriesList){{line(item.series,variantMeta(item.variant.variantId).color);}}
 c.strokeStyle='#18794e';c.lineWidth=1.5;c.beginPath();c.moveTo(m.l,y(target.targetTempC));c.lineTo(w-m.r,y(target.targetTempC));c.stroke();
 c.strokeStyle=COLORS.text;c.lineWidth=1.5;c.setLineDash([6,4]);c.beginPath();c.moveTo(x(0),m.t);c.lineTo(x(0),m.t+ph);c.stroke();c.setLineDash([]);
 c.fillStyle=COLORS.text;c.font='11px ui-sans-serif,system-ui';c.fillText('warmup→approach',Math.min(w-m.r-92,x(0)+6),m.t+12);
 }}
-function drawDurations(){{const [c,w,h]=frame(document.querySelector('#durationChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const durations=DATA.targets.flatMap(target=>target.variants.map(variant=>variant.metrics.approachDurationMs/1000));const maxY=Math.max(...durations,10);const xStep=pw/DATA.targets.length;const barWidth=xStep*0.28;const y=value=>m.t+((maxY-value)/maxY)*ph;
+function drawDurations(){{const [c,w,h]=frame(document.querySelector('#durationChart'));c.clearRect(0,0,w,h);const m={{l:56,r:20,t:18,b:34}};const pw=w-m.l-m.r,ph=h-m.t-m.b;const variantIds=Array.from(new Set(DATA.targets.flatMap(target=>durationVariants(target).map(variant=>variant.variantId))));const durations=DATA.targets.flatMap(target=>durationVariants(target).map(variant=>approachSeconds(variant)).filter(value=>value!=null));const maxY=Math.max(...durations,10);const xStep=pw/DATA.targets.length;const barWidth=xStep*Math.min(0.28,0.60/Math.max(variantIds.length,1));const y=value=>m.t+((maxY-value)/maxY)*ph;
 for(let i=0;i<=4;i++){{const yy=m.t+ph*i/4;c.strokeStyle=COLORS.grid;c.beginPath();c.moveTo(m.l,yy);c.lineTo(w-m.r,yy);c.stroke();const value=maxY-(maxY*i/4);c.fillStyle=COLORS.text;c.font='11px ui-monospace,monospace';c.fillText(fmt(value,1)+'s',8,yy+4);}}
-DATA.targets.forEach((target,index)=>{{const zero=target.variants.find(v=>v.variantId==='zero_coast').metrics.approachDurationMs/1000;const half=target.variants.find(v=>v.variantId==='half_floor_50').metrics.approachDurationMs/1000;const baseX=m.l+index*xStep+xStep/2;c.fillStyle=COLORS.zero;c.fillRect(baseX-barWidth-2,y(zero),barWidth,m.t+ph-y(zero));c.fillStyle=COLORS.half;c.fillRect(baseX+2,y(half),barWidth,m.t+ph-y(half));c.fillStyle=COLORS.text;c.fillText(target.targetTempC+'°C',baseX-16,h-10);}});
+DATA.targets.forEach((target,index)=>{{const bars=durationVariants(target);const baseX=m.l+index*xStep+xStep/2;const totalWidth=(bars.length*barWidth)+Math.max(0,bars.length-1)*4;let cursor=baseX-totalWidth/2;for(const variant of bars){{const value=approachSeconds(variant);if(value!=null){{c.fillStyle=variantMeta(variant.variantId).color;c.fillRect(cursor,y(value),barWidth,m.t+ph-y(value));}}cursor+=barWidth+4;}}c.fillStyle=COLORS.text;c.fillText(target.targetTempC+'°C',baseX-16,h-10);}});
 }}
-function renderFacts(){{const target=currentTarget();const zero=variantFor(target,'zero_coast');const half=variantFor(target,'half_floor_50');const hold=target.holdCheck||null;const facts=[
-['0加热用时',zero?.metrics?.approachDurationMs==null?'—':fmt(zero.metrics.approachDurationMs/1000,3)+' s'],
-['50%最低功率用时',half?.metrics?.approachDurationMs==null?'—':fmt(half.metrics.approachDurationMs/1000,3)+' s'],
-['0加热 brake',zero?.tunedPoint?.brakeDistanceCentiC==null?'—':String(zero.tunedPoint.brakeDistanceCentiC)],
-['50%最低功率 brake',half?.tunedPoint?.brakeDistanceCentiC==null?'—':String(half.tunedPoint.brakeDistanceCentiC)],
-['50%最低功率 half-floor',half?.halfFloorPermille==null?'—':String(half.halfFloorPermille)+' ‰'],
-['0加热 warmup 退出温度',zero?.metrics?.warmupExit?.tempC==null?'—':fmt(zero.metrics.warmupExit.tempC,2)+' °C'],
-['50%最低功率 warmup 退出温度',half?.metrics?.warmupExit?.tempC==null?'—':fmt(half.metrics.warmupExit.tempC,2)+' °C'],
-['0加热 source 摘要',sourceMetricText(zero?.metrics?.sourceStats)],
-['50%最低功率 source 摘要',sourceMetricText(half?.metrics?.sourceStats)],
+function renderFacts(){{const target=currentTarget();const scout=target.warmupScout25||null;const hold=target.holdCheck||null;const effective=target.effectivePoint||{{}};const facts=[
+['25% scout',runBadge(scout)],
+['25% scout failure',scout?.failureReason||'—'],
+['25% scout warmup 退出温度',scout?.warmupExitTempC==null?'—':fmt(scout.warmupExitTempC,2)+' °C'],
+['25% scout warmupExitedAtMs',scout?.warmupExitedAtMs==null?'—':fmtInt(scout.warmupExitedAtMs)+' ms'],
+['25% scout approachDurationMs',scout?.approachDurationMs==null?'—':fmtInt(scout.approachDurationMs)+' ms'],
+['25% scout firstBandAtMs',scout?.firstBandAtMs==null?'—':fmtInt(scout.firstBandAtMs)+' ms'],
+['25% scout peakTempC',scout?.peakTempC==null?'—':fmt(scout.peakTempC,2)+' °C'],
+['25% scout rollbackAtMs',scout?.rollbackAtMs==null?'—':fmtInt(scout.rollbackAtMs)+' ms'],
+['25% scout source 摘要',sourceMetricText(scout?.sourceSummary)],
+['candidate brake',effective.brakeDistanceCentiC==null?'—':String(effective.brakeDistanceCentiC)],
+['candidate warmup',effective.warmupPowerPermille==null?'—':String(effective.warmupPowerPermille)+' ‰'],
+['candidate approachPower',effective.approachPowerPermille==null?'—':String(effective.approachPowerPermille)+' ‰'],
+['candidate approachFloor',effective.approachFloorPowerPermille==null?'—':String(effective.approachFloorPowerPermille)+' ‰'],
+['candidate holdEntry',effective.holdEntryCentiC==null?'—':String(effective.holdEntryCentiC)],
+['candidate holdPower / reheat',effective.holdPowerPermille==null||effective.holdReheatPowerPermille==null?'—':`${{effective.holdPowerPermille}} / ${{effective.holdReheatPowerPermille}} ‰`],
+['25% scout floor',scout?.variantFloorPermille==null?'—':String(scout.variantFloorPermille)+' ‰'],
 ['warmup 参考窗口',fmt(PRE_CONTEXT_SECONDS,1)+' s'],
 ['0 秒虚线', 'warmup→approach'],
 ];if(hold){{facts.push(
-['Hold confirm',hold.passed?'PASS':'FAIL'],
+['Hold confirm',runBadge(hold)],
 ['Hold failure reason',hold.failureReason||'—'],
 ['Hold seconds',hold.holdSeconds==null?'—':fmtInt(hold.holdSeconds)+' s'],
 ['firstHoldAtMs',hold.firstHoldAtMs==null?'—':fmtInt(hold.firstHoldAtMs)+' ms'],
@@ -1059,7 +1252,7 @@ function renderFacts(){{const target=currentTarget();const zero=variantFor(targe
 ['Approach source 摘要',sourceMetricText(hold.approachSource)],
 ['Hold source 摘要',sourceMetricText(hold.holdSource)],
 );}}document.querySelector('#facts').innerHTML=facts.map(item=>`<div class="fact"><label>${{item[0]}}</label><strong>${{item[1]}}</strong></div>`).join('');}}
-function renderAll(){{drawApproach();drawDurations();renderFacts();}}
+function renderAll(){{renderLegend();drawApproach();drawDurations();renderFacts();}}
 new ResizeObserver(renderAll).observe(document.body);
 renderAll();
 </script>
@@ -1069,18 +1262,20 @@ renderAll();
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Collect Flux Purr dual-approach characterization bundle")
+    parser = argparse.ArgumentParser(description="Collect Flux Purr approach characterization bundle")
     parser.add_argument("--devd-url", default="http://127.0.0.1:62610")
     parser.add_argument("--authorized-port", default="/dev/cu.usbmodem2111401")
     parser.add_argument("--source-url", required=True)
     parser.add_argument("--source-id-prefix", required=True)
     parser.add_argument("--profile-file", required=True, type=Path)
     parser.add_argument("--targets-c")
+    parser.add_argument("--variants", help="comma-separated variant ids: warmup_scout_25, zero_coast, half_floor_50 (default: warmup_scout_25)")
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     targets = parse_targets(args.targets_c)
+    variant_ids = parse_variant_ids(args.variants)
     base_profile = json.loads(args.profile_file.read_text())
     bundle_dir = args.output_dir
     bundle_dir.mkdir(parents=True, exist_ok=True)
@@ -1138,14 +1333,14 @@ def main() -> int:
                     base_point["brakeDistanceCentiC"] = int(round((int(lower["brakeDistanceCentiC"]) + int(upper["brakeDistanceCentiC"])) / 2))
                     base_point["holdPowerPermille"] = int(round((int(lower["holdPowerPermille"]) + int(upper["holdPowerPermille"])) / 2))
                     base_point["holdReheatPowerPermille"] = int(round((int(lower["holdReheatPowerPermille"]) + int(upper["holdReheatPowerPermille"])) / 2))
-                target_result = {
-                    "targetTempC": target_temp_c,
-                    "effectivePoint": base_point,
-                    "variants": [
-                        dry_run_target_result(target_temp_c, base_point, "zero_coast"),
-                        dry_run_target_result(target_temp_c, base_point, "half_floor_50"),
+                target_result = build_target_result(
+                    target_temp_c,
+                    base_point,
+                    [
+                        dry_run_target_result(target_temp_c, base_point, variant_id)
+                        for variant_id in variant_ids
                     ],
-                }
+                )
                 characterization_targets.append(target_result)
         else:
             flux = FluxClient(args.devd_url, args.authorized_port)
@@ -1193,10 +1388,10 @@ def main() -> int:
                         lease_id,
                         {"thermalControlProfile": {"op": "clear_preview"}},
                     )
-                    target_result = {
-                        "targetTempC": target_temp_c,
-                        "effectivePoint": effective_point,
-                        "variants": [
+                    target_result = build_target_result(
+                        target_temp_c,
+                        effective_point,
+                        [
                             characterize_variant(
                                 flux,
                                 device,
@@ -1206,23 +1401,12 @@ def main() -> int:
                                 base_profile,
                                 target_temp_c,
                                 effective_point,
-                                "zero_coast",
+                                variant_id,
                                 samples_writer,
-                            ),
-                            characterize_variant(
-                                flux,
-                                device,
-                                args.source_url,
-                                lease_id,
-                                run_id,
-                                base_profile,
-                                target_temp_c,
-                                effective_point,
-                                "half_floor_50",
-                                samples_writer,
-                            ),
+                            )
+                            for variant_id in variant_ids
                         ],
-                    }
+                    )
                     characterization_targets.append(target_result)
             finally:
                 try:
