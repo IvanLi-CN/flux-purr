@@ -1,5 +1,11 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-19
+
+- 热失控告警合同收敛为两个 owner-facing 状态：`temp >= 420°C` 活动期间每 `1s` 播放一次热失控提示；回落到 `<420°C` 后若尚未确认，则以 `faultAttentionPending=true` 每 `10s` reminder。确认不得绕过活动热失控的绝对停热与提示。
+- 删除分支中按相邻温度或 raw ADC 变化幅度升级 `sensor-glitch` fault 的启发式。PPS request/VIN transition 仍可触发立即重读，但有效重读继续进入既有温度采样链；只有 `SensorShort / SensorOpen / AdcReadFailed` 和绝对过温进入硬保护。
+- 热失控未确认期间禁止 heater arm，并按现有主动降温包线强制风扇：`>60°C` 全速、`40~60°C` 为 `50%`；温度 `<40°C` 或收到确认时解除强制风扇，低于 `40°C` 本身不代替告警确认。
+
 ## 2026-07-17
 
 - 主人因旧 bench source 异常，更换当前 100W HIL source 为 IsolaPurr `f293cc9c139e` / `http://192.168.31.224`。当 source 遥测表现为低压卡死或 PPS 不再跟随请求时，当前可复用恢复流程固定为：先停止加热并保留 unsaved run，再对同一 source 执行 `isolapurr power output manual --usb-c-path disconnected`，随后 `isolapurr power output auto`；若 USB-C power path 仍卡住，再对 `port_c` 做 replug。该流程只用于 source-side stale / latched 输出，不得用来掩盖 controller、sensor 或 runtime 缺陷。

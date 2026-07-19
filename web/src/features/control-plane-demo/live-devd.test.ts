@@ -447,9 +447,9 @@ function makeBusyRecord(id: string): DevdDeviceRecord {
     },
     status: {
       uptimeSeconds: 0,
-      currentTempC: 0,
+      currentTempC: -1,
       targetTempC: 30,
-      boardTempCenti: 0,
+      boardTempCenti: -100,
       voltageMv: 0,
       currentMa: 0,
       pdRequestMv: 0,

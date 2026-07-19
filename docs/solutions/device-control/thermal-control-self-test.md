@@ -119,6 +119,7 @@ The RTD path has two distinct consumers and they must stay separated:
 
 - owner-facing temperature uses the current valid RTD sample
 - controller temperature uses the EMA state
+- if RTD enters fault, owner-facing display keeps the last valid readout instead of synthesizing `0°C`
 
 Current control-path truth is:
 
@@ -134,6 +135,25 @@ At PPS transition boundaries:
 
 - owner-facing temperature must continue to update from each valid RTD sample
 - only controller EMA and slope may remain guarded across the transition window
+
+### Thermal-runaway attention and measurement-fault recovery
+
+Current runtime truth separates thermal-runaway attention from measurement protection:
+
+- `temp >= 420°C` replays the thermal-runaway cue every `1s`
+- after temperature falls below `420°C`, an unacknowledged runaway exposes `faultAttentionPending=true` and uses a `10s` reminder cadence
+- front panel input and runtime/CLI/app `faultAttentionAcknowledged=true` are equivalent acknowledgement paths, but acknowledgement never bypasses active absolute overtemperature cutoff
+- `sensor-open`, `sensor-short`, and `adc-read-failed` stop heating without buzzer attention or pending reminder
+
+Thermal tuning automation should treat measurement faults and runaway attention as distinct recovery paths:
+
+1. Stop heating for the interrupted sub-step and keep active cooling enabled.
+2. Poll runtime status on the same owner-authorized device until `heaterFaultReason` clears and runtime exits `fault`.
+3. Only when runtime reports a real `faultAttentionPending=true` thermal-runaway reminder, send `faultAttentionAcknowledged=true` before the next test.
+4. Clear the RAM thermal preview that belonged to the interrupted attempt.
+5. Retry only the same failed sub-step once.
+
+If three consecutive valid tests still carry transient sensor-fault or reminder evidence, stop the sprint and require manual inspection. Record the affected attempts and rerun those same attempts only after human confirmation that the hardware path is healthy again.
 
 ### Phase-transition and low-temperature guardrails
 
@@ -185,10 +205,10 @@ For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow p
 1. tuning scout
 2. target-local retune and one evidence-specific predicted point
 3. one batch comparison of `current` and the predicted point
-4. one optional second tuning round
-5. final `60s` hold confirm
+4. repeat the same target-local scout/retune/batch loop while the per-target budget remains
+5. run a `60s` hold confirm every time a promotable candidate clears the gate
 
-The `60 / 220°C` focused re-test uses the same workflow with only those two values passed as anchors, validation targets, and tuning targets. Its seed contains only the requested explicit points; it must not materialize an unrelated interpolation target. A short-scout p2p result cannot create a Hold candidate. Only a candidate with valid `100%` warmup output, the target-specific stable-window gate, and its confirmation margin may be promoted to a `60s` Hold confirm. If no candidate is promotable after the two allowed rounds, preserve the evidence as `not_converged` and skip the confirm.
+The `60 / 220°C` focused re-test uses the same workflow with only those two values passed as anchors, validation targets, and tuning targets. Its seed contains only the requested explicit points; it must not materialize an unrelated interpolation target. A short-scout p2p result cannot create a Hold candidate. Only a candidate with valid `100%` warmup output, the target-specific stable-window gate, and its confirmation margin may be promoted to a `60s` Hold confirm. If a confirm fails thermally while budget remains, keep that failed confirm as valid evidence, use it to seed the next predicted correction through the next scout/batch loop, and continue the same target until it either completes, exhausts the budget, or becomes environment-blocked.
 
 The flagship execution whitelist is fixed:
 
@@ -234,7 +254,7 @@ For candidate tuning:
 - distinguish failure before generating a candidate: `missed_lower_band_before_limit`, `missed_upper_band_before_limit`, `stable_window_broke_low`, `stable_window_broke_high`, and `within_gate_low_margin` require different corrections
 - a low-side miss with approach already at full power moves only the warmup handoff; a high-side stable-window break changes only braking and approach-tail heat
 - require at least `1s` full-speed margin at or below `150°C` and `0.5s` above `150°C` before promoting a short scout result to confirm
-- if confirm fails thermally while budget remains, generate one evidence-specific correction, verify it with a short scout, and allow one more confirm; report `not_converged` rather than `budget_exhausted` when wall-clock budget remains
+- if confirm fails thermally while budget remains, generate the next evidence-specific correction, verify it with the next short scout, and continue iterating until the target completes, the wall-clock budget is exhausted, or the environment blocks further progress
 
 ## Validation gates
 
@@ -299,6 +319,20 @@ If the source remains at a stale low-voltage state or otherwise fails to follow 
 7. Count the recovery time inside the same per-target `20min` budget.
 
 Use this procedure only when source telemetry proves the source is stuck or stale. Do not use it to mask a controller, sensor, or runtime defect.
+
+### Recovering a transient measurement fault
+
+If a run stops on `sensor-open`, `sensor-short`, or `adc-read-failed`, do not immediately classify the target as a thermal tuning failure:
+
+1. Stop heating for the current sub-step and keep active cooling enabled.
+2. Poll runtime status on the same owner-authorized device until `heaterFaultReason` clears and runtime exits `fault`.
+3. Do not expect or acknowledge `faultAttentionPending`; measurement faults do not enter the buzzer attention state machine.
+4. Clear the RAM thermal preview that belonged to the interrupted attempt.
+5. Retry only the same failed sub-step once.
+
+Use this path only for transient measurement warnings that clear on the same hardware path. Do not use it to hide repeated sensor faults, runtime resets, or source-side capability loss.
+
+Do not add a `sensor-glitch` fault based on adjacent temperature or raw ADC deltas. A PPS request or VIN transition may trigger an immediate RTD reread, but a valid reread must continue through the established display/control sampling path; only open, short, ADC read failure, and absolute overtemperature are hard protection inputs.
 
 ### Recovering a dead local `devd`
 

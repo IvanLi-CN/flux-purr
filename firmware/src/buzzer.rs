@@ -293,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn looping_alarm_wraps_without_going_idle() {
+    fn protection_alarm_loops_until_stopped() {
         let mut controller = BuzzerController::new();
         controller.play(BuzzerCueId::ProtectionAlarm, 0);
 

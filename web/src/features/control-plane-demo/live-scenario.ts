@@ -1,4 +1,4 @@
-import type { ControlPlaneScenario } from './types'
+import { type ControlPlaneScenario, UNAVAILABLE_TEMPERATURE_C } from './types'
 
 export const liveControlPlaneScenario: ControlPlaneScenario = {
   name: 'Live hardware',
@@ -16,8 +16,8 @@ export const liveControlPlaneScenario: ControlPlaneScenario = {
       firmware: 'unknown',
       buildId: 'unknown',
       uptime: 'disconnected',
-      boardTempC: 0,
-      currentTempC: 0,
+      boardTempC: UNAVAILABLE_TEMPERATURE_C,
+      currentTempC: UNAVAILABLE_TEMPERATURE_C,
       targetTempC: 30,
       voltageMv: 0,
       currentMa: 0,

@@ -54,6 +54,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "heaterEnabled": true,
   "heaterOutputPercent": 22,
+  "faultAttentionPending": false,
   "activeCoolingEnabled": true,
   "fanDisplayState": "AUTO",
   "fanEnabled": true,
@@ -84,6 +85,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
 `rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
+`faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
 `manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the EEPROM-backed saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation and inherited defaults are applied. The current reserve is subtracted from the lower of PPS capability current and live CH224Q current before the heater voltage ceiling is calculated, leaving source margin for board power and conversion loss.
 
 ### `CalibrationState`
@@ -331,6 +333,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
   "heaterEnabled": true,
+  "faultAttentionAcknowledged": true,
   "manualPpsEnabled": true,
   "manualPpsMv": 10400,
   "manualPpsMa": 2500,
@@ -670,6 +673,7 @@ The response returns the updated status:
       "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
       "activeCoolingEnabled": true,
       "heaterEnabled": true,
+      "faultAttentionPending": false,
       "manualPpsEnabled": true,
       "manualPpsMv": 10400,
       "manualPpsMa": 2500,

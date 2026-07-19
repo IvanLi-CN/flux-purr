@@ -436,6 +436,7 @@ impl DeviceRecord {
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
             heater_fault_reason: None,
+            fault_attention_pending: false,
             heater_lock_reason: None,
             heater_control_phase: None,
             heater_error_c: None,
@@ -488,7 +489,7 @@ impl DeviceRecord {
         let status = ControlPlaneStatus {
             mode: "idle".to_string(),
             uptime_seconds: 0,
-            current_temp_c: 0.0,
+            current_temp_c: -1.0,
             target_temp_c: 220,
             selected_preset_slot: None,
             presets_c: None,
@@ -501,7 +502,7 @@ impl DeviceRecord {
             fan_pwm_permille: 0,
             voltage_mv: 0,
             current_ma: 0,
-            board_temp_centi: 0,
+            board_temp_centi: -100,
             rtd_raw_adc_mv: None,
             vin_raw_adc_mv: None,
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
@@ -515,6 +516,7 @@ impl DeviceRecord {
             pps_capability_max_ma: None,
             manual_pps_error: None,
             heater_fault_reason: None,
+            fault_attention_pending: false,
             heater_lock_reason: None,
             heater_control_phase: None,
             heater_error_c: None,
@@ -672,6 +674,8 @@ pub struct ControlPlaneStatus {
     pub manual_pps_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_fault_reason: Option<String>,
+    #[serde(default)]
+    pub fault_attention_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_lock_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1192,6 +1196,7 @@ pub struct RuntimeConfigRequest {
     pub manual_pps_enabled: Option<bool>,
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
+    pub fault_attention_acknowledged: Option<bool>,
     pub calibration: Option<CalibrationControlRequest>,
     pub thermal_profile_mode: Option<String>,
     pub thermal_control_profile: Option<ThermalControlProfileRequest>,
@@ -5375,6 +5380,7 @@ fn emit_runtime_config_event(
                 "manualPpsEnabled": payload.manual_pps_enabled,
                 "manualPpsMv": payload.manual_pps_mv,
                 "manualPpsMa": payload.manual_pps_ma,
+                "faultAttentionAcknowledged": payload.fault_attention_acknowledged,
             },
             "status": {
                 "targetTempC": status.target_temp_c,
@@ -5385,6 +5391,7 @@ fn emit_runtime_config_event(
                 "manualPpsEnabled": status.manual_pps_enabled,
                 "manualPpsMv": status.manual_pps_mv,
                 "manualPpsMa": status.manual_pps_ma,
+                "faultAttentionPending": status.fault_attention_pending,
             },
         }),
     ));
@@ -5806,7 +5813,7 @@ mod tests {
         assert_eq!(device.connection, ConnectionState::Disconnected);
         assert_eq!(device.identity.build_id, "native-serial-placeholder");
         assert_eq!(device.identity.board, "unknown");
-        assert_eq!(device.status.current_temp_c, 0.0);
+        assert_eq!(device.status.current_temp_c, -1.0);
         assert!(!device.status.heater_enabled);
         assert_eq!(device.status.pd_contract_mv, 0);
         assert_eq!(device.network.state, NetworkState::Idle);
@@ -6284,6 +6291,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6313,6 +6321,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::Preview,
                     bank: None,
@@ -6376,6 +6385,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::ClearSaved,
                     bank: None,
@@ -6405,6 +6415,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::ClearPreview,
                     bank: None,
@@ -6439,6 +6450,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::Save,
                     bank: None,
@@ -6502,6 +6514,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: Some(ThermalControlProfileRequest {
                     op: ThermalControlProfileOp::ClearSaved,
                     bank: None,
@@ -6659,6 +6672,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6709,6 +6723,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6737,6 +6752,7 @@ mod tests {
                 manual_pps_ma: Some(2_500),
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6763,6 +6779,7 @@ mod tests {
                 manual_pps_ma: None,
                 calibration: None,
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6810,6 +6827,7 @@ mod tests {
                     target_adc_mv: None,
                 }),
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -6857,6 +6875,7 @@ mod tests {
                     target_adc_mv: None,
                 }),
                 thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
                 thermal_control_profile: None,
             }),
         )
@@ -7116,6 +7135,7 @@ mod tests {
                 target_adc_mv: Some(930),
             }),
             thermal_profile_mode: None,
+            fault_attention_acknowledged: None,
             thermal_control_profile: None,
         };
         let status = ControlPlaneStatus {
@@ -7147,6 +7167,7 @@ mod tests {
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),
             manual_pps_error: None,
+            fault_attention_pending: false,
             heater_fault_reason: None,
             heater_lock_reason: None,
             heater_control_phase: None,
@@ -7208,6 +7229,7 @@ mod tests {
                 target_adc_mv: None,
             }),
             thermal_profile_mode: None,
+            fault_attention_acknowledged: None,
             thermal_control_profile: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
@@ -7255,6 +7277,7 @@ mod tests {
             manual_pps_ma: None,
             calibration: None,
             thermal_profile_mode: None,
+            fault_attention_acknowledged: None,
             thermal_control_profile: Some(ThermalControlProfileRequest {
                 op: ThermalControlProfileOp::Preview,
                 bank: None,
@@ -7314,6 +7337,7 @@ mod tests {
             manual_pps_ma: None,
             calibration: None,
             thermal_profile_mode: None,
+            fault_attention_acknowledged: None,
             thermal_control_profile: Some(ThermalControlProfileRequest {
                 op: ThermalControlProfileOp::Save,
                 bank: None,

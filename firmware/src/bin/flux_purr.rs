@@ -302,6 +302,8 @@ const BUZZER_PWM_PERIOD_TICKS: u16 = 999;
 #[cfg(target_arch = "xtensa")]
 const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
+const BUZZER_PROTECTION_ALARM_INTERVAL_MS: u64 = 1_000;
+#[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
@@ -315,10 +317,6 @@ const RTD_MIN_VALID_SAMPLE_COUNT: usize = 48;
 const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_CONTROL_SAMPLE_STABLE_AFTER_REQUEST_MS: u64 = 300;
-#[cfg(any(target_arch = "xtensa", test))]
-const RTD_GLITCH_MAX_STEP_TEMP_C: f32 = 12.0;
-#[cfg(any(target_arch = "xtensa", test))]
-const RTD_GLITCH_MAX_STEP_RAW_ADC_DELTA_MV: u16 = 60;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -418,7 +416,6 @@ enum HeaterFaultReason {
     SensorShort,
     SensorOpen,
     AdcReadFailed,
-    SensorGlitch,
     OverTemp,
 }
 
@@ -429,7 +426,6 @@ impl HeaterFaultReason {
             Self::SensorShort => "sensor-short",
             Self::SensorOpen => "sensor-open",
             Self::AdcReadFailed => "adc-read-failed",
-            Self::SensorGlitch => "sensor-glitch",
             Self::OverTemp => "over-temp",
         }
     }
@@ -2045,9 +2041,13 @@ fn is_sensor_fault(reason: Option<HeaterFaultReason>) -> bool {
             HeaterFaultReason::SensorShort
                 | HeaterFaultReason::SensorOpen
                 | HeaterFaultReason::AdcReadFailed
-                | HeaterFaultReason::SensorGlitch
         )
     )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn is_overtemp_fault(reason: Option<HeaterFaultReason>) -> bool {
+    reason == Some(HeaterFaultReason::OverTemp)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2170,6 +2170,20 @@ fn fan_policy_decision(
         state,
         command,
         display_state: fan_display_state_for_command(active_cooling_enabled, command),
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn overtemp_forced_fan_state(
+    current_temp_c: i16,
+    forced_fan_active: bool,
+) -> Option<FanPolicyState> {
+    if !forced_fan_active || current_temp_c < AUTO_COOLING_FAN_MIN_TEMP_C {
+        None
+    } else if current_temp_c > AUTO_COOLING_FAN_FULL_TEMP_C {
+        Some(FanPolicyState::Full)
+    } else {
+        Some(FanPolicyState::SafeHalf)
     }
 }
 
@@ -2308,13 +2322,16 @@ fn apply_valid_rtd_measurement(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn clear_runtime_display_temperature(
+fn retain_runtime_display_temperature(
     ui_state: &mut FrontPanelUiState,
     latest_display_temp_c: &mut f32,
     latest_display_temp_i16: &mut i16,
 ) -> bool {
-    clear_runtime_temperature(latest_display_temp_c, latest_display_temp_i16);
-    sync_runtime_temperature_ui(ui_state, 0, 0)
+    sync_runtime_temperature_ui(
+        ui_state,
+        *latest_display_temp_i16,
+        temp_c_to_deci_c(*latest_display_temp_c),
+    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2383,62 +2400,6 @@ fn should_retry_rtd_sample_after_power_step(
             >= RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
-fn is_implausible_rtd_step(
-    previous_temp_c: f32,
-    current_temp_c: f32,
-    previous_raw_adc_mv: u16,
-    current_raw_adc_mv: u16,
-) -> bool {
-    (current_temp_c - previous_temp_c).abs() >= RTD_GLITCH_MAX_STEP_TEMP_C
-        || previous_raw_adc_mv.abs_diff(current_raw_adc_mv) >= RTD_GLITCH_MAX_STEP_RAW_ADC_DELTA_MV
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
-fn should_retry_rtd_sample_after_glitch(
-    previous_temp_c: f32,
-    previous_raw_adc_mv: u16,
-    sample: &RtdSample,
-) -> bool {
-    if previous_raw_adc_mv == 0 {
-        return false;
-    }
-    match sample {
-        RtdSample::Valid(measurement) => is_implausible_rtd_step(
-            previous_temp_c,
-            measurement.temp_c,
-            previous_raw_adc_mv,
-            measurement.raw_adc_mv,
-        ),
-        RtdSample::Fault { .. } => false,
-    }
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-fn reconcile_rtd_sample_after_glitch_retry(
-    previous_temp_c: f32,
-    previous_raw_adc_mv: u16,
-    retry_sample: RtdSample,
-) -> RtdSample {
-    match retry_sample {
-        RtdSample::Valid(measurement)
-            if is_implausible_rtd_step(
-                previous_temp_c,
-                measurement.temp_c,
-                previous_raw_adc_mv,
-                measurement.raw_adc_mv,
-            ) =>
-        {
-            RtdSample::Fault {
-                adc_mv: Some(measurement.raw_adc_mv),
-                reason: HeaterFaultReason::SensorGlitch,
-            }
-        }
-        other => other,
-    }
-}
-
 #[cfg(target_arch = "xtensa")]
 fn should_clear_runtime_fault_latch(
     heater_rearm_requested: bool,
@@ -2452,7 +2413,11 @@ fn should_clear_runtime_fault_latch(
 fn update_fault_attention_state(
     fault_present: bool,
     last_fault_present: &mut bool,
+    attention_acknowledged: &mut bool,
     attention_pending_after_fault_clear: &mut bool,
+    forced_fan_active: &mut bool,
+    current_temp_c: i16,
+    next_protection_alarm_ms: &mut Option<u64>,
     next_attention_reminder_ms: &mut Option<u64>,
     buzzer: &mut BuzzerController,
     now_ms: u64,
@@ -2460,17 +2425,29 @@ fn update_fault_attention_state(
     let mut changed = false;
 
     if fault_present && !*last_fault_present {
+        *attention_acknowledged = false;
         *attention_pending_after_fault_clear = false;
+        *forced_fan_active = true;
+        *next_protection_alarm_ms =
+            Some(now_ms.saturating_add(BUZZER_PROTECTION_ALARM_INTERVAL_MS));
         *next_attention_reminder_ms = None;
         let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, now_ms);
         changed = true;
     } else if !fault_present && *last_fault_present {
-        *attention_pending_after_fault_clear = true;
-        *next_attention_reminder_ms =
-            Some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
+        *attention_pending_after_fault_clear = !*attention_acknowledged;
+        *next_protection_alarm_ms = None;
+        *next_attention_reminder_ms = attention_pending_after_fault_clear
+            .then_some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
         if buzzer.active_cue() == Some(BuzzerCueId::ProtectionAlarm) {
             let _ = buzzer.stop();
         }
+        changed = true;
+    }
+
+    if *forced_fan_active
+        && (*attention_acknowledged || current_temp_c < AUTO_COOLING_FAN_MIN_TEMP_C)
+    {
+        *forced_fan_active = false;
         changed = true;
     }
 
@@ -2479,18 +2456,58 @@ fn update_fault_attention_state(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn consume_attention_input_if_pending(
+fn overtemp_attention_requires_ack(
+    overtemp_active: bool,
+    attention_acknowledged: bool,
+    attention_pending_after_fault_clear: bool,
+) -> bool {
+    (overtemp_active && !attention_acknowledged) || attention_pending_after_fault_clear
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn acknowledge_overtemp_attention(
+    overtemp_active: bool,
+    attention_acknowledged: &mut bool,
     attention_pending_after_fault_clear: &mut bool,
+    forced_fan_active: &mut bool,
     next_attention_reminder_ms: &mut Option<u64>,
     buzzer: &mut BuzzerController,
 ) -> bool {
-    if !*attention_pending_after_fault_clear {
+    if !overtemp_attention_requires_ack(
+        overtemp_active,
+        *attention_acknowledged,
+        *attention_pending_after_fault_clear,
+    ) {
         return false;
     }
 
+    *attention_acknowledged = true;
     *attention_pending_after_fault_clear = false;
+    *forced_fan_active = false;
     *next_attention_reminder_ms = None;
-    let _ = buzzer.stop();
+    if !overtemp_active {
+        let _ = buzzer.stop();
+    }
+    true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn maybe_play_protection_alarm(
+    fault_present: bool,
+    next_protection_alarm_ms: &mut Option<u64>,
+    buzzer: &mut BuzzerController,
+    now_ms: u64,
+) -> bool {
+    if !fault_present {
+        *next_protection_alarm_ms = None;
+        return false;
+    }
+    if !next_protection_alarm_ms.is_some_and(|next| now_ms >= next) {
+        return false;
+    }
+
+    let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, now_ms);
+    *next_protection_alarm_ms = Some(now_ms.saturating_add(BUZZER_PROTECTION_ALARM_INTERVAL_MS));
     true
 }
 
@@ -4597,6 +4614,7 @@ struct UsbRuntimeStatusContext {
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
     heater_fault_latched: Option<HeaterFaultReason>,
+    attention_pending_after_fault_clear: bool,
     thermal_control_profile_preview: bool,
     active_thermal_control_profile: Option<ThermalControlProfile>,
     last_raw_state: FrontPanelRawState,
@@ -4685,6 +4703,7 @@ fn usb_runtime_status(
         let _ = value.push_str(reason.label());
         value
     });
+    status.fault_attention_pending = context.attention_pending_after_fault_clear;
     status.heater_lock_reason = ui_state.heater_lock_reason.map(Into::into);
     let mut heater_control_phase = heapless::String::new();
     let _ = heater_control_phase.push_str(context.pid_snapshot.phase.label());
@@ -6077,7 +6096,7 @@ fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Control
             mode: DeviceMode::Fault,
             voltage_mv: 0,
             current_ma: 0,
-            board_temp_centi: 0,
+            board_temp_centi: -100,
             rtd_raw_adc_mv: 0,
             vin_raw_adc_mv: 0,
             pd_request_mv: DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
@@ -6183,6 +6202,11 @@ async fn handle_usb_control_line(
     manual_pps: &mut ManualPpsState,
     fan_command: FanHardwareCommand,
     current_rtd_fault: Option<HeaterFaultReason>,
+    overtemp_attention_acknowledged: &mut bool,
+    attention_pending_after_fault_clear: &mut bool,
+    overtemp_forced_fan_active: &mut bool,
+    next_attention_reminder_ms: &mut Option<u64>,
+    buzzer: &mut BuzzerController,
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
@@ -6200,26 +6224,29 @@ async fn handle_usb_control_line(
         manual_pps.capability_max_mv,
         manual_pps.capability_max_ma,
     );
-    let runtime_context = UsbRuntimeStatusContext {
-        elapsed_ms,
-        last_pd_observation,
-        heater_power_backend: *heater_power_backend,
-        pid_snapshot,
-        heater_control_timing,
-        heater_physical_output_percent: last_heater_duty,
-        manual_pps: *manual_pps,
-        calibration: *calibration_runtime_state,
-        fan_command,
-        current_rtd_fault,
-        heater_fault_latched: heater_controller.fault_latched(),
-        thermal_control_profile_preview: thermal_control_profile_preview.is_some(),
-        active_thermal_control_profile,
-        last_raw_state,
-        latest_status_temp_c,
-        latest_rtd_raw_adc_mv,
-        latest_vin_raw_adc_mv,
-        vin_mv: latest_vin_mv,
-    };
+    let runtime_context =
+        |heater_fault_latched: Option<HeaterFaultReason>,
+         attention_pending_after_fault_clear_value: bool| UsbRuntimeStatusContext {
+            elapsed_ms,
+            last_pd_observation,
+            heater_power_backend: *heater_power_backend,
+            pid_snapshot,
+            heater_control_timing,
+            heater_physical_output_percent: last_heater_duty,
+            manual_pps: *manual_pps,
+            calibration: *calibration_runtime_state,
+            fan_command,
+            current_rtd_fault,
+            heater_fault_latched,
+            attention_pending_after_fault_clear: attention_pending_after_fault_clear_value,
+            thermal_control_profile_preview: thermal_control_profile_preview.is_some(),
+            active_thermal_control_profile,
+            last_raw_state,
+            latest_status_temp_c,
+            latest_rtd_raw_adc_mv,
+            latest_vin_raw_adc_mv,
+            vin_mv: latest_vin_mv,
+        };
     let response = match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
@@ -6235,7 +6262,10 @@ async fn handle_usb_control_line(
                 UsbResponsePayload::Status(usb_runtime_status(
                     ui_state,
                     memory_config,
-                    runtime_context,
+                    runtime_context(
+                        heater_controller.fault_latched(),
+                        *attention_pending_after_fault_clear,
+                    ),
                 )),
             ),
             UsbRequestOp::GetCalibration => usb_response(
@@ -6267,10 +6297,31 @@ async fn handle_usb_control_line(
                 UsbResponsePayload::Wifi(config.redacted_summary()),
             )
         }
-        Ok(UsbFrame::RuntimeConfig { request_id, config }) => {
+        Ok(UsbFrame::RuntimeConfig {
+            request_id,
+            mut config,
+        }) => {
             let previous_memory_config = memory_config.clone();
             let heater_toggle_requested = config.heater_enabled.is_some();
             let heater_rearm_requested = config.heater_enabled == Some(true);
+            let overtemp_active = is_overtemp_fault(current_rtd_fault);
+            if config.fault_attention_acknowledged == Some(true)
+                && acknowledge_overtemp_attention(
+                    overtemp_active,
+                    overtemp_attention_acknowledged,
+                    attention_pending_after_fault_clear,
+                    overtemp_forced_fan_active,
+                    next_attention_reminder_ms,
+                    buzzer,
+                )
+            {
+                info!("overtemp attention acknowledged");
+            }
+            if heater_rearm_requested && (overtemp_active || *attention_pending_after_fault_clear) {
+                config.heater_enabled = Some(false);
+                let _ = buzzer.play(BuzzerCueId::HeaterReject, elapsed_ms);
+                info!("heater runtime arm rejected by overtemp attention state");
+            }
             if should_clear_runtime_fault_latch(
                 heater_rearm_requested,
                 current_rtd_fault,
@@ -6286,7 +6337,10 @@ async fn handle_usb_control_line(
                 memory_config,
                 manual_pps,
                 thermal_control_profile_preview,
-                runtime_context,
+                runtime_context(
+                    heater_controller.fault_latched(),
+                    *attention_pending_after_fault_clear,
+                ),
             );
             *calibration_runtime_state = next_calibration_runtime_state;
             if heater_toggle_requested {
@@ -7155,7 +7209,7 @@ async fn main(_spawner: Spawner) {
         RtdSample::Fault { adc_mv, reason } => {
             current_rtd_fault = Some(reason);
             let _ = heater_controller.latch_fault(reason);
-            let _ = clear_runtime_display_temperature(
+            let _ = retain_runtime_display_temperature(
                 &mut ui_state,
                 &mut latest_display_temp_c,
                 &mut latest_display_temp_i16,
@@ -7193,7 +7247,7 @@ async fn main(_spawner: Spawner) {
     let mut last_fan_command: Option<FanHardwareCommand> = None;
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    let initial_fan_decision = fan_policy_decision(
+    let mut initial_fan_decision = fan_policy_decision(
         latest_display_temp_i16,
         0,
         ui_state.heater_enabled,
@@ -7202,6 +7256,17 @@ async fn main(_spawner: Spawner) {
         fan_policy_state,
         is_sensor_fault(current_rtd_fault),
     );
+    if let Some(state) = overtemp_forced_fan_state(
+        latest_display_temp_i16,
+        is_overtemp_fault(current_rtd_fault),
+    ) {
+        let command = state.command(0);
+        initial_fan_decision = FanPolicyDecision {
+            state,
+            command,
+            display_state: fan_display_state_for_command(ui_state.active_cooling_enabled, command),
+        };
+    }
     fan_policy_state = initial_fan_decision.state;
     let mut fan_command = initial_fan_decision.command;
     let _ = sync_frontpanel_runtime_state(
@@ -7241,17 +7306,21 @@ async fn main(_spawner: Spawner) {
         &mut last_fan_command,
     );
     let mut buzzer = BuzzerController::new();
-    let mut last_fault_present = current_rtd_fault.is_some();
+    let mut last_fault_present = is_overtemp_fault(current_rtd_fault);
+    let mut overtemp_attention_acknowledged = false;
     let mut attention_pending_after_fault_clear = false;
+    let mut overtemp_forced_fan_active = last_fault_present;
     let mut suppress_attention_ack_input = false;
     let mut suppress_attention_ack_waits_for_event = false;
     let mut suppress_attention_ack_event_seen = false;
     let mut suppress_attention_ack_clear_delay_ms = FRONTPANEL_DEBOUNCE_MS;
     let mut suppress_attention_ack_clear_after_ms: Option<u64> = None;
+    let mut next_protection_alarm_ms: Option<u64> = None;
     let mut next_attention_reminder_ms: Option<u64> = None;
     let mut buzzer_output_applied = BuzzerHardwareState::default();
     if last_fault_present {
         let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, 0);
+        next_protection_alarm_ms = Some(BUZZER_PROTECTION_ALARM_INTERVAL_MS);
     }
     apply_buzzer_output(
         &mut mcpwm.timer2,
@@ -7335,6 +7404,11 @@ async fn main(_spawner: Spawner) {
                         &mut manual_pps_state,
                         fan_command,
                         current_rtd_fault,
+                        &mut overtemp_attention_acknowledged,
+                        &mut attention_pending_after_fault_clear,
+                        &mut overtemp_forced_fan_active,
+                        &mut next_attention_reminder_ms,
+                        &mut buzzer,
                         &mut thermal_control_profile_preview,
                         last_raw_state,
                         latest_display_temp_c,
@@ -7360,12 +7434,19 @@ async fn main(_spawner: Spawner) {
 
         if sample.raw_state != last_raw_state {
             if should_consume_attention_raw_input(
-                attention_pending_after_fault_clear,
+                overtemp_attention_requires_ack(
+                    is_overtemp_fault(current_rtd_fault),
+                    overtemp_attention_acknowledged,
+                    attention_pending_after_fault_clear,
+                ),
                 suppress_attention_ack_input,
                 last_raw_state,
                 sample.raw_state,
-            ) && consume_attention_input_if_pending(
+            ) && acknowledge_overtemp_attention(
+                is_overtemp_fault(current_rtd_fault),
+                &mut overtemp_attention_acknowledged,
                 &mut attention_pending_after_fault_clear,
+                &mut overtemp_forced_fan_active,
                 &mut next_attention_reminder_ms,
                 &mut buzzer,
             ) {
@@ -7418,8 +7499,11 @@ async fn main(_spawner: Spawner) {
                 suppress_attention_ack_event_seen = true;
                 continue;
             }
-            if consume_attention_input_if_pending(
+            if acknowledge_overtemp_attention(
+                is_overtemp_fault(current_rtd_fault),
+                &mut overtemp_attention_acknowledged,
                 &mut attention_pending_after_fault_clear,
+                &mut overtemp_forced_fan_active,
                 &mut next_attention_reminder_ms,
                 &mut buzzer,
             ) {
@@ -7562,8 +7646,6 @@ async fn main(_spawner: Spawner) {
                 .unwrap_or_default();
 
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
-            let previous_rtd_raw_adc_mv = latest_rtd_raw_adc_mv;
-            let previous_temp_c = latest_temp_c;
             let current_request_mv = heater_power_backend.pd_request_mv();
             let mut rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
             let first_rtd_snapshot = match &rtd_sample {
@@ -7612,44 +7694,6 @@ async fn main(_spawner: Spawner) {
                 }
             }
 
-            if should_retry_rtd_sample_after_glitch(
-                previous_temp_c,
-                previous_rtd_raw_adc_mv,
-                &rtd_sample,
-            ) {
-                let retry_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
-                let retry_rtd_snapshot = match &retry_sample {
-                    RtdSample::Valid(measurement) => {
-                        (measurement.raw_adc_mv, measurement.temp_c, "valid")
-                    }
-                    RtdSample::Fault { adc_mv, reason } => {
-                        (adc_mv.unwrap_or(0), 0.0, reason.label())
-                    }
-                };
-                let reconciled_rtd_sample = reconcile_rtd_sample_after_glitch_retry(
-                    previous_temp_c,
-                    previous_rtd_raw_adc_mv,
-                    retry_sample,
-                );
-                let reconciled_rtd_label = match &reconciled_rtd_sample {
-                    RtdSample::Valid(_) => "accepted",
-                    RtdSample::Fault { reason, .. } => reason.label(),
-                };
-                info!(
-                    "rtd glitch retry prev_raw_adc_mv={=u16} prev_temp_c={=f32} first_raw_adc_mv={=u16} first_temp_c={=f32} first_status={=str} retry_raw_adc_mv={=u16} retry_temp_c={=f32} retry_status={=str} resolved={=str}",
-                    previous_rtd_raw_adc_mv,
-                    previous_temp_c,
-                    first_rtd_snapshot.0,
-                    first_rtd_snapshot.1,
-                    first_rtd_snapshot.2,
-                    retry_rtd_snapshot.0,
-                    retry_rtd_snapshot.1,
-                    retry_rtd_snapshot.2,
-                    reconciled_rtd_label,
-                );
-                rtd_sample = reconciled_rtd_sample;
-            }
-
             match rtd_sample {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
@@ -7679,7 +7723,7 @@ async fn main(_spawner: Spawner) {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
                     current_rtd_fault = Some(reason);
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
-                    needs_redraw |= clear_runtime_display_temperature(
+                    needs_redraw |= retain_runtime_display_temperature(
                         &mut ui_state,
                         &mut latest_display_temp_c,
                         &mut latest_display_temp_i16,
@@ -7702,11 +7746,15 @@ async fn main(_spawner: Spawner) {
                 info!("heater fault latched reason={=str}", reason.label());
             }
 
-            let fault_present = current_rtd_fault.is_some();
+            let fault_present = is_overtemp_fault(current_rtd_fault);
             let attention_state_changed = update_fault_attention_state(
                 fault_present,
                 &mut last_fault_present,
+                &mut overtemp_attention_acknowledged,
                 &mut attention_pending_after_fault_clear,
+                &mut overtemp_forced_fan_active,
+                latest_display_temp_i16,
+                &mut next_protection_alarm_ms,
                 &mut next_attention_reminder_ms,
                 &mut buzzer,
                 elapsed_ms,
@@ -7926,7 +7974,7 @@ async fn main(_spawner: Spawner) {
             needs_redraw = true;
         }
 
-        let fan_decision = fan_policy_decision(
+        let mut fan_decision = fan_policy_decision(
             latest_display_temp_i16,
             elapsed_ms,
             ui_state.heater_enabled,
@@ -7935,6 +7983,19 @@ async fn main(_spawner: Spawner) {
             fan_policy_state,
             is_sensor_fault(current_rtd_fault),
         );
+        if let Some(state) =
+            overtemp_forced_fan_state(latest_display_temp_i16, overtemp_forced_fan_active)
+        {
+            let command = state.command(elapsed_ms);
+            fan_decision = FanPolicyDecision {
+                state,
+                command,
+                display_state: fan_display_state_for_command(
+                    ui_state.active_cooling_enabled,
+                    command,
+                ),
+            };
+        }
         fan_policy_state = fan_decision.state;
         fan_command = fan_decision.command;
         apply_fan_output(
@@ -7956,14 +8017,18 @@ async fn main(_spawner: Spawner) {
             needs_redraw = true;
         }
 
-        if current_rtd_fault.is_some() && buzzer.active_cue() != Some(BuzzerCueId::ProtectionAlarm)
-        {
-            let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, elapsed_ms);
+        if maybe_play_protection_alarm(
+            is_overtemp_fault(current_rtd_fault),
+            &mut next_protection_alarm_ms,
+            &mut buzzer,
+            elapsed_ms,
+        ) {
+            info!("protection alarm -> replay");
         }
 
         if maybe_play_attention_reminder(
             attention_pending_after_fault_clear,
-            current_rtd_fault.is_some(),
+            is_overtemp_fault(current_rtd_fault),
             &mut next_attention_reminder_ms,
             &mut buzzer,
             elapsed_ms,
@@ -8059,6 +8124,7 @@ mod tests {
             heater_physical_output_percent: 0,
             current_rtd_fault: None,
             heater_fault_latched: None,
+            attention_pending_after_fault_clear: false,
             thermal_control_profile_preview: false,
             active_thermal_control_profile: None,
             last_raw_state: FrontPanelRawState::default(),
@@ -8301,6 +8367,7 @@ mod tests {
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
@@ -8378,6 +8445,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileCommand {
@@ -8455,6 +8523,7 @@ mod tests {
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileCommand {
@@ -8535,6 +8604,7 @@ mod tests {
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: Some(ThermalControlProfileCommand {
@@ -8839,6 +8909,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_400),
                 manual_pps_ma: Some(2_500),
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
@@ -8900,6 +8971,7 @@ mod tests {
                 manual_pps_enabled: Some(true),
                 manual_pps_mv: Some(10_450),
                 manual_pps_ma: Some(2_500),
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
@@ -8919,6 +8991,7 @@ mod tests {
                 manual_pps_enabled: Some(false),
                 manual_pps_mv: None,
                 manual_pps_ma: None,
+                fault_attention_acknowledged: None,
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
@@ -12351,57 +12424,6 @@ mod tests {
     }
 
     #[test]
-    fn rtd_glitch_detection_rejects_large_temp_jump() {
-        assert!(is_implausible_rtd_step(62.49, 48.14, 997, 967));
-    }
-
-    #[test]
-    fn rtd_glitch_detection_rejects_large_raw_adc_jump() {
-        assert!(is_implausible_rtd_step(91.55, 158.89, 1_055, 1_176));
-    }
-
-    #[test]
-    fn rtd_glitch_detection_accepts_normal_heating_step() {
-        assert!(!is_implausible_rtd_step(60.81, 61.37, 980, 982));
-    }
-
-    #[test]
-    fn rtd_glitch_retry_promotes_persistent_jump_to_sensor_fault() {
-        let retry_sample = RtdSample::Valid(RtdMeasurement {
-            raw_adc_mv: 1_176,
-            adc_mv: 1_176,
-            resistance_ohms: 1_605.39,
-            temp_c: 158.89,
-            current_temp_c: 159,
-        });
-
-        let reconciled = reconcile_rtd_sample_after_glitch_retry(91.55, 1_055, retry_sample);
-
-        assert_eq!(
-            reconciled,
-            RtdSample::Fault {
-                adc_mv: Some(1_176),
-                reason: HeaterFaultReason::SensorGlitch,
-            }
-        );
-    }
-
-    #[test]
-    fn rtd_glitch_retry_accepts_recovered_second_sample() {
-        let retry_sample = RtdSample::Valid(RtdMeasurement {
-            raw_adc_mv: 985,
-            adc_mv: 985,
-            resistance_ohms: 1_217.20,
-            temp_c: 56.2,
-            current_temp_c: 56,
-        });
-
-        let reconciled = reconcile_rtd_sample_after_glitch_retry(62.49, 997, retry_sample);
-
-        assert_eq!(reconciled, retry_sample);
-    }
-
-    #[test]
     fn heater_controller_reseed_clears_measurement_slope_without_changing_phase() {
         let mut controller = HeaterController::new();
         controller.phase = HeaterControlPhase::Approach;
@@ -12650,6 +12672,73 @@ mod tests {
     }
 
     #[test]
+    fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
+        let retry_sample = RtdSample::Valid(RtdMeasurement {
+            raw_adc_mv: 983,
+            adc_mv: 983,
+            resistance_ohms: 1_118.0,
+            temp_c: 30.73,
+            current_temp_c: 31,
+        });
+        let RtdSample::Valid(measurement) = retry_sample else {
+            panic!("5A warmup retry must remain a valid RTD sample");
+        };
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut latest_temp_c = 25.37;
+        let mut latest_temp_i16 = 25;
+        let mut latest_display_temp_c = latest_temp_c;
+        let mut latest_display_temp_i16 = latest_temp_i16;
+        let mut guard = RtdPpsTransitionGuard::new(19_500);
+        let mut controller = HeaterController::new();
+
+        assert!(apply_valid_rtd_measurement(
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_temp_c,
+                latest_control_temp_i16: &mut latest_temp_i16,
+                transition_guard: &mut guard,
+                heater_controller: &mut controller,
+            },
+            20_000,
+            100,
+            measurement.temp_c,
+        ));
+
+        assert_eq!(latest_display_temp_c, 30.73);
+        assert_eq!(latest_display_temp_i16, 31);
+        assert_eq!(ui_state.current_temp_c, 31);
+        assert_eq!(ui_state.current_temp_deci_c, 307);
+        assert_eq!(latest_temp_c, 25.37);
+        assert_eq!(latest_temp_i16, 25);
+        assert_eq!(controller.fault_latched(), None);
+    }
+
+    #[test]
+    fn measurement_fault_samples_remain_explicit_hard_faults() {
+        for reason in [
+            HeaterFaultReason::SensorOpen,
+            HeaterFaultReason::SensorShort,
+            HeaterFaultReason::AdcReadFailed,
+        ] {
+            let sample = RtdSample::Fault {
+                adc_mv: None,
+                reason,
+            };
+            assert!(matches!(
+                sample,
+                RtdSample::Fault {
+                    reason: observed,
+                    ..
+                } if observed == reason
+            ));
+        }
+    }
+
+    #[test]
     fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
         let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         let mut latest_temp_c = 41.39;
@@ -12731,51 +12820,209 @@ mod tests {
     #[test]
     fn fault_attention_transitions_alarm_to_pending_reminder() {
         let mut last_fault_present = false;
+        let mut attention_acknowledged = false;
         let mut attention_pending = false;
+        let mut forced_fan_active = false;
+        let mut next_protection_alarm_ms = None;
         let mut next_reminder_ms = None;
         let mut buzzer = BuzzerController::new();
 
         assert!(update_fault_attention_state(
             true,
             &mut last_fault_present,
+            &mut attention_acknowledged,
             &mut attention_pending,
+            &mut forced_fan_active,
+            100,
+            &mut next_protection_alarm_ms,
             &mut next_reminder_ms,
             &mut buzzer,
             3_000,
         ));
         assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
         assert!(!attention_pending);
+        assert_eq!(next_protection_alarm_ms, Some(4_000));
         assert_eq!(next_reminder_ms, None);
+        assert!(forced_fan_active);
 
         assert!(update_fault_attention_state(
             false,
             &mut last_fault_present,
+            &mut attention_acknowledged,
             &mut attention_pending,
+            &mut forced_fan_active,
+            100,
+            &mut next_protection_alarm_ms,
             &mut next_reminder_ms,
             &mut buzzer,
             8_000,
         ));
         assert_eq!(buzzer.active_cue(), None);
         assert!(attention_pending);
+        assert_eq!(next_protection_alarm_ms, None);
         assert_eq!(
             next_reminder_ms,
             Some(8_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
         );
+        assert!(forced_fan_active);
+    }
+
+    #[test]
+    fn measurement_faults_do_not_require_overtemp_attention() {
+        for reason in [
+            HeaterFaultReason::SensorOpen,
+            HeaterFaultReason::SensorShort,
+            HeaterFaultReason::AdcReadFailed,
+        ] {
+            assert!(!is_overtemp_fault(Some(reason)));
+        }
+        assert!(is_overtemp_fault(Some(HeaterFaultReason::OverTemp)));
+        assert!(!is_overtemp_fault(None));
+    }
+
+    #[test]
+    fn acknowledging_active_overtemp_keeps_alarm_but_prevents_pending_reminder() {
+        let mut last_overtemp_present = false;
+        let mut acknowledged = false;
+        let mut pending = false;
+        let mut forced_fan = false;
+        let mut next_alarm_ms = None;
+        let mut next_reminder_ms = None;
+        let mut buzzer = BuzzerController::new();
+
+        assert!(update_fault_attention_state(
+            true,
+            &mut last_overtemp_present,
+            &mut acknowledged,
+            &mut pending,
+            &mut forced_fan,
+            420,
+            &mut next_alarm_ms,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            0,
+        ));
+        assert!(acknowledge_overtemp_attention(
+            true,
+            &mut acknowledged,
+            &mut pending,
+            &mut forced_fan,
+            &mut next_reminder_ms,
+            &mut buzzer,
+        ));
+        assert!(acknowledged);
+        assert!(!pending);
+        assert!(!forced_fan);
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
+
+        assert!(update_fault_attention_state(
+            false,
+            &mut last_overtemp_present,
+            &mut acknowledged,
+            &mut pending,
+            &mut forced_fan,
+            100,
+            &mut next_alarm_ms,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            2_000,
+        ));
+        assert!(!pending);
+        assert_eq!(next_reminder_ms, None);
+    }
+
+    #[test]
+    fn cooling_below_40_releases_forced_fan_but_not_attention_requirement() {
+        let mut last_overtemp_present = true;
+        let mut acknowledged = false;
+        let mut pending = false;
+        let mut forced_fan = true;
+        let mut next_alarm_ms = Some(1_000);
+        let mut next_reminder_ms = None;
+        let mut buzzer = BuzzerController::new();
+
+        assert!(update_fault_attention_state(
+            false,
+            &mut last_overtemp_present,
+            &mut acknowledged,
+            &mut pending,
+            &mut forced_fan,
+            39,
+            &mut next_alarm_ms,
+            &mut next_reminder_ms,
+            &mut buzzer,
+            2_000,
+        ));
+        assert!(pending);
+        assert!(!forced_fan);
+        assert!(overtemp_attention_requires_ack(
+            false,
+            acknowledged,
+            pending
+        ));
+    }
+
+    #[test]
+    fn overtemp_forced_fan_follows_locked_temperature_bands() {
+        assert_eq!(
+            overtemp_forced_fan_state(61, true),
+            Some(FanPolicyState::Full)
+        );
+        assert_eq!(
+            overtemp_forced_fan_state(60, true),
+            Some(FanPolicyState::SafeHalf)
+        );
+        assert_eq!(
+            overtemp_forced_fan_state(40, true),
+            Some(FanPolicyState::SafeHalf)
+        );
+        assert_eq!(overtemp_forced_fan_state(39, true), None);
+        assert_eq!(overtemp_forced_fan_state(220, false), None);
+    }
+
+    #[test]
+    fn protection_alarm_stays_continuous_while_fault_is_active() {
+        let mut next_protection_alarm_ms = Some(10_000);
+        let mut buzzer = BuzzerController::new();
+
+        assert!(!maybe_play_protection_alarm(
+            true,
+            &mut next_protection_alarm_ms,
+            &mut buzzer,
+            9_999,
+        ));
+        assert_eq!(buzzer.active_cue(), None);
+
+        assert!(maybe_play_protection_alarm(
+            true,
+            &mut next_protection_alarm_ms,
+            &mut buzzer,
+            10_000,
+        ));
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
+        assert_eq!(next_protection_alarm_ms, Some(11_000));
     }
 
     #[test]
     fn attention_pending_consumes_first_input_and_stops_reminders() {
+        let mut attention_acknowledged = false;
         let mut attention_pending = true;
+        let mut forced_fan_active = true;
         let mut next_reminder_ms = Some(15_000);
         let mut buzzer = BuzzerController::new();
         let _ = buzzer.play(BuzzerCueId::AttentionReminder, 10_000);
 
-        assert!(consume_attention_input_if_pending(
+        assert!(acknowledge_overtemp_attention(
+            false,
+            &mut attention_acknowledged,
             &mut attention_pending,
+            &mut forced_fan_active,
             &mut next_reminder_ms,
             &mut buzzer,
         ));
+        assert!(attention_acknowledged);
         assert!(!attention_pending);
+        assert!(!forced_fan_active);
         assert_eq!(next_reminder_ms, None);
         assert_eq!(buzzer.active_cue(), None);
     }

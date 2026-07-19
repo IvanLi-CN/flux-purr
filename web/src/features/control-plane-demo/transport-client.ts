@@ -358,6 +358,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     ppsCapabilityMaxMv: record.status.ppsCapabilityMaxMv ?? null,
     ppsCapabilityMaxMa: record.status.ppsCapabilityMaxMa ?? null,
     manualPpsError: record.status.manualPpsError ?? null,
+    faultAttentionPending: record.status.faultAttentionPending ?? false,
     heaterLockReason: record.status.heaterLockReason ?? null,
     calibration: record.status.calibration,
     storedCalibration: record.calibration,
