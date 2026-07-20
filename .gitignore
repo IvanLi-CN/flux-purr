@@ -33,6 +33,8 @@ thermal-self-test-runs/*
 !thermal-self-test-runs/baselines/
 !thermal-self-test-runs/baselines/**
 !thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json
+!thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/
+!thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/**
 
 # Python cache
 __pycache__/
