@@ -131,6 +131,8 @@ Current control-path truth is:
 
 Do not insert any additional multi-sample window, median, clamp, or rate limiter before the EMA path. Those stages distort heating and cooling rate readback and make the controller react to an artificial temperature trace.
 
+Offline retuning replays the existing `run.json` and `samples.ndjson` pair, writes `run.replayed.json` and `thermal-profile.replayed.candidate.json`, and may optionally apply the replayed candidate back as a RAM-only preview. When `--apply-preview` is used, the CLI must write replay artifacts first, send `thermalControlProfile.op=preview`, confirm `thermalControlProfilePreview=true` from status readback, and record the attempt in `run.replayed.json.applyPreview`. Replay apply must not save EEPROM.
+
 At PPS transition boundaries:
 
 - owner-facing temperature must continue to update from each valid RTD sample
@@ -154,6 +156,8 @@ Thermal tuning automation should treat measurement faults and runaway attention 
 5. Retry only the same failed sub-step once.
 
 If three consecutive valid tests still carry transient sensor-fault or reminder evidence, stop the sprint and require manual inspection. Record the affected attempts and rerun those same attempts only after human confirmation that the hardware path is healthy again.
+
+`runtime-rearm-attempts` is a bounded autonomy knob, not a license for open-ended retries. The host may automatically recover only the same target after recoverable runtime interruptions, must return the runtime to cooldown before retrying, and must leave a failed receipt or run evidence behind when recovery does not converge.
 
 ### Phase-transition and low-temperature guardrails
 

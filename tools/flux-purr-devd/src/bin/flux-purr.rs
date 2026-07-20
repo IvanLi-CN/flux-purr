@@ -369,6 +369,12 @@ struct ThermalSelfTestArgs {
     )]
     source_current_a: Option<String>,
     #[arg(
+        long = "source-power-watts",
+        default_value_t = THERMAL_SOURCE_65W_POWER_WATTS as u16,
+        help = "Requested bench-source capability power ceiling used for thermal HIL source setup."
+    )]
+    source_power_watts: u16,
+    #[arg(
         long = "source-mode",
         default_value = "auto-follow",
         value_parser = ["auto-follow", "manual-forced"],
@@ -397,7 +403,7 @@ struct ThermalSelfTestArgs {
     #[arg(
         long = "runtime-rearm-attempts",
         default_value_t = 1,
-        help = "Bounded automatic re-arm count for recovered transient sensor faults."
+        help = "Bounded automatic recovery count for transient sensor faults and recoverable runtime resets during thermal HIL."
     )]
     runtime_rearm_attempts: u8,
     #[arg(
@@ -451,6 +457,8 @@ struct ThermalSourceSelection {
 
 #[derive(Debug, Args, Clone)]
 struct ThermalRetuneArgs {
+    #[command(flatten)]
+    target: TargetSelector,
     #[arg(long = "run-dir")]
     run_dir: PathBuf,
     #[arg(
@@ -458,6 +466,12 @@ struct ThermalRetuneArgs {
         help = "Optional override for the sparse tuning targets used during replay."
     )]
     optimize_targets_c: Option<String>,
+    #[arg(
+        long = "apply-preview",
+        action = ArgAction::SetTrue,
+        help = "Apply the replayed candidate as a RAM-only thermal profile preview after artifacts are written."
+    )]
+    apply_preview: bool,
 }
 
 #[derive(Debug, Args)]
@@ -1035,6 +1049,54 @@ async fn request_leased(
         request = request.json(&body);
     }
     response_json_or_error(request.send().await?).await
+}
+
+async fn request_thermal_status_with_retry(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_thermal_status_with_retry_config(
+        client,
+        resolved,
+        lease_id,
+        Duration::from_millis(THERMAL_STATUS_REQUEST_TIMEOUT_MS),
+        THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS,
+    )
+    .await
+}
+
+async fn request_thermal_status_with_retry_config(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    timeout: Duration,
+    max_attempts: usize,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let attempts = max_attempts.max(1);
+    let timeout_ms = timeout.as_millis();
+    let mut last_error = "thermal status read did not start".to_string();
+    for attempt in 0..attempts {
+        match tokio::time::timeout(
+            timeout,
+            request_leased(client, resolved, lease_id, Method::GET, "/status", None),
+        )
+        .await
+        {
+            Ok(Ok(status)) => return Ok(status),
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => {
+                last_error = format!("thermal /status timed out after {timeout_ms}ms");
+            }
+        }
+        if attempt + 1 < attempts {
+            tokio::time::sleep(Duration::from_millis(
+                THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS * (attempt as u64 + 1),
+            ))
+            .await;
+        }
+    }
+    Err(format!("thermal /status failed after {attempts} attempt(s): {last_error}").into())
 }
 
 async fn response_json_or_error(
@@ -1739,7 +1801,7 @@ async fn handle_thermal_command(
         ThermalCommand::SelfTest(args) => {
             collect_thermal_self_test(client, default_devd, args).await
         }
-        ThermalCommand::Retune(args) => retune_thermal_self_test_run(args),
+        ThermalCommand::Retune(args) => retune_thermal_self_test_run(client, default_devd, args).await,
     }
 }
 
@@ -1943,6 +2005,9 @@ struct BenchSourceLiveTelemetry {
 const THERMAL_SOURCE_65W_POWER_WATTS: u64 = 65;
 const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
 const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
+const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
+const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 3;
+const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 100;
 
 struct BenchSourceTelemetrySampler {
     source_kind: BenchSourceKind,
@@ -2684,6 +2749,7 @@ fn thermal_stage_result_from_value(
         "wrong_mode" => "wrong_mode",
         "wrong_target" => "wrong_target",
         "sample_rate_below_3hz" => "sample_rate_below_3hz",
+        "status_request_failed" => "status_request_failed",
         "heater_no_output" => "heater_no_output",
         "warmup_timeout" => "warmup_timeout",
         "approach_threshold_timeout" => "approach_threshold_timeout",
@@ -3277,9 +3343,13 @@ fn thermal_replay_applied_profile(
     Ok(profile)
 }
 
-fn retune_thermal_self_test_run(
+async fn retune_thermal_self_test_run(
+    client: &Client,
+    default_devd: &str,
     args: ThermalRetuneArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let apply_preview = args.apply_preview;
+    let target = args.target.clone();
     let summary_path = args.run_dir.join("run.json");
     let samples_path = args.run_dir.join("samples.ndjson");
     let summary: Value = serde_json::from_slice(&fs::read(&summary_path)?)?;
@@ -3388,7 +3458,142 @@ fn retune_thermal_self_test_run(
         &replay_summary_path,
         serde_json::to_vec_pretty(&replay_summary)?,
     )?;
+    if !apply_preview {
+        return Ok(replay_summary);
+    }
+
+    let target_value = thermal_retune_requested_target_value(&target, default_devd);
+    let resolved = match resolve_target(target.clone(), default_devd) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            replay_summary["applyPreview"] = json!({
+                "op": "thermalControlProfile.preview",
+                "ok": false,
+                "target": target_value,
+                "previewResponse": null,
+                "statusReadback": null,
+                "error": error.to_string(),
+            });
+            fs::write(
+                &replay_summary_path,
+                serde_json::to_vec_pretty(&replay_summary)?,
+            )?;
+            return Err(error);
+        }
+    };
+    let preview_response = match request_with_lease(
+        client,
+        resolved.clone(),
+        Method::PUT,
+        "/runtime",
+        Some(json!({
+            "thermalControlProfile": {
+                "op": "preview",
+                "profile": candidate_profile_value,
+            }
+        })),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            replay_summary["applyPreview"] = json!({
+                "op": "thermalControlProfile.preview",
+                "ok": false,
+                "target": target_value,
+                "previewResponse": null,
+                "statusReadback": null,
+                "error": error.to_string(),
+            });
+            fs::write(
+                &replay_summary_path,
+                serde_json::to_vec_pretty(&replay_summary)?,
+            )?;
+            return Err(error);
+        }
+    };
+    let status = match request_with_lease(client, resolved, Method::GET, "/status", None).await {
+        Ok(status) => status,
+        Err(error) => {
+            replay_summary["applyPreview"] = json!({
+                "op": "thermalControlProfile.preview",
+                "ok": false,
+                "target": target_value,
+                "previewResponse": thermal_retune_status_summary(&preview_response),
+                "statusReadback": null,
+                "error": error.to_string(),
+            });
+            fs::write(
+                &replay_summary_path,
+                serde_json::to_vec_pretty(&replay_summary)?,
+            )?;
+            return Err(error);
+        }
+    };
+    if status
+        .get("thermalControlProfilePreview")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        let error = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "thermal retune preview apply did not enable thermalControlProfilePreview",
+        );
+        replay_summary["applyPreview"] = json!({
+            "op": "thermalControlProfile.preview",
+            "ok": false,
+            "target": target_value,
+            "previewResponse": thermal_retune_status_summary(&preview_response),
+            "statusReadback": thermal_retune_status_summary(&status),
+            "error": error.to_string(),
+        });
+        fs::write(
+            &replay_summary_path,
+            serde_json::to_vec_pretty(&replay_summary)?,
+        )?;
+        return Err(error.into());
+    }
+    replay_summary["applyPreview"] = json!({
+        "op": "thermalControlProfile.preview",
+        "ok": true,
+        "target": target_value,
+        "previewResponse": thermal_retune_status_summary(&preview_response),
+        "statusReadback": thermal_retune_status_summary(&status),
+        "error": null,
+    });
+    fs::write(
+        &replay_summary_path,
+        serde_json::to_vec_pretty(&replay_summary)?,
+    )?;
     Ok(replay_summary)
+}
+
+fn thermal_retune_requested_target_value(target: &TargetSelector, default_devd: &str) -> Value {
+    json!({
+        "deviceId": target.device,
+        "hardwareId": target.hardware,
+        "devd": default_devd,
+    })
+}
+
+fn thermal_retune_status_summary(status: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+    for key in [
+        "deviceId",
+        "mode",
+        "targetTempC",
+        "currentTempC",
+        "heaterEnabled",
+        "thermalControlProfilePreview",
+    ] {
+        if let Some(value) = status.get(key) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(thermal_control) = status.get("thermalControl") {
+        summary.insert("thermalControl".to_string(), thermal_control.clone());
+    }
+    Value::Object(summary)
 }
 
 async fn collect_thermal_self_test(
@@ -3562,6 +3767,7 @@ async fn collect_batch_thermal_self_test(
             &args.source_id,
             &args.source_mode,
             args.profile_mode,
+            args.source_power_watts,
             source_voltage_mv,
             source_current_ma,
         )
@@ -3905,6 +4111,7 @@ async fn collect_single_thermal_self_test(
             &args.source_id,
             &args.source_mode,
             args.profile_mode,
+            args.source_power_watts,
             source_voltage_mv,
             source_current_ma,
         )
@@ -6378,6 +6585,7 @@ fn thermal_source_summary_value(
         "id": args.source_id,
         "deviceId": args.source_id,
         "mode": args.source_mode,
+        "capabilityPowerWatts": args.source_power_watts,
         "selectedMode": args.profile_mode.as_str(),
         "resolvedBank": selection.resolved_bank,
         "detectedSourceClass": selection.detected_source_class,
@@ -6516,7 +6724,13 @@ async fn run_thermal_stage(
         let status = if let Some(status) = next_status.take() {
             status
         } else {
-            request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?
+            match request_thermal_status_with_retry(client, resolved, lease_id).await {
+                Ok(status) => status,
+                Err(_) => {
+                    stop_reason = "status_request_failed";
+                    break;
+                }
+            }
         };
         let runtime_drop_reason =
             thermal_runtime_drop_reason(&status, target_temp_c, last_uptime_seconds);
@@ -6534,6 +6748,7 @@ async fn run_thermal_stage(
                 "targetTempC": target_temp_c,
                 "source": {
                     "mode": args.source_mode,
+                    "capabilityPowerWatts": args.source_power_watts,
                     "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
                     "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
                 },
@@ -6886,6 +7101,7 @@ async fn prepare_thermal_bench_source(
     source_id: &str,
     source_mode: &str,
     profile_mode: ThermalProfileMode,
+    source_power_watts: u16,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
@@ -6897,6 +7113,7 @@ async fn prepare_thermal_bench_source(
                 source_id,
                 source_mode,
                 profile_mode,
+                source_power_watts,
                 voltage_mv,
                 current_limit_ma,
             )
@@ -7050,6 +7267,7 @@ async fn prepare_isolapurr_thermal_source(
     device_id: &str,
     source_mode: &str,
     profile_mode: ThermalProfileMode,
+    source_power_watts: u16,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
@@ -7058,7 +7276,7 @@ async fn prepare_isolapurr_thermal_source(
             .await
     } else {
         if profile_mode.explicit_bank().is_some() {
-            ensure_isolapurr_thermal_capability(source_url, device_id, current_limit_ma)?;
+            ensure_isolapurr_thermal_capability(source_url, device_id, source_power_watts)?;
         } else {
             ensure_isolapurr_auto_thermal_capability(source_url, device_id)?;
         }
@@ -7077,6 +7295,7 @@ async fn prepare_thermal_source_and_lease(
     source_id: &str,
     source_mode: &str,
     profile_mode: ThermalProfileMode,
+    source_power_watts: u16,
     voltage_mv: u16,
     current_limit_ma: u16,
 ) -> Result<(BenchSourceLiveTelemetry, Lease), Box<dyn std::error::Error + Send + Sync>> {
@@ -7087,6 +7306,7 @@ async fn prepare_thermal_source_and_lease(
         source_id,
         source_mode,
         profile_mode,
+        source_power_watts,
         voltage_mv,
         current_limit_ma,
     )
@@ -7112,14 +7332,10 @@ async fn prepare_thermal_source_and_lease(
 fn ensure_isolapurr_thermal_capability(
     source_url: &str,
     device_id: &str,
-    current_limit_ma: u16,
+    source_power_watts: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_isolapurr_device_identity(source_url, device_id)?;
-    let required_power_watts = if current_limit_ma >= 5_000 {
-        THERMAL_SOURCE_100W_POWER_WATTS
-    } else {
-        THERMAL_SOURCE_65W_POWER_WATTS
-    };
+    let required_power_watts = u64::from(source_power_watts);
     let requires_pps_5a = required_power_watts == THERMAL_SOURCE_100W_POWER_WATTS;
     let mut config = read_isolapurr_power_config(source_url)?;
     if !isolapurr_power_config_has_thermal_capability(
