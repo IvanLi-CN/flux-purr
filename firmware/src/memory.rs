@@ -7,13 +7,16 @@ use crate::frontpanel::{
 pub const M24C64_I2C_ADDRESS: u8 = 0x50;
 pub const M24C64_CAPACITY_BYTES: u16 = 8 * 1024;
 pub const M24C64_PAGE_SIZE: usize = 32;
-pub const MEMORY_SLOT_SIZE: usize = 1024;
-pub const MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
-pub const MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
+pub const MEMORY_SLOT_SIZE: usize = 2048;
+pub const MEMORY_SLOT_A_OFFSET: u16 = 0x1000;
+pub const MEMORY_SLOT_B_OFFSET: u16 = 0x1800;
+pub const PREVIOUS_MEMORY_SLOT_SIZE: usize = 1024;
+pub const PREVIOUS_MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
+pub const PREVIOUS_MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
 pub const LEGACY_MEMORY_SLOT_SIZE: usize = 512;
 pub const LEGACY_MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
 pub const LEGACY_MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
-pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 1;
+pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 2;
 pub const MEMORY_RECORD_HEADER_LEN: usize = 16;
 pub const MEMORY_RECORD_PAYLOAD_MAX: usize = MEMORY_SLOT_SIZE - MEMORY_RECORD_HEADER_LEN;
 pub const MEMORY_WIFI_SSID_MAX_LEN: usize = 32;
@@ -23,7 +26,7 @@ pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
 pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = 6;
-pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 700;
+pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
 pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
 pub const THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT: u16 = 90;
 pub const THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT: u16 = 200;
@@ -42,7 +45,7 @@ pub const THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT: u16 = 0;
 pub const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT: u16 = 1_000;
 pub const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
 pub const THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
-pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 6_100;
+pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_DEFAULT: u16 = 5_000;
 pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN: u16 = 5_000;
 pub const THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX: u16 = 28_000;
 pub const THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT: u16 = 200;
@@ -111,6 +114,9 @@ const TLV_ADC_CALIBRATION_SLOTS: u8 = 0x26;
 const TLV_ADC_CALIBRATION_ACTIVE_SLOTS: u8 = 0x27;
 const TLV_ACTIVE_HEATER_CURVE: u8 = 0x30;
 const TLV_ACTIVE_THERMAL_CONTROL_PROFILE: u8 = 0x31;
+const TLV_THERMAL_CONTROL_PROFILE_PPS3A: u8 = 0x32;
+const TLV_THERMAL_CONTROL_PROFILE_PPS5A: u8 = 0x33;
+const TLV_THERMAL_PROFILE_MODE: u8 = 0x34;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryConfig {
@@ -124,7 +130,50 @@ pub struct MemoryConfig {
     pub telemetry_interval_ms: u32,
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
+    /// The legacy field is the persisted 3 A / 65 W bank. Keeping its name makes
+    /// v1 record migration explicit and avoids a silent behavior change for callers.
     pub active_thermal_control_profile: ThermalControlProfileConfig,
+    pub thermal_control_profile_pps5a: ThermalControlProfileConfig,
+    pub thermal_profile_mode: ThermalProfileMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalProfileMode {
+    Auto,
+    W65,
+    W100,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalProfileBank {
+    Pps3a,
+    Pps5a,
+}
+
+impl ThermalProfileMode {
+    pub const fn default_bank(self) -> ThermalProfileBank {
+        match self {
+            Self::W100 => ThermalProfileBank::Pps5a,
+            Self::Auto | Self::W65 => ThermalProfileBank::Pps3a,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::W65 => "65w",
+            Self::W100 => "100w",
+        }
+    }
+}
+
+impl ThermalProfileBank {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pps3a => "pps3a",
+            Self::Pps5a => "pps5a",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,6 +444,8 @@ impl Default for MemoryConfig {
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
             active_thermal_control_profile: ThermalControlProfileConfig::default(),
+            thermal_control_profile_pps5a: ThermalControlProfileConfig::default(),
+            thermal_profile_mode: ThermalProfileMode::W65,
         }
     }
 }
@@ -414,6 +465,24 @@ impl MemoryConfig {
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
         sanitize_thermal_control_profile(&mut self.active_thermal_control_profile);
+        sanitize_thermal_control_profile(&mut self.thermal_control_profile_pps5a);
+    }
+
+    pub const fn thermal_profile(&self, bank: ThermalProfileBank) -> &ThermalControlProfileConfig {
+        match bank {
+            ThermalProfileBank::Pps3a => &self.active_thermal_control_profile,
+            ThermalProfileBank::Pps5a => &self.thermal_control_profile_pps5a,
+        }
+    }
+
+    pub fn thermal_profile_mut(
+        &mut self,
+        bank: ThermalProfileBank,
+    ) -> &mut ThermalControlProfileConfig {
+        match bank {
+            ThermalProfileBank::Pps3a => &mut self.active_thermal_control_profile,
+            ThermalProfileBank::Pps5a => &mut self.thermal_control_profile_pps5a,
+        }
     }
 }
 
@@ -902,7 +971,7 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     if bytes[0..4] != MEMORY_RECORD_MAGIC {
         return Err(MemoryDecodeError::BadMagic);
     }
-    if bytes[4] != MEMORY_RECORD_FORMAT_VERSION {
+    if bytes[4] != 1 && bytes[4] != MEMORY_RECORD_FORMAT_VERSION {
         return Err(MemoryDecodeError::UnsupportedFormat(bytes[4]));
     }
     if bytes[5] as usize != MEMORY_RECORD_HEADER_LEN {
@@ -1052,11 +1121,27 @@ fn encode_config_payload(
         &mut thermal_profile_payload,
     );
     push_tlv(
-        TLV_ACTIVE_THERMAL_CONTROL_PROFILE,
+        TLV_THERMAL_CONTROL_PROFILE_PPS3A,
         &thermal_profile_payload[..thermal_profile_len],
         out,
         &mut cursor,
     )?;
+    let pps5a_profile_len = encode_thermal_control_profile(
+        &config.thermal_control_profile_pps5a,
+        &mut thermal_profile_payload,
+    );
+    push_tlv(
+        TLV_THERMAL_CONTROL_PROFILE_PPS5A,
+        &thermal_profile_payload[..pps5a_profile_len],
+        out,
+        &mut cursor,
+    )?;
+    let mode = match config.thermal_profile_mode {
+        ThermalProfileMode::Auto => 0,
+        ThermalProfileMode::W65 => 1,
+        ThermalProfileMode::W100 => 2,
+    };
+    push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
     Ok(cursor)
 }
 
@@ -1169,6 +1254,19 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             }
             TLV_ACTIVE_THERMAL_CONTROL_PROFILE if is_supported_thermal_control_profile_len(len) => {
                 config.active_thermal_control_profile = decode_thermal_control_profile(value);
+            }
+            TLV_THERMAL_CONTROL_PROFILE_PPS3A if is_supported_thermal_control_profile_len(len) => {
+                config.active_thermal_control_profile = decode_thermal_control_profile(value);
+            }
+            TLV_THERMAL_CONTROL_PROFILE_PPS5A if is_supported_thermal_control_profile_len(len) => {
+                config.thermal_control_profile_pps5a = decode_thermal_control_profile(value);
+            }
+            TLV_THERMAL_PROFILE_MODE if len == 1 => {
+                config.thermal_profile_mode = match value[0] {
+                    0 => ThermalProfileMode::Auto,
+                    2 => ThermalProfileMode::W100,
+                    _ => ThermalProfileMode::W65,
+                };
             }
             _ => {}
         }
@@ -2272,6 +2370,12 @@ mod tests {
             approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
             hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
         });
+        config.thermal_control_profile_pps5a = config.active_thermal_control_profile;
+        config.thermal_control_profile_pps5a.points[1]
+            .as_mut()
+            .expect("5A profile point")
+            .target_temp_c = 250;
+        config.thermal_profile_mode = ThermalProfileMode::W100;
         config
     }
 
@@ -2350,6 +2454,74 @@ mod tests {
                 approach_lead_ticks: THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT,
                 hold_lead_ticks: THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT,
             })
+        );
+        assert_eq!(
+            decoded.config.thermal_profile_mode,
+            ThermalProfileMode::W100
+        );
+        assert_eq!(
+            decoded.config.thermal_control_profile_pps5a.points[1]
+                .expect("5A profile point")
+                .target_temp_c,
+            250
+        );
+    }
+
+    #[test]
+    fn v1_header_decodes_the_legacy_profile_as_the_65w_bank() {
+        let record = MemoryRecord {
+            sequence: 7,
+            config: sample_config(),
+        };
+        let mut current = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut current).unwrap();
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        bytes[..MEMORY_RECORD_HEADER_LEN].copy_from_slice(&current[..MEMORY_RECORD_HEADER_LEN]);
+        bytes[4] = 1;
+        let mut source = MEMORY_RECORD_HEADER_LEN;
+        let mut destination = MEMORY_RECORD_HEADER_LEN;
+        while source < len {
+            let tag = current[source];
+            let value_len = current[source + 1] as usize;
+            let value_end = source + 2 + value_len;
+            if tag != TLV_THERMAL_CONTROL_PROFILE_PPS5A && tag != TLV_THERMAL_PROFILE_MODE {
+                bytes[destination] = if tag == TLV_THERMAL_CONTROL_PROFILE_PPS3A {
+                    TLV_ACTIVE_THERMAL_CONTROL_PROFILE
+                } else {
+                    tag
+                };
+                bytes[destination + 1..destination + 2 + value_len]
+                    .copy_from_slice(&current[source + 1..value_end]);
+                destination += 2 + value_len;
+            }
+            source = value_end;
+        }
+        let payload_len = destination - MEMORY_RECORD_HEADER_LEN;
+        bytes[6..8].copy_from_slice(&(payload_len as u16).to_le_bytes());
+        let crc = crc32_update(
+            crc32(&bytes[0..12]),
+            &bytes[MEMORY_RECORD_HEADER_LEN..destination],
+        ) ^ 0xffff_ffff;
+        bytes[12..16].copy_from_slice(&crc.to_le_bytes());
+
+        let decoded = decode_memory_record(&bytes[..destination]).unwrap();
+        assert_eq!(decoded.sequence, record.sequence);
+        assert_eq!(decoded.config.thermal_profile_mode, ThermalProfileMode::W65);
+        assert_eq!(
+            decoded
+                .config
+                .thermal_profile(ThermalProfileBank::Pps3a)
+                .points[0]
+                .expect("migrated 65W point")
+                .target_temp_c,
+            100
+        );
+        assert_eq!(
+            decoded
+                .config
+                .thermal_profile(ThermalProfileBank::Pps5a)
+                .points[0],
+            None
         );
     }
 

@@ -52,7 +52,7 @@
 ### MUST
 
 - EEPROM 设备默认为 `M24C64`，7-bit I2C 地址 `0x50`，容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
-- record 使用双槽：slot A `0x0400`、slot B `0x0800`，每槽 `1024 bytes`。旧版 slot A `0x0000`、slot B `0x0200`（每槽 `512 bytes`）仅作为启动时的只读迁移回退；新写入不得继续覆盖旧槽。
+- record v2 使用双槽：slot A `0x1000`、slot B `0x1800`，每槽 `2048 bytes`。启动读取顺序固定为 v2 `2048B`、v1 `1024B`（`0x0400` / `0x0800`）、legacy `512B`（`0x0000` / `0x0200`）；旧槽仅作只读迁移回退，新写入只落 v2 槽。
 - 启动时读取两个槽，选择 CRC 合法且 `sequence` 最大的 record；两槽都无效时使用默认配置。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
@@ -98,6 +98,10 @@
   - `0x21`: `adc_calibration_references`
   - `0x22`: `adc_calibration_slots`
   - `0x23`: `adc_calibration_active_slot`
+  - `0x32`: `pps3a` saved thermal control profile
+  - `0x33`: `pps5a` saved thermal control profile
+  - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
+- 旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多六个压紧锚点，和完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -111,6 +115,8 @@
 - Given ADC calibration state 已写入 EEPROM，When 固件重启，Then 共享样本、A/B 槽位与当前激活槽位都恢复。
 - Given ADC calibration sample 在保存时带有 `referenceTempC` 或 `referenceVinMv`，When 固件重启或 control-plane 重新读取 calibration package，Then ADC-domain points 与原始 physical reference 都恢复，页面不需要靠 `expectedMv` 反推 owner-facing 标定值。
 - Given EEPROM record 来自旧格式且没有 `0x22/0x23` reference TLV，When 固件解码，Then calibration sample 仍恢复为同样的 `observed_mv/expected_mv`，只是 reference 字段为空。
+- Given v1 或 legacy record 只含一个 saved thermal profile，When 解码，Then profile 写入 `pps3a` bank，`pps5a` 保持空 profile，mode 为 `65w`。
+- Given v2 record 同时含两个 thermal bank，When 重启恢复，Then 两个 bank、mode、Wi-Fi 凭据和 calibration state 都完整恢复。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

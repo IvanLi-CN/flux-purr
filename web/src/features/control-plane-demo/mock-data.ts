@@ -1,5 +1,5 @@
 import { Activity, Cable, Cpu, Gauge, Monitor, Radio, Router, Terminal } from 'lucide-react'
-import type { ControlPlaneScenario, Workstream } from './types'
+import { type ControlPlaneScenario, UNAVAILABLE_TEMPERATURE_C, type Workstream } from './types'
 
 export const controlPlaneWorkstreams: Workstream[] = [
   {
@@ -163,8 +163,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       firmware: 'fw/v0.2.0',
       buildId: 's3-mock',
       uptime: 'disconnected',
-      boardTempC: 0,
-      currentTempC: 0,
+      boardTempC: UNAVAILABLE_TEMPERATURE_C,
+      currentTempC: UNAVAILABLE_TEMPERATURE_C,
       targetTempC: 180,
       voltageMv: 0,
       currentMa: 0,

@@ -32,6 +32,7 @@ Cargo.lock
 thermal-self-test-runs/*
 !thermal-self-test-runs/baselines/
 !thermal-self-test-runs/baselines/**
+!thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json
 
 # Python cache
 __pycache__/

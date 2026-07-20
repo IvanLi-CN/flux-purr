@@ -54,6 +54,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "heaterEnabled": true,
   "heaterOutputPercent": 22,
+  "faultAttentionPending": false,
   "activeCoolingEnabled": true,
   "fanDisplayState": "AUTO",
   "fanEnabled": true,
@@ -84,6 +85,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
 `rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
+`faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
 `manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the EEPROM-backed saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation and inherited defaults are applied. The current reserve is subtracted from the lower of PPS capability current and live CH224Q current before the heater voltage ceiling is calculated, leaving source margin for board power and conversion loss.
 
 ### `CalibrationState`
@@ -180,7 +182,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
   "files": [
     {
       "kind": "elf",
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452,
       "flashAddress": null
@@ -189,7 +191,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`, while other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
 
 ### `ApiError`
 
@@ -331,6 +333,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
   "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
   "activeCoolingEnabled": true,
   "heaterEnabled": true,
+  "faultAttentionAcknowledged": true,
   "manualPpsEnabled": true,
   "manualPpsMv": 10400,
   "manualPpsMa": 2500,
@@ -454,7 +457,7 @@ Save copies the preview curve to active curve and schedules EEPROM persistence. 
       "files": [
         {
           "kind": "elf",
-          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+          "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
           "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
           "size": 741452,
           "flashAddress": null
@@ -475,7 +478,7 @@ Save copies the preview curve to active curve and schedules EEPROM persistence. 
     "files": [
       {
         "kind": "elf",
-        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+        "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
         "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
         "size": 741452,
         "flashAddress": null
@@ -493,7 +496,7 @@ Successful response:
   "artifactId": "local-esp32s3-release",
   "files": [
     {
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452
     }
@@ -516,7 +519,7 @@ Core commands:
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`
-- `flux-purr thermal self-test --device <id> --source-device-id <isolapurr-id> --source-url <lan-url> [--source-mode auto-follow|manual-forced]`
+- `flux-purr thermal self-test --device <id> [--source-kind isolapurr] --source-id <bench-source-id> --source-url <lan-url> [--profile-mode auto|65w|100w] [--source-mode auto-follow|manual-forced]`
 - Batch profile comparison repeats `--candidate-profile-file <path>` for one `--targets-c` value; candidates share one source/lease session, use `max(40C, target-30C)` as the restart threshold, produce separate reports, and never write EEPROM.
 - `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
@@ -670,6 +673,7 @@ The response returns the updated status:
       "presetsC": [50, 100, 120, 150, 180, 200, 210, 220, 250, 300],
       "activeCoolingEnabled": true,
       "heaterEnabled": true,
+      "faultAttentionPending": false,
       "manualPpsEnabled": true,
       "manualPpsMv": 10400,
       "manualPpsMa": 2500,

@@ -9,6 +9,7 @@ import type {
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
 export type DeviceSeverity = 'nominal' | 'warning' | 'offline'
 export type WorkstreamId = 'fleet' | 'connect' | 'overview' | 'wifi' | 'firmware' | 'monitor'
+export const UNAVAILABLE_TEMPERATURE_C = -1
 
 export interface DeviceTarget {
   id: string
@@ -39,6 +40,7 @@ export interface DeviceTarget {
   ppsCapabilityMaxMv?: number | null
   ppsCapabilityMaxMa?: number | null
   manualPpsError?: string | null
+  faultAttentionPending?: boolean
   calibration: CalibrationRuntimeState
   storedCalibration?: CalibrationState
   heaterEnabled: boolean

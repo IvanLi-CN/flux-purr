@@ -105,6 +105,7 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     ppsCapabilityMaxMv: probe.status.ppsCapabilityMaxMv ?? null,
     ppsCapabilityMaxMa: probe.status.ppsCapabilityMaxMa ?? null,
     manualPpsError: probe.status.manualPpsError ?? null,
+    faultAttentionPending: probe.status.faultAttentionPending ?? false,
     calibration: probe.status.calibration,
     heaterEnabled: probe.status.heaterEnabled,
     heaterOutputPercent: probe.status.heaterOutputPercent,

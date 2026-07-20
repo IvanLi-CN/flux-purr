@@ -64,6 +64,7 @@ export interface ControlPlaneStatus {
   ppsCapabilityMaxMv?: number | null
   ppsCapabilityMaxMa?: number | null
   manualPpsError?: string | null
+  faultAttentionPending?: boolean
   heaterLockReason?: HeaterLockReason | null
   calibration: CalibrationRuntimeState
   frontpanelKey?: 'center' | 'right' | 'down' | 'left' | 'up' | null
@@ -193,6 +194,7 @@ export interface RuntimeConfigRequest {
   manualPpsEnabled?: boolean
   manualPpsMv?: number
   manualPpsMa?: number
+  faultAttentionAcknowledged?: boolean
   calibration?: CalibrationControlRequest
 }
 

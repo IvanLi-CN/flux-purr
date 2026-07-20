@@ -104,6 +104,7 @@ import type {
   TransportKind,
   WorkflowPhase,
 } from '../types'
+import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
 
 interface ControlPlaneDemoProps {
@@ -271,8 +272,8 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     firmware: 'pending',
     buildId: 'pending',
     uptime: 'pending',
-    boardTempC: 0,
-    currentTempC: 0,
+    boardTempC: UNAVAILABLE_TEMPERATURE_C,
+    currentTempC: UNAVAILABLE_TEMPERATURE_C,
     targetTempC: TARGET_TEMP_MIN,
     voltageMv: 0,
     currentMa: 0,
@@ -348,6 +349,10 @@ function createPendingDevice(kind: AddDeviceKind): DeviceTarget {
     networkState: 'disabled',
     transportIssue: 'Open this in live mode to select a browser Web Serial port.',
   }
+}
+
+function isRenderableTemperature(value: number) {
+  return Number.isFinite(value) && value >= 0
 }
 
 export function ControlPlaneDemo({
@@ -722,13 +727,15 @@ export function ControlPlaneDemo({
         ? selectedDevice.heaterOutputPercent
         : liveRuntimeDevice
           ? selectedDevice.heaterOutputPercent
-          : Math.min(
-              100,
-              Math.max(
-                0,
-                selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
+          : !isRenderableTemperature(currentTempC)
+            ? selectedDevice.heaterOutputPercent
+            : Math.min(
+                100,
+                Math.max(
+                  0,
+                  selectedDevice.heaterOutputPercent + Math.round((targetTempC - currentTempC) / 8)
+                )
               )
-            )
     const manualPpsOverride = liveRuntimeDevice ? undefined : manualPpsByDevice[selectedDevice.id]
     const manualPpsEnabled = manualPpsOverride?.enabled ?? selectedDevice.manualPpsEnabled ?? false
     const manualPpsMv = manualPpsOverride
@@ -789,7 +796,9 @@ export function ControlPlaneDemo({
   const visibleCalibrationWorkspaceTab =
     calibrationWorkspaceTabByDevice[visibleDevice.id] ?? 'heater_curve'
   const visibleCalibrationRefs = calibrationRefsByDevice[visibleDevice.id] ?? {
-    rtdTempC: Number(visibleDevice.currentTempC.toFixed(1)),
+    rtdTempC: isRenderableTemperature(visibleDevice.currentTempC)
+      ? Number(visibleDevice.currentTempC.toFixed(1))
+      : 25,
     vinMv: visibleDevice.voltageMv,
   }
 
@@ -1119,6 +1128,7 @@ export function ControlPlaneDemo({
       heaterEnabled?: boolean
       manualPpsEnabled?: boolean
       manualPpsMv?: number
+      faultAttentionAcknowledged?: boolean
       calibration?: CalibrationControlRequest
     }) => {
       const calibrationPatch = patch.calibration
@@ -1147,6 +1157,7 @@ export function ControlPlaneDemo({
         heaterEnabled?: boolean
         manualPpsEnabled?: boolean
         manualPpsMv?: number
+        faultAttentionAcknowledged?: boolean
         calibration?: CalibrationControlRequest
       },
       failureMessage: string
@@ -1808,6 +1819,31 @@ export function ControlPlaneDemo({
     )
   }
 
+  const handleFaultAttentionAcknowledge = async () => {
+    if (!visibleDeviceIsLive) {
+      setFeedback({
+        title: '消告警仅支持在线硬件',
+        detail: '请在 live devd 或浏览器 Web Serial 连接下确认告警。',
+        tone: 'warning',
+      })
+      emitEvent('thermal', 'fault attention acknowledge blocked outside live mode', 'warning')
+      return
+    }
+    const liveUpdated = await configureLiveRuntime(
+      { faultAttentionAcknowledged: true },
+      'fault attention acknowledge was not accepted by devd'
+    )
+    if (!liveUpdated) {
+      return
+    }
+    setFeedback({
+      title: '告警已确认',
+      detail: `${visibleDevice.alias} 已清除待确认告警提醒。`,
+      tone: 'success',
+    })
+    emitEvent('thermal', 'fault attention acknowledged', 'success')
+  }
+
   const handleStartDryRun = async () => {
     if (
       visibleDevice.severity === 'offline' ||
@@ -2381,6 +2417,7 @@ export function ControlPlaneDemo({
                 onManualPpsApply={handleManualPpsApply}
                 onManualPpsClear={handleManualPpsClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
+                onFaultAttentionAcknowledge={handleFaultAttentionAcknowledge}
                 onArtifactChange={handleArtifactChange}
                 onCalibrationReferenceChange={setCalibrationReference}
                 onCalibrationCapture={handleCalibrationCapture}
@@ -2904,7 +2941,7 @@ function fanPolicyFromDevice(device: DeviceTarget): DeviceTarget['fanState'] {
 }
 
 function formatTemp(value: number) {
-  if (value < 0) {
+  if (!isRenderableTemperature(value)) {
     return 'N/A'
   }
 
@@ -2916,6 +2953,9 @@ function formatPresetTemp(value: number, enabled: boolean) {
 }
 
 function formatTempNumber(value: number) {
+  if (!isRenderableTemperature(value)) {
+    return 'N/A'
+  }
   return value.toFixed(1).replace(/\.0$/, '')
 }
 
@@ -3055,6 +3095,9 @@ function pdStateLabel(state: DeviceTarget['pdState']) {
 }
 
 function temperatureBand(tempC: number) {
+  if (!isRenderableTemperature(tempC)) {
+    return 'cool'
+  }
   if (tempC >= 300) {
     return 'overtemp'
   }
@@ -3147,6 +3190,7 @@ function ViewPanel({
   onManualPpsApply,
   onManualPpsClear,
   onHeaterHoldToggle,
+  onFaultAttentionAcknowledge,
   onArtifactChange,
   onDeviceSelect,
   onQuickAddDevice,
@@ -3198,6 +3242,7 @@ function ViewPanel({
   onManualPpsApply: (millivolts: number) => void | Promise<void>
   onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
+  onFaultAttentionAcknowledge: () => void | Promise<void>
   onArtifactChange: (artifactId: string) => void
   onDeviceSelect: (deviceId: string) => void
   onQuickAddDevice: (kind: AddDeviceKind) => void
@@ -3337,6 +3382,7 @@ function ViewPanel({
       onManualPpsApply={onManualPpsApply}
       onManualPpsClear={onManualPpsClear}
       onHeaterHoldToggle={onHeaterHoldToggle}
+      onFaultAttentionAcknowledge={onFaultAttentionAcknowledge}
     />
   )
 }
@@ -3478,6 +3524,7 @@ function DashboardView({
   onManualPpsApply,
   onManualPpsClear,
   onHeaterHoldToggle,
+  onFaultAttentionAcknowledge,
 }: {
   device: DeviceTarget
   artifact?: FirmwareArtifact
@@ -3486,6 +3533,7 @@ function DashboardView({
   onManualPpsApply: (millivolts: number) => void | Promise<void>
   onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
+  onFaultAttentionAcknowledge: () => void | Promise<void>
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const manualPpsDefaultMv = defaultManualPpsMv(device)
@@ -3512,7 +3560,7 @@ function DashboardView({
           <p className="industrial-label">Current temp</p>
           <div className="industrial-temp-dial__value">
             <strong>{formatTempNumber(device.currentTempC)}</strong>
-            <span>℃</span>
+            {isRenderableTemperature(device.currentTempC) ? <span>℃</span> : null}
           </div>
           <meter
             className="industrial-heat-output"
@@ -3571,6 +3619,16 @@ function DashboardView({
           <Power size={16} aria-hidden="true" />
           {device.heaterEnabled ? 'Hold heater' : 'Resume heater'}
         </button>
+        {device.faultAttentionPending ? (
+          <button
+            type="button"
+            className="industrial-button industrial-button--secondary"
+            disabled={device.severity === 'offline'}
+            onClick={onFaultAttentionAcknowledge}
+          >
+            消告警
+          </button>
+        ) : null}
         <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
       </div>
       <CapabilityStrip device={device} />
@@ -3946,6 +4004,7 @@ function RuntimeMiniStatus({
         {device.fanState}
       </span>
       <span>{artifact?.version ?? device.firmware}</span>
+      {device.faultAttentionPending ? <span>fault attention pending</span> : null}
       {device.heaterLockReason ? (
         <span>{heaterLockReasonText(device.heaterLockReason)}</span>
       ) : null}

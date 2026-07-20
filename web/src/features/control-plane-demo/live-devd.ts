@@ -16,7 +16,12 @@ import {
   devdRecordToDeviceTarget,
   isMeaningfulDevdTransportIssueEvent,
 } from './transport-client'
-import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
+import {
+  type ControlPlaneScenario,
+  type DeviceTarget,
+  type EventLogEntry,
+  UNAVAILABLE_TEMPERATURE_C,
+} from './types'
 
 const DEVD_POLL_MS = 2_000
 const DEVD_TRACE_LIMIT = 240
@@ -474,9 +479,9 @@ export function createBootstrappingLiveDevdScenario(
     },
     status: {
       uptimeSeconds: 0,
-      currentTempC: 0,
+      currentTempC: UNAVAILABLE_TEMPERATURE_C,
       targetTempC: 30,
-      boardTempCenti: 0,
+      boardTempCenti: UNAVAILABLE_TEMPERATURE_C * 100,
       voltageMv: 0,
       currentMa: 0,
       pdRequestMv: 0,
@@ -569,8 +574,8 @@ function createUnavailableLiveDevdTarget(issue: string): DeviceTarget {
     firmware: 'unknown',
     buildId: 'unknown',
     uptime: 'unavailable',
-    boardTempC: 0,
-    currentTempC: 0,
+    boardTempC: UNAVAILABLE_TEMPERATURE_C,
+    currentTempC: UNAVAILABLE_TEMPERATURE_C,
     targetTempC: 30,
     voltageMv: 0,
     currentMa: 0,

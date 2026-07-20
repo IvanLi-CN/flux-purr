@@ -65,6 +65,7 @@
   - `FAN_TACH = GPIO34` (reserved only in this round)
 - Runtime truth source:
   - `current_temp_c` is the live PT1000-derived temperature sample from `GPIO2 / ADC1`
+  - when RTD enters fault, the front panel keeps the last valid displayed temperature instead of synthesizing `0°C`
   - `target_temp_c` is clamped to `0..=400°C`
   - Dashboard and `Preset Temp` up/down short-presses adjust by `1°C`; holding up/down repeats after the `500ms` long-press threshold, first about every `120ms` and then about every `60ms`
   - `Preset Temp` defaults are `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`
@@ -85,13 +86,15 @@
   - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum; `1..100%` maps equivalent power into a `100 mV` aligned PPS voltage request from the source PPS minimum up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; WARMUP keeps this dynamic PPS control path; sub-`500 mV` target changes are suppressed and larger changes ramp by at most `500 mV` per request; same-APDO changes keep the MOS gate active and use a `25 ms` request transition gate, while APDO/AVS/fixed-PDO/fallback path changes blank the MOS and use a `275 ms` transition window; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
   - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
   - control interval is `100 ms (10 Hz)`
-  - RTD open/short, ADC read failure, or `temp >= 420°C` force heater fault-latch and duty `0%`
-  - fault-latch requires the user to clear the fault condition and re-arm with another center short-press
+  - RTD open/short or ADC read failure forces heater fault-latch and duty `0%` without buzzer attention; valid temperature or raw ADC changes are never classified as a speed/discontinuity fault
+  - `temp >= 420°C` enters thermal runaway, forces duty `0%`, and rejects heater arm while the runaway alert remains unacknowledged; acknowledgement never bypasses the active absolute overtemperature cutoff
+  - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
 - Fan control:
   - heater disabled + active cooling enabled: `40~60°C` runs at `GPIO36 duty=50%` (`500‰`), `>60°C` switches to full speed (`0‰`)
   - once active cooling has the fan running and temperature drops below `40°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
   - heater enabled: `<=100°C` keeps the fan off; `>100°C` uses minimum-voltage enable pulses only while the live heater output is non-zero; the pulse on-window is twice the cooling-disabled pulse and capped at `50%`
   - active cooling disabled: `>100°C` minimum-voltage `0.2Hz` enable pulse capped at `25%`, `>350°C` heater lock + `50%` fan, `>360°C` full speed
+  - unacknowledged thermal runaway forces the existing active-cooling envelope regardless of the owner policy: `>60°C` full speed and `40~60°C` at `50%`; the forced state ends at `<40°C` or on acknowledgement, whichever comes first
   - Dashboard `fan_display_state` is `OFF / AUTO / RUN`; `fan_enabled` remains the actual runtime output
   - the `Active Cooling` page is informational in the formal runtime; owner-facing wording should call this setting “开启主动降温”, not “风扇开机”
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
@@ -101,8 +104,9 @@
   - boot and idle are silent
   - fixed one-shot cues cover `ui_input / heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
   - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions use the generic `ui_input` prompt cue
-  - active protection (`SensorShort / SensorOpen / AdcReadFailed / OverTemp`) forces an urgent looping alarm
-  - when the active fault disappears, the looping alarm stops and a single reminder chirp repeats every `10s` until any user input acknowledges it
+  - buzzer attention has only two owner-facing states: active thermal runaway and thermal-runaway acknowledgement pending
+  - active thermal runaway (`temp >= 420°C`) replays the protection cue every `1s`; after temperature returns below `420°C`, an unacknowledged alert replays the reminder cue every `10s`
+  - front-panel input or CLI/app runtime acknowledgement clears pending attention and the forced-fan latch, but cannot silence or clear active absolute overtemperature protection
   - retriggering the same cue always restarts from the first note; the hardware PWM must not continue from the previous half-played frequency stage
 - PD policy:
   - default build requests `20 V` from `CH224Q`
@@ -158,7 +162,7 @@
 - Repo-local config: `mcu-agentd.toml`
 - MCU id: `esp32s3_frontpanel`
 - Configured ELF artifact:
-  - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
+  - `target/xtensa-esp32s3-none-elf/release/flux-purr`
 - Typical flow:
   - `source /Users/ivan/export-esp.sh`
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release` (default `20 V` + real control-plane transport)
