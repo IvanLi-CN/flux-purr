@@ -33,8 +33,6 @@ thermal-self-test-runs/*
 !thermal-self-test-runs/baselines/
 !thermal-self-test-runs/baselines/**
 !thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json
-!thermal-self-test-runs/preliminary-review-100w-60-140-220-20260720-serial-303a-1001-a0-f2-62-f2-0d-6c/
-!thermal-self-test-runs/preliminary-review-100w-60-140-220-20260720-serial-303a-1001-a0-f2-62-f2-0d-6c/**
 
 # Python cache
 __pycache__/
