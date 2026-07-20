@@ -15,6 +15,11 @@ use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+#[path = "flux_purr/thermal_retune.rs"]
+mod thermal_retune;
+#[path = "flux_purr/thermal_report.rs"]
+mod thermal_report;
+
 #[derive(Debug, Parser)]
 #[command(name = "flux-purr")]
 #[command(about = "Flux Purr CLI for USB/devd hardware workflows")]
@@ -302,10 +307,22 @@ enum ThermalCommand {
         command: ThermalProfileCommand,
     },
     SelfTest(ThermalSelfTestArgs),
+    Report {
+        #[command(subcommand)]
+        command: ThermalReportCommand,
+    },
     #[command(
         about = "Recompute analysis and tuned candidate from an existing thermal self-test run."
     )]
     Retune(ThermalRetuneArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum ThermalReportCommand {
+    #[command(
+        about = "Rerender a legacy preliminary thermal review bundle into the canonical compliant HTML bundle."
+    )]
+    RerenderLegacy(ThermalLegacyReportArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -472,6 +489,20 @@ struct ThermalRetuneArgs {
         help = "Apply the replayed candidate as a RAM-only thermal profile preview after artifacts are written."
     )]
     apply_preview: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ThermalLegacyReportArgs {
+    #[arg(
+        long = "legacy-bundle-dir",
+        help = "Directory containing legacy run.bundle.json / samples.ndjson / thermal-profile.accepted.json."
+    )]
+    legacy_bundle_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Output directory for the rerendered compliant bundle. Defaults to <legacy-bundle-dir>-rerendered."
+    )]
+    output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -1801,6 +1832,16 @@ async fn handle_thermal_command(
         ThermalCommand::SelfTest(args) => {
             collect_thermal_self_test(client, default_devd, args).await
         }
+        ThermalCommand::Report { command } => match command {
+            ThermalReportCommand::RerenderLegacy(args) => {
+                thermal_report::rerender_legacy_preliminary_review_bundle(
+                    thermal_report::ThermalLegacyReportInput {
+                        legacy_bundle_dir: args.legacy_bundle_dir,
+                        output_dir: args.output_dir,
+                    },
+                )
+            }
+        },
         ThermalCommand::Retune(args) => retune_thermal_self_test_run(client, default_devd, args).await,
     }
 }
@@ -8992,6 +9033,17 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
                 .unwrap_or(false),
         ));
     }
+    if payload.get("operation").and_then(Value::as_str)
+        == Some("thermal_report.rerender_legacy_preliminary_review_bundle")
+    {
+        return Ok(format!(
+            "Thermal report bundle: {}",
+            payload
+                .get("bundleIndexHtml")
+                .and_then(Value::as_str)
+                .unwrap_or("-")
+        ));
+    }
     if payload.get("runId").is_some() && payload.get("sampleCount").is_some() {
         return Ok(format!(
             "Calibration run {}: {} samples stop={} complete={}",
@@ -9026,12 +9078,16 @@ fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use axum::{
         Json, Router,
         extract::{Path as AxumPath, State},
-        routing::{delete, post},
+        http::StatusCode,
+        routing::{delete, get, post, put},
     };
 
     #[test]
@@ -11583,6 +11639,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_thermal_report_rerender_legacy_command() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "report",
+            "rerender-legacy",
+            "--legacy-bundle-dir",
+            "/tmp/legacy-bundle",
+            "--output-dir",
+            "/tmp/compliant-bundle",
+        ])
+        .expect("parse thermal report rerender legacy");
+
+        let Command::Thermal {
+            command: ThermalCommand::Report { command },
+        } = cli.command
+        else {
+            panic!("expected thermal report command");
+        };
+
+        let ThermalReportCommand::RerenderLegacy(args) = command;
+
+        assert_eq!(args.legacy_bundle_dir, PathBuf::from("/tmp/legacy-bundle"));
+        assert_eq!(args.output_dir, Some(PathBuf::from("/tmp/compliant-bundle")));
+    }
+
+    #[test]
     fn thermal_hold_tracker_samples_one_minute_after_entering_hold() {
         let start = tokio::time::Instant::now();
         let mut tracker = ThermalHoldTracker::new(120, Duration::from_secs(10));
@@ -12400,6 +12483,865 @@ mod tests {
         assert_eq!(artifacts[0].artifact_id, "a");
     }
 
+    fn write_retune_fixture(run_dir: &Path) {
+        fs::create_dir_all(run_dir).unwrap();
+        let samples_path = run_dir.join("samples.ndjson");
+        let profile = default_thermal_candidate_profile();
+        let mut samples_writer = BufWriter::new(File::create(&samples_path).unwrap());
+        let mut sample_index = 0usize;
+        let applied = write_dry_thermal_ladder(
+            &mut samples_writer,
+            "thermal-fixture",
+            "applied",
+            20_000,
+            3_250,
+            Some(&profile),
+            "preview",
+            &[60],
+            &mut sample_index,
+        )
+        .unwrap();
+        samples_writer.flush().unwrap();
+        let summary = json!({
+            "kind": "thermal_self_test",
+            "ok": true,
+            "runId": "thermal-fixture",
+            "dryRun": true,
+            "target": {
+                "deviceId": "bench",
+                "hardwareId": Value::Null,
+                "devd": DEFAULT_DEVD_URL,
+            },
+            "source": {
+                "deviceId": "iso-fixture",
+                "mode": "dry_run",
+                "url": "http://127.0.0.1:1",
+            },
+            "parameters": {
+                "targetsC": [60],
+                "optimizeTargetsC": [],
+                "sampleIntervalMs": 300,
+                "effectiveSampleIntervalMs": 300,
+                "holdSeconds": 60,
+                "stageTimeoutSeconds": 300,
+                "runtimeRearmAttempts": 1,
+                "cooldownTempC": 40.0,
+                "cooldownTimeoutSeconds": 7200,
+                "limits": {
+                    "overshootC": 3.0,
+                    "holdPeakToPeakC": 3.0,
+                    "fullSpeedToStableMs": {
+                        "lte150C": ThermalFullSpeedStableTracker::LOW_TEMP_SETTLE_LIMIT_MS,
+                        "gt150C": ThermalFullSpeedStableTracker::HIGH_TEMP_SETTLE_LIMIT_MS,
+                    },
+                },
+                "seedProfileFile": Value::Null,
+            },
+            "files": {
+                "runDir": run_dir,
+                "summaryPath": run_dir.join("run.json"),
+                "samplesPath": samples_path,
+                "candidateProfilePath": run_dir.join("thermal-profile.candidate.json"),
+            },
+            "candidateProfile": profile,
+            "profilePersistence": "dry_run",
+            "tuningSteps": [],
+            "applied": applied.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
+            "validation": validate_thermal_applied_results(
+                &applied,
+                &[60],
+                ThermalSelfTestEvaluationMode::HoldConfirm,
+            ),
+            "sampleCount": sample_index,
+            "complete": true,
+            "error": Value::Null,
+        });
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::to_vec_pretty(&summary).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn thermal_retune_offline_writes_replay_artifacts_without_apply_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+
+        let output =
+            thermal_retune::retune_thermal_self_test_run(thermal_retune::ThermalRetuneInput {
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            output.summary["kind"].as_str(),
+            Some("thermal_self_test_replay")
+        );
+        assert!(output.summary.get("applyPreview").is_none());
+        assert!(dir.path().join("run.replayed.json").exists());
+        assert!(
+            dir.path()
+                .join("thermal-profile.replayed.candidate.json")
+                .exists()
+        );
+    }
+
+    fn thermal_report_test_point(target_temp_c: i16) -> Value {
+        json!({
+            "targetTempC": target_temp_c,
+            "brakeDistanceCentiC": 1100,
+            "warmupPowerPermille": 1000,
+            "approachPowerPermille": 420,
+            "approachFloorPowerPermille": 320,
+            "approachDampingExponentPermille": 910,
+            "approachTailWindowCentiC": 0,
+            "holdPowerPermille": 335,
+            "holdReheatPowerPermille": 400,
+            "holdEntryCentiC": 150,
+            "holdExitCentiC": 100,
+            "holdOnCentiC": 10,
+            "holdOffCentiC": 160,
+            "overshootCutoffCentiC": 220,
+            "holdKpPermillePerC": 22,
+            "holdKiPermillePerCTick": 1,
+            "holdBlendTicks": 1,
+            "approachLeadTicks": 2,
+            "holdLeadTicks": 0
+        })
+    }
+
+    #[test]
+    fn thermal_report_rerender_preliminary_bundle_writes_compliant_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy");
+        let output_dir = dir.path().join("rerendered");
+        fs::create_dir_all(&legacy_dir).unwrap();
+
+        let legacy_bundle = json!({
+            "kind": "thermal_approach_characterization",
+            "runId": "legacy-run",
+            "generatedAt": "2026-07-17T12:00:00Z",
+            "selectedMode": "100w",
+            "resolvedBank": "pps5a",
+            "detectedSourceClass": "pps5a",
+            "bundleDisposition": "preliminary_review",
+            "acceptedProfileRole": "review_candidate_snapshot",
+            "source": {
+                "sourceDeviceId": "f293cc9c139e"
+            },
+            "targets": [
+                {
+                    "targetTempC": 60,
+                    "effectivePoint": thermal_report_test_point(60),
+                    "variants": [
+                        {
+                            "variantId": "zero_coast",
+                            "variantLabel": "0加热",
+                            "valid": true,
+                            "tunedPoint": thermal_report_test_point(60),
+                            "metrics": {
+                                "approachDurationMs": 8200,
+                                "peak": 0.75,
+                                "rollback": 1.71
+                            },
+                            "samples": [
+                                {
+                                    "elapsedMs": 0,
+                                    "currentTempC": 35.0,
+                                    "heaterFilteredTempC": 35.0,
+                                    "heaterControlPhase": "warmup",
+                                    "heaterOutputPercent": 100,
+                                    "heaterPhysicalOutputPercent": 100,
+                                    "sourceTelemetry": {
+                                        "voltageMv": 21000,
+                                        "currentMa": 4800,
+                                        "powerMw": 100800
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "holdCheck": {
+                        "confirmRunId": "confirm-60",
+                        "passed": true,
+                        "failureReason": Value::Null,
+                        "holdSeconds": 60,
+                        "maxOvershootC": 0.75,
+                        "holdPeakToPeakC": 1.71,
+                        "holdMedianOutputPermille": 0,
+                        "holdP90OutputPermille": 100,
+                        "approachSource": {"powerMw": {"avg": 22425.0}},
+                        "holdSource": {"powerMw": {"avg": 3935.0}},
+                        "stopReason": "completed"
+                    }
+                }
+            ]
+        });
+        fs::write(
+            legacy_dir.join("run.bundle.json"),
+            serde_json::to_vec_pretty(&legacy_bundle).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            legacy_dir.join("thermal-profile.accepted.json"),
+            serde_json::to_vec_pretty(&json!({
+                "points": [thermal_report_test_point(60)],
+                "settings": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            legacy_dir.join("samples.ndjson"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "targetTempC": 60,
+                    "elapsedMs": 1000,
+                    "status": {
+                        "currentTempC": 60.2,
+                        "heaterFilteredTempC": 60.1,
+                        "heaterOutputPercent": 18,
+                        "heaterPhysicalOutputPercent": 18,
+                        "pdRequestMv": 21000
+                    },
+                    "phase": "hold",
+                    "sourceTelemetry": {
+                        "voltageMv": 21000,
+                        "currentMa": 300,
+                        "powerMw": 6300
+                    }
+                }))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        let result =
+            thermal_report::rerender_legacy_preliminary_review_bundle(
+                thermal_report::ThermalLegacyReportInput {
+                    legacy_bundle_dir: legacy_dir.clone(),
+                    output_dir: Some(output_dir.clone()),
+                },
+            )
+            .unwrap();
+        let bundle: Value =
+            serde_json::from_slice(&fs::read(output_dir.join("run.bundle.json")).unwrap()).unwrap();
+        let html = fs::read_to_string(output_dir.join("index.html")).unwrap();
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["operation"],
+            "thermal_report.rerender_legacy_preliminary_review_bundle"
+        );
+        assert_eq!(bundle["kind"], "thermal_self_test_preliminary_bundle");
+        assert_eq!(bundle["bundleDisposition"], "preliminary_review");
+        assert_eq!(bundle["acceptedProfileRole"], "review_candidate_snapshot");
+        assert_eq!(bundle["flagshipTargetsC"], json!([60]));
+        assert_eq!(bundle["runs"][0]["target"], 60);
+        assert_eq!(bundle["runs"][0]["pointSource"], "review_candidate_snapshot");
+        assert_eq!(bundle["runs"][0]["rounds"][0]["attemptType"], "characterization");
+        assert!(html.contains("60°C"));
+        assert!(html.contains("preliminary review"));
+    }
+
+    #[test]
+    fn thermal_report_rerender_live_bundle_splits_time_reset_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_dir = dir.path().join("legacy-live");
+        fs::create_dir_all(&legacy_dir).unwrap();
+
+        let legacy_bundle = json!({
+            "kind": "thermal_self_test_report_bundle",
+            "runId": "legacy-live-run",
+            "generatedAt": "2026-07-20T10:36:44.251Z",
+            "selectedMode": "100w",
+            "resolvedBank": "pps5a",
+            "detectedSourceClass": "pps5a",
+            "bundleDisposition": "latest_live_report",
+            "acceptedProfileRole": "review_candidate_snapshot",
+            "source": {
+                "deviceId": "f293cc9c139e"
+            },
+            "target": {
+                "deviceId": "serial-303a-1001-A0:F2:62:F2:0D:6C"
+            },
+            "parameters": {
+                "holdSeconds": 60
+            },
+            "sourceRuns": {
+                "60": "thermal-self-test-runs/source-run-summaries/60.run.json"
+            },
+            "candidateProfile": {
+                "settings": {},
+                "points": [thermal_report_test_point(60)]
+            },
+            "applied": [
+                {
+                    "targetTempC": 60,
+                    "stopReason": "completed",
+                    "maxOvershootC": 0.75,
+                    "holdPeakToPeakC": 1.71,
+                    "analysis": {
+                        "holdMedianOutputPermille": 0,
+                        "holdP90OutputPermille": 100,
+                        "approachSource": {"powerMw": {"avg": 22425.0}},
+                        "holdSource": {"powerMw": {"avg": 3935.0}}
+                    },
+                    "fullSpeedToStable": {
+                        "limitMs": 10000,
+                        "settleTimeMs": 8200,
+                        "failureReason": Value::Null
+                    },
+                    "guard": {
+                        "firstHoldAtMs": 9100
+                    }
+                }
+            ],
+            "validation": {
+                "passed": true,
+                "expectedTargetsC": [60],
+                "failures": []
+            }
+        });
+        fs::write(
+            legacy_dir.join("run.bundle.json"),
+            serde_json::to_vec_pretty(&legacy_bundle).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            legacy_dir.join("thermal-profile.accepted.json"),
+            serde_json::to_vec_pretty(&json!({
+                "points": [thermal_report_test_point(60)],
+                "settings": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let live_samples = vec![
+            json!({
+                "targetTempC": 60,
+                "elapsedMs": 5000,
+                "status": {
+                    "currentTempC": 60.8,
+                    "heaterFilteredTempC": 60.7,
+                    "heaterOutputPercent": 16,
+                    "heaterPhysicalOutputPercent": 16,
+                    "pdRequestMv": 21000
+                },
+                "phase": "hold",
+                "heaterParameters": thermal_report_test_point(60),
+                "sourceTelemetry": {
+                    "voltageMv": 21000,
+                    "currentMa": 280,
+                    "powerMw": 5880
+                }
+            }),
+            json!({
+                "targetTempC": 60,
+                "elapsedMs": 1000,
+                "status": {
+                    "currentTempC": 60.2,
+                    "heaterFilteredTempC": 60.1,
+                    "heaterOutputPercent": 18,
+                    "heaterPhysicalOutputPercent": 18,
+                    "pdRequestMv": 21000
+                },
+                "phase": "hold",
+                "heaterParameters": thermal_report_test_point(60),
+                "sourceTelemetry": {
+                    "voltageMv": 21000,
+                    "currentMa": 300,
+                    "powerMw": 6300
+                }
+            }),
+        ];
+        fs::write(
+            legacy_dir.join("samples.ndjson"),
+            live_samples
+                .iter()
+                .map(|sample| serde_json::to_string(sample).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let result =
+            thermal_report::rerender_legacy_preliminary_review_bundle(
+                thermal_report::ThermalLegacyReportInput {
+                    legacy_bundle_dir: legacy_dir.clone(),
+                    output_dir: None,
+                },
+            )
+            .unwrap();
+        let output_dir = dir.path().join("legacy-live-rerendered");
+        let bundle: Value =
+            serde_json::from_slice(&fs::read(output_dir.join("run.bundle.json")).unwrap()).unwrap();
+        let written_samples: Vec<Value> = fs::read_to_string(output_dir.join("samples.ndjson"))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(bundle["kind"], "thermal_self_test_preliminary_bundle");
+        assert_eq!(bundle["flagshipTargetsC"], json!([60]));
+        assert_eq!(bundle["runs"][0]["roundCount"], 2);
+        assert_eq!(bundle["runs"][0]["rounds"][0]["attemptType"], "legacy_live_report");
+        assert_eq!(bundle["runs"][0]["rounds"][0]["selected"], false);
+        assert_eq!(bundle["runs"][0]["rounds"][1]["selected"], true);
+        assert_eq!(bundle["runs"][0]["holdCheck"]["confirmRunId"], "legacy-live-run-60");
+        assert_eq!(bundle["runs"][0]["samples"][0]["t"], 1.0);
+        assert_eq!(bundle["runs"][0]["rounds"][0]["samples"][0]["t"], 5.0);
+        assert_eq!(bundle["runs"][0]["rounds"][1]["samples"][0]["t"], 1.0);
+        assert_eq!(written_samples[0]["t"], 5.0);
+        assert_eq!(written_samples[1]["t"], 1.0);
+        assert!(
+            result["outputDir"]
+                .as_str()
+                .unwrap()
+                .ends_with("legacy-live-rerendered")
+        );
+    }
+
+    #[derive(Clone)]
+    struct RetuneApplyTestState {
+        runtime_requests: Arc<Mutex<Vec<Value>>>,
+        preview_enabled_readback: bool,
+    }
+
+    async fn create_retune_test_lease() -> Json<Value> {
+        Json(json!({
+            "leaseId": "lease-retune",
+            "ttlMs": 60_000,
+        }))
+    }
+
+    async fn heartbeat_retune_test_lease() -> Json<Value> {
+        Json(json!({
+            "leaseId": "lease-retune",
+            "ttlMs": 60_000,
+        }))
+    }
+
+    async fn release_retune_test_lease() -> Json<Value> {
+        Json(json!({ "released": true }))
+    }
+
+    async fn capture_retune_preview(
+        State(state): State<RetuneApplyTestState>,
+        AxumPath(_device_id): AxumPath<String>,
+        Json(payload): Json<Value>,
+    ) -> Json<Value> {
+        state.runtime_requests.lock().unwrap().push(payload.clone());
+        Json(json!({
+            "deviceId": "bench",
+            "mode": "idle",
+            "targetTempC": 60,
+            "currentTempC": 25.0,
+            "heaterEnabled": false,
+            "thermalControlProfilePreview": true,
+        }))
+    }
+
+    async fn retune_status_readback(
+        State(state): State<RetuneApplyTestState>,
+        AxumPath(_device_id): AxumPath<String>,
+    ) -> Json<Value> {
+        Json(json!({
+            "deviceId": "bench",
+            "mode": "idle",
+            "targetTempC": 60,
+            "currentTempC": 25.0,
+            "heaterEnabled": false,
+            "thermalControlProfilePreview": state.preview_enabled_readback,
+            "thermalControl": {
+                "profileActive": state.preview_enabled_readback,
+                "source": if state.preview_enabled_readback { "preview" } else { "default" },
+            },
+        }))
+    }
+
+    async fn failing_retune_preview(
+        State(state): State<RetuneApplyTestState>,
+        AxumPath(_device_id): AxumPath<String>,
+        Json(payload): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        state.runtime_requests.lock().unwrap().push(payload);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "preview failed"})),
+        )
+    }
+
+    async fn spawn_retune_apply_server(
+        preview_enabled_readback: bool,
+        fail_preview: bool,
+    ) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+        let runtime_requests = Arc::new(Mutex::new(Vec::new()));
+        let state = RetuneApplyTestState {
+            runtime_requests: runtime_requests.clone(),
+            preview_enabled_readback,
+        };
+        let runtime_route = if fail_preview {
+            put(failing_retune_preview)
+        } else {
+            put(capture_retune_preview)
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/devices/{device_id}/leases",
+                post(create_retune_test_lease),
+            )
+            .route(
+                "/api/v1/leases/{lease_id}/heartbeat",
+                post(heartbeat_retune_test_lease),
+            )
+            .route(
+                "/api/v1/leases/{lease_id}",
+                delete(release_retune_test_lease),
+            )
+            .route("/api/v1/devices/{device_id}/runtime", runtime_route)
+            .route(
+                "/api/v1/devices/{device_id}/status",
+                get(retune_status_readback),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), runtime_requests, server)
+    }
+
+    #[derive(Clone)]
+    struct ThermalStatusRetryTestState {
+        attempts: Arc<AtomicUsize>,
+        delayed_attempts: usize,
+        delay_ms: u64,
+    }
+
+    async fn flaky_thermal_status_readback(
+        State(state): State<ThermalStatusRetryTestState>,
+        AxumPath(_device_id): AxumPath<String>,
+    ) -> Json<Value> {
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt <= state.delayed_attempts {
+            tokio::time::sleep(Duration::from_millis(state.delay_ms)).await;
+        }
+        Json(json!({
+            "attempt": attempt,
+            "currentTempC": 25.0,
+            "heaterEnabled": false,
+            "thermalControlProfilePreview": false,
+        }))
+    }
+
+    async fn spawn_flaky_thermal_status_server(
+        delayed_attempts: usize,
+        delay_ms: u64,
+    ) -> (
+        ResolvedUsbTarget,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let state = ThermalStatusRetryTestState {
+            attempts: attempts.clone(),
+            delayed_attempts,
+            delay_ms,
+        };
+        let app = Router::new()
+            .route(
+                "/api/v1/devices/{device_id}/status",
+                get(flaky_thermal_status_readback),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            ResolvedUsbTarget {
+                device: "bench".to_string(),
+                devd: format!("http://{addr}"),
+                hardware_id: None,
+            },
+            attempts,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn thermal_status_retry_recovers_after_single_timeout() {
+        let (resolved, attempts, server) = spawn_flaky_thermal_status_server(1, 150).await;
+
+        let status = request_thermal_status_with_retry_config(
+            &Client::new(),
+            &resolved,
+            "lease-test",
+            Duration::from_millis(50),
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["attempt"], 2);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_writes_verified_receipt_and_uses_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+        let (base_url, runtime_requests, server) = spawn_retune_apply_server(true, false).await;
+
+        let summary = retune_thermal_self_test_run(
+            &Client::new(),
+            &base_url,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: Some("bench".to_string()),
+                    hardware: None,
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert_eq!(summary["applyPreview"]["ok"], true);
+        assert_eq!(replay_summary["applyPreview"]["ok"], true);
+        assert_eq!(
+            replay_summary["applyPreview"]["statusReadback"]["thermalControlProfilePreview"],
+            true
+        );
+        let requests = runtime_requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["leaseId"], "lease-retune");
+        assert_eq!(
+            requests[0]["thermalControlProfile"]["op"].as_str(),
+            Some("preview")
+        );
+        assert_eq!(
+            requests[0]["thermalControlProfile"]["profile"],
+            replay_summary["candidateProfile"]
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_failure_preserves_replay_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+        let (base_url, _runtime_requests, server) = spawn_retune_apply_server(true, true).await;
+
+        let error = retune_thermal_self_test_run(
+            &Client::new(),
+            &base_url,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: Some("bench".to_string()),
+                    hardware: None,
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert!(error.contains("HTTP 500"));
+        assert_eq!(replay_summary["applyPreview"]["ok"], false);
+        assert!(
+            replay_summary["applyPreview"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP 500")
+        );
+        assert!(
+            dir.path()
+                .join("thermal-profile.replayed.candidate.json")
+                .exists()
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_target_error_preserves_replay_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+
+        let error = retune_thermal_self_test_run(
+            &Client::new(),
+            DEFAULT_DEVD_URL,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: None,
+                    hardware: None,
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert!(error.contains("requires --device or --hardware"));
+        assert_eq!(replay_summary["applyPreview"]["ok"], false);
+        assert_eq!(
+            replay_summary["applyPreview"]["target"]["devd"],
+            DEFAULT_DEVD_URL
+        );
+        assert!(
+            dir.path()
+                .join("thermal-profile.replayed.candidate.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_rejects_ambiguous_target_and_preserves_replay_artifacts()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+
+        let error = retune_thermal_self_test_run(
+            &Client::new(),
+            DEFAULT_DEVD_URL,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: Some("bench".to_string()),
+                    hardware: Some("saved-bench".to_string()),
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert!(error.contains("accepts only one of --device or --hardware"));
+        assert_eq!(replay_summary["applyPreview"]["ok"], false);
+        assert_eq!(
+            replay_summary["applyPreview"]["target"]["deviceId"],
+            "bench"
+        );
+        assert_eq!(
+            replay_summary["applyPreview"]["target"]["hardwareId"],
+            "saved-bench"
+        );
+        assert!(
+            dir.path()
+                .join("thermal-profile.replayed.candidate.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_missing_saved_hardware_preserves_replay_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+
+        let missing_hardware_id = "missing-retune-hardware-7c6c7596f0b64e75";
+        let error = retune_thermal_self_test_run(
+            &Client::new(),
+            DEFAULT_DEVD_URL,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: None,
+                    hardware: Some(missing_hardware_id.to_string()),
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert!(error.contains("saved hardware not found"));
+        assert_eq!(replay_summary["applyPreview"]["ok"], false);
+        assert_eq!(
+            replay_summary["applyPreview"]["target"]["hardwareId"],
+            missing_hardware_id
+        );
+        assert!(
+            dir.path()
+                .join("thermal-profile.replayed.candidate.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_requires_status_readback_preview_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+        let (base_url, _runtime_requests, server) = spawn_retune_apply_server(false, false).await;
+
+        let error = retune_thermal_self_test_run(
+            &Client::new(),
+            &base_url,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: Some("bench".to_string()),
+                    hardware: None,
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert!(error.contains("thermalControlProfilePreview"));
+        assert_eq!(replay_summary["applyPreview"]["ok"], false);
+        assert_eq!(
+            replay_summary["applyPreview"]["statusReadback"]["thermalControlProfilePreview"],
+            false
+        );
+
+        server.abort();
+    }
     #[tokio::test]
     async fn flash_with_lease_reuses_same_lease_for_dry_run_and_real_flash() {
         #[derive(Clone)]

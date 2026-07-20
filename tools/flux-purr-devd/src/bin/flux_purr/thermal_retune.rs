@@ -7,11 +7,12 @@ use serde_json::{Value, json};
 
 use super::{
     ThermalStageResult, parse_thermal_targets, parse_thermal_targets_from_summary,
-    read_ndjson_values, render_thermal_self_test_report_html, thermal_candidate_point_mut,
-    thermal_candidate_profile_to_value, thermal_rebuild_profile_from_anchor_targets,
-    thermal_replay_applied_profile, thermal_replay_full_speed_to_stable,
-    thermal_replay_stage_analysis, thermal_replay_stage_samples, thermal_stage_result_from_value,
-    tune_thermal_candidate_point, validate_thermal_applied_results,
+    read_ndjson_values, thermal_candidate_point_mut, thermal_candidate_profile_to_value,
+    thermal_rebuild_profile_from_anchor_targets, thermal_replay_applied_profile,
+    thermal_replay_full_speed_to_stable, thermal_replay_stage_analysis,
+    thermal_replay_stage_samples, thermal_self_test_evaluation_mode_from_summary,
+    thermal_stage_result_from_value, tune_thermal_candidate_point,
+    validate_thermal_applied_results,
 };
 
 #[derive(Debug, Clone)]
@@ -25,8 +26,6 @@ pub(super) struct ThermalRetuneOutput {
     pub(super) summary: Value,
     pub(super) candidate_profile: Value,
     summary_path: PathBuf,
-    samples_path: PathBuf,
-    report_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -58,10 +57,6 @@ impl ThermalRetuneOutput {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.summary["applyPreview"] = receipt.to_value();
         write_json_pretty(&self.summary_path, &self.summary)?;
-        fs::write(
-            &self.report_path,
-            render_thermal_self_test_report_html(&self.summary, &self.samples_path)?,
-        )?;
         Ok(())
     }
 }
@@ -129,12 +124,13 @@ pub(super) fn retune_thermal_self_test_run(
         applied_results.push(replayed);
     }
 
-    let validation = validate_thermal_applied_results(&applied_results, &target_temps_c);
+    let evaluation_mode = thermal_self_test_evaluation_mode_from_summary(&summary);
+    let validation =
+        validate_thermal_applied_results(&applied_results, &target_temps_c, evaluation_mode);
     let replay_summary_path = input.run_dir.join("run.replayed.json");
     let replay_candidate_path = input
         .run_dir
         .join("thermal-profile.replayed.candidate.json");
-    let replay_report_path = input.run_dir.join("report.replayed.html");
     let replay_summary = json!({
         "kind": "thermal_self_test_replay",
         "ok": validation.get("passed").and_then(Value::as_bool) == Some(true),
@@ -160,7 +156,6 @@ pub(super) fn retune_thermal_self_test_run(
             "summaryPath": replay_summary_path,
             "samplesPath": samples_path,
             "candidateProfilePath": replay_candidate_path,
-            "reportHtmlPath": replay_report_path,
         },
         "sampleCount": summary.get("sampleCount").cloned().unwrap_or(Value::Null),
         "candidateProfile": candidate_profile_value.clone(),
@@ -171,16 +166,10 @@ pub(super) fn retune_thermal_self_test_run(
     });
     write_json_pretty(&replay_candidate_path, &candidate_profile_value)?;
     write_json_pretty(&replay_summary_path, &replay_summary)?;
-    fs::write(
-        &replay_report_path,
-        render_thermal_self_test_report_html(&replay_summary, &samples_path)?,
-    )?;
     Ok(ThermalRetuneOutput {
         summary: replay_summary,
         candidate_profile: candidate_profile_value,
         summary_path: replay_summary_path,
-        samples_path,
-        report_path: replay_report_path,
     })
 }
 

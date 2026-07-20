@@ -68,11 +68,18 @@ For approach-curve fitting, use the same canonical bundle shape. A dedicated `th
 
 When the bundle is a review-only checkpoint rather than a committed accepted baseline, keep the same four-file layout and mark it explicitly:
 
+- top-level `kind=thermal_self_test_preliminary_bundle`
 - top-level `bundleDisposition=preliminary_review`
 - top-level `acceptedProfileRole=review_candidate_snapshot`
 - `thermal-profile.accepted.json` means the current review candidate snapshot only; it is not a committed accepted baseline and it is not evidence that EEPROM has been saved
 
-Merged preliminary review bundles may also attach a per-target `holdCheck` block to the same `thermal_approach_characterization` payload. That block should summarize the single-target `60s` hold confirm for the same target and carry:
+The owner-facing compliant preliminary review bundle is now regenerated through the Rust CLI:
+
+- `flux-purr thermal report rerender-legacy --legacy-bundle-dir <dir> [--output-dir <dir>]`
+
+When an older `preliminary-review-*` legacy directory already exists, rerender it through this Rust CLI path rather than treating the legacy `run.bundle.json` as the owner-facing final report. The same command also accepts an already-compliant `thermal_self_test_preliminary_bundle` input and rewrites it into a fresh output directory, so the final `index.html + run.bundle.json + samples.ndjson + thermal-profile.accepted.json` package can stay on the Rust-owned path.
+
+Merged preliminary review bundles may also attach a per-target `holdCheck` block to the same `thermal_self_test_preliminary_bundle` payload. That block should summarize the single-target `60s` hold confirm for the same target and carry:
 
 - `confirmRunId`
 - `passed`

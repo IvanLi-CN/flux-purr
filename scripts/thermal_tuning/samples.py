@@ -47,6 +47,47 @@ def normalized_sample(sample: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def sort_samples_by_time(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sample_key(item: tuple[int, dict[str, Any]]) -> tuple[int, float | int, int]:
+        index, sample = item
+        try:
+            t = float(sample.get("t"))
+        except (TypeError, ValueError):
+            return (1, index, index)
+        if not math.isfinite(t):
+            return (1, index, index)
+        return (0, t, index)
+
+    return [sample for _, sample in sorted(enumerate(samples), key=sample_key)]
+
+
+def normalized_sorted_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sort_samples_by_time([normalized_sample(sample) for sample in samples if isinstance(sample, dict)])
+
+
+def split_samples_on_time_reset(samples: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    segments: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    last_t: float | None = None
+    for sample in samples:
+        if not isinstance(sample, dict):
+            continue
+        raw_t = sample.get("elapsedMs", sample.get("t"))
+        try:
+            current_t = float(raw_t)
+        except (TypeError, ValueError):
+            current_t = None
+        if current and current_t is not None and last_t is not None and current_t < last_t:
+            segments.append(current)
+            current = []
+        current.append(sample)
+        if current_t is not None:
+            last_t = current_t
+    if current:
+        segments.append(current)
+    return segments
+
+
 POINT_FIELDS = [
     "targetTempC",
     "brakeDistanceCentiC",
@@ -104,7 +145,7 @@ def normalize_round_step_samples(samples: Any) -> list[dict[str, Any]]:
             continue
         if "t" in sample and ("temp" in sample or "filtered" in sample):
             normalized.append(dict(sample))
-    return normalized
+    return sort_samples_by_time(normalized)
 
 
 def summary_run_path(summary: dict[str, Any]) -> Path:
@@ -124,7 +165,7 @@ def samples_for_target(summary: dict[str, Any], target_temp_c: int) -> list[dict
     if not samples_file.exists():
         return []
     grouped = grouped_samples(samples_file)
-    return [normalized_sample(sample) for sample in grouped.get(int(target_temp_c), [])]
+    return normalized_sorted_samples(grouped.get(int(target_temp_c), []))
 
 
 def warmup_output_is_full(summary: dict[str, Any], target_temp_c: int) -> bool:
@@ -207,7 +248,7 @@ def target_run_entry(
         "rounds": tuning_rounds_for_target(summary, target_temp_c),
         "result": stage,
         "failures": failures,
-        "samples": [normalized_sample(sample) for sample in samples],
+        "samples": normalized_sorted_samples(samples),
     }
 
 

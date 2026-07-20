@@ -181,6 +181,27 @@ def default_preliminary_bundle_dir(targets_c: list[int] | None = None) -> Path:
     return REPO_ROOT / f"thermal-self-test-runs/preliminary-pd100w-pps5a-{target_slug}-{today_slug()}"
 
 
+def preliminary_entry_with_sorted_samples(entry: dict[str, Any]) -> dict[str, Any]:
+    sorted_entry = dict(entry)
+    entry_samples = entry.get("samples") if isinstance(entry.get("samples"), list) else []
+    sorted_entry["samples"] = sort_samples_by_time(
+        [dict(sample) for sample in entry_samples if isinstance(sample, dict)]
+    )
+    rounds = []
+    for round_item in entry.get("rounds") or []:
+        if not isinstance(round_item, dict):
+            continue
+        sorted_round = dict(round_item)
+        round_samples = round_item.get("samples") if isinstance(round_item.get("samples"), list) else []
+        sorted_round["samples"] = sort_samples_by_time(
+            [dict(sample) for sample in round_samples if isinstance(sample, dict)]
+        )
+        rounds.append(sorted_round)
+    if isinstance(entry.get("rounds"), list):
+        sorted_entry["rounds"] = rounds
+    return sorted_entry
+
+
 def write_preliminary_review_bundle(
     *,
     bundle_dir: Path,
@@ -194,6 +215,7 @@ def write_preliminary_review_bundle(
     source_preset: str = "21V / 5.0A",
     provider: str = "IsolaPurr",
 ) -> dict[str, Any]:
+    entries = [preliminary_entry_with_sorted_samples(entry) for entry in entries]
     bundle_dir.mkdir(parents=True, exist_ok=True)
     samples_path = bundle_dir / "samples.ndjson"
     sample_lines: list[str] = []
@@ -284,11 +306,13 @@ def legacy_preliminary_review_entries(
         hold_check = target_payload.get("holdCheck") if isinstance(target_payload.get("holdCheck"), dict) else {}
         variants = target_payload.get("variants") if isinstance(target_payload.get("variants"), list) else []
         effective_point = sanitize_point(target_payload.get("effectivePoint"), target_temp_c)
-        top_level_samples = [
-            normalized_sample(sample)
+        raw_target_samples = [
+            sample
             for sample in grouped_target_samples.get(target_temp_c, [])
             if isinstance(sample, dict)
         ]
+        target_segments = split_samples_on_time_reset(raw_target_samples)
+        top_level_samples = normalized_sorted_samples(target_segments[-1] if target_segments else [])
         rounds: list[dict[str, Any]] = []
         selected_round = max(len(variants), 1)
         for index, variant in enumerate(variants, start=1):
@@ -321,6 +345,7 @@ def legacy_preliminary_review_entries(
                     }
                 )
             metrics = variant.get("metrics") if isinstance(variant.get("metrics"), dict) else {}
+            variant_samples = sort_samples_by_time(variant_samples)
             rounds.append(
                 {
                     "round": index,
@@ -392,6 +417,128 @@ def legacy_preliminary_review_entries(
     return entries
 
 
+def legacy_live_report_entries(
+    legacy_bundle: dict[str, Any],
+    accepted_profile: dict[str, Any],
+    grouped_target_samples: dict[int, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    accepted_points = point_map(accepted_profile)
+    candidate_profile = (
+        legacy_bundle.get("candidateProfile")
+        if isinstance(legacy_bundle.get("candidateProfile"), dict)
+        else {}
+    )
+    candidate_points = point_map(candidate_profile) if candidate_profile else {}
+    hold_seconds = value_at_path(legacy_bundle, "parameters", "holdSeconds")
+    source_runs = legacy_bundle.get("sourceRuns") if isinstance(legacy_bundle.get("sourceRuns"), dict) else {}
+
+    entries: list[dict[str, Any]] = []
+    for stage in legacy_bundle.get("applied") or []:
+        if not isinstance(stage, dict):
+            continue
+        target_temp_c = int(stage["targetTempC"])
+        raw_target_samples = [
+            sample
+            for sample in grouped_target_samples.get(target_temp_c, [])
+            if isinstance(sample, dict)
+        ]
+        target_segments = split_samples_on_time_reset(raw_target_samples)
+        segment_rounds: list[dict[str, Any]] = []
+        for segment_index, raw_segment in enumerate(target_segments, start=1):
+            segment_samples = normalized_sorted_samples(raw_segment)
+            segment_rounds.append(
+                {
+                    "round": segment_index,
+                    "label": f"legacy live review {segment_index}",
+                    "attemptType": "legacy_live_report",
+                    "candidateName": f"legacy_live_report_{segment_index}",
+                    "selected": segment_index == len(target_segments),
+                    "evidenceValid": True,
+                    "point": effective_point_from_samples(raw_segment, target_temp_c),
+                    "samples": segment_samples,
+                }
+            )
+        selected_round = segment_rounds[-1] if segment_rounds else None
+        top_level_samples = list(selected_round.get("samples") or []) if selected_round else []
+        point = (
+            sanitize_point(accepted_points.get(target_temp_c), target_temp_c)
+            or sanitize_point(candidate_points.get(target_temp_c), target_temp_c)
+            or (selected_round.get("point") if selected_round else None)
+            or effective_point_from_samples(raw_target_samples, target_temp_c)
+        )
+        analysis = stage.get("analysis") if isinstance(stage.get("analysis"), dict) else {}
+        full_speed = stage.get("fullSpeedToStable") if isinstance(stage.get("fullSpeedToStable"), dict) else {}
+        failures = validation_failures_for_target(legacy_bundle, target_temp_c)
+        failure_reason = (
+            failures[0].get("reason")
+            if failures
+            else full_speed.get("failureReason")
+            or (stage.get("stopReason") if stage.get("stopReason") != "completed" else None)
+        )
+        passed = not failures and stage.get("stopReason") == "completed"
+        hold_check = {
+            "confirmRunId": f"{legacy_bundle.get('runId') or 'legacy'}-{target_temp_c}",
+            "passed": passed,
+            "failureReason": failure_reason,
+            "holdSeconds": hold_seconds,
+            "maxOvershootC": stage.get("maxOvershootC"),
+            "holdPeakToPeakC": stage.get("holdPeakToPeakC"),
+            "firstHoldAtMs": value_at_path(stage, "guard", "firstHoldAtMs"),
+            "holdMedianOutputPermille": analysis.get("holdMedianOutputPermille"),
+            "holdP90OutputPermille": analysis.get("holdP90OutputPermille"),
+            "approachSource": analysis.get("approachSource"),
+            "holdSource": analysis.get("holdSource"),
+            "sourceRunPath": source_runs.get(str(target_temp_c)),
+            "stopReason": stage.get("stopReason"),
+        }
+        round_result = {
+            "stopReason": stage.get("stopReason"),
+            "maxOvershootC": stage.get("maxOvershootC"),
+            "holdPeakToPeakC": stage.get("holdPeakToPeakC"),
+            "settleTimeMs": full_speed.get("settleTimeMs"),
+            "fullSpeedLimitMs": full_speed.get("limitMs"),
+            "failureReason": full_speed.get("failureReason"),
+        }
+        rounds = []
+        for segment_round in segment_rounds:
+            round_item = dict(segment_round)
+            round_item["point"] = round_item.get("point") or point
+            round_item["failures"] = failures
+            round_item["result"] = dict(round_result)
+            rounds.append(round_item)
+        entries.append(
+            {
+                "runId": hold_check["confirmRunId"],
+                "target": target_temp_c,
+                "targetTempC": target_temp_c,
+                "ok": passed,
+                "saved": False,
+                "evidence": "preliminary_review",
+                "budgetOutcome": "completed" if passed else "not_converged",
+                "timeSpentSeconds": int(round(top_level_samples[-1]["t"])) if top_level_samples else 0,
+                "roundCount": len(rounds),
+                "validTestCount": sum(1 for round_item in rounds if round_item.get("evidenceValid") is not False),
+                "invalidTestCount": 0,
+                "approachReference": {"limitMs": full_speed.get("limitMs")},
+                "point": point,
+                "truthPoint": point,
+                "pointSource": "review_candidate_snapshot",
+                "rounds": rounds,
+                "result": {
+                    "stopReason": stage.get("stopReason"),
+                    "maxOvershootC": stage.get("maxOvershootC"),
+                    "holdPeakToPeakC": stage.get("holdPeakToPeakC"),
+                    "fullSpeedToStable": full_speed,
+                    "analysis": analysis,
+                },
+                "failures": failures,
+                "samples": top_level_samples,
+                "holdCheck": hold_check,
+            }
+        )
+    return entries
+
+
 def rerender_legacy_preliminary_review_bundle(
     *,
     legacy_bundle_dir: Path,
@@ -400,15 +547,25 @@ def rerender_legacy_preliminary_review_bundle(
     legacy_bundle = read_json(legacy_bundle_dir / "run.bundle.json")
     accepted_profile = read_json(legacy_bundle_dir / "thermal-profile.accepted.json")
     target_samples = grouped_samples(legacy_bundle_dir / "samples.ndjson")
-    entries = legacy_preliminary_review_entries(legacy_bundle, target_samples)
+    if legacy_bundle.get("kind") == "thermal_self_test_report_bundle":
+        entries = legacy_live_report_entries(legacy_bundle, accepted_profile, target_samples)
+    else:
+        entries = legacy_preliminary_review_entries(legacy_bundle, target_samples)
     source = legacy_bundle.get("source") if isinstance(legacy_bundle.get("source"), dict) else {}
+    target = legacy_bundle.get("target") if isinstance(legacy_bundle.get("target"), dict) else {}
     return write_preliminary_review_bundle(
         bundle_dir=output_dir,
         accepted_profile=accepted_profile,
         entries=entries,
-        source_id=str(source.get("sourceDeviceId") or "unknown-source"),
-        device_id=str(source.get("deviceId") or "unknown-device"),
-        port_path=str(source.get("port") or source.get("portPath") or "/dev/cu.usbmodem2111401"),
+        source_id=str(source.get("sourceDeviceId") or source.get("deviceId") or "unknown-source"),
+        device_id=str(target.get("deviceId") or source.get("deviceId") or "unknown-device"),
+        port_path=str(
+            target.get("port")
+            or target.get("portPath")
+            or source.get("port")
+            or source.get("portPath")
+            or "/dev/cu.usbmodem2111401"
+        ),
         tuning_budget_seconds=0,
         generated_at=legacy_bundle.get("generatedAt"),
         source_preset="21V / 5.0A",
