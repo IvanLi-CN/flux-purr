@@ -190,6 +190,9 @@ def write_preliminary_review_bundle(
     device_id: str,
     port_path: str,
     tuning_budget_seconds: int,
+    generated_at: str | None = None,
+    source_preset: str = "21V / 5.0A",
+    provider: str = "IsolaPurr",
 ) -> dict[str, Any]:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     samples_path = bundle_dir / "samples.ndjson"
@@ -224,14 +227,14 @@ def write_preliminary_review_bundle(
         "canonicalReportFormat": "html_bundle",
         "bundleDisposition": "preliminary_review",
         "acceptedProfileRole": "review_candidate_snapshot",
-        "generatedAt": now_iso(),
+        "generatedAt": generated_at or now_iso(),
         "selectedMode": PROFILE_MODE,
         "resolvedBank": EXPECTED_BANK,
         "detectedSourceClass": EXPECTED_SOURCE_CLASS,
         "tuningBudgetSeconds": int(tuning_budget_seconds),
         "flagshipTargetsC": [entry["target"] for entry in entries],
-        "sourcePreset": "21V / 5.0A",
-        "provider": "IsolaPurr",
+        "sourcePreset": source_preset,
+        "provider": provider,
         "sourceDeviceId": source_id,
         "deviceId": device_id,
         "port": port_path,
@@ -267,6 +270,150 @@ def write_preliminary_review_bundle(
     }
     (bundle_dir / "index.html").write_text(render_baseline_html(html_data), encoding="utf-8")
     return bundle
+
+
+def legacy_preliminary_review_entries(
+    legacy_bundle: dict[str, Any],
+    grouped_target_samples: dict[int, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for target_payload in legacy_bundle.get("targets") or []:
+        if not isinstance(target_payload, dict):
+            continue
+        target_temp_c = int(target_payload["targetTempC"])
+        hold_check = target_payload.get("holdCheck") if isinstance(target_payload.get("holdCheck"), dict) else {}
+        variants = target_payload.get("variants") if isinstance(target_payload.get("variants"), list) else []
+        effective_point = sanitize_point(target_payload.get("effectivePoint"), target_temp_c)
+        top_level_samples = [
+            normalized_sample(sample)
+            for sample in grouped_target_samples.get(target_temp_c, [])
+            if isinstance(sample, dict)
+        ]
+        rounds: list[dict[str, Any]] = []
+        selected_round = max(len(variants), 1)
+        for index, variant in enumerate(variants, start=1):
+            if not isinstance(variant, dict):
+                continue
+            variant_point = sanitize_point(variant.get("tunedPoint"), target_temp_c)
+            variant_samples = []
+            for sample in variant.get("samples") or []:
+                if not isinstance(sample, dict):
+                    continue
+                source = sample.get("sourceTelemetry") if isinstance(sample.get("sourceTelemetry"), dict) else {}
+                variant_samples.append(
+                    {
+                        "t": round(float(sample.get("elapsedMs", 0)) / 1000.0, 3),
+                        "temp": sample.get("currentTempC"),
+                        "filtered": sample.get("heaterFilteredTempC"),
+                        "command": sample.get("heaterOutputPercent"),
+                        "output": sample.get("heaterPhysicalOutputPercent"),
+                        "requestV": None,
+                        "phase": sample.get("heaterControlPhase"),
+                        "sourceVoltageV": round(float(source["voltageMv"]) / 1000.0, 3)
+                        if isinstance(source.get("voltageMv"), (int, float))
+                        else None,
+                        "sourceCurrentA": round(float(source["currentMa"]) / 1000.0, 3)
+                        if isinstance(source.get("currentMa"), (int, float))
+                        else None,
+                        "sourcePowerW": round(float(source["powerMw"]) / 1000.0, 3)
+                        if isinstance(source.get("powerMw"), (int, float))
+                        else None,
+                    }
+                )
+            metrics = variant.get("metrics") if isinstance(variant.get("metrics"), dict) else {}
+            rounds.append(
+                {
+                    "round": index,
+                    "label": variant.get("variantLabel") or f"variant {index}",
+                    "attemptType": "characterization",
+                    "candidateName": variant.get("variantId") or f"variant_{index}",
+                    "selected": index == selected_round,
+                    "evidenceValid": bool(variant.get("valid", True)),
+                    "point": variant_point,
+                    "samples": variant_samples,
+                    "failures": [],
+                    "result": {
+                        "stopReason": "completed",
+                        "maxOvershootC": metrics.get("peak"),
+                        "holdPeakToPeakC": metrics.get("rollback"),
+                        "settleTimeMs": metrics.get("approachDurationMs"),
+                    },
+                }
+            )
+        full_speed_limit_ms = 10_000 if target_temp_c <= 150 else 5_000
+        result = {
+            "stopReason": hold_check.get("stopReason") or ("completed" if hold_check.get("passed") else hold_check.get("failureReason")),
+            "maxOvershootC": hold_check.get("maxOvershootC"),
+            "holdPeakToPeakC": hold_check.get("holdPeakToPeakC"),
+            "fullSpeedToStable": {
+                "limitMs": full_speed_limit_ms,
+                "settleTimeMs": None,
+                "failureReason": hold_check.get("failureReason"),
+            },
+            "analysis": {
+                "holdMedianOutputPermille": hold_check.get("holdMedianOutputPermille"),
+                "holdP90OutputPermille": hold_check.get("holdP90OutputPermille"),
+                "approachSource": hold_check.get("approachSource"),
+                "holdSource": hold_check.get("holdSource"),
+            },
+        }
+        failures = []
+        if hold_check and not bool(hold_check.get("passed")):
+            failures.append(
+                {
+                    "targetTempC": target_temp_c,
+                    "reason": hold_check.get("failureReason") or "hold_check_failed",
+                }
+            )
+        entries.append(
+            {
+                "runId": hold_check.get("confirmRunId") or legacy_bundle.get("runId") or f"legacy-{target_temp_c}",
+                "target": target_temp_c,
+                "targetTempC": target_temp_c,
+                "ok": bool(hold_check.get("passed")),
+                "saved": False,
+                "evidence": "preliminary_review",
+                "budgetOutcome": "completed" if hold_check.get("passed") else "not_converged",
+                "timeSpentSeconds": int(round(top_level_samples[-1]["t"])) if top_level_samples else 0,
+                "roundCount": len(rounds),
+                "validTestCount": sum(1 for round_item in rounds if round_item.get("evidenceValid") is not False),
+                "invalidTestCount": sum(1 for round_item in rounds if round_item.get("evidenceValid") is False),
+                "approachReference": {"limitMs": full_speed_limit_ms},
+                "point": effective_point,
+                "truthPoint": effective_point,
+                "pointSource": "review_candidate_snapshot",
+                "rounds": rounds,
+                "result": result,
+                "failures": failures,
+                "samples": top_level_samples,
+                "holdCheck": hold_check,
+            }
+        )
+    return entries
+
+
+def rerender_legacy_preliminary_review_bundle(
+    *,
+    legacy_bundle_dir: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    legacy_bundle = read_json(legacy_bundle_dir / "run.bundle.json")
+    accepted_profile = read_json(legacy_bundle_dir / "thermal-profile.accepted.json")
+    target_samples = grouped_samples(legacy_bundle_dir / "samples.ndjson")
+    entries = legacy_preliminary_review_entries(legacy_bundle, target_samples)
+    source = legacy_bundle.get("source") if isinstance(legacy_bundle.get("source"), dict) else {}
+    return write_preliminary_review_bundle(
+        bundle_dir=output_dir,
+        accepted_profile=accepted_profile,
+        entries=entries,
+        source_id=str(source.get("sourceDeviceId") or "unknown-source"),
+        device_id=str(source.get("deviceId") or "unknown-device"),
+        port_path=str(source.get("port") or source.get("portPath") or "/dev/cu.usbmodem2111401"),
+        tuning_budget_seconds=0,
+        generated_at=legacy_bundle.get("generatedAt"),
+        source_preset="21V / 5.0A",
+        provider="IsolaPurr",
+    )
 
 
 def synthetic_failure_summary(target_temp_c: int, reason: str) -> dict[str, Any]:

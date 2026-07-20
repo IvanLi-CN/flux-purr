@@ -2074,6 +2074,120 @@ class ThermalTuningSprintTests(unittest.TestCase):
         self.assertIn("name:'功率'", html)
         self.assertIn("rawUnit:'W'", html)
 
+    def test_rerender_legacy_preliminary_review_bundle_converts_old_shape(self) -> None:
+        legacy_bundle = {
+            "kind": "thermal_approach_characterization",
+            "runId": "legacy-run",
+            "generatedAt": "2026-07-17T12:00:00Z",
+            "selectedMode": "100w",
+            "resolvedBank": "pps5a",
+            "detectedSourceClass": "pps5a",
+            "bundleDisposition": "preliminary_review",
+            "acceptedProfileRole": "review_candidate_snapshot",
+            "source": {
+                "sourceDeviceId": "f293cc9c139e",
+            },
+            "targets": [
+                {
+                    "targetTempC": 60,
+                    "effectivePoint": make_point(60),
+                    "variants": [
+                        {
+                            "variantId": "zero_coast",
+                            "variantLabel": "0加热",
+                            "valid": True,
+                            "tunedPoint": make_point(60, holdPowerPermille=190),
+                            "metrics": {
+                                "approachDurationMs": 8200,
+                                "peak": 0.75,
+                                "rollback": 1.71,
+                            },
+                            "samples": [
+                                {
+                                    "elapsedMs": 0,
+                                    "currentTempC": 35.0,
+                                    "heaterFilteredTempC": 35.0,
+                                    "heaterControlPhase": "warmup",
+                                    "heaterOutputPercent": 100,
+                                    "heaterPhysicalOutputPercent": 100,
+                                    "sourceTelemetry": {
+                                        "voltageMv": 21000,
+                                        "currentMa": 4800,
+                                        "powerMw": 100800,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                    "holdCheck": {
+                        "confirmRunId": "confirm-60",
+                        "passed": True,
+                        "failureReason": None,
+                        "holdSeconds": 60,
+                        "maxOvershootC": 0.75,
+                        "holdPeakToPeakC": 1.71,
+                        "holdMedianOutputPermille": 0,
+                        "holdP90OutputPermille": 100,
+                        "approachSource": {"powerMw": {"avg": 22425.0}},
+                        "holdSource": {"powerMw": {"avg": 3935.0}},
+                        "stopReason": "completed",
+                    },
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legacy_dir = Path(tmpdir) / "legacy"
+            out_dir = Path(tmpdir) / "rerendered"
+            legacy_dir.mkdir()
+            (legacy_dir / "run.bundle.json").write_text(
+                json.dumps(legacy_bundle, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (legacy_dir / "thermal-profile.accepted.json").write_text(
+                json.dumps({"points": [make_point(60)], "settings": {}}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (legacy_dir / "samples.ndjson").write_text(
+                json.dumps(
+                    {
+                        "targetTempC": 60,
+                        "elapsedMs": 1000,
+                        "status": {
+                            "currentTempC": 60.2,
+                            "heaterFilteredTempC": 60.1,
+                            "heaterOutputPercent": 18,
+                            "heaterPhysicalOutputPercent": 18,
+                            "pdRequestMv": 21000,
+                        },
+                        "phase": "hold",
+                        "sourceTelemetry": {
+                            "voltageMv": 21000,
+                            "currentMa": 300,
+                            "powerMw": 6300,
+                        },
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            bundle = MODULE.rerender_legacy_preliminary_review_bundle(
+                legacy_bundle_dir=legacy_dir,
+                output_dir=out_dir,
+            )
+            rerendered = json.loads((out_dir / "run.bundle.json").read_text(encoding="utf-8"))
+            html = (out_dir / "index.html").read_text(encoding="utf-8")
+
+        self.assertEqual(bundle["bundleDisposition"], "preliminary_review")
+        self.assertEqual(bundle["acceptedProfileRole"], "review_candidate_snapshot")
+        self.assertEqual(bundle["generatedAt"], "2026-07-17T12:00:00Z")
+        self.assertEqual(rerendered["runs"][0]["target"], 60)
+        self.assertEqual(rerendered["runs"][0]["pointSource"], "review_candidate_snapshot")
+        self.assertEqual(rerendered["runs"][0]["rounds"][0]["attemptType"], "characterization")
+        self.assertIn("60°C", html)
+        self.assertIn("preliminary review", html)
+
 
 if __name__ == "__main__":
     unittest.main()
