@@ -35,9 +35,11 @@ EXPECTED_SOURCE_POWER_WATTS = 100
 EXPECTED_SOURCE_PPS_LIMIT_MA = 5_000
 DEFAULT_AUTHORIZED_PORT = "/dev/cu.usbmodem2111401"
 DEFAULT_PER_TARGET_BUDGET_SECONDS = 1_200
-DEFAULT_MAX_TUNING_ROUNDS = 2
+DEFAULT_MAX_TUNING_ROUNDS: int | None = None
 DEFAULT_SCOUT_HOLD_SECONDS = 12
 DEFAULT_CONFIRM_HOLD_SECONDS = 60
+DEFAULT_STAGE_TIMEOUT_SECONDS = 180
+DEFAULT_WARMUP_TIMEOUT_SECONDS = 180
 EVALUATION_MODE_TUNING_SCOUT = "tuning-scout"
 EVALUATION_MODE_HOLD_CONFIRM = "hold-confirm"
 SOURCE_RECOVERY_SETTLE_SECONDS = 2.0
@@ -90,18 +92,18 @@ def budget_exhausted(
     return budget_remaining_seconds(start_monotonic, budget_seconds, now_monotonic) <= 0
 
 
-def step_timeouts_for_budget(remaining_seconds: int, hold_seconds: int) -> tuple[int, int] | None:
+def step_timeouts_for_budget(remaining_seconds: int, hold_seconds: int) -> tuple[int, int, int] | None:
+    del hold_seconds
     remaining = int(remaining_seconds)
-    hold = int(hold_seconds)
-    if remaining <= hold + 30:
+    stage_timeout = DEFAULT_STAGE_TIMEOUT_SECONDS
+    warmup_timeout = DEFAULT_WARMUP_TIMEOUT_SECONDS
+    if remaining <= stage_timeout:
         return None
-    stage_timeout = min(max(hold + 30, 90), max(hold + 5, remaining - 15))
-    cooldown_timeout = max(15, remaining - stage_timeout)
-    if cooldown_timeout + stage_timeout > remaining:
-        cooldown_timeout = max(1, remaining - stage_timeout)
-    if cooldown_timeout <= 0 or stage_timeout <= hold:
-        return None
-    return cooldown_timeout, stage_timeout
+    # Remaining target budget may cap only pre-run cooldown waiting. The active
+    # round itself keeps a fixed 180s timeout, and warmup remains an explicit
+    # timeout contract instead of being synthesized from budget slack.
+    cooldown_timeout = max(1, remaining - stage_timeout)
+    return cooldown_timeout, stage_timeout, warmup_timeout
 
 
 def parse_targets(raw: str | None, default: list[int]) -> list[int]:
@@ -195,6 +197,28 @@ def verify_isolapurr_power_show(
             f"isolapurr usb_c_actual sample uptime did not advance after recovery: previous={previous_sample_uptime_ms} current={uptime_ms}"
         )
     return uptime_ms
+
+
+def verify_isolapurr_output_disabled(payload: dict[str, Any]) -> int | None:
+    output_enabled = value_at_path(payload, "config", "runtime", "output_enabled")
+    if output_enabled is not False:
+        raise RuntimeError(
+            f"isolapurr runtime output is still enabled while recovery expects power-off: {output_enabled}"
+        )
+    usb_status = value_at_path(payload, "diagnostics", "usb_c_actual", "status")
+    usb_current_ma = value_at_path(payload, "diagnostics", "usb_c_actual", "current_ma")
+    usb_power_mw = value_at_path(payload, "diagnostics", "usb_c_actual", "power_mw")
+    if usb_status == "ok" and not (
+        isinstance(usb_current_ma, (int, float))
+        and isinstance(usb_power_mw, (int, float))
+        and int(usb_current_ma) == 0
+        and int(usb_power_mw) == 0
+    ):
+        raise RuntimeError(
+            "isolapurr usb_c_actual is still sourcing power while recovery expects power-off: "
+            f"status={usb_status} current_ma={usb_current_ma} power_mw={usb_power_mw}"
+        )
+    return source_usb_c_sample_uptime_ms(payload)
 
 
 def ensure_expected_source(summary: dict[str, Any]) -> None:

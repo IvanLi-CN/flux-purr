@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -80,6 +81,12 @@ def make_bundle(target_temp_c: int) -> tuple[dict, dict]:
 
 
 class ThermalApproachCharacterizationTests(unittest.TestCase):
+    def test_characterize_variant_does_not_disable_active_cooling_when_heating_starts(self) -> None:
+        source = inspect.getsource(MODULE.characterize_variant)
+
+        self.assertIn('"heaterEnabled": True', source)
+        self.assertNotIn('"activeCoolingEnabled": False', source)
+
     def test_parse_variant_ids_defaults_and_custom(self) -> None:
         self.assertEqual(MODULE.parse_variant_ids(None), ["warmup_scout_25"])
         self.assertEqual(

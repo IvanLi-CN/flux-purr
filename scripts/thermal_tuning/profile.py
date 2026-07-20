@@ -184,7 +184,15 @@ def mutate_more_brake(point: dict[str, Any], target_temp_c: int) -> dict[str, An
         4000,
     )
     mutated["approachLeadTicks"] = clamp_int(int(mutated["approachLeadTicks"]) + 1, 0, 255)
-    mutated["holdEntryCentiC"] = clamp_int(int(mutated["holdEntryCentiC"]) - (15 if target_temp_c <= 140 else 8), 0, 5000)
+    if target_temp_c >= 180:
+        mutated["approachFloorPowerPermille"] = clamp_int(int(mutated["approachFloorPowerPermille"]) - 20, 0, 1000)
+        mutated["holdEntryCentiC"] = clamp_int(int(mutated["holdEntryCentiC"]) + 12, 0, 5000)
+    else:
+        mutated["holdEntryCentiC"] = clamp_int(
+            int(mutated["holdEntryCentiC"]) - (15 if target_temp_c <= 140 else 8),
+            0,
+            5000,
+        )
     mutated["holdReheatPowerPermille"] = clamp_int(int(mutated["holdReheatPowerPermille"]) - 30, 0, 1000)
     return mutated
 
@@ -209,6 +217,23 @@ def mutate_hold_ripple(point: dict[str, Any], metrics: dict[str, Any]) -> dict[s
     return mutated
 
 
+def low_side_hold_starved(stage: dict[str, Any], evidence: dict[str, Any], target_temp_c: int) -> bool:
+    if int(target_temp_c) < 180:
+        return False
+    if str(evidence.get("failureClass") or "") not in {"missed_lower_band_before_limit", "stable_window_broke_low"}:
+        return False
+    metrics = stage_metrics(stage)
+    hold_median = metrics.get("holdMedianOutputPermille")
+    if not isinstance(hold_median, (int, float)) or float(hold_median) > 100.0:
+        return False
+    analysis = stage.get("analysis") if isinstance(stage.get("analysis"), dict) else {}
+    first_hold_error = analysis.get("firstHoldErrorC")
+    if isinstance(first_hold_error, (int, float)) and float(first_hold_error) >= 0.75:
+        return True
+    first_hold_temp = analysis.get("firstHoldTempC")
+    return isinstance(first_hold_temp, (int, float)) and float(first_hold_temp) <= float(target_temp_c) - 0.75
+
+
 @dataclass
 class CandidateVariant:
     name: str
@@ -229,8 +254,14 @@ def build_candidate_variants(
         raise RuntimeError(f"missing {target_temp_c}°C anchor while building variants")
     evidence = stability_evidence_for_stage(scout_stage, scout_samples or [], target_temp_c)
     predicted_point = predict_next_point(current_point, evidence)
+    if low_side_hold_starved(scout_stage, evidence, target_temp_c):
+        predicted_point = mutate_more_heat(predicted_point, target_temp_c)
 
     variants = [CandidateVariant("current", current_profile)]
     if predicted_point != current_point:
         variants.append(CandidateVariant(str(evidence["failureClass"]), merge_point(current_profile, predicted_point)))
+    elif int(target_temp_c) > 150 and str(evidence.get("failureClass") or "") == "within_gate":
+        conservative_point = mutate_more_brake(current_point, target_temp_c)
+        if conservative_point != current_point:
+            variants.append(CandidateVariant("within_gate_more_brake", merge_point(current_profile, conservative_point)))
     return variants

@@ -35,7 +35,12 @@ def main() -> int:
     parser.add_argument("--validation-targets-c")
     parser.add_argument("--tune-targets-c")
     parser.add_argument("--per-target-budget-seconds", type=int, default=DEFAULT_PER_TARGET_BUDGET_SECONDS)
-    parser.add_argument("--max-tuning-rounds", type=int, default=DEFAULT_MAX_TUNING_ROUNDS)
+    parser.add_argument(
+        "--max-tuning-rounds",
+        type=int,
+        default=DEFAULT_MAX_TUNING_ROUNDS,
+        help="Optional debug-only round cap. Omit to tune until the per-target budget is exhausted.",
+    )
     parser.add_argument("--scout-hold-seconds", type=int, default=DEFAULT_SCOUT_HOLD_SECONDS)
     parser.add_argument("--confirm-hold-seconds", type=int, default=DEFAULT_CONFIRM_HOLD_SECONDS)
     parser.add_argument("--dry-run", action="store_true")
@@ -118,17 +123,32 @@ def main() -> int:
             review_entries.append(entry)
             write_json(output_root / "review-entries.json", review_entries)
 
-        accepted_profile_path = output_root / "review-candidate-profile.json"
-        write_json(accepted_profile_path, current_profile)
-        bundle = write_preliminary_review_bundle(
-            bundle_dir=bundle_dir,
-            accepted_profile=current_profile,
+            accepted_profile_path = output_root / "review-candidate-profile.json"
+            write_json(accepted_profile_path, current_profile)
+            bundle = write_preliminary_review_bundle(
+                bundle_dir=bundle_dir,
+                accepted_profile=current_profile,
             entries=review_entries,
             source_id=args.source_id,
             device_id=runner.resolve_device_id(args.dry_run),
-            port_path=args.authorized_port,
-            tuning_budget_seconds=args.per_target_budget_seconds,
+                port_path=args.authorized_port,
+                tuning_budget_seconds=args.per_target_budget_seconds,
+            )
+    except AlarmInterventionRequired as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "kind": "thermal_alarm_pause",
+                    "message": str(exc),
+                    "affectedAttempts": exc.attempts,
+                    "resumeAction": "inspect hardware, clear the alarm, then rerun the affected tests",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         )
+        return 2
     finally:
         runner.disarm_and_clear_preview()
     print(

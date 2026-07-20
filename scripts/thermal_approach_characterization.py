@@ -758,7 +758,6 @@ def characterize_variant(
             lease_id,
             {
                 "heaterEnabled": True,
-                "activeCoolingEnabled": False,
                 "targetTempC": target_temp_c,
             },
         )

@@ -136,6 +136,7 @@ def stability_evidence_for_stage(
 def predict_next_point(point: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
     """Apply one bounded, evidence-specific correction to a target-local point."""
     predicted = dict(point)
+    target_temp_c = int(predicted.get("targetTempC") or 0)
     failure_class = str(evidence.get("failureClass") or "")
     gap_c = float(evidence.get("temperatureGapC") or 0.0)
     correction_centi_c = clamp_int(int(math.ceil((gap_c + 0.4) * 100.0)), 30, 120)
@@ -151,8 +152,27 @@ def predict_next_point(point: dict[str, Any], evidence: dict[str, Any]) -> dict[
             0,
             1000,
         )
+        if target_temp_c >= 180:
+            predicted["approachDampingExponentPermille"] = clamp_int(
+                int(predicted["approachDampingExponentPermille"]) + 90,
+                0,
+                4000,
+            )
+            predicted["approachLeadTicks"] = clamp_int(int(predicted["approachLeadTicks"]) + 1, 0, 255)
+            predicted["holdEntryCentiC"] = clamp_int(
+                int(predicted["holdEntryCentiC"]) + max(8, correction_centi_c // 6),
+                0,
+                5000,
+            )
+            predicted["holdReheatPowerPermille"] = clamp_int(
+                int(predicted["holdReheatPowerPermille"]) - max(20, correction_centi_c // 3),
+                0,
+                1000,
+            )
     elif failure_class in {"missed_lower_band_before_limit", "stable_window_broke_low"}:
-        if int(predicted["approachPowerPermille"]) >= 1000 and int(predicted["approachFloorPowerPermille"]) >= 1000:
+        approach_power = int(predicted["approachPowerPermille"])
+        approach_floor = int(predicted["approachFloorPowerPermille"])
+        if approach_power >= 1000 and (approach_floor >= 1000 or (target_temp_c >= 180 and approach_floor >= 950)):
             predicted["brakeDistanceCentiC"] = clamp_int(
                 int(predicted["brakeDistanceCentiC"]) - correction_centi_c,
                 0,
@@ -211,6 +231,21 @@ def candidate_score(summary: dict[str, Any], target_temp_c: int) -> tuple[Any, .
     stage = stage_for_target(summary, target_temp_c)
     metrics = stage_metrics(stage)
     evidence = stability_evidence_for_stage(stage, samples_for_target(summary, target_temp_c), target_temp_c)
+    failure_class = str(evidence.get("failureClass") or "")
+    temperature_gap = float(evidence.get("temperatureGapC") if isinstance(evidence.get("temperatureGapC"), (int, float)) else 0.0)
+    first_band_at_ms = evidence.get("firstBandAtMs")
+    stability_progress_penalty = {
+        "within_gate": 0.0,
+        "within_gate_low_margin": 0.25,
+        "stable_window_broke_low": 1.0,
+        "stable_window_broke_high": 1.0,
+        "band_entry_not_observed": 2.0,
+        "missed_lower_band_before_limit": 3.0,
+        "missed_upper_band_before_limit": 3.0,
+    }.get(failure_class, 4.0)
+    if isinstance(first_band_at_ms, (int, float)):
+        stability_progress_penalty += min(float(first_band_at_ms) / 1_000_000.0, 0.5)
+    stability_progress_penalty += min(temperature_gap, 5.0)
     hold_p2p = metrics.get("holdPeakToPeakC")
     settle_time_ms = metrics.get("settleTimeMs")
     full_speed_limit_ms = metrics.get("fullSpeedLimitMs")
@@ -238,7 +273,8 @@ def candidate_score(summary: dict[str, Any], target_temp_c: int) -> tuple[Any, .
     return (
         1 if run_is_disqualified(summary, target_temp_c) else 0,
         0 if metrics.get("stopReason") == "completed" else 1,
-        1 if evidence.get("failureClass") == "within_gate_low_margin" else 0,
+        1 if failure_class == "within_gate_low_margin" else 0,
+        stability_progress_penalty,
         full_speed_margin_penalty,
         settle_penalty,
         float(metrics.get("maxOvershootC") if isinstance(metrics.get("maxOvershootC"), (int, float)) else math.inf),

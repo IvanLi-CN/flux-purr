@@ -2,13 +2,16 @@
 
 ## 2026-07-19
 
+- `220°C` rerun3/rerun4/rerun5 的 current truth 已收口到同一高温点族。`2026-07-19` 的 rerun4 与 rerun5 都停在 `brake=701 / approachFloor=898 / damping=410 / lead=3 / holdEntry=159 / holdReheat=930`，失败形态也从早期的高侧 overshoot 收敛成低侧或低裕量：`missed_lower_band_before_limit`、`stable_window_broke_low` 与 `within_gate_low_margin`。这说明当前 `220°C` 剩余 blocker 已不是高侧余热，而是 low-side / low-margin plateau。
+- 同日确认并修复了一处 host timing 缺陷：剩余 per-target budget 被错误折算进每轮 `stage_timeout_seconds`，导致 warmup/stage 在预算尾部被意外截短。当前 timing contract 改为每轮 active self-test 固定 `180s`，remaining budget 只裁剪冷却等待或阻止开始下一轮；warmup timeout 保持独立显式参数，不再由预算 slack 隐式生成。
+- 同日将 IsolaPurr source 重新上电流程从 USB-C path 切换固化为 runtime output gate。真实掉电步骤为 `isolapurr power runtime output --enabled false`，用 `runtime.output_enabled=false` 和 USB-C 零电流/零功率或非 `ok` 状态证明不再出力；等待 `2s` 后执行 `isolapurr power runtime output --enabled true`，再确认 telemetry 推进、`auto_follow`、`100W`、PD/PPS 与 PPS 5A capability。旧的 `power output manual --usb-c-path disconnected` / `power output auto` 只改变 source path/mode，不再作为 thermal HIL 标准 power-cycle。
 - 热失控告警合同收敛为两个 owner-facing 状态：`temp >= 420°C` 活动期间每 `1s` 播放一次热失控提示；回落到 `<420°C` 后若尚未确认，则以 `faultAttentionPending=true` 每 `10s` reminder。确认不得绕过活动热失控的绝对停热与提示。
 - 删除分支中按相邻温度或 raw ADC 变化幅度升级 `sensor-glitch` fault 的启发式。PPS request/VIN transition 仍可触发立即重读，但有效重读继续进入既有温度采样链；只有 `SensorShort / SensorOpen / AdcReadFailed` 和绝对过温进入硬保护。
 - 热失控未确认期间禁止 heater arm，并按现有主动降温包线强制风扇：`>60°C` 全速、`40~60°C` 为 `50%`；温度 `<40°C` 或收到确认时解除强制风扇，低于 `40°C` 本身不代替告警确认。
 
 ## 2026-07-17
 
-- 主人因旧 bench source 异常，更换当前 100W HIL source 为 IsolaPurr `f293cc9c139e` / `http://192.168.31.224`。当 source 遥测表现为低压卡死或 PPS 不再跟随请求时，当前可复用恢复流程固定为：先停止加热并保留 unsaved run，再对同一 source 执行 `isolapurr power output manual --usb-c-path disconnected`，随后 `isolapurr power output auto`；若 USB-C power path 仍卡住，再对 `port_c` 做 replug。该流程只用于 source-side stale / latched 输出，不得用来掩盖 controller、sensor 或 runtime 缺陷。
+- 主人因旧 bench source 异常，更换当前 100W HIL source 为 IsolaPurr `f293cc9c139e` / `http://192.168.31.224`。当时的 source-side stale / latched 输出恢复曾使用 USB-C path 切换；该历史流程已由 `2026-07-19` 的 runtime output gate 合同取代，不再作为 thermal HIL 标准重新上电路径。
 - 完成 `100w / pps5a` 的三点 preliminary review bundle：`thermal-self-test-runs/preliminary-pd100w-pps5a-60-140-220-20260717/`。该 bundle 固定为 canonical HTML 形态，并显式标记 `bundleDisposition=preliminary_review`、`acceptedProfileRole=review_candidate_snapshot`。三个目标的单点 `60s` hold confirm 结果为：`60°C => overshoot 0.75 / p2p 1.71`、`140°C => overshoot 1.73 / p2p 2.94`、`220°C => overshoot 1.11 / p2p 1.59`。这份证据只代表当前审查候选，不代表 committed accepted baseline，也不代表 EEPROM saved bank。
 
 ## 2026-07-11

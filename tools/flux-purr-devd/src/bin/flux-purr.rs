@@ -208,6 +208,8 @@ struct RuntimeSetArgs {
     active_cooling: Option<bool>,
     #[arg(long = "heater-enabled")]
     heater_enabled: Option<bool>,
+    #[arg(long = "fault-attention-acknowledged")]
+    fault_attention_acknowledged: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -384,8 +386,14 @@ struct ThermalSelfTestArgs {
     evaluation_mode: ThermalSelfTestEvaluationMode,
     #[arg(long = "hold-seconds", default_value_t = 60)]
     hold_seconds: u64,
-    #[arg(long = "stage-timeout-seconds", default_value_t = 300)]
+    #[arg(long = "stage-timeout-seconds", default_value_t = 180)]
     stage_timeout_seconds: u64,
+    #[arg(
+        long = "warmup-timeout-seconds",
+        default_value_t = 180,
+        help = "Explicit warmup timeout. It is tracked separately from the overall stage timeout and must not be derived from remaining target budget."
+    )]
+    warmup_timeout_seconds: u64,
     #[arg(
         long = "runtime-rearm-attempts",
         default_value_t = 1,
@@ -2487,7 +2495,7 @@ fn thermal_runtime_drop_reason(
 fn thermal_recoverable_sensor_fault(status: &Value) -> bool {
     matches!(
         status.get("heaterFaultReason").and_then(Value::as_str),
-        Some("sensor-open" | "sensor-short" | "adc-read-failed")
+        Some("sensor-glitch" | "sensor-open" | "sensor-short" | "adc-read-failed")
     ) && status.get("mode").and_then(Value::as_str) != Some("fault")
 }
 
@@ -2677,6 +2685,7 @@ fn thermal_stage_result_from_value(
         "wrong_target" => "wrong_target",
         "sample_rate_below_3hz" => "sample_rate_below_3hz",
         "heater_no_output" => "heater_no_output",
+        "warmup_timeout" => "warmup_timeout",
         "approach_threshold_timeout" => "approach_threshold_timeout",
         "approach_hold_timeout" => "approach_hold_timeout",
         "approach_reentered_warmup" => "approach_reentered_warmup",
@@ -3770,7 +3779,8 @@ fn thermal_batch_candidate_summary(
             "effectiveSampleIntervalMs": effective_thermal_sample_interval_ms(args.sample_interval_ms),
             "holdSeconds": args.hold_seconds.max(1),
             "stageTimeoutSeconds": args.stage_timeout_seconds.max(1),
-                "runtimeRearmAttempts": args.runtime_rearm_attempts,
+            "warmupTimeoutSeconds": args.warmup_timeout_seconds.max(1),
+            "runtimeRearmAttempts": args.runtime_rearm_attempts,
             "cooldownTempC": restart_temp_c,
             "cooldownTimeoutSeconds": args.cooldown_timeout_seconds.max(1),
             "batchCandidate": true,
@@ -4184,7 +4194,8 @@ async fn collect_single_thermal_self_test(
             "effectiveSampleIntervalMs": effective_thermal_sample_interval_ms(args.sample_interval_ms),
             "holdSeconds": args.hold_seconds.max(1),
             "stageTimeoutSeconds": args.stage_timeout_seconds.max(1),
-                "runtimeRearmAttempts": args.runtime_rearm_attempts,
+            "warmupTimeoutSeconds": args.warmup_timeout_seconds.max(1),
+            "runtimeRearmAttempts": args.runtime_rearm_attempts,
             "cooldownTempC": args.cooldown_temp_c,
             "cooldownTimeoutSeconds": args.cooldown_timeout_seconds.max(1),
             "limits": {
@@ -6350,7 +6361,9 @@ fn thermal_self_test_runtime_body(heater_enabled: bool, target_temp_c: i16) -> V
         "heaterEnabled": heater_enabled,
         "targetTempC": target_temp_c,
     });
-    body["activeCoolingEnabled"] = json!(!heater_enabled);
+    if !heater_enabled {
+        body["activeCoolingEnabled"] = json!(true);
+    }
     body
 }
 
@@ -6437,10 +6450,10 @@ async fn arm_thermal_self_test_heater(
         )
         .into());
     }
-    if status.get("activeCoolingEnabled").and_then(Value::as_bool) != Some(!heater_enabled) {
+    if !heater_enabled && status.get("activeCoolingEnabled").and_then(Value::as_bool) != Some(true)
+    {
         return Err(format!(
-            "heater runtime readback activeCooling mismatch: expected {}, got {}",
-            !heater_enabled,
+            "heater runtime readback activeCooling mismatch: expected true, got {}",
             status
                 .get("activeCoolingEnabled")
                 .and_then(Value::as_bool)
@@ -6470,6 +6483,7 @@ async fn run_thermal_stage(
 ) -> Result<ThermalStageResult, Box<dyn std::error::Error + Send + Sync>> {
     let mut started = tokio::time::Instant::now();
     let stage_timeout = Duration::from_secs(args.stage_timeout_seconds.max(1));
+    let warmup_timeout = Duration::from_secs(args.warmup_timeout_seconds.max(1));
     let mut deadline = started + stage_timeout;
     let hold_duration = Duration::from_secs(args.hold_seconds.max(1));
     let sample_interval = Duration::from_millis(effective_thermal_sample_interval_ms(
@@ -6616,6 +6630,12 @@ async fn run_thermal_stage(
         } else {
             None
         };
+        if stop_reason == "timeout"
+            && full_speed_tracker.warmup_exited_at_ms.is_none()
+            && started.elapsed() >= warmup_timeout
+        {
+            stop_reason = "warmup_timeout";
+        }
         if stop_reason == "timeout" {
             if let Some(reason) = full_speed_stop_reason {
                 stop_reason = reason;
@@ -6728,6 +6748,7 @@ fn thermal_stage_can_continue_tuning(stage: &ThermalStageResult) -> bool {
     matches!(
         stage.stop_reason,
         "completed"
+            | "warmup_timeout"
             | "full_speed_to_stable_timeout"
             | "approach_threshold_timeout"
             | "approach_hold_timeout"
@@ -6740,6 +6761,7 @@ fn thermal_stage_can_tune(stage: &ThermalStageResult) -> bool {
         stage.stop_reason,
         "completed"
             | "timeout"
+            | "warmup_timeout"
             | "full_speed_to_stable_timeout"
             | "approach_threshold_timeout"
             | "approach_hold_timeout"
@@ -6980,6 +7002,21 @@ async fn set_isolapurr_output_auto(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_isolapurr_device_identity(source_url, device_id)?;
     let mut config = read_isolapurr_power_config(source_url)?;
+    if !isolapurr_power_config_usb_c_path_is_default(&config) {
+        let response = isolapurr_cli_json(
+            source_url,
+            &["power", "output", "manual", "--usb-c-path", "automatic"],
+        )?;
+        if !isolapurr_cli_write_succeeded(&response)
+            && !isolapurr_power_config_usb_c_path_is_default(&response)
+        {
+            return Err(format!(
+                "isolapurr auto output path-normalization did not acknowledge success source_url={source_url}"
+            )
+            .into());
+        }
+        config = read_isolapurr_power_config(source_url)?;
+    }
     if !isolapurr_power_config_value_is_auto(&config) {
         let response = isolapurr_cli_json(source_url, &["power", "output", "auto"])?;
         if !isolapurr_cli_write_succeeded(&response)
@@ -6995,6 +7032,12 @@ async fn set_isolapurr_output_auto(
     if !isolapurr_power_config_value_is_auto(&config) {
         return Err(format!(
             "isolapurr power output auto readback mismatch for source_url={source_url}"
+        )
+        .into());
+    }
+    if !isolapurr_power_config_path_is_automatic(&config) {
+        return Err(format!(
+            "isolapurr power output auto left USB-C path in a non-automatic state for source_url={source_url}"
         )
         .into());
     }
@@ -7370,6 +7413,31 @@ fn isolapurr_power_config_value_is_auto(config: &Value) -> bool {
         .as_object()
         .and_then(|config| json_str_any(config, &["tps_mode", "tpsMode"]))
         .is_some_and(|mode| mode == "auto_follow" || mode == "autoFollow")
+}
+
+fn isolapurr_power_config_usb_c_path_is_default(config: &Value) -> bool {
+    config
+        .get("manual")
+        .and_then(Value::as_object)
+        .is_some_and(|manual| {
+            matches!(
+                json_str_any(manual, &["usb_c_path_mode", "usbCPathMode"]),
+                Some("default" | "automatic")
+            )
+        })
+}
+
+fn isolapurr_power_config_path_is_automatic(config: &Value) -> bool {
+    isolapurr_power_config_usb_c_path_is_default(config)
+        && config
+            .get("manual")
+            .and_then(Value::as_object)
+            .is_some_and(|manual| {
+                matches!(
+                    json_str_any(manual, &["path_policy", "pathPolicy"]),
+                    Some("auto")
+                )
+            })
 }
 
 fn read_isolapurr_power_config(
@@ -8151,6 +8219,9 @@ async fn runtime_body(
     insert_if_some(&mut body, "selectedPresetSlot", args.selected_preset_slot);
     insert_if_some(&mut body, "activeCoolingEnabled", args.active_cooling);
     insert_if_some(&mut body, "heaterEnabled", args.heater_enabled);
+    if args.fault_attention_acknowledged {
+        body.insert("faultAttentionAcknowledged".to_string(), json!(true));
+    }
     if let Some(file) = args.presets_file {
         body.insert("presetsC".to_string(), read_json_file(&file)?);
     }
@@ -9277,6 +9348,8 @@ mod tests {
         };
 
         assert!(thermal_stage_can_continue_tuning(&stage));
+        stage.stop_reason = "warmup_timeout";
+        assert!(thermal_stage_can_continue_tuning(&stage));
         stage.stop_reason = "heater_disarmed";
         assert!(!thermal_stage_can_continue_tuning(&stage));
     }
@@ -9980,6 +10053,22 @@ mod tests {
         }))
         .unwrap();
 
+        assert!(stage.hold_peak_to_peak_c.is_infinite());
+    }
+
+    #[test]
+    fn thermal_replay_accepts_warmup_timeout_stop_reason() {
+        let stage = thermal_stage_result_from_value(&json!({
+            "targetTempC": 220,
+            "riseTimeMs": 45_000,
+            "maxOvershootC": 0.0,
+            "holdPeakToPeakC": null,
+            "sampleCount": 90,
+            "stopReason": "warmup_timeout",
+        }))
+        .unwrap();
+
+        assert_eq!(stage.stop_reason, "warmup_timeout");
         assert!(stage.hold_peak_to_peak_c.is_infinite());
     }
 
@@ -11577,6 +11666,19 @@ mod tests {
         );
         assert!(thermal_recoverable_sensor_fault(&latched_fault));
 
+        let glitch = json!({
+            "mode": "sampling",
+            "uptimeSeconds": 34,
+            "targetTempC": 210,
+            "heaterEnabled": true,
+            "heaterFaultReason": "sensor-glitch",
+        });
+        assert_eq!(
+            thermal_runtime_drop_reason(&glitch, 210, Some(33)),
+            Some(ThermalRuntimeDropReason::LatchedFault)
+        );
+        assert!(thermal_recoverable_sensor_fault(&glitch));
+
         let active_fault = json!({
             "mode": "fault",
             "heaterFaultReason": "sensor-open",
@@ -11638,7 +11740,6 @@ mod tests {
             json!({
                 "heaterEnabled": true,
                 "targetTempC": 220,
-                "activeCoolingEnabled": false,
             })
         );
     }
@@ -11673,8 +11774,8 @@ mod tests {
             "manual": {
                 "voltageMv": 20_000,
                 "currentLimitMa": 3_250,
-                "usbCPathMode": "force",
-                "pathPolicy": "force_open",
+                "usbCPathMode": "default",
+                "pathPolicy": "auto",
             }
         });
 
@@ -11685,6 +11786,7 @@ mod tests {
         ));
         assert!(!isolapurr_power_config_value_is_auto(&manual_config));
         assert!(isolapurr_power_config_value_is_auto(&auto_config));
+        assert!(isolapurr_power_config_path_is_automatic(&auto_config));
         assert!(!isolapurr_power_config_value_matches_manual(
             &manual_config,
             20_000,

@@ -301,13 +301,14 @@ If the source remains at a stale low-voltage state or otherwise fails to follow 
 
 1. Stop heating and keep the run unsaved.
 2. Record the failure as a source-side issue, not as thermal-profile evidence.
-3. Restart the same IsolaPurr USB-C output path on the same authorized source:
-   - `isolapurr power output manual --url <source-url> --usb-c-path disconnected --json`
-   - `isolapurr power show --url <source-url> --json` and confirm `usb_c_power_enabled=false`
+3. Restart the same IsolaPurr runtime output gate on the same authorized source:
+   - `isolapurr power runtime output --url <source-url> --enabled false --json`
+   - `isolapurr power show --url <source-url> --json` and confirm `runtime.output_enabled=false`
+   - confirm the USB-C output is no longer sourcing power: either `usb_c_actual.status != ok`, or both `usb_c_actual.current_ma=0` and `usb_c_actual.power_mw=0`
    - wait `2s`
-   - `isolapurr power output auto --url <source-url> --json`
+   - `isolapurr power runtime output --url <source-url> --enabled true --json`
 4. Poll `isolapurr power show --url <source-url> --json` until all of the following are true again:
-   - `usb_c_power_enabled=true`
+   - `runtime.output_enabled=true`
    - `tps_mode=auto_follow`
    - `power_watts=100`
    - PD and PPS both enabled

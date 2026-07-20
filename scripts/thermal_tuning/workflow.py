@@ -323,7 +323,7 @@ def run_budgeted_self_test(
     timeouts = step_timeouts_for_budget(remaining, hold_seconds)
     if timeouts is None:
         raise RuntimeError("target_budget_exhausted")
-    cooldown_timeout_seconds, stage_timeout_seconds = timeouts
+    cooldown_timeout_seconds, stage_timeout_seconds, warmup_timeout_seconds = timeouts
     return runner.self_test(
         seed_profile_file=seed_profile_file,
         candidate_profile_files=candidate_profile_files,
@@ -333,8 +333,38 @@ def run_budgeted_self_test(
         evaluation_mode=evaluation_mode,
         cooldown_temp_c=cooldown_temp_c,
         stage_timeout_seconds=stage_timeout_seconds,
+        warmup_timeout_seconds=warmup_timeout_seconds,
         cooldown_timeout_seconds=cooldown_timeout_seconds,
     )
+
+
+def reseed_after_failed_hold_confirm(
+    profile: dict[str, Any],
+    target_temp_c: int,
+    confirm_summary: dict[str, Any],
+) -> dict[str, Any]:
+    current_point = explicit_point(profile, target_temp_c)
+    if current_point is None:
+        return profile
+    evidence = stability_evidence_for_stage(
+        stage_for_target(confirm_summary, target_temp_c),
+        samples_for_target(confirm_summary, target_temp_c),
+        target_temp_c,
+    )
+    metrics = stage_metrics(stage_for_target(confirm_summary, target_temp_c))
+    predicted_point = predict_next_point(current_point, evidence)
+    failure_class = str(evidence.get("failureClass") or "")
+    hold_median = metrics.get("holdMedianOutputPermille")
+    if (
+        int(target_temp_c) >= 180
+        and failure_class in {"missed_lower_band_before_limit", "stable_window_broke_low"}
+        and isinstance(hold_median, (int, float))
+        and float(hold_median) <= 100.0
+    ):
+        predicted_point = mutate_more_heat(predicted_point, target_temp_c)
+    if predicted_point == current_point:
+        return profile
+    return merge_point(profile, predicted_point)
 
 
 def tune_flagship_target(
@@ -345,7 +375,7 @@ def tune_flagship_target(
     workspace_dir: Path,
     *,
     per_target_budget_seconds: int,
-    max_tuning_rounds: int,
+    max_tuning_rounds: int | None,
     scout_hold_seconds: int,
     confirm_hold_seconds: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -353,6 +383,11 @@ def tune_flagship_target(
     budget_started_at = time.monotonic()
     cooldown_temp = cooldown_threshold(target_temp_c)
     updated_profile = copy.deepcopy(current_profile)
+    explicit_round_limit = (
+        int(max_tuning_rounds)
+        if isinstance(max_tuning_rounds, int) and int(max_tuning_rounds) > 0
+        else None
+    )
     reference = {
         "targetTempC": int(target_temp_c),
         "variantId": "full_speed_to_stable_gate",
@@ -364,132 +399,138 @@ def tune_flagship_target(
     rounds: list[dict[str, Any]] = []
     last_summary = synthetic_failure_summary(target_temp_c, "no_round_completed")
     budget_outcome = "not_converged"
-    approach_promoted = False
+    round_index = 0
 
-    for round_index in range(max_tuning_rounds):
-        if budget_exhausted(budget_started_at, per_target_budget_seconds):
-            break
-        round_dir = workspace_dir / f"round-{round_index + 1}"
-        round_seed = round_dir / "current-sparse.json"
-        write_json(round_seed, updated_profile)
-        try:
-            scout = run_budgeted_self_test(
-                runner,
-                seed_profile_file=round_seed,
-                targets_c=[target_temp_c],
-                hold_seconds=scout_hold_seconds,
-                output_dir=round_dir / "scout",
-                evaluation_mode=EVALUATION_MODE_TUNING_SCOUT,
-                cooldown_temp_c=cooldown_temp,
-                budget_started_at=budget_started_at,
-                budget_seconds=per_target_budget_seconds,
-            )
-            ensure_expected_source(scout.summary)
-            last_summary = scout.summary
-            rounds.append(
-                round_record_from_summary(
-                    scout.summary,
-                    target_temp_c,
-                    len(rounds) + 1,
-                    f"tuning {round_index + 1} / scout",
-                    explicit_point(updated_profile, target_temp_c),
-                    attempt_type="scout",
-                    tuning_round=round_index + 1,
-                    selected=False,
-                    budget_elapsed_seconds_value=budget_elapsed_seconds(budget_started_at),
+    try:
+        while True:
+            if budget_exhausted(budget_started_at, per_target_budget_seconds):
+                budget_outcome = "budget_exhausted"
+                break
+            if explicit_round_limit is not None and round_index >= explicit_round_limit:
+                break
+            round_index += 1
+            round_dir = workspace_dir / f"round-{round_index}"
+            round_seed = round_dir / "current-sparse.json"
+            write_json(round_seed, updated_profile)
+            try:
+                scout = run_budgeted_self_test(
+                    runner,
+                    seed_profile_file=round_seed,
+                    targets_c=[target_temp_c],
+                    hold_seconds=scout_hold_seconds,
+                    output_dir=round_dir / "scout",
+                    evaluation_mode=EVALUATION_MODE_TUNING_SCOUT,
+                    cooldown_temp_c=cooldown_temp,
+                    budget_started_at=budget_started_at,
+                    budget_seconds=per_target_budget_seconds,
                 )
-            )
-            if run_is_disqualified(scout.summary, target_temp_c):
-                budget_outcome = "environment_blocked"
-                break
-            if not warmup_output_is_full(scout.summary, target_temp_c):
-                budget_outcome = "not_converged"
-                break
-
-            retuned_profile_raw, retuned_candidate_path = runner.retune(scout.run_dir, target_temp_c)
-            retuned_profile = normalize_sparse_profile(
-                runner,
-                retuned_profile_raw,
-                anchors_c,
-                round_dir / "materialized",
-                f"normalize-retune-{target_temp_c}-{round_index + 1}",
-            )
-            scout_stage = stage_for_target(scout.summary, target_temp_c)
-            variants = build_candidate_variants(
-                updated_profile,
-                retuned_profile,
-                target_temp_c,
-                scout_stage,
-                samples_for_target(scout.summary, target_temp_c),
-            )
-            candidates_dir = round_dir / "candidates"
-            candidate_paths: list[Path] = []
-            for variant in variants:
-                variant_path = candidates_dir / f"{variant.name}.json"
-                write_json(variant_path, variant.profile)
-                variant.path = variant_path
-                candidate_paths.append(variant_path)
-
-            batch = run_budgeted_self_test(
-                runner,
-                candidate_profile_files=candidate_paths,
-                targets_c=[target_temp_c],
-                hold_seconds=scout_hold_seconds,
-                output_dir=round_dir / "batch",
-                evaluation_mode=EVALUATION_MODE_TUNING_SCOUT,
-                cooldown_temp_c=cooldown_temp,
-                budget_started_at=budget_started_at,
-                budget_seconds=per_target_budget_seconds,
-            )
-            diagnostic_best = choose_best_batch_run(batch.summary, target_temp_c)
-            promoted_best = choose_promotable_batch_run(batch.summary, target_temp_c)
-            selected_best = promoted_best or diagnostic_best
-            selected_run_id = str(selected_best["summary"].get("runId") or "")
-            score_by_run_id = {
-                str(run.get("runId") or ""): list(candidate_score(run, target_temp_c))
-                for run in batch.summary.get("runs") or []
-                if isinstance(run, dict)
-            }
-            rounds.extend(
-                batch_attempt_records(
-                    batch.summary,
-                    target_temp_c,
-                    first_round_number=len(rounds) + 1,
-                    tuning_round=round_index + 1,
-                    selected_run_id=selected_run_id,
-                    score_by_run_id=score_by_run_id,
-                    budget_elapsed_seconds_value=budget_elapsed_seconds(budget_started_at),
+                ensure_expected_source(scout.summary)
+                last_summary = scout.summary
+                rounds.append(
+                    round_record_from_summary(
+                        scout.summary,
+                        target_temp_c,
+                        len(rounds) + 1,
+                        f"tuning {round_index} / scout",
+                        explicit_point(updated_profile, target_temp_c),
+                        attempt_type="scout",
+                        tuning_round=round_index,
+                        selected=False,
+                        budget_elapsed_seconds_value=budget_elapsed_seconds(budget_started_at),
+                    )
                 )
-            )
-            chosen_profile = read_json(selected_best["candidateProfileFile"])
-            updated_profile = normalize_sparse_profile(
-                runner,
-                chosen_profile,
-                anchors_c,
-                round_dir / "materialized",
-                f"normalize-best-{target_temp_c}-{round_index + 1}",
-            )
-            write_json(round_dir / "accepted-sparse-profile.json", updated_profile)
-            chosen_summary = selected_best["summary"]
-            last_summary = chosen_summary
-            if promoted_best is not None:
-                approach_promoted = True
-                break
-        except Exception as exc:
-            budget_outcome = (
-                "budget_exhausted" if "target_budget_exhausted" in str(exc) else "environment_blocked"
-            )
-            last_summary = synthetic_failure_summary(
-                target_temp_c,
-                "target_budget_exhausted" if budget_outcome == "budget_exhausted" else "round_execution_failed",
-            )
-            break
+                if run_is_disqualified(scout.summary, target_temp_c):
+                    budget_outcome = "environment_blocked"
+                    break
+                if not warmup_output_is_full(scout.summary, target_temp_c):
+                    budget_outcome = "not_converged"
+                    break
 
-    if approach_promoted and budget_outcome != "environment_blocked":
-        if budget_exhausted(budget_started_at, per_target_budget_seconds):
-            budget_outcome = "budget_exhausted"
-        else:
-            hold_seed = workspace_dir / "hold-confirm-1-seed.json"
+                retuned_profile_raw, retuned_candidate_path = runner.retune(scout.run_dir, target_temp_c)
+                retuned_profile = normalize_sparse_profile(
+                    runner,
+                    retuned_profile_raw,
+                    anchors_c,
+                    round_dir / "materialized",
+                    f"normalize-retune-{target_temp_c}-{round_index}",
+                )
+                scout_stage = stage_for_target(scout.summary, target_temp_c)
+                variants = build_candidate_variants(
+                    updated_profile,
+                    retuned_profile,
+                    target_temp_c,
+                    scout_stage,
+                    samples_for_target(scout.summary, target_temp_c),
+                )
+                candidates_dir = round_dir / "candidates"
+                candidate_paths: list[Path] = []
+                for variant in variants:
+                    variant_path = candidates_dir / f"{variant.name}.json"
+                    write_json(variant_path, variant.profile)
+                    variant.path = variant_path
+                    candidate_paths.append(variant_path)
+
+                batch = run_budgeted_self_test(
+                    runner,
+                    candidate_profile_files=candidate_paths,
+                    targets_c=[target_temp_c],
+                    hold_seconds=scout_hold_seconds,
+                    output_dir=round_dir / "batch",
+                    evaluation_mode=EVALUATION_MODE_TUNING_SCOUT,
+                    cooldown_temp_c=cooldown_temp,
+                    budget_started_at=budget_started_at,
+                    budget_seconds=per_target_budget_seconds,
+                )
+                diagnostic_best = choose_best_batch_run(batch.summary, target_temp_c)
+                promoted_best = choose_promotable_batch_run(batch.summary, target_temp_c)
+                selected_best = promoted_best or diagnostic_best
+                selected_run_id = str(selected_best["summary"].get("runId") or "")
+                score_by_run_id = {
+                    str(run.get("runId") or ""): list(candidate_score(run, target_temp_c))
+                    for run in batch.summary.get("runs") or []
+                    if isinstance(run, dict)
+                }
+                rounds.extend(
+                    batch_attempt_records(
+                        batch.summary,
+                        target_temp_c,
+                        first_round_number=len(rounds) + 1,
+                        tuning_round=round_index,
+                        selected_run_id=selected_run_id,
+                        score_by_run_id=score_by_run_id,
+                        budget_elapsed_seconds_value=budget_elapsed_seconds(budget_started_at),
+                    )
+                )
+                chosen_profile = read_json(selected_best["candidateProfileFile"])
+                updated_profile = normalize_sparse_profile(
+                    runner,
+                    chosen_profile,
+                    anchors_c,
+                    round_dir / "materialized",
+                    f"normalize-best-{target_temp_c}-{round_index}",
+                )
+                write_json(round_dir / "accepted-sparse-profile.json", updated_profile)
+                chosen_summary = selected_best["summary"]
+                last_summary = chosen_summary
+            except AlarmInterventionRequired:
+                raise
+            except Exception as exc:
+                budget_outcome = (
+                    "budget_exhausted" if "target_budget_exhausted" in str(exc) else "environment_blocked"
+                )
+                last_summary = synthetic_failure_summary(
+                    target_temp_c,
+                    "target_budget_exhausted" if budget_outcome == "budget_exhausted" else "round_execution_failed",
+                )
+                break
+
+            if promoted_best is None:
+                continue
+
+            if budget_exhausted(budget_started_at, per_target_budget_seconds):
+                budget_outcome = "budget_exhausted"
+                break
+            hold_seed = workspace_dir / f"hold-confirm-{round_index}-seed.json"
             write_json(hold_seed, updated_profile)
             try:
                 confirm = run_budgeted_self_test(
@@ -497,7 +538,7 @@ def tune_flagship_target(
                     seed_profile_file=hold_seed,
                     targets_c=[target_temp_c],
                     hold_seconds=confirm_hold_seconds,
-                    output_dir=workspace_dir / "hold-confirm-1",
+                    output_dir=workspace_dir / f"hold-confirm-{round_index}",
                     evaluation_mode=EVALUATION_MODE_HOLD_CONFIRM,
                     cooldown_temp_c=cooldown_temp,
                     budget_started_at=budget_started_at,
@@ -519,10 +560,23 @@ def tune_flagship_target(
                 )
                 if confirm.summary.get("validation", {}).get("passed") is True:
                     budget_outcome = "completed"
-                elif run_is_disqualified(confirm.summary, target_temp_c):
+                    break
+                if run_is_disqualified(confirm.summary, target_temp_c):
                     budget_outcome = "environment_blocked"
-                else:
-                    budget_outcome = "not_converged"
+                    break
+                reseeded_profile = reseed_after_failed_hold_confirm(updated_profile, target_temp_c, confirm.summary)
+                if reseeded_profile != updated_profile:
+                    updated_profile = normalize_sparse_profile(
+                        runner,
+                        reseeded_profile,
+                        anchors_c,
+                        workspace_dir / "materialized",
+                        f"normalize-confirm-{target_temp_c}-{round_index}",
+                    )
+                    write_json(workspace_dir / f"hold-confirm-{round_index}-reseed.json", updated_profile)
+                budget_outcome = "not_converged"
+            except AlarmInterventionRequired:
+                raise
             except Exception as exc:
                 budget_outcome = (
                     "budget_exhausted" if "target_budget_exhausted" in str(exc) else "environment_blocked"
@@ -531,6 +585,21 @@ def tune_flagship_target(
                     target_temp_c,
                     "target_budget_exhausted" if budget_outcome == "budget_exhausted" else "hold_confirm_failed",
                 )
+                break
+    except AlarmInterventionRequired as exc:
+        write_json(
+            workspace_dir / "alarm-pause.json",
+            {
+                "kind": "thermal_alarm_pause",
+                "targetTempC": int(target_temp_c),
+                "budgetOutcome": "alarm_pause_required",
+                "timeSpentSeconds": budget_elapsed_seconds(budget_started_at),
+                "message": str(exc),
+                "resumeAction": "inspect hardware, clear the alarm, then rerun the affected tests",
+                "attempts": exc.attempts,
+            },
+        )
+        raise
 
     entry = review_target_entry(
         target_temp_c=target_temp_c,
@@ -696,7 +765,7 @@ def build_plan_payload(
     validation_targets_c: list[int],
     tune_targets_c: list[int],
     per_target_budget_seconds: int,
-    max_tuning_rounds: int,
+    max_tuning_rounds: int | None,
     scout_hold_seconds: int,
     confirm_hold_seconds: int,
     dry_run: bool,
@@ -712,6 +781,12 @@ def build_plan_payload(
             "flagshipTargetsC": tune_targets_c,
             "executionOrder": tune_targets_c,
             "perTargetBudgetSeconds": per_target_budget_seconds,
+            "roundLimitMode": "explicit_cap"
+            if isinstance(max_tuning_rounds, int) and int(max_tuning_rounds) > 0
+            else "budget_only",
+            "maxTuningRounds": int(max_tuning_rounds)
+            if isinstance(max_tuning_rounds, int) and int(max_tuning_rounds) > 0
+            else None,
         },
         "deviceConnection": {
             "fluxPurr": {
@@ -744,8 +819,12 @@ def build_plan_payload(
             "perTargetWorkflow": [
                 f"Wait for cooldown gate, then run one {scout_hold_seconds}s tuning scout.",
                 "Classify the failure, then compare the current point with one evidence-specific predicted point.",
-                f"Allow at most {max_tuning_rounds} targeted tuning rounds while the per-target budget remains.",
-                f"Run one {confirm_hold_seconds}s hold confirm only after a candidate clears the promotion gate; a failed confirm ends the target.",
+                (
+                    f"Allow at most {max_tuning_rounds} targeted tuning rounds while the per-target budget remains."
+                    if isinstance(max_tuning_rounds, int) and int(max_tuning_rounds) > 0
+                    else "Continue targeted tuning rounds until the per-target budget is exhausted or the target completes."
+                ),
+                f"Run a {confirm_hold_seconds}s hold confirm only after a candidate clears the promotion gate; thermal confirm failures feed the next tuning round while budget remains.",
                 "Modify only the current target profile point; keep warmupPowerPermille fixed at 1000 and require 100% warmup output.",
             ],
             "dynamicApproachGate": [
@@ -765,10 +844,10 @@ def build_plan_payload(
             ],
             "steps": [
                 "Stop heating immediately and mark the current attempt invalid.",
-                f"Run `isolapurr power output manual --url {source_url} --usb-c-path disconnected --json`.",
-                f"Run `isolapurr power show --url {source_url} --json` and confirm usb_c_power_enabled=false, then wait 2s.",
-                f"Run `isolapurr power output auto --url {source_url} --json`.",
-                f"Run `isolapurr power show --url {source_url} --json` until telemetry advances and confirm output enabled, auto_follow, 100W, PPS, PPS 5A, and 5000mA capability readback.",
+                f"Run `isolapurr power runtime output --url {source_url} --enabled false --json`.",
+                f"Run `isolapurr power show --url {source_url} --json` and confirm runtime.output_enabled=false plus a non-sourcing USB-C state, then wait 2s.",
+                f"Run `isolapurr power runtime output --url {source_url} --enabled true --json`.",
+                f"Run `isolapurr power show --url {source_url} --json` until telemetry advances and confirm runtime.output_enabled=true, auto_follow, 100W, PPS, PPS 5A, and 5000mA capability readback.",
                 f"Confirm the exact authorized port `{authorized_port}` still exists before retrying the failed substep.",
                 "Retry the same failed substep once; if the environment fails again, stop that target as environment_blocked.",
             ],
