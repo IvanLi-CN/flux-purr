@@ -2410,18 +2410,31 @@ fn should_clear_runtime_fault_latch(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+struct FaultAttentionState<'a> {
+    last_fault_present: &'a mut bool,
+    attention_acknowledged: &'a mut bool,
+    attention_pending_after_fault_clear: &'a mut bool,
+    forced_fan_active: &'a mut bool,
+    next_protection_alarm_ms: &'a mut Option<u64>,
+    next_attention_reminder_ms: &'a mut Option<u64>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn update_fault_attention_state(
     fault_present: bool,
-    last_fault_present: &mut bool,
-    attention_acknowledged: &mut bool,
-    attention_pending_after_fault_clear: &mut bool,
-    forced_fan_active: &mut bool,
+    state: FaultAttentionState<'_>,
     current_temp_c: i16,
-    next_protection_alarm_ms: &mut Option<u64>,
-    next_attention_reminder_ms: &mut Option<u64>,
     buzzer: &mut BuzzerController,
     now_ms: u64,
 ) -> bool {
+    let FaultAttentionState {
+        last_fault_present,
+        attention_acknowledged,
+        attention_pending_after_fault_clear,
+        forced_fan_active,
+        next_protection_alarm_ms,
+        next_attention_reminder_ms,
+    } = state;
     let mut changed = false;
 
     if fault_present && !*last_fault_present {
@@ -7749,13 +7762,15 @@ async fn main(_spawner: Spawner) {
             let fault_present = is_overtemp_fault(current_rtd_fault);
             let attention_state_changed = update_fault_attention_state(
                 fault_present,
-                &mut last_fault_present,
-                &mut overtemp_attention_acknowledged,
-                &mut attention_pending_after_fault_clear,
-                &mut overtemp_forced_fan_active,
+                FaultAttentionState {
+                    last_fault_present: &mut last_fault_present,
+                    attention_acknowledged: &mut overtemp_attention_acknowledged,
+                    attention_pending_after_fault_clear: &mut attention_pending_after_fault_clear,
+                    forced_fan_active: &mut overtemp_forced_fan_active,
+                    next_protection_alarm_ms: &mut next_protection_alarm_ms,
+                    next_attention_reminder_ms: &mut next_attention_reminder_ms,
+                },
                 latest_display_temp_i16,
-                &mut next_protection_alarm_ms,
-                &mut next_attention_reminder_ms,
                 &mut buzzer,
                 elapsed_ms,
             );
@@ -12829,13 +12844,15 @@ mod tests {
 
         assert!(update_fault_attention_state(
             true,
-            &mut last_fault_present,
-            &mut attention_acknowledged,
-            &mut attention_pending,
-            &mut forced_fan_active,
+            FaultAttentionState {
+                last_fault_present: &mut last_fault_present,
+                attention_acknowledged: &mut attention_acknowledged,
+                attention_pending_after_fault_clear: &mut attention_pending,
+                forced_fan_active: &mut forced_fan_active,
+                next_protection_alarm_ms: &mut next_protection_alarm_ms,
+                next_attention_reminder_ms: &mut next_reminder_ms,
+            },
             100,
-            &mut next_protection_alarm_ms,
-            &mut next_reminder_ms,
             &mut buzzer,
             3_000,
         ));
@@ -12847,13 +12864,15 @@ mod tests {
 
         assert!(update_fault_attention_state(
             false,
-            &mut last_fault_present,
-            &mut attention_acknowledged,
-            &mut attention_pending,
-            &mut forced_fan_active,
+            FaultAttentionState {
+                last_fault_present: &mut last_fault_present,
+                attention_acknowledged: &mut attention_acknowledged,
+                attention_pending_after_fault_clear: &mut attention_pending,
+                forced_fan_active: &mut forced_fan_active,
+                next_protection_alarm_ms: &mut next_protection_alarm_ms,
+                next_attention_reminder_ms: &mut next_reminder_ms,
+            },
             100,
-            &mut next_protection_alarm_ms,
-            &mut next_reminder_ms,
             &mut buzzer,
             8_000,
         ));
@@ -12892,13 +12911,15 @@ mod tests {
 
         assert!(update_fault_attention_state(
             true,
-            &mut last_overtemp_present,
-            &mut acknowledged,
-            &mut pending,
-            &mut forced_fan,
+            FaultAttentionState {
+                last_fault_present: &mut last_overtemp_present,
+                attention_acknowledged: &mut acknowledged,
+                attention_pending_after_fault_clear: &mut pending,
+                forced_fan_active: &mut forced_fan,
+                next_protection_alarm_ms: &mut next_alarm_ms,
+                next_attention_reminder_ms: &mut next_reminder_ms,
+            },
             420,
-            &mut next_alarm_ms,
-            &mut next_reminder_ms,
             &mut buzzer,
             0,
         ));
@@ -12917,13 +12938,15 @@ mod tests {
 
         assert!(update_fault_attention_state(
             false,
-            &mut last_overtemp_present,
-            &mut acknowledged,
-            &mut pending,
-            &mut forced_fan,
+            FaultAttentionState {
+                last_fault_present: &mut last_overtemp_present,
+                attention_acknowledged: &mut acknowledged,
+                attention_pending_after_fault_clear: &mut pending,
+                forced_fan_active: &mut forced_fan,
+                next_protection_alarm_ms: &mut next_alarm_ms,
+                next_attention_reminder_ms: &mut next_reminder_ms,
+            },
             100,
-            &mut next_alarm_ms,
-            &mut next_reminder_ms,
             &mut buzzer,
             2_000,
         ));
@@ -12943,13 +12966,15 @@ mod tests {
 
         assert!(update_fault_attention_state(
             false,
-            &mut last_overtemp_present,
-            &mut acknowledged,
-            &mut pending,
-            &mut forced_fan,
+            FaultAttentionState {
+                last_fault_present: &mut last_overtemp_present,
+                attention_acknowledged: &mut acknowledged,
+                attention_pending_after_fault_clear: &mut pending,
+                forced_fan_active: &mut forced_fan,
+                next_protection_alarm_ms: &mut next_alarm_ms,
+                next_attention_reminder_ms: &mut next_reminder_ms,
+            },
             39,
-            &mut next_alarm_ms,
-            &mut next_reminder_ms,
             &mut buzzer,
             2_000,
         ));
