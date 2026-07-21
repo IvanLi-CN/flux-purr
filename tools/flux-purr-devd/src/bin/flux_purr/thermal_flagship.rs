@@ -1590,6 +1590,7 @@ fn run_is_disqualified(summary: &Value, target_temp_c: i16) -> bool {
             | "source_telemetry_stale"
             | "source_fault"
             | "status_request_failed"
+            | "temperature_sample_glitch"
     ) {
         return true;
     }
@@ -1613,6 +1614,7 @@ fn run_is_disqualified(summary: &Value, target_temp_c: i16) -> bool {
                 || reason.contains("sample_rate")
                 || reason.contains("target_mismatch")
                 || reason.contains("heater_disarmed")
+                || reason.contains("temperature_sample_glitch")
         })
 }
 
@@ -1625,6 +1627,7 @@ fn flagship_retryable_environment_error_message(message: &str) -> bool {
         || lowered.contains("source_fault")
         || lowered.contains("source_telemetry_stale")
         || lowered.contains("status_request_failed")
+        || lowered.contains("temperature_sample_glitch")
         || lowered.contains("runtime_reset")
         || lowered.contains("sample_rate_below")
         || lowered.contains("usb_response_timeout")
@@ -1641,6 +1644,7 @@ fn flagship_retryable_environment_failure_reason(reason: &str) -> bool {
         "source_telemetry_stale"
             | "source_fault"
             | "status_request_failed"
+            | "temperature_sample_glitch"
             | "runtime_reset"
             | "sample_rate_below_minimum"
             | "sample_rate_below_3hz"
@@ -2281,6 +2285,27 @@ mod tests {
                 }],
             },
             "applied": [],
+        });
+
+        assert!(flagship_retryable_environment_summary(&summary, 140));
+    }
+
+    #[test]
+    fn retryable_environment_summary_detects_temperature_sample_glitch() {
+        let summary = json!({
+            "validation": {
+                "failures": [{
+                    "phase": "applied",
+                    "reason": "incomplete_stage",
+                    "stopReason": "temperature_sample_glitch",
+                    "targetTempC": 140,
+                }],
+            },
+            "applied": [{
+                "targetTempC": 140,
+                "stopReason": "temperature_sample_glitch",
+                "terminalRuntimeDropReason": "temperature_sample_glitch",
+            }],
         });
 
         assert!(flagship_retryable_environment_summary(&summary, 140));
