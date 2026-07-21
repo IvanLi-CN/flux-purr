@@ -2229,7 +2229,9 @@ struct BenchSourceTelemetrySampler {
 }
 
 impl BenchSourceTelemetrySampler {
-    const MAX_STALE_DURATION: Duration = Duration::from_secs(2);
+    // Real IsolaPurr USB-C telemetry can legitimately advance in multi-second bursts
+    // during high-load thermal HIL and recovery. Treat only sustained >25s gaps as stale.
+    const MAX_STALE_DURATION: Duration = Duration::from_secs(25);
 
     fn new(
         source_kind: BenchSourceKind,
@@ -2280,11 +2282,19 @@ impl BenchSourceTelemetrySampler {
             .as_ref()
             .is_some_and(|pending| pending.is_finished())
         {
-            let telemetry = self.pending.take().unwrap().await??;
-            if telemetry.sample_uptime_ms != self.latest.sample_uptime_ms {
-                self.latest_sample_seen_at = tokio::time::Instant::now();
+            match self.pending.take().unwrap().await? {
+                Ok(telemetry) => {
+                    if telemetry.sample_uptime_ms != self.latest.sample_uptime_ms {
+                        self.latest_sample_seen_at = tokio::time::Instant::now();
+                    }
+                    self.latest = telemetry;
+                }
+                Err(error) => {
+                    if !thermal_source_probe_transient_error(error.as_ref()) {
+                        return Err(error);
+                    }
+                }
             }
-            self.latest = telemetry;
             self.start_poll();
         }
         let stale_ms = self
@@ -7547,25 +7557,12 @@ async fn prepare_thermal_bench_source(
 fn read_isolapurr_live_telemetry(
     source_url: &str,
 ) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
-    let mut last_error = None::<String>;
-    for attempt in 1..=6 {
-        let result = isolapurr_cli_json_read_once_with_timeout(
-            source_url,
-            &["power", "show"],
-            Duration::from_millis(1_000),
-        )
-        .and_then(|power| parse_isolapurr_live_telemetry(&power).map_err(Into::into));
-        match result {
-            Ok(telemetry) => return Ok(telemetry),
-            Err(error) => last_error = Some(error.to_string()),
-        }
-        if attempt < 6 {
-            std::thread::sleep(isolapurr_read_retry_delay(attempt));
-        }
-    }
-    Err(last_error
-        .unwrap_or_else(|| "isolapurr USB-C telemetry unavailable".to_string())
-        .into())
+    isolapurr_cli_json_read_once_with_timeout(
+        source_url,
+        &["power", "show"],
+        Duration::from_millis(750),
+    )
+    .and_then(|power| parse_isolapurr_live_telemetry(&power).map_err(Into::into))
 }
 
 fn validate_isolapurr_tools() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
