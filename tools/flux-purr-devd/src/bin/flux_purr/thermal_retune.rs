@@ -3,11 +3,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use reqwest::{Client, Method};
 use serde_json::{Value, json};
 
 use super::{
-    ThermalStageResult, parse_thermal_targets, parse_thermal_targets_from_summary,
-    read_ndjson_values, thermal_candidate_point_mut, thermal_candidate_profile_to_value,
+    ThermalRetuneArgs, ThermalStageResult, parse_thermal_targets,
+    parse_thermal_targets_from_summary, read_ndjson_values, request_with_lease, resolve_target,
+    thermal_candidate_point_mut, thermal_candidate_profile_to_value,
     thermal_rebuild_profile_from_anchor_targets, thermal_replay_applied_profile,
     thermal_replay_full_speed_to_stable, thermal_replay_stage_analysis,
     thermal_replay_stage_samples, thermal_self_test_evaluation_mode_from_summary,
@@ -171,6 +173,129 @@ pub(super) fn retune_thermal_self_test_run(
         candidate_profile: candidate_profile_value,
         summary_path: replay_summary_path,
     })
+}
+
+pub(super) async fn run_thermal_retune(
+    client: &Client,
+    default_devd: &str,
+    args: ThermalRetuneArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let apply_preview = args.apply_preview;
+    let target = args.target.clone();
+    let mut output = retune_thermal_self_test_run(ThermalRetuneInput {
+        run_dir: args.run_dir,
+        optimize_targets_c: args.optimize_targets_c,
+    })?;
+    if !apply_preview {
+        return Ok(output.summary);
+    }
+
+    let target_value = json!({
+        "deviceId": target.device,
+        "hardwareId": target.hardware,
+        "devd": default_devd,
+    });
+    let resolved = match resolve_target(target, default_devd) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+                ok: false,
+                target: target_value,
+                preview_response: None,
+                status_readback: None,
+                error: Some(error.to_string()),
+            })?;
+            return Err(error);
+        }
+    };
+
+    let preview_response = match request_with_lease(
+        client,
+        resolved.clone(),
+        Method::PUT,
+        "/runtime",
+        Some(json!({
+            "thermalControlProfile": {
+                "op": "preview",
+                "profile": output.candidate_profile,
+            }
+        })),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+                ok: false,
+                target: target_value,
+                preview_response: None,
+                status_readback: None,
+                error: Some(error.to_string()),
+            })?;
+            return Err(error);
+        }
+    };
+
+    let status = match request_with_lease(client, resolved, Method::GET, "/status", None).await {
+        Ok(status) => status,
+        Err(error) => {
+            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+                ok: false,
+                target: target_value,
+                preview_response: Some(thermal_retune_status_summary(&preview_response)),
+                status_readback: None,
+                error: Some(error.to_string()),
+            })?;
+            return Err(error);
+        }
+    };
+    if status
+        .get("thermalControlProfilePreview")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        let error = io::Error::new(
+            io::ErrorKind::InvalidData,
+            "thermal retune preview apply did not enable thermalControlProfilePreview",
+        );
+        output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+            ok: false,
+            target: target_value,
+            preview_response: Some(thermal_retune_status_summary(&preview_response)),
+            status_readback: Some(thermal_retune_status_summary(&status)),
+            error: Some(error.to_string()),
+        })?;
+        return Err(error.into());
+    }
+
+    output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+        ok: true,
+        target: target_value,
+        preview_response: Some(thermal_retune_status_summary(&preview_response)),
+        status_readback: Some(thermal_retune_status_summary(&status)),
+        error: None,
+    })?;
+    Ok(output.summary)
+}
+
+fn thermal_retune_status_summary(status: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+    for key in [
+        "deviceId",
+        "mode",
+        "targetTempC",
+        "currentTempC",
+        "heaterEnabled",
+        "thermalControlProfilePreview",
+        "thermalControl",
+        "heaterFaultReason",
+        "faultAttentionPending",
+    ] {
+        if let Some(value) = status.get(key) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(summary)
 }
 
 fn write_json_pretty(

@@ -91,9 +91,7 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
     let device_id = target
         .and_then(|payload| payload.get("deviceId").and_then(Value::as_str))
         .or_else(|| legacy_bundle.get("deviceId").and_then(Value::as_str))
-        .or_else(|| {
-            source.and_then(|payload| payload.get("deviceId").and_then(Value::as_str))
-        })
+        .or_else(|| source.and_then(|payload| payload.get("deviceId").and_then(Value::as_str)))
         .unwrap_or("unknown-device")
         .to_string();
     let port_path = target
@@ -106,9 +104,9 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         .or_else(|| {
             source.and_then(|payload| {
                 payload
-                .get("port")
-                .or_else(|| payload.get("portPath"))
-                .and_then(Value::as_str)
+                    .get("port")
+                    .or_else(|| payload.get("portPath"))
+                    .and_then(Value::as_str)
             })
         })
         .or_else(|| {
@@ -220,7 +218,83 @@ fn current_unix_millis() -> u64 {
 }
 
 fn read_json(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let bytes = fs::read(path)?;
+    match serde_json::from_slice(&bytes) {
+        Ok(value) => Ok(value),
+        Err(strict_error) => {
+            let text = String::from_utf8(bytes)?;
+            let sanitized = sanitize_non_finite_json_numbers(&text);
+            if sanitized == text {
+                return Err(strict_error.into());
+            }
+            Ok(serde_json::from_str(&sanitized)?)
+        }
+    }
+}
+
+fn sanitize_non_finite_json_numbers(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte as char);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if byte == b'"' {
+            in_string = true;
+            out.push('"');
+            index += 1;
+            continue;
+        }
+
+        if let Some(length) = non_finite_token_length(bytes, index) {
+            out.push_str("null");
+            index += length;
+            continue;
+        }
+
+        out.push(byte as char);
+        index += 1;
+    }
+    out
+}
+
+fn non_finite_token_length(bytes: &[u8], index: usize) -> Option<usize> {
+    const TOKENS: [&[u8]; 3] = [b"-Infinity", b"Infinity", b"NaN"];
+    TOKENS
+        .iter()
+        .find(|token| bytes[index..].starts_with(**token))
+        .and_then(|token| {
+            let before_ok = index == 0 || is_json_token_delimiter(bytes[index.saturating_sub(1)]);
+            let after_index = index + token.len();
+            let after_ok =
+                after_index >= bytes.len() || is_json_token_delimiter(bytes[after_index]);
+            if before_ok && after_ok {
+                Some(token.len())
+            } else {
+                None
+            }
+        })
+}
+
+fn is_json_token_delimiter(byte: u8) -> bool {
+    matches!(
+        byte,
+        b' ' | b'\n' | b'\r' | b'\t' | b',' | b':' | b'[' | b']' | b'{' | b'}'
+    )
 }
 
 fn write_json_pretty(
@@ -247,11 +321,9 @@ fn grouped_samples(
             continue;
         }
         let sample: Value = serde_json::from_str(&line)?;
-        let target_temp_c = value_as_i16(
-            sample.get("targetTempC").ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "sample missing targetTempC")
-            })?,
-        )?;
+        let target_temp_c = value_as_i16(sample.get("targetTempC").ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "sample missing targetTempC")
+        })?)?;
         groups.entry(target_temp_c).or_default().push(sample);
     }
     Ok(groups)
@@ -289,9 +361,7 @@ fn normalized_sample(sample: &Value) -> Value {
     let source = sample.get("sourceTelemetry").and_then(Value::as_object);
     let request_mv = status
         .and_then(|payload| payload.get("pdRequestMv").and_then(Value::as_f64))
-        .or_else(|| {
-            heater.and_then(|payload| payload.get("ppsRequestMv").and_then(Value::as_f64))
-        })
+        .or_else(|| heater.and_then(|payload| payload.get("ppsRequestMv").and_then(Value::as_f64)))
         .or_else(|| status.and_then(|payload| payload.get("voltageMv").and_then(Value::as_f64)))
         .or_else(|| {
             heater.and_then(|payload| payload.get("hotplateVoltageMv").and_then(Value::as_f64))
@@ -313,18 +383,21 @@ fn normalized_sample(sample: &Value) -> Value {
 }
 
 fn sample_time_key(sample: &Value) -> Option<f64> {
-    sample.get("t").and_then(Value::as_f64).filter(|value| value.is_finite())
+    sample
+        .get("t")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
 }
 
 fn sort_samples_by_time(mut samples: Vec<Value>) -> Vec<Value> {
-    samples.sort_by(|left, right| match (sample_time_key(left), sample_time_key(right)) {
-        (Some(a), Some(b)) => a
-            .partial_cmp(&b)
-            .unwrap_or(std::cmp::Ordering::Equal),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    samples.sort_by(
+        |left, right| match (sample_time_key(left), sample_time_key(right)) {
+            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        },
+    );
     samples
 }
 
@@ -484,7 +557,8 @@ fn legacy_preliminary_review_entries(
             let Some(variant_object) = variant.as_object() else {
                 continue;
             };
-            let variant_point = sanitize_point(variant_object.get("tunedPoint"), Some(target_temp_c));
+            let variant_point =
+                sanitize_point(variant_object.get("tunedPoint"), Some(target_temp_c));
             let metrics = variant_object
                 .get("metrics")
                 .and_then(Value::as_object)
@@ -537,7 +611,10 @@ fn legacy_preliminary_review_entries(
             .get("passed")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let failure_reason = hold_check.get("failureReason").cloned().unwrap_or(Value::Null);
+        let failure_reason = hold_check
+            .get("failureReason")
+            .cloned()
+            .unwrap_or(Value::Null);
         let failures = if !passed && !hold_check.is_null() {
             vec![json!({
                 "targetTempC": target_temp_c,
@@ -785,7 +862,7 @@ fn build_history(entries: &[Value]) -> Vec<Value> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_preliminary_review_bundle(
+pub(super) fn write_preliminary_review_bundle(
     bundle_dir: &Path,
     accepted_profile: &Value,
     entries: Vec<Value>,
@@ -818,17 +895,14 @@ fn write_preliminary_review_bundle(
                         .flatten()
                     {
                         let mut enriched = sample.clone();
-                        enriched["targetTempC"] = entry.get("target").cloned().unwrap_or(Value::Null);
+                        enriched["targetTempC"] =
+                            entry.get("target").cloned().unwrap_or(Value::Null);
                         enriched["attemptNumber"] =
                             attempt.get("round").cloned().unwrap_or(Value::Null);
-                        enriched["attemptType"] = attempt
-                            .get("attemptType")
-                            .cloned()
-                            .unwrap_or(Value::Null);
-                        enriched["candidateName"] = attempt
-                            .get("candidateName")
-                            .cloned()
-                            .unwrap_or(Value::Null);
+                        enriched["attemptType"] =
+                            attempt.get("attemptType").cloned().unwrap_or(Value::Null);
+                        enriched["candidateName"] =
+                            attempt.get("candidateName").cloned().unwrap_or(Value::Null);
                         enriched["selected"] = attempt
                             .get("selected")
                             .cloned()
@@ -925,19 +999,29 @@ fn write_preliminary_review_bundle(
                 .unwrap_or(&[]),
         ),
     });
-    fs::write(
-        &index_html_path,
-        render_baseline_html(&html_data)?,
-    )?;
+    fs::write(&index_html_path, render_baseline_html(&html_data)?)?;
     Ok(bundle)
 }
 
-fn render_baseline_html(
-    data: &Value,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let data_json = serde_json::to_string(data)?;
     Ok(REPORT_TEMPLATE
         .replace(DATA_PLACEHOLDER, &data_json)
         .replace("{{", "{")
         .replace("}}", "}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_non_finite_json_numbers;
+
+    #[test]
+    fn sanitize_non_finite_json_numbers_replaces_bare_tokens_only() {
+        let input = r#"{"ok":[Infinity,-Infinity,NaN],"label":"Infinity","nested":{"x":Infinity}}"#;
+        let sanitized = sanitize_non_finite_json_numbers(input);
+        assert_eq!(
+            sanitized,
+            r#"{"ok":[null,null,null],"label":"Infinity","nested":{"x":null}}"#
+        );
+    }
 }

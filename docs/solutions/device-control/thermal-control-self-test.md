@@ -219,7 +219,18 @@ For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow p
 4. repeat the same target-local scout/retune/batch loop while the per-target budget remains
 5. run a `60s` hold confirm every time a promotable candidate clears the gate
 
+Owner-facing execution boundary:
+
+- the supported flagship tuning execution surface is repo-local `flux-purr thermal flagship-tune`
+- the supported legacy/compliant bundle rewrite surface is repo-local `flux-purr thermal report rerender-legacy`
+- historical Python thermal tuning entrypoints are retired from the supported execution surface
+- real HIL, formal tuning, formal report generation, and owner-facing delivery must use the Rust CLI surfaces only
+
 The `60 / 220°C` focused re-test uses the same workflow with only those two values passed as anchors, validation targets, and tuning targets. Its seed contains only the requested explicit points; it must not materialize an unrelated interpolation target. A short-scout p2p result cannot create a Hold candidate. Only a candidate with valid `100%` warmup output, the target-specific stable-window gate, and its confirmation margin may be promoted to a `60s` Hold confirm. If a confirm fails thermally while budget remains, keep that failed confirm as valid evidence, use it to seed the next predicted correction through the next scout/batch loop, and continue the same target until it either completes, exhausts the budget, or becomes environment-blocked.
+
+If the tuning scout itself already proves that the current profile satisfies the dynamic gate with the required time margin, the Rust orchestration may promote that current profile directly into the `60s` Hold confirm. This avoids spending budget on a redundant batch rerun of the same current point and is especially important for `220°C`, where a single extra scout/batch cycle can consume the remaining budget before Hold confirm starts.
+
+When source telemetry goes stale mid-run, the Rust CLI must treat source recovery as a preview activation boundary. Recovering the bench source is not enough: the runner must reapply the preview profile, then verify `thermalProfileMode`, `thermalProfileResolvedBank`, `thermalControlProfilePreview`, and `thermalControl.profileSource=preview` before resuming the stage. If readback falls back to the default `65w / pps3a` profile, the run is invalid and must fail instead of generating tuning evidence from the wrong control bank.
 
 The flagship execution whitelist is fixed:
 
@@ -227,7 +238,7 @@ The flagship execution whitelist is fixed:
 - bind repo-local `flux-purr-devd` to the exact owner-authorized serial path only
 - confirm Flux Purr runtime readback shows `selectedMode=100w`, `resolvedBank=pps5a`, and `detectedSourceClass=pps5a` before heating
 - confirm IsolaPurr readback still shows `100W`, PD enabled, PPS enabled, `pd_pps_5a=true`, `pps3_limit_ma >= 5000`, and `tps_mode=auto_follow`
-- run only the explicit target order, with at most two evidence-specific tuning rounds plus one `60s` confirm per target; a target-local confirm failure ends that target without a recovery scout or another confirm
+- run only the explicit target order, and keep the same target-local scout/retune/batch/confirm loop active while the per-target budget remains; do not add an independent hard cap on tuning rounds or hold confirms
 - keep `warmupPowerPermille=1000` and require actual warmup output to stay at `100%`
 
 The flagship sprint must not:
