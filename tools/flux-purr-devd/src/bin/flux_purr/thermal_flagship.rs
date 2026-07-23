@@ -44,7 +44,7 @@ struct SelectedBatchRun {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct CandidateScore([f64; 10]);
+struct CandidateScore([f64; 11]);
 
 impl CandidateScore {
     fn to_value(self) -> Value {
@@ -1193,33 +1193,75 @@ fn apply_flagship_gate_nudge(
         .get("failureClass")
         .and_then(Value::as_str)
         .unwrap_or("");
+    let temperature_gap_c = evidence
+        .get("temperatureGapC")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .max(0.0);
     if matches!(
         failure_class,
         "missed_lower_band_before_limit" | "stable_window_broke_low" | "within_gate_low_margin"
     ) {
         let stable_band_centi_c = (ThermalFullSpeedStableTracker::STABLE_BAND_C * 100.0) as u16;
-        if failure_class == "missed_lower_band_before_limit" {
-            point.brake_distance_centi_c = point.brake_distance_centi_c.min(stable_band_centi_c);
+        let low_temp = target_temp_c <= 150;
+        let brake_step = if low_temp {
+            match failure_class {
+                "within_gate_low_margin" => 100,
+                "missed_lower_band_before_limit" if temperature_gap_c <= 0.5 => 160,
+                "missed_lower_band_before_limit" if temperature_gap_c <= 1.5 => 220,
+                "missed_lower_band_before_limit" => 300,
+                _ if temperature_gap_c <= 0.5 => 120,
+                _ if temperature_gap_c <= 1.5 => 180,
+                _ => 260,
+            }
         } else {
-            point.brake_distance_centi_c = point
-                .brake_distance_centi_c
-                .saturating_sub(if target_temp_c <= 150 { 180 } else { 120 })
-                .max(stable_band_centi_c);
-        }
-        let approach_floor_target = if target_temp_c <= 150 { 650 } else { 900 };
-        let approach_power_target = if target_temp_c <= 150 { 800 } else { 1_000 };
-        point.approach_floor_power_permille = point
+            match failure_class {
+                "within_gate_low_margin" => 120,
+                _ if temperature_gap_c <= 0.5 => 180,
+                _ if temperature_gap_c <= 1.5 => 260,
+                _ => 360,
+            }
+        };
+        let low_temp_brake_floor = if low_temp {
+            stable_band_centi_c.saturating_add(300)
+        } else {
+            stable_band_centi_c
+        };
+        let brake_floor = low_temp_brake_floor.min(current_point.brake_distance_centi_c);
+        point.brake_distance_centi_c = current_point
+            .brake_distance_centi_c
+            .saturating_sub(brake_step)
+            .max(brake_floor);
+
+        let power_step = if low_temp {
+            match failure_class {
+                "within_gate_low_margin" => 80,
+                _ if temperature_gap_c <= 0.5 => 120,
+                _ if temperature_gap_c <= 1.5 => 180,
+                _ => 240,
+            }
+        } else if temperature_gap_c <= 1.0 {
+            180
+        } else {
+            260
+        };
+        point.approach_floor_power_permille = current_point
             .approach_floor_power_permille
-            .max(approach_floor_target)
+            .saturating_add(power_step)
+            .max(current_point.hold_power_permille)
             .min(1_000);
-        point.approach_power_permille = point
+        point.approach_power_permille = current_point
             .approach_power_permille
-            .max(approach_power_target)
+            .saturating_add(power_step)
+            .max(point.approach_floor_power_permille.saturating_add(80))
             .min(1_000);
         point.approach_damping_exponent_permille = point
             .approach_damping_exponent_permille
-            .saturating_sub(if target_temp_c <= 150 { 600 } else { 300 })
+            .saturating_sub(if low_temp { 180 } else { 260 })
             .max(100);
+        if low_temp {
+            point.approach_lead_ticks = current_point.approach_lead_ticks.saturating_sub(1).min(12);
+        }
     }
     if matches!(
         failure_class,
@@ -1234,10 +1276,18 @@ fn apply_flagship_gate_nudge(
             .brake_distance_centi_c
             .saturating_add(max_brake_delta);
         point.brake_distance_centi_c = point.brake_distance_centi_c.clamp(min_brake, max_brake);
+        if target_temp_c <= 150 {
+            point.brake_distance_centi_c = point.brake_distance_centi_c.max(450);
+        }
+        let lead_step = if target_temp_c <= 150 && temperature_gap_c >= 1.5 {
+            2
+        } else {
+            1
+        };
         point.approach_lead_ticks = point
             .approach_lead_ticks
-            .max(current_point.approach_lead_ticks.saturating_add(1))
-            .min(3);
+            .max(current_point.approach_lead_ticks.saturating_add(lead_step))
+            .min(12);
         point.approach_damping_exponent_permille = point
             .approach_damping_exponent_permille
             .max(
@@ -1251,7 +1301,34 @@ fn apply_flagship_gate_nudge(
                     .saturating_add(180),
             )
             .max(180);
-        if target_temp_c > 150 && point.hold_power_permille >= 900 {
+        if target_temp_c <= 150 {
+            let trim = if temperature_gap_c >= 1.5 { 120 } else { 80 };
+            point.approach_floor_power_permille = current_point
+                .approach_floor_power_permille
+                .saturating_sub(trim)
+                .max(current_point.hold_power_permille)
+                .max(100);
+            point.approach_power_permille = current_point
+                .approach_power_permille
+                .saturating_sub(trim)
+                .max(point.approach_floor_power_permille.saturating_add(80))
+                .min(1_000);
+            point.hold_reheat_power_permille = current_point
+                .hold_reheat_power_permille
+                .saturating_sub(trim / 2)
+                .max(current_point.hold_power_permille);
+            point.hold_kp_permille_per_c = current_point
+                .hold_kp_permille_per_c
+                .saturating_sub(4)
+                .max(8);
+            point.overshoot_cutoff_centi_c = current_point
+                .overshoot_cutoff_centi_c
+                .saturating_sub(40)
+                .max(80);
+            point.hold_off_centi_c = current_point
+                .hold_off_centi_c
+                .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+        } else if point.hold_power_permille >= 900 {
             point.hold_power_permille = point.hold_power_permille.saturating_sub(180).max(780);
             point.hold_reheat_power_permille = point
                 .hold_reheat_power_permille
@@ -1395,6 +1472,7 @@ fn candidate_score(summary: &Value, target_temp_c: i16) -> CandidateScore {
         } else {
             1.0
         },
+        candidate_metric_gate_penalty(&stage, target_temp_c),
         if failure_class == "within_gate_low_margin" {
             1.0
         } else {
@@ -1422,6 +1500,26 @@ fn candidate_score(summary: &Value, target_temp_c: i16) -> CandidateScore {
     ])
 }
 
+fn candidate_metric_gate_penalty(stage: &Value, target_temp_c: i16) -> f64 {
+    if review_candidate_metric_gate_passes(stage, target_temp_c) {
+        return 0.0;
+    }
+    let overshoot_penalty = metric_value(stage, &["/maxOvershootC"])
+        .map(|value| (value - 3.0).max(0.0))
+        .unwrap_or(3.0);
+    let p2p_penalty = metric_value(stage, &["/holdPeakToPeakC"])
+        .map(|value| (value - 3.0).max(0.0))
+        .unwrap_or(3.0);
+    let settle_penalty = metric_value(stage, &["/fullSpeedToStable/settleTimeMs", "/settleTimeMs"])
+        .zip(metric_value(
+            stage,
+            &["/fullSpeedToStable/limitMs", "/fullSpeedLimitMs"],
+        ))
+        .map(|(settle_ms, limit_ms)| ((settle_ms - limit_ms).max(0.0) / 1_000.0).min(5.0))
+        .unwrap_or(2.0);
+    1.0 + overshoot_penalty + p2p_penalty + settle_penalty
+}
+
 fn stage_reference_gate_satisfied(summary: &Value, target_temp_c: i16) -> bool {
     if run_is_disqualified(summary, target_temp_c) || !warmup_output_is_full(summary, target_temp_c)
     {
@@ -1436,6 +1534,7 @@ fn stage_reference_gate_satisfied(summary: &Value, target_temp_c: i16) -> bool {
     let samples = samples_for_target(summary, target_temp_c);
     let evidence = stability_evidence_for_stage(&stage, &samples, target_temp_c);
     evidence.get("failureClass").and_then(Value::as_str) == Some("within_gate")
+        && review_candidate_metric_gate_passes(&stage, target_temp_c)
 }
 
 fn batch_attempt_records(
@@ -1876,6 +1975,20 @@ fn apply_hold_confirm_reseed_nudge(
         .get("holdP90OutputPermille")
         .and_then(Value::as_u64)
         .unwrap_or(0) as u16;
+    let overshoot_c = stage
+        .get("maxOvershootC")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let hold_p2p_c = stage
+        .get("holdPeakToPeakC")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let high_side_or_ripple = matches!(
+        failure_class,
+        "stable_window_broke_high" | "missed_upper_band_before_limit" | "within_gate"
+    ) && (overshoot_c > 3.0 || hold_p2p_c > 3.0);
     if target_temp_c > 150
         && matches!(
             failure_class,
@@ -1894,6 +2007,40 @@ fn apply_hold_confirm_reseed_nudge(
         point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(120);
         point.hold_entry_centi_c = point.hold_entry_centi_c.saturating_sub(20).max(120);
         point.hold_exit_centi_c = point.hold_exit_centi_c.saturating_sub(20).max(120);
+    }
+    if target_temp_c <= 150 && high_side_or_ripple {
+        let severity_c = (overshoot_c - 3.0).max(hold_p2p_c - 3.0).max(0.0);
+        let brake_step = ((severity_c * 75.0) + 80.0).round().clamp(80.0, 350.0) as u16;
+        point.brake_distance_centi_c = point
+            .brake_distance_centi_c
+            .saturating_add(brake_step)
+            .max(450)
+            .min(5_000);
+        point.approach_lead_ticks = point
+            .approach_lead_ticks
+            .saturating_add(if severity_c >= 2.0 { 2 } else { 1 })
+            .min(12);
+        let trim = if severity_c >= 2.0 { 120 } else { 80 };
+        point.approach_floor_power_permille = point
+            .approach_floor_power_permille
+            .saturating_sub(trim)
+            .max(point.hold_power_permille)
+            .max(100);
+        point.approach_power_permille = point
+            .approach_power_permille
+            .saturating_sub(trim)
+            .max(point.approach_floor_power_permille.saturating_add(80))
+            .min(1_000);
+        point.hold_reheat_power_permille = point
+            .hold_reheat_power_permille
+            .saturating_sub(trim / 2)
+            .max(point.hold_power_permille);
+        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+        point.hold_blend_ticks = point.hold_blend_ticks.saturating_sub(1).max(1);
+        point.overshoot_cutoff_centi_c = point.overshoot_cutoff_centi_c.saturating_sub(40).max(80);
+        point.hold_off_centi_c = point
+            .hold_off_centi_c
+            .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
     }
     point
 }
@@ -2670,6 +2817,8 @@ mod tests {
                 "targetTempC": 220,
                 "stopReason": stop_reason,
                 "terminalRuntimeDropReason": null,
+                "maxOvershootC": 1.2,
+                "holdPeakToPeakC": 1.6,
                 "analysis": {},
                 "fullSpeedToStable": {
                     "limitMs": 5000,
@@ -2728,6 +2877,25 @@ mod tests {
             sample(4000, "hold", 220.8, 97),
         ]);
         let summary = scout_summary_with_samples(&samples_path, Some(4_700), "completed");
+
+        assert!(!scout_current_is_promotable(&summary, 220));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
+    fn promotable_scout_current_rejects_metric_failures() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(600, "warmup", 178.0, 100),
+            sample(1100, "approach", 218.7, 100),
+            sample(2000, "hold", 219.0, 98),
+            sample(3000, "hold", 221.8, 98),
+            sample(4000, "hold", 223.4, 97),
+        ]);
+        let mut summary = scout_summary_with_samples(&samples_path, Some(3_200), "completed");
+        summary["applied"][0]["maxOvershootC"] = json!(3.4);
+        summary["applied"][0]["holdPeakToPeakC"] = json!(4.4);
 
         assert!(!scout_current_is_promotable(&summary, 220));
 
@@ -3364,6 +3532,143 @@ mod tests {
         assert_eq!(nudged.hold_reheat_power_permille, 820);
         assert_eq!(nudged.approach_lead_ticks, 1);
         assert_eq!(nudged.overshoot_cutoff_centi_c, 160);
+    }
+
+    #[test]
+    fn low_side_gate_nudge_is_incremental_for_low_temperature_miss() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 140,
+            brake_distance_centi_c: 1000,
+            warmup_power_permille: 1000,
+            approach_power_permille: 420,
+            approach_floor_power_permille: 200,
+            approach_damping_exponent_permille: 1000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 280,
+            hold_reheat_power_permille: 340,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 160,
+            hold_on_centi_c: 5,
+            hold_off_centi_c: 160,
+            overshoot_cutoff_centi_c: 180,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 4,
+            hold_lead_ticks: 0,
+        };
+        let predicted = ThermalCandidatePoint {
+            brake_distance_centi_c: 150,
+            approach_power_permille: 800,
+            approach_floor_power_permille: 650,
+            approach_damping_exponent_permille: 310,
+            approach_lead_ticks: 2,
+            ..current
+        };
+        let nudged = apply_flagship_gate_nudge(
+            &current,
+            predicted,
+            &json!({
+                "failureClass": "missed_lower_band_before_limit",
+                "temperatureGapC": 0.25
+            }),
+            140,
+        );
+
+        assert!(nudged.brake_distance_centi_c >= 800);
+        assert!(nudged.approach_power_permille <= 560);
+        assert!(nudged.approach_floor_power_permille <= 360);
+    }
+
+    #[test]
+    fn low_temperature_high_side_nudge_damps_approach_energy() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 100,
+            brake_distance_centi_c: 700,
+            warmup_power_permille: 1000,
+            approach_power_permille: 800,
+            approach_floor_power_permille: 650,
+            approach_damping_exponent_permille: 530,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 220,
+            hold_reheat_power_permille: 220,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 160,
+            hold_on_centi_c: 5,
+            hold_off_centi_c: 180,
+            overshoot_cutoff_centi_c: 180,
+            hold_kp_permille_per_c: 20,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 4,
+            hold_lead_ticks: 0,
+        };
+        let predicted = ThermalCandidatePoint {
+            brake_distance_centi_c: 840,
+            approach_power_permille: 800,
+            approach_floor_power_permille: 650,
+            approach_damping_exponent_permille: 710,
+            approach_lead_ticks: 3,
+            hold_kp_permille_per_c: 16,
+            ..current
+        };
+        let nudged = apply_flagship_gate_nudge(
+            &current,
+            predicted,
+            &json!({"failureClass": "stable_window_broke_high", "temperatureGapC": 2.0}),
+            100,
+        );
+
+        assert!(nudged.brake_distance_centi_c > current.brake_distance_centi_c);
+        assert!(nudged.approach_lead_ticks > current.approach_lead_ticks);
+        assert!(nudged.approach_power_permille < current.approach_power_permille);
+        assert!(nudged.approach_floor_power_permille < current.approach_floor_power_permille);
+    }
+
+    #[test]
+    fn failed_low_temperature_hold_confirm_damps_long_hold_ripple() {
+        let point = ThermalCandidatePoint {
+            target_temp_c: 120,
+            brake_distance_centi_c: 173,
+            warmup_power_permille: 1000,
+            approach_power_permille: 800,
+            approach_floor_power_permille: 650,
+            approach_damping_exponent_permille: 510,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 225,
+            hold_reheat_power_permille: 300,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 160,
+            hold_on_centi_c: 5,
+            hold_off_centi_c: 170,
+            overshoot_cutoff_centi_c: 180,
+            hold_kp_permille_per_c: 39,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 5,
+            hold_lead_ticks: 0,
+        };
+        let stage = json!({
+            "targetTempC": 120,
+            "stopReason": "completed",
+            "maxOvershootC": 3.79,
+            "holdPeakToPeakC": 6.60,
+            "analysis": {
+                "holdMedianOutputPermille": 225,
+                "holdP90OutputPermille": 300,
+            },
+            "fullSpeedToStable": {
+                "limitMs": 10000,
+                "settleTimeMs": 5949,
+                "warmupExitedAtMs": 1000,
+            },
+        });
+        let nudged = apply_hold_confirm_reseed_nudge(point, &stage, &[], 120);
+
+        assert!(nudged.brake_distance_centi_c > point.brake_distance_centi_c);
+        assert!(nudged.approach_lead_ticks > point.approach_lead_ticks);
+        assert!(nudged.approach_power_permille < point.approach_power_permille);
+        assert!(nudged.approach_floor_power_permille < point.approach_floor_power_permille);
     }
 }
 

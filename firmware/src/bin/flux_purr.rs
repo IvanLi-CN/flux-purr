@@ -4254,7 +4254,8 @@ fn floor_gate_pulse_density_duty_percent(
 #[allow(clippy::too_many_arguments)]
 fn adjustable_floor_gate_duty_percent(
     duty_percent: u8,
-    request_mv: u16,
+    active_request_mv: u16,
+    target_request_mv: u16,
     floor_mv: u16,
     ceiling_mv: u16,
     allow_subfloor_modulation: bool,
@@ -4267,14 +4268,30 @@ fn adjustable_floor_gate_duty_percent(
         return 0;
     }
 
-    // A 5V-capable profile may request sub-5V-equivalent power before the bounded PPS down-ramp
-    // reaches its floor. Compensate against the active request voltage so that transition energy
-    // does not exceed the controller's requested power. Each tick remains static 0% or 100%.
-    if floor_mv == CH224Q_ADJUSTABLE_REQUEST_MIN_MV && !allow_subfloor_modulation {
-        return floor_gate_pulse_density_duty_percent(duty_percent, request_mv, ceiling_mv, now_ms);
+    // Same-APDO PPS down-ramps are intentionally bounded in voltage step size. While the source
+    // still sits above the newly requested voltage, compensate against the active request voltage so
+    // a low reheat command does not inject a high-voltage full-on pulse. Each tick remains static
+    // 0% or 100%; this is pulse-density gating, not hardware PWM.
+    if active_request_mv > target_request_mv {
+        return floor_gate_pulse_density_duty_percent(
+            duty_percent,
+            active_request_mv,
+            ceiling_mv,
+            now_ms,
+        );
     }
 
-    if request_mv > floor_mv || ceiling_mv <= floor_mv {
+    // A 5V-capable profile may request sub-5V-equivalent power at the bounded floor.
+    if floor_mv == CH224Q_ADJUSTABLE_REQUEST_MIN_MV && !allow_subfloor_modulation {
+        return floor_gate_pulse_density_duty_percent(
+            duty_percent,
+            active_request_mv,
+            ceiling_mv,
+            now_ms,
+        );
+    }
+
+    if active_request_mv > floor_mv || ceiling_mv <= floor_mv {
         return 100;
     }
 
@@ -4738,6 +4755,7 @@ where
                         adjustable_floor_gate_duty_percent(
                             duty_percent,
                             current_request_mv,
+                            current_request_mv,
                             control_floor_mv,
                             safe_max_mv,
                             heater_phase == HeaterControlPhase::Hold,
@@ -4774,6 +4792,7 @@ where
                 adjustable_floor_gate_duty_percent(
                     duty_percent,
                     current_request_mv,
+                    request_mv,
                     control_floor_mv,
                     safe_max_mv,
                     heater_phase == HeaterControlPhase::Hold,
@@ -4850,6 +4869,7 @@ where
                 adjustable_floor_gate_duty_percent(
                     duty_percent,
                     current_request_mv,
+                    request_mv,
                     control_floor_mv,
                     safe_max_mv,
                     heater_phase == HeaterControlPhase::Hold,
@@ -11958,11 +11978,15 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_coasts_after_crossing_target() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.1, 0.3, 100, 0),
+            adjustable_floor_gate_duty_percent(
+                17, 6_100, 6_100, 6_100, 14_500, true, 0.1, 0.3, 100, 0
+            ),
             100
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.0, 0.3, 100, 0),
+            adjustable_floor_gate_duty_percent(
+                17, 6_100, 6_100, 6_100, 14_500, true, 0.0, 0.3, 100, 0
+            ),
             0
         );
     }
@@ -11970,11 +11994,15 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_reheats_after_hold_on_error() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.2, 0.3, 0, 0),
+            adjustable_floor_gate_duty_percent(
+                17, 6_100, 6_100, 6_100, 14_500, true, 0.2, 0.3, 0, 0
+            ),
             0
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_100, 6_100, 14_500, true, 0.3, 0.3, 0, 0),
+            adjustable_floor_gate_duty_percent(
+                17, 6_100, 6_100, 6_100, 14_500, true, 0.3, 0.3, 0, 0
+            ),
             100
         );
     }
@@ -11982,11 +12010,15 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_stays_static_once_request_leaves_floor() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(17, 6_200, 6_100, 14_500, true, -0.5, 0.3, 100, 0),
+            adjustable_floor_gate_duty_percent(
+                17, 6_200, 6_200, 6_100, 14_500, true, -0.5, 0.3, 100, 0
+            ),
             100
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(0, 6_100, 6_100, 14_500, true, 1.0, 0.3, 100, 0),
+            adjustable_floor_gate_duty_percent(
+                0, 6_100, 6_100, 6_100, 14_500, true, 1.0, 0.3, 100, 0
+            ),
             0
         );
     }
@@ -11994,7 +12026,9 @@ mod tests {
     #[test]
     fn adjustable_floor_gate_duty_stays_static_outside_hold_phase() {
         assert_eq!(
-            adjustable_floor_gate_duty_percent(5, 6_100, 6_100, 14_500, false, -0.5, 0.3, 100, 0),
+            adjustable_floor_gate_duty_percent(
+                5, 6_100, 6_100, 6_100, 14_500, false, -0.5, 0.3, 100, 0
+            ),
             100
         );
     }
@@ -12010,12 +12044,15 @@ mod tests {
             0
         );
         assert_eq!(
-            adjustable_floor_gate_duty_percent(10, 5_000, 5_000, 7_500, false, 2.0, 0.3, 0, 0),
+            adjustable_floor_gate_duty_percent(
+                10, 5_000, 5_000, 5_000, 7_500, false, 2.0, 0.3, 0, 0
+            ),
             100
         );
         assert_eq!(
             adjustable_floor_gate_duty_percent(
                 10,
+                5_000,
                 5_000,
                 5_000,
                 7_500,
@@ -12037,6 +12074,7 @@ mod tests {
                     11,
                     13_500,
                     5_000,
+                    5_000,
                     14_000,
                     false,
                     6.0,
@@ -12047,6 +12085,27 @@ mod tests {
             })
             .count();
         assert_eq!(physical_ticks, 11);
+    }
+
+    #[test]
+    fn adjustable_above_floor_hold_reheat_compensates_during_pps_down_ramp() {
+        let physical_ticks = (0..100_u64)
+            .filter(|tick| {
+                adjustable_floor_gate_duty_percent(
+                    6,
+                    17_000,
+                    10_000,
+                    6_100,
+                    21_000,
+                    true,
+                    0.3,
+                    0.3,
+                    100,
+                    tick * HEATER_CONTROL_INTERVAL_MS,
+                ) == 100
+            })
+            .count();
+        assert_eq!(physical_ticks, 9);
     }
 
     #[test]
