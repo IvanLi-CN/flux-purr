@@ -877,6 +877,163 @@ fn build_history(entries: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+fn metric_value(result: &Value, paths: &[&str]) -> Option<f64> {
+    paths
+        .iter()
+        .find_map(|path| result.pointer(path).and_then(Value::as_f64))
+}
+
+fn candidate_metric_gate(entry: &Value) -> Option<bool> {
+    let target_temp_c = entry
+        .get("target")
+        .or_else(|| entry.get("targetTempC"))
+        .and_then(Value::as_i64)?;
+    let result = entry.get("result")?;
+    if result.is_null() {
+        return None;
+    }
+    let stop_reason = result.get("stopReason").and_then(Value::as_str)?;
+    if stop_reason != "completed" {
+        return Some(false);
+    }
+    let overshoot_c = metric_value(result, &["/maxOvershootC"])?;
+    if overshoot_c > 3.0 {
+        return Some(false);
+    }
+    let hold_p2p_c = metric_value(result, &["/holdPeakToPeakC"])?;
+    if hold_p2p_c > 3.0 {
+        return Some(false);
+    }
+    if result
+        .pointer("/fullSpeedToStable/failureReason")
+        .or_else(|| result.get("failureReason"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| !reason.is_empty())
+    {
+        return Some(false);
+    }
+    let Some(settle_time_ms) = metric_value(
+        result,
+        &["/fullSpeedToStable/settleTimeMs", "/settleTimeMs"],
+    ) else {
+        return Some(false);
+    };
+    let limit_ms = metric_value(result, &["/fullSpeedToStable/limitMs", "/fullSpeedLimitMs"])
+        .unwrap_or(if target_temp_c > 150 {
+            5_000.0
+        } else {
+            10_000.0
+        });
+    Some(settle_time_ms <= limit_ms)
+}
+
+fn unique_targets_sorted(entries: &[Value]) -> Vec<i64> {
+    entries
+        .iter()
+        .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn target_role(entry: &Value) -> &str {
+    entry
+        .get("targetRole")
+        .and_then(Value::as_str)
+        .unwrap_or("tuning")
+}
+
+fn select_report_entry_index(entries: &[Value]) -> usize {
+    entries
+        .iter()
+        .rposition(|entry| target_role(entry) == "supplemental_tuning")
+        .or_else(|| {
+            entries.iter().rposition(|entry| {
+                target_role(entry) == "validation"
+                    && (entry.get("ok").and_then(Value::as_bool) == Some(true)
+                        || entry.get("budgetOutcome").and_then(Value::as_str)
+                            == Some("validation_passed"))
+            })
+        })
+        .or_else(|| {
+            entries
+                .iter()
+                .rposition(|entry| target_role(entry) != "validation")
+        })
+        .unwrap_or_else(|| entries.len().saturating_sub(1))
+}
+
+fn report_audit_entry(raw_entry_index: usize, entry: &Value) -> Value {
+    json!({
+        "rawEntryIndex": raw_entry_index,
+        "runId": entry.get("runId").cloned().unwrap_or(Value::Null),
+        "target": entry.get("target").cloned().unwrap_or(Value::Null),
+        "targetTempC": entry.get("targetTempC").cloned().unwrap_or(Value::Null),
+        "targetRole": target_role(entry),
+        "ok": entry.get("ok").cloned().unwrap_or(Value::Null),
+        "reviewOutcome": entry.get("reviewOutcome").cloned().unwrap_or(Value::Null),
+        "reviewPassed": entry.get("reviewPassed").cloned().unwrap_or(Value::Null),
+        "budgetOutcome": entry.get("budgetOutcome").cloned().unwrap_or(Value::Null),
+        "candidateDisposition": entry
+            .get("candidateDisposition")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "candidateReady": entry.get("candidateReady").cloned().unwrap_or(Value::Null),
+        "timeSpentSeconds": entry.get("timeSpentSeconds").cloned().unwrap_or(Value::Null),
+        "roundCount": entry.get("roundCount").cloned().unwrap_or(Value::Null),
+        "validTestCount": entry.get("validTestCount").cloned().unwrap_or(Value::Null),
+        "invalidTestCount": entry.get("invalidTestCount").cloned().unwrap_or(Value::Null),
+        "failures": entry.get("failures").cloned().unwrap_or_else(|| json!([])),
+    })
+}
+
+fn build_report_runs(entries: &[Value]) -> Vec<Value> {
+    let targets = unique_targets_sorted(entries);
+    targets
+        .iter()
+        .filter_map(|target| {
+            let audit_entries = entries
+                .iter()
+                .enumerate()
+                .filter(|(_, entry)| entry.get("target").and_then(Value::as_i64) == Some(*target))
+                .map(|(index, entry)| (index, entry.clone()))
+                .collect::<Vec<_>>();
+            if audit_entries.is_empty() {
+                return None;
+            }
+            let audit_values = audit_entries
+                .iter()
+                .map(|(_, entry)| entry.clone())
+                .collect::<Vec<_>>();
+            let selected_index = select_report_entry_index(&audit_values);
+            let mut report_entry = audit_entries[selected_index].1.clone();
+            let audit_roles = audit_entries
+                .iter()
+                .map(|(_, entry)| json!({
+                    "targetRole": target_role(entry),
+                    "reviewOutcome": entry.get("reviewOutcome").cloned().unwrap_or(Value::Null),
+                    "reviewPassed": entry.get("reviewPassed").cloned().unwrap_or(Value::Null),
+                    "budgetOutcome": entry.get("budgetOutcome").cloned().unwrap_or(Value::Null),
+                    "candidateDisposition": entry
+                        .get("candidateDisposition")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                    "candidateReady": entry.get("candidateReady").cloned().unwrap_or(Value::Null),
+                    "validTestCount": entry.get("validTestCount").cloned().unwrap_or(Value::Null),
+                }))
+                .collect::<Vec<_>>();
+            let audit_receipts = audit_entries
+                .iter()
+                .map(|(index, entry)| report_audit_entry(*index, entry))
+                .collect::<Vec<_>>();
+            report_entry["auditEntryCount"] = json!(audit_entries.len());
+            report_entry["auditEntries"] = Value::Array(audit_receipts);
+            report_entry["auditSummary"] = Value::Array(audit_roles);
+            Some(report_entry)
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn write_preliminary_review_bundle(
     bundle_dir: &Path,
@@ -956,10 +1113,9 @@ pub(super) fn write_preliminary_review_bundle(
     let index_html_path = bundle_dir.join("index.html");
     write_json_pretty(&accepted_profile_path, accepted_profile)?;
     let entries_array = Value::Array(entries.clone());
-    let flagship_targets_c = entries
-        .iter()
-        .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
-        .collect::<Vec<_>>();
+    let report_runs = build_report_runs(&entries);
+    let report_runs_array = Value::Array(report_runs.clone());
+    let flagship_targets_c = unique_targets_sorted(&entries);
     let candidate_dispositions = entries
         .iter()
         .map(|entry| {
@@ -1104,6 +1260,7 @@ pub(super) fn write_preliminary_review_bundle(
         "sourceDeviceId": source_id,
         "deviceId": device_id,
         "port": port_path,
+        "reportRuns": report_runs_array,
         "targets": entries_array.clone(),
         "runs": entries_array,
         "files": {
@@ -1117,7 +1274,7 @@ pub(super) fn write_preliminary_review_bundle(
     write_json_pretty(&run_bundle_path, &bundle)?;
 
     let target_label = bundle
-        .get("runs")
+        .get("reportRuns")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
@@ -1151,10 +1308,11 @@ pub(super) fn write_preliminary_review_bundle(
         "validationUnresolvedTargetsC": bundle.get("validationUnresolvedTargetsC").cloned().unwrap_or(Value::Null),
         "supplementalTuningTargetsC": bundle.get("supplementalTuningTargetsC").cloned().unwrap_or(Value::Null),
         "supplementalCandidateReadyTargetsC": bundle.get("supplementalCandidateReadyTargetsC").cloned().unwrap_or(Value::Null),
-        "runs": bundle.get("runs").cloned().unwrap_or_else(|| json!([])),
+        "runs": bundle.get("reportRuns").cloned().unwrap_or_else(|| json!([])),
+        "rawRuns": bundle.get("runs").cloned().unwrap_or_else(|| json!([])),
         "history": build_history(
             bundle
-                .get("runs")
+                .get("reportRuns")
                 .and_then(Value::as_array)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
@@ -1185,7 +1343,7 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("tuning")
         .to_string();
-    let candidate_ready = entry
+    let base_candidate_ready = entry
         .get("candidateReady")
         .and_then(Value::as_bool)
         .unwrap_or_else(|| {
@@ -1199,37 +1357,56 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
                 .unwrap_or(0);
             target_role != "validation" && has_point && valid_count > 0
         });
+    let metric_gate = candidate_metric_gate(&entry);
+    let candidate_ready =
+        target_role != "validation" && base_candidate_ready && metric_gate.unwrap_or(true);
+    if metric_gate == Some(false) {
+        entry["ok"] = json!(false);
+    }
     entry["candidateReady"] = json!(candidate_ready);
-    if entry
+    let existing_disposition = entry
         .get("candidateDisposition")
         .and_then(Value::as_str)
-        .is_none()
+        .map(str::to_string);
+    let budget_outcome = entry
+        .get("budgetOutcome")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let ok = entry.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let disposition =
+        if target_role == "validation" && (ok || budget_outcome == "validation_passed") {
+            "validation_passed"
+        } else if target_role == "validation" && budget_outcome == "validation_failed" {
+            "validation_failed"
+        } else if target_role == "validation" && budget_outcome == "budget_exhausted" {
+            "validation_budget_exhausted"
+        } else if (ok || budget_outcome == "completed") && candidate_ready {
+            "acceptance_passed"
+        } else if candidate_ready {
+            "candidate_ready"
+        } else if budget_outcome == "environment_blocked" {
+            "environment_blocked"
+        } else if budget_outcome == "budget_exhausted" {
+            "budget_exhausted_without_candidate"
+        } else {
+            "not_available"
+        };
+    if existing_disposition.as_deref().is_none()
+        || metric_gate == Some(false)
+        || existing_disposition.as_deref() == Some("candidate_ready") && !candidate_ready
+        || existing_disposition.as_deref() == Some("acceptance_passed") && !candidate_ready
     {
-        let budget_outcome = entry
-            .get("budgetOutcome")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let ok = entry.get("ok").and_then(Value::as_bool).unwrap_or(false);
-        let disposition =
-            if target_role == "validation" && (ok || budget_outcome == "validation_passed") {
-                "validation_passed"
-            } else if target_role == "validation" && budget_outcome == "validation_failed" {
-                "validation_failed"
-            } else if target_role == "validation" && budget_outcome == "budget_exhausted" {
-                "validation_budget_exhausted"
-            } else if ok || budget_outcome == "completed" {
-                "acceptance_passed"
-            } else if candidate_ready {
-                "candidate_ready"
-            } else if budget_outcome == "environment_blocked" {
-                "environment_blocked"
-            } else if budget_outcome == "budget_exhausted" {
-                "budget_exhausted_without_candidate"
-            } else {
-                "not_available"
-            };
         entry["candidateDisposition"] = json!(disposition);
     }
+    let final_disposition = entry
+        .get("candidateDisposition")
+        .and_then(Value::as_str)
+        .unwrap_or(disposition);
+    let review_passed = candidate_ready
+        || final_disposition == "acceptance_passed"
+        || final_disposition == "validation_passed";
+    entry["reviewPassed"] = json!(review_passed);
+    entry["reviewOutcome"] = json!(if review_passed { "passed" } else { "failed" });
     entry
 }
 
@@ -1244,7 +1421,17 @@ mod tests {
     use super::{sanitize_non_finite_json_numbers, write_preliminary_review_bundle};
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use std::{env, fs};
+    use std::{env, fs, path::Path};
+
+    fn embedded_report_data(bundle_dir: &Path) -> serde_json::Value {
+        let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
+        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
+        let data_end = html[data_start..]
+            .find(";\n  const COLORS")
+            .expect("embedded data terminator")
+            + data_start;
+        serde_json::from_str(&html[data_start..data_end]).expect("valid embedded report data")
+    }
 
     #[test]
     fn sanitize_non_finite_json_numbers_replaces_bare_tokens_only() {
@@ -1331,18 +1518,15 @@ mod tests {
             "validation_passed"
         );
         assert_eq!(bundle["runs"][0]["targetRole"], "validation");
+        assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
+        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], "passed");
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
 
         let samples = fs::read_to_string(bundle_dir.join("samples.ndjson")).expect("samples");
         assert!(samples.contains(r#""targetTempC":80"#));
 
-        let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
-        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let data_end = html[data_start..]
-            .find(";\n  const COLORS")
-            .expect("embedded data terminator")
-            + data_start;
-        let embedded_data: serde_json::Value =
-            serde_json::from_str(&html[data_start..data_end]).expect("valid embedded report data");
+        let embedded_data = embedded_report_data(&bundle_dir);
+        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], "passed");
         assert_eq!(
             embedded_data["runs"][0]["samples"][0]["temperature"]["humanTempC"],
             json!(78.0)
@@ -1424,6 +1608,7 @@ mod tests {
 
         assert_eq!(bundle["validationFailedTargetsC"], json!([]));
         assert_eq!(bundle["validationUnresolvedTargetsC"], json!([]));
+        assert_eq!(bundle["flagshipTargetsC"], json!([120]));
         assert_eq!(bundle["supplementalTuningTargetsC"], json!([120]));
         assert_eq!(bundle["supplementalCandidateReadyTargetsC"], json!([120]));
         assert_eq!(bundle["candidateReadyTargetsC"], json!([120]));
@@ -1431,6 +1616,299 @@ mod tests {
             bundle["validationTargetDispositions"]["120"],
             "validation_failed_then_candidate_ready"
         );
+        assert_eq!(bundle["runs"].as_array().expect("raw runs").len(), 2);
+        assert_eq!(bundle["targets"].as_array().expect("raw targets").len(), 2);
+        assert_eq!(
+            bundle["reportRuns"].as_array().expect("report runs").len(),
+            1
+        );
+        assert_eq!(bundle["reportRuns"][0]["target"], json!(120));
+        assert_eq!(
+            bundle["reportRuns"][0]["targetRole"],
+            json!("supplemental_tuning")
+        );
+        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], json!("passed"));
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], json!(true));
+        assert_eq!(
+            bundle["reportRuns"][0]["auditEntries"]
+                .as_array()
+                .expect("audit entries")
+                .len(),
+            2
+        );
+        assert!(
+            bundle["reportRuns"][0]["auditEntries"][0]
+                .get("samples")
+                .is_none()
+        );
+        assert!(
+            bundle["reportRuns"][0]["auditEntries"][0]
+                .get("rounds")
+                .is_none()
+        );
+        assert_eq!(
+            bundle["reportRuns"][0]["auditSummary"][0]["targetRole"],
+            json!("validation")
+        );
+        assert_eq!(
+            bundle["reportRuns"][0]["auditSummary"][1]["targetRole"],
+            json!("supplemental_tuning")
+        );
+
+        let embedded_data = embedded_report_data(&bundle_dir);
+        assert_eq!(
+            embedded_data["runs"].as_array().expect("html runs").len(),
+            1
+        );
+        assert_eq!(embedded_data["runs"][0]["target"], json!(120));
+        assert_eq!(
+            embedded_data["runs"][0]["targetRole"],
+            json!("supplemental_tuning")
+        );
+        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], json!("passed"));
+        assert_eq!(embedded_data["runs"][0]["reviewPassed"], json!(true));
+        let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
+        assert!(!html.contains("审计分类"));
+        assert!(!html.contains("审计路径"));
+        assert!(!html.contains("候选状态"));
+        assert_eq!(
+            embedded_data["rawRuns"]
+                .as_array()
+                .expect("html raw runs")
+                .len(),
+            2
+        );
+        assert_eq!(embedded_data["rawRuns"][0]["target"], json!(120));
+        assert_eq!(
+            embedded_data["rawRuns"][0]["targetRole"],
+            json!("validation")
+        );
+        assert_eq!(
+            embedded_data["rawRuns"][0]["samples"]
+                .as_array()
+                .expect("validation samples")
+                .len(),
+            1
+        );
+        assert_eq!(
+            embedded_data["rawRuns"][1]["targetRole"],
+            json!("supplemental_tuning")
+        );
+        assert_eq!(
+            embedded_data["rawRuns"][1]["samples"]
+                .as_array()
+                .expect("supplemental samples")
+                .len(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(bundle_dir);
+    }
+
+    #[test]
+    fn preliminary_review_bundle_sorts_report_targets_by_temperature() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let bundle_dir = env::temp_dir().join(format!("thermal-report-sorted-test-{unique}"));
+        let sample_for = |target: i64| {
+            json!({
+                "t": 0.0,
+                "temp": target,
+                "phase": "hold",
+                "command": 50,
+                "output": 50
+            })
+        };
+        let bundle = write_preliminary_review_bundle(
+            &bundle_dir,
+            &json!({
+                "settings": {},
+                "points": [
+                    {"targetTempC": 60, "holdPowerPermille": 400},
+                    {"targetTempC": 80, "holdPowerPermille": 450},
+                    {"targetTempC": 100, "holdPowerPermille": 500}
+                ],
+            }),
+            vec![
+                json!({
+                    "target": 60,
+                    "targetTempC": 60,
+                    "targetRole": "tuning",
+                    "budgetOutcome": "completed",
+                    "samples": [sample_for(60)],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 100,
+                    "targetTempC": 100,
+                    "targetRole": "tuning",
+                    "budgetOutcome": "completed",
+                    "samples": [sample_for(100)],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 80,
+                    "targetTempC": 80,
+                    "targetRole": "validation",
+                    "budgetOutcome": "validation_failed",
+                    "candidateDisposition": "validation_failed",
+                    "samples": [sample_for(80)],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 80,
+                    "targetTempC": 80,
+                    "targetRole": "supplemental_tuning",
+                    "budgetOutcome": "completed",
+                    "samples": [sample_for(80)],
+                    "rounds": []
+                }),
+            ],
+            "f293cc9c139e",
+            "mock-fp-lab-01",
+            "/dev/cu.usbmodem2111401",
+            1200,
+            json!(1234567890),
+            "100w",
+            "pps5a",
+            "pps5a",
+            &[60, 100],
+            &[80],
+            &[60, 100],
+            "21V / 5.0A",
+            "IsolaPurr",
+        )
+        .expect("bundle");
+
+        assert_eq!(bundle["flagshipTargetsC"], json!([60, 80, 100]));
+        assert_eq!(
+            bundle["reportRuns"]
+                .as_array()
+                .expect("report runs")
+                .iter()
+                .map(|entry| entry["target"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!(60), json!(80), json!(100)]
+        );
+        assert_eq!(
+            bundle["runs"]
+                .as_array()
+                .expect("raw runs")
+                .iter()
+                .map(|entry| entry["target"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!(60), json!(100), json!(80), json!(80)]
+        );
+
+        let embedded_data = embedded_report_data(&bundle_dir);
+        assert_eq!(
+            embedded_data["runs"]
+                .as_array()
+                .expect("html runs")
+                .iter()
+                .map(|entry| entry["target"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!(60), json!(80), json!(100)]
+        );
+        assert_eq!(
+            embedded_data["rawRuns"]
+                .as_array()
+                .expect("html raw runs")
+                .iter()
+                .map(|entry| entry["target"].clone())
+                .collect::<Vec<_>>(),
+            vec![json!(60), json!(100), json!(80), json!(80)]
+        );
+
+        let _ = fs::remove_dir_all(bundle_dir);
+    }
+
+    #[test]
+    fn preliminary_review_bundle_drops_metric_failed_candidate_ready() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let bundle_dir = env::temp_dir().join(format!("thermal-report-metric-gate-test-{unique}"));
+        let sample = json!({
+            "t": 0.0,
+            "temp": 100.0,
+            "phase": "hold",
+            "command": 80,
+            "output": 80,
+            "requestV": 18.0
+        });
+        let bundle = write_preliminary_review_bundle(
+            &bundle_dir,
+            &json!({
+                "settings": {},
+                "points": [{"targetTempC": 100, "holdPowerPermille": 500}],
+            }),
+            vec![json!({
+                "target": 100,
+                "targetTempC": 100,
+                "targetRole": "tuning",
+                "ok": false,
+                "candidateReady": true,
+                "candidateDisposition": "candidate_ready",
+                "budgetOutcome": "budget_exhausted",
+                "validTestCount": 11,
+                "samples": [sample],
+                "rounds": [],
+                "point": {
+                    "targetTempC": 100,
+                    "holdPowerPermille": 500
+                },
+                "result": {
+                    "stopReason": "full_speed_to_stable_timeout",
+                    "maxOvershootC": 9.04,
+                    "holdPeakToPeakC": 11.88,
+                    "fullSpeedToStable": {
+                        "limitMs": 10000,
+                        "settleTimeMs": null,
+                        "failureReason": "full_speed_to_stable_timeout"
+                    }
+                }
+            })],
+            "f293cc9c139e",
+            "mock-fp-lab-01",
+            "/dev/cu.usbmodem2111401",
+            1200,
+            json!(1234567890),
+            "100w",
+            "pps5a",
+            "pps5a",
+            &[60, 100, 140],
+            &[],
+            &[60, 100, 140],
+            "21V / 5.0A",
+            "IsolaPurr",
+        )
+        .expect("bundle");
+
+        assert_eq!(bundle["runs"][0]["candidateReady"], json!(false));
+        assert_eq!(
+            bundle["runs"][0]["candidateDisposition"],
+            json!("budget_exhausted_without_candidate")
+        );
+        assert_eq!(bundle["candidateReadyTargetsC"], json!([]));
+        assert_eq!(
+            bundle["reportRuns"][0]["candidateDisposition"],
+            json!("budget_exhausted_without_candidate")
+        );
+        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], json!("failed"));
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], json!(false));
+
+        let embedded_data = embedded_report_data(&bundle_dir);
+        assert_eq!(embedded_data["runs"][0]["candidateReady"], json!(false));
+        assert_eq!(
+            embedded_data["runs"][0]["candidateDisposition"],
+            json!("budget_exhausted_without_candidate")
+        );
+        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], json!("failed"));
+        assert_eq!(embedded_data["runs"][0]["reviewPassed"], json!(false));
 
         let _ = fs::remove_dir_all(bundle_dir);
     }

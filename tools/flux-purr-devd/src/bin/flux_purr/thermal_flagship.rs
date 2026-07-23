@@ -1579,16 +1579,22 @@ fn review_target_entry(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| format!("target-{target_temp_c}"));
+    let has_valid_evidence = rounds
+        .iter()
+        .any(|item| item.get("evidenceValid").and_then(Value::as_bool) != Some(false));
+    let candidate_ready = effective_point.is_some()
+        && has_valid_evidence
+        && review_candidate_metric_gate_passes(&stage, target_temp_c);
     json!({
         "runId": run_id,
         "target": target_temp_c,
         "targetTempC": target_temp_c,
         "targetRole": "tuning",
         "ok": budget_outcome == "completed",
-        "candidateReady": effective_point.is_some() && rounds.iter().any(|item| item.get("evidenceValid").and_then(Value::as_bool) != Some(false)),
+        "candidateReady": candidate_ready,
         "candidateDisposition": candidate_disposition_for_target(
             budget_outcome,
-            effective_point.is_some() && rounds.iter().any(|item| item.get("evidenceValid").and_then(Value::as_bool) != Some(false)),
+            candidate_ready,
         ),
         "saved": false,
         "evidence": "preliminary_review",
@@ -1648,7 +1654,7 @@ fn validation_target_entry(
 }
 
 fn candidate_disposition_for_target(budget_outcome: &str, candidate_ready: bool) -> &'static str {
-    if budget_outcome == "completed" {
+    if budget_outcome == "completed" && candidate_ready {
         "acceptance_passed"
     } else if candidate_ready {
         "candidate_ready"
@@ -1693,6 +1699,51 @@ fn result_is_empty(result: &Value) -> bool {
         || (result.get("stopReason").is_none()
             && result.get("analysis").is_none()
             && result.get("fullSpeedToStable").is_none())
+}
+
+fn metric_value(result: &Value, paths: &[&str]) -> Option<f64> {
+    paths
+        .iter()
+        .find_map(|path| result.pointer(path).and_then(Value::as_f64))
+}
+
+fn review_candidate_metric_gate_passes(result: &Value, target_temp_c: i16) -> bool {
+    if result.get("stopReason").and_then(Value::as_str) != Some("completed") {
+        return false;
+    }
+    let Some(overshoot_c) = metric_value(result, &["/maxOvershootC"]) else {
+        return false;
+    };
+    if overshoot_c > 3.0 {
+        return false;
+    }
+    let Some(hold_p2p_c) = metric_value(result, &["/holdPeakToPeakC"]) else {
+        return false;
+    };
+    if hold_p2p_c > 3.0 {
+        return false;
+    }
+    if result
+        .pointer("/fullSpeedToStable/failureReason")
+        .or_else(|| result.get("failureReason"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| !reason.is_empty())
+    {
+        return false;
+    }
+    let Some(settle_time_ms) = metric_value(
+        result,
+        &["/fullSpeedToStable/settleTimeMs", "/settleTimeMs"],
+    ) else {
+        return false;
+    };
+    let limit_ms = metric_value(result, &["/fullSpeedToStable/limitMs", "/fullSpeedLimitMs"])
+        .unwrap_or(if target_temp_c > 150 {
+            5_000.0
+        } else {
+            10_000.0
+        });
+    settle_time_ms <= limit_ms
 }
 
 fn fallback_round_evidence(rounds: &[Value]) -> Option<(Value, Vec<Value>)> {
@@ -2939,6 +2990,90 @@ mod tests {
 
         let _ = fs::remove_file(samples_path);
         let _ = fs::remove_file(summary_path);
+    }
+
+    #[test]
+    fn review_target_entry_rejects_metric_failed_candidate_ready() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 58.0, 100),
+            sample(5000, "warmup", 70.0, 100),
+            sample(15075, "approach", 91.0, 80),
+            sample(19000, "hold", 101.0, 70),
+            sample(25000, "hold", 109.0, 70),
+        ]);
+        let summary = json!({
+            "runId": "metric-failed-run",
+            "files": {
+                "samplesPath": samples_path,
+                "summaryPath": "/tmp/metric-failed-run.json",
+            },
+            "validation": {
+                "failures": [],
+                "passed": false,
+            },
+            "applied": [{
+                "targetTempC": 100,
+                "stopReason": "full_speed_to_stable_timeout",
+                "maxOvershootC": 9.04,
+                "holdPeakToPeakC": 11.88,
+                "analysis": {
+                    "holdMedianOutputPermille": 600,
+                    "holdP90OutputPermille": 900,
+                },
+                "guard": {
+                    "firstHoldAtMs": 19000,
+                },
+                "fullSpeedToStable": {
+                    "limitMs": 10000,
+                    "settleTimeMs": null,
+                    "warmupExitedAtMs": 15075,
+                    "failureReason": "full_speed_to_stable_timeout",
+                },
+            }],
+        });
+        let round = round_record_from_summary(
+            &summary,
+            100,
+            1,
+            "tuning 1 / batch",
+            Some(json!({
+                "targetTempC": 100,
+                "holdPowerPermille": 500,
+            })),
+            "batch_candidate",
+            Some(1),
+            Some("bad-candidate"),
+            true,
+            None,
+            1200,
+        );
+        let accepted_profile = json!({
+            "settings": {},
+            "points": [{
+                "targetTempC": 100,
+                "holdPowerPermille": 500,
+                "holdReheatPowerPermille": 620,
+            }],
+        });
+
+        let entry = review_target_entry(
+            100,
+            "budget_exhausted",
+            1200,
+            vec![round],
+            &summary,
+            &accepted_profile,
+            60,
+        );
+
+        assert_eq!(entry["candidateReady"], false);
+        assert_eq!(
+            entry["candidateDisposition"],
+            "budget_exhausted_without_candidate"
+        );
+        assert_eq!(entry["result"]["holdPeakToPeakC"], json!(11.88));
+
+        let _ = fs::remove_file(samples_path);
     }
 
     #[test]
