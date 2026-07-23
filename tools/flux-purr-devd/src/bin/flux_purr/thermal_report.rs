@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{self, BufRead, BufReader},
     path::{Path, PathBuf},
@@ -147,6 +147,19 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         .get("generatedAt")
         .cloned()
         .unwrap_or_else(|| json!(current_unix_millis()));
+    let entry_targets_c = entries
+        .iter()
+        .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
+        .filter_map(|target| i16::try_from(target).ok())
+        .collect::<Vec<_>>();
+    let fallback_targets_c = i16_array_field(&legacy_bundle, "flagshipTargetsC")
+        .unwrap_or_else(|| entry_targets_c.clone());
+    let anchor_targets_c = i16_array_field(&legacy_bundle, "anchorTargetsC")
+        .unwrap_or_else(|| fallback_targets_c.clone());
+    let validation_targets_c =
+        i16_array_field(&legacy_bundle, "validationTargetsC").unwrap_or_default();
+    let tuning_targets_c =
+        i16_array_field(&legacy_bundle, "tuningTargetsC").unwrap_or(fallback_targets_c);
 
     let bundle = write_preliminary_review_bundle(
         &output_dir,
@@ -160,6 +173,9 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         &selected_mode,
         &resolved_bank,
         &detected_source_class,
+        &anchor_targets_c,
+        &validation_targets_c,
+        &tuning_targets_c,
         &source_preset,
         &provider,
     )?;
@@ -874,10 +890,17 @@ pub(super) fn write_preliminary_review_bundle(
     selected_mode: &str,
     resolved_bank: &str,
     detected_source_class: &str,
+    anchor_targets_c: &[i16],
+    validation_targets_c: &[i16],
+    tuning_targets_c: &[i16],
     source_preset: &str,
     provider: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let entries: Vec<Value> = entries.iter().map(sort_entry_samples).collect();
+    let entries: Vec<Value> = entries
+        .iter()
+        .map(sort_entry_samples)
+        .map(ensure_candidate_receipt_fields)
+        .collect();
     fs::create_dir_all(bundle_dir)?;
     let samples_path = bundle_dir.join("samples.ndjson");
     let mut sample_lines = String::new();
@@ -937,6 +960,120 @@ pub(super) fn write_preliminary_review_bundle(
         .iter()
         .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
         .collect::<Vec<_>>();
+    let candidate_dispositions = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry
+                    .get("target")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry
+                    .get("candidateDisposition")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    let candidate_ready_targets_c = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("candidateReady").and_then(Value::as_bool) == Some(true) {
+                entry.get("target").and_then(Value::as_i64)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let supplemental_tuning_targets_c = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning") {
+                entry.get("target").and_then(Value::as_i64)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let supplemental_candidate_ready_targets_c = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning")
+                && entry.get("candidateReady").and_then(Value::as_bool) == Some(true)
+            {
+                entry.get("target").and_then(Value::as_i64)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let mut validation_target_dispositions = entries
+        .iter()
+        .filter(|entry| entry.get("targetRole").and_then(Value::as_str) == Some("validation"))
+        .map(|entry| {
+            (
+                entry
+                    .get("target")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+                    .to_string(),
+                entry
+                    .get("candidateDisposition")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    for entry in entries.iter().filter(|entry| {
+        entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning")
+    }) {
+        let Some(target) = entry.get("target").and_then(Value::as_i64) else {
+            continue;
+        };
+        if entry.get("candidateReady").and_then(Value::as_bool) == Some(true) {
+            validation_target_dispositions.insert(
+                target.to_string(),
+                json!("validation_failed_then_candidate_ready"),
+            );
+        }
+    }
+    let validation_passed_targets_c = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("targetRole").and_then(Value::as_str) == Some("validation")
+                && entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_passed")
+            {
+                entry.get("target").and_then(Value::as_i64)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let validation_failed_raw_targets_c = entries
+        .iter()
+        .filter_map(|entry| {
+            if entry.get("targetRole").and_then(Value::as_str) == Some("validation")
+                && entry.get("budgetOutcome").and_then(Value::as_str) != Some("validation_passed")
+            {
+                entry.get("target").and_then(Value::as_i64)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    let validation_unresolved_targets_c = validation_failed_raw_targets_c
+        .difference(&supplemental_candidate_ready_targets_c)
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let validation_failed_targets_c = validation_unresolved_targets_c.clone();
+    let temperature_semantics = json!({
+        "primaryChartField": "humanTempC",
+        "gateField": "controlTempC",
+        "humanTempC": "Human-readable temperature used for report plots.",
+        "filteredTempC": "Firmware-filtered temperature when exposed by telemetry.",
+        "controlTempC": "Control-loop temperature used by thermal gates and scoring.",
+    });
 
     let bundle = json!({
         "kind": "thermal_self_test_preliminary_bundle",
@@ -948,7 +1085,20 @@ pub(super) fn write_preliminary_review_bundle(
         "resolvedBank": resolved_bank,
         "detectedSourceClass": detected_source_class,
         "tuningBudgetSeconds": tuning_budget_seconds,
+        "tuningWorkflow": "five_amp_batch",
         "flagshipTargetsC": flagship_targets_c,
+        "anchorTargetsC": anchor_targets_c,
+        "validationTargetsC": validation_targets_c,
+        "tuningTargetsC": tuning_targets_c,
+        "temperatureSemantics": temperature_semantics,
+        "candidateDispositions": candidate_dispositions,
+        "candidateReadyTargetsC": set_to_vec(candidate_ready_targets_c),
+        "validationTargetDispositions": validation_target_dispositions,
+        "validationPassedTargetsC": set_to_vec(validation_passed_targets_c),
+        "validationFailedTargetsC": set_to_vec(validation_failed_targets_c),
+        "validationUnresolvedTargetsC": set_to_vec(validation_unresolved_targets_c),
+        "supplementalTuningTargetsC": set_to_vec(supplemental_tuning_targets_c),
+        "supplementalCandidateReadyTargetsC": set_to_vec(supplemental_candidate_ready_targets_c),
         "sourcePreset": source_preset,
         "provider": provider,
         "sourceDeviceId": source_id,
@@ -978,7 +1128,7 @@ pub(super) fn write_preliminary_review_bundle(
     let html_data = json!({
         "generatedAt": bundle.get("generatedAt").cloned().unwrap_or(Value::Null),
         "title": format!("Flux Purr 100W / pps5a {target_label} preliminary review"),
-        "subtitle": format!("当前只收口 {target_label}。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示全部有效调参轮次、预算结果与 hold confirm。"),
+        "subtitle": format!("展示本次 full-batch 调优锚点与验证温度：{target_label}。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示全部有效调优/验证尝试、预算结果与 hold confirm。"),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "selectedMode": bundle.get("selectedMode").cloned().unwrap_or(Value::Null),
@@ -990,6 +1140,17 @@ pub(super) fn write_preliminary_review_bundle(
         "deviceId": bundle.get("deviceId").cloned().unwrap_or(Value::Null),
         "port": bundle.get("port").cloned().unwrap_or(Value::Null),
         "tuningBudgetSeconds": bundle.get("tuningBudgetSeconds").cloned().unwrap_or(Value::Null),
+        "anchorTargetsC": bundle.get("anchorTargetsC").cloned().unwrap_or(Value::Null),
+        "validationTargetsC": bundle.get("validationTargetsC").cloned().unwrap_or(Value::Null),
+        "tuningTargetsC": bundle.get("tuningTargetsC").cloned().unwrap_or(Value::Null),
+        "candidateDispositions": bundle.get("candidateDispositions").cloned().unwrap_or(Value::Null),
+        "candidateReadyTargetsC": bundle.get("candidateReadyTargetsC").cloned().unwrap_or(Value::Null),
+        "validationTargetDispositions": bundle.get("validationTargetDispositions").cloned().unwrap_or(Value::Null),
+        "validationPassedTargetsC": bundle.get("validationPassedTargetsC").cloned().unwrap_or(Value::Null),
+        "validationFailedTargetsC": bundle.get("validationFailedTargetsC").cloned().unwrap_or(Value::Null),
+        "validationUnresolvedTargetsC": bundle.get("validationUnresolvedTargetsC").cloned().unwrap_or(Value::Null),
+        "supplementalTuningTargetsC": bundle.get("supplementalTuningTargetsC").cloned().unwrap_or(Value::Null),
+        "supplementalCandidateReadyTargetsC": bundle.get("supplementalCandidateReadyTargetsC").cloned().unwrap_or(Value::Null),
         "runs": bundle.get("runs").cloned().unwrap_or_else(|| json!([])),
         "history": build_history(
             bundle
@@ -1003,17 +1164,87 @@ pub(super) fn write_preliminary_review_bundle(
     Ok(bundle)
 }
 
+fn set_to_vec(values: BTreeSet<i64>) -> Vec<i64> {
+    values.into_iter().collect()
+}
+
+fn i16_array_field(value: &Value, field: &str) -> Option<Vec<i16>> {
+    let targets = value
+        .get(field)?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.as_i64())
+        .filter_map(|target| i16::try_from(target).ok())
+        .collect::<Vec<_>>();
+    (!targets.is_empty()).then_some(targets)
+}
+
+fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
+    let target_role = entry
+        .get("targetRole")
+        .and_then(Value::as_str)
+        .unwrap_or("tuning")
+        .to_string();
+    let candidate_ready = entry
+        .get("candidateReady")
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| {
+            let has_point = entry
+                .get("point")
+                .or_else(|| entry.get("truthPoint"))
+                .is_some_and(|point| !point.is_null());
+            let valid_count = entry
+                .get("validTestCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            target_role != "validation" && has_point && valid_count > 0
+        });
+    entry["candidateReady"] = json!(candidate_ready);
+    if entry
+        .get("candidateDisposition")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        let budget_outcome = entry
+            .get("budgetOutcome")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let ok = entry.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        let disposition =
+            if target_role == "validation" && (ok || budget_outcome == "validation_passed") {
+                "validation_passed"
+            } else if target_role == "validation" && budget_outcome == "validation_failed" {
+                "validation_failed"
+            } else if target_role == "validation" && budget_outcome == "budget_exhausted" {
+                "validation_budget_exhausted"
+            } else if ok || budget_outcome == "completed" {
+                "acceptance_passed"
+            } else if candidate_ready {
+                "candidate_ready"
+            } else if budget_outcome == "environment_blocked" {
+                "environment_blocked"
+            } else if budget_outcome == "budget_exhausted" {
+                "budget_exhausted_without_candidate"
+            } else {
+                "not_available"
+            };
+        entry["candidateDisposition"] = json!(disposition);
+    }
+    entry
+}
+
 fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let data_json = serde_json::to_string(data)?;
-    Ok(REPORT_TEMPLATE
-        .replace(DATA_PLACEHOLDER, &data_json)
-        .replace("{{", "{")
-        .replace("}}", "}"))
+    let template = REPORT_TEMPLATE.replace("{{", "{").replace("}}", "}");
+    Ok(template.replace(DATA_PLACEHOLDER, &data_json))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_non_finite_json_numbers;
+    use super::{sanitize_non_finite_json_numbers, write_preliminary_review_bundle};
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{env, fs};
 
     #[test]
     fn sanitize_non_finite_json_numbers_replaces_bare_tokens_only() {
@@ -1023,5 +1254,184 @@ mod tests {
             sanitized,
             r#"{"ok":[null,null,null],"label":"Infinity","nested":{"x":null}}"#
         );
+    }
+
+    #[test]
+    fn preliminary_review_bundle_includes_validation_targets_as_runs() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let bundle_dir = env::temp_dir().join(format!("thermal-report-validation-test-{unique}"));
+        let bundle = write_preliminary_review_bundle(
+            &bundle_dir,
+            &json!({
+                "settings": {},
+                "points": [
+                    {"targetTempC": 60, "holdPowerPermille": 400},
+                    {"targetTempC": 100, "holdPowerPermille": 500}
+                ],
+            }),
+            vec![json!({
+                "target": 80,
+                "targetTempC": 80,
+                "targetRole": "validation",
+                "ok": true,
+                "candidateReady": false,
+                "candidateDisposition": "validation_passed",
+                "budgetOutcome": "validation_passed",
+                "validTestCount": 1,
+                "samples": [{
+                    "t": 0.0,
+                    "temp": 78.0,
+                    "temperature": {
+                        "humanTempC": 78.0,
+                        "filteredTempC": 77.9,
+                        "controlTempC": 77.8
+                    }
+                }],
+                "rounds": [{
+                    "round": 1,
+                    "attemptType": "validation",
+                    "candidateName": "final-profile",
+                    "selected": true,
+                    "evidenceValid": true,
+                    "samples": [{
+                        "t": 0.0,
+                        "temp": 78.0,
+                        "temperature": {
+                            "humanTempC": 78.0,
+                            "filteredTempC": 77.9,
+                            "controlTempC": 77.8
+                        }
+                    }]
+                }]
+            })],
+            "f293cc9c139e",
+            "mock-fp-lab-01",
+            "/dev/cu.usbmodem2111401",
+            1200,
+            json!(1234567890),
+            "100w",
+            "pps5a",
+            "pps5a",
+            &[60, 100],
+            &[80],
+            &[60, 100],
+            "21V / 5.0A",
+            "IsolaPurr",
+        )
+        .expect("bundle");
+
+        assert_eq!(bundle["validationTargetsC"], json!([80]));
+        assert_eq!(bundle["validationPassedTargetsC"], json!([80]));
+        assert_eq!(bundle["validationFailedTargetsC"], json!([]));
+        assert_eq!(
+            bundle["validationTargetDispositions"]["80"],
+            "validation_passed"
+        );
+        assert_eq!(bundle["runs"][0]["targetRole"], "validation");
+
+        let samples = fs::read_to_string(bundle_dir.join("samples.ndjson")).expect("samples");
+        assert!(samples.contains(r#""targetTempC":80"#));
+
+        let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
+        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
+        let data_end = html[data_start..]
+            .find(";\n  const COLORS")
+            .expect("embedded data terminator")
+            + data_start;
+        let embedded_data: serde_json::Value =
+            serde_json::from_str(&html[data_start..data_end]).expect("valid embedded report data");
+        assert_eq!(
+            embedded_data["runs"][0]["samples"][0]["temperature"]["humanTempC"],
+            json!(78.0)
+        );
+
+        let _ = fs::remove_dir_all(bundle_dir);
+    }
+
+    #[test]
+    fn preliminary_review_bundle_marks_validation_resolved_by_supplemental_candidate() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let bundle_dir = env::temp_dir().join(format!("thermal-report-supplemental-test-{unique}"));
+        let sample = json!({
+            "t": 0.0,
+            "temp": 120.0,
+            "phase": "hold",
+            "command": 60,
+            "output": 60,
+            "requestV": 12.0,
+            "sourcePowerW": 20.0,
+            "temperature": {
+                "humanTempC": 120.0,
+                "filteredTempC": 119.8,
+                "controlTempC": 119.7
+            }
+        });
+        let bundle = write_preliminary_review_bundle(
+            &bundle_dir,
+            &json!({
+                "settings": {},
+                "points": [
+                    {"targetTempC": 120, "holdPowerPermille": 500}
+                ],
+            }),
+            vec![
+                json!({
+                    "target": 120,
+                    "targetTempC": 120,
+                    "targetRole": "validation",
+                    "ok": false,
+                    "candidateReady": false,
+                    "candidateDisposition": "validation_failed",
+                    "budgetOutcome": "validation_failed",
+                    "validTestCount": 1,
+                    "samples": [sample.clone()],
+                    "rounds": []
+                }),
+                json!({
+                    "target": 120,
+                    "targetTempC": 120,
+                    "targetRole": "supplemental_tuning",
+                    "ok": false,
+                    "candidateReady": true,
+                    "candidateDisposition": "candidate_ready",
+                    "budgetOutcome": "budget_exhausted",
+                    "validTestCount": 2,
+                    "samples": [sample],
+                    "rounds": []
+                }),
+            ],
+            "f293cc9c139e",
+            "mock-fp-lab-01",
+            "/dev/cu.usbmodem2111401",
+            1200,
+            json!(1234567890),
+            "100w",
+            "pps5a",
+            "pps5a",
+            &[60, 100, 140],
+            &[120],
+            &[60, 100, 140],
+            "21V / 5.0A",
+            "IsolaPurr",
+        )
+        .expect("bundle");
+
+        assert_eq!(bundle["validationFailedTargetsC"], json!([]));
+        assert_eq!(bundle["validationUnresolvedTargetsC"], json!([]));
+        assert_eq!(bundle["supplementalTuningTargetsC"], json!([120]));
+        assert_eq!(bundle["supplementalCandidateReadyTargetsC"], json!([120]));
+        assert_eq!(bundle["candidateReadyTargetsC"], json!([120]));
+        assert_eq!(
+            bundle["validationTargetDispositions"]["120"],
+            "validation_failed_then_candidate_ready"
+        );
+
+        let _ = fs::remove_dir_all(bundle_dir);
     }
 }

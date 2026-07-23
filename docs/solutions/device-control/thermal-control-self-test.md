@@ -24,7 +24,7 @@ Flux Purr exposes:
 
 - a conservative firmware default controller
 - a RAM-only `thermalControlProfile.op=preview`
-- an EEPROM-backed `save` / `clear_saved` path
+- a persistent `save` / `clear_saved` path backed by EEPROM first and ESP flash fallback when EEPROM is unavailable
 - two persisted thermal banks: `pps3a` and `pps5a`
 - a user-facing profile mode: `auto | 65w | 100w`
 
@@ -33,16 +33,18 @@ Flux Purr exposes:
 The persisted profile is sparse by design:
 
 - preview may keep up to `10` RAM slots
-- EEPROM persists at most `6` populated anchors per bank
-- EEPROM v2 uses fixed `2 KiB` slots
-- read order is `2 KiB v2 -> 1 KiB v1 -> 512 B legacy`
+- persistent memory keeps at most `6` populated anchors per bank
+- EEPROM v2 uses fixed `1 KiB` slots
+- EEPROM read order is `1 KiB v2 -> 512 B legacy`; flash fallback uses the same record encoding and sequence selection
 - old single-profile records migrate into `pps3a` with mode `65w`
 
-The current tuning and acceptance convention is:
+The current 5A full-batch tuning and review convention is:
 
-- flagship tuning targets: `60 / 140 / 220°C`
-- sparse tuning anchors: `60 / 140 / 220°C`
-- supported explicit ladder: `60 / 100 / 140 / 180 / 220 / 250°C`
+- tuning anchors: `60 / 100 / 140 / 180 / 220°C`
+- validation targets: `80 / 120 / 160 / 240°C`
+- validation targets run after tuning with the final review candidate profile
+- a passing validation target records `validation_passed` and does not become a tuning anchor
+- supported explicit ladder: `60 / 80 / 100 / 120 / 140 / 160 / 180 / 200 / 220 / 240 / 250°C`
 - `300°C` remains outside first-version acceptance
 
 ## Artifact model
@@ -138,7 +140,7 @@ Current control-path truth is:
 
 Do not insert any additional multi-sample window, median, clamp, or rate limiter before the EMA path. Those stages distort heating and cooling rate readback and make the controller react to an artificial temperature trace.
 
-Offline retuning replays the existing `run.json` and `samples.ndjson` pair, writes `run.replayed.json` and `thermal-profile.replayed.candidate.json`, and may optionally apply the replayed candidate back as a RAM-only preview. When `--apply-preview` is used, the CLI must write replay artifacts first, send `thermalControlProfile.op=preview`, confirm `thermalControlProfilePreview=true` from status readback, and record the attempt in `run.replayed.json.applyPreview`. Replay apply must not save EEPROM.
+Offline retuning replays the existing `run.json` and `samples.ndjson` pair, writes `run.replayed.json` and `thermal-profile.replayed.candidate.json`, and may optionally apply the replayed candidate back as a RAM-only preview. When `--apply-preview` is used, the CLI must write replay artifacts first, send `thermalControlProfile.op=preview`, confirm `thermalControlProfilePreview=true` from status readback, and record the attempt in `run.replayed.json.applyPreview`. Replay apply must not save persistent memory.
 
 At PPS transition boundaries:
 
@@ -213,7 +215,7 @@ Ambient temperature is still useful, but only as an optional compensation term l
 
 Use sparse focused tuning during iteration. Reserve the full supported ladder for final acceptance.
 
-For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow per target:
+For the 5A full-batch tuning target set `60 / 100 / 140 / 180 / 220°C`, use a fixed budgeted workflow per tuning target:
 
 1. tuning scout
 2. target-local retune and one evidence-specific predicted point
@@ -223,10 +225,12 @@ For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow p
 
 Owner-facing execution boundary:
 
-- the supported flagship tuning execution surface is repo-local `flux-purr thermal flagship-tune`
+- the supported 5A full-batch tuning execution surface is repo-local `flux-purr thermal tune`
 - the supported legacy/compliant bundle rewrite surface is repo-local `flux-purr thermal report rerender-legacy`
 - historical Python thermal tuning entrypoints are retired from the supported execution surface
 - real HIL, formal tuning, formal report generation, and owner-facing delivery must use the Rust CLI surfaces only
+
+After all tuning targets have reached a terminal disposition, run validation targets `80 / 120 / 160 / 240°C` with the final review candidate profile. Validation targets must appear in the same target cards, tabs, temperature/control/source charts, round table, and `samples.ndjson` as tuning targets, but with `targetRole=validation`, `candidateReady=false`, and a validation-specific disposition. Validation failure is evidence that the final profile did not cover the interpolation point; it must not silently mutate the profile or rerun as a new tuning anchor unless the operator starts a new tuning scope.
 
 The `60 / 220°C` focused re-test uses the same workflow with only those two values passed as anchors, validation targets, and tuning targets. Its seed contains only the requested explicit points; it must not materialize an unrelated interpolation target. A short-scout p2p result cannot create a Hold candidate. Only a candidate with valid `100%` warmup output, the target-specific stable-window gate, and its confirmation margin may be promoted to a `60s` Hold confirm. If a confirm fails thermally while budget remains, keep that failed confirm as valid evidence, use it to seed the next predicted correction through the next scout/batch loop, and continue the same target until it either completes, exhausts the budget, or becomes environment-blocked.
 
@@ -243,13 +247,13 @@ The flagship execution whitelist is fixed:
 - run only the explicit target order, and keep the same target-local scout/retune/batch/confirm loop active while the per-target budget remains; do not add an independent hard cap on tuning rounds or hold confirms
 - keep `warmupPowerPermille=1000` and require actual warmup output to stay at `100%`
 
-The flagship sprint must not:
+The full-batch review must not:
 
-- add `80 / 100 / 120 / 160 / 180 / 240 / 250°C` runs
-- run the full ladder
+- add `80 / 120 / 160 / 240°C` as tuning anchors when they pass validation
+- run unrelated ladder points outside the declared tuning and validation target sets
 - collect default `0% / 25% / 50%` approach-only curves
 - flash firmware, reset the MCU, change selector, or switch to another serial path
-- save `pps5a` EEPROM or freeze a committed accepted baseline
+- save `pps5a` persistent profile or freeze a committed accepted baseline
 - restart from `60°C` after a later target fails; only the failed sub-step may be retried
 
 The target-specific start condition is fixed:
@@ -284,7 +288,7 @@ For candidate tuning:
 
 The saved-profile acceptance contract remains:
 
-- the flagship set `60 / 140 / 220°C` must pass in order before extending to interpolated non-flagship temperatures
+- the 5A full-batch tuning anchors `60 / 100 / 140 / 180 / 220°C` and validation targets `80 / 120 / 160 / 240°C` must pass before promoting the review candidate to a committed baseline
 - maximum overshoot `<= 3.0°C`
 - once hold sampling starts, continuous `60s` hold peak-to-peak `<= 3.0°C`
 - each stage stops on runtime reset, heater disarm, target mismatch, mode mismatch, source fault, or deadline expiry

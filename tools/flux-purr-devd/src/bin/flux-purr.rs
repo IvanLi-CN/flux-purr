@@ -310,9 +310,11 @@ enum ThermalCommand {
     },
     SelfTest(ThermalSelfTestArgs),
     #[command(
-        about = "Run the owner-facing flagship multi-round thermal tuning workflow and emit a canonical preliminary review bundle."
+        name = "tune",
+        visible_alias = "flagship-tune",
+        about = "Run the owner-facing 5A full-batch thermal tuning workflow and emit a canonical preliminary review bundle."
     )]
-    FlagshipTune(ThermalFlagshipTuneArgs),
+    Tune(ThermalFlagshipTuneArgs),
     Report {
         #[command(subcommand)]
         command: ThermalReportCommand,
@@ -553,19 +555,19 @@ struct ThermalFlagshipTuneArgs {
     runtime_rearm_attempts: u8,
     #[arg(
         long = "anchor-targets-c",
-        default_value = "60,140,220",
+        default_value = "60,100,140,180,220",
         help = "Comma-separated sparse anchor targets used to maintain the working candidate profile."
     )]
     anchor_targets_c: String,
     #[arg(
         long = "validation-targets-c",
-        default_value = "60,140,220",
+        default_value = "80,120,160,240",
         help = "Comma-separated validation target list recorded in the flagship summary."
     )]
     validation_targets_c: String,
     #[arg(
         long = "tune-targets-c",
-        default_value = "60,140,220",
+        default_value = "60,100,140,180,220",
         help = "Comma-separated flagship tuning execution order."
     )]
     tune_targets_c: String,
@@ -1993,7 +1995,7 @@ async fn handle_thermal_command(
         ThermalCommand::SelfTest(args) => {
             collect_thermal_self_test(client, default_devd, args).await
         }
-        ThermalCommand::FlagshipTune(args) => {
+        ThermalCommand::Tune(args) => {
             thermal_flagship::run_flagship_tuning(client, default_devd, args).await
         }
         ThermalCommand::Report { command } => match command {
@@ -6920,13 +6922,22 @@ fn verify_thermal_control_readback_field(
             format!("thermal control readback missing integer field: {field}"),
         )
     })?;
-    if actual_value != expected_value {
+    let tolerance = thermal_control_readback_field_tolerance(field);
+    if actual_value.abs_diff(expected_value) > tolerance {
         return Err(format!(
             "thermal control readback mismatch for {field}: expected {expected_value}, got {actual_value}"
         )
         .into());
     }
     Ok(())
+}
+
+fn thermal_control_readback_field_tolerance(field: &str) -> u64 {
+    if field != "targetTempC" && field.ends_with("CentiC") {
+        1
+    } else {
+        0
+    }
 }
 
 fn thermal_preview_activation_retryable_error_message(message: &str) -> bool {
@@ -10109,6 +10120,17 @@ mod tests {
         });
         assert!(verify_thermal_control_readback(&status, &expected, "preview").is_ok());
 
+        let mut rounded = actual.clone();
+        rounded.insert(
+            "brakeDistanceCentiC".to_string(),
+            json!(expected["brakeDistanceCentiC"].as_u64().unwrap() + 1),
+        );
+        let rounded_status = json!({
+            "thermalControlProfilePreview": true,
+            "thermalControl": Value::Object(rounded),
+        });
+        assert!(verify_thermal_control_readback(&rounded_status, &expected, "preview").is_ok());
+
         actual.insert("warmupPowerPermille".to_string(), json!(999));
         let mismatch = json!({
             "thermalControlProfilePreview": true,
@@ -12448,11 +12470,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_thermal_flagship_tune_command() {
+    fn parses_thermal_tune_command() {
         let cli = Cli::try_parse_from([
             "flux-purr",
             "thermal",
-            "flagship-tune",
+            "tune",
             "--device",
             "mock-fp-lab-01",
             "--source-id",
@@ -12468,10 +12490,10 @@ mod tests {
         .expect("parse thermal flagship tune");
 
         let Command::Thermal {
-            command: ThermalCommand::FlagshipTune(args),
+            command: ThermalCommand::Tune(args),
         } = cli.command
         else {
-            panic!("expected thermal flagship tune command");
+            panic!("expected thermal tune command");
         };
 
         assert_eq!(args.profile_mode, ThermalProfileMode::W100);
@@ -12479,6 +12501,37 @@ mod tests {
         assert_eq!(args.per_target_budget_seconds, 600);
         assert_eq!(args.max_tuning_rounds, Some(1));
         assert_eq!(args.runtime_rearm_attempts, 3);
+        assert_eq!(args.anchor_targets_c, "60,100,140,180,220");
+        assert_eq!(args.validation_targets_c, "80,120,160,240");
+        assert_eq!(args.tune_targets_c, "60,100,140,180,220");
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_thermal_flagship_tune_alias() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "flagship-tune",
+            "--device",
+            "mock-fp-lab-01",
+            "--source-id",
+            "iso-mock",
+            "--source-url",
+            "http://127.0.0.1:1",
+            "--dry-run",
+        ])
+        .expect("parse thermal flagship-tune alias");
+
+        let Command::Thermal {
+            command: ThermalCommand::Tune(args),
+        } = cli.command
+        else {
+            panic!("expected thermal tune command from alias");
+        };
+
+        assert_eq!(args.profile_mode, ThermalProfileMode::W100);
+        assert_eq!(args.source_id, "iso-mock");
         assert!(args.dry_run);
     }
 

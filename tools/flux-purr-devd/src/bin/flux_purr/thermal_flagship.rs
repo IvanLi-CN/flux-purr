@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -162,6 +163,69 @@ pub(super) async fn run_flagship_tuning(
             &current_profile,
         )?;
     }
+    for target_temp_c in validation_targets_c.iter().copied() {
+        let entry = validate_flagship_target(
+            client,
+            default_devd,
+            &args,
+            &target_selector,
+            &current_profile,
+            target_temp_c,
+            &output_root.join(format!("validation-{target_temp_c}")),
+        )
+        .await?;
+        write_json_pretty(
+            &output_root
+                .join(format!("validation-{target_temp_c}"))
+                .join("review-entry.json"),
+            &entry,
+        )?;
+        review_entries.push(entry);
+        write_json_pretty(
+            &output_root.join("review-entries.json"),
+            &Value::Array(review_entries.clone()),
+        )?;
+        if validation_entry_should_trigger_supplemental_tuning(
+            review_entries
+                .last()
+                .ok_or("missing validation review entry")?,
+        ) {
+            let supplemental_anchors_c = supplemental_anchor_targets(&anchors_c, target_temp_c);
+            let normalized_profile =
+                normalize_sparse_profile_value(&current_profile, &supplemental_anchors_c)?;
+            let (updated_profile, mut supplemental_entry) = tune_flagship_target(
+                client,
+                default_devd,
+                &args,
+                &target_selector,
+                normalized_profile,
+                target_temp_c,
+                &supplemental_anchors_c,
+                &output_root.join(format!("validation-{target_temp_c}-supplemental-tune")),
+            )
+            .await?;
+            supplemental_entry["targetRole"] = json!("supplemental_tuning");
+            supplemental_entry["supplementalForTargetC"] = json!(target_temp_c);
+            supplemental_entry["supplementalReason"] =
+                json!("validation_failed_with_valid_evidence");
+            current_profile = updated_profile;
+            write_json_pretty(
+                &output_root
+                    .join(format!("validation-{target_temp_c}-supplemental-tune"))
+                    .join("review-entry.json"),
+                &supplemental_entry,
+            )?;
+            write_json_pretty(
+                &output_root.join("review-candidate-profile.json"),
+                &current_profile,
+            )?;
+            review_entries.push(supplemental_entry);
+            write_json_pretty(
+                &output_root.join("review-entries.json"),
+                &Value::Array(review_entries.clone()),
+            )?;
+        }
+    }
 
     let bundle = super::thermal_report::write_preliminary_review_bundle(
         &bundle_dir,
@@ -175,12 +239,51 @@ pub(super) async fn run_flagship_tuning(
         args.profile_mode.as_str(),
         flagship_resolved_bank(args.profile_mode),
         flagship_detected_source_class(args.profile_mode),
+        &anchors_c,
+        &validation_targets_c,
+        &tune_targets_c,
         source_preset(args.profile_mode),
         PROVIDER_ISOLAPURR,
     )?;
 
+    let supplemental_candidate_ready_targets_c =
+        unique_i64(review_entries.iter().filter_map(|entry| {
+            (entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning")
+                && entry.get("candidateReady").and_then(Value::as_bool) == Some(true))
+            .then(|| entry.get("target").and_then(Value::as_i64))
+            .flatten()
+        }));
+    let supplemental_candidate_ready_targets_set = supplemental_candidate_ready_targets_c
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let validation_failed_targets_c = unique_i64(review_entries.iter().filter_map(|entry| {
+        if entry.get("targetRole").and_then(Value::as_str) == Some("validation")
+            && entry.get("budgetOutcome").and_then(Value::as_str) != Some("validation_passed")
+        {
+            entry
+                .get("target")
+                .and_then(Value::as_i64)
+                .filter(|target| !supplemental_candidate_ready_targets_set.contains(target))
+        } else {
+            None
+        }
+    }));
+    let summary_ok = review_entries.iter().all(|entry| {
+        let target = entry.get("target").and_then(Value::as_i64);
+        match entry.get("targetRole").and_then(Value::as_str) {
+            Some("validation") => {
+                entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_passed")
+                    || target.is_some_and(|target| {
+                        supplemental_candidate_ready_targets_set.contains(&target)
+                    })
+            }
+            _ => entry.get("candidateReady").and_then(Value::as_bool) == Some(true),
+        }
+    });
+
     Ok(json!({
-        "ok": review_entries.iter().all(|entry| entry.get("ok").and_then(Value::as_bool) == Some(true)),
+        "ok": summary_ok,
         "kind": "thermal_flagship_tuning",
         "mode": if args.dry_run { "dry_run" } else { "real_hil" },
         "profileMode": args.profile_mode.as_str(),
@@ -204,7 +307,60 @@ pub(super) async fn run_flagship_tuning(
                 entry.get("budgetOutcome").cloned().unwrap_or(Value::Null),
             )
         }).collect::<serde_json::Map<String, Value>>(),
+        "candidateDispositions": review_entries.iter().map(|entry| {
+            (
+                entry.get("target").and_then(Value::as_i64).unwrap_or_default().to_string(),
+                entry.get("candidateDisposition").cloned().unwrap_or(Value::Null),
+            )
+        }).collect::<serde_json::Map<String, Value>>(),
+        "candidateReadyTargetsC": unique_i64(review_entries.iter().filter_map(|entry| {
+            (entry.get("candidateReady").and_then(Value::as_bool) == Some(true))
+                .then(|| entry.get("target").and_then(Value::as_i64))
+                .flatten()
+        })),
+        "supplementalTuningTargetsC": unique_i64(review_entries.iter().filter_map(|entry| {
+            (entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning"))
+                .then(|| entry.get("target").and_then(Value::as_i64))
+                .flatten()
+        })),
+        "supplementalCandidateReadyTargetsC": supplemental_candidate_ready_targets_c,
+        "validationPassedTargetsC": unique_i64(review_entries.iter().filter_map(|entry| {
+            if entry.get("targetRole").and_then(Value::as_str) == Some("validation")
+                && entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_passed")
+            {
+                entry.get("target").and_then(Value::as_i64)
+            } else {
+                None
+            }
+        })),
+        "validationFailedTargetsC": validation_failed_targets_c,
     }))
+}
+
+fn unique_i64(values: impl IntoIterator<Item = i64>) -> Vec<i64> {
+    values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn validation_entry_should_trigger_supplemental_tuning(entry: &Value) -> bool {
+    entry.get("targetRole").and_then(Value::as_str) == Some("validation")
+        && entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_failed")
+        && entry
+            .get("validTestCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+}
+
+fn supplemental_anchor_targets(anchors_c: &[i16], target_temp_c: i16) -> Vec<i16> {
+    let mut targets = anchors_c.to_vec();
+    targets.push(target_temp_c);
+    targets.sort_unstable();
+    targets.dedup();
+    targets
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -238,7 +394,10 @@ async fn tune_flagship_target(
         let round_dir = workspace_dir.join(format!("round-{round_index}"));
         fs::create_dir_all(&round_dir)?;
         let round_seed = round_dir.join("current-sparse.json");
-        write_json_pretty(&round_seed, &current_profile)?;
+        write_json_pretty(
+            &round_seed,
+            &target_local_profile_window(&current_profile, target_temp_c)?,
+        )?;
 
         let mut scout_retry_count = 0u8;
         let scout = loop {
@@ -427,7 +586,8 @@ async fn tune_flagship_target(
             target_temp_c,
             anchors_c,
         )?;
-        let candidate_paths = write_candidate_variants(&round_dir.join("candidates"), &variants)?;
+        let candidate_paths =
+            write_candidate_variants(&round_dir.join("candidates"), &variants, target_temp_c)?;
 
         let mut batch_retry_count = 0u8;
         let batch_outcome = loop {
@@ -644,6 +804,184 @@ async fn tune_flagship_target(
     Ok((current_profile, entry))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn validate_flagship_target(
+    client: &Client,
+    default_devd: &str,
+    args: &ThermalFlagshipTuneArgs,
+    target_selector: &TargetSelector,
+    current_profile: &Value,
+    target_temp_c: i16,
+    workspace_dir: &Path,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    fs::create_dir_all(workspace_dir)?;
+    let budget_started_at = Instant::now();
+    let cooldown_temp_c = cooldown_threshold(target_temp_c);
+    let seed_profile_file = workspace_dir.join("final-sparse-profile.json");
+    let validation_profile = validation_preview_profile_for_target(current_profile, target_temp_c)?;
+    write_json_pretty(&seed_profile_file, &validation_profile)?;
+
+    let mut rounds = Vec::<Value>::new();
+    let mut validation_retry_count = 0u8;
+
+    let (budget_outcome, last_summary) = loop {
+        if budget_exhausted(budget_started_at, args.per_target_budget_seconds) {
+            break (
+                "budget_exhausted".to_string(),
+                synthetic_failure_summary(target_temp_c, "target_budget_exhausted"),
+            );
+        }
+        let attempt_number = rounds.len() + 1;
+        let validation = match run_budgeted_self_test(
+            client,
+            default_devd,
+            args,
+            target_selector,
+            SelfTestRequest {
+                seed_profile_file: Some(seed_profile_file.clone()),
+                candidate_profile_files: Vec::new(),
+                target_temp_c,
+                hold_seconds: args.confirm_hold_seconds,
+                output_dir: workspace_dir.join(format!("attempt-{attempt_number}")),
+                evaluation_mode: ThermalSelfTestEvaluationMode::HoldConfirm,
+                cooldown_temp_c,
+                budget_started_at,
+            },
+        )
+        .await
+        {
+            Ok(run) => run,
+            Err(error) if error.to_string().contains("target_budget_exhausted") => {
+                break (
+                    "budget_exhausted".to_string(),
+                    synthetic_failure_summary(target_temp_c, "target_budget_exhausted"),
+                );
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if validation_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                    && flagship_retryable_environment_error_message(&message)
+                {
+                    validation_retry_count += 1;
+                    continue;
+                }
+                break (
+                    "environment_blocked".to_string(),
+                    synthetic_failure_summary(
+                        target_temp_c,
+                        &format!("validation_execution_failed: {message}"),
+                    ),
+                );
+            }
+        };
+
+        let source_ok = ensure_expected_source(&validation.summary, args.profile_mode).is_ok();
+        let run_summary = validation.summary.clone();
+        rounds.push(round_record_from_summary(
+            &validation.summary,
+            target_temp_c,
+            rounds.len() + 1,
+            "validation / final profile",
+            effective_profile_point(&validation_profile, target_temp_c),
+            "validation",
+            None,
+            Some("final-profile"),
+            true,
+            None,
+            budget_elapsed_seconds(budget_started_at),
+        ));
+
+        if !source_ok {
+            break ("environment_blocked".to_string(), run_summary);
+        }
+        if run_is_disqualified(&validation.summary, target_temp_c) {
+            if validation_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
+                && flagship_retryable_environment_summary(&validation.summary, target_temp_c)
+            {
+                validation_retry_count += 1;
+                continue;
+            }
+            break ("environment_blocked".to_string(), run_summary);
+        }
+        break (
+            if validation
+                .summary
+                .pointer("/validation/passed")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                "validation_passed".to_string()
+            } else {
+                "validation_failed".to_string()
+            },
+            run_summary,
+        );
+    };
+
+    Ok(validation_target_entry(
+        target_temp_c,
+        &budget_outcome,
+        budget_elapsed_seconds(budget_started_at),
+        rounds,
+        &last_summary,
+        &validation_profile,
+        args.confirm_hold_seconds,
+    ))
+}
+
+fn validation_preview_profile_for_target(
+    profile_value: &Value,
+    target_temp_c: i16,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    target_local_profile_window(profile_value, target_temp_c)
+}
+
+fn target_local_profile_window(
+    profile_value: &Value,
+    target_temp_c: i16,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut profile = thermal_candidate_profile_from_value(profile_value.clone());
+    profile.points.sort_by_key(|point| point.target_temp_c);
+    let target_point = thermal_candidate_point(&profile, target_temp_c)
+        .or_else(|| thermal_interpolated_candidate_point(&profile, target_temp_c))
+        .or_else(|| {
+            thermal_candidate_point_from_heater_parameters(&thermal_heater_parameters_value(
+                target_temp_c,
+                Some(profile_value),
+                "preview",
+            ))
+            .ok()
+        })
+        .ok_or_else(|| format!("target profile window could not materialize {target_temp_c}C"))?;
+    let mut window = Vec::<ThermalCandidatePoint>::new();
+    if let Some(lower) = profile
+        .points
+        .iter()
+        .copied()
+        .rev()
+        .find(|point| point.target_temp_c < target_temp_c)
+    {
+        window.push(lower);
+    }
+    window.push(target_point);
+    if let Some(upper) = profile
+        .points
+        .iter()
+        .copied()
+        .find(|point| point.target_temp_c > target_temp_c)
+    {
+        window.push(upper);
+    }
+    window.sort_by_key(|point| point.target_temp_c);
+    window.dedup_by_key(|point| point.target_temp_c);
+    Ok(thermal_candidate_profile_to_value(
+        &ThermalCandidateProfile {
+            settings: profile.settings,
+            points: window,
+        },
+    ))
+}
+
 #[derive(Debug, Clone)]
 struct SelfTestRequest {
     seed_profile_file: Option<PathBuf>,
@@ -732,7 +1070,10 @@ async fn run_hold_confirm_for_profile(
     budget_started_at: Instant,
 ) -> Result<SelfTestRun, Box<dyn std::error::Error + Send + Sync>> {
     let hold_seed = workspace_dir.join(format!("hold-confirm-{round_index}-seed.json"));
-    write_json_pretty(&hold_seed, current_profile)?;
+    write_json_pretty(
+        &hold_seed,
+        &target_local_profile_window(current_profile, target_temp_c)?,
+    )?;
     run_budgeted_self_test(
         client,
         default_devd,
@@ -928,12 +1269,13 @@ fn apply_flagship_gate_nudge(
 fn write_candidate_variants(
     candidates_dir: &Path,
     variants: &[(String, Value)],
+    target_temp_c: i16,
 ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
     fs::create_dir_all(candidates_dir)?;
     let mut paths = Vec::new();
     for (name, profile) in variants {
         let path = candidates_dir.join(format!("{}.json", slug(name)));
-        write_json_pretty(&path, profile)?;
+        write_json_pretty(&path, &target_local_profile_window(profile, target_temp_c)?)?;
         paths.push(path);
     }
     Ok(paths)
@@ -1204,19 +1546,30 @@ fn review_target_entry(
     confirm_hold_seconds: u64,
 ) -> Value {
     let final_stage = stage_for_target(final_summary, target_temp_c).ok();
-    let stage = final_stage
-        .clone()
-        .unwrap_or_else(|| fallback_round_result(&rounds).unwrap_or(Value::Null));
-    let samples = if final_stage.is_some() {
+    let final_samples = if final_stage.is_some() {
         samples_for_target(final_summary, target_temp_c)
     } else {
-        fallback_round_samples(&rounds)
-            .unwrap_or_else(|| samples_for_target(final_summary, target_temp_c))
+        Vec::new()
     };
-    let truth_point = sanitize_point(
-        explicit_point_value(accepted_profile, target_temp_c).as_ref(),
-        Some(target_temp_c),
-    );
+    let fallback_evidence = if final_stage.is_none() || final_samples.is_empty() {
+        fallback_round_evidence(&rounds)
+    } else {
+        None
+    };
+    let stage = fallback_evidence
+        .as_ref()
+        .map(|(result, _)| result.clone())
+        .or_else(|| final_stage.clone())
+        .or_else(|| fallback_round_result(&rounds))
+        .unwrap_or(Value::Null);
+    let samples = if !final_samples.is_empty() {
+        final_samples
+    } else if let Some((_, samples)) = fallback_evidence {
+        samples
+    } else {
+        fallback_round_samples(&rounds).unwrap_or_default()
+    };
+    let truth_point = effective_profile_point(accepted_profile, target_temp_c);
     let effective_point = truth_point
         .clone()
         .or_else(|| effective_point_from_samples(&samples, target_temp_c));
@@ -1230,7 +1583,13 @@ fn review_target_entry(
         "runId": run_id,
         "target": target_temp_c,
         "targetTempC": target_temp_c,
+        "targetRole": "tuning",
         "ok": budget_outcome == "completed",
+        "candidateReady": effective_point.is_some() && rounds.iter().any(|item| item.get("evidenceValid").and_then(Value::as_bool) != Some(false)),
+        "candidateDisposition": candidate_disposition_for_target(
+            budget_outcome,
+            effective_point.is_some() && rounds.iter().any(|item| item.get("evidenceValid").and_then(Value::as_bool) != Some(false)),
+        ),
         "saved": false,
         "evidence": "preliminary_review",
         "budgetOutcome": budget_outcome,
@@ -1256,30 +1615,120 @@ fn review_target_entry(
     })
 }
 
+fn validation_target_entry(
+    target_temp_c: i16,
+    budget_outcome: &str,
+    time_spent_seconds: u64,
+    rounds: Vec<Value>,
+    final_summary: &Value,
+    accepted_profile: &Value,
+    confirm_hold_seconds: u64,
+) -> Value {
+    let review_outcome = if budget_outcome == "validation_passed" {
+        "completed"
+    } else {
+        "not_converged"
+    };
+    let mut entry = review_target_entry(
+        target_temp_c,
+        review_outcome,
+        time_spent_seconds,
+        rounds,
+        final_summary,
+        accepted_profile,
+        confirm_hold_seconds,
+    );
+    entry["targetRole"] = json!("validation");
+    entry["ok"] = json!(budget_outcome == "validation_passed");
+    entry["candidateReady"] = json!(false);
+    entry["candidateDisposition"] = json!(validation_disposition_for_target(budget_outcome));
+    entry["budgetOutcome"] = json!(budget_outcome);
+    entry["pointSource"] = json!("validation_final_profile");
+    entry
+}
+
+fn candidate_disposition_for_target(budget_outcome: &str, candidate_ready: bool) -> &'static str {
+    if budget_outcome == "completed" {
+        "acceptance_passed"
+    } else if candidate_ready {
+        "candidate_ready"
+    } else if budget_outcome == "environment_blocked" {
+        "environment_blocked"
+    } else if budget_outcome == "budget_exhausted" {
+        "budget_exhausted_without_candidate"
+    } else {
+        "not_available"
+    }
+}
+
+fn validation_disposition_for_target(budget_outcome: &str) -> &'static str {
+    match budget_outcome {
+        "validation_passed" => "validation_passed",
+        "validation_failed" => "validation_failed",
+        "environment_blocked" => "environment_blocked",
+        "budget_exhausted" => "validation_budget_exhausted",
+        _ => "validation_not_available",
+    }
+}
+
 fn fallback_round_result(rounds: &[Value]) -> Option<Value> {
-    rounds.iter().rev().find_map(|round| {
-        let result = round.get("result")?.clone();
-        if result.is_null() {
-            return None;
-        }
-        if result.get("stopReason").is_none()
+    fallback_round_evidence(rounds)
+        .map(|(result, _)| result)
+        .or_else(|| rounds.iter().rev().find_map(reportable_round_result))
+}
+
+fn reportable_round_result(round: &Value) -> Option<Value> {
+    if round.get("evidenceValid").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
+    let result = round.get("result")?.clone();
+    if result_is_empty(&result) {
+        return None;
+    }
+    Some(result)
+}
+
+fn result_is_empty(result: &Value) -> bool {
+    result.is_null()
+        || (result.get("stopReason").is_none()
             && result.get("analysis").is_none()
-            && result.get("fullSpeedToStable").is_none()
-        {
-            return None;
-        }
-        Some(result)
-    })
+            && result.get("fullSpeedToStable").is_none())
+}
+
+fn fallback_round_evidence(rounds: &[Value]) -> Option<(Value, Vec<Value>)> {
+    rounds
+        .iter()
+        .rev()
+        .filter(|round| round.get("selected").and_then(Value::as_bool) == Some(true))
+        .find_map(reportable_round_evidence)
+        .or_else(|| rounds.iter().rev().find_map(reportable_round_evidence))
+}
+
+fn reportable_round_evidence(round: &Value) -> Option<(Value, Vec<Value>)> {
+    let result = reportable_round_result(round)?;
+    let samples = round
+        .get("samples")
+        .and_then(Value::as_array)
+        .filter(|samples| !samples.is_empty())
+        .cloned()?;
+    Some((result, samples))
 }
 
 fn fallback_round_samples(rounds: &[Value]) -> Option<Vec<Value>> {
-    rounds.iter().rev().find_map(|round| {
-        round
-            .get("samples")
-            .and_then(Value::as_array)
-            .filter(|samples| !samples.is_empty())
-            .cloned()
-    })
+    fallback_round_evidence(rounds)
+        .map(|(_, samples)| samples)
+        .or_else(|| {
+            rounds.iter().rev().find_map(|round| {
+                if round.get("evidenceValid").and_then(Value::as_bool) == Some(false) {
+                    return None;
+                }
+                round
+                    .get("samples")
+                    .and_then(Value::as_array)
+                    .filter(|samples| !samples.is_empty())
+                    .cloned()
+            })
+        })
 }
 
 fn hold_check(
@@ -1868,6 +2317,14 @@ fn explicit_point_value(profile: &Value, target_temp_c: i16) -> Option<Value> {
             point.get("targetTempC").and_then(Value::as_i64) == Some(i64::from(target_temp_c))
         })
         .cloned()
+}
+
+fn effective_profile_point(profile: &Value, target_temp_c: i16) -> Option<Value> {
+    let explicit = explicit_point_value(profile, target_temp_c);
+    sanitize_point(explicit.as_ref(), Some(target_temp_c)).or_else(|| {
+        let interpolated = thermal_heater_parameters_value(target_temp_c, Some(profile), "preview");
+        sanitize_point(Some(&interpolated), Some(target_temp_c))
+    })
 }
 
 fn effective_point_from_samples(samples: &[Value], target_temp_c: i16) -> Option<Value> {
@@ -2482,6 +2939,161 @@ mod tests {
 
         let _ = fs::remove_file(samples_path);
         let _ = fs::remove_file(summary_path);
+    }
+
+    #[test]
+    fn validation_target_entry_passes_without_promoting_candidate() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(800, "warmup", 182.0, 100),
+            sample(1200, "approach", 218.7, 100),
+            sample(2200, "hold", 219.7, 96),
+            sample(3200, "hold", 220.1, 95),
+            sample(4200, "hold", 220.4, 95),
+        ]);
+        let summary = json!({
+            "runId": "validation-run",
+            "files": {
+                "samplesPath": samples_path,
+                "summaryPath": "/tmp/validation-run.json",
+            },
+            "parameters": {
+                "evaluationMode": "hold-confirm",
+            },
+            "validation": {
+                "failures": [],
+                "passed": true,
+            },
+            "applied": [{
+                "targetTempC": 220,
+                "stopReason": "completed",
+                "maxOvershootC": 1.1,
+                "holdPeakToPeakC": 1.5,
+                "analysis": {
+                    "holdMedianOutputPermille": 780,
+                    "holdP90OutputPermille": 820,
+                },
+                "guard": {
+                    "firstHoldAtMs": 2200,
+                },
+                "fullSpeedToStable": {
+                    "limitMs": 5000,
+                    "settleTimeMs": 3200,
+                    "warmupExitedAtMs": 1000,
+                },
+            }],
+        });
+        let round = round_record_from_summary(
+            &summary,
+            220,
+            1,
+            "validation / final profile",
+            Some(json!({
+                "targetTempC": 220,
+                "holdPowerPermille": 780,
+            })),
+            "validation",
+            None,
+            Some("final-profile"),
+            true,
+            None,
+            64,
+        );
+        let accepted_profile = json!({
+            "settings": {},
+            "points": [{
+                "targetTempC": 220,
+                "holdPowerPermille": 780,
+                "holdReheatPowerPermille": 820,
+            }],
+        });
+
+        let entry = validation_target_entry(
+            220,
+            "validation_passed",
+            64,
+            vec![round],
+            &summary,
+            &accepted_profile,
+            60,
+        );
+
+        assert_eq!(entry["targetRole"], "validation");
+        assert_eq!(entry["budgetOutcome"], "validation_passed");
+        assert_eq!(entry["ok"], true);
+        assert_eq!(entry["candidateReady"], false);
+        assert_eq!(entry["candidateDisposition"], "validation_passed");
+        assert_eq!(entry["pointSource"], "validation_final_profile");
+        assert_eq!(entry["samples"].as_array().map(Vec::len), Some(6));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
+    fn validation_preview_profile_materializes_out_of_anchor_target_without_mutating_anchors() {
+        let accepted_profile = json!({
+            "settings": {},
+            "points": [
+                {
+                    "targetTempC": 60,
+                    "warmupPowerPermille": 1000,
+                    "approachPowerPermille": 800,
+                    "approachFloorPowerPermille": 650,
+                    "holdPowerPermille": 135,
+                    "holdReheatPowerPermille": 170
+                },
+                {
+                    "targetTempC": 220,
+                    "warmupPowerPermille": 1000,
+                    "approachPowerPermille": 1000,
+                    "approachFloorPowerPermille": 1000,
+                    "holdPowerPermille": 1000,
+                    "holdReheatPowerPermille": 1000
+                }
+            ],
+        });
+
+        let validation_profile =
+            validation_preview_profile_for_target(&accepted_profile, 240).expect("240C profile");
+
+        let materialized_count = validation_profile["points"]
+            .as_array()
+            .map(|points| points.iter().filter(|point| !point.is_null()).count());
+
+        assert_eq!(accepted_profile["points"].as_array().map(Vec::len), Some(2));
+        assert!(explicit_point_value(&validation_profile, 240).is_some());
+        assert_eq!(materialized_count, Some(2));
+    }
+
+    #[test]
+    fn validation_failure_with_valid_evidence_triggers_supplemental_tuning() {
+        let failed = json!({
+            "targetRole": "validation",
+            "budgetOutcome": "validation_failed",
+            "validTestCount": 1,
+        });
+        let passed = json!({
+            "targetRole": "validation",
+            "budgetOutcome": "validation_passed",
+            "validTestCount": 1,
+        });
+        let invalid = json!({
+            "targetRole": "validation",
+            "budgetOutcome": "environment_blocked",
+            "validTestCount": 0,
+        });
+
+        assert!(validation_entry_should_trigger_supplemental_tuning(&failed));
+        assert!(!validation_entry_should_trigger_supplemental_tuning(
+            &passed
+        ));
+        assert!(!validation_entry_should_trigger_supplemental_tuning(
+            &invalid
+        ));
+        assert_eq!(
+            supplemental_anchor_targets(&[60, 100, 140], 120),
+            vec![60, 100, 120, 140]
+        );
     }
 
     #[test]

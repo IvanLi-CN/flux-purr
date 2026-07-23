@@ -16,6 +16,12 @@ use embedded_hal::pwm::SetDutyCycle;
 #[cfg(target_arch = "xtensa")]
 use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
+use embedded_storage::{ReadStorage, Storage};
+#[cfg(target_arch = "xtensa")]
+use esp_bootloader_esp_idf::partitions::{
+    DataPartitionSubType, PARTITION_TABLE_MAX_LEN, PartitionType, read_partition_table,
+};
+#[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
@@ -37,6 +43,8 @@ use esp_hal::{
     timer::timg::TimerGroup,
     usb_serial_jtag::UsbSerialJtag,
 };
+#[cfg(target_arch = "xtensa")]
+use esp_storage::FlashStorage;
 #[cfg(test)]
 use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 #[cfg(test)]
@@ -67,6 +75,7 @@ use flux_purr_firmware::control_plane::{
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
     CalibrationJobCommandWire, CalibrationJobOpWire, HeaterCurveConfigCommand, HeaterCurveConfigOp,
+    HeaterCurveEepromProbeWire,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
@@ -87,6 +96,13 @@ use flux_purr_firmware::memory::{
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::memory::{
+    EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
+    M24C64_I2C_ADDRESS, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
+    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, decode_memory_record, encode_memory_record,
+    select_latest_memory_record,
+};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
     HeaterCurveConfig, MemoryConfig,
@@ -99,14 +115,6 @@ use flux_purr_firmware::memory::{
     THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, ThermalControlProfileConfig,
     ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, ThermalProfileBank,
     ThermalProfileMode, heater_resistance_ohms_from_curve,
-};
-#[cfg(target_arch = "xtensa")]
-use flux_purr_firmware::memory::{
-    LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    M24C64_PAGE_SIZE, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
-    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
-    PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
-    encode_memory_record, select_latest_memory_record,
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
@@ -286,6 +294,10 @@ const HEATER_APPROACH_DUTY_PERCENT: u8 = 32;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PROFILE_R20_OHMS: f32 = 3.2;
 #[cfg(any(target_arch = "xtensa", test))]
+const HEATER_CURVE_COLD_ANCHOR_TEMP_C: f32 = 0.0;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_CURVE_R20_ANCHOR_TEMP_C: f32 = 20.0;
+#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PROFILE_TEMP_COEFFICIENT_PER_C: f32 = 0.00393;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_CURRENT_LIMIT_FALLBACK_REQUEST: ch224q::VoltageRequest = ch224q::VoltageRequest::V9;
@@ -356,6 +368,10 @@ const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
+#[cfg(any(target_arch = "xtensa", test))]
+const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
+#[cfg(target_arch = "xtensa")]
+const FLASH_MEMORY_REGION_SIZE: u32 = FlashStorage::SECTOR_SIZE;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -2956,7 +2972,9 @@ impl HeaterCurveAutoBin {
             return None;
         }
         let temp_c = self.temp_sum_c / f32::from(self.samples);
-        let resistance_ohms = self.resistance_sum_ohms / f32::from(self.samples);
+        let measured_resistance_ohms = self.resistance_sum_ohms / f32::from(self.samples);
+        let resistance_ohms =
+            measured_resistance_ohms.max(default_estimated_heater_resistance_ohms(temp_c));
         let temp_centi_c = round_to_i16(temp_c * 100.0);
         let resistance_milliohms = round_to_u16_nonnegative(resistance_ohms * 1000.0);
         Some((temp_centi_c, resistance_milliohms))
@@ -3212,8 +3230,15 @@ impl ManualPpsState {
 fn manual_pps_error_code(
     error: ManualPpsError,
 ) -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
+    error_code_string(error.code())
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn error_code_string(
+    value: &str,
+) -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
     let mut out = heapless::String::new();
-    let _ = out.push_str(error.code());
+    let _ = out.push_str(value);
     out
 }
 
@@ -3525,8 +3550,263 @@ fn read_ch224q_status(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn load_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryRecord> {
-    let mut eeprom = M24c64::new(i2c);
+fn eeprom_address_candidates() -> core::ops::RangeInclusive<u8> {
+    M24C64_I2C_ADDRESS..=M24C64_I2C_ADDRESS.saturating_add(7)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn memory_commit_error_from_eeprom<I2cError>(error: EepromError<I2cError>) -> MemoryCommitError
+where
+    I2cError: embedded_hal::i2c::Error,
+{
+    match error {
+        EepromError::OutOfRange
+        | EepromError::PageWriteTooLong
+        | EepromError::PageBoundaryCrossed => MemoryCommitError::WriteFailed,
+        EepromError::I2c(error) => match error.kind() {
+            embedded_hal::i2c::ErrorKind::NoAcknowledge(source) => match source {
+                embedded_hal::i2c::NoAcknowledgeSource::Address => {
+                    MemoryCommitError::WriteAddressNoAck
+                }
+                embedded_hal::i2c::NoAcknowledgeSource::Data => MemoryCommitError::WriteDataNoAck,
+                _ => MemoryCommitError::WriteUnknownNoAck,
+            },
+            embedded_hal::i2c::ErrorKind::Bus => MemoryCommitError::WriteBus,
+            embedded_hal::i2c::ErrorKind::ArbitrationLoss => MemoryCommitError::WriteArbitration,
+            _ => MemoryCommitError::WriteOther,
+        },
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EepromProbe {
+    address: Option<u8>,
+    current_read_present: bool,
+    random_read_present: bool,
+    bus_current_read_addresses: [Option<u8>; 16],
+    last_error: MemoryCommitError,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn push_i2c_scan_address(addresses: &mut [Option<u8>; 16], address: u8) {
+    if let Some(slot) = addresses.iter_mut().find(|slot| slot.is_none()) {
+        *slot = Some(address);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn scan_i2c_current_read_addresses(i2c: &mut I2c<'_, esp_hal::Blocking>) -> [Option<u8>; 16] {
+    let mut addresses = [None; 16];
+    for address in [0x22, 0x23, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57] {
+        let mut byte = [0u8; 1];
+        if embedded_hal::i2c::I2c::read(i2c, address, &mut byte).is_ok() {
+            push_i2c_scan_address(&mut addresses, address);
+        }
+    }
+    addresses
+}
+
+#[cfg(target_arch = "xtensa")]
+fn probe_eeprom_with_scan(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    bus_current_read_addresses: [Option<u8>; 16],
+) -> EepromProbe {
+    let mut last_error = MemoryCommitError::WriteAddressNoAck;
+    for address in eeprom_address_candidates() {
+        let mut eeprom = M24c64::with_address(&mut *i2c, address);
+        let mut scratch = [0u8; 1];
+        match eeprom.read_bytes(0, &mut scratch) {
+            Ok(()) => {
+                let current_read_present = eeprom.read_current_byte().is_ok();
+                info!(
+                    "eeprom probe ok addr=0x{=u8:02x} current_read={=bool}",
+                    address, current_read_present,
+                );
+                return EepromProbe {
+                    address: Some(address),
+                    current_read_present,
+                    random_read_present: true,
+                    bus_current_read_addresses,
+                    last_error,
+                };
+            }
+            Err(error) => {
+                last_error = memory_commit_error_from_eeprom(error);
+                info!("eeprom probe miss addr=0x{=u8:02x}", address);
+            }
+        }
+    }
+    info!("eeprom probe failed reason={=str}", last_error.code());
+    EepromProbe {
+        address: None,
+        current_read_present: false,
+        random_read_present: false,
+        bus_current_read_addresses,
+        last_error,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn probe_eeprom(i2c: &mut I2c<'_, esp_hal::Blocking>) -> EepromProbe {
+    let bus_current_read_addresses = scan_i2c_current_read_addresses(i2c);
+    probe_eeprom_with_scan(i2c, bus_current_read_addresses)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
+    probe_eeprom(i2c).address
+}
+
+#[cfg(target_arch = "xtensa")]
+fn heater_curve_eeprom_probe_wire(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+) -> HeaterCurveEepromProbeWire {
+    let probe = probe_eeprom(i2c);
+    HeaterCurveEepromProbeWire {
+        present: probe.address.is_some(),
+        current_read_present: probe.current_read_present,
+        random_read_present: probe.random_read_present,
+        address: probe.address,
+        bus_current_read_addresses: probe.bus_current_read_addresses,
+        last_error: probe
+            .address
+            .is_none()
+            .then(|| error_code_string(probe.last_error.code())),
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn select_latest_optional_memory_record(
+    a: Option<MemoryRecord>,
+    b: Option<MemoryRecord>,
+) -> Option<MemoryRecord> {
+    select_latest_memory_record(
+        a.ok_or(flux_purr_firmware::memory::MemoryDecodeError::BadMagic),
+        b.ok_or(flux_purr_firmware::memory::MemoryDecodeError::BadMagic),
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
+fn flash_memory_base_offset(partition_len: u32) -> Option<u32> {
+    if partition_len >= FLASH_MEMORY_REGION_SIZE {
+        Some(partition_len - FLASH_MEMORY_REGION_SIZE)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn load_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
+    let mut table_storage = [0u8; PARTITION_TABLE_MAX_LEN];
+    let Ok(table) = read_partition_table(flash, &mut table_storage) else {
+        info!("flash memory restore skipped: partition table unavailable");
+        return None;
+    };
+
+    for index in 0..table.len() {
+        let Ok(entry) = table.get_partition(index) else {
+            continue;
+        };
+        if entry.is_read_only()
+            || entry.partition_type() != PartitionType::Data(DataPartitionSubType::Nvs)
+        {
+            continue;
+        }
+        let Some(region_base) = flash_memory_base_offset(entry.len()) else {
+            continue;
+        };
+        let mut region = entry.as_embedded_storage(flash);
+        let mut slot_a = [0u8; MEMORY_SLOT_SIZE];
+        let mut slot_b = [0u8; MEMORY_SLOT_SIZE];
+        let slot_a_read = region
+            .read(region_base + u32::from(MEMORY_SLOT_A_OFFSET), &mut slot_a)
+            .map(|_| decode_memory_record(&slot_a))
+            .ok()
+            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+        let slot_b_read = region
+            .read(region_base + u32::from(MEMORY_SLOT_B_OFFSET), &mut slot_b)
+            .map(|_| decode_memory_record(&slot_b))
+            .ok()
+            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+        let selected = select_latest_memory_record(slot_a_read, slot_b_read);
+        if let Some(record) = &selected {
+            info!(
+                "flash memory restore ok label={=str} seq={=u32}",
+                entry.label_as_str(),
+                record.sequence,
+            );
+        }
+        return selected;
+    }
+
+    info!("flash memory restore skipped: no writable nvs partition");
+    None
+}
+
+#[cfg(target_arch = "xtensa")]
+fn write_flash_memory_record(
+    flash: &mut FlashStorage,
+    record: &MemoryRecord,
+) -> Result<(), MemoryCommitError> {
+    let mut bytes = [0xffu8; MEMORY_SLOT_SIZE];
+    let Ok(record_len) = encode_memory_record(record, &mut bytes) else {
+        info!("flash memory commit encode failed");
+        return Err(MemoryCommitError::EncodeFailed);
+    };
+    let mut table_storage = [0u8; PARTITION_TABLE_MAX_LEN];
+    let Ok(table) = read_partition_table(flash, &mut table_storage) else {
+        info!("flash memory commit skipped: partition table unavailable");
+        return Err(MemoryCommitError::FlashUnavailable);
+    };
+
+    for index in 0..table.len() {
+        let Ok(entry) = table.get_partition(index) else {
+            continue;
+        };
+        if entry.is_read_only()
+            || entry.partition_type() != PartitionType::Data(DataPartitionSubType::Nvs)
+        {
+            continue;
+        }
+        let Some(region_base) = flash_memory_base_offset(entry.len()) else {
+            continue;
+        };
+        let absolute_offset =
+            region_base.saturating_add(u32::from(memory_slot_offset_for_sequence(record.sequence)));
+        let mut region = entry.as_embedded_storage(flash);
+        if region
+            .write(absolute_offset, &bytes[..record_len])
+            .map_err(|_| MemoryCommitError::FlashWriteFailed)
+            .is_err()
+        {
+            info!(
+                "flash memory commit write failed seq={=u32}",
+                record.sequence
+            );
+            return Err(MemoryCommitError::FlashWriteFailed);
+        }
+        info!(
+            "flash memory commit ok label={=str} seq={=u32} bytes={=u16}",
+            entry.label_as_str(),
+            record.sequence,
+            record_len as u16,
+        );
+        return Ok(());
+    }
+
+    info!("flash memory commit skipped: no writable nvs partition");
+    Err(MemoryCommitError::FlashUnavailable)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn load_eeprom_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryRecord> {
+    let Some(address) = probe_eeprom_address(i2c) else {
+        info!("memory restore skipped: eeprom unavailable");
+        return None;
+    };
+
+    let mut eeprom = M24c64::with_address(i2c, address);
     let mut slot_a = [0u8; MEMORY_SLOT_SIZE];
     let mut slot_b = [0u8; MEMORY_SLOT_SIZE];
     let slot_a_read = eeprom
@@ -3540,21 +3820,6 @@ fn load_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryReco
         .ok()
         .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
     let mut selected = select_latest_memory_record(slot_a_read, slot_b_read);
-    if selected.is_none() {
-        let mut previous_slot_a = [0u8; PREVIOUS_MEMORY_SLOT_SIZE];
-        let mut previous_slot_b = [0u8; PREVIOUS_MEMORY_SLOT_SIZE];
-        let previous_slot_a_read = eeprom
-            .read_bytes(PREVIOUS_MEMORY_SLOT_A_OFFSET, &mut previous_slot_a)
-            .map(|_| decode_memory_record(&previous_slot_a))
-            .ok()
-            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
-        let previous_slot_b_read = eeprom
-            .read_bytes(PREVIOUS_MEMORY_SLOT_B_OFFSET, &mut previous_slot_b)
-            .map(|_| decode_memory_record(&previous_slot_b))
-            .ok()
-            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
-        selected = select_latest_memory_record(previous_slot_a_read, previous_slot_b_read);
-    }
     if selected.is_none() {
         let mut legacy_slot_a = [0u8; LEGACY_MEMORY_SLOT_SIZE];
         let mut legacy_slot_b = [0u8; LEGACY_MEMORY_SLOT_SIZE];
@@ -3589,29 +3854,104 @@ fn load_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<MemoryReco
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn write_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>, record: &MemoryRecord) -> bool {
+fn load_memory_record(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    flash: &mut FlashStorage,
+) -> Option<MemoryRecord> {
+    select_latest_optional_memory_record(
+        load_eeprom_memory_record(i2c),
+        load_flash_memory_record(flash),
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryCommitError {
+    EncodeFailed,
+    WriteFailed,
+    WriteAddressNoAck,
+    WriteDataNoAck,
+    WriteUnknownNoAck,
+    WriteBus,
+    WriteArbitration,
+    WriteOther,
+    FlashUnavailable,
+    FlashWriteFailed,
+    VerifyUnreadable,
+    VerifyMismatch,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl MemoryCommitError {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::EncodeFailed => "memory_commit_encode_failed",
+            Self::WriteFailed => "memory_commit_write_failed",
+            Self::WriteAddressNoAck => "memory_commit_write_address_nack",
+            Self::WriteDataNoAck => "memory_commit_write_data_nack",
+            Self::WriteUnknownNoAck => "memory_commit_write_unknown_nack",
+            Self::WriteBus => "memory_commit_write_bus_error",
+            Self::WriteArbitration => "memory_commit_write_arbitration_lost",
+            Self::WriteOther => "memory_commit_write_other_error",
+            Self::FlashUnavailable => "memory_commit_flash_unavailable",
+            Self::FlashWriteFailed => "memory_commit_flash_write_failed",
+            Self::VerifyUnreadable => "memory_commit_verify_unreadable",
+            Self::VerifyMismatch => "memory_commit_verify_mismatch",
+        }
+    }
+
+    const fn message(self) -> &'static str {
+        match self {
+            Self::EncodeFailed => "Memory record could not be encoded.",
+            Self::WriteFailed => "Memory record could not be written to EEPROM.",
+            Self::WriteAddressNoAck => "EEPROM did not acknowledge its I2C address.",
+            Self::WriteDataNoAck => "EEPROM rejected the I2C write payload.",
+            Self::WriteUnknownNoAck => "EEPROM write failed with an I2C NACK.",
+            Self::WriteBus => "EEPROM write failed with an I2C bus error.",
+            Self::WriteArbitration => "EEPROM write lost I2C bus arbitration.",
+            Self::WriteOther => "EEPROM write failed with an uncategorized I2C error.",
+            Self::FlashUnavailable => "No writable flash fallback partition was available.",
+            Self::FlashWriteFailed => "Memory record could not be written to flash fallback.",
+            Self::VerifyUnreadable => "Memory record could not be read back after write.",
+            Self::VerifyMismatch => "Memory record readback did not match the requested config.",
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
+    let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
+    let page_room = page_size - (absolute_offset % page_size);
+    remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn write_eeprom_memory_record(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    record: &MemoryRecord,
+) -> Result<(), MemoryCommitError> {
     let mut bytes = [0xffu8; MEMORY_SLOT_SIZE];
     let Ok(record_len) = encode_memory_record(record, &mut bytes) else {
         info!("memory commit encode failed");
-        return false;
+        return Err(MemoryCommitError::EncodeFailed);
     };
     let base_offset = memory_slot_offset_for_sequence(record.sequence);
-    let mut eeprom = M24c64::new(i2c);
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return Err(MemoryCommitError::WriteAddressNoAck);
+    };
+    let mut eeprom = M24c64::with_address(i2c, address);
     let mut written = 0usize;
     while written < record_len {
         let absolute_offset = usize::from(base_offset) + written;
-        let page_room = M24C64_PAGE_SIZE - (absolute_offset % M24C64_PAGE_SIZE);
-        let chunk_len = (record_len - written).min(page_room).min(M24C64_PAGE_SIZE);
+        let chunk_len = memory_record_write_chunk_len(absolute_offset, record_len - written);
         let Ok(page_offset) = u16::try_from(absolute_offset) else {
             info!("memory commit offset overflow");
-            return false;
+            return Err(MemoryCommitError::WriteFailed);
         };
-        if eeprom
-            .write_page(page_offset, &bytes[written..written + chunk_len])
-            .is_err()
-        {
+        if let Err(error) = eeprom.write_page(page_offset, &bytes[written..written + chunk_len]) {
+            let error = memory_commit_error_from_eeprom(error);
             info!("memory commit write failed seq={=u32}", record.sequence);
-            return false;
+            return Err(error);
         }
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
@@ -3620,41 +3960,78 @@ async fn write_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>, record: &Memo
         "memory commit ok seq={=u32} bytes={=u16} slot=0x{=u16:04x}",
         record.sequence, record_len as u16, base_offset,
     );
-    true
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn write_memory_record(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    flash: &mut FlashStorage,
+    record: &MemoryRecord,
+) -> Result<(), MemoryCommitError> {
+    match write_eeprom_memory_record(i2c, record).await {
+        Ok(()) => Ok(()),
+        Err(eeprom_error) => {
+            info!(
+                "memory commit falling back to flash reason={=str}",
+                eeprom_error.code()
+            );
+            write_flash_memory_record(flash, record).map_err(|flash_error| {
+                info!(
+                    "memory commit flash fallback failed eeprom_reason={=str} flash_reason={=str}",
+                    eeprom_error.code(),
+                    flash_error.code(),
+                );
+                flash_error
+            })
+        }
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
 async fn commit_memory_config_now(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    flash: &mut FlashStorage,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
-) -> bool {
-    let next_sequence = memory_sequence.saturating_add(1);
-    let record = MemoryRecord {
-        sequence: next_sequence,
-        config: memory_config.clone(),
-    };
-    if !write_memory_record(i2c, &record).await {
-        return false;
+) -> Result<(), MemoryCommitError> {
+    let mut expected_config = memory_config.clone();
+    expected_config.sanitize();
+    let mut last_error = MemoryCommitError::WriteFailed;
+
+    for attempt in 0..2 {
+        let next_sequence = memory_sequence.saturating_add(1 + attempt);
+        let record = MemoryRecord {
+            sequence: next_sequence,
+            config: expected_config.clone(),
+        };
+        if let Err(error) = write_memory_record(i2c, flash, &record).await {
+            last_error = error;
+            continue;
+        }
+        let Some(verified) = load_memory_record(i2c, flash) else {
+            info!(
+                "memory commit verify failed seq={=u32} reason=unreadable",
+                next_sequence
+            );
+            last_error = MemoryCommitError::VerifyUnreadable;
+            continue;
+        };
+        if verified.sequence != next_sequence || verified.config != expected_config {
+            info!(
+                "memory commit verify failed seq={=u32} read_seq={=u32} config_match={=bool}",
+                next_sequence,
+                verified.sequence,
+                verified.config == expected_config,
+            );
+            last_error = MemoryCommitError::VerifyMismatch;
+            continue;
+        }
+        *memory_sequence = next_sequence;
+        return Ok(());
     }
-    let Some(verified) = load_memory_record(i2c) else {
-        info!(
-            "memory commit verify failed seq={=u32} reason=unreadable",
-            next_sequence
-        );
-        return false;
-    };
-    if verified.sequence != next_sequence || verified.config != *memory_config {
-        info!(
-            "memory commit verify failed seq={=u32} read_seq={=u32} config_match={=bool}",
-            next_sequence,
-            verified.sequence,
-            verified.config == *memory_config,
-        );
-        return false;
-    }
-    *memory_sequence = next_sequence;
-    true
+
+    Err(last_error)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -5214,6 +5591,18 @@ fn monotonic_smooth_heater_curve_points(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn enforce_heater_curve_model_floor(
+    points: &mut heapless::Vec<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>,
+) {
+    for point in points {
+        let temp_c = f32::from(point.temp_centi_c) / 100.0;
+        let model_floor_milliohms =
+            round_to_u16_nonnegative(default_estimated_heater_resistance_ohms(temp_c) * 1000.0);
+        point.resistance_milliohms = point.resistance_milliohms.max(model_floor_milliohms);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn select_vin_auto_draft_samples(
     collected: &[Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
     sample_count: usize,
@@ -5274,25 +5663,66 @@ fn commit_vin_auto_samples_to_draft(
 fn heater_curve_preview_from_auto_bins(
     bins: &[HeaterCurveAutoBin; 4],
 ) -> Option<HeaterCurveConfig> {
-    let mut compacted = heapless::Vec::<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>::new();
+    let mut measured = heapless::Vec::<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>::new();
     for bin in bins {
         let Some((temp_centi_c, resistance_milliohms)) = bin.averaged_point() else {
             continue;
         };
-        let _ = compacted.push(HeaterCurvePoint {
+        let _ = measured.push(HeaterCurvePoint {
             temp_centi_c,
             resistance_milliohms,
         });
     }
-    if compacted.is_empty() {
+    if measured.is_empty() {
         return None;
     }
-    monotonic_smooth_heater_curve_points(&mut compacted);
+    monotonic_smooth_heater_curve_points(&mut measured);
+    enforce_heater_curve_model_floor(&mut measured);
+
+    let mut compacted = heapless::Vec::<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>::new();
+    push_heater_curve_point_monotonic(
+        &mut compacted,
+        default_heater_curve_point(HEATER_CURVE_COLD_ANCHOR_TEMP_C),
+    );
+    push_heater_curve_point_monotonic(
+        &mut compacted,
+        default_heater_curve_point(HEATER_CURVE_R20_ANCHOR_TEMP_C),
+    );
+    for point in measured {
+        push_heater_curve_point_monotonic(&mut compacted, point);
+    }
+
     let mut points = [None; HEATER_CURVE_MAX_POINTS];
     for (index, point) in compacted.into_iter().enumerate() {
         points[index] = Some(point);
     }
     Some(HeaterCurveConfig { points })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn default_heater_curve_point(temp_c: f32) -> HeaterCurvePoint {
+    HeaterCurvePoint {
+        temp_centi_c: round_to_i16(temp_c * 100.0),
+        resistance_milliohms: round_to_u16_nonnegative(
+            default_estimated_heater_resistance_ohms(temp_c) * 1_000.0,
+        ),
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn push_heater_curve_point_monotonic(
+    points: &mut heapless::Vec<HeaterCurvePoint, { HEATER_CURVE_MAX_POINTS }>,
+    mut point: HeaterCurvePoint,
+) {
+    if let Some(previous) = points.last().copied() {
+        if point.temp_centi_c <= previous.temp_centi_c {
+            point.temp_centi_c = previous.temp_centi_c.saturating_add(1);
+        }
+        if point.resistance_milliohms < previous.resistance_milliohms {
+            point.resistance_milliohms = previous.resistance_milliohms;
+        }
+    }
+    let _ = points.push(point);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6206,6 +6636,7 @@ async fn handle_usb_control_line(
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
+    flash_storage: &mut FlashStorage,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     elapsed_ms: u64,
     last_pd_observation: Option<PdStatusObservation>,
@@ -6291,13 +6722,12 @@ async fn handle_usb_control_line(
                     calibration_runtime_state_to_wire(*calibration_runtime_state).job,
                 ),
             ),
-            UsbRequestOp::GetHeaterCurve => usb_response(
-                request_id,
-                UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                    memory_config,
-                    preview_heater_curve.as_ref(),
-                )),
-            ),
+            UsbRequestOp::GetHeaterCurve => {
+                let mut state =
+                    heater_curve_state_from_memory(memory_config, preview_heater_curve.as_ref());
+                state.eeprom_probe = Some(heater_curve_eeprom_probe_wire(pd_i2c));
+                usb_response(request_id, UsbResponsePayload::HeaterCurve(state))
+            }
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         },
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
@@ -6375,7 +6805,10 @@ async fn handle_usb_control_line(
                 latest_vin_raw_adc_mv,
             );
             if *memory_config != previous_memory_config {
-                if commit_memory_config_now(pd_i2c, memory_sequence, memory_config).await {
+                if commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
+                    .await
+                    .is_ok()
+                {
                     *memory_commit_due_ms = None;
                 } else {
                     *memory_config = previous_memory_config;
@@ -6414,21 +6847,19 @@ async fn handle_usb_control_line(
                 let previous_memory_config = memory_config.clone();
                 memory_config.active_heater_curve = preview;
                 memory_config.sanitize();
-                if commit_memory_config_now(pd_i2c, memory_sequence, memory_config).await {
-                    *memory_commit_due_ms = None;
-                } else {
+                if let Err(error) =
+                    commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
+                        .await
+                {
                     *memory_config = previous_memory_config;
                     usb_write_response_frame(
                         usb,
-                        &usb_error_response(
-                            request_id,
-                            "memory_commit_failed",
-                            "Heater curve could not be persisted.",
-                        ),
+                        &usb_error_response(request_id, error.code(), error.message()),
                         tx_buf,
                     );
                     return needs_redraw;
                 }
+                *memory_commit_due_ms = None;
                 usb_response(
                     request_id,
                     UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
@@ -6961,6 +7392,7 @@ async fn main(_spawner: Spawner) {
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
     let ch224q_address = request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await;
+    let mut flash_storage = FlashStorage::new();
     info!(
         "pd request locked addr=0x{=u8:02x} target_mv={=u16} settle_ms={=u64}",
         ch224q_address.as_u8(),
@@ -6977,7 +7409,7 @@ async fn main(_spawner: Spawner) {
         );
         EmbassyTimer::after_millis(10).await;
     }
-    let restored_memory_record = load_memory_record(&mut pd_i2c);
+    let restored_memory_record = load_memory_record(&mut pd_i2c, &mut flash_storage);
     let mut memory_config = restored_memory_record
         .as_ref()
         .map(|record| record.config.clone())
@@ -7408,6 +7840,7 @@ async fn main(_spawner: Spawner) {
                         &mut memory_commit_due_ms,
                         &mut memory_sequence,
                         &mut pd_i2c,
+                        &mut flash_storage,
                         &mut calibration_runtime_state,
                         elapsed_ms,
                         last_pd_observation,
@@ -7918,14 +8351,15 @@ async fn main(_spawner: Spawner) {
 
         if memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms) {
             memory_commit_due_ms = None;
-            let next_sequence = memory_sequence.saturating_add(1);
-            let record = MemoryRecord {
-                sequence: next_sequence,
-                config: memory_config.clone(),
-            };
-            if write_memory_record(&mut pd_i2c, &record).await {
-                memory_sequence = next_sequence;
-            } else {
+            if commit_memory_config_now(
+                &mut pd_i2c,
+                &mut flash_storage,
+                &mut memory_sequence,
+                &memory_config,
+            )
+            .await
+            .is_err()
+            {
                 memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
         }
@@ -9277,6 +9711,83 @@ mod tests {
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
         assert_eq!(memory_config.adc_calibration.vin.sample_count(), 8);
+    }
+
+    #[test]
+    fn heater_curve_auto_preview_includes_low_temperature_anchors() {
+        let mut bins = CalibrationHeaterCurveAutoJob::default().bins;
+        bins[0].observe(140.0, 3.911);
+        bins[1].observe(181.0, 3.918);
+        bins[2].observe(217.0, 3.924);
+        bins[3].observe(241.0, 3.929);
+
+        let preview = heater_curve_preview_from_auto_bins(&bins).unwrap();
+
+        assert_eq!(
+            preview.points[0],
+            Some(default_heater_curve_point(HEATER_CURVE_COLD_ANCHOR_TEMP_C))
+        );
+        assert_eq!(
+            preview.points[1],
+            Some(default_heater_curve_point(HEATER_CURVE_R20_ANCHOR_TEMP_C))
+        );
+        assert_eq!(
+            preview.points[2].map(|point| point.temp_centi_c),
+            Some(14_000)
+        );
+        assert!(preview.points[5].is_some());
+        assert!(preview.points[6].is_none());
+    }
+
+    #[test]
+    fn heater_curve_auto_preview_never_underestimates_nominal_heater_model() {
+        let mut bins = CalibrationHeaterCurveAutoJob::default().bins;
+        bins[0].observe(140.0, 3.911);
+        bins[1].observe(181.0, 3.918);
+        bins[2].observe(217.0, 3.924);
+        bins[3].observe(241.0, 3.929);
+
+        let preview = heater_curve_preview_from_auto_bins(&bins).unwrap();
+
+        for point in preview.points.into_iter().flatten() {
+            let temp_c = f32::from(point.temp_centi_c) / 100.0;
+            let expected_floor =
+                round_to_u16_nonnegative(default_estimated_heater_resistance_ohms(temp_c) * 1000.0);
+            assert!(point.resistance_milliohms >= expected_floor);
+        }
+    }
+
+    #[test]
+    fn heater_curve_auto_preview_does_not_clamp_low_temp_voltage_to_first_hot_bin() {
+        let mut bins = CalibrationHeaterCurveAutoJob::default().bins;
+        bins[0].observe(140.0, 3.911);
+        bins[1].observe(181.0, 3.918);
+        bins[2].observe(217.0, 3.924);
+        bins[3].observe(241.0, 3.929);
+
+        let preview = heater_curve_preview_from_auto_bins(&bins).unwrap();
+        let memory_config = MemoryConfig::default();
+
+        assert_eq!(
+            heater_safe_max_mv_for_temp(20.0, 5_000, 24_000, Some(&preview), &memory_config),
+            16_000
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(60.0, 5_000, 24_000, Some(&preview), &memory_config),
+            18_500
+        );
+        assert_eq!(
+            heater_safe_max_mv_for_temp(240.0, 4_800, 21_000, Some(&preview), &memory_config),
+            21_000
+        );
+    }
+
+    #[test]
+    fn memory_record_write_chunk_len_keeps_i2c_frames_small_and_page_aligned() {
+        assert_eq!(memory_record_write_chunk_len(0x0400, 128), 16);
+        assert_eq!(memory_record_write_chunk_len(0x0418, 128), 8);
+        assert_eq!(memory_record_write_chunk_len(0x041f, 128), 1);
+        assert_eq!(memory_record_write_chunk_len(0x0420, 7), 7);
     }
 
     #[test]
@@ -13206,6 +13717,18 @@ mod tests {
         let persisted = memory_config_from_ui(&state, &config);
         assert_eq!(persisted.target_temp_c, 180);
         assert!(!persisted.active_cooling_enabled);
+    }
+
+    #[test]
+    fn i2c_scan_address_list_keeps_first_sixteen_hits() {
+        let mut addresses = [None; 16];
+        for address in 0x08..=0x19 {
+            push_i2c_scan_address(&mut addresses, address);
+        }
+
+        assert_eq!(addresses[0], Some(0x08));
+        assert_eq!(addresses[15], Some(0x17));
+        assert!(!addresses.contains(&Some(0x18)));
     }
 
     #[test]

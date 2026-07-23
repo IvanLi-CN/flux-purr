@@ -941,6 +941,24 @@ pub struct HeaterCurvePackage {
 pub struct HeaterCurveState {
     pub active: HeaterCurvePackage,
     pub preview: Option<HeaterCurvePackage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eeprom_probe: Option<HeaterCurveEepromProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveEepromProbe {
+    pub present: bool,
+    #[serde(default)]
+    pub current_read_present: bool,
+    #[serde(default)]
+    pub random_read_present: bool,
+    #[serde(default)]
+    pub bus_current_read_addresses: Vec<Option<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl Default for HeaterCurvePackage {
@@ -956,6 +974,7 @@ impl Default for HeaterCurveState {
         Self {
             active: HeaterCurvePackage::default(),
             preview: None,
+            eeprom_probe: None,
         }
     }
 }

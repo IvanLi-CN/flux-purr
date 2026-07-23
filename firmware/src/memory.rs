@@ -7,12 +7,9 @@ use crate::frontpanel::{
 pub const M24C64_I2C_ADDRESS: u8 = 0x50;
 pub const M24C64_CAPACITY_BYTES: u16 = 8 * 1024;
 pub const M24C64_PAGE_SIZE: usize = 32;
-pub const MEMORY_SLOT_SIZE: usize = 2048;
-pub const MEMORY_SLOT_A_OFFSET: u16 = 0x1000;
-pub const MEMORY_SLOT_B_OFFSET: u16 = 0x1800;
-pub const PREVIOUS_MEMORY_SLOT_SIZE: usize = 1024;
-pub const PREVIOUS_MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
-pub const PREVIOUS_MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
+pub const MEMORY_SLOT_SIZE: usize = 1024;
+pub const MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
+pub const MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
 pub const LEGACY_MEMORY_SLOT_SIZE: usize = 512;
 pub const LEGACY_MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
 pub const LEGACY_MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
@@ -914,6 +911,14 @@ where
         self.i2c
             .write_read(self.address, &address, bytes)
             .map_err(EepromError::I2c)
+    }
+
+    pub fn read_current_byte(&mut self) -> Result<u8, EepromError<I2C::Error>> {
+        let mut byte = [0u8; 1];
+        self.i2c
+            .read(self.address, &mut byte)
+            .map_err(EepromError::I2c)?;
+        Ok(byte[0])
     }
 
     pub fn write_page(&mut self, offset: u16, bytes: &[u8]) -> Result<(), EepromError<I2C::Error>> {
@@ -2465,6 +2470,109 @@ mod tests {
                 .target_temp_c,
             250
         );
+    }
+
+    #[test]
+    fn record_roundtrip_preserves_six_point_heater_curve() {
+        let mut config = sample_config();
+        config.active_heater_curve.points = [
+            Some(HeaterCurvePoint {
+                temp_centi_c: 0,
+                resistance_milliohms: 2_948,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 2_000,
+                resistance_milliohms: 3_200,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 14_098,
+                resistance_milliohms: 3_904,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 18_221,
+                resistance_milliohms: 3_912,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 21_752,
+                resistance_milliohms: 3_919,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 24_142,
+                resistance_milliohms: 3_925,
+            }),
+            None,
+            None,
+        ];
+        let record = MemoryRecord {
+            sequence: 44,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).unwrap();
+
+        assert_eq!(decode_memory_record(&bytes[..len]).unwrap(), record);
+    }
+
+    #[test]
+    fn record_roundtrip_preserves_full_profiles_and_heater_curve_at_max_credentials() {
+        let mut config = sample_config();
+        config.wifi_ssid.clear();
+        config
+            .wifi_ssid
+            .push_str("12345678901234567890123456789012")
+            .unwrap();
+        config.wifi_password.clear();
+        config
+            .wifi_password
+            .push_str("1234567890123456789012345678901234567890123456789012345678901234")
+            .unwrap();
+        let template = config.active_thermal_control_profile.points[0].unwrap();
+        for (slot, target_temp_c) in [60, 100, 140, 180, 220, 250].into_iter().enumerate() {
+            let point = Some(ThermalControlProfilePointConfig {
+                target_temp_c,
+                ..template
+            });
+            config.active_thermal_control_profile.points[slot] = point;
+            config.thermal_control_profile_pps5a.points[slot] = point;
+        }
+        config.active_heater_curve.points = [
+            Some(HeaterCurvePoint {
+                temp_centi_c: 0,
+                resistance_milliohms: 2_948,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 2_000,
+                resistance_milliohms: 3_200,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 14_098,
+                resistance_milliohms: 3_904,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 18_221,
+                resistance_milliohms: 3_912,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 21_752,
+                resistance_milliohms: 3_919,
+            }),
+            Some(HeaterCurvePoint {
+                temp_centi_c: 24_142,
+                resistance_milliohms: 3_925,
+            }),
+            None,
+            None,
+        ];
+
+        let record = MemoryRecord {
+            sequence: 45,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).unwrap();
+
+        assert!(len <= MEMORY_SLOT_SIZE);
+        assert_eq!(decode_memory_record(&bytes[..len]).unwrap(), record);
     }
 
     #[test]

@@ -933,11 +933,27 @@ pub struct HeaterCurvePackageWire {
     pub points: [Option<HeaterCurvePointWire>; HEATER_CURVE_MAX_POINTS],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurveStateWire {
     pub active: HeaterCurvePackageWire,
     pub preview: Option<HeaterCurvePackageWire>,
+    #[serde(default)]
+    pub eeprom_probe: Option<HeaterCurveEepromProbeWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveEepromProbeWire {
+    pub present: bool,
+    #[serde(default)]
+    pub current_read_present: bool,
+    #[serde(default)]
+    pub random_read_present: bool,
+    pub address: Option<u8>,
+    #[serde(default)]
+    pub bus_current_read_addresses: [Option<u8>; 16],
+    pub last_error: Option<String<ERROR_CODE_MAX_LEN>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1023,6 +1039,7 @@ pub fn heater_curve_state_from_memory(
     HeaterCurveStateWire {
         active: HeaterCurvePackageWire::from_memory(&config.active_heater_curve),
         preview: preview.map(HeaterCurvePackageWire::from_memory),
+        eeprom_probe: None,
     }
 }
 
