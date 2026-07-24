@@ -161,6 +161,10 @@ pub struct ControlPlaneStatus {
     pub heater_control_phase: Option<String<ERROR_CODE_MAX_LEN>>,
     pub heater_error_c: Option<f32>,
     pub heater_control_error_c: Option<f32>,
+    #[serde(default)]
+    pub heater_control_temp_c: Option<f32>,
+    #[serde(default)]
+    pub heater_control_measurement_guarded: bool,
     pub heater_filtered_temp_c: Option<f32>,
     #[serde(default)]
     pub heater_filtered_slope_c_per_s: Option<f32>,
@@ -270,6 +274,8 @@ impl ControlPlaneStatus {
             heater_control_phase: None,
             heater_error_c: None,
             heater_control_error_c: None,
+            heater_control_temp_c: None,
+            heater_control_measurement_guarded: false,
             heater_filtered_temp_c: None,
             heater_filtered_slope_c_per_s: None,
             heater_coast_active: false,

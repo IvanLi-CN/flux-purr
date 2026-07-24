@@ -340,6 +340,8 @@ const RTD_MIN_VALID_SAMPLE_COUNT: usize = 48;
 const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_CONTROL_SAMPLE_STABLE_AFTER_REQUEST_MS: u64 = 300;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_CONTROL_MAX_SLEW_C_PER_S: f32 = 35.0;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2393,6 +2395,8 @@ struct RuntimeControlTemperatureState<'a> {
     latest_control_temp_c: &'a mut f32,
     latest_control_temp_i16: &'a mut i16,
     transition_guard: &'a mut RtdPpsTransitionGuard,
+    measurement_guard: &'a mut RtdControlMeasurementGuard,
+    control_measurement_guarded: &'a mut bool,
     heater_controller: &'a mut HeaterController,
 }
 
@@ -2413,6 +2417,7 @@ fn apply_valid_rtd_measurement(
     if let Some(control_temp_c) = accept_rtd_control_sample_after_pps_transition(
         control.transition_guard,
         control.heater_controller,
+        control.measurement_guard,
         *control.latest_control_temp_c,
         request_mv,
         now_ms,
@@ -2421,6 +2426,7 @@ fn apply_valid_rtd_measurement(
         *control.latest_control_temp_c = control_temp_c;
         *control.latest_control_temp_i16 = temp_c_to_whole_c(control_temp_c);
     }
+    *control.control_measurement_guarded = control.measurement_guard.guarded;
     needs_redraw
 }
 
@@ -2477,9 +2483,51 @@ impl RtdPpsTransitionGuard {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct RtdControlMeasurementGuard {
+    last_accepted_temp_c: Option<f32>,
+    last_accepted_at_ms: Option<u64>,
+    guarded: bool,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl RtdControlMeasurementGuard {
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn reseed(&mut self, temp_c: f32, now_ms: u64) {
+        self.last_accepted_temp_c = Some(temp_c);
+        self.last_accepted_at_ms = Some(now_ms);
+        self.guarded = false;
+    }
+
+    fn observe(&mut self, measurement_temp_c: f32, now_ms: u64) -> Option<f32> {
+        self.guarded = false;
+        let Some(last_temp_c) = self.last_accepted_temp_c else {
+            self.reseed(measurement_temp_c, now_ms);
+            return Some(measurement_temp_c);
+        };
+        let elapsed_ms = now_ms
+            .saturating_sub(self.last_accepted_at_ms.unwrap_or(now_ms))
+            .max(25);
+        let max_delta_c = RTD_CONTROL_MAX_SLEW_C_PER_S * (elapsed_ms as f32 / 1_000.0);
+        if (measurement_temp_c - last_temp_c).abs() > max_delta_c {
+            self.guarded = true;
+            return None;
+        }
+
+        self.last_accepted_temp_c = Some(measurement_temp_c);
+        self.last_accepted_at_ms = Some(now_ms);
+        Some(measurement_temp_c)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn accept_rtd_control_sample_after_pps_transition(
     transition_guard: &mut RtdPpsTransitionGuard,
     heater_controller: &mut HeaterController,
+    measurement_guard: &mut RtdControlMeasurementGuard,
     last_control_temp_c: f32,
     request_mv: u16,
     now_ms: u64,
@@ -2488,8 +2536,11 @@ fn accept_rtd_control_sample_after_pps_transition(
     let (accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
     if reseed_filter {
         heater_controller.reseed_measurement(last_control_temp_c);
+        measurement_guard.reseed(last_control_temp_c, now_ms);
     }
-    accept_control_sample.then_some(measurement_temp_c)
+    accept_control_sample
+        .then(|| measurement_guard.observe(measurement_temp_c, now_ms))
+        .flatten()
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5080,6 +5131,8 @@ struct UsbRuntimeStatusContext {
     active_thermal_control_profile: Option<ThermalControlProfile>,
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
+    latest_control_temp_c: f32,
+    control_measurement_guarded: bool,
     latest_rtd_raw_adc_mv: u16,
     latest_rtd_raw_adc_min_mv: u16,
     latest_rtd_raw_adc_max_mv: u16,
@@ -5178,6 +5231,8 @@ fn usb_runtime_status(
     status.heater_control_phase = Some(heater_control_phase);
     status.heater_error_c = Some(context.pid_snapshot.error_c);
     status.heater_control_error_c = Some(context.pid_snapshot.control_error_c);
+    status.heater_control_temp_c = Some(context.latest_control_temp_c);
+    status.heater_control_measurement_guarded = context.control_measurement_guarded;
     status.heater_filtered_temp_c = Some(context.pid_snapshot.filtered_temp_c);
     status.heater_filtered_slope_c_per_s = Some(context.pid_snapshot.filtered_slope_c_per_s);
     status.heater_coast_active = context.pid_snapshot.coast_active;
@@ -6732,6 +6787,8 @@ async fn handle_usb_control_line(
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
+    latest_control_temp_c: f32,
+    control_measurement_guarded: bool,
     latest_rtd_raw_adc_mv: u16,
     latest_rtd_raw_adc_min_mv: u16,
     latest_rtd_raw_adc_max_mv: u16,
@@ -6767,6 +6824,8 @@ async fn handle_usb_control_line(
             active_thermal_control_profile,
             last_raw_state,
             latest_status_temp_c,
+            latest_control_temp_c,
+            control_measurement_guarded,
             latest_rtd_raw_adc_mv,
             latest_rtd_raw_adc_min_mv,
             latest_rtd_raw_adc_max_mv,
@@ -7707,6 +7766,8 @@ async fn main(_spawner: Spawner) {
     let mut latest_vin_mv = 0_u32;
     let mut rtd_pps_transition_guard =
         RtdPpsTransitionGuard::new(heater_power_backend.pd_request_mv());
+    let mut rtd_control_measurement_guard = RtdControlMeasurementGuard::default();
+    let mut control_measurement_guarded = false;
     let mut last_rtd_sample_request_mv = heater_power_backend.pd_request_mv();
     match initial_rtd_sample {
         RtdSample::Valid(measurement) => {
@@ -7715,6 +7776,7 @@ async fn main(_spawner: Spawner) {
             latest_rtd_raw_adc_max_mv = measurement.raw_adc_max_mv;
             latest_temp_c = measurement.temp_c;
             latest_temp_i16 = temp_c_to_whole_c(measurement.temp_c);
+            rtd_control_measurement_guard.reseed(measurement.temp_c, 0);
             let _ = update_runtime_display_temperature(
                 &mut ui_state,
                 &mut latest_display_temp_c,
@@ -7944,6 +8006,8 @@ async fn main(_spawner: Spawner) {
                         &mut thermal_control_profile_preview,
                         last_raw_state,
                         latest_display_temp_c,
+                        latest_temp_c,
+                        control_measurement_guarded,
                         latest_rtd_raw_adc_mv,
                         latest_rtd_raw_adc_min_mv,
                         latest_rtd_raw_adc_max_mv,
@@ -8243,6 +8307,8 @@ async fn main(_spawner: Spawner) {
                             latest_control_temp_c: &mut latest_temp_c,
                             latest_control_temp_i16: &mut latest_temp_i16,
                             transition_guard: &mut rtd_pps_transition_guard,
+                            measurement_guard: &mut rtd_control_measurement_guard,
+                            control_measurement_guarded: &mut control_measurement_guarded,
                             heater_controller: &mut heater_controller,
                         },
                         current_request_mv,
@@ -8260,6 +8326,8 @@ async fn main(_spawner: Spawner) {
                     latest_rtd_raw_adc_min_mv = latest_rtd_raw_adc_mv;
                     latest_rtd_raw_adc_max_mv = latest_rtd_raw_adc_mv;
                     current_rtd_fault = Some(reason);
+                    rtd_control_measurement_guard.clear();
+                    control_measurement_guarded = false;
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
                     needs_redraw |= retain_runtime_display_temperature(
                         &mut ui_state,
@@ -8665,6 +8733,8 @@ mod tests {
             active_thermal_control_profile: None,
             last_raw_state: FrontPanelRawState::default(),
             latest_status_temp_c: 0.0,
+            latest_control_temp_c: 0.0,
+            control_measurement_guarded: false,
             latest_rtd_raw_adc_mv: 0,
             latest_rtd_raw_adc_min_mv: 0,
             latest_rtd_raw_adc_max_mv: 0,
@@ -9323,6 +9393,8 @@ mod tests {
                     interval_ms: 120,
                     cycle_ms: 7,
                 },
+                latest_control_temp_c: 139.8,
+                control_measurement_guarded: true,
                 ..test_usb_runtime_status_context()
             },
         );
@@ -9330,6 +9402,8 @@ mod tests {
         assert_eq!(status.heater_control_phase.as_deref(), Some("hold"));
         assert_eq!(status.heater_error_c, Some(-0.4));
         assert_eq!(status.heater_control_error_c, Some(-0.2));
+        assert_eq!(status.heater_control_temp_c, Some(139.8));
+        assert!(status.heater_control_measurement_guarded);
         assert_eq!(status.heater_filtered_temp_c, Some(140.2));
         assert_eq!(status.heater_filtered_slope_c_per_s, Some(0.6));
         assert!(status.heater_coast_active);
@@ -13076,11 +13150,13 @@ mod tests {
     fn pps_transition_reseed_keeps_last_trusted_control_temperature() {
         let mut guard = RtdPpsTransitionGuard::new(18_000);
         let mut controller = HeaterController::new();
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
         let last_control_temp_c = 41.39;
 
         let control_temp_c = accept_rtd_control_sample_after_pps_transition(
             &mut guard,
             &mut controller,
+            &mut measurement_guard,
             last_control_temp_c,
             14_000,
             0,
@@ -13098,6 +13174,50 @@ mod tests {
             controller.previous_measured_temp_c,
             Some(last_control_temp_c)
         );
+        assert!(!measurement_guard.guarded);
+    }
+
+    #[test]
+    fn rtd_control_guard_rejects_impossible_jump_without_hiding_raw_temperature() {
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut latest_control_temp_c = 140.0;
+        let mut latest_control_temp_i16 = 140;
+        let mut latest_display_temp_c = 140.0;
+        let mut latest_display_temp_i16 = 140;
+        let mut transition_guard = RtdPpsTransitionGuard::new(12_000);
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        measurement_guard.reseed(140.0, 0);
+        let mut control_measurement_guarded = false;
+        let mut controller = HeaterController::new();
+
+        assert!(apply_valid_rtd_measurement(
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_control_temp_c,
+                latest_control_temp_i16: &mut latest_control_temp_i16,
+                transition_guard: &mut transition_guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
+                heater_controller: &mut controller,
+            },
+            12_000,
+            50,
+            310.0,
+        ));
+
+        assert_eq!(latest_display_temp_c, 310.0);
+        assert_eq!(ui_state.current_temp_c, 310);
+        assert_eq!(latest_control_temp_c, 140.0);
+        assert_eq!(latest_control_temp_i16, 140);
+        assert!(control_measurement_guarded);
+
+        measurement_guard.clear();
+        assert_eq!(measurement_guard.observe(31.0, 100), Some(31.0));
+        assert!(!measurement_guard.guarded);
     }
 
     #[test]
@@ -13358,6 +13478,8 @@ mod tests {
         let mut latest_display_temp_c = latest_temp_c;
         let mut latest_display_temp_i16 = latest_temp_i16;
         let mut guard = RtdPpsTransitionGuard::new(12_000);
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        let mut control_measurement_guarded = false;
         let mut controller = HeaterController::new();
 
         assert!(apply_valid_rtd_measurement(
@@ -13370,6 +13492,8 @@ mod tests {
                 latest_control_temp_c: &mut latest_temp_c,
                 latest_control_temp_i16: &mut latest_temp_i16,
                 transition_guard: &mut guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
                 heater_controller: &mut controller,
             },
             15_000,
@@ -13405,6 +13529,8 @@ mod tests {
         let mut latest_display_temp_c = latest_temp_c;
         let mut latest_display_temp_i16 = latest_temp_i16;
         let mut guard = RtdPpsTransitionGuard::new(19_500);
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        let mut control_measurement_guarded = false;
         let mut controller = HeaterController::new();
 
         assert!(apply_valid_rtd_measurement(
@@ -13417,6 +13543,8 @@ mod tests {
                 latest_control_temp_c: &mut latest_temp_c,
                 latest_control_temp_i16: &mut latest_temp_i16,
                 transition_guard: &mut guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
                 heater_controller: &mut controller,
             },
             20_000,
@@ -13462,6 +13590,8 @@ mod tests {
         let mut latest_display_temp_c = latest_temp_c;
         let mut latest_display_temp_i16 = latest_temp_i16;
         let mut guard = RtdPpsTransitionGuard::new(12_000);
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        let mut control_measurement_guarded = false;
         let mut controller = HeaterController::new();
 
         assert!(apply_valid_rtd_measurement(
@@ -13474,6 +13604,8 @@ mod tests {
                 latest_control_temp_c: &mut latest_temp_c,
                 latest_control_temp_i16: &mut latest_temp_i16,
                 transition_guard: &mut guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
                 heater_controller: &mut controller,
             },
             15_000,
@@ -13490,6 +13622,8 @@ mod tests {
                 latest_control_temp_c: &mut latest_temp_c,
                 latest_control_temp_i16: &mut latest_temp_i16,
                 transition_guard: &mut guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
                 heater_controller: &mut controller,
             },
             15_000,

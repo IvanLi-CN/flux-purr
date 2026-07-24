@@ -127,25 +127,26 @@ If a host path preserves an older reduced warmup value, it creates a false readb
 The RTD path has two distinct consumers and they must stay separated:
 
 - owner-facing temperature uses the current valid RTD sample
-- controller temperature uses the EMA state
+- controller input uses the last physically plausible RTD sample, then the EMA state
 - if RTD enters fault, owner-facing display keeps the last valid readout instead of synthesizing `0°C`
+- `heaterControlTempC` reports the sample actually accepted by the controller; `heaterControlMeasurementGuarded=true` records when a physically impossible single-sample jump was kept out of the control path
 
 Current control-path truth is:
 
 - control loop frequency: `20Hz`
 - RTD oversampling per control cycle: `64` kept conversions
-- settle discard per cycle: `8`
+- settle discard per cycle: `24`
 - minimum valid samples: `48`
 - default `tempFilterAlphaPermille`: `750`
 
-Do not insert any additional multi-sample window, median, clamp, or rate limiter before the EMA path. Those stages distort heating and cooling rate readback and make the controller react to an artificial temperature trace.
+The control-side plausibility gate is deliberately narrower than a smoothing filter: it only rejects a single sample whose change exceeds `35°C/s` at the actual control-cycle interval. It does not modify `currentTempC`, raw ADC telemetry, front-panel display, or formal report evidence; accepted control samples still go directly through the configured EMA. Do not add a multi-sample window or median filter.
 
 Offline retuning replays the existing `run.json` and `samples.ndjson` pair, writes `run.replayed.json` and `thermal-profile.replayed.candidate.json`, and may optionally apply the replayed candidate back as a RAM-only preview. When `--apply-preview` is used, the CLI must write replay artifacts first, send `thermalControlProfile.op=preview`, confirm `thermalControlProfilePreview=true` from status readback, and record the attempt in `run.replayed.json.applyPreview`. Replay apply must not save persistent memory.
 
 At PPS transition boundaries:
 
 - owner-facing temperature must continue to update from each valid RTD sample
-- only controller EMA and slope may remain guarded across the transition window
+- only controller input, EMA, and slope may remain guarded across the transition window; the physical-slew gate is independent of PPS transition handling and never changes owner-facing temperature
 
 ### Thermal-runaway attention and measurement-fault recovery
 
@@ -361,7 +362,7 @@ If a run stops on `sensor-open`, `sensor-short`, or `adc-read-failed`, do not im
 
 Use this path only for transient measurement warnings that clear on the same hardware path. Do not use it to hide repeated sensor faults, runtime resets, or source-side capability loss.
 
-Do not add a `sensor-glitch` fault based on adjacent temperature or raw ADC deltas. A PPS request or VIN transition may trigger an immediate RTD reread, but a valid reread must continue through the established display/control sampling path; only open, short, ADC read failure, and absolute overtemperature are hard protection inputs.
+Do not add a `sensor-glitch` fault based on adjacent temperature or raw ADC deltas. A PPS request or VIN transition may trigger an immediate RTD reread; an implausible valid sample is retained as raw/human evidence and marked `heaterControlMeasurementGuarded` when it is excluded from PID input. Only open, short, ADC read failure, and absolute overtemperature are hard protection inputs.
 
 ### Recovering a dead local `devd`
 

@@ -2606,6 +2606,8 @@ fn normalized_sample(sample: Value) -> Value {
         "t": round_decimal(sample.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) / 1_000.0, 3),
         "temp": status.get("currentTempC").or_else(|| heater.get("currentTempC")).cloned().unwrap_or(Value::Null),
         "filtered": status.get("heaterFilteredTempC").or_else(|| heater.get("heaterFilteredTempC")).cloned().unwrap_or(Value::Null),
+        "control": status.get("heaterControlTempC").or_else(|| heater.get("heaterControlTempC")).cloned().unwrap_or(Value::Null),
+        "controlGuarded": status.get("heaterControlMeasurementGuarded").cloned().unwrap_or(Value::Null),
         "command": status.get("heaterOutputPercent").or_else(|| heater.get("heaterOutputPercent")).cloned().unwrap_or(Value::Null),
         "output": status.get("heaterPhysicalOutputPercent").or_else(|| heater.get("heaterPhysicalOutputPercent")).cloned().unwrap_or(Value::Null),
         "requestV": round_decimal(request_mv / 1_000.0, 3),
