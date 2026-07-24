@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use super::{
     TargetSelector, ThermalCandidatePoint, ThermalCandidateProfile, ThermalFlagshipTuneArgs,
     ThermalFullSpeedStableTracker, ThermalProfileMode, ThermalSelfTestArgs,
-    ThermalSelfTestEvaluationMode, collect_batch_thermal_self_test,
+    ThermalSelfTestEvaluationMode, ThermalStageResult, collect_batch_thermal_self_test,
     collect_single_thermal_self_test, current_unix_millis,
     load_thermal_default_seed_candidate_profile, parse_thermal_targets, request_json,
     resolve_target, thermal_candidate_point, thermal_candidate_point_from_heater_parameters,
@@ -1197,8 +1197,30 @@ fn candidate_variants(
         &stability_evidence_for_stage(&scout_stage, &scout_samples, target_temp_c),
         target_temp_c,
     );
+    let stability_evidence =
+        stability_evidence_for_stage(&scout_stage, &scout_samples, target_temp_c);
 
     let mut variants = vec![("current".to_string(), current_profile.clone())];
+    if let Some(conservative_point) = conservative_high_side_candidate(
+        current_point,
+        &scout_result,
+        &stability_evidence,
+        target_temp_c,
+    ) {
+        let mut conservative = current.clone();
+        if let Some(point) = super::thermal_candidate_point_mut(&mut conservative, target_temp_c) {
+            *point = conservative_point;
+        } else {
+            conservative.points.push(conservative_point);
+        }
+        variants.push((
+            "conservative-high-side".to_string(),
+            normalize_sparse_profile_value(
+                &thermal_candidate_profile_to_value(&conservative),
+                materialized_targets_c,
+            )?,
+        ));
+    }
     if predicted_point != current_point {
         let mut predicted = current.clone();
         if let Some(point) = super::thermal_candidate_point_mut(&mut predicted, target_temp_c) {
@@ -1215,6 +1237,73 @@ fn candidate_variants(
         ));
     }
     Ok(variants)
+}
+
+fn conservative_high_side_candidate(
+    current: ThermalCandidatePoint,
+    result: &ThermalStageResult,
+    evidence: &Value,
+    target_temp_c: i16,
+) -> Option<ThermalCandidatePoint> {
+    if target_temp_c > 150 {
+        return None;
+    }
+    let residual_c = result
+        .analysis
+        .residual_heat_after_hold_entry_c
+        .unwrap_or_default()
+        .max(0.0);
+    let severity_c = result
+        .max_overshoot_c
+        .max(result.hold_peak_to_peak_c)
+        .max(residual_c);
+    if severity_c <= 3.0
+        || !matches!(
+            evidence.get("failureClass").and_then(Value::as_str),
+            Some(
+                "stable_window_broke_high"
+                    | "missed_upper_band_before_limit"
+                    | "missed_lower_band_before_limit"
+            )
+        )
+    {
+        return None;
+    }
+
+    let trim = if severity_c >= 20.0 { 180 } else { 100 };
+    let mut point = current;
+    point.brake_distance_centi_c = point
+        .brake_distance_centi_c
+        .saturating_add(if severity_c >= 20.0 { 500 } else { 300 })
+        .min(5_000);
+    point.hold_entry_centi_c = point.hold_entry_centi_c.saturating_add(100).min(450);
+    point.hold_exit_centi_c = point
+        .hold_exit_centi_c
+        .saturating_add(80)
+        .min(point.hold_entry_centi_c.saturating_sub(20).max(20));
+    point.approach_floor_power_permille = point
+        .approach_floor_power_permille
+        .saturating_sub(trim)
+        .max(100);
+    point.approach_power_permille = point
+        .approach_power_permille
+        .saturating_sub(trim)
+        .max(point.approach_floor_power_permille.saturating_add(80))
+        .min(1_000);
+    point.hold_power_permille = point.hold_power_permille.saturating_sub(trim / 2).max(100);
+    point.hold_reheat_power_permille = point
+        .hold_reheat_power_permille
+        .saturating_sub(trim / 2)
+        .max(point.hold_power_permille);
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.overshoot_cutoff_centi_c = point
+        .overshoot_cutoff_centi_c
+        .saturating_sub(40)
+        .max(point.hold_off_centi_c.saturating_add(40));
+    point.hold_off_centi_c = point
+        .hold_off_centi_c
+        .min(point.overshoot_cutoff_centi_c.saturating_sub(40).max(50));
+    (point != current).then_some(point)
 }
 
 fn apply_flagship_gate_nudge(
@@ -2822,6 +2911,9 @@ fn source_preset(profile_mode: ThermalProfileMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ThermalApproachGuardAnalysis, ThermalFullSpeedStableAnalysis, ThermalStageAnalysis,
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn write_test_samples(samples: &[Value]) -> PathBuf {
@@ -3995,6 +4087,58 @@ mod tests {
         assert_eq!(nudged.brake_distance_centi_c, 840);
         assert_eq!(nudged.approach_floor_power_permille, 320);
         assert_eq!(nudged.approach_power_permille, 540);
+    }
+
+    #[test]
+    fn conservative_high_side_candidate_trims_energy_after_residual_heat() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 140,
+            brake_distance_centi_c: 940,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 420,
+            approach_floor_power_permille: 320,
+            approach_damping_exponent_permille: 910,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 335,
+            hold_reheat_power_permille: 400,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 100,
+            hold_on_centi_c: 10,
+            hold_off_centi_c: 160,
+            overshoot_cutoff_centi_c: 220,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 0,
+        };
+        let result = ThermalStageResult {
+            target_temp_c: 140,
+            rise_time_ms: 30_000,
+            max_overshoot_c: 12.0,
+            hold_peak_to_peak_c: 14.0,
+            sample_count: 100,
+            stop_reason: "completed",
+            terminal_runtime_drop_reason: None,
+            analysis: ThermalStageAnalysis {
+                residual_heat_after_hold_entry_c: Some(10.0),
+                ..ThermalStageAnalysis::default()
+            },
+            guard: ThermalApproachGuardAnalysis::default(),
+            full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+        };
+        let evidence = json!({"failureClass": "stable_window_broke_high"});
+
+        let tuned = conservative_high_side_candidate(current, &result, &evidence, 140)
+            .expect("conservative candidate");
+
+        assert!(tuned.brake_distance_centi_c > current.brake_distance_centi_c);
+        assert!(tuned.hold_entry_centi_c > current.hold_entry_centi_c);
+        assert!(tuned.approach_power_permille < current.approach_power_permille);
+        assert!(tuned.hold_power_permille < current.hold_power_permille);
+        assert!(tuned.hold_reheat_power_permille < current.hold_reheat_power_permille);
+        assert!(tuned.overshoot_cutoff_centi_c < current.overshoot_cutoff_centi_c);
     }
 
     #[test]
