@@ -2727,10 +2727,20 @@ fn temp_c_to_whole_c(temp_c: f32) -> i16 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RtdMeasurement {
     raw_adc_mv: u16,
+    raw_adc_min_mv: u16,
+    raw_adc_max_mv: u16,
     adc_mv: u16,
     resistance_ohms: f32,
     temp_c: f32,
     current_temp_c: i16,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RtdAdcBatch {
+    mean_mv: f32,
+    min_mv: u16,
+    max_mv: u16,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3465,16 +3475,31 @@ fn rtd_fractional_mean_mv(sum_mv: u32, valid_samples: usize) -> Option<f32> {
     Some(sum_mv as f32 / valid_samples as f32)
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 fn oversampled_fractional_mean_mv_with_discard<F>(
     total_samples: usize,
     discard_valid_prefix_samples: usize,
-    mut read_sample: F,
+    read_sample: F,
 ) -> Option<f32>
 where
     F: FnMut() -> Option<u16>,
 {
+    oversampled_rtd_batch_with_discard(total_samples, discard_valid_prefix_samples, read_sample)
+        .map(|batch| batch.mean_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn oversampled_rtd_batch_with_discard<F>(
+    total_samples: usize,
+    discard_valid_prefix_samples: usize,
+    mut read_sample: F,
+) -> Option<RtdAdcBatch>
+where
+    F: FnMut() -> Option<u16>,
+{
     let mut sum_mv: u32 = 0;
+    let mut min_mv = u16::MAX;
+    let mut max_mv = 0_u16;
     let mut valid_samples = 0_usize;
     let mut discarded_valid_samples = 0_usize;
 
@@ -3487,10 +3512,16 @@ where
             continue;
         }
         sum_mv = sum_mv.saturating_add(sample_mv as u32);
+        min_mv = min_mv.min(sample_mv);
+        max_mv = max_mv.max(sample_mv);
         valid_samples = valid_samples.saturating_add(1);
     }
 
-    rtd_fractional_mean_mv(sum_mv, valid_samples)
+    rtd_fractional_mean_mv(sum_mv, valid_samples).map(|mean_mv| RtdAdcBatch {
+        mean_mv,
+        min_mv,
+        max_mv,
+    })
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -3501,8 +3532,8 @@ fn read_rtd_adc_mv<'a>(
         esp_hal::peripherals::ADC1<'a>,
         AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
     >,
-) -> Option<(u16, f32)> {
-    let mean_mv = oversampled_fractional_mean_mv_with_discard(
+) -> Option<RtdAdcBatch> {
+    let batch = oversampled_rtd_batch_with_discard(
         RTD_SAMPLE_COUNT + RTD_SETTLE_DISCARD_SAMPLE_COUNT,
         RTD_SETTLE_DISCARD_SAMPLE_COUNT,
         || loop {
@@ -3513,7 +3544,7 @@ fn read_rtd_adc_mv<'a>(
             }
         },
     )?;
-    Some((mean_mv.round() as u16, mean_mv))
+    Some(batch)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -3573,12 +3604,14 @@ fn read_rtd_sample<'a>(
     >,
     memory_config: &MemoryConfig,
 ) -> RtdSample {
-    let Some((raw_adc_mv, raw_adc_fractional_mv)) = read_rtd_adc_mv(adc, pin) else {
+    let Some(batch) = read_rtd_adc_mv(adc, pin) else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
+    let raw_adc_mv = batch.mean_mv.round() as u16;
+    let raw_adc_fractional_mv = batch.mean_mv;
 
     if raw_adc_fractional_mv <= f32::from(RTD_SHORT_FAULT_MAX_MV) {
         return RtdSample::Fault {
@@ -3605,6 +3638,8 @@ fn read_rtd_sample<'a>(
             let temp_c = pt1000_temperature_c_from_resistance(resistance_ohms);
             RtdSample::Valid(RtdMeasurement {
                 raw_adc_mv,
+                raw_adc_min_mv: batch.min_mv,
+                raw_adc_max_mv: batch.max_mv,
                 adc_mv,
                 resistance_ohms,
                 temp_c,
@@ -5043,6 +5078,8 @@ struct UsbRuntimeStatusContext {
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
     latest_rtd_raw_adc_mv: u16,
+    latest_rtd_raw_adc_min_mv: u16,
+    latest_rtd_raw_adc_max_mv: u16,
     latest_vin_raw_adc_mv: u16,
     vin_mv: u32,
 }
@@ -5113,6 +5150,11 @@ fn usb_runtime_status(
     )
     .with_runtime_target_temp_c(ui_state.target_temp_c);
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
+    status.rtd_raw_adc_min_mv = context.latest_rtd_raw_adc_min_mv;
+    status.rtd_raw_adc_max_mv = context.latest_rtd_raw_adc_max_mv;
+    status.rtd_raw_adc_spread_mv = context
+        .latest_rtd_raw_adc_max_mv
+        .saturating_sub(context.latest_rtd_raw_adc_min_mv);
     status.vin_raw_adc_mv = context.latest_vin_raw_adc_mv;
     status.manual_pps_enabled = context.manual_pps.enabled;
     status.manual_pps_mv = context.manual_pps.target_mv;
@@ -6688,6 +6730,8 @@ async fn handle_usb_control_line(
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
     latest_rtd_raw_adc_mv: u16,
+    latest_rtd_raw_adc_min_mv: u16,
+    latest_rtd_raw_adc_max_mv: u16,
     latest_vin_raw_adc_mv: u16,
     latest_vin_mv: u32,
     last_heater_duty: u8,
@@ -6721,6 +6765,8 @@ async fn handle_usb_control_line(
             last_raw_state,
             latest_status_temp_c,
             latest_rtd_raw_adc_mv,
+            latest_rtd_raw_adc_min_mv,
+            latest_rtd_raw_adc_max_mv,
             latest_vin_raw_adc_mv,
             vin_mv: latest_vin_mv,
         };
@@ -7652,6 +7698,8 @@ async fn main(_spawner: Spawner) {
     let mut latest_display_temp_c = 0.0_f32;
     let mut latest_display_temp_i16 = 0_i16;
     let mut latest_rtd_raw_adc_mv = 0_u16;
+    let mut latest_rtd_raw_adc_min_mv = 0_u16;
+    let mut latest_rtd_raw_adc_max_mv = 0_u16;
     let mut latest_vin_raw_adc_mv = 0_u16;
     let mut latest_vin_mv = 0_u32;
     let mut rtd_pps_transition_guard =
@@ -7660,6 +7708,8 @@ async fn main(_spawner: Spawner) {
     match initial_rtd_sample {
         RtdSample::Valid(measurement) => {
             latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
+            latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
+            latest_rtd_raw_adc_max_mv = measurement.raw_adc_max_mv;
             latest_temp_c = measurement.temp_c;
             latest_temp_i16 = temp_c_to_whole_c(measurement.temp_c);
             let _ = update_runtime_display_temperature(
@@ -7892,6 +7942,8 @@ async fn main(_spawner: Spawner) {
                         last_raw_state,
                         latest_display_temp_c,
                         latest_rtd_raw_adc_mv,
+                        latest_rtd_raw_adc_min_mv,
+                        latest_rtd_raw_adc_max_mv,
                         latest_vin_raw_adc_mv,
                         latest_vin_mv,
                         last_heater_duty,
@@ -8176,6 +8228,8 @@ async fn main(_spawner: Spawner) {
             match rtd_sample {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
+                    latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
+                    latest_rtd_raw_adc_max_mv = measurement.raw_adc_max_mv;
                     needs_redraw |= apply_valid_rtd_measurement(
                         RuntimeDisplayTemperatureState {
                             ui_state: &mut ui_state,
@@ -8200,6 +8254,8 @@ async fn main(_spawner: Spawner) {
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
+                    latest_rtd_raw_adc_min_mv = latest_rtd_raw_adc_mv;
+                    latest_rtd_raw_adc_max_mv = latest_rtd_raw_adc_mv;
                     current_rtd_fault = Some(reason);
                     clear_runtime_temperature(&mut latest_temp_c, &mut latest_temp_i16);
                     needs_redraw |= retain_runtime_display_temperature(
@@ -8607,6 +8663,8 @@ mod tests {
             last_raw_state: FrontPanelRawState::default(),
             latest_status_temp_c: 0.0,
             latest_rtd_raw_adc_mv: 0,
+            latest_rtd_raw_adc_min_mv: 0,
+            latest_rtd_raw_adc_max_mv: 0,
             latest_vin_raw_adc_mv: 0,
             vin_mv: 12_000,
         }
@@ -9290,6 +9348,26 @@ mod tests {
 
         assert_eq!(status.board_temp_centi, 14_024);
         assert_eq!(status.current_temp_c, 140.24);
+    }
+
+    #[test]
+    fn runtime_status_reports_rtd_batch_extrema() {
+        let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let status = usb_runtime_status(
+            &ui_state,
+            &MemoryConfig::default(),
+            UsbRuntimeStatusContext {
+                latest_rtd_raw_adc_mv: 900,
+                latest_rtd_raw_adc_min_mv: 899,
+                latest_rtd_raw_adc_max_mv: 902,
+                ..test_usb_runtime_status_context()
+            },
+        );
+
+        assert_eq!(status.rtd_raw_adc_mv, 900);
+        assert_eq!(status.rtd_raw_adc_min_mv, 899);
+        assert_eq!(status.rtd_raw_adc_max_mv, 902);
+        assert_eq!(status.rtd_raw_adc_spread_mv, 3);
     }
 
     #[test]
@@ -13107,6 +13185,26 @@ mod tests {
     }
 
     #[test]
+    fn rtd_oversampling_reports_kept_batch_extrema() {
+        let mut samples = vec![Some(1_240_u16); RTD_SETTLE_DISCARD_SAMPLE_COUNT];
+        let mut kept = vec![Some(900_u16); RTD_SAMPLE_COUNT];
+        kept[3] = Some(899);
+        kept[17] = Some(902);
+        samples.extend(kept);
+        let mut iter = samples.into_iter();
+        let batch = oversampled_rtd_batch_with_discard(
+            RTD_SAMPLE_COUNT + RTD_SETTLE_DISCARD_SAMPLE_COUNT,
+            RTD_SETTLE_DISCARD_SAMPLE_COUNT,
+            || iter.next().flatten(),
+        )
+        .expect("RTD batch has enough valid conversions");
+
+        assert_eq!(batch.min_mv, 899);
+        assert_eq!(batch.max_mv, 902);
+        assert_eq!(batch.max_mv.saturating_sub(batch.min_mv), 3);
+    }
+
+    #[test]
     fn rtd_oversampling_ignores_faulty_prefix_only_after_valid_tail_threshold() {
         let kept_valid_samples = RTD_MIN_VALID_SAMPLE_COUNT;
         let mut samples = vec![Some(1_240_u16); RTD_SETTLE_DISCARD_SAMPLE_COUNT];
@@ -13288,6 +13386,8 @@ mod tests {
     fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
         let retry_sample = RtdSample::Valid(RtdMeasurement {
             raw_adc_mv: 983,
+            raw_adc_min_mv: 982,
+            raw_adc_max_mv: 984,
             adc_mv: 983,
             resistance_ohms: 1_118.0,
             temp_c: 30.73,

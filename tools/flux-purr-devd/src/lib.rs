@@ -424,6 +424,9 @@ impl DeviceRecord {
             current_ma: 840,
             board_temp_centi: 3_840,
             rtd_raw_adc_mv: Some(1_123),
+            rtd_raw_adc_min_mv: Some(1_122),
+            rtd_raw_adc_max_mv: Some(1_124),
+            rtd_raw_adc_spread_mv: Some(2),
             vin_raw_adc_mv: Some(1_678),
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: DEFAULT_PD_REQUEST_MV,
@@ -504,6 +507,9 @@ impl DeviceRecord {
             current_ma: 0,
             board_temp_centi: -100,
             rtd_raw_adc_mv: None,
+            rtd_raw_adc_min_mv: None,
+            rtd_raw_adc_max_mv: None,
+            rtd_raw_adc_spread_mv: None,
             vin_raw_adc_mv: None,
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: 0,
@@ -653,6 +659,12 @@ pub struct ControlPlaneStatus {
     pub board_temp_centi: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtd_raw_adc_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_min_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_max_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_spread_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vin_raw_adc_mv: Option<u16>,
     pub pd_request_mv: u16,
@@ -7207,6 +7219,9 @@ mod tests {
             current_ma: 2_800,
             board_temp_centi: 3150,
             rtd_raw_adc_mv: Some(934),
+            rtd_raw_adc_min_mv: Some(933),
+            rtd_raw_adc_max_mv: Some(935),
+            rtd_raw_adc_spread_mv: Some(2),
             vin_raw_adc_mv: Some(1003),
             pd_request_mv: 12_000,
             pd_contract_mv: 12_000,

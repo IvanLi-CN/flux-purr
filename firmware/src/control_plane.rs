@@ -136,6 +136,12 @@ pub struct ControlPlaneStatus {
     pub current_ma: u32,
     pub board_temp_centi: i32,
     pub rtd_raw_adc_mv: u16,
+    #[serde(default)]
+    pub rtd_raw_adc_min_mv: u16,
+    #[serde(default)]
+    pub rtd_raw_adc_max_mv: u16,
+    #[serde(default)]
+    pub rtd_raw_adc_spread_mv: u16,
     pub vin_raw_adc_mv: u16,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
@@ -244,6 +250,9 @@ impl ControlPlaneStatus {
             current_ma: status.current_ma,
             board_temp_centi: status.board_temp_centi,
             rtd_raw_adc_mv: status.rtd_raw_adc_mv,
+            rtd_raw_adc_min_mv: 0,
+            rtd_raw_adc_max_mv: 0,
+            rtd_raw_adc_spread_mv: 0,
             vin_raw_adc_mv: status.vin_raw_adc_mv,
             pd_request_mv: status.pd_request_mv,
             pd_contract_mv: status.pd_contract_mv,
