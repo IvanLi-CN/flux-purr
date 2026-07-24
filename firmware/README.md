@@ -80,12 +80,12 @@
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
-  - the control loop runs at `10 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
+  - the control loop runs at `20 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
   - the controller uses model-assisted ramp/soak plus hold PI trimming: far from target it uses an approach power, inside the target-specific brake distance it ramps toward hold power, and in hold it trims around hold power with a small PI term
   - optional `ThermalControlProfile` preview is RAM-only and can tune up to 10 target points with `targetTempC`, `brakeDistanceCentiC`, `approachPowerPermille`, and `holdPowerPermille`; missing points fall back to conservative defaults, and interpolated targets use linear interpolation
   - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum; `1..100%` maps equivalent power into a `100 mV` aligned PPS voltage request from the source PPS minimum up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; WARMUP keeps this dynamic PPS control path; sub-`500 mV` target changes are suppressed and larger changes ramp by at most `500 mV` per request; same-APDO changes keep the MOS gate active and use a `25 ms` request transition gate, while APDO/AVS/fixed-PDO/fallback path changes blank the MOS and use a `275 ms` transition window; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
-  - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
-  - control interval is `100 ms (10 Hz)`
+  - `GPIO47` uses MCPWM at `100 Hz` for PPS and fixed-PD fallback. PPS voltage provides coarse power control; at the PPS floor and during bounded down-ramp, PWM continuously extends physical output down to `0%`. Each warmup entry applies a `1000 ms` linear physical-output soft start
+  - control interval is `50 ms (20 Hz)`
   - RTD open/short or ADC read failure forces heater fault-latch and duty `0%` without buzzer attention; valid temperature or raw ADC changes are never classified as a speed/discontinuity fault
   - `temp >= 420°C` enters thermal runaway, forces duty `0%`, and rejects heater arm while the runaway alert remains unacknowledged; acknowledgement never bypasses the active absolute overtemperature cutoff
   - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
@@ -180,7 +180,7 @@
 - GPIO profile is locked to the S3 front-panel baseline (`24` firmware-active GPIO, center key on `GPIO0`).
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
-- `GPIO47` (chip pin `37`) controls the low-side `BUK9Y14-40B,115` MOSFET stage. In `pps-mos` mode it is a static off/on gate output; in fallback mode it remains the `2 kHz` heater PWM output.
+- `GPIO47` (chip pin `37`) controls the low-side `BUK9Y14-40B,115` MOSFET stage through MCPWM at `100 Hz` in both PPS and fallback modes.
 - `GPIO48` (chip pin `36`) is the active buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
