@@ -555,20 +555,20 @@ struct ThermalFlagshipTuneArgs {
     runtime_rearm_attempts: u8,
     #[arg(
         long = "anchor-targets-c",
-        default_value = "60,100,140,180,220",
-        help = "Comma-separated sparse anchor targets used to maintain the working candidate profile."
+        default_value = "60,80,100,120,140,160,180,220,240",
+        help = "Deprecated legacy flag. Canonical 5A full-batch tuning now uses a single same-grade target set."
     )]
     anchor_targets_c: String,
     #[arg(
         long = "validation-targets-c",
-        default_value = "80,120,160,240",
-        help = "Comma-separated validation target list recorded in the flagship summary."
+        default_value = "60,80,100,120,140,160,180,220,240",
+        help = "Deprecated legacy flag. Canonical 5A full-batch tuning no longer runs a separate validation tier."
     )]
     validation_targets_c: String,
     #[arg(
         long = "tune-targets-c",
-        default_value = "60,100,140,180,220",
-        help = "Comma-separated flagship tuning execution order."
+        default_value = "60,80,100,120,140,160,180,220,240",
+        help = "Comma-separated full-batch tuning target set. Execution order is derived recursively from the physical temperature order."
     )]
     tune_targets_c: String,
     #[arg(
@@ -2163,20 +2163,8 @@ enum ThermalFullSpeedStableObservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ThermalCandidateSettings {
     temp_filter_alpha_permille: u16,
-    warmup_reenter_centi_c: u16,
-    hold_entry_centi_c: u16,
-    hold_exit_centi_c: u16,
-    hold_on_centi_c: u16,
-    hold_off_centi_c: u16,
-    overshoot_cutoff_centi_c: u16,
     approach_max_ticks: u16,
     approach_min_power_ratio_permille: u16,
-    hold_kp_permille_per_c: u16,
-    hold_ki_permille_per_c_tick: u16,
-    hold_blend_ticks: u16,
-    hold_reheat_power_permille: u16,
-    approach_lead_ticks: u16,
-    hold_lead_ticks: u16,
     auto_adjustable_working_floor_mv: u16,
     heater_current_reserve_ma: u16,
 }
@@ -2192,6 +2180,7 @@ struct ThermalCandidatePoint {
     approach_tail_window_centi_c: u16,
     hold_power_permille: u16,
     hold_reheat_power_permille: u16,
+    warmup_reenter_centi_c: u16,
     hold_entry_centi_c: u16,
     hold_exit_centi_c: u16,
     hold_on_centi_c: u16,
@@ -3534,6 +3523,11 @@ fn thermal_candidate_point_from_heater_parameters(
             .and_then(Value::as_u64)
             .map(|value| value as u16)
             .unwrap_or(default_point.hold_reheat_power_permille),
+        warmup_reenter_centi_c: heater_parameters
+            .get("warmupReenterCentiC")
+            .and_then(Value::as_u64)
+            .map(|value| value as u16)
+            .unwrap_or(default_point.warmup_reenter_centi_c),
         hold_entry_centi_c: heater_parameters
             .get("holdEntryCentiC")
             .and_then(Value::as_u64)
@@ -4865,23 +4859,8 @@ fn thermal_persisted_profile_for_bank(
 fn thermal_default_settings() -> ThermalCandidateSettings {
     ThermalCandidateSettings {
         temp_filter_alpha_permille: 750,
-        // A noisy sub-second reading must not re-enter full-power warmup after the controller
-        // has started braking. The threshold remains profile-controlled and is persisted with
-        // the rest of the adaptive point data.
-        warmup_reenter_centi_c: 1_000,
-        hold_entry_centi_c: 20,
-        hold_exit_centi_c: 80,
-        hold_on_centi_c: 15,
-        hold_off_centi_c: 80,
-        overshoot_cutoff_centi_c: 120,
         approach_max_ticks: 250,
         approach_min_power_ratio_permille: 500,
-        hold_kp_permille_per_c: 35,
-        hold_ki_permille_per_c_tick: 1,
-        hold_blend_ticks: 12,
-        hold_reheat_power_permille: 0,
-        approach_lead_ticks: 0,
-        hold_lead_ticks: 0,
         auto_adjustable_working_floor_mv: 5_000,
         heater_current_reserve_ma: 200,
     }
@@ -4896,6 +4875,7 @@ fn thermal_default_target_point(target_temp_c: i16) -> ThermalCandidatePoint {
         approach_damping_exponent_permille,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -4917,6 +4897,7 @@ fn thermal_default_target_point(target_temp_c: i16) -> ThermalCandidatePoint {
         approach_tail_window_centi_c: 0,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -4946,6 +4927,7 @@ fn thermal_candidate_profile_to_value(profile: &ThermalCandidateProfile) -> Valu
                 "approachTailWindowCentiC": point.approach_tail_window_centi_c,
                 "holdPowerPermille": point.hold_power_permille,
                 "holdReheatPowerPermille": point.hold_reheat_power_permille,
+                "warmupReenterCentiC": point.warmup_reenter_centi_c,
                 "holdEntryCentiC": point.hold_entry_centi_c,
                 "holdExitCentiC": point.hold_exit_centi_c,
                 "holdOnCentiC": point.hold_on_centi_c,
@@ -4978,36 +4960,6 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
             .and_then(Value::as_u64)
             .map(|value| value as u16)
             .unwrap_or(default_settings.temp_filter_alpha_permille),
-        warmup_reenter_centi_c: settings_value
-            .get("warmupReenterCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.warmup_reenter_centi_c),
-        hold_entry_centi_c: settings_value
-            .get("holdEntryCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_entry_centi_c),
-        hold_exit_centi_c: settings_value
-            .get("holdExitCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_exit_centi_c),
-        hold_on_centi_c: settings_value
-            .get("holdOnCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_on_centi_c),
-        hold_off_centi_c: settings_value
-            .get("holdOffCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_off_centi_c),
-        overshoot_cutoff_centi_c: settings_value
-            .get("overshootCutoffCentiC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.overshoot_cutoff_centi_c),
         approach_max_ticks: settings_value
             .get("approachMaxTicks")
             .and_then(Value::as_u64)
@@ -5018,36 +4970,6 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
             .and_then(Value::as_u64)
             .map(|value| value as u16)
             .unwrap_or(default_settings.approach_min_power_ratio_permille),
-        hold_kp_permille_per_c: settings_value
-            .get("holdKpPermillePerC")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_kp_permille_per_c),
-        hold_ki_permille_per_c_tick: settings_value
-            .get("holdKiPermillePerCTick")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_ki_permille_per_c_tick),
-        hold_blend_ticks: settings_value
-            .get("holdBlendTicks")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_blend_ticks),
-        hold_reheat_power_permille: settings_value
-            .get("holdReheatPowerPermille")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_reheat_power_permille),
-        approach_lead_ticks: settings_value
-            .get("approachLeadTicks")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.approach_lead_ticks),
-        hold_lead_ticks: settings_value
-            .get("holdLeadTicks")
-            .and_then(Value::as_u64)
-            .map(|value| value as u16)
-            .unwrap_or(default_settings.hold_lead_ticks),
         auto_adjustable_working_floor_mv: settings_value
             .get("autoAdjustableWorkingFloorMv")
             .and_then(Value::as_u64)
@@ -5125,57 +5047,92 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
                     .get("holdReheatPowerPermille")
                     .and_then(Value::as_u64)
                     .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_reheat_power_permille),
-                hold_entry_centi_c: point_value
-                    .get("holdEntryCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_entry_centi_c),
-                hold_exit_centi_c: point_value
-                    .get("holdExitCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_exit_centi_c),
-                hold_on_centi_c: point_value
-                    .get("holdOnCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(settings.hold_on_centi_c),
-                hold_off_centi_c: point_value
-                    .get("holdOffCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_off_centi_c),
-                overshoot_cutoff_centi_c: point_value
-                    .get("overshootCutoffCentiC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.overshoot_cutoff_centi_c),
-                hold_kp_permille_per_c: point_value
-                    .get("holdKpPermillePerC")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_kp_permille_per_c),
-                hold_ki_permille_per_c_tick: point_value
-                    .get("holdKiPermillePerCTick")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_ki_permille_per_c_tick),
-                hold_blend_ticks: point_value
-                    .get("holdBlendTicks")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_blend_ticks),
-                approach_lead_ticks: point_value
-                    .get("approachLeadTicks")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.approach_lead_ticks),
-                hold_lead_ticks: point_value
-                    .get("holdLeadTicks")
-                    .and_then(Value::as_u64)
-                    .map(|value| value as u16)
-                    .unwrap_or(default_point.hold_lead_ticks),
+                    .unwrap_or_else(|| {
+                        inherited_point_u16(
+                            &point_value,
+                            "holdReheatPowerPermille",
+                            &settings_value,
+                            "holdReheatPowerPermille",
+                            default_point.hold_reheat_power_permille,
+                        )
+                    }),
+                warmup_reenter_centi_c: inherited_point_u16(
+                    &point_value,
+                    "warmupReenterCentiC",
+                    &settings_value,
+                    "warmupReenterCentiC",
+                    default_point.warmup_reenter_centi_c,
+                ),
+                hold_entry_centi_c: inherited_point_u16(
+                    &point_value,
+                    "holdEntryCentiC",
+                    &settings_value,
+                    "holdEntryCentiC",
+                    default_point.hold_entry_centi_c,
+                ),
+                hold_exit_centi_c: inherited_point_u16(
+                    &point_value,
+                    "holdExitCentiC",
+                    &settings_value,
+                    "holdExitCentiC",
+                    default_point.hold_exit_centi_c,
+                ),
+                hold_on_centi_c: inherited_point_u16(
+                    &point_value,
+                    "holdOnCentiC",
+                    &settings_value,
+                    "holdOnCentiC",
+                    default_point.hold_on_centi_c,
+                ),
+                hold_off_centi_c: inherited_point_u16(
+                    &point_value,
+                    "holdOffCentiC",
+                    &settings_value,
+                    "holdOffCentiC",
+                    default_point.hold_off_centi_c,
+                ),
+                overshoot_cutoff_centi_c: inherited_point_u16(
+                    &point_value,
+                    "overshootCutoffCentiC",
+                    &settings_value,
+                    "overshootCutoffCentiC",
+                    default_point.overshoot_cutoff_centi_c,
+                ),
+                hold_kp_permille_per_c: inherited_point_u16(
+                    &point_value,
+                    "holdKpPermillePerC",
+                    &settings_value,
+                    "holdKpPermillePerC",
+                    default_point.hold_kp_permille_per_c,
+                ),
+                hold_ki_permille_per_c_tick: inherited_point_u16(
+                    &point_value,
+                    "holdKiPermillePerCTick",
+                    &settings_value,
+                    "holdKiPermillePerCTick",
+                    default_point.hold_ki_permille_per_c_tick,
+                ),
+                hold_blend_ticks: inherited_point_u16(
+                    &point_value,
+                    "holdBlendTicks",
+                    &settings_value,
+                    "holdBlendTicks",
+                    default_point.hold_blend_ticks,
+                ),
+                approach_lead_ticks: inherited_point_u16(
+                    &point_value,
+                    "approachLeadTicks",
+                    &settings_value,
+                    "approachLeadTicks",
+                    default_point.approach_lead_ticks,
+                ),
+                hold_lead_ticks: inherited_point_u16(
+                    &point_value,
+                    "holdLeadTicks",
+                    &settings_value,
+                    "holdLeadTicks",
+                    default_point.hold_lead_ticks,
+                ),
             };
             point.warmup_power_permille = 1_000;
             point
@@ -5184,23 +5141,34 @@ fn thermal_candidate_profile_from_value(imported: Value) -> ThermalCandidateProf
     ThermalCandidateProfile { settings, points }
 }
 
+fn inherited_point_u16(
+    point_value: &Value,
+    point_key: &str,
+    legacy_settings: &Value,
+    legacy_key: &str,
+    default_value: u16,
+) -> u16 {
+    if let Some(value) = point_value
+        .get(point_key)
+        .and_then(Value::as_u64)
+        .map(|value| value as u16)
+    {
+        if value != 0 || legacy_settings.get(legacy_key).is_none() {
+            return value;
+        }
+    }
+    legacy_settings
+        .get(legacy_key)
+        .and_then(Value::as_u64)
+        .map(|value| value as u16)
+        .unwrap_or(default_value)
+}
+
 fn thermal_candidate_settings_to_value(settings: ThermalCandidateSettings) -> Value {
     json!({
         "tempFilterAlphaPermille": settings.temp_filter_alpha_permille,
-        "warmupReenterCentiC": settings.warmup_reenter_centi_c,
-        "holdEntryCentiC": settings.hold_entry_centi_c,
-        "holdExitCentiC": settings.hold_exit_centi_c,
-        "holdOnCentiC": settings.hold_on_centi_c,
-        "holdOffCentiC": settings.hold_off_centi_c,
-        "overshootCutoffCentiC": settings.overshoot_cutoff_centi_c,
         "approachMaxTicks": settings.approach_max_ticks,
         "approachMinPowerRatioPermille": settings.approach_min_power_ratio_permille,
-        "holdKpPermillePerC": settings.hold_kp_permille_per_c,
-        "holdKiPermillePerCTick": settings.hold_ki_permille_per_c_tick,
-        "holdBlendTicks": settings.hold_blend_ticks,
-        "holdReheatPowerPermille": settings.hold_reheat_power_permille,
-        "approachLeadTicks": settings.approach_lead_ticks,
-        "holdLeadTicks": settings.hold_lead_ticks,
         "autoAdjustableWorkingFloorMv": settings.auto_adjustable_working_floor_mv,
         "heaterCurrentReserveMa": settings.heater_current_reserve_ma,
     })
@@ -5215,6 +5183,7 @@ const THERMAL_SAMPLE_RATE_WINDOW_MS: u64 = 3_000;
 const THERMAL_SAMPLE_RATE_FAILURE_GRACE_MS: u64 = 3_000;
 const THERMAL_HEATER_OUTPUT_START_TIMEOUT_MS: u64 = 2_000;
 const THERMAL_COOLDOWN_POLL_INTERVAL_MS: u64 = 1_000;
+const THERMAL_COOLDOWN_EPSILON_C: f64 = 0.15;
 
 impl ThermalSampleRateTracker {
     fn new() -> Self {
@@ -5278,32 +5247,33 @@ fn thermal_default_target_values(
     u16,
     u16,
     u16,
+    u16,
 ) {
     if target_temp_c <= 60 {
         (
             // The verified low-temperature point predicts stored heat during Approach, enters
             // Hold early, then coasts at zero output until the plate starts falling again.
-            1_310, 1_000, 590, 510, 1_320, 60, 60, 200, 540, 30, 120, 150, 8, 2, 1, 4, 2,
+            1_310, 1_000, 590, 510, 1_320, 60, 60, 1_000, 200, 540, 30, 120, 150, 8, 2, 1, 4, 2,
         )
     } else if target_temp_c <= 100 {
         (
-            1_100, 1_000, 420, 220, 1_400, 170, 260, 12, 60, 30, 180, 230, 55, 2, 6, 9, 0,
+            1_100, 1_000, 420, 220, 1_400, 170, 260, 1_000, 12, 60, 30, 180, 230, 55, 2, 6, 9, 0,
         )
     } else if target_temp_c <= 140 {
         (
-            1_000, 1_000, 420, 200, 1_000, 280, 340, 10, 55, 30, 160, 220, 22, 1, 1, 4, 0,
+            1_000, 1_000, 420, 200, 1_000, 280, 340, 1_000, 10, 55, 30, 160, 220, 22, 1, 1, 4, 0,
         )
     } else if target_temp_c <= 180 {
         (
-            650, 1_000, 760, 460, 800, 450, 620, 15, 70, 25, 240, 300, 20, 1, 3, 4, 0,
+            650, 1_000, 760, 460, 800, 450, 620, 1_000, 15, 70, 25, 240, 300, 20, 1, 3, 4, 0,
         )
     } else if target_temp_c <= 220 {
         (
-            520, 1_000, 760, 600, 550, 620, 700, 8, 50, 14, 240, 320, 22, 1, 2, 2, 0,
+            520, 1_000, 760, 600, 550, 620, 700, 1_000, 8, 50, 14, 240, 320, 22, 1, 2, 2, 0,
         )
     } else {
         (
-            500, 1_000, 960, 860, 350, 850, 930, 10, 55, 14, 320, 420, 12, 1, 1, 1, 0,
+            500, 1_000, 960, 860, 350, 850, 930, 1_000, 10, 55, 14, 320, 420, 12, 1, 1, 1, 0,
         )
     }
 }
@@ -5405,6 +5375,7 @@ fn thermal_interpolated_candidate_point(
     };
     let scale_low_temp_hold =
         |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
+    let default_point = thermal_default_target_point(target_temp_c);
     Some(ThermalCandidatePoint {
         target_temp_c,
         brake_distance_centi_c: interpolated_brake_distance,
@@ -5440,6 +5411,12 @@ fn thermal_interpolated_candidate_point(
             1_000,
         )) * low_temp_reheat_scale
             + 0.5) as u16,
+        warmup_reenter_centi_c: lerp(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            5_000,
+        )
+        .max(default_point.warmup_reenter_centi_c.min(5_000)),
         hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
@@ -5461,7 +5438,7 @@ fn thermal_interpolated_candidate_point(
                 10_000,
             );
             if interpolated == 0 {
-                profile.settings.hold_ki_permille_per_c_tick
+                default_point.hold_ki_permille_per_c_tick
             } else {
                 interpolated
             }
@@ -5662,6 +5639,14 @@ fn rebuild_thermal_candidate_point_from_anchor_relations(
         ),
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c: shift_from_default(
+            default_point.warmup_reenter_centi_c,
+            lower.warmup_reenter_centi_c,
+            lower_default.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            upper_default.warmup_reenter_centi_c,
+            5_000,
+        ),
         hold_entry_centi_c: shift_from_default(
             default_point.hold_entry_centi_c,
             lower.hold_entry_centi_c,
@@ -6287,7 +6272,7 @@ fn thermal_heater_parameters_value(
     let interpolated_point = interpolated_profile
         .as_ref()
         .and_then(|profile| thermal_interpolated_candidate_point(profile, target_temp_c))
-        .map(|point| thermal_effective_candidate_point(point, &effective_settings));
+        .map(thermal_effective_candidate_point);
     let point_value = interpolated_point.map(|point| {
         thermal_candidate_profile_to_value(&ThermalCandidateProfile {
             settings: effective_settings.clone(),
@@ -6308,6 +6293,7 @@ fn thermal_heater_parameters_value(
         approach_damping_exponent_permille,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -6343,6 +6329,10 @@ fn thermal_heater_parameters_value(
                 .unwrap_or(220) as u16,
             point
                 .get("holdReheatPowerPermille")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as u16,
+            point
+                .get("warmupReenterCentiC")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u16,
             point
@@ -6404,6 +6394,7 @@ fn thermal_heater_parameters_value(
         "approachTailWindowCentiC": approach_tail_window_centi_c,
         "holdPowerPermille": hold_power_permille,
         "holdReheatPowerPermille": hold_reheat_power_permille,
+        "warmupReenterCentiC": warmup_reenter_centi_c,
         "holdEntryCentiC": hold_entry_centi_c,
         "holdExitCentiC": hold_exit_centi_c,
         "holdOnCentiC": hold_on_centi_c,
@@ -6418,40 +6409,7 @@ fn thermal_heater_parameters_value(
     })
 }
 
-fn thermal_effective_candidate_point(
-    mut point: ThermalCandidatePoint,
-    settings: &ThermalCandidateSettings,
-) -> ThermalCandidatePoint {
-    if point.hold_entry_centi_c == 0 {
-        point.hold_entry_centi_c = settings.hold_entry_centi_c;
-    }
-    if point.hold_exit_centi_c == 0 {
-        point.hold_exit_centi_c = settings.hold_exit_centi_c;
-    }
-    if point.hold_on_centi_c == 0 {
-        point.hold_on_centi_c = settings.hold_on_centi_c;
-    }
-    if point.hold_off_centi_c == 0 {
-        point.hold_off_centi_c = settings.hold_off_centi_c;
-    }
-    if point.overshoot_cutoff_centi_c == 0 {
-        point.overshoot_cutoff_centi_c = settings.overshoot_cutoff_centi_c;
-    }
-    if point.hold_kp_permille_per_c == 0 {
-        point.hold_kp_permille_per_c = settings.hold_kp_permille_per_c;
-    }
-    if point.hold_ki_permille_per_c_tick == 0 {
-        point.hold_ki_permille_per_c_tick = settings.hold_ki_permille_per_c_tick;
-    }
-    if point.hold_blend_ticks == 0 {
-        point.hold_blend_ticks = settings.hold_blend_ticks;
-    }
-    if point.hold_reheat_power_permille == 0 {
-        point.hold_reheat_power_permille = settings.hold_reheat_power_permille;
-    }
-    if point.hold_reheat_power_permille == 0 {
-        point.hold_reheat_power_permille = point.hold_power_permille;
-    }
+fn thermal_effective_candidate_point(mut point: ThermalCandidatePoint) -> ThermalCandidatePoint {
     point.warmup_power_permille = 1_000;
     point
 }
@@ -6861,6 +6819,7 @@ fn verify_thermal_control_readback(
         "approachTailWindowCentiC",
         "holdPowerPermille",
         "holdReheatPowerPermille",
+        "warmupReenterCentiC",
         "holdEntryCentiC",
         "holdExitCentiC",
         "holdOnCentiC",
@@ -6874,7 +6833,6 @@ fn verify_thermal_control_readback(
     ];
     const SETTINGS_FIELDS: &[&str] = &[
         "tempFilterAlphaPermille",
-        "warmupReenterCentiC",
         "approachMaxTicks",
         "approachMinPowerRatioPermille",
         "autoAdjustableWorkingFloorMv",
@@ -7392,7 +7350,7 @@ async fn run_thermal_stage(
         {
             stop_reason = "warmup_timeout";
         }
-        if stop_reason == "timeout" {
+        if stop_reason == "timeout" && args.evaluation_mode.enforces_stage_limits() {
             if let Some(reason) = full_speed_stop_reason {
                 stop_reason = reason;
             }
@@ -7487,7 +7445,7 @@ async fn wait_for_cooldown(
         let status =
             request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
         let current_temp_c = require_status_f64(&status, "currentTempC")?;
-        if current_temp_c <= cooldown_temp_c {
+        if cooldown_target_reached(current_temp_c, cooldown_temp_c) {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
@@ -7498,6 +7456,10 @@ async fn wait_for_cooldown(
         }
         tokio::time::sleep(Duration::from_millis(THERMAL_COOLDOWN_POLL_INTERVAL_MS)).await;
     }
+}
+
+fn cooldown_target_reached(current_temp_c: f64, cooldown_temp_c: f64) -> bool {
+    current_temp_c <= cooldown_temp_c + THERMAL_COOLDOWN_EPSILON_C
 }
 
 fn thermal_stage_can_continue_tuning(stage: &ThermalStageResult) -> bool {
@@ -7690,12 +7652,36 @@ async fn prepare_thermal_bench_source(
 fn read_isolapurr_live_telemetry(
     source_url: &str,
 ) -> Result<BenchSourceLiveTelemetry, Box<dyn std::error::Error + Send + Sync>> {
-    isolapurr_cli_json_read_once_with_timeout(
-        source_url,
-        &["power", "show"],
-        Duration::from_millis(750),
-    )
-    .and_then(|power| parse_isolapurr_live_telemetry(&power).map_err(Into::into))
+    const LIVE_TELEMETRY_TIMEOUT: Duration = Duration::from_millis(1_500);
+    const LIVE_TELEMETRY_ATTEMPTS: usize = 3;
+
+    let mut last_error = None::<String>;
+    for attempt in 1..=LIVE_TELEMETRY_ATTEMPTS {
+        let result = isolapurr_cli_json_read_once_with_timeout(
+            source_url,
+            &["power", "show"],
+            LIVE_TELEMETRY_TIMEOUT,
+        )
+        .and_then(|power| parse_isolapurr_live_telemetry(&power).map_err(Into::into));
+        match result {
+            Ok(telemetry) => return Ok(telemetry),
+            Err(error) => {
+                let message = error.to_string();
+                if attempt >= LIVE_TELEMETRY_ATTEMPTS
+                    || !(isolapurr_cli_transient_error_message(&message)
+                        || isolapurr_live_telemetry_transient_error_message(&message))
+                {
+                    return Err(error);
+                }
+                last_error = Some(message);
+                std::thread::sleep(isolapurr_read_retry_delay(attempt));
+            }
+        }
+    }
+
+    Err(last_error
+        .unwrap_or_else(|| "isolapurr live telemetry did not stabilize".to_string())
+        .into())
 }
 
 fn validate_isolapurr_tools() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -8442,7 +8428,9 @@ fn thermal_source_telemetry_stale_error(error: &(dyn std::error::Error + Send + 
 
 fn thermal_source_probe_transient_error(error: &(dyn std::error::Error + Send + Sync)) -> bool {
     let message = error.to_string();
-    thermal_source_telemetry_stale_error(error) || isolapurr_cli_transient_error_message(&message)
+    thermal_source_telemetry_stale_error(error)
+        || isolapurr_cli_transient_error_message(&message)
+        || isolapurr_live_telemetry_transient_error_message(&message)
 }
 
 fn isolapurr_cli_transient_error_message(message: &str) -> bool {
@@ -8451,6 +8439,17 @@ fn isolapurr_cli_transient_error_message(message: &str) -> bool {
         || message.contains("client error (Connect)")
         || message.contains("tcp connect error")
         || message.contains("Connection refused")
+}
+
+fn isolapurr_live_telemetry_transient_error_message(message: &str) -> bool {
+    message.contains("isolapurr ports missing USB-C telemetry")
+        || message.contains("isolapurr USB-C telemetry missing object")
+        || message.contains("isolapurr USB-C telemetry missing voltage")
+        || message.contains("isolapurr USB-C telemetry missing current")
+        || message.contains("isolapurr USB-C telemetry missing power")
+        || message.contains("isolapurr USB-C telemetry missing sample uptime")
+        || message.contains("status=not_inserted")
+        || message.contains("status=unknown")
 }
 
 fn isolapurr_cli_json_read(
@@ -10067,13 +10066,15 @@ mod tests {
 
     #[test]
     fn thermal_heater_parameters_apply_firmware_zero_value_inheritance() {
-        let mut profile = thermal_seed_candidate_profile();
-        profile.settings.hold_ki_permille_per_c_tick = 1;
-        thermal_candidate_point_mut(&mut profile, 60)
-            .expect("60C anchor")
-            .hold_ki_permille_per_c_tick = 0;
-
-        let value = thermal_candidate_profile_to_value(&profile);
+        let value = json!({
+            "settings": {
+                "holdKiPermillePerCTick": 1
+            },
+            "points": [{
+                "targetTempC": 60,
+                "holdKiPermillePerCTick": 0
+            }]
+        });
         let parameters = thermal_heater_parameters_value(60, Some(&value), "preview");
         assert_eq!(parameters["holdKiPermillePerCTick"], 1);
     }
@@ -10106,7 +10107,6 @@ mod tests {
         );
         for field in [
             "tempFilterAlphaPermille",
-            "warmupReenterCentiC",
             "approachMaxTicks",
             "approachMinPowerRatioPermille",
             "autoAdjustableWorkingFloorMv",
@@ -10161,7 +10161,7 @@ mod tests {
         assert_eq!(normalized["points"][0]["warmupPowerPermille"], 1_000);
 
         let point = thermal_candidate_point(&parsed, 60).expect("60C point");
-        let effective = thermal_effective_candidate_point(point, &parsed.settings);
+        let effective = thermal_effective_candidate_point(point);
         assert_eq!(effective.warmup_power_permille, 1_000);
 
         let params = thermal_heater_parameters_value(60, Some(&normalized), "preview");
@@ -11420,6 +11420,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 58,
             hold_reheat_power_permille: 116,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 35,
             hold_exit_centi_c: 93,
             hold_on_centi_c: 30,
@@ -11482,6 +11483,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 0,
             hold_reheat_power_permille: 80,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 30,
             hold_exit_centi_c: 87,
             hold_on_centi_c: 30,
@@ -11542,6 +11544,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 0,
             hold_reheat_power_permille: 58,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 35,
             hold_exit_centi_c: 107,
             hold_on_centi_c: 30,
@@ -11601,6 +11604,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 980,
             hold_reheat_power_permille: 980,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 25,
             hold_exit_centi_c: 75,
             hold_on_centi_c: 30,
@@ -11661,6 +11665,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 59,
             hold_reheat_power_permille: 390,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 25,
             hold_exit_centi_c: 75,
             hold_on_centi_c: 30,
@@ -11725,6 +11730,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 720,
             hold_reheat_power_permille: 880,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 8,
             hold_exit_centi_c: 45,
             hold_on_centi_c: 14,
@@ -11839,6 +11845,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 740,
             hold_reheat_power_permille: 790,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 100,
             hold_exit_centi_c: 170,
             hold_on_centi_c: 200,
@@ -11909,6 +11916,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 59,
             hold_reheat_power_permille: 390,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 25,
             hold_exit_centi_c: 75,
             hold_on_centi_c: 30,
@@ -12238,6 +12246,7 @@ mod tests {
             approach_tail_window_centi_c: lower_default.approach_tail_window_centi_c,
             hold_power_permille: scale_power(lower_default.hold_power_permille),
             hold_reheat_power_permille: scale_power(lower_default.hold_reheat_power_permille),
+            warmup_reenter_centi_c: lower_default.warmup_reenter_centi_c,
             hold_entry_centi_c: lower_default.hold_entry_centi_c.saturating_add(5),
             hold_exit_centi_c: lower_default.hold_exit_centi_c.saturating_add(10),
             hold_on_centi_c: lower_default.hold_on_centi_c.saturating_add(5),
@@ -12263,6 +12272,7 @@ mod tests {
             approach_tail_window_centi_c: upper_default.approach_tail_window_centi_c,
             hold_power_permille: scale_power(upper_default.hold_power_permille),
             hold_reheat_power_permille: scale_power(upper_default.hold_reheat_power_permille),
+            warmup_reenter_centi_c: upper_default.warmup_reenter_centi_c,
             hold_entry_centi_c: upper_default.hold_entry_centi_c.saturating_add(5),
             hold_exit_centi_c: upper_default.hold_exit_centi_c.saturating_add(10),
             hold_on_centi_c: upper_default.hold_on_centi_c.saturating_add(5),
@@ -12501,9 +12511,12 @@ mod tests {
         assert_eq!(args.per_target_budget_seconds, 600);
         assert_eq!(args.max_tuning_rounds, Some(1));
         assert_eq!(args.runtime_rearm_attempts, 3);
-        assert_eq!(args.anchor_targets_c, "60,100,140,180,220");
-        assert_eq!(args.validation_targets_c, "80,120,160,240");
-        assert_eq!(args.tune_targets_c, "60,100,140,180,220");
+        assert_eq!(args.anchor_targets_c, "60,80,100,120,140,160,180,220,240");
+        assert_eq!(
+            args.validation_targets_c,
+            "60,80,100,120,140,160,180,220,240"
+        );
+        assert_eq!(args.tune_targets_c, "60,80,100,120,140,160,180,220,240");
         assert!(args.dry_run);
     }
 
@@ -12769,6 +12782,27 @@ mod tests {
     }
 
     #[test]
+    fn thermal_tuning_scout_keeps_collecting_after_full_speed_timeout() {
+        let full_speed_stop_reason = Some("full_speed_to_stable_timeout");
+
+        let scout_stop_reason =
+            if ThermalSelfTestEvaluationMode::TuningScout.enforces_stage_limits() {
+                full_speed_stop_reason.unwrap_or("timeout")
+            } else {
+                "timeout"
+            };
+        let confirm_stop_reason =
+            if ThermalSelfTestEvaluationMode::HoldConfirm.enforces_stage_limits() {
+                full_speed_stop_reason.unwrap_or("timeout")
+            } else {
+                "timeout"
+            };
+
+        assert_eq!(scout_stop_reason, "timeout");
+        assert_eq!(confirm_stop_reason, "full_speed_to_stable_timeout");
+    }
+
+    #[test]
     fn thermal_replay_analysis_includes_post_hold_approach_samples_in_hold_window() {
         let samples = vec![
             json!({
@@ -12827,6 +12861,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 60,
             hold_reheat_power_permille: 120,
+            warmup_reenter_centi_c: 1_000,
             hold_entry_centi_c: 30,
             hold_exit_centi_c: 90,
             hold_on_centi_c: 30,
@@ -13360,6 +13395,14 @@ mod tests {
 
         let timeout = io::Error::other("isolapurr power show timed out after 750ms");
         assert!(thermal_source_probe_transient_error(&timeout));
+
+        let not_inserted = io::Error::other(
+            "isolapurr USB-C telemetry missing voltage status=not_inserted state=null",
+        );
+        assert!(thermal_source_probe_transient_error(&not_inserted));
+
+        let missing_object = io::Error::other("isolapurr USB-C telemetry missing object");
+        assert!(thermal_source_probe_transient_error(&missing_object));
 
         let refused = io::Error::other(
             "isolapurr status exited with exit status: 1; stderr=Error: error sending request for url (http://192.168.31.224/api/v1/info)\n\nCaused by:\n    0: client error (Connect)\n    1: tcp connect error\n    2: Connection refused (os error 61)",
@@ -13908,7 +13951,7 @@ mod tests {
         assert_eq!(bundle["kind"], "thermal_self_test_preliminary_bundle");
         assert_eq!(bundle["bundleDisposition"], "preliminary_review");
         assert_eq!(bundle["acceptedProfileRole"], "review_candidate_snapshot");
-        assert_eq!(bundle["flagshipTargetsC"], json!([60]));
+        assert_eq!(bundle["tuningTargetsC"], json!([60]));
         assert_eq!(bundle["runs"][0]["target"], 60);
         assert_eq!(
             bundle["runs"][0]["pointSource"],
@@ -14063,7 +14106,7 @@ mod tests {
 
         assert_eq!(result["ok"], true);
         assert_eq!(bundle["kind"], "thermal_self_test_preliminary_bundle");
-        assert_eq!(bundle["flagshipTargetsC"], json!([60]));
+        assert_eq!(bundle["tuningTargetsC"], json!([60]));
         assert_eq!(bundle["runs"][0]["roundCount"], 2);
         assert_eq!(
             bundle["runs"][0]["rounds"][0]["attemptType"],
@@ -14624,5 +14667,11 @@ mod tests {
         assert_eq!(captured[1]["confirm"], "FLASH");
 
         server.abort();
+    }
+
+    #[test]
+    fn cooldown_target_reached_allows_quantized_edge_without_hiding_real_overshoot() {
+        assert!(super::cooldown_target_reached(35.1, 35.0));
+        assert!(!super::cooldown_target_reached(35.2, 35.0));
     }
 }

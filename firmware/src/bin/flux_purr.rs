@@ -303,12 +303,20 @@ const HEATER_PROFILE_TEMP_COEFFICIENT_PER_C: f32 = 0.00393;
 const HEATER_CURRENT_LIMIT_FALLBACK_REQUEST: ch224q::VoltageRequest = ch224q::VoltageRequest::V9;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_CURRENT_LIMIT_RETURN_HYSTERESIS_MV: u16 = 200;
-#[cfg(target_arch = "xtensa")]
-const HEATER_PWM_FREQUENCY_HZ: u32 = 2_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PWM_FREQUENCY_HZ: u32 = 100;
+#[cfg(any(target_arch = "xtensa", test))]
+const MCPWM_PERIPHERAL_CLOCK_HZ: u32 = 40_000_000;
+#[cfg(test)]
+const MCPWM_TIMER_MAX_PRESCALER: u32 = 255;
 #[cfg(target_arch = "xtensa")]
 const FAN_PWM_PERIOD_TICKS: u16 = 99;
-#[cfg(target_arch = "xtensa")]
-const HEATER_PWM_PERIOD_TICKS: u16 = 99;
+// MCPWM's timer prescaler is only eight bits. At 40 MHz, 100 Hz needs at
+// least 1,563 timer counts; 1,600 counts gives an exact 100 Hz period.
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_PWM_PERIOD_TICKS: u16 = 1_599;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_WARMUP_SOFT_START_MS: u64 = 1_000;
 #[cfg(target_arch = "xtensa")]
 const BUZZER_PWM_PERIOD_TICKS: u16 = 999;
 #[cfg(target_arch = "xtensa")]
@@ -471,6 +479,7 @@ impl HeaterControlPhase {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct HeaterPidSnapshot {
     duty_percent: u8,
+    warmup_soft_start_percent: u8,
     error_c: f32,
     control_error_c: f32,
     filtered_temp_c: f32,
@@ -492,6 +501,7 @@ struct ThermalControlProfilePoint {
     target_temp_c: i16,
     brake_distance_centi_c: u16,
     warmup_power_permille: u16,
+    warmup_reenter_centi_c: u16,
     approach_power_permille: u16,
     approach_floor_power_permille: u16,
     approach_damping_exponent_permille: u16,
@@ -522,6 +532,7 @@ struct ThermalControlProfile {
 struct ThermalControlTarget {
     brake_distance_c: f32,
     warmup_power_permille: u16,
+    warmup_reenter_error_c: f32,
     approach_power_permille: u16,
     approach_floor_power_permille: u16,
     approach_damping_exponent: f32,
@@ -573,6 +584,7 @@ impl ThermalControlProfilePoint {
             target_temp_c: self.target_temp_c,
             brake_distance_centi_c: self.brake_distance_centi_c.clamp(100, 5_000),
             warmup_power_permille: self.warmup_power_permille.min(1_000),
+            warmup_reenter_centi_c: sanitize_inherited(self.warmup_reenter_centi_c, 5_000),
             approach_power_permille: self.approach_power_permille.min(1_000),
             approach_floor_power_permille: self.approach_floor_power_permille.min(1_000),
             approach_damping_exponent_permille: if self.approach_damping_exponent_permille == 0 {
@@ -612,6 +624,7 @@ impl From<ThermalControlProfilePointWire> for ThermalControlProfilePoint {
             target_temp_c: value.target_temp_c,
             brake_distance_centi_c: value.brake_distance_centi_c,
             warmup_power_permille: value.warmup_power_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
@@ -640,6 +653,7 @@ impl From<ThermalControlProfilePointConfig> for ThermalControlProfilePoint {
             target_temp_c: value.target_temp_c,
             brake_distance_centi_c: value.brake_distance_centi_c,
             warmup_power_permille: value.warmup_power_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
@@ -789,6 +803,10 @@ impl ThermalControlProfile {
         .into();
         for point in self.points.iter_mut().flatten() {
             let mut sanitized = point.sanitized();
+            if sanitized.warmup_reenter_centi_c == 0 {
+                sanitized.warmup_reenter_centi_c =
+                    (self.settings.warmup_reenter_error_c * 100.0) as u16;
+            }
             if sanitized.hold_entry_centi_c == 0 {
                 sanitized.hold_entry_centi_c = (self.settings.hold_entry_error_c * 100.0) as u16;
             }
@@ -969,9 +987,7 @@ fn thermal_control_runtime_wire(
         temp_filter_alpha_permille: round_to_u16_nonnegative(
             target.settings.temp_filter_alpha * 1_000.0,
         ),
-        warmup_reenter_centi_c: round_to_u16_nonnegative(
-            target.settings.warmup_reenter_error_c * 100.0,
-        ),
+        warmup_reenter_centi_c: round_to_u16_nonnegative(target.warmup_reenter_error_c * 100.0),
         approach_max_ticks: u16::from(target.settings.approach_max_ticks),
         approach_min_power_ratio_permille: round_to_u16_nonnegative(
             target.settings.approach_min_power_ratio * 1_000.0,
@@ -1046,6 +1062,7 @@ fn default_thermal_control_target_with_settings(
     ThermalControlTarget {
         brake_distance_c: brake_distance_centi_c as f32 / 100.0,
         warmup_power_permille,
+        warmup_reenter_error_c: settings.warmup_reenter_error_c,
         approach_power_permille,
         approach_floor_power_permille,
         approach_damping_exponent: f32::from(approach_damping_exponent_permille) / 1_000.0,
@@ -1151,6 +1168,7 @@ fn interpolate_thermal_control_target(
         return ThermalControlTarget {
             brake_distance_c: lower.brake_distance_centi_c as f32 / 100.0,
             warmup_power_permille: 1_000,
+            warmup_reenter_error_c: f32::from(lower.warmup_reenter_centi_c) / 100.0,
             approach_power_permille: lower.approach_power_permille,
             approach_floor_power_permille: lower.approach_floor_power_permille,
             approach_damping_exponent: f32::from(lower.approach_damping_exponent_permille)
@@ -1213,6 +1231,11 @@ fn interpolate_thermal_control_target(
     ThermalControlTarget {
         brake_distance_c: f32::from(interpolated_brake_distance) / 100.0,
         warmup_power_permille: 1_000,
+        warmup_reenter_error_c: f32::from(lerp_u16(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            5_000,
+        )) / 100.0,
         approach_power_permille: lerp_u16(
             lower.approach_power_permille,
             upper.approach_power_permille,
@@ -1443,6 +1466,9 @@ struct HeaterController {
     hold_entry_output_percent: u8,
     hold_integral_c: f32,
     hold_coast_active: bool,
+    hold_coast_cooling_samples: u8,
+    heater_was_enabled: bool,
+    warmup_started_at_ms: Option<u64>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1462,6 +1488,9 @@ impl HeaterController {
             hold_entry_output_percent: 0,
             hold_integral_c: 0.0,
             hold_coast_active: false,
+            hold_coast_cooling_samples: 0,
+            heater_was_enabled: false,
+            warmup_started_at_ms: None,
         }
     }
 
@@ -1482,6 +1511,9 @@ impl HeaterController {
         self.hold_entry_output_percent = 0;
         self.hold_integral_c = 0.0;
         self.hold_coast_active = false;
+        self.hold_coast_cooling_samples = 0;
+        self.heater_was_enabled = false;
+        self.warmup_started_at_ms = None;
     }
 
     fn reseed_measurement(&mut self, measured_temp_c: f32) {
@@ -1505,15 +1537,36 @@ impl HeaterController {
         self.hold_entry_output_percent = 0;
         self.hold_integral_c = 0.0;
         self.hold_coast_active = false;
+        self.hold_coast_cooling_samples = 0;
+        self.heater_was_enabled = false;
+        self.warmup_started_at_ms = None;
         changed
     }
 
+    #[cfg(test)]
     fn update(
         &mut self,
         target_temp_c: i16,
         measured_temp_c: f32,
         heater_enabled: bool,
         thermal_profile: Option<ThermalControlProfile>,
+    ) -> HeaterPidSnapshot {
+        self.update_at(
+            target_temp_c,
+            measured_temp_c,
+            heater_enabled,
+            thermal_profile,
+            0,
+        )
+    }
+
+    fn update_at(
+        &mut self,
+        target_temp_c: i16,
+        measured_temp_c: f32,
+        heater_enabled: bool,
+        thermal_profile: Option<ThermalControlProfile>,
+        now_ms: u64,
     ) -> HeaterPidSnapshot {
         let target_temp_c = target_temp_c.clamp(HEATER_PID_TARGET_MIN_C, HEATER_PID_TARGET_MAX_C);
         let last_target_temp_c = self.last_target_temp_c;
@@ -1540,8 +1593,12 @@ impl HeaterController {
             self.hold_entry_output_percent = 0;
             self.hold_integral_c = 0.0;
             self.hold_coast_active = false;
+            self.hold_coast_cooling_samples = 0;
+            self.heater_was_enabled = false;
+            self.warmup_started_at_ms = None;
             return HeaterPidSnapshot {
                 duty_percent: 0,
+                warmup_soft_start_percent: 0,
                 error_c: f32::from(target_temp_c) - measured_temp_c,
                 control_error_c: f32::from(target_temp_c) - measured_temp_c,
                 filtered_temp_c: measured_temp_c,
@@ -1563,7 +1620,14 @@ impl HeaterController {
             self.hold_entry_output_percent = 0;
             self.hold_integral_c = 0.0;
             self.hold_coast_active = false;
+            self.hold_coast_cooling_samples = 0;
+            self.warmup_started_at_ms = Some(now_ms);
         }
+
+        if !self.heater_was_enabled {
+            self.warmup_started_at_ms = Some(now_ms);
+        }
+        self.heater_was_enabled = true;
 
         let control_target = thermal_profile
             .map(|profile| profile.control_target(target_temp_c))
@@ -1655,7 +1719,7 @@ impl HeaterController {
             .max(control_target.hold_entry_error_c + 0.1);
         let warmup_handoff_error_c = warmup_handoff_error_c(
             brake_distance_c,
-            settings.warmup_reenter_error_c,
+            control_target.warmup_reenter_error_c,
             filtered_temp_slope_c_per_profile_tick,
             control_target.approach_lead_ticks,
         );
@@ -1680,7 +1744,7 @@ impl HeaterController {
                     && hold_state_ready;
                 // Re-enter warmup only when the actual plate reading is well below the brake
                 // boundary. Filter lag after a rising sample must not undo a deliberate brake.
-                if error_c >= brake_distance_c + settings.warmup_reenter_error_c {
+                if error_c >= brake_distance_c + control_target.warmup_reenter_error_c {
                     next_phase = HeaterControlPhase::Warmup;
                 } else if (approach_control_error_c <= hold_entry_gate_c
                     && error_c <= hold_entry_gate_c
@@ -1705,6 +1769,9 @@ impl HeaterController {
             self.phase_ticks = 0;
             self.recovering_from_hold = previous_phase == HeaterControlPhase::Hold
                 && self.phase == HeaterControlPhase::Approach;
+            if self.phase == HeaterControlPhase::Warmup {
+                self.warmup_started_at_ms = Some(now_ms);
+            }
         } else {
             self.phase_ticks = self.phase_ticks.saturating_add(1);
             if self.phase != HeaterControlPhase::Approach {
@@ -1728,6 +1795,7 @@ impl HeaterController {
                         || control_error_c <= 0.0
                         || hold_entry_zero_output_ready
                         || hold_entry_projection_ready);
+                self.hold_coast_cooling_samples = 0;
                 if actual_crossed_target_ready {
                     self.filtered_temp_c = Some(measured_temp_c);
                     self.previous_filtered_temp_c = Some(measured_temp_c);
@@ -1773,19 +1841,25 @@ impl HeaterController {
                 };
             } else {
                 self.hold_coast_active = false;
+                self.hold_coast_cooling_samples = 0;
                 self.hold_entry_output_percent = 0;
                 if self.phase != HeaterControlPhase::Hold {
                     self.hold_integral_c = 0.0;
                 }
             }
         }
-        if self.hold_coast_active
-            && filtered_temp_slope_c_per_profile_tick <= -0.02
-            && measured_temp_c + 0.05 < previous_measured_temp_c
-            && error_c >= control_target.hold_on_error_c.max(0.05)
-            && control_error_c >= control_target.hold_on_error_c.max(0.05)
-        {
+        let coast_raw_cooling = measured_temp_c + 0.05 < previous_measured_temp_c
+            && error_c >= control_target.hold_on_error_c.max(0.05);
+        if self.hold_coast_active && coast_raw_cooling {
+            self.hold_coast_cooling_samples = self.hold_coast_cooling_samples.saturating_add(1);
+        } else {
+            self.hold_coast_cooling_samples = 0;
+        }
+        let coast_plate_is_cooling =
+            filtered_temp_slope_c_per_profile_tick <= -0.02 && self.hold_coast_cooling_samples >= 2;
+        if self.hold_coast_active && coast_plate_is_cooling {
             self.hold_coast_active = false;
+            self.hold_coast_cooling_samples = 0;
             self.phase_ticks = 0;
             self.hold_entry_output_percent = 0;
         }
@@ -1892,9 +1966,20 @@ impl HeaterController {
         };
 
         self.duty_percent = duty_percent;
+        let warmup_soft_start_percent = if self.phase == HeaterControlPhase::Warmup {
+            self.warmup_started_at_ms
+                .map(|started_at_ms| {
+                    let elapsed_ms = now_ms.saturating_sub(started_at_ms);
+                    (elapsed_ms.saturating_mul(100) / HEATER_WARMUP_SOFT_START_MS).min(100) as u8
+                })
+                .unwrap_or(100)
+        } else {
+            100
+        };
 
         HeaterPidSnapshot {
             duty_percent,
+            warmup_soft_start_percent,
             error_c,
             control_error_c,
             filtered_temp_c,
@@ -4231,85 +4316,30 @@ fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn floor_gate_pulse_density_duty_percent(
+fn heater_physical_pwm_percent(
     duty_percent: u8,
-    active_request_mv: u16,
     ceiling_mv: u16,
-    now_ms: u64,
-) -> u8 {
-    let active_power = u64::from(active_request_mv).saturating_mul(u64::from(active_request_mv));
-    let target_percent = u64::from(duty_percent)
-        .saturating_mul(u64::from(ceiling_mv).saturating_mul(u64::from(ceiling_mv)))
-        / active_power.max(1);
-    let target_percent = target_percent.clamp(1, 100);
-    let tick = now_ms / HEATER_CONTROL_INTERVAL_MS;
-    if (tick.saturating_mul(target_percent) % 100) < target_percent {
-        100
-    } else {
-        0
-    }
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[allow(clippy::too_many_arguments)]
-fn adjustable_floor_gate_duty_percent(
-    duty_percent: u8,
     active_request_mv: u16,
-    target_request_mv: u16,
-    floor_mv: u16,
-    ceiling_mv: u16,
-    allow_subfloor_modulation: bool,
-    heater_error_c: f32,
-    hold_on_error_c: f32,
-    previous_physical_duty_percent: u8,
-    now_ms: u64,
+    warmup_soft_start_percent: u8,
 ) -> u8 {
     if duty_percent == 0 {
         return 0;
     }
+    let requested_power = u64::from(duty_percent.min(100))
+        .saturating_mul(u64::from(ceiling_mv).saturating_mul(u64::from(ceiling_mv)));
+    let active_request_mv = active_request_mv.max(CH224Q_ADJUSTABLE_REQUEST_MIN_MV);
+    let active_power = u64::from(active_request_mv).saturating_mul(u64::from(active_request_mv));
+    let power_matched_percent = (requested_power / active_power.max(1)).min(100) as u8;
+    let soft_started_percent = u16::from(power_matched_percent)
+        .saturating_mul(u16::from(warmup_soft_start_percent.min(100)))
+        / 100;
+    soft_started_percent.min(100) as u8
+}
 
-    // Same-APDO PPS down-ramps are intentionally bounded in voltage step size. While the source
-    // still sits above the newly requested voltage, compensate against the active request voltage so
-    // a low reheat command does not inject a high-voltage full-on pulse. Each tick remains static
-    // 0% or 100%; this is pulse-density gating, not hardware PWM.
-    if active_request_mv > target_request_mv {
-        return floor_gate_pulse_density_duty_percent(
-            duty_percent,
-            active_request_mv,
-            ceiling_mv,
-            now_ms,
-        );
-    }
-
-    // A 5V-capable profile may request sub-5V-equivalent power at the bounded floor.
-    if floor_mv == CH224Q_ADJUSTABLE_REQUEST_MIN_MV && !allow_subfloor_modulation {
-        return floor_gate_pulse_density_duty_percent(
-            duty_percent,
-            active_request_mv,
-            ceiling_mv,
-            now_ms,
-        );
-    }
-
-    if active_request_mv > floor_mv || ceiling_mv <= floor_mv {
-        return 100;
-    }
-
-    if !allow_subfloor_modulation {
-        return 100;
-    }
-
-    if previous_physical_duty_percent == 0 {
-        if heater_error_c >= hold_on_error_c.max(0.05) {
-            100
-        } else {
-            0
-        }
-    } else if heater_error_c <= 0.0 {
-        0
-    } else {
-        100
-    }
+#[cfg(any(target_arch = "xtensa", test))]
+fn apply_warmup_soft_start(duty_percent: u8, warmup_soft_start_percent: u8) -> u8 {
+    (u16::from(duty_percent.min(100)).saturating_mul(u16::from(warmup_soft_start_percent.min(100)))
+        / 100) as u8
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4496,9 +4526,7 @@ async fn apply_heater_power_output<PWM>(
     current_temp_c: f32,
     duty_percent: u8,
     heater_enabled: bool,
-    heater_phase: HeaterControlPhase,
-    heater_error_c: f32,
-    hold_on_error_c: f32,
+    warmup_soft_start_percent: u8,
     last_physical_duty_percent: &mut u8,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
@@ -4614,7 +4642,11 @@ where
                     return false;
                 }
             }
-            apply_heater_duty(heater_pwm, duty_percent, last_physical_duty_percent);
+            apply_heater_duty(
+                heater_pwm,
+                apply_warmup_soft_start(duty_percent, warmup_soft_start_percent),
+                last_physical_duty_percent,
+            );
             false
         }
         HeaterPowerBackend::PpsMos {
@@ -4706,12 +4738,15 @@ where
                         return true;
                     }
                 }
-                let fallback_duty_percent = current_limit_fixed_pwm_duty_percent(
-                    duty_percent,
-                    current_temp_c,
-                    effective_current_limit_ma,
-                    preview_heater_curve,
-                    memory_config,
+                let fallback_duty_percent = apply_warmup_soft_start(
+                    current_limit_fixed_pwm_duty_percent(
+                        duty_percent,
+                        current_temp_c,
+                        effective_current_limit_ma,
+                        preview_heater_curve,
+                        memory_config,
+                    ),
+                    warmup_soft_start_percent,
                 );
                 apply_heater_duty(
                     heater_pwm,
@@ -4749,22 +4784,12 @@ where
                     current_limit_fixed_request_confirmed: false,
                 };
                 if current_request_mv <= safe_max_mv {
-                    let settled_gate_duty_percent = if duty_percent == 0 {
-                        0
-                    } else {
-                        adjustable_floor_gate_duty_percent(
-                            duty_percent,
-                            current_request_mv,
-                            current_request_mv,
-                            control_floor_mv,
-                            safe_max_mv,
-                            heater_phase == HeaterControlPhase::Hold,
-                            heater_error_c,
-                            hold_on_error_c,
-                            *last_physical_duty_percent,
-                            now_ms,
-                        )
-                    };
+                    let settled_gate_duty_percent = heater_physical_pwm_percent(
+                        duty_percent,
+                        safe_max_mv,
+                        current_request_mv,
+                        warmup_soft_start_percent,
+                    );
                     apply_heater_duty(
                         heater_pwm,
                         settled_gate_duty_percent,
@@ -4786,22 +4811,12 @@ where
             let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
             let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
             let request_transition_pending = !manual_pps_active && now_ms < next_request_at_ms;
-            let gate_duty_percent = if duty_percent == 0 {
-                0
-            } else {
-                adjustable_floor_gate_duty_percent(
-                    duty_percent,
-                    current_request_mv,
-                    request_mv,
-                    control_floor_mv,
-                    safe_max_mv,
-                    heater_phase == HeaterControlPhase::Hold,
-                    heater_error_c,
-                    hold_on_error_c,
-                    *last_physical_duty_percent,
-                    now_ms,
-                )
-            };
+            let gate_duty_percent = heater_physical_pwm_percent(
+                duty_percent,
+                safe_max_mv,
+                current_request_mv,
+                warmup_soft_start_percent,
+            );
 
             let blank_heater = should_blank_heater_for_adjustable_request(
                 current_request_mv,
@@ -4834,7 +4849,11 @@ where
                         fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                     };
                     if fixed_request_confirmed {
-                        apply_heater_duty(heater_pwm, duty_percent, last_physical_duty_percent);
+                        apply_heater_duty(
+                            heater_pwm,
+                            apply_warmup_soft_start(duty_percent, warmup_soft_start_percent),
+                            last_physical_duty_percent,
+                        );
                     }
                     info!(
                         "heater backend fallback -> reason={=str} fixed_request_confirmed={=bool}",
@@ -4866,17 +4885,11 @@ where
             }
 
             let active_request_gate_duty_percent = if request_transition_pending {
-                adjustable_floor_gate_duty_percent(
+                heater_physical_pwm_percent(
                     duty_percent,
-                    current_request_mv,
-                    request_mv,
-                    control_floor_mv,
                     safe_max_mv,
-                    heater_phase == HeaterControlPhase::Hold,
-                    heater_error_c,
-                    hold_on_error_c,
-                    *last_physical_duty_percent,
-                    now_ms,
+                    current_request_mv,
+                    warmup_soft_start_percent,
                 )
             } else {
                 gate_duty_percent
@@ -7466,8 +7479,9 @@ async fn main(_spawner: Spawner) {
     );
 
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
-    let pwm_clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40))
-        .expect("failed to derive MCPWM peripheral clock");
+    let pwm_clock_cfg =
+        PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
+            .expect("failed to derive MCPWM peripheral clock");
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, pwm_clock_cfg);
 
     mcpwm.operator0.set_timer(&mcpwm.timer0);
@@ -7699,6 +7713,7 @@ async fn main(_spawner: Spawner) {
     let mut last_heater_duty = 0_u8;
     let mut last_pid_snapshot = HeaterPidSnapshot {
         duty_percent: 0,
+        warmup_soft_start_percent: 0,
         error_c: 0.0,
         control_error_c: 0.0,
         filtered_temp_c: 0.0,
@@ -7753,9 +7768,7 @@ async fn main(_spawner: Spawner) {
         latest_temp_c,
         0,
         false,
-        HeaterControlPhase::Warmup,
-        0.0,
-        0.05,
+        0,
         &mut last_heater_duty,
         preview_heater_curve.as_ref(),
         &memory_config,
@@ -8253,11 +8266,12 @@ async fn main(_spawner: Spawner) {
                 last_pd_status_log_key = pd_status_log_key(current_pd_observation);
             }
             last_pd_observation = current_pd_observation;
-            let pid_snapshot = heater_controller.update(
+            let pid_snapshot = heater_controller.update_at(
                 ui_state.target_temp_c,
                 latest_temp_c,
                 ui_state.heater_enabled,
                 active_thermal_control_profile,
+                elapsed_ms,
             );
             last_pid_snapshot = pid_snapshot;
             let requested_duty_percent = pid_snapshot.duty_percent;
@@ -8275,12 +8289,7 @@ async fn main(_spawner: Spawner) {
                 latest_temp_c,
                 requested_duty_percent,
                 ui_state.heater_enabled,
-                pid_snapshot.phase,
-                pid_snapshot.error_c,
-                active_thermal_control_profile
-                    .map(|profile| profile.control_target(ui_state.target_temp_c))
-                    .unwrap_or_else(|| default_thermal_control_target(ui_state.target_temp_c))
-                    .hold_on_error_c,
+                pid_snapshot.warmup_soft_start_percent,
                 &mut last_heater_duty,
                 preview_heater_curve.as_ref(),
                 &memory_config,
@@ -8426,9 +8435,7 @@ async fn main(_spawner: Spawner) {
                 latest_temp_c,
                 0,
                 false,
-                HeaterControlPhase::Warmup,
-                0.0,
-                0.05,
+                0,
                 &mut last_heater_duty,
                 preview_heater_curve.as_ref(),
                 &memory_config,
@@ -8579,6 +8586,7 @@ mod tests {
             },
             pid_snapshot: HeaterPidSnapshot {
                 duty_percent: 0,
+                warmup_soft_start_percent: 0,
                 error_c: 0.0,
                 control_error_c: 0.0,
                 filtered_temp_c: 0.0,
@@ -8885,6 +8893,7 @@ mod tests {
             target_temp_c: 120,
             brake_distance_centi_c: 700,
             warmup_power_permille: 320,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
@@ -8963,6 +8972,7 @@ mod tests {
             target_temp_c: 120,
             brake_distance_centi_c: 700,
             warmup_power_permille: 320,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
@@ -9044,6 +9054,7 @@ mod tests {
             target_temp_c: 210,
             brake_distance_centi_c: 1_000,
             warmup_power_permille: 260,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 260,
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille: 1_000,
@@ -9120,6 +9131,8 @@ mod tests {
                         target_temp_c: 210,
                         brake_distance_centi_c: 1_000,
                         warmup_power_permille: 260,
+                        warmup_reenter_centi_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT,
                         approach_power_permille: 260,
                         approach_floor_power_permille: 180,
                         approach_damping_exponent_permille: 1_000,
@@ -9150,6 +9163,7 @@ mod tests {
             target_temp_c: 210,
             brake_distance_centi_c: 1_000,
             warmup_power_permille: 260,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 260,
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille: 1_000,
@@ -9236,6 +9250,7 @@ mod tests {
             UsbRuntimeStatusContext {
                 pid_snapshot: HeaterPidSnapshot {
                     duty_percent: 37,
+                    warmup_soft_start_percent: 100,
                     error_c: -0.4,
                     control_error_c: -0.2,
                     filtered_temp_c: 140.2,
@@ -9303,6 +9318,7 @@ mod tests {
                 latest_status_temp_c: 73.74,
                 pid_snapshot: HeaterPidSnapshot {
                     duty_percent: 0,
+                    warmup_soft_start_percent: 100,
                     error_c: 0.998,
                     control_error_c: 0.998,
                     filtered_temp_c: 59.004,
@@ -9822,6 +9838,45 @@ mod tests {
     }
 
     #[test]
+    fn warmup_soft_start_runs_once_per_arm_and_target_change() {
+        let mut controller = HeaterController::new();
+        let armed = controller.update_at(140, 25.0, true, None, 1_000);
+        assert_eq!(armed.warmup_soft_start_percent, 0);
+
+        let mid_ramp = controller.update_at(140, 25.0, true, None, 1_500);
+        assert_eq!(mid_ramp.warmup_soft_start_percent, 50);
+
+        let completed = controller.update_at(140, 25.0, true, None, 2_000);
+        assert_eq!(completed.warmup_soft_start_percent, 100);
+
+        let target_changed = controller.update_at(180, 25.0, true, None, 3_000);
+        assert_eq!(target_changed.warmup_soft_start_percent, 0);
+
+        let disabled = controller.update_at(180, 25.0, false, None, 4_000);
+        assert_eq!(disabled.warmup_soft_start_percent, 0);
+
+        let rearmed = controller.update_at(180, 25.0, true, None, 5_000);
+        assert_eq!(rearmed.warmup_soft_start_percent, 0);
+    }
+
+    #[test]
+    fn warmup_soft_start_restarts_after_approach_reentry() {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 140;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(25.0);
+        controller.previous_filtered_temp_c = Some(25.0);
+        controller.previous_measured_temp_c = Some(25.0);
+        controller.warmup_started_at_ms = Some(0);
+
+        let snapshot = controller.update_at(140, 25.0, true, None, 4_000);
+
+        assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
+        assert_eq!(snapshot.warmup_soft_start_percent, 0);
+    }
+
+    #[test]
     fn heater_control_poll_wait_lands_on_the_next_deadline() {
         assert_eq!(
             heater_control_poll_wait_ms(0, HEATER_CONTROL_INTERVAL_MS),
@@ -9941,6 +9996,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 500,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 590,
                     approach_floor_power_permille: 510,
                     approach_damping_exponent_permille: 1_320,
@@ -9981,13 +10037,23 @@ mod tests {
     fn heater_control_reduces_output_as_temperature_rises() {
         let mut controller = HeaterController::new();
         let mut snapshots = Vec::new();
+        let mut now_ms = 0;
         for measured in [25.0, 60.0, 80.0, 92.0, 96.0, 99.2] {
-            snapshots.push(controller.update(100, measured, true, None));
+            let mut snapshot = controller.update_at(100, measured, true, None, now_ms);
+            for _ in 1..20 {
+                now_ms += HEATER_CONTROL_INTERVAL_MS;
+                snapshot = controller.update_at(100, measured, true, None, now_ms);
+            }
+            now_ms += HEATER_CONTROL_INTERVAL_MS;
+            snapshots.push(snapshot);
         }
 
         assert_eq!(snapshots[0].duty_percent, 100);
         assert!(snapshots[3].duty_percent >= snapshots[4].duty_percent);
-        assert!(snapshots[5].duty_percent < snapshots[0].duty_percent);
+        assert!(
+            snapshots[5].duty_percent < snapshots[0].duty_percent,
+            "snapshots={snapshots:?}"
+        );
     }
 
     #[test]
@@ -10019,6 +10085,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 1,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 100,
                     approach_floor_power_permille: 25,
                     approach_damping_exponent_permille: 1_000,
@@ -10064,6 +10131,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 420,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
@@ -10118,6 +10186,7 @@ mod tests {
                     target_temp_c: 180,
                     brake_distance_centi_c: 650,
                     warmup_power_permille: 760,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 760,
                     approach_floor_power_permille: 460,
                     approach_damping_exponent_permille: 1_000,
@@ -10190,14 +10259,21 @@ mod tests {
     #[test]
     fn heater_control_reapplies_power_when_temperature_falls_below_target() {
         let mut controller = HeaterController::new();
+        let mut now_ms = 0;
 
         for measured in [25.0, 40.0, 55.0, 70.0, 82.0, 90.0, 96.0, 99.2, 100.4] {
-            let _ = controller.update(100, measured, true, None);
+            for _ in 0..20 {
+                let _ = controller.update_at(100, measured, true, None, now_ms);
+                now_ms += HEATER_CONTROL_INTERVAL_MS;
+            }
         }
 
-        let _ = controller.update(100, 99.6, true, None);
-        let _ = controller.update(100, 98.4, true, None);
-        let cooling = controller.update(100, 98.8, true, None);
+        let mut cooling = controller.update_at(100, 99.6, true, None, now_ms);
+        for step in 1..=12 {
+            now_ms += HEATER_CONTROL_INTERVAL_MS;
+            let measured = 99.6 - (step as f32 * 0.06);
+            cooling = controller.update_at(100, measured, true, None, now_ms);
+        }
         assert!(cooling.duty_percent > 0);
         assert!(matches!(
             cooling.phase,
@@ -10219,11 +10295,20 @@ mod tests {
     #[test]
     fn heater_control_hold_reapplies_small_power_near_target_without_waiting_for_large_drop() {
         let mut controller = HeaterController::new();
+        let mut now_ms = 0;
         for measured in [25.0, 60.0, 80.0, 92.0, 96.0, 99.2, 99.8, 100.3] {
-            let _ = controller.update(100, measured, true, None);
+            for _ in 0..20 {
+                let _ = controller.update_at(100, measured, true, None, now_ms);
+                now_ms += HEATER_CONTROL_INTERVAL_MS;
+            }
         }
 
-        let near_target = controller.update(100, 99.95, true, None);
+        let mut near_target = controller.update_at(100, 99.95, true, None, now_ms);
+        for step in 1..=12 {
+            now_ms += HEATER_CONTROL_INTERVAL_MS;
+            let measured = 99.95 - (step as f32 * 0.06);
+            near_target = controller.update_at(100, measured, true, None, now_ms);
+        }
         assert!(matches!(
             near_target.phase,
             HeaterControlPhase::Approach | HeaterControlPhase::Hold
@@ -10250,6 +10335,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 320,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 100,
                     approach_floor_power_permille: 25,
                     approach_damping_exponent_permille: 1_500,
@@ -10306,6 +10392,7 @@ mod tests {
                     target_temp_c: 100,
                     brake_distance_centi_c: 900,
                     warmup_power_permille: 300,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 300,
                     approach_floor_power_permille: 150,
                     approach_damping_exponent_permille: 1_000,
@@ -10361,6 +10448,7 @@ mod tests {
                     target_temp_c: 100,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 420,
                     approach_floor_power_permille: 300,
                     approach_damping_exponent_permille: 1_220,
@@ -10419,6 +10507,7 @@ mod tests {
                     target_temp_c: 100,
                     brake_distance_centi_c: 1_300,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 340,
                     approach_floor_power_permille: 220,
                     approach_damping_exponent_permille: 1_500,
@@ -10476,6 +10565,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 320,
                     warmup_power_permille: 920,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 920,
                     approach_floor_power_permille: 780,
                     approach_damping_exponent_permille: 1_000,
@@ -10530,6 +10620,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 440,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 440,
                     approach_floor_power_permille: 240,
                     approach_damping_exponent_permille: 1_000,
@@ -10582,6 +10673,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 320,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 100,
                     approach_floor_power_permille: 25,
                     approach_damping_exponent_permille: 1_500,
@@ -10632,6 +10724,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_310,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 590,
                     approach_floor_power_permille: 510,
                     approach_damping_exponent_permille: 1_370,
@@ -10684,6 +10777,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_310,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 590,
                     approach_floor_power_permille: 510,
                     approach_damping_exponent_permille: 1_370,
@@ -10767,6 +10861,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
@@ -10852,6 +10947,7 @@ mod tests {
                     target_temp_c: 180,
                     brake_distance_centi_c: 875,
                     warmup_power_permille: 950,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 710,
                     approach_floor_power_permille: 410,
                     approach_damping_exponent_permille: 1_000,
@@ -10905,6 +11001,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 600,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 700,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,
@@ -10967,6 +11064,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 500,
                     warmup_power_permille: 980,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 920,
                     approach_floor_power_permille: 730,
                     approach_damping_exponent_permille: 250,
@@ -11030,6 +11128,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 500,
                     warmup_power_permille: 980,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 920,
                     approach_floor_power_permille: 730,
                     approach_damping_exponent_permille: 250,
@@ -11082,6 +11181,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 450,
                     warmup_power_permille: 900,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 900,
                     approach_floor_power_permille: 740,
                     approach_damping_exponent_permille: 1_000,
@@ -11137,6 +11237,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 520,
                     warmup_power_permille: 760,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 760,
                     approach_floor_power_permille: 600,
                     approach_damping_exponent_permille: 1_000,
@@ -11193,6 +11294,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 780,
                     warmup_power_permille: 640,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 600,
                     approach_floor_power_permille: 360,
                     approach_damping_exponent_permille: 700,
@@ -11248,6 +11350,7 @@ mod tests {
                     target_temp_c: 100,
                     brake_distance_centi_c: 860,
                     warmup_power_permille: 361,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 361,
                     approach_floor_power_permille: 249,
                     approach_damping_exponent_permille: 1_000,
@@ -11302,6 +11405,7 @@ mod tests {
                     target_temp_c: 100,
                     brake_distance_centi_c: 860,
                     warmup_power_permille: 361,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 361,
                     approach_floor_power_permille: 249,
                     approach_damping_exponent_permille: 1_000,
@@ -11357,6 +11461,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_910,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 520,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_540,
@@ -11414,6 +11519,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
@@ -11466,6 +11572,7 @@ mod tests {
                     target_temp_c: 140,
                     brake_distance_centi_c: 1_000,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 420,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
@@ -11526,6 +11633,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 442,
                     warmup_power_permille: 980,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 940,
                     approach_floor_power_permille: 760,
                     approach_damping_exponent_permille: 250,
@@ -11572,6 +11680,7 @@ mod tests {
         let target = ThermalControlTarget {
             brake_distance_c: 4.5,
             warmup_power_permille: 1_000,
+            warmup_reenter_error_c: 4.0,
             approach_power_permille: 900,
             approach_floor_power_permille: 740,
             approach_damping_exponent: 1.0,
@@ -11602,6 +11711,7 @@ mod tests {
         let target = ThermalControlTarget {
             brake_distance_c: 4.5,
             warmup_power_permille: 1_000,
+            warmup_reenter_error_c: 4.0,
             approach_power_permille: 900,
             approach_floor_power_permille: 740,
             approach_damping_exponent: 1.0,
@@ -11647,6 +11757,7 @@ mod tests {
                     target_temp_c: 220,
                     brake_distance_centi_c: 450,
                     warmup_power_permille: 900,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 900,
                     approach_floor_power_permille: 740,
                     approach_damping_exponent_permille: 1_000,
@@ -11703,6 +11814,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_050,
                     warmup_power_permille: 1_000,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 600,
                     approach_floor_power_permille: 300,
                     approach_damping_exponent_permille: 4_000,
@@ -11759,6 +11871,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_400,
                     warmup_power_permille: 740,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 450,
                     approach_floor_power_permille: 240,
                     approach_damping_exponent_permille: 4_000,
@@ -11819,6 +11932,7 @@ mod tests {
                     target_temp_c: 60,
                     brake_distance_centi_c: 1_400,
                     warmup_power_permille: 740,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 450,
                     approach_floor_power_permille: 240,
                     approach_damping_exponent_permille: 4_000,
@@ -11867,6 +11981,7 @@ mod tests {
         let target = ThermalControlTarget {
             brake_distance_c: 4.5,
             warmup_power_permille: 1_000,
+            warmup_reenter_error_c: 4.0,
             approach_power_permille: 900,
             approach_floor_power_permille: 740,
             approach_damping_exponent: 1.0,
@@ -11897,6 +12012,7 @@ mod tests {
         let target = ThermalControlTarget {
             brake_distance_c: 4.5,
             warmup_power_permille: 1_000,
+            warmup_reenter_error_c: 4.0,
             approach_power_permille: 900,
             approach_floor_power_permille: 500,
             approach_damping_exponent: 1.0,
@@ -11976,136 +12092,42 @@ mod tests {
     }
 
     #[test]
-    fn adjustable_floor_gate_duty_coasts_after_crossing_target() {
+    fn heater_pwm_frequency_is_100hz_for_all_heater_backends() {
+        assert_eq!(HEATER_PWM_FREQUENCY_HZ, 100);
+    }
+
+    #[test]
+    fn heater_pwm_timer_is_representable_at_100hz() {
+        let timer_counts = u32::from(HEATER_PWM_PERIOD_TICKS) + 1;
+        let required_prescaler =
+            MCPWM_PERIPHERAL_CLOCK_HZ / (HEATER_PWM_FREQUENCY_HZ * timer_counts) - 1;
+
+        assert!(required_prescaler <= MCPWM_TIMER_MAX_PRESCALER);
         assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                17, 6_100, 6_100, 6_100, 14_500, true, 0.1, 0.3, 100, 0
-            ),
-            100
-        );
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                17, 6_100, 6_100, 6_100, 14_500, true, 0.0, 0.3, 100, 0
-            ),
-            0
+            MCPWM_PERIPHERAL_CLOCK_HZ / (required_prescaler + 1) / timer_counts,
+            HEATER_PWM_FREQUENCY_HZ
         );
     }
 
     #[test]
-    fn adjustable_floor_gate_duty_reheats_after_hold_on_error() {
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                17, 6_100, 6_100, 6_100, 14_500, true, 0.2, 0.3, 0, 0
-            ),
-            0
-        );
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                17, 6_100, 6_100, 6_100, 14_500, true, 0.3, 0.3, 0, 0
-            ),
-            100
-        );
+    fn heater_physical_pwm_uses_full_duty_when_pps_matches_requested_power() {
+        assert_eq!(heater_physical_pwm_percent(100, 14_000, 14_000, 100), 100);
+        assert_eq!(heater_physical_pwm_percent(25, 14_000, 7_000, 100), 100);
     }
 
     #[test]
-    fn adjustable_floor_gate_duty_stays_static_once_request_leaves_floor() {
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                17, 6_200, 6_200, 6_100, 14_500, true, -0.5, 0.3, 100, 0
-            ),
-            100
-        );
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                0, 6_100, 6_100, 6_100, 14_500, true, 1.0, 0.3, 100, 0
-            ),
-            0
-        );
+    fn heater_physical_pwm_reduces_power_at_pps_floor_and_during_down_ramp() {
+        assert_eq!(heater_physical_pwm_percent(0, 14_000, 5_000, 100), 0);
+        assert_eq!(heater_physical_pwm_percent(10, 14_000, 5_000, 100), 78);
+        assert_eq!(heater_physical_pwm_percent(10, 14_000, 13_500, 100), 10);
+        assert!(heater_physical_pwm_percent(10, 14_000, 13_500, 100) <= 10);
     }
 
     #[test]
-    fn adjustable_floor_gate_duty_stays_static_outside_hold_phase() {
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                5, 6_100, 6_100, 6_100, 14_500, false, -0.5, 0.3, 100, 0
-            ),
-            100
-        );
-    }
-
-    #[test]
-    fn adjustable_5v_approach_floor_distributes_requested_power_across_ticks() {
-        assert_eq!(
-            floor_gate_pulse_density_duty_percent(10, 5_000, 7_500, 0),
-            100
-        );
-        assert_eq!(
-            floor_gate_pulse_density_duty_percent(10, 5_000, 7_500, HEATER_CONTROL_INTERVAL_MS),
-            0
-        );
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                10, 5_000, 5_000, 5_000, 7_500, false, 2.0, 0.3, 0, 0
-            ),
-            100
-        );
-        assert_eq!(
-            adjustable_floor_gate_duty_percent(
-                10,
-                5_000,
-                5_000,
-                5_000,
-                7_500,
-                false,
-                2.0,
-                0.3,
-                0,
-                HEATER_CONTROL_INTERVAL_MS,
-            ),
-            0
-        );
-    }
-
-    #[test]
-    fn adjustable_5v_approach_compensates_during_pps_down_ramp() {
-        let physical_ticks = (0..100_u64)
-            .filter(|tick| {
-                adjustable_floor_gate_duty_percent(
-                    11,
-                    13_500,
-                    5_000,
-                    5_000,
-                    14_000,
-                    false,
-                    6.0,
-                    0.3,
-                    100,
-                    tick * HEATER_CONTROL_INTERVAL_MS,
-                ) == 100
-            })
-            .count();
-        assert_eq!(physical_ticks, 11);
-    }
-
-    #[test]
-    fn adjustable_above_floor_hold_reheat_compensates_during_pps_down_ramp() {
-        let physical_ticks = (0..100_u64)
-            .filter(|tick| {
-                adjustable_floor_gate_duty_percent(
-                    6,
-                    17_000,
-                    10_000,
-                    6_100,
-                    21_000,
-                    true,
-                    0.3,
-                    0.3,
-                    100,
-                    tick * HEATER_CONTROL_INTERVAL_MS,
-                ) == 100
-            })
-            .count();
-        assert_eq!(physical_ticks, 9);
+    fn warmup_soft_start_scales_physical_pwm_without_changing_control_request() {
+        assert_eq!(apply_warmup_soft_start(80, 0), 0);
+        assert_eq!(apply_warmup_soft_start(80, 50), 40);
+        assert_eq!(apply_warmup_soft_start(80, 100), 80);
     }
 
     #[test]
@@ -12117,6 +12139,7 @@ mod tests {
                     target_temp_c: 100,
                     brake_distance_centi_c: 500,
                     warmup_power_permille: 400,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 400,
                     approach_floor_power_permille: 220,
                     approach_damping_exponent_permille: 1_000,
@@ -12138,6 +12161,7 @@ mod tests {
                     target_temp_c: 200,
                     brake_distance_centi_c: 900,
                     warmup_power_permille: 300,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 300,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,
@@ -12192,6 +12216,7 @@ mod tests {
                     target_temp_c: 180,
                     brake_distance_centi_c: 1_200,
                     warmup_power_permille: 300,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 300,
                     approach_floor_power_permille: 240,
                     approach_damping_exponent_permille: 1_000,
@@ -12213,6 +12238,7 @@ mod tests {
                     target_temp_c: 250,
                     brake_distance_centi_c: 2_000,
                     warmup_power_permille: 260,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 260,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,
@@ -12267,6 +12293,7 @@ mod tests {
                     target_temp_c: 50,
                     brake_distance_centi_c: 500,
                     warmup_power_permille: 400,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 400,
                     approach_floor_power_permille: 200,
                     approach_damping_exponent_permille: 1_000,
@@ -12288,6 +12315,7 @@ mod tests {
                     target_temp_c: 250,
                     brake_distance_centi_c: 2_000,
                     warmup_power_permille: 260,
+                    warmup_reenter_centi_c: 0,
                     approach_power_permille: 260,
                     approach_floor_power_permille: 260,
                     approach_damping_exponent_permille: 1_000,

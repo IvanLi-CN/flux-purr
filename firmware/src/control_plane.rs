@@ -638,6 +638,8 @@ pub struct ThermalControlProfilePointWire {
     pub brake_distance_centi_c: u16,
     #[serde(default)]
     pub warmup_power_permille: u16,
+    #[serde(default)]
+    pub warmup_reenter_centi_c: u16,
     pub approach_power_permille: u16,
     pub approach_floor_power_permille: u16,
     #[serde(default = "default_approach_damping_exponent_permille_wire")]
@@ -727,6 +729,7 @@ impl From<ThermalControlProfilePointWire> for ThermalControlProfilePointConfig {
             target_temp_c: value.target_temp_c,
             brake_distance_centi_c: value.brake_distance_centi_c,
             warmup_power_permille: value.warmup_power_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
@@ -2034,6 +2037,7 @@ mod tests {
             target_temp_c: 210,
             brake_distance_centi_c: 1_000,
             warmup_power_permille: 260,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 260,
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille:
@@ -2082,6 +2086,8 @@ mod tests {
                 target_temp_c: 210,
                 brake_distance_centi_c: 1_000,
                 warmup_power_permille: 260,
+                warmup_reenter_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT,
                 approach_power_permille: 260,
                 approach_floor_power_permille: 180,
                 approach_damping_exponent_permille:
@@ -2136,6 +2142,7 @@ mod tests {
                 target_temp_c,
                 brake_distance_centi_c: 1_000,
                 warmup_power_permille: 260,
+                warmup_reenter_centi_c: 0,
                 approach_power_permille: 260,
                 approach_floor_power_permille: 180,
                 approach_damping_exponent_permille:
@@ -2353,6 +2360,7 @@ mod tests {
                 target_temp_c: 100,
                 brake_distance_centi_c: 700,
                 warmup_power_permille: 0,
+                warmup_reenter_centi_c: 0,
                 approach_power_permille: 420,
                 approach_floor_power_permille: 220,
                 approach_damping_exponent_permille:

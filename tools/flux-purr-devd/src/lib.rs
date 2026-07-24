@@ -782,6 +782,7 @@ struct MockThermalCandidatePoint {
     approach_tail_window_centi_c: u16,
     hold_power_permille: u16,
     hold_reheat_power_permille: u16,
+    warmup_reenter_centi_c: u16,
     hold_entry_centi_c: u16,
     hold_exit_centi_c: u16,
     hold_on_centi_c: u16,
@@ -1247,6 +1248,8 @@ pub struct ThermalControlProfilePoint {
     #[serde(default)]
     pub hold_reheat_power_permille: u16,
     #[serde(default)]
+    pub warmup_reenter_centi_c: u16,
+    #[serde(default)]
     pub hold_entry_centi_c: u16,
     #[serde(default)]
     pub hold_exit_centi_c: u16,
@@ -1279,15 +1282,23 @@ pub struct ThermalControlProfilePackage {
 #[serde(rename_all = "camelCase")]
 pub struct ThermalControlProfileSettings {
     pub temp_filter_alpha_permille: u16,
+    #[serde(default)]
     pub warmup_reenter_centi_c: u16,
+    #[serde(default)]
     pub hold_entry_centi_c: u16,
+    #[serde(default)]
     pub hold_exit_centi_c: u16,
+    #[serde(default)]
     pub hold_on_centi_c: u16,
+    #[serde(default)]
     pub hold_off_centi_c: u16,
+    #[serde(default)]
     pub overshoot_cutoff_centi_c: u16,
     pub approach_max_ticks: u16,
     pub approach_min_power_ratio_permille: u16,
+    #[serde(default)]
     pub hold_kp_permille_per_c: u16,
+    #[serde(default)]
     pub hold_ki_permille_per_c_tick: u16,
     #[serde(default = "default_hold_blend_ticks")]
     pub hold_blend_ticks: u16,
@@ -2844,23 +2855,15 @@ fn validate_thermal_control_profile_request(
             if let Some(settings) = profile.settings.as_ref()
                 && (settings.temp_filter_alpha_permille == 0
                     || settings.temp_filter_alpha_permille > 1_000
-                    || settings.warmup_reenter_centi_c == 0
-                    || settings.hold_entry_centi_c == 0
-                    || settings.hold_exit_centi_c == 0
-                    || settings.hold_on_centi_c == 0
-                    || settings.overshoot_cutoff_centi_c == 0
                     || !(AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN..=PPS_HARDWARE_MAX_MV)
                         .contains(&settings.auto_adjustable_working_floor_mv)
                     || settings.heater_current_reserve_ma > 1_000
                     || settings.approach_min_power_ratio_permille > 1_000
-                    || !(1..=255).contains(&settings.approach_max_ticks)
-                    || !(1..=255).contains(&settings.hold_blend_ticks)
-                    || settings.approach_lead_ticks > 255
-                    || settings.hold_lead_ticks > 255)
+                    || !(1..=255).contains(&settings.approach_max_ticks))
             {
                 return Err(HttpError::bad_request(
                     "invalid_thermal_profile",
-                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, 5000..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, 1..255 approach/hold-blend ticks, and 0..255 predictive lead ticks.",
+                    "thermal profile settings must use 1..1000 alpha, 5000..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, and 1..255 approach max ticks.",
                 ));
             }
             for point in profile.points.iter().flatten() {
@@ -3017,6 +3020,7 @@ fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidate
         approach_tail_window_centi_c: 0,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c: 1_000,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -3104,6 +3108,9 @@ fn mock_thermal_profile_from_package(
                 hold_reheat_power_permille: point
                     .map(|point| point.hold_reheat_power_permille)
                     .unwrap_or(default_point.hold_reheat_power_permille),
+                warmup_reenter_centi_c: point
+                    .map(|point| point.warmup_reenter_centi_c)
+                    .unwrap_or(default_point.warmup_reenter_centi_c),
                 hold_entry_centi_c: point
                     .map(|point| point.hold_entry_centi_c)
                     .unwrap_or(default_point.hold_entry_centi_c),
@@ -3112,7 +3119,7 @@ fn mock_thermal_profile_from_package(
                     .unwrap_or(default_point.hold_exit_centi_c),
                 hold_on_centi_c: point
                     .map(|point| point.hold_on_centi_c)
-                    .unwrap_or(settings.hold_on_centi_c),
+                    .unwrap_or(default_point.hold_on_centi_c),
                 hold_off_centi_c: point
                     .map(|point| point.hold_off_centi_c)
                     .unwrap_or(default_point.hold_off_centi_c),
@@ -3246,6 +3253,11 @@ fn mock_thermal_interpolated_candidate_point(
             1_000,
         )) * low_temp_reheat_scale
             + 0.5) as u16,
+        warmup_reenter_centi_c: lerp(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            5_000,
+        ),
         hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
@@ -3266,11 +3278,7 @@ fn mock_thermal_interpolated_candidate_point(
                 upper.hold_ki_permille_per_c_tick,
                 10_000,
             );
-            if interpolated == 0 {
-                profile.settings.hold_ki_permille_per_c_tick
-            } else {
-                interpolated
-            }
+            interpolated.max(1)
         },
         hold_blend_ticks: lerp(
             lower.hold_blend_ticks,
@@ -3320,6 +3328,7 @@ fn mock_thermal_runtime(
         approach_damping_exponent_permille,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -3340,6 +3349,7 @@ fn mock_thermal_runtime(
                 point.approach_damping_exponent_permille,
                 point.hold_power_permille,
                 point.hold_reheat_power_permille,
+                point.warmup_reenter_centi_c,
                 point.hold_entry_centi_c,
                 point.hold_exit_centi_c,
                 point.hold_on_centi_c,
@@ -3352,7 +3362,29 @@ fn mock_thermal_runtime(
                 point.hold_lead_ticks,
             )
         })
-        .unwrap_or_else(|| mock_thermal_default_target_values(target_temp_c));
+        .unwrap_or_else(|| {
+            let default_point = mock_thermal_default_target_point(target_temp_c);
+            (
+                default_point.brake_distance_centi_c,
+                default_point.warmup_power_permille,
+                default_point.approach_power_permille,
+                default_point.approach_floor_power_permille,
+                default_point.approach_damping_exponent_permille,
+                default_point.hold_power_permille,
+                default_point.hold_reheat_power_permille,
+                default_point.warmup_reenter_centi_c,
+                default_point.hold_entry_centi_c,
+                default_point.hold_exit_centi_c,
+                default_point.hold_on_centi_c,
+                default_point.hold_off_centi_c,
+                default_point.overshoot_cutoff_centi_c,
+                default_point.hold_kp_permille_per_c,
+                default_point.hold_ki_permille_per_c_tick,
+                default_point.hold_blend_ticks,
+                default_point.approach_lead_ticks,
+                default_point.hold_lead_ticks,
+            )
+        });
     let warmup_power_permille = if let Some(point) = point {
         point
             .warmup_power_permille
@@ -3390,7 +3422,7 @@ fn mock_thermal_runtime(
         approach_lead_ticks,
         hold_lead_ticks,
         temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
-        warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
+        warmup_reenter_centi_c,
         approach_max_ticks: settings.approach_max_ticks,
         approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
         auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,

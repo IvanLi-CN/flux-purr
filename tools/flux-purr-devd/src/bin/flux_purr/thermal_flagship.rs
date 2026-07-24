@@ -14,12 +14,11 @@ use super::{
     ThermalFullSpeedStableTracker, ThermalProfileMode, ThermalSelfTestArgs,
     ThermalSelfTestEvaluationMode, collect_batch_thermal_self_test,
     collect_single_thermal_self_test, current_unix_millis,
-    load_thermal_default_seed_candidate_profile, parse_thermal_targets,
-    parse_thermal_targets_preserve_order, request_json, resolve_target, thermal_candidate_point,
-    thermal_candidate_point_from_heater_parameters, thermal_candidate_profile_from_value,
-    thermal_candidate_profile_to_value, thermal_heater_parameters_value,
-    thermal_interpolated_candidate_point, thermal_rebuild_profile_from_anchor_targets,
-    thermal_retune, thermal_stage_result_from_value, tune_thermal_candidate_point,
+    load_thermal_default_seed_candidate_profile, parse_thermal_targets, request_json,
+    resolve_target, thermal_candidate_point, thermal_candidate_point_from_heater_parameters,
+    thermal_candidate_profile_from_value, thermal_candidate_profile_to_value,
+    thermal_heater_parameters_value, thermal_interpolated_candidate_point, thermal_retune,
+    thermal_stage_result_from_value, tune_thermal_candidate_point,
 };
 
 const DEFAULT_OUTPUT_ROOT: &str = "thermal-self-test-runs";
@@ -95,10 +94,9 @@ pub(super) async fn run_flagship_tuning(
     args: ThermalFlagshipTuneArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let target_selector = flagship_target_selector(&args);
-    let anchors_c = parse_thermal_targets(Some(&args.anchor_targets_c))?;
-    let validation_targets_c = parse_thermal_targets(Some(&args.validation_targets_c))?;
-    let tune_targets_c = parse_thermal_targets_preserve_order(Some(&args.tune_targets_c))?;
-    validate_flagship_scope(&anchors_c, &validation_targets_c, &tune_targets_c)?;
+    let tune_targets_c = parse_thermal_targets(Some(&args.tune_targets_c))?;
+    validate_flagship_scope(&tune_targets_c)?;
+    let tuning_execution_order_c = build_recursive_tuning_execution_order(&tune_targets_c);
     let output_root = effective_output_root(&args.output_root);
     fs::create_dir_all(&output_root)?;
     let bundle_dir = args
@@ -123,12 +121,92 @@ pub(super) async fn run_flagship_tuning(
         "dry-run".to_string()
     };
 
-    let mut current_profile = initial_sparse_profile(&args, &anchors_c)?;
+    let mut current_profile = initial_sparse_profile(&args, &tune_targets_c)?;
     let initial_profile_path = output_root.join("seed").join("initial-sparse-profile.json");
     write_json_pretty(&initial_profile_path, &current_profile)?;
 
     let mut review_entries = Vec::<Value>::new();
-    for target_temp_c in tune_targets_c.iter().copied() {
+    let mut accepted_targets_c = BTreeSet::<i16>::new();
+    let mut candidate_ready_targets_c = BTreeSet::<i16>::new();
+
+    if let Some((&first_target_c, remaining_targets)) = tune_targets_c.split_first() {
+        let endpoint_targets = if let Some(&last_target_c) = remaining_targets.last() {
+            if first_target_c == last_target_c {
+                vec![first_target_c]
+            } else {
+                vec![first_target_c, last_target_c]
+            }
+        } else {
+            vec![first_target_c]
+        };
+
+        for target_temp_c in endpoint_targets {
+            let workspace_dir = output_root.join(format!("target-{target_temp_c}"));
+            let (updated_profile, entry) = tune_flagship_target(
+                client,
+                default_devd,
+                &args,
+                &target_selector,
+                current_profile,
+                target_temp_c,
+                &tune_targets_c,
+                &workspace_dir,
+            )
+            .await?;
+            current_profile = updated_profile;
+            if entry_candidate_ready(&entry) {
+                candidate_ready_targets_c.insert(target_temp_c);
+            }
+            if entry_acceptance_passed(&entry) {
+                accepted_targets_c.insert(target_temp_c);
+            }
+            review_entries.push(entry);
+            let persisted_entry = review_entries
+                .last()
+                .ok_or("missing flagship review entry after endpoint tuning")?;
+            persist_target_review(
+                &output_root,
+                target_temp_c,
+                &current_profile,
+                persisted_entry,
+                &review_entries,
+            )?;
+        }
+    }
+
+    let mut interval_stack = if tune_targets_c.len() >= 2
+        && accepted_targets_c.contains(&tune_targets_c[0])
+        && accepted_targets_c.contains(
+            tune_targets_c
+                .last()
+                .ok_or("missing final tuning target for flagship DFS")?,
+        ) {
+        vec![(0usize, tune_targets_c.len() - 1)]
+    } else {
+        Vec::new()
+    };
+
+    while let Some((lower_index, upper_index)) = interval_stack.pop() {
+        if upper_index <= lower_index + 1 {
+            continue;
+        }
+        let lower_target_c = tune_targets_c[lower_index];
+        let upper_target_c = tune_targets_c[upper_index];
+        if !accepted_targets_c.contains(&lower_target_c)
+            || !accepted_targets_c.contains(&upper_target_c)
+        {
+            continue;
+        }
+        let midpoint_index = interval_midpoint_index(lower_index, upper_index);
+        let target_temp_c = tune_targets_c[midpoint_index];
+        current_profile = reseed_target_from_accepted_bounds(
+            &current_profile,
+            target_temp_c,
+            lower_target_c,
+            upper_target_c,
+            &tune_targets_c,
+        )?;
+        let workspace_dir = output_root.join(format!("target-{target_temp_c}"));
         let (updated_profile, entry) = tune_flagship_target(
             client,
             default_devd,
@@ -136,94 +214,32 @@ pub(super) async fn run_flagship_tuning(
             &target_selector,
             current_profile,
             target_temp_c,
-            &anchors_c,
-            &output_root.join(format!("target-{target_temp_c}")),
+            &tune_targets_c,
+            &workspace_dir,
         )
         .await?;
         current_profile = updated_profile;
-        write_json_pretty(
-            &output_root
-                .join(format!("target-{target_temp_c}"))
-                .join("review-entry.json"),
-            &entry,
-        )?;
-        write_json_pretty(
-            &output_root
-                .join(format!("target-{target_temp_c}"))
-                .join("accepted-sparse-profile.json"),
-            &current_profile,
-        )?;
+        let candidate_ready = entry_candidate_ready(&entry);
+        if candidate_ready {
+            candidate_ready_targets_c.insert(target_temp_c);
+        }
+        if entry_acceptance_passed(&entry) {
+            accepted_targets_c.insert(target_temp_c);
+        }
         review_entries.push(entry);
-        write_json_pretty(
-            &output_root.join("review-entries.json"),
-            &Value::Array(review_entries.clone()),
-        )?;
-        write_json_pretty(
-            &output_root.join("review-candidate-profile.json"),
-            &current_profile,
-        )?;
-    }
-    for target_temp_c in validation_targets_c.iter().copied() {
-        let entry = validate_flagship_target(
-            client,
-            default_devd,
-            &args,
-            &target_selector,
-            &current_profile,
+        let persisted_entry = review_entries
+            .last()
+            .ok_or("missing flagship review entry after midpoint tuning")?;
+        persist_target_review(
+            &output_root,
             target_temp_c,
-            &output_root.join(format!("validation-{target_temp_c}")),
-        )
-        .await?;
-        write_json_pretty(
-            &output_root
-                .join(format!("validation-{target_temp_c}"))
-                .join("review-entry.json"),
-            &entry,
+            &current_profile,
+            persisted_entry,
+            &review_entries,
         )?;
-        review_entries.push(entry);
-        write_json_pretty(
-            &output_root.join("review-entries.json"),
-            &Value::Array(review_entries.clone()),
-        )?;
-        if validation_entry_should_trigger_supplemental_tuning(
-            review_entries
-                .last()
-                .ok_or("missing validation review entry")?,
-        ) {
-            let supplemental_anchors_c = supplemental_anchor_targets(&anchors_c, target_temp_c);
-            let normalized_profile =
-                normalize_sparse_profile_value(&current_profile, &supplemental_anchors_c)?;
-            let (updated_profile, mut supplemental_entry) = tune_flagship_target(
-                client,
-                default_devd,
-                &args,
-                &target_selector,
-                normalized_profile,
-                target_temp_c,
-                &supplemental_anchors_c,
-                &output_root.join(format!("validation-{target_temp_c}-supplemental-tune")),
-            )
-            .await?;
-            supplemental_entry["targetRole"] = json!("supplemental_tuning");
-            supplemental_entry["supplementalForTargetC"] = json!(target_temp_c);
-            supplemental_entry["supplementalReason"] =
-                json!("validation_failed_with_valid_evidence");
-            current_profile = updated_profile;
-            write_json_pretty(
-                &output_root
-                    .join(format!("validation-{target_temp_c}-supplemental-tune"))
-                    .join("review-entry.json"),
-                &supplemental_entry,
-            )?;
-            write_json_pretty(
-                &output_root.join("review-candidate-profile.json"),
-                &current_profile,
-            )?;
-            review_entries.push(supplemental_entry);
-            write_json_pretty(
-                &output_root.join("review-entries.json"),
-                &Value::Array(review_entries.clone()),
-            )?;
+        if entry_acceptance_passed(persisted_entry) {
+            interval_stack.push((midpoint_index, upper_index));
+            interval_stack.push((lower_index, midpoint_index));
         }
     }
 
@@ -239,48 +255,46 @@ pub(super) async fn run_flagship_tuning(
         args.profile_mode.as_str(),
         flagship_resolved_bank(args.profile_mode),
         flagship_detected_source_class(args.profile_mode),
-        &anchors_c,
-        &validation_targets_c,
         &tune_targets_c,
+        &tuning_execution_order_c,
         source_preset(args.profile_mode),
         PROVIDER_ISOLAPURR,
     )?;
 
-    let supplemental_candidate_ready_targets_c =
-        unique_i64(review_entries.iter().filter_map(|entry| {
-            (entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning")
-                && entry.get("candidateReady").and_then(Value::as_bool) == Some(true))
-            .then(|| entry.get("target").and_then(Value::as_i64))
-            .flatten()
-        }));
-    let supplemental_candidate_ready_targets_set = supplemental_candidate_ready_targets_c
+    let review_outcomes = tune_targets_c
         .iter()
         .copied()
-        .collect::<BTreeSet<_>>();
-    let validation_failed_targets_c = unique_i64(review_entries.iter().filter_map(|entry| {
-        if entry.get("targetRole").and_then(Value::as_str) == Some("validation")
-            && entry.get("budgetOutcome").and_then(Value::as_str) != Some("validation_passed")
-        {
-            entry
-                .get("target")
-                .and_then(Value::as_i64)
-                .filter(|target| !supplemental_candidate_ready_targets_set.contains(target))
-        } else {
-            None
-        }
-    }));
-    let summary_ok = review_entries.iter().all(|entry| {
-        let target = entry.get("target").and_then(Value::as_i64);
-        match entry.get("targetRole").and_then(Value::as_str) {
-            Some("validation") => {
-                entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_passed")
-                    || target.is_some_and(|target| {
-                        supplemental_candidate_ready_targets_set.contains(&target)
-                    })
-            }
-            _ => entry.get("candidateReady").and_then(Value::as_bool) == Some(true),
-        }
-    });
+        .map(|target_temp_c| {
+            let passed = review_entries.iter().find(|entry| {
+                entry.get("target").and_then(Value::as_i64) == Some(i64::from(target_temp_c))
+            });
+            (
+                target_temp_c.to_string(),
+                json!(if passed.is_some_and(entry_acceptance_passed) {
+                    "passed"
+                } else {
+                    "failed"
+                }),
+            )
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    let candidate_dispositions = tune_targets_c
+        .iter()
+        .copied()
+        .map(|target_temp_c| {
+            let disposition = review_entries
+                .iter()
+                .find(|entry| {
+                    entry.get("target").and_then(Value::as_i64) == Some(i64::from(target_temp_c))
+                })
+                .and_then(|entry| entry.get("candidateDisposition").cloned())
+                .unwrap_or_else(|| json!("not_executed_without_accepted_bounds"));
+            (target_temp_c.to_string(), disposition)
+        })
+        .collect::<serde_json::Map<String, Value>>();
+    let summary_ok = tune_targets_c
+        .iter()
+        .all(|target_temp_c| accepted_targets_c.contains(target_temp_c));
 
     Ok(json!({
         "ok": summary_ok,
@@ -289,9 +303,8 @@ pub(super) async fn run_flagship_tuning(
         "profileMode": args.profile_mode.as_str(),
         "resolvedBank": flagship_resolved_bank(args.profile_mode),
         "detectedSourceClass": flagship_detected_source_class(args.profile_mode),
-        "anchorsC": anchors_c,
-        "validationTargetsC": validation_targets_c,
         "tuneTargetsC": tune_targets_c,
+        "tuningExecutionOrderC": tuning_execution_order_c,
         "perTargetBudgetSeconds": args.per_target_budget_seconds,
         "maxTuningRounds": effective_round_limit(&args),
         "scoutHoldSeconds": args.scout_hold_seconds,
@@ -301,50 +314,196 @@ pub(super) async fn run_flagship_tuning(
         "bundleDir": display_path(&bundle_dir),
         "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
         "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
-        "reviewOutcomes": review_entries.iter().map(|entry| {
-            (
-                entry.get("target").and_then(Value::as_i64).unwrap_or_default().to_string(),
-                entry.get("budgetOutcome").cloned().unwrap_or(Value::Null),
-            )
-        }).collect::<serde_json::Map<String, Value>>(),
-        "candidateDispositions": review_entries.iter().map(|entry| {
-            (
-                entry.get("target").and_then(Value::as_i64).unwrap_or_default().to_string(),
-                entry.get("candidateDisposition").cloned().unwrap_or(Value::Null),
-            )
-        }).collect::<serde_json::Map<String, Value>>(),
-        "candidateReadyTargetsC": unique_i64(review_entries.iter().filter_map(|entry| {
-            (entry.get("candidateReady").and_then(Value::as_bool) == Some(true))
-                .then(|| entry.get("target").and_then(Value::as_i64))
-                .flatten()
-        })),
-        "supplementalTuningTargetsC": unique_i64(review_entries.iter().filter_map(|entry| {
-            (entry.get("targetRole").and_then(Value::as_str) == Some("supplemental_tuning"))
-                .then(|| entry.get("target").and_then(Value::as_i64))
-                .flatten()
-        })),
-        "supplementalCandidateReadyTargetsC": supplemental_candidate_ready_targets_c,
-        "validationPassedTargetsC": unique_i64(review_entries.iter().filter_map(|entry| {
-            if entry.get("targetRole").and_then(Value::as_str) == Some("validation")
-                && entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_passed")
-            {
-                entry.get("target").and_then(Value::as_i64)
-            } else {
-                None
-            }
-        })),
-        "validationFailedTargetsC": validation_failed_targets_c,
+        "reviewOutcomes": review_outcomes,
+        "candidateDispositions": candidate_dispositions,
+        "candidateReadyTargetsC": candidate_ready_targets_c.iter().copied().map(i64::from).collect::<Vec<_>>(),
     }))
 }
 
-fn unique_i64(values: impl IntoIterator<Item = i64>) -> Vec<i64> {
-    values
-        .into_iter()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+fn interval_midpoint_index(lower_index: usize, upper_index: usize) -> usize {
+    (lower_index + upper_index) / 2
 }
 
+fn persist_target_review(
+    output_root: &Path,
+    target_temp_c: i16,
+    current_profile: &Value,
+    entry: &Value,
+    review_entries: &[Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    write_json_pretty(
+        &output_root
+            .join(format!("target-{target_temp_c}"))
+            .join("review-entry.json"),
+        entry,
+    )?;
+    write_json_pretty(
+        &output_root
+            .join(format!("target-{target_temp_c}"))
+            .join("accepted-sparse-profile.json"),
+        current_profile,
+    )?;
+    write_json_pretty(
+        &output_root.join("review-entries.json"),
+        &Value::Array(review_entries.to_vec()),
+    )?;
+    write_json_pretty(
+        &output_root.join("review-candidate-profile.json"),
+        current_profile,
+    )?;
+    Ok(())
+}
+
+fn build_recursive_tuning_execution_order(targets_c: &[i16]) -> Vec<i16> {
+    match targets_c {
+        [] => Vec::new(),
+        [target] => vec![*target],
+        _ => {
+            let mut order = vec![targets_c[0], *targets_c.last().unwrap_or(&targets_c[0])];
+            append_interval_midpoints(targets_c, 0, targets_c.len() - 1, &mut order);
+            order
+        }
+    }
+}
+
+fn append_interval_midpoints(
+    targets_c: &[i16],
+    lower_index: usize,
+    upper_index: usize,
+    order: &mut Vec<i16>,
+) {
+    if upper_index <= lower_index + 1 {
+        return;
+    }
+    let midpoint_index = interval_midpoint_index(lower_index, upper_index);
+    order.push(targets_c[midpoint_index]);
+    append_interval_midpoints(targets_c, lower_index, midpoint_index, order);
+    append_interval_midpoints(targets_c, midpoint_index, upper_index, order);
+}
+
+fn reseed_target_from_accepted_bounds(
+    current_profile: &Value,
+    target_temp_c: i16,
+    lower_target_c: i16,
+    upper_target_c: i16,
+    materialized_targets_c: &[i16],
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    if lower_target_c >= upper_target_c {
+        return Ok(current_profile.clone());
+    }
+    let mut profile = thermal_candidate_profile_from_value(current_profile.clone());
+    let lower_point = thermal_candidate_point(&profile, lower_target_c)
+        .ok_or_else(|| format!("missing accepted lower bound {lower_target_c}C"))?;
+    let upper_point = thermal_candidate_point(&profile, upper_target_c)
+        .ok_or_else(|| format!("missing accepted upper bound {upper_target_c}C"))?;
+    let seeded_point = linear_seed_candidate_point(target_temp_c, lower_point, upper_point);
+    if let Some(point) = super::thermal_candidate_point_mut(&mut profile, target_temp_c) {
+        *point = seeded_point;
+    } else {
+        profile.points.push(seeded_point);
+    }
+    normalize_sparse_profile_value(
+        &thermal_candidate_profile_to_value(&profile),
+        materialized_targets_c,
+    )
+}
+
+fn linear_seed_candidate_point(
+    target_temp_c: i16,
+    lower: ThermalCandidatePoint,
+    upper: ThermalCandidatePoint,
+) -> ThermalCandidatePoint {
+    if lower.target_temp_c >= upper.target_temp_c {
+        return ThermalCandidatePoint {
+            target_temp_c,
+            ..lower
+        };
+    }
+    let ratio = f32::from(target_temp_c - lower.target_temp_c)
+        / f32::from(upper.target_temp_c - lower.target_temp_c);
+    let lerp = |left: u16, right: u16, upper_bound: u16| {
+        (f32::from(left) + ((f32::from(right) - f32::from(left)) * ratio) + 0.5)
+            .clamp(0.0, f32::from(upper_bound)) as u16
+    };
+    ThermalCandidatePoint {
+        target_temp_c,
+        brake_distance_centi_c: lerp(
+            lower.brake_distance_centi_c,
+            upper.brake_distance_centi_c,
+            5_000,
+        ),
+        warmup_power_permille: 1_000,
+        approach_power_permille: lerp(
+            lower.approach_power_permille,
+            upper.approach_power_permille,
+            1_000,
+        ),
+        approach_floor_power_permille: lerp(
+            lower.approach_floor_power_permille,
+            upper.approach_floor_power_permille,
+            1_000,
+        ),
+        approach_damping_exponent_permille: lerp(
+            lower.approach_damping_exponent_permille,
+            upper.approach_damping_exponent_permille,
+            4_000,
+        ),
+        approach_tail_window_centi_c: lerp(
+            lower.approach_tail_window_centi_c,
+            upper.approach_tail_window_centi_c,
+            5_000,
+        ),
+        hold_power_permille: lerp(lower.hold_power_permille, upper.hold_power_permille, 1_000),
+        hold_reheat_power_permille: lerp(
+            lower.hold_reheat_power_permille,
+            upper.hold_reheat_power_permille,
+            1_000,
+        ),
+        warmup_reenter_centi_c: lerp(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            5_000,
+        ),
+        hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
+        hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
+        hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
+        hold_off_centi_c: lerp(lower.hold_off_centi_c, upper.hold_off_centi_c, 5_000),
+        overshoot_cutoff_centi_c: lerp(
+            lower.overshoot_cutoff_centi_c,
+            upper.overshoot_cutoff_centi_c,
+            5_000,
+        ),
+        hold_kp_permille_per_c: lerp(
+            lower.hold_kp_permille_per_c,
+            upper.hold_kp_permille_per_c,
+            10_000,
+        ),
+        hold_ki_permille_per_c_tick: lerp(
+            lower.hold_ki_permille_per_c_tick,
+            upper.hold_ki_permille_per_c_tick,
+            10_000,
+        )
+        .max(1),
+        hold_blend_ticks: lerp(
+            lower.hold_blend_ticks,
+            upper.hold_blend_ticks,
+            u16::from(u8::MAX),
+        )
+        .max(1),
+        approach_lead_ticks: lerp(
+            lower.approach_lead_ticks,
+            upper.approach_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+        hold_lead_ticks: lerp(
+            lower.hold_lead_ticks,
+            upper.hold_lead_ticks,
+            u16::from(u8::MAX),
+        ),
+    }
+}
+
+#[cfg(test)]
 fn validation_entry_should_trigger_supplemental_tuning(entry: &Value) -> bool {
     entry.get("targetRole").and_then(Value::as_str) == Some("validation")
         && entry.get("budgetOutcome").and_then(Value::as_str) == Some("validation_failed")
@@ -355,6 +514,7 @@ fn validation_entry_should_trigger_supplemental_tuning(entry: &Value) -> bool {
             > 0
 }
 
+#[cfg(test)]
 fn supplemental_anchor_targets(anchors_c: &[i16], target_temp_c: i16) -> Vec<i16> {
     let mut targets = anchors_c.to_vec();
     targets.push(target_temp_c);
@@ -804,131 +964,6 @@ async fn tune_flagship_target(
     Ok((current_profile, entry))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn validate_flagship_target(
-    client: &Client,
-    default_devd: &str,
-    args: &ThermalFlagshipTuneArgs,
-    target_selector: &TargetSelector,
-    current_profile: &Value,
-    target_temp_c: i16,
-    workspace_dir: &Path,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    fs::create_dir_all(workspace_dir)?;
-    let budget_started_at = Instant::now();
-    let cooldown_temp_c = cooldown_threshold(target_temp_c);
-    let seed_profile_file = workspace_dir.join("final-sparse-profile.json");
-    let validation_profile = validation_preview_profile_for_target(current_profile, target_temp_c)?;
-    write_json_pretty(&seed_profile_file, &validation_profile)?;
-
-    let mut rounds = Vec::<Value>::new();
-    let mut validation_retry_count = 0u8;
-
-    let (budget_outcome, last_summary) = loop {
-        if budget_exhausted(budget_started_at, args.per_target_budget_seconds) {
-            break (
-                "budget_exhausted".to_string(),
-                synthetic_failure_summary(target_temp_c, "target_budget_exhausted"),
-            );
-        }
-        let attempt_number = rounds.len() + 1;
-        let validation = match run_budgeted_self_test(
-            client,
-            default_devd,
-            args,
-            target_selector,
-            SelfTestRequest {
-                seed_profile_file: Some(seed_profile_file.clone()),
-                candidate_profile_files: Vec::new(),
-                target_temp_c,
-                hold_seconds: args.confirm_hold_seconds,
-                output_dir: workspace_dir.join(format!("attempt-{attempt_number}")),
-                evaluation_mode: ThermalSelfTestEvaluationMode::HoldConfirm,
-                cooldown_temp_c,
-                budget_started_at,
-            },
-        )
-        .await
-        {
-            Ok(run) => run,
-            Err(error) if error.to_string().contains("target_budget_exhausted") => {
-                break (
-                    "budget_exhausted".to_string(),
-                    synthetic_failure_summary(target_temp_c, "target_budget_exhausted"),
-                );
-            }
-            Err(error) => {
-                let message = error.to_string();
-                if validation_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                    && flagship_retryable_environment_error_message(&message)
-                {
-                    validation_retry_count += 1;
-                    continue;
-                }
-                break (
-                    "environment_blocked".to_string(),
-                    synthetic_failure_summary(
-                        target_temp_c,
-                        &format!("validation_execution_failed: {message}"),
-                    ),
-                );
-            }
-        };
-
-        let source_ok = ensure_expected_source(&validation.summary, args.profile_mode).is_ok();
-        let run_summary = validation.summary.clone();
-        rounds.push(round_record_from_summary(
-            &validation.summary,
-            target_temp_c,
-            rounds.len() + 1,
-            "validation / final profile",
-            effective_profile_point(&validation_profile, target_temp_c),
-            "validation",
-            None,
-            Some("final-profile"),
-            true,
-            None,
-            budget_elapsed_seconds(budget_started_at),
-        ));
-
-        if !source_ok {
-            break ("environment_blocked".to_string(), run_summary);
-        }
-        if run_is_disqualified(&validation.summary, target_temp_c) {
-            if validation_retry_count < FLAGSHIP_ENVIRONMENT_RETRY_LIMIT
-                && flagship_retryable_environment_summary(&validation.summary, target_temp_c)
-            {
-                validation_retry_count += 1;
-                continue;
-            }
-            break ("environment_blocked".to_string(), run_summary);
-        }
-        break (
-            if validation
-                .summary
-                .pointer("/validation/passed")
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
-                "validation_passed".to_string()
-            } else {
-                "validation_failed".to_string()
-            },
-            run_summary,
-        );
-    };
-
-    Ok(validation_target_entry(
-        target_temp_c,
-        &budget_outcome,
-        budget_elapsed_seconds(budget_started_at),
-        rounds,
-        &last_summary,
-        &validation_profile,
-        args.confirm_hold_seconds,
-    ))
-}
-
 fn validation_preview_profile_for_target(
     profile_value: &Value,
     target_temp_c: i16,
@@ -1039,7 +1074,7 @@ async fn run_budgeted_self_test(
         collect_batch_thermal_self_test(client, default_devd, self_args, request.target_temp_c)
             .await?
     };
-    if summary_is_pre_sample_cooldown_timeout(&summary) {
+    if summary_has_cooldown_precondition_error(&summary) {
         let message = summary
             .get("error")
             .and_then(Value::as_str)
@@ -1142,7 +1177,7 @@ fn candidate_variants(
     retuned_profile: &Value,
     scout_summary: &Value,
     target_temp_c: i16,
-    anchors_c: &[i16],
+    materialized_targets_c: &[i16],
 ) -> Result<Vec<(String, Value)>, Box<dyn std::error::Error + Send + Sync>> {
     let current = thermal_candidate_profile_from_value(current_profile.clone());
     let current_point = thermal_candidate_point(&current, target_temp_c)
@@ -1171,12 +1206,11 @@ fn candidate_variants(
         } else {
             predicted.points.push(predicted_point);
         }
-        thermal_rebuild_profile_from_anchor_targets(&mut predicted, anchors_c);
         variants.push((
             stability_failure_class(&scout_stage, &scout_samples, target_temp_c),
             normalize_sparse_profile_value(
                 &thermal_candidate_profile_to_value(&predicted),
-                anchors_c,
+                materialized_targets_c,
             )?,
         ));
     }
@@ -1207,8 +1241,7 @@ fn apply_flagship_gate_nudge(
         let brake_step = if low_temp {
             match failure_class {
                 "within_gate_low_margin" => 100,
-                "missed_lower_band_before_limit" if temperature_gap_c <= 0.5 => 160,
-                "missed_lower_band_before_limit" if temperature_gap_c <= 1.5 => 220,
+                "missed_lower_band_before_limit" if temperature_gap_c <= 1.5 => 160,
                 "missed_lower_band_before_limit" => 300,
                 _ if temperature_gap_c <= 0.5 => 120,
                 _ if temperature_gap_c <= 1.5 => 180,
@@ -1236,8 +1269,7 @@ fn apply_flagship_gate_nudge(
         let power_step = if low_temp {
             match failure_class {
                 "within_gate_low_margin" => 80,
-                _ if temperature_gap_c <= 0.5 => 120,
-                _ if temperature_gap_c <= 1.5 => 180,
+                _ if temperature_gap_c <= 1.5 => 120,
                 _ => 240,
             }
         } else if temperature_gap_c <= 1.0 {
@@ -1766,6 +1798,14 @@ fn candidate_disposition_for_target(budget_outcome: &str, candidate_ready: bool)
     }
 }
 
+fn entry_candidate_ready(entry: &Value) -> bool {
+    entry.get("candidateReady").and_then(Value::as_bool) == Some(true)
+}
+
+fn entry_acceptance_passed(entry: &Value) -> bool {
+    entry.get("candidateDisposition").and_then(Value::as_str) == Some("acceptance_passed")
+}
+
 fn validation_disposition_for_target(budget_outcome: &str) -> &'static str {
     match budget_outcome {
         "validation_passed" => "validation_passed",
@@ -2008,6 +2048,28 @@ fn apply_hold_confirm_reseed_nudge(
         point.hold_entry_centi_c = point.hold_entry_centi_c.saturating_sub(20).max(120);
         point.hold_exit_centi_c = point.hold_exit_centi_c.saturating_sub(20).max(120);
     }
+    if target_temp_c > 150
+        && matches!(
+            failure_class,
+            "stable_window_broke_low" | "missed_lower_band_before_limit"
+        )
+        && (hold_median == 0 || hold_p90 < 900)
+    {
+        point.brake_distance_centi_c = point.brake_distance_centi_c.saturating_sub(40).max(120);
+        point.approach_lead_ticks = point.approach_lead_ticks.saturating_sub(1);
+        point.hold_power_permille = point
+            .hold_power_permille
+            .saturating_add(80)
+            .min(1_000)
+            .max(700);
+        point.hold_reheat_power_permille = point
+            .hold_reheat_power_permille
+            .saturating_add(60)
+            .max(point.hold_power_permille)
+            .min(1_000);
+        point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_add(4).min(24);
+        point.hold_on_centi_c = point.hold_on_centi_c.saturating_add(4).min(60);
+    }
     if target_temp_c <= 150 && high_side_or_ripple {
         let severity_c = (overshoot_c - 3.0).max(hold_p2p_c - 3.0).max(0.0);
         let brake_step = ((severity_c * 75.0) + 80.0).round().clamp(80.0, 350.0) as u16;
@@ -2114,12 +2176,11 @@ fn stability_evidence_for_stage(stage: &Value, samples: &[Value], target_temp_c:
     let limit_ms = stable.get("limitMs").and_then(Value::as_f64);
     let required_margin_ms = if target_temp_c > 150 { 500.0 } else { 1_000.0 };
     if stage.get("stopReason").and_then(Value::as_str) == Some("completed")
-        && let Some(settle_ms) = settle_ms
+        && let Some((settle_ms, limit_ms)) = settle_ms.zip(limit_ms)
+        && settle_ms <= limit_ms
     {
         evidence["failureClass"] = json!("within_gate");
-        if let Some(limit_ms) = limit_ms
-            && limit_ms - settle_ms < required_margin_ms
-        {
+        if limit_ms - settle_ms < required_margin_ms {
             evidence["failureClass"] = json!("within_gate_low_margin");
             evidence["timeMarginMs"] = json!(limit_ms - settle_ms);
             evidence["requiredTimeMarginMs"] = json!(required_margin_ms);
@@ -2434,19 +2495,21 @@ fn scout_current_is_promotable(summary: &Value, target_temp_c: i16) -> bool {
         && stage_reference_gate_satisfied(summary, target_temp_c)
 }
 
-fn summary_is_pre_sample_cooldown_timeout(summary: &Value) -> bool {
-    let sample_count = summary.get("sampleCount").and_then(Value::as_u64);
-    let applied_empty = summary
-        .get("applied")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty);
-    let cooldown_error = summary
-        .get("error")
-        .and_then(Value::as_str)
-        .is_some_and(|error| {
+fn summary_has_cooldown_precondition_error(summary: &Value) -> bool {
+    let is_cooldown_error = |value: &Value| {
+        value.as_str().is_some_and(|error| {
             error.contains("requires cooldown") || error.contains("cooldown precondition")
-        });
-    sample_count == Some(0) && applied_empty && cooldown_error
+        })
+    };
+    summary.get("error").is_some_and(is_cooldown_error)
+        || summary
+            .get("runs")
+            .and_then(Value::as_array)
+            .is_some_and(|runs| {
+                runs.iter()
+                    .filter_map(|run| run.get("error"))
+                    .any(is_cooldown_error)
+            })
 }
 
 fn validation_failures_for_target(summary: &Value, target_temp_c: i16) -> Vec<Value> {
@@ -2689,17 +2752,10 @@ fn flagship_target_selector(args: &ThermalFlagshipTuneArgs) -> TargetSelector {
 }
 
 fn validate_flagship_scope(
-    anchors_c: &[i16],
-    validation_targets_c: &[i16],
     tune_targets_c: &[i16],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if anchors_c.is_empty() || validation_targets_c.is_empty() || tune_targets_c.is_empty() {
-        return Err("flagship target lists must be non-empty".into());
-    }
-    for target in tune_targets_c {
-        if !anchors_c.contains(target) {
-            return Err(format!("tune target {target}C must be present in anchor targets").into());
-        }
+    if tune_targets_c.is_empty() {
+        return Err("flagship tuning target list must be non-empty".into());
     }
     Ok(())
 }
@@ -2713,11 +2769,7 @@ fn effective_output_root(output_root: &Path) -> PathBuf {
 }
 
 fn cooldown_threshold(target_temp_c: i16) -> f64 {
-    if target_temp_c < 80 {
-        35.0
-    } else {
-        f64::from(target_temp_c - 40)
-    }
+    f64::from((target_temp_c - 30).max(40))
 }
 
 fn budget_elapsed_seconds(started_at: Instant) -> u64 {
@@ -2799,6 +2851,108 @@ mod tests {
         )
         .expect("write json");
         path
+    }
+
+    #[test]
+    fn recursive_execution_order_matches_canonical_full_batch() {
+        assert_eq!(
+            build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220, 240]),
+            vec![60, 240, 140, 100, 80, 120, 180, 160, 220]
+        );
+    }
+
+    #[test]
+    fn interval_midpoint_prefers_lower_index_for_even_spans() {
+        assert_eq!(interval_midpoint_index(0, 5), 2);
+        assert_eq!(interval_midpoint_index(2, 7), 4);
+    }
+
+    #[test]
+    fn reseed_target_from_accepted_bounds_only_rewrites_requested_point() {
+        let current_profile = json!({
+            "settings": {},
+            "points": [
+                {
+                    "targetTempC": 60,
+                    "brakeDistanceCentiC": 900,
+                    "warmupPowerPermille": 1000,
+                    "approachPowerPermille": 500,
+                    "approachFloorPowerPermille": 200,
+                    "approachDampingExponentPermille": 1300,
+                    "approachTailWindowCentiC": 120,
+                    "holdPowerPermille": 150,
+                    "holdReheatPowerPermille": 210,
+                    "warmupReenterCentiC": 1000,
+                    "holdEntryCentiC": 180,
+                    "holdExitCentiC": 240,
+                    "holdOnCentiC": 30,
+                    "holdOffCentiC": 90,
+                    "overshootCutoffCentiC": 110,
+                    "holdKpPermillePerC": 10,
+                    "holdKiPermillePerCTick": 2,
+                    "holdBlendTicks": 2,
+                    "approachLeadTicks": 4,
+                    "holdLeadTicks": 3
+                },
+                {
+                    "targetTempC": 140,
+                    "brakeDistanceCentiC": 750,
+                    "warmupPowerPermille": 1000,
+                    "approachPowerPermille": 640,
+                    "approachFloorPowerPermille": 260,
+                    "approachDampingExponentPermille": 900,
+                    "approachTailWindowCentiC": 60,
+                    "holdPowerPermille": 280,
+                    "holdReheatPowerPermille": 340,
+                    "warmupReenterCentiC": 1000,
+                    "holdEntryCentiC": 140,
+                    "holdExitCentiC": 180,
+                    "holdOnCentiC": 18,
+                    "holdOffCentiC": 120,
+                    "overshootCutoffCentiC": 190,
+                    "holdKpPermillePerC": 18,
+                    "holdKiPermillePerCTick": 1,
+                    "holdBlendTicks": 3,
+                    "approachLeadTicks": 6,
+                    "holdLeadTicks": 5
+                },
+                {
+                    "targetTempC": 240,
+                    "brakeDistanceCentiC": 420,
+                    "warmupPowerPermille": 1000,
+                    "approachPowerPermille": 920,
+                    "approachFloorPowerPermille": 820,
+                    "approachDampingExponentPermille": 400,
+                    "approachTailWindowCentiC": 0,
+                    "holdPowerPermille": 820,
+                    "holdReheatPowerPermille": 900,
+                    "warmupReenterCentiC": 1000,
+                    "holdEntryCentiC": 100,
+                    "holdExitCentiC": 60,
+                    "holdOnCentiC": 12,
+                    "holdOffCentiC": 260,
+                    "overshootCutoffCentiC": 360,
+                    "holdKpPermillePerC": 14,
+                    "holdKiPermillePerCTick": 1,
+                    "holdBlendTicks": 1,
+                    "approachLeadTicks": 2,
+                    "holdLeadTicks": 1
+                }
+            ]
+        });
+
+        let lower_before = explicit_point_value(&current_profile, 60).expect("60C point");
+        let upper_before = explicit_point_value(&current_profile, 240).expect("240C point");
+        let reseeded =
+            reseed_target_from_accepted_bounds(&current_profile, 140, 60, 240, &[60, 140, 240])
+                .expect("reseeded profile");
+
+        assert_eq!(explicit_point_value(&reseeded, 60), Some(lower_before));
+        assert_eq!(explicit_point_value(&reseeded, 240), Some(upper_before));
+        assert_ne!(
+            explicit_point_value(&reseeded, 140),
+            explicit_point_value(&current_profile, 140)
+        );
     }
 
     fn scout_summary_with_samples(
@@ -2903,7 +3057,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_sample_cooldown_timeout_is_target_budget_exhaustion() {
+    fn cooldown_precondition_timeout_is_target_budget_exhaustion() {
         let summary = json!({
             "applied": [],
             "error": "thermal self-test requires cooldown to <= 35.0C, got 36.7C",
@@ -2924,7 +3078,27 @@ mod tests {
             },
         });
 
-        assert!(summary_is_pre_sample_cooldown_timeout(&summary));
+        assert!(summary_has_cooldown_precondition_error(&summary));
+    }
+
+    #[test]
+    fn batch_cooldown_precondition_timeout_is_target_budget_exhaustion() {
+        let summary = json!({
+            "sampleCount": 128,
+            "runs": [{
+                "error": "thermal self-test requires cooldown to <= 40.0C, got 40.4C",
+            }],
+        });
+
+        assert!(summary_has_cooldown_precondition_error(&summary));
+    }
+
+    #[test]
+    fn cooldown_threshold_uses_target_minus_thirty_with_forty_degree_floor() {
+        assert_eq!(cooldown_threshold(60), 40.0);
+        assert_eq!(cooldown_threshold(80), 50.0);
+        assert_eq!(cooldown_threshold(120), 90.0);
+        assert_eq!(cooldown_threshold(240), 210.0);
     }
 
     #[test]
@@ -2946,7 +3120,7 @@ mod tests {
             },
         });
 
-        assert!(!summary_is_pre_sample_cooldown_timeout(&summary));
+        assert!(!summary_has_cooldown_precondition_error(&summary));
     }
 
     #[test]
@@ -3245,6 +3419,91 @@ mod tests {
     }
 
     #[test]
+    fn budget_exhausted_candidate_ready_is_not_acceptance_passed() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 54.7, 100),
+            sample(5000, "approach", 58.7, 40),
+            sample(15697, "hold", 59.0, 14),
+            sample(20000, "hold", 60.2, 0),
+            sample(25843, "hold", 59.8, 14),
+        ]);
+        let summary = json!({
+            "runId": "candidate-ready-run",
+            "files": {
+                "samplesPath": samples_path,
+                "summaryPath": "/tmp/candidate-ready-run.json",
+            },
+            "validation": {
+                "failures": [],
+                "passed": false,
+            },
+            "applied": [{
+                "targetTempC": 60,
+                "stopReason": "completed",
+                "maxOvershootC": 0.28,
+                "holdPeakToPeakC": 1.18,
+                "analysis": {
+                    "holdMedianOutputPermille": 140,
+                    "holdP90OutputPermille": 170,
+                },
+                "guard": {
+                    "firstHoldAtMs": 12690,
+                },
+                "fullSpeedToStable": {
+                    "limitMs": 10000,
+                    "settleTimeMs": 6298,
+                    "warmupExitedAtMs": 9399,
+                },
+            }],
+        });
+        let round = round_record_from_summary(
+            &summary,
+            60,
+            1,
+            "tuning 2 / batch candidate 1",
+            Some(json!({
+                "targetTempC": 60,
+                "approachPowerPermille": 870,
+                "approachFloorPowerPermille": 580,
+                "brakeDistanceCentiC": 580,
+            })),
+            "batch_candidate",
+            Some(2),
+            Some("candidate-1"),
+            true,
+            None,
+            1155,
+        );
+        let accepted_profile = json!({
+            "settings": {},
+            "points": [{
+                "targetTempC": 60,
+                "approachPowerPermille": 870,
+                "approachFloorPowerPermille": 580,
+                "brakeDistanceCentiC": 580,
+                "holdPowerPermille": 135,
+                "holdReheatPowerPermille": 170,
+            }],
+        });
+
+        let entry = review_target_entry(
+            60,
+            "budget_exhausted",
+            1155,
+            vec![round],
+            &summary,
+            &accepted_profile,
+            60,
+        );
+
+        assert_eq!(entry["candidateReady"], json!(true));
+        assert_eq!(entry["candidateDisposition"], json!("candidate_ready"));
+        assert!(!entry_acceptance_passed(&entry));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
     fn validation_target_entry_passes_without_promoting_candidate() {
         let samples_path = write_test_samples(&[
             sample(0, "warmup", 170.0, 100),
@@ -3488,6 +3747,123 @@ mod tests {
     }
 
     #[test]
+    fn failed_hold_confirm_boosts_underpowered_high_temp_hold_response() {
+        let sample = |elapsed_ms: i64, phase: &str, temp_c: f64, output_percent: i64| {
+            json!({
+                "targetTempC": 240,
+                "elapsedMs": elapsed_ms,
+                "phase": phase,
+                "status": {
+                    "currentTempC": temp_c,
+                    "heaterFilteredTempC": temp_c,
+                    "heaterOutputPercent": output_percent,
+                    "heaterPhysicalOutputPercent": output_percent,
+                    "pdRequestMv": 21000,
+                },
+                "sourceTelemetry": {
+                    "voltageMv": 21000,
+                    "currentMa": 3000,
+                    "powerMw": 63000,
+                },
+            })
+        };
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(800, "warmup", 195.0, 100),
+            sample(1200, "approach", 236.4, 100),
+            sample(2200, "hold", 237.4, 0),
+            sample(3200, "hold", 237.9, 25),
+            sample(4200, "hold", 238.1, 35),
+            sample(6200, "hold", 238.0, 65),
+        ]);
+        let profile = json!({
+            "settings": {},
+            "points": [{
+                "targetTempC": 240,
+                "brakeDistanceCentiC": 150,
+                "warmupPowerPermille": 1000,
+                "approachPowerPermille": 1000,
+                "approachFloorPowerPermille": 1000,
+                "approachDampingExponentPermille": 100,
+                "approachTailWindowCentiC": 0,
+                "holdPowerPermille": 950,
+                "holdReheatPowerPermille": 1000,
+                "holdEntryCentiC": 10,
+                "holdExitCentiC": 55,
+                "holdOnCentiC": 14,
+                "holdOffCentiC": 320,
+                "overshootCutoffCentiC": 420,
+                "holdKpPermillePerC": 16,
+                "holdKiPermillePerCTick": 1,
+                "holdBlendTicks": 1,
+                "approachLeadTicks": 0,
+                "holdLeadTicks": 0
+            }]
+        });
+        let summary = json!({
+            "files": {
+                "samplesPath": samples_path,
+            },
+            "validation": {
+                "failures": [{
+                    "targetTempC": 240,
+                    "reason": "full_speed_to_stable_missing",
+                }],
+            },
+            "applied": [{
+                "targetTempC": 240,
+                "stopReason": "full_speed_to_stable_timeout",
+                "riseTimeMs": 57944,
+                "maxOvershootC": 0.93,
+                "holdPeakToPeakC": 2.56,
+                "sampleCount": 202,
+                "analysis": {
+                    "holdMedianOutputPermille": 0,
+                    "holdP90OutputPermille": 650,
+                    "holdMaxAboveTargetC": 0.93,
+                    "holdMaxBelowTargetC": 1.63,
+                    "residualHeatAfterHoldEntryC": 0.0,
+                },
+                "guard": {
+                    "holdThresholdTempC": 239.9,
+                },
+                "fullSpeedToStable": {
+                    "limitMs": 5000,
+                    "settleTimeMs": null,
+                    "warmupExitedAtMs": 1000,
+                    "failureReason": "full_speed_to_stable_timeout",
+                },
+            }],
+        });
+
+        let reseeded =
+            reseed_after_failed_hold_confirm(&profile, 240, &summary).expect("reseed result");
+        let point = reseeded
+            .and_then(|value| explicit_point_value(&value, 240))
+            .expect("240C point");
+
+        assert_eq!(
+            point.get("brakeDistanceCentiC").and_then(Value::as_i64),
+            Some(120)
+        );
+        assert_eq!(
+            point.get("holdPowerPermille").and_then(Value::as_i64),
+            Some(1000)
+        );
+        assert_eq!(
+            point.get("holdReheatPowerPermille").and_then(Value::as_i64),
+            Some(1000)
+        );
+        assert_eq!(
+            point.get("holdKpPermillePerC").and_then(Value::as_i64),
+            Some(20)
+        );
+        assert_eq!(point.get("holdOnCentiC").and_then(Value::as_i64), Some(18));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
     fn high_side_gate_nudge_clamps_predicted_brake_and_trims_hold() {
         let current = ThermalCandidatePoint {
             target_temp_c: 220,
@@ -3499,6 +3875,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 1000,
             hold_reheat_power_permille: 1000,
+            warmup_reenter_centi_c: 1000,
             hold_entry_centi_c: 150,
             hold_exit_centi_c: 160,
             hold_on_centi_c: 5,
@@ -3546,6 +3923,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 280,
             hold_reheat_power_permille: 340,
+            warmup_reenter_centi_c: 1000,
             hold_entry_centi_c: 150,
             hold_exit_centi_c: 160,
             hold_on_centi_c: 5,
@@ -3581,6 +3959,73 @@ mod tests {
     }
 
     #[test]
+    fn low_side_medium_gap_uses_the_verified_moderate_step() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 60,
+            brake_distance_centi_c: 1_000,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 420,
+            approach_floor_power_permille: 200,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 280,
+            hold_reheat_power_permille: 340,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 160,
+            hold_on_centi_c: 5,
+            hold_off_centi_c: 160,
+            overshoot_cutoff_centi_c: 180,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 4,
+            hold_lead_ticks: 0,
+        };
+        let nudged = apply_flagship_gate_nudge(
+            &current,
+            current,
+            &json!({
+                "failureClass": "missed_lower_band_before_limit",
+                "temperatureGapC": 1.2
+            }),
+            60,
+        );
+
+        assert_eq!(nudged.brake_distance_centi_c, 840);
+        assert_eq!(nudged.approach_floor_power_permille, 320);
+        assert_eq!(nudged.approach_power_permille, 540);
+    }
+
+    #[test]
+    fn late_completed_scout_keeps_lower_band_miss_classification() {
+        let stage = json!({
+            "stopReason": "completed",
+            "fullSpeedToStable": {
+                "warmupExitedAtMs": 0,
+                "limitMs": 10_000,
+                "settleTimeMs": 28_000,
+            },
+        });
+        let samples = vec![
+            json!({"t": 0.0, "temp": 50.0}),
+            json!({"t": 10.0, "temp": 53.0}),
+            json!({"t": 28.0, "temp": 60.0}),
+        ];
+
+        let evidence = stability_evidence_for_stage(&stage, &samples, 60);
+
+        assert_eq!(
+            evidence.get("failureClass").and_then(Value::as_str),
+            Some("missed_lower_band_before_limit")
+        );
+        assert_eq!(
+            evidence.get("temperatureGapC").and_then(Value::as_f64),
+            Some(5.5)
+        );
+    }
+
+    #[test]
     fn low_temperature_high_side_nudge_damps_approach_energy() {
         let current = ThermalCandidatePoint {
             target_temp_c: 100,
@@ -3592,6 +4037,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 220,
             hold_reheat_power_permille: 220,
+            warmup_reenter_centi_c: 1000,
             hold_entry_centi_c: 150,
             hold_exit_centi_c: 160,
             hold_on_centi_c: 5,
@@ -3637,6 +4083,7 @@ mod tests {
             approach_tail_window_centi_c: 0,
             hold_power_permille: 225,
             hold_reheat_power_permille: 300,
+            warmup_reenter_centi_c: 1000,
             hold_entry_centi_c: 150,
             hold_exit_centi_c: 160,
             hold_on_centi_c: 5,
