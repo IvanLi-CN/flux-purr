@@ -2206,6 +2206,8 @@ const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
 const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
 const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 3;
 const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 100;
+const THERMAL_RUNTIME_READBACK_TIMEOUT_MS: u64 = 3_000;
+const THERMAL_RUNTIME_READBACK_POLL_MS: u64 = 100;
 struct BenchSourceTelemetrySampler {
     source_kind: BenchSourceKind,
     source_url: String,
@@ -6912,6 +6914,53 @@ fn thermal_self_test_cooldown_runtime_body() -> Value {
     })
 }
 
+fn thermal_runtime_readback_matches(
+    status: &Value,
+    heater_enabled: bool,
+    target_temp_c: i16,
+) -> bool {
+    status.get("targetTempC").and_then(Value::as_i64) == Some(i64::from(target_temp_c))
+        && status.get("heaterEnabled").and_then(Value::as_bool) == Some(heater_enabled)
+        && (heater_enabled
+            || status.get("activeCoolingEnabled").and_then(Value::as_bool) == Some(true))
+}
+
+async fn wait_for_thermal_runtime_readback(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    initial_status: Value,
+    heater_enabled: bool,
+    target_temp_c: i16,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_millis(THERMAL_RUNTIME_READBACK_TIMEOUT_MS);
+    let mut status = initial_status;
+    loop {
+        if thermal_runtime_readback_matches(&status, heater_enabled, target_temp_c) {
+            return Ok(status);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let readback_target = status
+                .get("targetTempC")
+                .and_then(Value::as_i64)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "missing".to_string());
+            let readback_enabled = status
+                .get("heaterEnabled")
+                .and_then(Value::as_bool)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "missing".to_string());
+            return Err(format!(
+                "heater runtime readback did not settle: expected target={target_temp_c} enabled={heater_enabled}, got target={readback_target} enabled={readback_enabled}"
+            )
+            .into());
+        }
+        tokio::time::sleep(Duration::from_millis(THERMAL_RUNTIME_READBACK_POLL_MS)).await;
+        status = request_thermal_status_with_retry(client, resolved, lease_id).await?;
+    }
+}
+
 async fn arm_thermal_self_test_heater(
     client: &Client,
     resolved: &ResolvedUsbTarget,
@@ -6924,6 +6973,15 @@ async fn arm_thermal_self_test_heater(
         resolved,
         lease_id,
         thermal_self_test_runtime_body(heater_enabled, target_temp_c),
+    )
+    .await?;
+    let status = wait_for_thermal_runtime_readback(
+        client,
+        resolved,
+        lease_id,
+        status,
+        heater_enabled,
+        target_temp_c,
     )
     .await?;
     let readback_target = require_status_i32(&status, "targetTempC")?;
@@ -12904,6 +12962,33 @@ mod tests {
     }
 
     #[test]
+    fn thermal_runtime_readback_requires_target_and_enable_state() {
+        let stale = json!({
+            "targetTempC": 140,
+            "heaterEnabled": false,
+            "activeCoolingEnabled": true,
+        });
+        let settled = json!({
+            "targetTempC": 140,
+            "heaterEnabled": true,
+            "activeCoolingEnabled": true,
+        });
+
+        assert!(!thermal_runtime_readback_matches(&stale, true, 140));
+        assert!(thermal_runtime_readback_matches(&settled, true, 140));
+        assert!(thermal_runtime_readback_matches(&stale, false, 140));
+        assert!(!thermal_runtime_readback_matches(
+            &json!({
+                "targetTempC": 140,
+                "heaterEnabled": false,
+                "activeCoolingEnabled": false,
+            }),
+            false,
+            140,
+        ));
+    }
+
+    #[test]
     fn thermal_self_test_shutdown_body_enables_active_cooling() {
         assert_eq!(
             thermal_self_test_runtime_body(false, 220),
@@ -14189,6 +14274,65 @@ mod tests {
         assert_eq!(status["attempt"], 2);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
 
+        server.abort();
+    }
+
+    #[derive(Clone)]
+    struct ThermalRuntimeReadbackTestState {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    async fn delayed_thermal_runtime_readback(
+        State(state): State<ThermalRuntimeReadbackTestState>,
+        AxumPath(_device_id): AxumPath<String>,
+    ) -> Json<Value> {
+        let attempt = state.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        Json(json!({
+            "targetTempC": 140,
+            "heaterEnabled": attempt >= 3,
+            "activeCoolingEnabled": true,
+        }))
+    }
+
+    #[tokio::test]
+    async fn thermal_runtime_readback_waits_for_async_arm_state() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/api/v1/devices/{device_id}/status",
+                get(delayed_thermal_runtime_readback),
+            )
+            .with_state(ThermalRuntimeReadbackTestState {
+                attempts: attempts.clone(),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let resolved = ResolvedUsbTarget {
+            device: "bench".to_string(),
+            devd: format!("http://{addr}"),
+            hardware_id: None,
+        };
+
+        let status = wait_for_thermal_runtime_readback(
+            &Client::new(),
+            &resolved,
+            "lease-test",
+            json!({
+                "targetTempC": 140,
+                "heaterEnabled": false,
+                "activeCoolingEnabled": true,
+            }),
+            true,
+            140,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["heaterEnabled"], true);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
         server.abort();
     }
 

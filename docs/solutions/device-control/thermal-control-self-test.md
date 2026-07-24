@@ -245,6 +245,7 @@ The flagship execution whitelist is fixed:
 - bind repo-local `flux-purr-devd` to the exact owner-authorized serial path only
 - confirm Flux Purr runtime readback shows `selectedMode=100w`, `resolvedBank=pps5a`, and `detectedSourceClass=pps5a` before heating
 - confirm IsolaPurr readback still shows `100W`, PD enabled, PPS enabled, `pd_pps_5a=true`, `pps3_limit_ma >= 5000`, and `tps_mode=auto_follow`
+- treat runtime arm/shutdown writes as asynchronous: after `PUT /runtime`, poll `/status` under the same lease until `targetTempC` and `heaterEnabled` match; shutdown also requires `activeCoolingEnabled=true`
 - run only the explicit target order, and keep the same target-local scout/retune/batch/confirm loop active while the per-target budget remains; do not add an independent hard cap on tuning rounds or hold confirms
 - keep `warmupPowerPermille=1000` and require actual warmup output to stay at `100%`
 
