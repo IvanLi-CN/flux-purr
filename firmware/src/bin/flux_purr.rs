@@ -330,7 +330,10 @@ const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_SAMPLE_COUNT: usize = 64;
 #[cfg(any(target_arch = "xtensa", test))]
-const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 8;
+// ADC1 is shared by the high-impedance RTD divider and the VIN divider. Keep
+// a longer discard prefix after every channel switch so the retained batch is
+// not biased by the preceding channel's sample-and-hold residue.
+const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 24;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_MIN_VALID_SAMPLE_COUNT: usize = 48;
 #[cfg(any(target_arch = "xtensa", test))]

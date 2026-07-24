@@ -1199,6 +1199,12 @@ fn candidate_variants(
     );
     let stability_evidence =
         stability_evidence_for_stage(&scout_stage, &scout_samples, target_temp_c);
+    predicted_point = bound_low_temperature_candidate_step(
+        &current_point,
+        predicted_point,
+        &stability_evidence,
+        target_temp_c,
+    );
 
     let mut variants = vec![("current".to_string(), current_profile.clone())];
     if let Some(conservative_point) = conservative_high_side_candidate(
@@ -1461,6 +1467,62 @@ fn apply_flagship_gate_nudge(
                 point.overshoot_cutoff_centi_c.saturating_sub(20).max(140);
         }
     }
+    point
+}
+
+fn bound_low_temperature_candidate_step(
+    current_point: &ThermalCandidatePoint,
+    mut point: ThermalCandidatePoint,
+    evidence: &Value,
+    target_temp_c: i16,
+) -> ThermalCandidatePoint {
+    if target_temp_c > 150 {
+        return point;
+    }
+    let failure_class = evidence
+        .get("failureClass")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !matches!(
+        failure_class,
+        "missed_lower_band_before_limit" | "stable_window_broke_low" | "within_gate_low_margin"
+    ) {
+        return point;
+    }
+
+    // A low-temperature plate has little thermal margin. Keep each exploratory
+    // step local; repeated rounds can still move the point, but one bad model
+    // fit cannot inject a large burst of heat into the hardware.
+    const MAX_APPROACH_POWER_STEP: u16 = 80;
+    const MAX_BRAKE_REDUCTION: u16 = 80;
+    const MAX_DAMPING_REDUCTION: u16 = 120;
+
+    point.approach_floor_power_permille = point.approach_floor_power_permille.min(
+        current_point
+            .approach_floor_power_permille
+            .saturating_add(MAX_APPROACH_POWER_STEP),
+    );
+    point.approach_power_permille = point
+        .approach_power_permille
+        .min(
+            current_point
+                .approach_power_permille
+                .saturating_add(MAX_APPROACH_POWER_STEP),
+        )
+        .max(point.approach_floor_power_permille.saturating_add(80));
+    point.brake_distance_centi_c = point.brake_distance_centi_c.max(
+        current_point
+            .brake_distance_centi_c
+            .saturating_sub(MAX_BRAKE_REDUCTION),
+    );
+    point.approach_damping_exponent_permille = point.approach_damping_exponent_permille.max(
+        current_point
+            .approach_damping_exponent_permille
+            .saturating_sub(MAX_DAMPING_REDUCTION),
+    );
+    point.approach_lead_ticks = point
+        .approach_lead_ticks
+        .max(current_point.approach_lead_ticks.saturating_sub(1));
     point
 }
 
@@ -4048,6 +4110,56 @@ mod tests {
         assert!(nudged.brake_distance_centi_c >= 800);
         assert!(nudged.approach_power_permille <= 560);
         assert!(nudged.approach_floor_power_permille <= 360);
+    }
+
+    #[test]
+    fn low_temperature_candidate_step_caps_aggressive_reseed() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 140,
+            brake_distance_centi_c: 940,
+            warmup_power_permille: 1000,
+            approach_power_permille: 420,
+            approach_floor_power_permille: 320,
+            approach_damping_exponent_permille: 910,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 335,
+            hold_reheat_power_permille: 400,
+            warmup_reenter_centi_c: 1000,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 100,
+            hold_on_centi_c: 10,
+            hold_off_centi_c: 160,
+            overshoot_cutoff_centi_c: 220,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 0,
+        };
+        let aggressive = ThermalCandidatePoint {
+            brake_distance_centi_c: 700,
+            approach_power_permille: 800,
+            approach_floor_power_permille: 650,
+            approach_damping_exponent_permille: 310,
+            approach_lead_ticks: 0,
+            ..current
+        };
+
+        let bounded = bound_low_temperature_candidate_step(
+            &current,
+            aggressive,
+            &json!({
+                "failureClass": "missed_lower_band_before_limit",
+                "temperatureGapC": 0.8
+            }),
+            140,
+        );
+
+        assert_eq!(bounded.approach_power_permille, 500);
+        assert_eq!(bounded.approach_floor_power_permille, 400);
+        assert_eq!(bounded.brake_distance_centi_c, 860);
+        assert_eq!(bounded.approach_damping_exponent_permille, 790);
+        assert_eq!(bounded.approach_lead_ticks, 1);
     }
 
     #[test]
