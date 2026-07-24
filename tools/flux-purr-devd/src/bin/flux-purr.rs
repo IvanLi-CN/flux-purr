@@ -2085,14 +2085,6 @@ struct ThermalReplayStageSample {
     source_power_mw: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ThermalMeasuredSample {
-    elapsed_ms: u64,
-    current_temp_c: f64,
-    filtered_temp_c: Option<f64>,
-    heater_output_percent: u8,
-}
-
 #[derive(Debug, Clone)]
 struct ThermalStageAnalyzer {
     target_temp_c: f64,
@@ -2214,13 +2206,6 @@ const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
 const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
 const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 3;
 const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 100;
-const THERMAL_SAMPLE_GLITCH_MIN_INTERVAL_MS: u64 = 200;
-const THERMAL_SAMPLE_GLITCH_MAX_RATE_C_PER_S: f64 = 35.0;
-const THERMAL_SAMPLE_GLITCH_MIN_DELTA_C: f64 = 10.0;
-const THERMAL_SAMPLE_GLITCH_FILTER_GAP_C: f64 = 18.0;
-const THERMAL_SAMPLE_GLITCH_ZERO_OUTPUT_DELTA_C: f64 = 6.0;
-const THERMAL_SAMPLE_GLITCH_ZERO_OUTPUT_RATE_C_PER_S: f64 = 20.0;
-
 struct BenchSourceTelemetrySampler {
     source_kind: BenchSourceKind,
     source_url: String,
@@ -2348,7 +2333,6 @@ enum ThermalRuntimeDropReason {
     HeaterDisarmed,
     WrongMode,
     WrongTarget,
-    TemperatureSampleGlitch,
 }
 
 impl ThermalRuntimeDropReason {
@@ -2359,7 +2343,6 @@ impl ThermalRuntimeDropReason {
             ThermalRuntimeDropReason::HeaterDisarmed => "heater_disarmed",
             ThermalRuntimeDropReason::WrongMode => "wrong_mode",
             ThermalRuntimeDropReason::WrongTarget => "wrong_target",
-            ThermalRuntimeDropReason::TemperatureSampleGlitch => "temperature_sample_glitch",
         }
     }
 }
@@ -2786,44 +2769,6 @@ fn thermal_runtime_drop_reason(
         return Some(ThermalRuntimeDropReason::HeaterDisarmed);
     }
     None
-}
-
-fn thermal_temperature_sample_glitch(
-    previous: Option<ThermalMeasuredSample>,
-    current: ThermalMeasuredSample,
-) -> bool {
-    let Some(previous) = previous else {
-        return false;
-    };
-    let delta_ms = current.elapsed_ms.saturating_sub(previous.elapsed_ms);
-    if delta_ms < THERMAL_SAMPLE_GLITCH_MIN_INTERVAL_MS {
-        return false;
-    }
-    let delta_c = current.current_temp_c - previous.current_temp_c;
-    let abs_delta_c = delta_c.abs();
-    let rate_c_per_s = abs_delta_c * 1_000.0 / delta_ms as f64;
-    if abs_delta_c >= THERMAL_SAMPLE_GLITCH_MIN_DELTA_C
-        && rate_c_per_s >= THERMAL_SAMPLE_GLITCH_MAX_RATE_C_PER_S
-    {
-        return true;
-    }
-    let filter_gap_c = current
-        .filtered_temp_c
-        .map(|filtered| (current.current_temp_c - filtered).abs())
-        .unwrap_or_default()
-        .max(
-            previous
-                .filtered_temp_c
-                .map(|filtered| (previous.current_temp_c - filtered).abs())
-                .unwrap_or_default(),
-        );
-    previous.heater_output_percent == 0
-        && current.heater_output_percent == 0
-        && abs_delta_c >= THERMAL_SAMPLE_GLITCH_ZERO_OUTPUT_DELTA_C
-        && rate_c_per_s >= THERMAL_SAMPLE_GLITCH_ZERO_OUTPUT_RATE_C_PER_S
-        || filter_gap_c >= THERMAL_SAMPLE_GLITCH_FILTER_GAP_C
-            && abs_delta_c >= THERMAL_SAMPLE_GLITCH_ZERO_OUTPUT_DELTA_C
-            && rate_c_per_s >= THERMAL_SAMPLE_GLITCH_ZERO_OUTPUT_RATE_C_PER_S
 }
 
 fn thermal_recoverable_sensor_fault(status: &Value) -> bool {
@@ -7088,7 +7033,6 @@ async fn run_thermal_stage(
     let mut heater_output_seen = false;
     let mut runtime_rearm_attempts_remaining = args.runtime_rearm_attempts;
     let mut next_status = initial_status;
-    let mut last_measured_sample = None::<ThermalMeasuredSample>;
     let source_selection = resolve_thermal_source_selection(args)?;
     let source_power_watts = thermal_effective_source_power_watts(args, &source_selection);
 
@@ -7176,7 +7120,6 @@ async fn run_thermal_stage(
                 last_uptime_seconds = None;
                 sample_rate_tracker = ThermalSampleRateTracker::new();
                 heater_output_seen = false;
-                last_measured_sample = None;
                 continue;
             }
             Err(error) => return Err(error),
@@ -7246,7 +7189,6 @@ async fn run_thermal_stage(
                 last_uptime_seconds = None;
                 sample_rate_tracker = ThermalSampleRateTracker::new();
                 heater_output_seen = false;
-                last_measured_sample = None;
                 continue;
             }
             stop_reason = reason.as_str();
@@ -7257,47 +7199,9 @@ async fn run_thermal_stage(
         let current_temp_c = require_status_f64(&status, "currentTempC")?;
         let heater_output_percent =
             require_status_u64(&status, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
-        let filtered_temp_c = status.get("heaterFilteredTempC").and_then(Value::as_f64);
         heater_output_seen |= heater_output_percent > 0;
         max_temp_c = max_temp_c.max(current_temp_c);
         let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let measured_sample = ThermalMeasuredSample {
-            elapsed_ms,
-            current_temp_c,
-            filtered_temp_c,
-            heater_output_percent,
-        };
-        if thermal_temperature_sample_glitch(last_measured_sample, measured_sample) {
-            let sample = json!({
-                "runId": run_id,
-                "sampleIndex": *sample_index,
-                "capturedAtUnixMs": current_unix_millis(),
-                "elapsedMs": elapsed_ms,
-                "testPhase": test_phase,
-                "phase": "temperature_sample_glitch",
-                "targetTempC": target_temp_c,
-                "source": {
-                    "mode": args.source_mode,
-                    "requestedVoltageMv": (args.source_mode == "manual-forced").then_some(source_voltage_mv),
-                    "requestedCurrentLimitMa": (args.source_mode == "manual-forced").then_some(source_current_ma),
-                },
-                "sourceTelemetry": source_telemetry.to_value(),
-                "sourceTelemetryStaleMs": source_telemetry_stale_ms,
-                "heaterTelemetry": heater_telemetry_value(&status)?,
-                "heaterParameters": heater_parameters,
-                "runtimeDropReason": ThermalRuntimeDropReason::TemperatureSampleGlitch.as_str(),
-                "status": status,
-            });
-            writeln!(samples_writer, "{}", serde_json::to_string(&sample)?)?;
-            samples_writer.flush()?;
-            *sample_index = sample_index.saturating_add(1);
-            stage_sample_count = stage_sample_count.saturating_add(1);
-            stop_reason = ThermalRuntimeDropReason::TemperatureSampleGlitch.as_str();
-            terminal_runtime_drop_reason =
-                Some(ThermalRuntimeDropReason::TemperatureSampleGlitch.as_str());
-            break;
-        }
-        last_measured_sample = Some(measured_sample);
         let sample_rate = sample_rate_tracker.observe(elapsed_ms);
         let control_phase = status.get("heaterControlPhase").and_then(Value::as_str);
         let control_phase_in_hold = control_phase.is_some_and(|phase| phase == "hold");
@@ -12994,42 +12898,6 @@ mod tests {
             thermal_runtime_drop_reason(&disarmed, 210, Some(34)),
             Some(ThermalRuntimeDropReason::HeaterDisarmed)
         );
-    }
-
-    #[test]
-    fn thermal_temperature_sample_glitch_detects_impossible_zero_output_jump() {
-        let previous = ThermalMeasuredSample {
-            elapsed_ms: 35_160,
-            current_temp_c: 156.07,
-            filtered_temp_c: Some(148.69),
-            heater_output_percent: 0,
-        };
-        let current = ThermalMeasuredSample {
-            elapsed_ms: 35_460,
-            current_temp_c: 215.56,
-            filtered_temp_c: Some(160.32),
-            heater_output_percent: 0,
-        };
-
-        assert!(thermal_temperature_sample_glitch(Some(previous), current));
-    }
-
-    #[test]
-    fn thermal_temperature_sample_glitch_ignores_normal_near_target_drift() {
-        let previous = ThermalMeasuredSample {
-            elapsed_ms: 32_454,
-            current_temp_c: 142.78,
-            filtered_temp_c: Some(140.41),
-            heater_output_percent: 25,
-        };
-        let current = ThermalMeasuredSample {
-            elapsed_ms: 32_756,
-            current_temp_c: 142.62,
-            filtered_temp_c: Some(141.06),
-            heater_output_percent: 0,
-        };
-
-        assert!(!thermal_temperature_sample_glitch(Some(previous), current));
     }
 
     #[test]
