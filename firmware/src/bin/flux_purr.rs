@@ -269,23 +269,15 @@ const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_PPS_DISCOVERY_DWELL_MS: u64 = 300;
-#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_STEADY_DWELL_MS: u64 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_PPS_NOMINAL_PWM_MIN_PERCENT: u8 = 90;
-#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_SATURATION_PWM_MIN_PERCENT: u8 = 98;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_PPS_LOWERING_ERROR_MIN_C: f32 = -1.5;
-#[cfg(any(target_arch = "xtensa", test))]
-const HEATER_HOLD_PPS_LOWERING_ERROR_MAX_C: f32 = 0.5;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_RAISE_ERROR_MIN_C: f32 = 0.25;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_RAISE_MAX_SLOPE_C_PER_S: f32 = 0.25;
 #[cfg(any(target_arch = "xtensa", test))]
-const HEATER_PPS_SMALL_TRANSITION_MS: u64 = 25;
+const HEATER_PPS_SMALL_TRANSITION_MS: u64 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PPS_LARGE_TRANSITION_MS: u64 = 275;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2505,7 +2497,7 @@ impl RtdPpsTransitionGuard {
             Some(blocked_until_ms) if now_ms < blocked_until_ms => false,
             Some(_) => {
                 self.blocked_until_ms = None;
-                true
+                return (true, true);
             }
             None => true,
         };
@@ -2950,7 +2942,6 @@ enum HeaterPowerBackend {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HoldPpsGovernor {
     active: bool,
-    discovering_voltage: bool,
     next_adjust_at_ms: u64,
 }
 
@@ -2959,13 +2950,31 @@ impl HoldPpsGovernor {
     const fn new() -> Self {
         Self {
             active: false,
-            discovering_voltage: false,
             next_adjust_at_ms: 0,
         }
     }
 
     fn reset(&mut self) {
         *self = Self::new();
+    }
+
+    fn step_request_into_bounds(
+        current_request_mv: u16,
+        control_floor_mv: u16,
+        safe_max_mv: u16,
+    ) -> u16 {
+        let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
+        if current_request_mv < control_floor_mv {
+            current_request_mv
+                .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
+                .min(control_floor_mv)
+        } else if current_request_mv > bounded_safe_max_mv {
+            current_request_mv
+                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
+                .max(bounded_safe_max_mv)
+        } else {
+            current_request_mv
+        }
     }
 
     fn request_mv(
@@ -2987,15 +2996,16 @@ impl HoldPpsGovernor {
         // A nonzero command below the working floor is handled by the fixed-PWM safety
         // fallback before this governor. Keep the idle path well-defined too.
         let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
-        let bounded_request_mv = current_request_mv.clamp(control_floor_mv, bounded_safe_max_mv);
+        let bounded_request_mv = Self::step_request_into_bounds(
+            current_request_mv,
+            control_floor_mv,
+            bounded_safe_max_mv,
+        );
         if !self.active {
             self.active = true;
-            self.discovering_voltage = duty_percent > 0;
-            // Keep PPS fixed through the full-speed stability window. PWM alone handles
-            // fast Hold corrections; voltage discovery starts only after that evidence.
-            self.next_adjust_at_ms = now_ms.saturating_add(
-                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
-            );
+            // Hold inherits the Approach voltage. PWM handles fast corrections; PPS only
+            // rises later if that voltage cannot provide enough heating headroom.
+            self.next_adjust_at_ms = now_ms.saturating_add(HEATER_HOLD_PPS_INITIAL_SETTLE_MS);
             return Some(bounded_request_mv);
         }
         if duty_percent == 0 || now_ms < self.next_adjust_at_ms {
@@ -3004,18 +3014,10 @@ impl HoldPpsGovernor {
 
         let physical_pwm_percent =
             heater_physical_pwm_percent(duty_percent, bounded_safe_max_mv, bounded_request_mv, 100);
-        let within_nominal_hold_band = actual_error_c >= HEATER_HOLD_PPS_LOWERING_ERROR_MIN_C
-            && actual_error_c <= HEATER_HOLD_PPS_LOWERING_ERROR_MAX_C;
-        let lower_voltage = physical_pwm_percent < HEATER_HOLD_PPS_NOMINAL_PWM_MIN_PERCENT
-            && within_nominal_hold_band;
         let raise_voltage = physical_pwm_percent >= HEATER_HOLD_PPS_SATURATION_PWM_MIN_PERCENT
             && actual_error_c >= HEATER_HOLD_PPS_RAISE_ERROR_MIN_C
             && filtered_slope_c_per_s <= HEATER_HOLD_PPS_RAISE_MAX_SLOPE_C_PER_S;
-        let next_request_mv = if lower_voltage {
-            bounded_request_mv
-                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
-                .max(control_floor_mv)
-        } else if raise_voltage {
+        let next_request_mv = if raise_voltage {
             bounded_request_mv
                 .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
                 .min(bounded_safe_max_mv)
@@ -3023,16 +3025,7 @@ impl HoldPpsGovernor {
             bounded_request_mv
         };
 
-        if self.discovering_voltage
-            && physical_pwm_percent >= HEATER_HOLD_PPS_NOMINAL_PWM_MIN_PERCENT
-        {
-            self.discovering_voltage = false;
-        }
-        self.next_adjust_at_ms = now_ms.saturating_add(if self.discovering_voltage {
-            HEATER_HOLD_PPS_DISCOVERY_DWELL_MS
-        } else {
-            HEATER_HOLD_PPS_STEADY_DWELL_MS
-        });
+        self.next_adjust_at_ms = now_ms.saturating_add(HEATER_HOLD_PPS_STEADY_DWELL_MS);
         Some(next_request_mv)
     }
 }
@@ -4709,7 +4702,9 @@ fn heater_adjustable_request_mv(
 ) -> u16 {
     if duty_percent == 0 {
         if heater_enabled {
-            control_floor_mv
+            current_request_mv
+                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
+                .max(control_floor_mv)
         } else {
             idle_request_mv
         }
@@ -12478,9 +12473,13 @@ mod tests {
     }
 
     #[test]
-    fn heater_armed_zero_output_returns_to_working_floor() {
+    fn heater_armed_zero_output_steps_toward_working_floor() {
         assert_eq!(
             heater_adjustable_request_mv(0, true, 11_300, 12_000, 6_100, 20_000),
+            10_800
+        );
+        assert_eq!(
+            heater_adjustable_request_mv(0, true, 6_300, 12_000, 6_100, 20_000),
             6_100
         );
         assert_eq!(
@@ -12529,6 +12528,10 @@ mod tests {
     fn heater_physical_pwm_reduces_power_below_6_5v_working_floor() {
         assert_eq!(
             heater_adjustable_request_mv(0, true, 12_000, 12_000, 6_100, 20_000),
+            11_500
+        );
+        assert_eq!(
+            heater_adjustable_request_mv(0, true, 6_100, 12_000, 6_100, 20_000),
             6_100
         );
         assert_eq!(heater_physical_pwm_percent(10, 14_000, 6_100, 100), 52);
@@ -12537,7 +12540,7 @@ mod tests {
     }
 
     #[test]
-    fn hold_pps_governor_discovers_a_pwm_dominant_voltage_then_holds_it() {
+    fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
         let mut governor = HoldPpsGovernor::new();
         assert_eq!(
             governor.request_mv(
@@ -12574,9 +12577,22 @@ mod tests {
                 18_000,
                 6_100,
                 21_000,
-                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS,
             ),
-            Some(17_500)
+            Some(18_000)
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                0,
+                -1.0,
+                0.05,
+                18_000,
+                6_100,
+                21_000,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_STEADY_DWELL_MS,
+            ),
+            Some(18_000)
         );
 
         let mut nominal = HoldPpsGovernor::new();
@@ -12602,9 +12618,40 @@ mod tests {
                 14_000,
                 6_100,
                 21_000,
-                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS,
             ),
             Some(14_000)
+        );
+    }
+
+    #[test]
+    fn hold_pps_governor_steps_toward_a_lower_safe_max_without_clamping() {
+        let mut governor = HoldPpsGovernor::new();
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                -1.0,
+                0.05,
+                19_000,
+                6_100,
+                6_100,
+                0,
+            ),
+            Some(18_500)
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                -1.0,
+                0.05,
+                18_500,
+                6_100,
+                6_100,
+                HEATER_PPS_SMALL_TRANSITION_MS,
+            ),
+            Some(18_000)
         );
     }
 
@@ -12633,7 +12680,7 @@ mod tests {
                 12_000,
                 6_100,
                 14_000,
-                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS,
             ),
             Some(12_500)
         );
@@ -12661,7 +12708,7 @@ mod tests {
                 12_000,
                 6_100,
                 14_000,
-                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS,
             ),
             Some(12_000)
         );
@@ -13026,7 +13073,7 @@ mod tests {
 
     #[test]
     fn adjustable_pps_request_transition_distinguishes_same_mode_and_path_changes() {
-        assert_eq!(pps_request_transition_ms(false), 25);
+        assert_eq!(pps_request_transition_ms(false), 500);
         assert_eq!(pps_request_transition_ms(true), 275);
     }
 
@@ -13611,8 +13658,59 @@ mod tests {
         assert_eq!(guard.observe(20_500, 40), (false, true));
         assert_eq!(guard.observe(20_000, 240), (false, true));
         assert_eq!(guard.observe(20_000, 520), (false, false));
-        assert_eq!(guard.observe(20_000, 540), (true, false));
+        assert_eq!(guard.observe(20_000, 540), (true, true));
         assert_eq!(guard.observe(20_000, 580), (true, false));
+    }
+
+    #[test]
+    fn rtd_pps_transition_rechecks_first_stable_sample_from_last_trusted_temperature() {
+        let mut guard = RtdPpsTransitionGuard::new(18_000);
+        let mut controller = HeaterController::new();
+        controller.reseed_measurement(140.0);
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        measurement_guard.reseed(140.0, 0);
+
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut guard,
+                &mut controller,
+                &mut measurement_guard,
+                140.0,
+                17_500,
+                50,
+                140.0,
+            ),
+            None
+        );
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut guard,
+                &mut controller,
+                &mut measurement_guard,
+                140.0,
+                17_500,
+                350,
+                143.0,
+            ),
+            None
+        );
+        assert!(measurement_guard.guarded);
+        assert_eq!(controller.filtered_temp_c, Some(140.0));
+
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut guard,
+                &mut controller,
+                &mut measurement_guard,
+                140.0,
+                17_500,
+                1_100,
+                143.0,
+            ),
+            Some(143.0)
+        );
+        assert!(!measurement_guard.guarded);
+        assert_eq!(controller.filtered_temp_c, Some(143.0));
     }
 
     #[test]
@@ -14129,15 +14227,15 @@ mod tests {
             },
             15_000,
             450,
-            46.0,
+            42.0,
         ));
 
-        assert_eq!(latest_temp_c, 46.0);
-        assert_eq!(latest_temp_i16, 46);
-        assert_eq!(latest_display_temp_c, 46.0);
-        assert_eq!(latest_display_temp_i16, 46);
-        assert_eq!(ui_state.current_temp_c, 46);
-        assert_eq!(ui_state.current_temp_deci_c, 460);
+        assert_eq!(latest_temp_c, 42.0);
+        assert_eq!(latest_temp_i16, 42);
+        assert_eq!(latest_display_temp_c, 42.0);
+        assert_eq!(latest_display_temp_i16, 42);
+        assert_eq!(ui_state.current_temp_c, 42);
+        assert_eq!(ui_state.current_temp_deci_c, 420);
     }
 
     #[test]
