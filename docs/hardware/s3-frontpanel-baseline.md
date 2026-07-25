@@ -110,9 +110,12 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - The archived 2026-04-22 main-board netlist keeps a second RGB LED footprint (`LED2`) on the same `LED_R/G/B` rails, but that footprint is marked DNI; the populated baseline still assumes exactly one RGB status LED and one ballast resistor per color.
 - Heater switching baseline:
   - use low-side `NMOS`
-  - current approved part: `BUK9Y14-40B,115`
-  - `R_GATE = 10 Ohm`
+  - primary approved part: `BUK9Y14-40B,115`
+  - approved pin-compatible substitute: `PSMN1R4-40YLDX`
+  - both approved parts use the `SOT669 / LFPAK56` footprint and retain the `40 V` drain-source rating
+  - `R_GATE = 68 Ohm`
   - `R_GPD = 100 kOhm`
+  - retain direct `3.3 V` GPIO47 drive at the default approximately `20 mA` pin drive strength; do not add a gate driver or increase edge strength without gate-waveform and drain-overshoot evidence
   - PWM start point `1 kHz ~ 2 kHz`
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - In the implemented netlist, `GPIO35` first drives `FAN_EN_RAW`, then passes through a `2.2 kOhm` series resistor into the TPS62933 `EN` pin. The weak `100 kOhm` pulldown remains on the actual `FAN_EN` node.

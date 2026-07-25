@@ -44,9 +44,15 @@ This means the heater and the rest of the board both run from the fused `VBUS` n
 
 ## 3) Approved MOSFET baseline
 
-Current approved part:
+Primary approved part:
 
 - `BUK9Y14-40B,115`
+
+Approved pin-compatible substitute:
+
+- `PSMN1R4-40YLDX`
+
+Both parts use the `SOT669 / LFPAK56` footprint with pins `1..3 = source`, pin `4 = gate`, and the mounting base connected to drain. The substitute therefore does not require a PCB footprint or pin-map change.
 
 Reason for approval:
 
@@ -54,22 +60,33 @@ Reason for approval:
 - Nexperia classifies it as a logic-level MOSFET
 - its gate charge is materially lighter than `PSMN014-80YLX`, which makes direct MCU drive more realistic
 
+Substitute rationale:
+
+- Nexperia also classifies `PSMN1R4-40YLDX` as a logic-level MOSFET
+- it retains the required `40 V` drain-source rating and provides substantially lower guaranteed `RDS(on)` at `VGS = 4.5 V`
+- its typical total gate charge is about `45 nC` at `VGS = 4.5 V`, compared with about `21 nC` at `VGS = 5 V` for the primary part, so the real gate waveform remains part of board validation
+
 Important limitation:
 
-- the datasheet does not provide a guaranteed `RDS(on)` number at `3.3 V`
-- therefore this is a practical approval under sourcing constraints, not a paper guarantee that every operating corner is ideal
+- neither datasheet provides a guaranteed `RDS(on)` number at `3.3 V`
+- approval of the substitute does not waive gate-waveform, switching-temperature, or drain-overshoot validation with the populated part
+- this remains a practical direct-MCU-drive approval, not a paper guarantee that every operating corner is ideal
 
 ## 4) Gate-drive baseline
 
-Start from this network:
+Populated baseline:
 
-- `R_GATE = 10 Ohm ~ 22 Ohm`
-- `R_GPD = 47 kOhm ~ 100 kOhm`
-
-Recommended default:
-
-- `R_GATE = 10 Ohm`
+- `R_GATE = 68 Ohm`
 - `R_GPD = 100 kOhm`
+
+The direct gate-drive topology is retained for both approved MOSFETs:
+
+- the target `ESP32-S3FH4R2` drives `GPIO47` from the `3.3 V` I/O domain; the `1.8 V` GPIO47/48 exception for the `ESP32-S3R8V` and `ESP32-S3R16V` variants does not apply
+- the GPIO47 MCPWM path uses the pin's default approximately `20 mA` drive strength
+- `PSMN1R4-40YLDX` has more gate charge than the primary part, but the preferred PPS/AVS path uses static off/on switching and the fallback frequency remains only `2 kHz`
+- the `PSMN1R4-40YLD` typical output curves at `VGS = 3.0 V` show drain-current capability well above the heater branch's source-limited `5 A` operating envelope
+
+An external gate driver, a stronger GPIO drive setting, or a lower gate resistance is not required for the frozen operating envelope. Do not make any of those changes without oscilloscope evidence: faster edges can increase drain overshoot and EMI. Reconsider the gate-drive topology if the heater current contract or PWM frequency increases, if measured switching temperature is unacceptable, or if production requires a guaranteed `RDS(on)` specification at the actual gate voltage.
 
 Connection:
 
@@ -181,9 +198,11 @@ This footprint is optional and should not be populated by default without oscill
 
 - verify fuse rating against worst-case heater cold-start current
 - verify the chosen TVS does not nuisance-conduct at the highest intended PD voltage
-- verify MOSFET temperature at the highest intended heater power
+- verify MOSFET temperature at the highest intended heater power for each populated approved part
 - verify drain overshoot at `5 / 9 / 12 / 15 / 20 / 28 V`
-- verify the gate waveform with the real `3.3 V` MCU drive
+- verify the gate waveform with the real `3.3 V` MCU drive and populated `68 Ohm` gate resistor
+- verify that the GPIO47 high level reaches its steady `3.3 V` gate-drive level with each approved MOSFET
+- verify fallback switching loss and MOSFET temperature at `2 kHz` before increasing GPIO drive strength or reducing `R_GATE`
 - confirm that worst-case on-state heater current stays inside the PD contract
 - confirm that VIN and RTD sampling remain stable in both `pps-mos` and fallback PWM modes
 
@@ -191,4 +210,7 @@ This footprint is optional and should not be populated by default without oscill
 
 - [Nexperia BUK9Y14-40B product page](https://www.nexperia.com/product/BUK9Y14-40B)
 - [Nexperia BUK9Y14-40B datasheet](https://assets.nexperia.com/documents/data-sheet/BUK9Y14-40B.pdf)
+- [Nexperia PSMN1R4-40YLD product page](https://www.nexperia.com/product/PSMN1R4-40YLD)
+- [Nexperia PSMN1R4-40YLD datasheet](https://assets.nexperia.com/documents/data-sheet/PSMN1R4-40YLD.pdf)
+- [Espressif ESP32-S3 series datasheet](https://www.espressif.com/sites/default/files/documentation/esp32-s3_datasheet_en.pdf)
 - [TI decoupling capacitor notes](https://www.ti.com/content/dam/videos/external-videos/en-us/9/3816841626001/6313253251112.mp4/subassets/notes-decoupling_capacitors.pdf)
