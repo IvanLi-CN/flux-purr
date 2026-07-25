@@ -1475,6 +1475,8 @@ struct UsbRuntimeConfigWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_ma: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    fault_attention_acknowledged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<&'a CalibrationControlRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_profile_mode: Option<&'a String>,
@@ -1495,6 +1497,7 @@ fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
         manual_pps_enabled: None,
         manual_pps_mv: None,
         manual_pps_ma: None,
+        fault_attention_acknowledged: None,
         calibration: None,
         thermal_profile_mode: Some(mode),
         thermal_control_profile: None,
@@ -3893,6 +3896,7 @@ async fn serial_runtime_config(
         manual_pps_enabled: payload.manual_pps_enabled,
         manual_pps_mv: payload.manual_pps_mv,
         manual_pps_ma: payload.manual_pps_ma,
+        fault_attention_acknowledged: payload.fault_attention_acknowledged,
         calibration: payload.calibration.as_ref(),
         thermal_profile_mode: payload.thermal_profile_mode.as_ref(),
         thermal_control_profile: payload.thermal_control_profile.as_ref(),
@@ -4251,6 +4255,7 @@ fn serial_exchange_blocking(
     let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
+    let mut discarding_overlong_line = false;
 
     while Instant::now() < deadline {
         match session.port.read(&mut read_buf) {
@@ -4265,7 +4270,7 @@ fn serial_exchange_blocking(
             }
             Ok(read) => {
                 for byte in &read_buf[..read] {
-                    if *byte == b'\n' {
+                    if serial_line_finished(&mut line, &mut discarding_overlong_line, *byte) {
                         emit_serial_log_line(state, events, device_id, &line);
                         match decode_usb_response_line(&line, request_id) {
                             Ok(Some(payload)) => {
@@ -4288,10 +4293,6 @@ fn serial_exchange_blocking(
                             }
                         }
                         line.clear();
-                    } else if line.len() < SERIAL_LINE_LIMIT {
-                        line.push(*byte);
-                    } else {
-                        line.clear();
                     }
                 }
             }
@@ -4310,12 +4311,15 @@ fn serial_exchange_blocking(
                 session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
                 next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
                 line.clear();
+                discarding_overlong_line = false;
             }
             Err(error) => return Err(serial_io_http_error(error)),
         }
     }
 
-    store_serial_session(&mut serial_sessions, port_path, session);
+    // A timeout can leave an incomplete response in the driver buffer. Do not
+    // reuse that session: the next RPC must start at a fresh JSONL boundary.
+    drop(session);
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",
@@ -4352,6 +4356,26 @@ fn emit_serial_log_line(
         inner.push_event(event.clone());
     }
     let _ = events.send(event);
+}
+
+fn serial_line_finished(line: &mut Vec<u8>, discarding_overlong_line: &mut bool, byte: u8) -> bool {
+    if byte == b'\n' {
+        if *discarding_overlong_line {
+            *discarding_overlong_line = false;
+            line.clear();
+            return false;
+        }
+        return true;
+    }
+    if !*discarding_overlong_line {
+        if line.len() < SERIAL_LINE_LIMIT {
+            line.push(byte);
+        } else {
+            line.clear();
+            *discarding_overlong_line = true;
+        }
+    }
+    false
 }
 
 type SerialSessionMap = HashMap<String, SerialSession>;
@@ -6240,6 +6264,29 @@ mod tests {
     }
 
     #[test]
+    fn usb_runtime_wire_serializes_fault_attention_acknowledgement() {
+        let json = serde_json::to_value(UsbRuntimeConfigWire {
+            frame_type: "runtime_config",
+            request_id: "attention-test",
+            target_temp_c: Some(140),
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: Some(true),
+            heater_enabled: Some(false),
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: Some(true),
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        })
+        .unwrap();
+
+        assert_eq!(json["faultAttentionAcknowledged"], true);
+    }
+
+    #[test]
     fn real_flash_args_flash_elf_and_hard_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
@@ -6403,6 +6450,7 @@ mod tests {
                                 target_temp_c: 100,
                                 brake_distance_centi_c: 700,
                                 warmup_power_permille: 320,
+                                warmup_reenter_centi_c: 0,
                                 approach_power_permille: 320,
                                 approach_floor_power_permille: 220,
                                 approach_damping_exponent_permille: 1_000,
@@ -6532,6 +6580,7 @@ mod tests {
                                 target_temp_c: 210,
                                 brake_distance_centi_c: 1_000,
                                 warmup_power_permille: 260,
+                                warmup_reenter_centi_c: 0,
                                 approach_power_permille: 260,
                                 approach_floor_power_permille: 180,
                                 approach_damping_exponent_permille: 1_000,
@@ -7125,6 +7174,26 @@ mod tests {
     }
 
     #[test]
+    fn serial_line_reader_discards_an_overlong_frame_before_the_next_response() {
+        let mut line = Vec::new();
+        let mut discarding = false;
+        for _ in 0..=SERIAL_LINE_LIMIT {
+            assert!(!serial_line_finished(&mut line, &mut discarding, b'x'));
+        }
+        assert!(discarding);
+        assert!(!serial_line_finished(&mut line, &mut discarding, b'\n'));
+        assert!(!discarding);
+        assert!(line.is_empty());
+
+        let response = br#"{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#;
+        for byte in response {
+            assert!(!serial_line_finished(&mut line, &mut discarding, *byte));
+        }
+        assert!(serial_line_finished(&mut line, &mut discarding, b'\n'));
+        assert!(decode_usb_response_line(&line, "req-1").unwrap().is_some());
+    }
+
+    #[test]
     fn usb_response_decoder_extracts_runtime_config_status_payload() {
         let payload = decode_usb_response_line(
             br#"{"type":"response","requestId":"runtime-1","ok":true,"result":{"status":{"mode":"sampling","uptimeSeconds":12,"currentTempC":194.0,"targetTempC":240,"heaterEnabled":true,"heaterOutputPercent":25,"activeCoolingEnabled":false,"fanDisplayState":"AUTO","fanEnabled":true,"fanPwmPermille":500,"voltageMv":20000,"currentMa":850,"boardTempCenti":1940,"pdRequestMv":20000,"pdContractMv":20000,"pdState":"ready","frontpanelKey":null,"network":{"state":"idle","dns":[],"wifiRssi":null}}}}"#,
@@ -7324,6 +7393,7 @@ mod tests {
             target_temp_c: 120,
             brake_distance_centi_c: 700,
             warmup_power_permille: 320,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
@@ -7384,6 +7454,7 @@ mod tests {
             target_temp_c: 220,
             brake_distance_centi_c: 520,
             warmup_power_permille: 1_000,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 760,
             approach_floor_power_permille: 600,
             approach_damping_exponent_permille: 550,

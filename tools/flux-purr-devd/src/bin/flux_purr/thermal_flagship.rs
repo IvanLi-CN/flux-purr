@@ -3,7 +3,7 @@ use std::{
     collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use reqwest::{Client, Method};
@@ -28,6 +28,10 @@ const FLAGSHIP_ENVIRONMENT_RETRY_LIMIT: u8 = 1;
 const SOURCE_PRESET_100W: &str = "21V / 5.0A";
 const SOURCE_PRESET_65W: &str = "20V / 3.25A";
 const PROVIDER_ISOLAPURR: &str = "IsolaPurr";
+const WARMUP_LOGICAL_FULL_OUTPUT_PERCENT: f64 = 99.5;
+const WARMUP_PHYSICAL_FULL_OUTPUT_PERCENT: f64 = 99.0;
+const WARMUP_PHYSICAL_TRANSIENT_MIN_PERCENT: f64 = 95.0;
+const WARMUP_PHYSICAL_TRANSIENT_MAX_SECONDS: f64 = 2.0;
 
 #[derive(Debug, Clone)]
 struct SelfTestRun {
@@ -824,7 +828,7 @@ async fn tune_flagship_target(
                     break None;
                 }
             };
-            let promoted_best = choose_promotable_batch_run(&batch.summary, target_temp_c)?;
+            let promoted_best = choose_confirmable_batch_run(&batch.summary, target_temp_c)?;
             let selected_best = promoted_best
                 .clone()
                 .unwrap_or_else(|| diagnostic_best.clone());
@@ -988,31 +992,13 @@ fn target_local_profile_window(
             .ok()
         })
         .ok_or_else(|| format!("target profile window could not materialize {target_temp_c}C"))?;
-    let mut window = Vec::<ThermalCandidatePoint>::new();
-    if let Some(lower) = profile
-        .points
-        .iter()
-        .copied()
-        .rev()
-        .find(|point| point.target_temp_c < target_temp_c)
-    {
-        window.push(lower);
-    }
-    window.push(target_point);
-    if let Some(upper) = profile
-        .points
-        .iter()
-        .copied()
-        .find(|point| point.target_temp_c > target_temp_c)
-    {
-        window.push(upper);
-    }
-    window.sort_by_key(|point| point.target_temp_c);
-    window.dedup_by_key(|point| point.target_temp_c);
+
+    // Runtime preview controls exactly one target. Neighbor points are host-only seeds and must
+    // not become an implicit shared control surface in the device profile.
     Ok(thermal_candidate_profile_to_value(
         &ThermalCandidateProfile {
             settings: profile.settings,
-            points: window,
+            points: vec![target_point],
         },
     ))
 }
@@ -1067,6 +1053,10 @@ async fn run_budgeted_self_test(
         candidate_profile_files: request.candidate_profile_files,
         output_dir: request.output_dir,
         dry_run: args.dry_run,
+        execution_deadline: target_budget_deadline(
+            request.budget_started_at,
+            args.per_target_budget_seconds,
+        ),
     };
     let summary = if self_args.candidate_profile_files.is_empty() {
         collect_single_thermal_self_test(client, default_devd, self_args, false).await?
@@ -1207,6 +1197,26 @@ fn candidate_variants(
     );
 
     let mut variants = vec![("current".to_string(), current_profile.clone())];
+    if let Some(trimmed_point) = hold_ripple_trim_candidate(
+        current_point,
+        &scout_result,
+        &stability_evidence,
+        target_temp_c,
+    ) {
+        let mut trimmed = current.clone();
+        if let Some(point) = super::thermal_candidate_point_mut(&mut trimmed, target_temp_c) {
+            *point = trimmed_point;
+        } else {
+            trimmed.points.push(trimmed_point);
+        }
+        variants.push((
+            "hold-ripple-trim".to_string(),
+            normalize_sparse_profile_value(
+                &thermal_candidate_profile_to_value(&trimmed),
+                materialized_targets_c,
+            )?,
+        ));
+    }
     if let Some(conservative_point) = conservative_high_side_candidate(
         current_point,
         &scout_result,
@@ -1243,6 +1253,28 @@ fn candidate_variants(
         ));
     }
     Ok(variants)
+}
+
+fn hold_ripple_trim_candidate(
+    current: ThermalCandidatePoint,
+    result: &ThermalStageResult,
+    evidence: &Value,
+    target_temp_c: i16,
+) -> Option<ThermalCandidatePoint> {
+    let failure_class = evidence.get("failureClass").and_then(Value::as_str);
+    let is_small_hold_ripple = target_temp_c <= 150
+        && failure_class == Some("within_gate")
+        && result.max_overshoot_c <= 3.0
+        && result.hold_peak_to_peak_c > 3.0
+        && result.hold_peak_to_peak_c <= 4.0;
+    if !is_small_hold_ripple {
+        return None;
+    }
+
+    let mut point = current;
+    point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_sub(4).max(8);
+    point.hold_blend_ticks = point.hold_blend_ticks.saturating_add(1).min(8);
+    (point != current).then_some(point)
 }
 
 fn conservative_high_side_candidate(
@@ -1394,8 +1426,21 @@ fn apply_flagship_gate_nudge(
         failure_class,
         "stable_window_broke_high" | "missed_upper_band_before_limit"
     ) {
-        let min_brake_delta = if target_temp_c <= 150 { 80 } else { 120 };
-        let max_brake_delta = if target_temp_c <= 150 { 140 } else { 180 };
+        let severe_mid_temperature_high_side = target_temp_c <= 150 && temperature_gap_c >= 1.5;
+        let min_brake_delta = if severe_mid_temperature_high_side {
+            140
+        } else if target_temp_c <= 150 {
+            80
+        } else {
+            120
+        };
+        let max_brake_delta = if severe_mid_temperature_high_side {
+            240
+        } else if target_temp_c <= 150 {
+            140
+        } else {
+            180
+        };
         let min_brake = current_point
             .brake_distance_centi_c
             .saturating_add(min_brake_delta);
@@ -1406,7 +1451,7 @@ fn apply_flagship_gate_nudge(
         if target_temp_c <= 150 {
             point.brake_distance_centi_c = point.brake_distance_centi_c.max(450);
         }
-        let lead_step = if target_temp_c <= 150 && temperature_gap_c >= 1.5 {
+        let lead_step = if severe_mid_temperature_high_side {
             2
         } else {
             1
@@ -1429,7 +1474,11 @@ fn apply_flagship_gate_nudge(
             )
             .max(180);
         if target_temp_c <= 150 {
-            let trim = if temperature_gap_c >= 1.5 { 120 } else { 80 };
+            let trim = if severe_mid_temperature_high_side {
+                180
+            } else {
+                80
+            };
             point.approach_floor_power_permille = current_point
                 .approach_floor_power_permille
                 .saturating_sub(trim)
@@ -1442,12 +1491,21 @@ fn apply_flagship_gate_nudge(
                 .min(1_000);
             point.hold_reheat_power_permille = current_point
                 .hold_reheat_power_permille
-                .saturating_sub(trim / 2)
+                .saturating_sub(if severe_mid_temperature_high_side {
+                    100
+                } else {
+                    trim / 2
+                })
                 .max(current_point.hold_power_permille);
             point.hold_kp_permille_per_c = current_point
                 .hold_kp_permille_per_c
                 .saturating_sub(4)
                 .max(8);
+            if severe_mid_temperature_high_side {
+                point.hold_ki_permille_per_c_tick =
+                    current_point.hold_ki_permille_per_c_tick.saturating_sub(1);
+                point.hold_blend_ticks = current_point.hold_blend_ticks.saturating_add(1).min(8);
+            }
             point.overshoot_cutoff_centi_c = current_point
                 .overshoot_cutoff_centi_c
                 .saturating_sub(40)
@@ -1490,35 +1548,54 @@ fn bound_low_temperature_candidate_step(
         return point;
     }
 
-    // A low-temperature plate has little thermal margin. Keep each exploratory
-    // step local; repeated rounds can still move the point, but one bad model
-    // fit cannot inject a large burst of heat into the hardware.
-    const MAX_APPROACH_POWER_STEP: u16 = 80;
-    const MAX_BRAKE_REDUCTION: u16 = 80;
-    const MAX_DAMPING_REDUCTION: u16 = 120;
+    let temperature_gap_c = evidence
+        .get("temperatureGapC")
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::INFINITY)
+        .max(0.0);
+    // A low-temperature plate has little thermal margin. A large low-side miss
+    // with low overshoot and low hold ripple is nevertheless safe evidence that
+    // the controller left warmup too early; use a bounded larger correction so
+    // the next candidate can reach the timing gate within the same budget.
+    let observed_safety_margin = evidence
+        .get("acceleratedLowTemperatureStepSafe")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let accelerated_large_lower_band_miss = failure_class == "missed_lower_band_before_limit"
+        && temperature_gap_c >= 1.5
+        && observed_safety_margin;
+    let accelerated_safe_step = temperature_gap_c <= 0.5 && observed_safety_margin;
+    let (max_approach_power_step, max_brake_reduction, max_damping_reduction) =
+        if accelerated_large_lower_band_miss {
+            (240, 300, 360)
+        } else if accelerated_safe_step {
+            (120, 120, 180)
+        } else {
+            (80, 80, 120)
+        };
 
     point.approach_floor_power_permille = point.approach_floor_power_permille.min(
         current_point
             .approach_floor_power_permille
-            .saturating_add(MAX_APPROACH_POWER_STEP),
+            .saturating_add(max_approach_power_step),
     );
     point.approach_power_permille = point
         .approach_power_permille
         .min(
             current_point
                 .approach_power_permille
-                .saturating_add(MAX_APPROACH_POWER_STEP),
+                .saturating_add(max_approach_power_step),
         )
         .max(point.approach_floor_power_permille.saturating_add(80));
     point.brake_distance_centi_c = point.brake_distance_centi_c.max(
         current_point
             .brake_distance_centi_c
-            .saturating_sub(MAX_BRAKE_REDUCTION),
+            .saturating_sub(max_brake_reduction),
     );
     point.approach_damping_exponent_permille = point.approach_damping_exponent_permille.max(
         current_point
             .approach_damping_exponent_permille
-            .saturating_sub(MAX_DAMPING_REDUCTION),
+            .saturating_sub(max_damping_reduction),
     );
     point.approach_lead_ticks = point
         .approach_lead_ticks
@@ -1582,28 +1659,28 @@ fn batch_summary_error(batch_summary: &Value) -> String {
         .to_string()
 }
 
-fn choose_promotable_batch_run(
+fn choose_confirmable_batch_run(
     batch_summary: &Value,
     target_temp_c: i16,
 ) -> Result<Option<SelectedBatchRun>, Box<dyn std::error::Error + Send + Sync>> {
-    let mut promotable = Vec::new();
+    let mut confirmable = Vec::new();
     for run in batch_summary
         .get("runs")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
     {
-        if !stage_reference_gate_satisfied(run, target_temp_c) {
+        if !stage_reference_gate_confirmable(run, target_temp_c) {
             continue;
         }
-        promotable.push(SelectedBatchRun {
+        confirmable.push(SelectedBatchRun {
             summary: run.clone(),
             candidate_profile_file: candidate_profile_file(run)?,
             score: candidate_score(run, target_temp_c),
         });
     }
-    promotable.sort_by_key(|item| item.score);
-    Ok(promotable.into_iter().next())
+    confirmable.sort_by_key(|item| item.score);
+    Ok(confirmable.into_iter().next())
 }
 
 fn candidate_score(summary: &Value, target_temp_c: i16) -> CandidateScore {
@@ -1703,7 +1780,10 @@ fn candidate_metric_gate_penalty(stage: &Value, target_temp_c: i16) -> f64 {
     1.0 + overshoot_penalty + p2p_penalty + settle_penalty
 }
 
-fn stage_reference_gate_satisfied(summary: &Value, target_temp_c: i16) -> bool {
+// A low-margin short run has met the formal fast-response gate, but only a
+// complete hold confirm may accept it. The extra margin stays a ranking signal
+// and never turns a short run into an accepted result by itself.
+fn stage_reference_gate_confirmable(summary: &Value, target_temp_c: i16) -> bool {
     if run_is_disqualified(summary, target_temp_c) || !warmup_output_is_full(summary, target_temp_c)
     {
         return false;
@@ -1716,8 +1796,10 @@ fn stage_reference_gate_satisfied(summary: &Value, target_temp_c: i16) -> bool {
     }
     let samples = samples_for_target(summary, target_temp_c);
     let evidence = stability_evidence_for_stage(&stage, &samples, target_temp_c);
-    evidence.get("failureClass").and_then(Value::as_str) == Some("within_gate")
-        && review_candidate_metric_gate_passes(&stage, target_temp_c)
+    matches!(
+        evidence.get("failureClass").and_then(Value::as_str),
+        Some("within_gate" | "within_gate_low_margin")
+    ) && review_candidate_metric_gate_passes(&stage, target_temp_c)
 }
 
 fn batch_attempt_records(
@@ -2180,6 +2262,11 @@ fn apply_hold_confirm_reseed_nudge(
         failure_class,
         "stable_window_broke_high" | "missed_upper_band_before_limit" | "within_gate"
     ) && (overshoot_c > 3.0 || hold_p2p_c > 3.0);
+    let stable_band_high_side = matches!(
+        failure_class,
+        "stable_window_broke_high" | "missed_upper_band_before_limit"
+    ) && (overshoot_c > ThermalFullSpeedStableTracker::STABLE_BAND_C
+        || hold_p2p_c > ThermalFullSpeedStableTracker::STABLE_BAND_C);
     if target_temp_c > 150
         && matches!(
             failure_class,
@@ -2221,9 +2308,17 @@ fn apply_hold_confirm_reseed_nudge(
         point.hold_kp_permille_per_c = point.hold_kp_permille_per_c.saturating_add(4).min(24);
         point.hold_on_centi_c = point.hold_on_centi_c.saturating_add(4).min(60);
     }
-    if target_temp_c <= 150 && high_side_or_ripple {
-        let severity_c = (overshoot_c - 3.0).max(hold_p2p_c - 3.0).max(0.0);
-        let brake_step = ((severity_c * 75.0) + 80.0).round().clamp(80.0, 350.0) as u16;
+    if target_temp_c <= 150 && (high_side_or_ripple || stable_band_high_side) {
+        let severity_floor_c = if high_side_or_ripple { 3.0 } else { 1.5 };
+        let severity_c = (overshoot_c - severity_floor_c)
+            .max(hold_p2p_c - severity_floor_c)
+            .max(0.0);
+        let mild_high_side = high_side_or_ripple && severity_c < 1.0;
+        let brake_step = if mild_high_side {
+            40
+        } else {
+            ((severity_c * 75.0) + 80.0).round().clamp(80.0, 350.0) as u16
+        };
         point.brake_distance_centi_c = point
             .brake_distance_centi_c
             .saturating_add(brake_step)
@@ -2231,9 +2326,21 @@ fn apply_hold_confirm_reseed_nudge(
             .min(5_000);
         point.approach_lead_ticks = point
             .approach_lead_ticks
-            .saturating_add(if severity_c >= 2.0 { 2 } else { 1 })
+            .saturating_add(if severity_c >= 2.0 {
+                2
+            } else if mild_high_side {
+                0
+            } else {
+                1
+            })
             .min(12);
-        let trim = if severity_c >= 2.0 { 120 } else { 80 };
+        let trim = if severity_c >= 2.0 {
+            120
+        } else if mild_high_side {
+            40
+        } else {
+            80
+        };
         point.approach_floor_power_permille = point
             .approach_floor_power_permille
             .saturating_sub(trim)
@@ -2323,6 +2430,15 @@ fn stability_evidence_for_stage(stage: &Value, samples: &[Value], target_temp_c:
         stable.get("warmupExitedAtMs").and_then(Value::as_f64),
         stable.get("limitMs").and_then(Value::as_f64),
     );
+    let accelerated_low_temperature_step_safe = stage
+        .get("maxOvershootC")
+        .and_then(Value::as_f64)
+        .is_some_and(|value| value <= 1.5)
+        && stage
+            .get("holdPeakToPeakC")
+            .and_then(Value::as_f64)
+            .is_some_and(|value| value <= 2.0);
+    evidence["acceleratedLowTemperatureStepSafe"] = json!(accelerated_low_temperature_step_safe);
     let settle_ms = stable.get("settleTimeMs").and_then(Value::as_f64);
     let limit_ms = stable.get("limitMs").and_then(Value::as_f64);
     let required_margin_ms = if target_temp_c > 150 { 500.0 } else { 1_000.0 };
@@ -2608,6 +2724,10 @@ fn normalized_sample(sample: Value) -> Value {
         "filtered": status.get("heaterFilteredTempC").or_else(|| heater.get("heaterFilteredTempC")).cloned().unwrap_or(Value::Null),
         "control": status.get("heaterControlTempC").or_else(|| heater.get("heaterControlTempC")).cloned().unwrap_or(Value::Null),
         "controlGuarded": status.get("heaterControlMeasurementGuarded").cloned().unwrap_or(Value::Null),
+        "rtdRawAdcMv": status.get("rtdRawAdcMv").or_else(|| heater.get("rtdRawAdcMv")).cloned().unwrap_or(Value::Null),
+        "rtdRawAdcMinMv": status.get("rtdRawAdcMinMv").or_else(|| heater.get("rtdRawAdcMinMv")).cloned().unwrap_or(Value::Null),
+        "rtdRawAdcMaxMv": status.get("rtdRawAdcMaxMv").or_else(|| heater.get("rtdRawAdcMaxMv")).cloned().unwrap_or(Value::Null),
+        "rtdRawAdcSpreadMv": status.get("rtdRawAdcSpreadMv").or_else(|| heater.get("rtdRawAdcSpreadMv")).cloned().unwrap_or(Value::Null),
         "command": status.get("heaterOutputPercent").or_else(|| heater.get("heaterOutputPercent")).cloned().unwrap_or(Value::Null),
         "output": status.get("heaterPhysicalOutputPercent").or_else(|| heater.get("heaterPhysicalOutputPercent")).cloned().unwrap_or(Value::Null),
         "requestV": round_decimal(request_mv / 1_000.0, 3),
@@ -2631,21 +2751,48 @@ fn warmup_output_is_full(summary: &Value, target_temp_c: i16) -> bool {
     let outputs = samples_for_target(summary, target_temp_c)
         .into_iter()
         .filter(|sample| sample.get("phase").and_then(Value::as_str) == Some("warmup"))
-        .filter_map(|sample| sample.get("output").and_then(Value::as_f64))
+        .filter_map(|sample| {
+            let elapsed_seconds = sample.get("t").and_then(Value::as_f64)?;
+            let command = sample.get("command").and_then(Value::as_f64)?;
+            let output = sample.get("output").and_then(Value::as_f64)?;
+            Some((elapsed_seconds, command, output))
+        })
         .collect::<Vec<_>>();
-    let Some(first_full_index) = outputs.iter().position(|output| *output >= 99.5) else {
+    let Some(first_full_index) = outputs.iter().position(|(_, command, output)| {
+        *command >= WARMUP_LOGICAL_FULL_OUTPUT_PERCENT
+            && *output >= WARMUP_PHYSICAL_FULL_OUTPUT_PERCENT
+    }) else {
         return false;
     };
-    outputs
-        .iter()
-        .skip(first_full_index)
-        .all(|output| *output >= 99.5)
+
+    // During a PPS safety-limit update, the logical controller can remain at
+    // full power while the physical PWM briefly follows the old request. Do
+    // not reject that bounded transition, but never tolerate a logical power
+    // reduction, a deep physical drop, or a sustained under-power interval.
+    let mut transient_started_at = None;
+    for (elapsed_seconds, command, output) in outputs.iter().skip(first_full_index) {
+        if *command < WARMUP_LOGICAL_FULL_OUTPUT_PERCENT {
+            return false;
+        }
+        if *output >= WARMUP_PHYSICAL_FULL_OUTPUT_PERCENT {
+            transient_started_at = None;
+            continue;
+        }
+        if *output < WARMUP_PHYSICAL_TRANSIENT_MIN_PERCENT {
+            return false;
+        }
+        let started_at = transient_started_at.get_or_insert(*elapsed_seconds);
+        if elapsed_seconds - *started_at > WARMUP_PHYSICAL_TRANSIENT_MAX_SECONDS {
+            return false;
+        }
+    }
+    true
 }
 
 fn scout_current_is_promotable(summary: &Value, target_temp_c: i16) -> bool {
     !run_is_disqualified(summary, target_temp_c)
         && warmup_output_is_full(summary, target_temp_c)
-        && stage_reference_gate_satisfied(summary, target_temp_c)
+        && stage_reference_gate_confirmable(summary, target_temp_c)
 }
 
 fn summary_has_cooldown_precondition_error(summary: &Value) -> bool {
@@ -2937,6 +3084,10 @@ fn budget_exhausted(started_at: Instant, budget_seconds: u64) -> bool {
     budget_remaining_seconds(started_at, budget_seconds) == 0
 }
 
+fn target_budget_deadline(started_at: Instant, budget_seconds: u64) -> Option<Instant> {
+    started_at.checked_add(Duration::from_secs(budget_seconds))
+}
+
 fn step_timeouts_for_budget(remaining_seconds: u64) -> Option<(u64, u64, u64)> {
     if remaining_seconds <= SCOUT_STAGE_TIMEOUT_SECONDS {
         return None;
@@ -3021,6 +3172,33 @@ mod tests {
     fn interval_midpoint_prefers_lower_index_for_even_spans() {
         assert_eq!(interval_midpoint_index(0, 5), 2);
         assert_eq!(interval_midpoint_index(2, 7), 4);
+    }
+
+    #[test]
+    fn normalized_sample_preserves_rtd_batch_diagnostics() {
+        let normalized = normalized_sample(json!({
+            "elapsedMs": 250,
+            "phase": "hold",
+            "status": {
+                "currentTempC": 140.0,
+                "heaterControlTempC": 139.8,
+                "heaterFilteredTempC": 139.9,
+                "heaterControlMeasurementGuarded": true,
+                "heaterOutputPercent": 12,
+                "heaterPhysicalOutputPercent": 8,
+                "pdRequestMv": 6500,
+                "rtdRawAdcMv": 1180,
+                "rtdRawAdcMinMv": 1178,
+                "rtdRawAdcMaxMv": 1184,
+                "rtdRawAdcSpreadMv": 6
+            }
+        }));
+
+        assert_eq!(normalized["rtdRawAdcMv"], 1180);
+        assert_eq!(normalized["rtdRawAdcMinMv"], 1178);
+        assert_eq!(normalized["rtdRawAdcMaxMv"], 1184);
+        assert_eq!(normalized["rtdRawAdcSpreadMv"], 6);
+        assert_eq!(normalized["controlGuarded"], true);
     }
 
     #[test]
@@ -3140,6 +3318,16 @@ mod tests {
     }
 
     fn sample(elapsed_ms: i64, phase: &str, temp_c: f64, output_percent: i64) -> Value {
+        sample_with_command_and_physical(elapsed_ms, phase, temp_c, output_percent, output_percent)
+    }
+
+    fn sample_with_command_and_physical(
+        elapsed_ms: i64,
+        phase: &str,
+        temp_c: f64,
+        command_percent: i64,
+        physical_percent: i64,
+    ) -> Value {
         json!({
             "targetTempC": 220,
             "elapsedMs": elapsed_ms,
@@ -3147,8 +3335,8 @@ mod tests {
             "status": {
                 "currentTempC": temp_c,
                 "heaterFilteredTempC": temp_c,
-                "heaterOutputPercent": output_percent,
-                "heaterPhysicalOutputPercent": output_percent,
+                "heaterOutputPercent": command_percent,
+                "heaterPhysicalOutputPercent": physical_percent,
                 "pdRequestMv": 21000,
             },
             "sourceTelemetry": {
@@ -3177,7 +3365,7 @@ mod tests {
     }
 
     #[test]
-    fn promotable_scout_current_rejects_low_margin_completion() {
+    fn promotable_scout_current_allows_low_margin_completion_only_for_hold_confirm() {
         let samples_path = write_test_samples(&[
             sample(0, "warmup", 170.0, 100),
             sample(600, "warmup", 178.0, 100),
@@ -3188,7 +3376,7 @@ mod tests {
         ]);
         let summary = scout_summary_with_samples(&samples_path, Some(4_700), "completed");
 
-        assert!(!scout_current_is_promotable(&summary, 220));
+        assert!(scout_current_is_promotable(&summary, 220));
 
         let _ = fs::remove_file(samples_path);
     }
@@ -3210,6 +3398,86 @@ mod tests {
         assert!(!scout_current_is_promotable(&summary, 220));
 
         let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
+    fn warmup_full_gate_allows_safe_physical_pwm_rounding() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(600, "warmup", 178.0, 100),
+            sample_with_command_and_physical(1100, "warmup", 182.0, 100, 99),
+        ]);
+        let summary = scout_summary_with_samples(&samples_path, Some(3_200), "completed");
+
+        assert!(warmup_output_is_full(&summary, 220));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
+    fn warmup_full_gate_allows_bounded_safety_limited_transient() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(600, "warmup", 178.0, 100),
+            sample_with_command_and_physical(1100, "warmup", 182.0, 100, 97),
+            sample_with_command_and_physical(1500, "warmup", 184.0, 100, 98),
+            sample_with_command_and_physical(2000, "warmup", 186.0, 100, 99),
+        ]);
+        let summary = scout_summary_with_samples(&samples_path, Some(3_200), "completed");
+
+        assert!(warmup_output_is_full(&summary, 220));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
+    fn warmup_full_gate_rejects_deep_or_sustained_physical_drop() {
+        let deep_samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(600, "warmup", 178.0, 100),
+            sample_with_command_and_physical(1100, "warmup", 182.0, 100, 94),
+        ]);
+        let deep_summary = scout_summary_with_samples(&deep_samples_path, Some(3_200), "completed");
+        assert!(!warmup_output_is_full(&deep_summary, 220));
+
+        let sustained_samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(600, "warmup", 178.0, 100),
+            sample_with_command_and_physical(1100, "warmup", 182.0, 100, 97),
+            sample_with_command_and_physical(2200, "warmup", 184.0, 100, 97),
+            sample_with_command_and_physical(3300, "warmup", 186.0, 100, 97),
+        ]);
+        let sustained_summary =
+            scout_summary_with_samples(&sustained_samples_path, Some(3_200), "completed");
+        assert!(!warmup_output_is_full(&sustained_summary, 220));
+
+        let _ = fs::remove_file(deep_samples_path);
+        let _ = fs::remove_file(sustained_samples_path);
+    }
+
+    #[test]
+    fn warmup_full_gate_rejects_non_full_logical_command() {
+        let samples_path = write_test_samples(&[
+            sample(0, "warmup", 170.0, 100),
+            sample(600, "warmup", 178.0, 100),
+            sample(1100, "warmup", 182.0, 98),
+        ]);
+        let summary = scout_summary_with_samples(&samples_path, Some(3_200), "completed");
+
+        assert!(!warmup_output_is_full(&summary, 220));
+
+        let _ = fs::remove_file(samples_path);
+    }
+
+    #[test]
+    fn target_budget_deadline_covers_the_entire_target_lifecycle() {
+        let started_at = Instant::now();
+        let deadline = target_budget_deadline(started_at, 1_200).expect("deadline");
+
+        assert_eq!(
+            deadline.duration_since(started_at),
+            Duration::from_secs(1_200)
+        );
     }
 
     #[test]
@@ -3780,7 +4048,7 @@ mod tests {
 
         assert_eq!(accepted_profile["points"].as_array().map(Vec::len), Some(2));
         assert!(explicit_point_value(&validation_profile, 240).is_some());
-        assert_eq!(materialized_count, Some(2));
+        assert_eq!(materialized_count, Some(1));
     }
 
     #[test]
@@ -4165,6 +4433,93 @@ mod tests {
     }
 
     #[test]
+    fn low_temperature_candidate_step_accelerates_safe_narrow_miss() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 60,
+            brake_distance_centi_c: 1_000,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 420,
+            approach_floor_power_permille: 320,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 280,
+            hold_reheat_power_permille: 340,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 160,
+            hold_on_centi_c: 5,
+            hold_off_centi_c: 160,
+            overshoot_cutoff_centi_c: 180,
+            hold_kp_permille_per_c: 22,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 4,
+            hold_lead_ticks: 0,
+        };
+        let aggressive = ThermalCandidatePoint {
+            brake_distance_centi_c: 700,
+            approach_power_permille: 800,
+            approach_floor_power_permille: 650,
+            approach_damping_exponent_permille: 310,
+            approach_lead_ticks: 0,
+            ..current
+        };
+
+        let bounded = bound_low_temperature_candidate_step(
+            &current,
+            aggressive,
+            &json!({
+                "failureClass": "missed_lower_band_before_limit",
+                "temperatureGapC": 0.25,
+                "acceleratedLowTemperatureStepSafe": true
+            }),
+            60,
+        );
+
+        assert_eq!(bounded.approach_power_permille, 540);
+        assert_eq!(bounded.approach_floor_power_permille, 440);
+        assert_eq!(bounded.brake_distance_centi_c, 880);
+        assert_eq!(bounded.approach_damping_exponent_permille, 820);
+        assert_eq!(bounded.approach_lead_ticks, 3);
+    }
+
+    #[test]
+    fn low_temperature_candidate_step_accelerates_safe_large_lower_band_miss() {
+        let mut current = super::super::thermal_default_target_point(60);
+        current.brake_distance_centi_c = 1_020;
+        current.approach_power_permille = 530;
+        current.approach_floor_power_permille = 240;
+        current.approach_damping_exponent_permille = 3_880;
+        current.approach_lead_ticks = 5;
+
+        let predicted = ThermalCandidatePoint {
+            brake_distance_centi_c: 720,
+            approach_power_permille: 770,
+            approach_floor_power_permille: 480,
+            approach_damping_exponent_permille: 3_580,
+            approach_lead_ticks: 4,
+            ..current
+        };
+
+        let bounded = bound_low_temperature_candidate_step(
+            &current,
+            predicted,
+            &json!({
+                "failureClass": "missed_lower_band_before_limit",
+                "temperatureGapC": 4.44,
+                "acceleratedLowTemperatureStepSafe": true
+            }),
+            60,
+        );
+
+        assert_eq!(bounded.brake_distance_centi_c, 720);
+        assert_eq!(bounded.approach_power_permille, 770);
+        assert_eq!(bounded.approach_floor_power_permille, 480);
+        assert_eq!(bounded.approach_damping_exponent_permille, 3_580);
+        assert_eq!(bounded.approach_lead_ticks, 4);
+    }
+
+    #[test]
     fn low_side_medium_gap_uses_the_verified_moderate_step() {
         let current = ThermalCandidatePoint {
             target_temp_c: 60,
@@ -4253,6 +4608,64 @@ mod tests {
         assert!(tuned.hold_power_permille < current.hold_power_permille);
         assert!(tuned.hold_reheat_power_permille < current.hold_reheat_power_permille);
         assert!(tuned.overshoot_cutoff_centi_c < current.overshoot_cutoff_centi_c);
+    }
+
+    #[test]
+    fn hold_ripple_trim_preserves_approach_when_only_hold_p2p_misses() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 100,
+            brake_distance_centi_c: 1_000,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 420,
+            approach_floor_power_permille: 300,
+            approach_damping_exponent_permille: 1_220,
+            approach_tail_window_centi_c: 375,
+            hold_power_permille: 220,
+            hold_reheat_power_permille: 220,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 120,
+            hold_on_centi_c: 10,
+            hold_off_centi_c: 180,
+            overshoot_cutoff_centi_c: 90,
+            hold_kp_permille_per_c: 20,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 2,
+            approach_lead_ticks: 7,
+            hold_lead_ticks: 8,
+        };
+        let result = ThermalStageResult {
+            target_temp_c: 100,
+            rise_time_ms: 30_000,
+            max_overshoot_c: 2.61,
+            hold_peak_to_peak_c: 3.07,
+            sample_count: 100,
+            stop_reason: "completed",
+            terminal_runtime_drop_reason: None,
+            analysis: ThermalStageAnalysis::default(),
+            guard: ThermalApproachGuardAnalysis::default(),
+            full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+        };
+
+        let tuned = hold_ripple_trim_candidate(
+            current,
+            &result,
+            &json!({"failureClass": "within_gate"}),
+            100,
+        )
+        .expect("hold ripple candidate");
+
+        assert_eq!(
+            tuned.approach_power_permille,
+            current.approach_power_permille
+        );
+        assert_eq!(
+            tuned.approach_floor_power_permille,
+            current.approach_floor_power_permille
+        );
+        assert_eq!(tuned.brake_distance_centi_c, current.brake_distance_centi_c);
+        assert_eq!(tuned.hold_kp_permille_per_c, 16);
+        assert_eq!(tuned.hold_blend_ticks, 3);
     }
 
     #[test]
@@ -4369,6 +4782,55 @@ mod tests {
             },
         });
         let nudged = apply_hold_confirm_reseed_nudge(point, &stage, &[], 120);
+
+        assert!(nudged.brake_distance_centi_c > point.brake_distance_centi_c);
+        assert!(nudged.approach_lead_ticks > point.approach_lead_ticks);
+        assert!(nudged.approach_power_permille < point.approach_power_permille);
+        assert!(nudged.approach_floor_power_permille < point.approach_floor_power_permille);
+    }
+
+    #[test]
+    fn failed_low_temperature_hold_confirm_damps_stable_band_breach_below_three_degrees() {
+        let point = ThermalCandidatePoint {
+            target_temp_c: 140,
+            brake_distance_centi_c: 1_094,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 708,
+            approach_floor_power_permille: 628,
+            approach_damping_exponent_permille: 778,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 423,
+            hold_reheat_power_permille: 428,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 278,
+            hold_exit_centi_c: 258,
+            hold_on_centi_c: 23,
+            hold_off_centi_c: 102,
+            overshoot_cutoff_centi_c: 142,
+            hold_kp_permille_per_c: 8,
+            hold_ki_permille_per_c_tick: 2,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 1,
+        };
+        let stage = json!({
+            "targetTempC": 140,
+            "stopReason": "full_speed_to_stable_timeout",
+            "maxOvershootC": 2.07,
+            "holdPeakToPeakC": 1.93,
+            "fullSpeedToStable": {
+                "limitMs": 10000,
+                "settleTimeMs": null,
+                "warmupExitedAtMs": 11804,
+            },
+        });
+        let samples = vec![
+            json!({"t": 11.804, "temp": 138.4}),
+            json!({"t": 18.103, "temp": 141.2}),
+            json!({"t": 21.103, "temp": 142.07}),
+        ];
+
+        let nudged = apply_hold_confirm_reseed_nudge(point, &stage, &samples, 140);
 
         assert!(nudged.brake_distance_centi_c > point.brake_distance_centi_c);
         assert!(nudged.approach_lead_ticks > point.approach_lead_ticks);

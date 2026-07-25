@@ -28,6 +28,7 @@ use esp_hal::{
     Blocking,
     analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
     clock::CpuClock,
+    delay::Delay,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     mcpwm::{
@@ -264,6 +265,24 @@ const HEATER_PPS_REQUEST_HYSTERESIS_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 10_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_DISCOVERY_DWELL_MS: u64 = 300;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_STEADY_DWELL_MS: u64 = 2_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_NOMINAL_PWM_MIN_PERCENT: u8 = 90;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_SATURATION_PWM_MIN_PERCENT: u8 = 98;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_LOWERING_ERROR_MIN_C: f32 = -1.5;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_LOWERING_ERROR_MAX_C: f32 = 0.5;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_RAISE_ERROR_MIN_C: f32 = 0.25;
+#[cfg(any(target_arch = "xtensa", test))]
+const HEATER_HOLD_PPS_RAISE_MAX_SLOPE_C_PER_S: f32 = 0.25;
+#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PPS_SMALL_TRANSITION_MS: u64 = 25;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PPS_LARGE_TRANSITION_MS: u64 = 275;
@@ -328,20 +347,33 @@ const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(any(target_arch = "xtensa", test))]
-const RTD_SAMPLE_COUNT: usize = 64;
+// Sample each 1 ms phase across the full 100 Hz MOS period. A contiguous ADC
+// burst can otherwise land on one PWM phase and report switching noise as a
+// temperature change. This is acquisition timing, not a display filter.
+const RTD_SAMPLE_COUNT: usize = 80;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_SAMPLE_PWM_PHASE_COUNT: usize = 10;
+#[cfg(target_arch = "xtensa")]
+const RTD_SAMPLE_PWM_PHASE_SPACING_US: u32 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 // ADC1 is shared by the high-impedance RTD divider and the VIN divider. Keep
 // a longer discard prefix after every channel switch so the retained batch is
 // not biased by the preceding channel's sample-and-hold residue.
-const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 24;
+const RTD_SETTLE_DISCARD_SAMPLE_COUNT: usize = 96;
 #[cfg(any(target_arch = "xtensa", test))]
-const RTD_MIN_VALID_SAMPLE_COUNT: usize = 48;
+const RTD_MIN_VALID_SAMPLE_COUNT: usize = 60;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_RETRY_AFTER_VIN_STEP_RAW_ADC_DELTA_MV: u16 = 48;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_CONTROL_SAMPLE_STABLE_AFTER_REQUEST_MS: u64 = 300;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_CONTROL_MAX_SLEW_C_PER_S: f32 = 35.0;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_CONTROL_MAX_ACCEPTED_STEP_C: f32 = 6.0;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_CONTROL_GUARD_RECOVERY_WINDOW_MS: u64 = 750;
+#[cfg(any(target_arch = "xtensa", test))]
+const RTD_CONTROL_GUARD_RECOVERY_BAND_C: f32 = 3.0;
 #[cfg(target_arch = "xtensa")]
 const RTD_LOG_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2348,6 +2380,11 @@ fn is_overtemp_sample(temp_c: f32) -> bool {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn overtemp_fault_from_control_temperature(temp_c: f32) -> Option<HeaterFaultReason> {
+    is_overtemp_sample(temp_c).then_some(HeaterFaultReason::OverTemp)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn clear_runtime_temperature(latest_temp_c: &mut f32, latest_temp_i16: &mut i16) {
     *latest_temp_c = 0.0;
     *latest_temp_i16 = 0;
@@ -2487,6 +2524,8 @@ impl RtdPpsTransitionGuard {
 struct RtdControlMeasurementGuard {
     last_accepted_temp_c: Option<f32>,
     last_accepted_at_ms: Option<u64>,
+    guarded_candidate_temp_c: Option<f32>,
+    guarded_candidate_since_ms: Option<u64>,
     guarded: bool,
 }
 
@@ -2499,6 +2538,8 @@ impl RtdControlMeasurementGuard {
     fn reseed(&mut self, temp_c: f32, now_ms: u64) {
         self.last_accepted_temp_c = Some(temp_c);
         self.last_accepted_at_ms = Some(now_ms);
+        self.guarded_candidate_temp_c = None;
+        self.guarded_candidate_since_ms = None;
         self.guarded = false;
     }
 
@@ -2511,15 +2552,39 @@ impl RtdControlMeasurementGuard {
         let elapsed_ms = now_ms
             .saturating_sub(self.last_accepted_at_ms.unwrap_or(now_ms))
             .max(25);
-        let max_delta_c = RTD_CONTROL_MAX_SLEW_C_PER_S * (elapsed_ms as f32 / 1_000.0);
+        let max_delta_c = (RTD_CONTROL_MAX_SLEW_C_PER_S * (elapsed_ms as f32 / 1_000.0))
+            .min(RTD_CONTROL_MAX_ACCEPTED_STEP_C);
         if (measurement_temp_c - last_temp_c).abs() > max_delta_c {
+            let candidate_is_consistent = self.guarded_candidate_temp_c.is_some_and(|candidate| {
+                (measurement_temp_c - candidate).abs() <= RTD_CONTROL_GUARD_RECOVERY_BAND_C
+            });
+            if !candidate_is_consistent {
+                self.guarded_candidate_temp_c = Some(measurement_temp_c);
+                self.guarded_candidate_since_ms = Some(now_ms);
+            }
+            if candidate_is_consistent
+                && now_ms.saturating_sub(self.guarded_candidate_since_ms.unwrap_or(now_ms))
+                    >= RTD_CONTROL_GUARD_RECOVERY_WINDOW_MS
+            {
+                self.reseed(measurement_temp_c, now_ms);
+                return Some(measurement_temp_c);
+            }
             self.guarded = true;
             return None;
         }
 
-        self.last_accepted_temp_c = Some(measurement_temp_c);
-        self.last_accepted_at_ms = Some(now_ms);
+        self.reseed(measurement_temp_c, now_ms);
         Some(measurement_temp_c)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn preserve_rtd_control_guard_when_heater_disabled(
+    heater_enabled: bool,
+    measurement_guarded: &mut bool,
+) {
+    if !heater_enabled {
+        *measurement_guarded = false;
     }
 }
 
@@ -2538,9 +2603,14 @@ fn accept_rtd_control_sample_after_pps_transition(
         heater_controller.reseed_measurement(last_control_temp_c);
         measurement_guard.reseed(last_control_temp_c, now_ms);
     }
-    accept_control_sample
+    let was_guarded = measurement_guard.guarded;
+    let accepted = accept_control_sample
         .then(|| measurement_guard.observe(measurement_temp_c, now_ms))
-        .flatten()
+        .flatten();
+    if was_guarded && accepted.is_some() {
+        heater_controller.reseed_measurement(measurement_temp_c);
+    }
+    accepted
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2879,6 +2949,97 @@ enum HeaterPowerBackend {
         fixed_request_confirmed: bool,
         fixed_request: ch224q::VoltageRequest,
     },
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HoldPpsGovernor {
+    active: bool,
+    discovering_voltage: bool,
+    next_adjust_at_ms: u64,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl HoldPpsGovernor {
+    const fn new() -> Self {
+        Self {
+            active: false,
+            discovering_voltage: false,
+            next_adjust_at_ms: 0,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn request_mv(
+        &mut self,
+        phase: HeaterControlPhase,
+        duty_percent: u8,
+        actual_error_c: f32,
+        filtered_slope_c_per_s: f32,
+        current_request_mv: u16,
+        control_floor_mv: u16,
+        safe_max_mv: u16,
+        now_ms: u64,
+    ) -> Option<u16> {
+        if phase != HeaterControlPhase::Hold {
+            self.reset();
+            return None;
+        }
+
+        // A nonzero command below the working floor is handled by the fixed-PWM safety
+        // fallback before this governor. Keep the idle path well-defined too.
+        let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
+        let bounded_request_mv = current_request_mv.clamp(control_floor_mv, bounded_safe_max_mv);
+        if !self.active {
+            self.active = true;
+            self.discovering_voltage = duty_percent > 0;
+            // Keep PPS fixed through the full-speed stability window. PWM alone handles
+            // fast Hold corrections; voltage discovery starts only after that evidence.
+            self.next_adjust_at_ms = now_ms.saturating_add(
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+            );
+            return Some(bounded_request_mv);
+        }
+        if duty_percent == 0 || now_ms < self.next_adjust_at_ms {
+            return Some(bounded_request_mv);
+        }
+
+        let physical_pwm_percent =
+            heater_physical_pwm_percent(duty_percent, bounded_safe_max_mv, bounded_request_mv, 100);
+        let within_nominal_hold_band = actual_error_c >= HEATER_HOLD_PPS_LOWERING_ERROR_MIN_C
+            && actual_error_c <= HEATER_HOLD_PPS_LOWERING_ERROR_MAX_C;
+        let lower_voltage = physical_pwm_percent < HEATER_HOLD_PPS_NOMINAL_PWM_MIN_PERCENT
+            && within_nominal_hold_band;
+        let raise_voltage = physical_pwm_percent >= HEATER_HOLD_PPS_SATURATION_PWM_MIN_PERCENT
+            && actual_error_c >= HEATER_HOLD_PPS_RAISE_ERROR_MIN_C
+            && filtered_slope_c_per_s <= HEATER_HOLD_PPS_RAISE_MAX_SLOPE_C_PER_S;
+        let next_request_mv = if lower_voltage {
+            bounded_request_mv
+                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
+                .max(control_floor_mv)
+        } else if raise_voltage {
+            bounded_request_mv
+                .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
+                .min(bounded_safe_max_mv)
+        } else {
+            bounded_request_mv
+        };
+
+        if self.discovering_voltage
+            && physical_pwm_percent >= HEATER_HOLD_PPS_NOMINAL_PWM_MIN_PERCENT
+        {
+            self.discovering_voltage = false;
+        }
+        self.next_adjust_at_ms = now_ms.saturating_add(if self.discovering_voltage {
+            HEATER_HOLD_PPS_DISCOVERY_DWELL_MS
+        } else {
+            HEATER_HOLD_PPS_STEADY_DWELL_MS
+        });
+        Some(next_request_mv)
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3542,7 +3703,7 @@ where
         .map(|batch| batch.mean_mv)
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 fn oversampled_rtd_batch_with_discard<F>(
     total_samples: usize,
     discard_valid_prefix_samples: usize,
@@ -3578,6 +3739,55 @@ where
     })
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn phase_averaged_rtd_batch_with_discard<F, W>(
+    retained_samples: usize,
+    phase_count: usize,
+    discard_valid_prefix_samples: usize,
+    mut read_sample: F,
+    mut wait_for_next_phase: W,
+) -> Option<RtdAdcBatch>
+where
+    F: FnMut() -> Option<u16>,
+    W: FnMut(),
+{
+    if retained_samples == 0 || phase_count == 0 || retained_samples % phase_count != 0 {
+        return None;
+    }
+
+    let samples_per_phase = retained_samples / phase_count;
+    let mut sum_mv: u32 = 0;
+    let mut min_mv = u16::MAX;
+    let mut max_mv = 0_u16;
+    let mut valid_samples = 0_usize;
+    let mut discarded_valid_samples = 0_usize;
+
+    for _ in 0..retained_samples.saturating_add(discard_valid_prefix_samples) {
+        let Some(sample_mv) = read_sample() else {
+            continue;
+        };
+        if discarded_valid_samples < discard_valid_prefix_samples {
+            discarded_valid_samples = discarded_valid_samples.saturating_add(1);
+            continue;
+        }
+
+        sum_mv = sum_mv.saturating_add(sample_mv as u32);
+        min_mv = min_mv.min(sample_mv);
+        max_mv = max_mv.max(sample_mv);
+        valid_samples = valid_samples.saturating_add(1);
+
+        if valid_samples % samples_per_phase == 0 && valid_samples < retained_samples {
+            wait_for_next_phase();
+        }
+    }
+
+    rtd_fractional_mean_mv(sum_mv, valid_samples).map(|mean_mv| RtdAdcBatch {
+        mean_mv,
+        min_mv,
+        max_mv,
+    })
+}
+
 #[cfg(target_arch = "xtensa")]
 fn read_rtd_adc_mv<'a>(
     adc: &mut Adc<'a, esp_hal::peripherals::ADC1<'a>, esp_hal::Blocking>,
@@ -3587,8 +3797,10 @@ fn read_rtd_adc_mv<'a>(
         AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
     >,
 ) -> Option<RtdAdcBatch> {
-    let batch = oversampled_rtd_batch_with_discard(
-        RTD_SAMPLE_COUNT + RTD_SETTLE_DISCARD_SAMPLE_COUNT,
+    let delay = Delay::new();
+    let batch = phase_averaged_rtd_batch_with_discard(
+        RTD_SAMPLE_COUNT,
+        RTD_SAMPLE_PWM_PHASE_COUNT,
         RTD_SETTLE_DISCARD_SAMPLE_COUNT,
         || loop {
             match adc.read_oneshot(pin) {
@@ -3597,6 +3809,7 @@ fn read_rtd_adc_mv<'a>(
                 Err(_) => break None,
             }
         },
+        || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
     )?;
     Some(batch)
 }
@@ -4501,7 +4714,7 @@ fn heater_adjustable_request_mv(
 ) -> u16 {
     if duty_percent == 0 {
         if heater_enabled {
-            current_request_mv
+            control_floor_mv
         } else {
             idle_request_mv
         }
@@ -4610,11 +4823,15 @@ async fn apply_heater_power_output<PWM>(
     ch224q_address: Address,
     heater_pwm: &mut PWM,
     backend: &mut HeaterPowerBackend,
+    hold_pps_governor: &mut HoldPpsGovernor,
     manual_pps: &mut ManualPpsState,
     pd_observation: Option<PdStatusObservation>,
     current_temp_c: f32,
     duty_percent: u8,
     heater_enabled: bool,
+    control_phase: HeaterControlPhase,
+    control_error_c: f32,
+    filtered_slope_c_per_s: f32,
     warmup_soft_start_percent: u8,
     last_physical_duty_percent: &mut u8,
     preview_heater_curve: Option<&HeaterCurveConfig>,
@@ -4626,6 +4843,9 @@ where
     PWM: SetDutyCycle,
 {
     let manual_pps_active = manual_pps.enabled;
+    if manual_pps_active {
+        hold_pps_governor.reset();
+    }
     if manual_pps_active {
         let target_mv = match manual_pps.target_mv {
             Some(target_mv) => target_mv,
@@ -4777,6 +4997,7 @@ where
                 control_floor_mv,
             );
             if current_limit_fixed_pwm_active {
+                hold_pps_governor.reset();
                 if !current_limit_fixed_request_confirmed {
                     apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
                     if let Some(settle_until_ms) = settle_until_ms {
@@ -4888,7 +5109,7 @@ where
                 }
             }
 
-            let request_mv = heater_adjustable_request_mv(
+            let automatic_request_mv = heater_adjustable_request_mv(
                 duty_percent,
                 heater_enabled,
                 current_request_mv,
@@ -4896,6 +5117,22 @@ where
                 control_floor_mv,
                 safe_max_mv,
             );
+            let request_mv = if manual_pps_active {
+                automatic_request_mv
+            } else {
+                hold_pps_governor
+                    .request_mv(
+                        control_phase,
+                        duty_percent,
+                        control_error_c,
+                        filtered_slope_c_per_s,
+                        current_request_mv,
+                        control_floor_mv,
+                        safe_max_mv,
+                        now_ms,
+                    )
+                    .unwrap_or(automatic_request_mv)
+            };
             let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
             let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
             let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
@@ -7717,6 +7954,7 @@ async fn main(_spawner: Spawner) {
         power_data_capabilities,
         last_pd_observation.map(|status| status.status),
     );
+    let mut hold_pps_governor = HoldPpsGovernor::new();
     match heater_power_backend {
         HeaterPowerBackend::PpsMos {
             pps_min_mv,
@@ -7783,8 +8021,8 @@ async fn main(_spawner: Spawner) {
                 &mut latest_display_temp_i16,
                 measurement.temp_c,
             );
-            if is_overtemp_sample(measurement.temp_c) {
-                current_rtd_fault = Some(HeaterFaultReason::OverTemp);
+            if let Some(reason) = overtemp_fault_from_control_temperature(latest_temp_c) {
+                current_rtd_fault = Some(reason);
                 let _ = heater_controller.latch_fault(HeaterFaultReason::OverTemp);
                 info!(
                     "heater initial fault latched reason={=str}",
@@ -7878,11 +8116,15 @@ async fn main(_spawner: Spawner) {
         ch224q_address,
         &mut heater_pwm,
         &mut heater_power_backend,
+        &mut hold_pps_governor,
         &mut manual_pps_state,
         last_pd_observation,
         latest_temp_c,
         0,
         false,
+        HeaterControlPhase::Warmup,
+        0.0,
+        0.0,
         0,
         &mut last_heater_duty,
         preview_heater_curve.as_ref(),
@@ -8292,6 +8534,11 @@ async fn main(_spawner: Spawner) {
                 }
             }
 
+            preserve_rtd_control_guard_when_heater_disabled(
+                ui_state.heater_enabled,
+                &mut control_measurement_guarded,
+            );
+
             match rtd_sample {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
@@ -8315,11 +8562,7 @@ async fn main(_spawner: Spawner) {
                         elapsed_ms,
                         measurement.temp_c,
                     );
-                    current_rtd_fault = if is_overtemp_sample(measurement.temp_c) {
-                        Some(HeaterFaultReason::OverTemp)
-                    } else {
-                        None
-                    };
+                    current_rtd_fault = overtemp_fault_from_control_temperature(latest_temp_c);
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
@@ -8411,11 +8654,15 @@ async fn main(_spawner: Spawner) {
                 ch224q_address,
                 &mut heater_pwm,
                 &mut heater_power_backend,
+                &mut hold_pps_governor,
                 &mut manual_pps_state,
                 current_pd_observation,
                 latest_temp_c,
                 requested_duty_percent,
                 ui_state.heater_enabled,
+                pid_snapshot.phase,
+                pid_snapshot.error_c,
+                pid_snapshot.filtered_slope_c_per_s,
                 pid_snapshot.warmup_soft_start_percent,
                 &mut last_heater_duty,
                 preview_heater_curve.as_ref(),
@@ -8557,11 +8804,15 @@ async fn main(_spawner: Spawner) {
                 ch224q_address,
                 &mut heater_pwm,
                 &mut heater_power_backend,
+                &mut hold_pps_governor,
                 &mut manual_pps_state,
                 last_pd_observation,
                 latest_temp_c,
                 0,
                 false,
+                HeaterControlPhase::Warmup,
+                -1.0,
+                -1.0,
                 0,
                 &mut last_heater_duty,
                 preview_heater_curve.as_ref(),
@@ -12231,10 +12482,10 @@ mod tests {
     }
 
     #[test]
-    fn heater_armed_zero_output_keeps_current_pps_request() {
+    fn heater_armed_zero_output_returns_to_working_floor() {
         assert_eq!(
             heater_adjustable_request_mv(0, true, 11_300, 12_000, 6_100, 20_000),
-            11_300
+            6_100
         );
         assert_eq!(
             heater_adjustable_request_mv(0, false, 11_300, 12_000, 6_100, 20_000),
@@ -12276,6 +12527,189 @@ mod tests {
         assert_eq!(heater_physical_pwm_percent(10, 14_000, 5_000, 100), 78);
         assert_eq!(heater_physical_pwm_percent(10, 14_000, 13_500, 100), 10);
         assert!(heater_physical_pwm_percent(10, 14_000, 13_500, 100) <= 10);
+    }
+
+    #[test]
+    fn heater_physical_pwm_reduces_power_below_6_5v_working_floor() {
+        assert_eq!(
+            heater_adjustable_request_mv(0, true, 12_000, 12_000, 6_100, 20_000),
+            6_100
+        );
+        assert_eq!(heater_physical_pwm_percent(10, 14_000, 6_100, 100), 52);
+        assert_eq!(heater_physical_pwm_percent(1, 14_000, 6_100, 100), 5);
+        assert_eq!(heater_physical_pwm_percent(0, 14_000, 6_100, 100), 0);
+    }
+
+    #[test]
+    fn hold_pps_governor_discovers_a_pwm_dominant_voltage_then_holds_it() {
+        let mut governor = HoldPpsGovernor::new();
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                -1.0,
+                0.05,
+                18_000,
+                6_100,
+                21_000,
+                0,
+            ),
+            Some(18_000)
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                -1.0,
+                0.05,
+                18_000,
+                6_100,
+                21_000,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS,
+            ),
+            Some(18_000)
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                -1.0,
+                0.05,
+                18_000,
+                6_100,
+                21_000,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+            ),
+            Some(17_500)
+        );
+
+        let mut nominal = HoldPpsGovernor::new();
+        assert_eq!(
+            nominal.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                0.0,
+                0.05,
+                14_000,
+                6_100,
+                21_000,
+                0,
+            ),
+            Some(14_000)
+        );
+        assert_eq!(
+            nominal.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                0.0,
+                0.05,
+                14_000,
+                6_100,
+                21_000,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+            ),
+            Some(14_000)
+        );
+    }
+
+    #[test]
+    fn hold_pps_governor_raises_only_for_flat_below_target_saturation() {
+        let mut governor = HoldPpsGovernor::new();
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                80,
+                0.6,
+                0.1,
+                12_000,
+                6_100,
+                14_000,
+                0,
+            ),
+            Some(12_000)
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                80,
+                0.6,
+                0.1,
+                12_000,
+                6_100,
+                14_000,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+            ),
+            Some(12_500)
+        );
+
+        let mut rising = HoldPpsGovernor::new();
+        assert_eq!(
+            rising.request_mv(
+                HeaterControlPhase::Hold,
+                80,
+                0.6,
+                0.5,
+                12_000,
+                6_100,
+                14_000,
+                0,
+            ),
+            Some(12_000)
+        );
+        assert_eq!(
+            rising.request_mv(
+                HeaterControlPhase::Hold,
+                80,
+                0.6,
+                0.5,
+                12_000,
+                6_100,
+                14_000,
+                HEATER_HOLD_PPS_INITIAL_SETTLE_MS + HEATER_HOLD_PPS_DISCOVERY_DWELL_MS,
+            ),
+            Some(12_000)
+        );
+    }
+
+    #[test]
+    fn hold_pps_governor_resets_outside_hold() {
+        let mut governor = HoldPpsGovernor::new();
+        let _ = governor.request_mv(
+            HeaterControlPhase::Hold,
+            40,
+            0.0,
+            0.0,
+            18_000,
+            6_100,
+            21_000,
+            0,
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Approach,
+                70,
+                1.0,
+                0.2,
+                18_000,
+                6_100,
+                21_000,
+                1_000,
+            ),
+            None
+        );
+        assert_eq!(
+            governor.request_mv(
+                HeaterControlPhase::Hold,
+                40,
+                0.0,
+                0.0,
+                18_000,
+                6_100,
+                21_000,
+                1_000,
+            ),
+            Some(18_000)
+        );
     }
 
     #[test]
@@ -13136,6 +13570,51 @@ mod tests {
     }
 
     #[test]
+    fn implausible_rtd_overtemp_spike_does_not_become_control_fault() {
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        measurement_guard.reseed(140.0, 0);
+
+        assert_eq!(measurement_guard.observe(430.0, 1_000), None);
+        assert!(measurement_guard.guarded);
+        assert_eq!(overtemp_fault_from_control_temperature(140.0), None);
+        assert_eq!(
+            overtemp_fault_from_control_temperature(420.0),
+            Some(HeaterFaultReason::OverTemp)
+        );
+    }
+
+    #[test]
+    fn rtd_control_guard_recovers_after_a_stable_persistent_temperature_shift() {
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        measurement_guard.reseed(140.0, 0);
+
+        assert_eq!(measurement_guard.observe(260.0, 1_000), None);
+        assert!(measurement_guard.guarded);
+        assert_eq!(measurement_guard.observe(260.0, 1_700), None);
+        assert!(measurement_guard.guarded);
+        assert_eq!(measurement_guard.observe(260.0, 1_800), Some(260.0));
+        assert!(!measurement_guard.guarded);
+        assert_eq!(measurement_guard.observe(145.0, 5_000), None);
+        assert!(measurement_guard.guarded);
+        assert_eq!(measurement_guard.observe(145.0, 5_800), Some(145.0));
+        assert!(!measurement_guard.guarded);
+    }
+
+    #[test]
+    fn rtd_control_guard_remains_active_after_heater_disabled_interval() {
+        let mut measurement_guard = RtdControlMeasurementGuard::default();
+        measurement_guard.reseed(143.7, 0);
+        let mut measurement_guarded = true;
+
+        preserve_rtd_control_guard_when_heater_disabled(false, &mut measurement_guarded);
+
+        assert_eq!(measurement_guard.last_accepted_temp_c, Some(143.7));
+        assert!(!measurement_guarded);
+        assert_eq!(measurement_guard.observe(430.0, 1_000), None);
+        assert!(measurement_guard.guarded);
+    }
+
+    #[test]
     fn rtd_pps_transition_guard_accepts_immediately_and_reseeds_on_request_change() {
         let mut guard = RtdPpsTransitionGuard::new(21_000);
         assert_eq!(guard.observe(21_000, 0), (true, false));
@@ -13275,10 +13754,10 @@ mod tests {
     #[test]
     fn rtd_oversampling_accepts_partial_batch_with_enough_valid_conversions() {
         let valid_samples = RTD_MIN_VALID_SAMPLE_COUNT;
-        let sum_mv = (900 * valid_samples) + ((valid_samples * 3) / 8);
+        let sum_mv = (900 * valid_samples) + (valid_samples / 2);
         let mean_mv = rtd_fractional_mean_mv(sum_mv as u32, valid_samples).unwrap();
 
-        assert!((mean_mv - 900.375).abs() < 0.001);
+        assert!((mean_mv - 900.5).abs() < 0.001);
     }
 
     #[test]
@@ -13325,6 +13804,41 @@ mod tests {
         assert_eq!(batch.min_mv, 899);
         assert_eq!(batch.max_mv, 902);
         assert_eq!(batch.max_mv.saturating_sub(batch.min_mv), 3);
+    }
+
+    #[test]
+    fn rtd_phase_sampling_covers_the_entire_pwm_period_without_hiding_extrema() {
+        let mut samples = vec![Some(1_240_u16); RTD_SETTLE_DISCARD_SAMPLE_COUNT];
+        for phase in 0..RTD_SAMPLE_PWM_PHASE_COUNT {
+            let phase_mv = if phase % 2 == 0 { 900 } else { 920 };
+            samples.extend(std::iter::repeat_n(
+                Some(phase_mv),
+                RTD_SAMPLE_COUNT / RTD_SAMPLE_PWM_PHASE_COUNT,
+            ));
+        }
+        let mut iter = samples.into_iter();
+        let mut phase_waits = 0_usize;
+        let batch = phase_averaged_rtd_batch_with_discard(
+            RTD_SAMPLE_COUNT,
+            RTD_SAMPLE_PWM_PHASE_COUNT,
+            RTD_SETTLE_DISCARD_SAMPLE_COUNT,
+            || iter.next().flatten(),
+            || phase_waits = phase_waits.saturating_add(1),
+        )
+        .expect("RTD phase batch has enough valid conversions");
+
+        assert!((batch.mean_mv - 910.0).abs() < 0.001);
+        assert_eq!(batch.min_mv, 900);
+        assert_eq!(batch.max_mv, 920);
+        assert_eq!(phase_waits, RTD_SAMPLE_PWM_PHASE_COUNT - 1);
+    }
+
+    #[test]
+    fn rtd_phase_sampling_rejects_an_invalid_phase_plan() {
+        assert_eq!(
+            phase_averaged_rtd_batch_with_discard(79, 10, 0, || Some(900), || {}),
+            None
+        );
     }
 
     #[test]
@@ -13628,15 +14142,15 @@ mod tests {
             },
             15_000,
             450,
-            52.15,
+            46.0,
         ));
 
-        assert_eq!(latest_temp_c, 52.15);
-        assert_eq!(latest_temp_i16, 52);
-        assert_eq!(latest_display_temp_c, 52.15);
-        assert_eq!(latest_display_temp_i16, 52);
-        assert_eq!(ui_state.current_temp_c, 52);
-        assert_eq!(ui_state.current_temp_deci_c, 522);
+        assert_eq!(latest_temp_c, 46.0);
+        assert_eq!(latest_temp_i16, 46);
+        assert_eq!(latest_display_temp_c, 46.0);
+        assert_eq!(latest_display_temp_i16, 46);
+        assert_eq!(ui_state.current_temp_c, 46);
+        assert_eq!(ui_state.current_temp_deci_c, 460);
     }
 
     #[test]

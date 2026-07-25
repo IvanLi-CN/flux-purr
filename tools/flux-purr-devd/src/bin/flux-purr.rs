@@ -155,6 +155,10 @@ impl ThermalSelfTestEvaluationMode {
     fn enforces_stage_limits(self) -> bool {
         matches!(self, Self::HoldConfirm)
     }
+
+    fn reports_stage_limits(self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -231,6 +235,8 @@ enum CalibrationCommand {
     Capture(CalibrationCaptureArgs),
     Delete(CalibrationDeleteArgs),
     Clear(CalibrationChannelArgs),
+    SetSlotFit(CalibrationSetSlotFitArgs),
+    SetActiveSlot(CalibrationSetActiveSlotArgs),
     Import(CalibrationImportArgs),
     Export(CalibrationExportArgs),
     Collect(CalibrationCollectArgs),
@@ -469,6 +475,10 @@ struct ThermalSelfTestArgs {
     output_dir: PathBuf,
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
     dry_run: bool,
+    // Internal flagship-tuning deadline. The public self-test command remains unbounded
+    // except for its explicit stage and cooldown timeouts.
+    #[arg(skip)]
+    execution_deadline: Option<StdInstant>,
 }
 
 #[derive(Debug, Clone)]
@@ -658,6 +668,30 @@ struct CalibrationDeleteArgs {
     channel: String,
     #[arg(long = "sample-index")]
     sample_index: usize,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationSetSlotFitArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    slot: String,
+    #[arg(long)]
+    gain: f32,
+    #[arg(long = "offset-mv")]
+    offset_mv: f32,
+}
+
+#[derive(Debug, Args)]
+struct CalibrationSetActiveSlotArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long)]
+    channel: String,
+    #[arg(long)]
+    slot: String,
 }
 
 #[derive(Debug, Args)]
@@ -1364,6 +1398,33 @@ async fn handle_calibration_command(
                 "op": "clear",
                 "channel": parse_calibration_channel(&args.channel)?,
             });
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/calibration",
+                Some(body),
+            )
+            .await
+        }
+        CalibrationCommand::SetSlotFit(args) => {
+            let body = calibration_set_slot_fit_body(
+                &args.channel,
+                &args.slot,
+                args.gain,
+                args.offset_mv,
+            )?;
+            request_with_lease(
+                client,
+                resolve_target(args.target, default_devd)?,
+                Method::PUT,
+                "/calibration",
+                Some(body),
+            )
+            .await
+        }
+        CalibrationCommand::SetActiveSlot(args) => {
+            let body = calibration_set_active_slot_body(&args.channel, &args.slot)?;
             request_with_lease(
                 client,
                 resolve_target(args.target, default_devd)?,
@@ -3095,6 +3156,39 @@ fn read_ndjson_values(path: &Path) -> Result<Vec<Value>, Box<dyn std::error::Err
     Ok(values)
 }
 
+fn thermal_control_temperature_c(
+    status: &Value,
+    heater: Option<&Value>,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    status
+        .get("heaterControlTempC")
+        .and_then(Value::as_f64)
+        .or_else(|| status.get("heaterFilteredTempC").and_then(Value::as_f64))
+        .or_else(|| status.get("currentTempC").and_then(Value::as_f64))
+        .or_else(|| {
+            heater
+                .and_then(|value| value.get("heaterControlTempC"))
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| {
+            heater
+                .and_then(|value| value.get("heaterFilteredTempC"))
+                .and_then(Value::as_f64)
+        })
+        .or_else(|| {
+            heater
+                .and_then(|value| value.get("currentTempC"))
+                .and_then(Value::as_f64)
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "thermal sample missing control temperature",
+            )
+            .into()
+        })
+}
+
 fn thermal_replay_stage_samples(
     samples: &[Value],
     target_temp_c: i16,
@@ -3123,7 +3217,7 @@ fn thermal_replay_stage_samples(
             )
         })?;
         let elapsed_ms = require_value_u64(sample, "elapsedMs")?;
-        let current_temp_c = require_status_f64(heater, "currentTempC")?;
+        let current_temp_c = thermal_control_temperature_c(status, Some(heater))?;
         let heater_output_percent =
             require_status_u64(heater, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
         let control_phase = status
@@ -4078,6 +4172,16 @@ async fn collect_batch_thermal_self_test(
                     &mut source_sampler,
                 )
                 .await?;
+                // Recheck immediately before arm: a prior candidate can leave residual heat
+                // after its batch-level cooldown was observed.
+                wait_for_cooldown(
+                    client,
+                    &resolved,
+                    &lease.lease_id,
+                    restart_temp_c,
+                    Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+                )
+                .await?;
                 let arm_status = preview_prepare_and_arm_thermal_self_test_target(
                     client,
                     &resolved,
@@ -4146,8 +4250,16 @@ async fn collect_batch_thermal_self_test(
             }
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         };
+        let deadline = async {
+            if let Some(deadline) = args.execution_deadline {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
         let test_result = tokio::select! {
             result = test_future => result,
+            _ = deadline => Err("target_budget_exhausted: thermal batch self-test deadline reached; heater cleanup requested".into()),
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 Err("thermal batch self-test interrupted; heater cleanup requested".into())
@@ -4421,6 +4533,14 @@ async fn collect_single_thermal_self_test(
                     Some(&candidate_profile_value),
                     "preview",
                 );
+                wait_for_cooldown(
+                    client,
+                    &resolved,
+                    &lease.lease_id,
+                    args.cooldown_temp_c,
+                    Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+                )
+                .await?;
                 let arm_status = preview_prepare_and_arm_thermal_self_test_target(
                     client,
                     &resolved,
@@ -4513,6 +4633,14 @@ async fn collect_single_thermal_self_test(
                         Some(&candidate_profile_value),
                         "preview",
                     );
+                    wait_for_cooldown(
+                        client,
+                        &resolved,
+                        &lease.lease_id,
+                        args.cooldown_temp_c,
+                        Duration::from_secs(args.cooldown_timeout_seconds.max(1)),
+                    )
+                    .await?;
                     let arm_status = preview_prepare_and_arm_thermal_self_test_target(
                         client,
                         &resolved,
@@ -4601,8 +4729,16 @@ async fn collect_single_thermal_self_test(
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         };
 
+        let deadline = async {
+            if let Some(deadline) = args.execution_deadline {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
         let test_result = tokio::select! {
             result = test_future => result,
+            _ = deadline => Err("target_budget_exhausted: thermal self-test deadline reached; heater cleanup requested".into()),
             signal = tokio::signal::ctrl_c() => {
                 signal?;
                 Err("thermal self-test interrupted; heater cleanup requested".into())
@@ -5128,9 +5264,26 @@ fn effective_thermal_sample_interval_ms(requested_ms: u64) -> u64 {
 const THERMAL_MIN_SAMPLE_RATE_HZ: f64 = 3.0;
 const THERMAL_SAMPLE_RATE_WINDOW_MS: u64 = 3_000;
 const THERMAL_SAMPLE_RATE_FAILURE_GRACE_MS: u64 = 3_000;
+const THERMAL_MEASUREMENT_GUARD_FAILURE_GRACE_MS: u64 = 2_000;
 const THERMAL_HEATER_OUTPUT_START_TIMEOUT_MS: u64 = 2_000;
 const THERMAL_COOLDOWN_POLL_INTERVAL_MS: u64 = 1_000;
 const THERMAL_COOLDOWN_EPSILON_C: f64 = 0.15;
+
+#[derive(Debug, Clone, Default)]
+struct ThermalMeasurementGuardTracker {
+    guarded_since_ms: Option<u64>,
+}
+
+impl ThermalMeasurementGuardTracker {
+    fn observe(&mut self, measurement_guarded: bool, elapsed_ms: u64) -> bool {
+        if !measurement_guarded {
+            self.guarded_since_ms = None;
+            return false;
+        }
+        let guarded_since_ms = *self.guarded_since_ms.get_or_insert(elapsed_ms);
+        elapsed_ms.saturating_sub(guarded_since_ms) >= THERMAL_MEASUREMENT_GUARD_FAILURE_GRACE_MS
+    }
+}
 
 impl ThermalSampleRateTracker {
     fn new() -> Self {
@@ -5755,7 +5908,6 @@ fn tune_thermal_candidate_point(
         || stability_overshoot
         || entry_residual_dominant
         || (residual_c > 2.5 && entering_above_target > 0.5 && over_c > under_c);
-    let hold_ripple = curve_oscillation || (analysis.hold_sample_count > 0 && hold_p2p_c > 3.0);
     let timely_hold_but_late_stability = full_speed_failed
         && result
             .guard
@@ -5783,6 +5935,7 @@ fn tune_thermal_candidate_point(
         && entering_below_target >= 0.4
         && residual_c >= ThermalFullSpeedStableTracker::STABLE_BAND_C
         && over_c > ThermalFullSpeedStableTracker::STABLE_BAND_C;
+    let hold_ripple = curve_oscillation || (analysis.hold_sample_count > 0 && hold_p2p_c > 3.0);
     let underpowered = curve_underpowered
         || starved_low_temp_hold
         || (full_speed_failed && !overshoot_dominant && !hold_ripple)
@@ -6356,6 +6509,24 @@ fn thermal_heater_parameters_value(
     })
 }
 
+fn thermal_target_scoped_preview_profile_value(profile: &Value, target_temp_c: i16) -> Value {
+    let effective = thermal_heater_parameters_value(target_temp_c, Some(profile), "preview");
+    let settings = effective
+        .get("settings")
+        .cloned()
+        .unwrap_or_else(thermal_default_settings_value);
+    let mut point = effective.as_object().cloned().unwrap_or_default();
+    point.remove("mode");
+    point.remove("settings");
+
+    let mut points = vec![Value::Null; THERMAL_CONTROL_PROFILE_MAX_POINTS];
+    points[0] = Value::Object(point);
+    json!({
+        "settings": settings,
+        "points": points,
+    })
+}
+
 fn thermal_effective_candidate_point(mut point: ThermalCandidatePoint) -> ThermalCandidatePoint {
     point.warmup_power_permille = 1_000;
     point
@@ -6626,11 +6797,12 @@ async fn preview_and_prepare_thermal_self_test_target(
     target_temp_c: i16,
     heater_parameters: &Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let preview_profile = thermal_target_scoped_preview_profile_value(profile, target_temp_c);
     let preview_status = request_thermal_runtime_with_retry(
         client,
         resolved,
         lease_id,
-        thermal_profile_preview_runtime_body(profile_mode, profile.clone()),
+        thermal_profile_preview_runtime_body(profile_mode, preview_profile),
     )
     .await?;
     verify_thermal_profile_mode_readback(&preview_status, profile_mode)?;
@@ -6968,13 +7140,45 @@ async fn arm_thermal_self_test_heater(
     heater_enabled: bool,
     target_temp_c: i16,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let status = request_thermal_runtime_with_retry(
+    let mut status = request_thermal_runtime_with_retry(
         client,
         resolved,
         lease_id,
         thermal_self_test_runtime_body(heater_enabled, target_temp_c),
     )
     .await?;
+    if heater_enabled && status.get("faultAttentionPending").and_then(Value::as_bool) == Some(true)
+    {
+        if status
+            .get("currentTempC")
+            .and_then(Value::as_f64)
+            .is_some_and(|temperature_c| temperature_c >= 420.0)
+        {
+            return Err(
+                "heater runtime arm blocked while absolute over-temperature protection is active"
+                    .into(),
+            );
+        }
+        let mut acknowledge_body = thermal_self_test_runtime_body(false, target_temp_c);
+        acknowledge_body["faultAttentionAcknowledged"] = json!(true);
+        let acknowledged_status =
+            request_thermal_runtime_with_retry(client, resolved, lease_id, acknowledge_body)
+                .await?;
+        if acknowledged_status
+            .get("faultAttentionPending")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            return Err("heater runtime fault attention acknowledgement did not settle".into());
+        }
+        status = request_thermal_runtime_with_retry(
+            client,
+            resolved,
+            lease_id,
+            thermal_self_test_runtime_body(true, target_temp_c),
+        )
+        .await?;
+    }
     let status = wait_for_thermal_runtime_readback(
         client,
         resolved,
@@ -7088,6 +7292,7 @@ async fn run_thermal_stage(
     let mut terminal_runtime_drop_reason = None::<&'static str>;
     let mut last_uptime_seconds = None::<u64>;
     let mut sample_rate_tracker = ThermalSampleRateTracker::new();
+    let mut measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
     let mut heater_output_seen = false;
     let mut runtime_rearm_attempts_remaining = args.runtime_rearm_attempts;
     let mut next_status = initial_status;
@@ -7177,6 +7382,7 @@ async fn run_thermal_stage(
                 recorded_samples.clear();
                 last_uptime_seconds = None;
                 sample_rate_tracker = ThermalSampleRateTracker::new();
+                measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
                 heater_output_seen = false;
                 continue;
             }
@@ -7246,6 +7452,7 @@ async fn run_thermal_stage(
                 recorded_samples.clear();
                 last_uptime_seconds = None;
                 sample_rate_tracker = ThermalSampleRateTracker::new();
+                measurement_guard_tracker = ThermalMeasurementGuardTracker::default();
                 heater_output_seen = false;
                 continue;
             }
@@ -7254,13 +7461,22 @@ async fn run_thermal_stage(
             break;
         }
         last_uptime_seconds = status.get("uptimeSeconds").and_then(Value::as_u64);
-        let current_temp_c = require_status_f64(&status, "currentTempC")?;
+        // Use the firmware's guarded control temperature for live gates and
+        // metrics. The raw human-facing temperature remains in `status` and
+        // is preserved in the recorded sample/report for diagnosis.
+        let current_temp_c = thermal_control_temperature_c(&status, None)?;
         let heater_output_percent =
             require_status_u64(&status, "heaterOutputPercent")?.min(u64::from(u8::MAX)) as u8;
         heater_output_seen |= heater_output_percent > 0;
         max_temp_c = max_temp_c.max(current_temp_c);
         let elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         let sample_rate = sample_rate_tracker.observe(elapsed_ms);
+        let control_measurement_guarded = status
+            .get("heaterControlMeasurementGuarded")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let measurement_guard_violation =
+            measurement_guard_tracker.observe(control_measurement_guarded, elapsed_ms);
         let control_phase = status.get("heaterControlPhase").and_then(Value::as_str);
         let control_phase_in_hold = control_phase.is_some_and(|phase| phase == "hold");
         analyzer.observe(
@@ -7285,6 +7501,9 @@ async fn run_thermal_stage(
         }
         if stop_reason == "timeout" && sample_rate.violation {
             stop_reason = "sample_rate_below_3hz";
+        }
+        if stop_reason == "timeout" && measurement_guard_violation {
+            stop_reason = "temperature_sample_glitch";
         }
         if stop_reason == "timeout"
             && !heater_output_seen
@@ -7340,6 +7559,9 @@ async fn run_thermal_stage(
                 "minimumRateHz": THERMAL_MIN_SAMPLE_RATE_HZ,
                 "windowMs": THERMAL_SAMPLE_RATE_WINDOW_MS,
                 "rateViolation": sample_rate.violation,
+                "controlMeasurementGuarded": control_measurement_guarded,
+                "measurementGuardGraceMs": THERMAL_MEASUREMENT_GUARD_FAILURE_GRACE_MS,
+                "measurementGuardViolation": measurement_guard_violation,
             },
             "status": status,
         });
@@ -7489,7 +7711,7 @@ fn validate_thermal_applied_results(
         {
             continue;
         }
-        if evaluation_mode.enforces_stage_limits() && applied_stage.max_overshoot_c > 3.0 {
+        if evaluation_mode.reports_stage_limits() && applied_stage.max_overshoot_c > 3.0 {
             failures.push(json!({
                 "targetTempC": applied_stage.target_temp_c,
                 "reason": "overshoot",
@@ -7497,7 +7719,7 @@ fn validate_thermal_applied_results(
                 "limit": 3.0,
             }));
         }
-        if evaluation_mode.enforces_stage_limits() && applied_stage.hold_peak_to_peak_c > 3.0 {
+        if evaluation_mode.reports_stage_limits() && applied_stage.hold_peak_to_peak_c > 3.0 {
             failures.push(json!({
                 "targetTempC": applied_stage.target_temp_c,
                 "reason": "hold_p2p",
@@ -7505,7 +7727,7 @@ fn validate_thermal_applied_results(
                 "limit": 3.0,
             }));
         }
-        if evaluation_mode.enforces_stage_limits() {
+        if evaluation_mode.reports_stage_limits() {
             let limit_ms = ThermalFullSpeedStableTracker::settle_limit_ms_for_target(
                 applied_stage.target_temp_c,
             );
@@ -8541,6 +8763,50 @@ fn parse_calibration_channel(
     }
 }
 
+fn parse_calibration_slot(
+    value: &str,
+) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>> {
+    match value {
+        "a" | "A" => Ok("a"),
+        "b" | "B" => Ok("b"),
+        _ => Err("calibration slot must be a or b".into()),
+    }
+}
+
+fn calibration_set_slot_fit_body(
+    channel: &str,
+    slot: &str,
+    gain: f32,
+    offset_mv: f32,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    if !gain.is_finite() || gain <= 0.0 {
+        return Err("calibration gain must be a finite positive number".into());
+    }
+    if !offset_mv.is_finite() {
+        return Err("calibration offset must be finite".into());
+    }
+    Ok(json!({
+        "op": "set_slot_fit",
+        "channel": parse_calibration_channel(channel)?,
+        "slot": parse_calibration_slot(slot)?,
+        "fit": {
+            "gain": gain,
+            "offsetMv": offset_mv,
+        },
+    }))
+}
+
+fn calibration_set_active_slot_body(
+    channel: &str,
+    slot: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(json!({
+        "op": "set_active_slot",
+        "channel": parse_calibration_channel(channel)?,
+        "slot": parse_calibration_slot(slot)?,
+    }))
+}
+
 fn parse_reference_vin_mv(
     millivolts: Option<u32>,
     volts: Option<&str>,
@@ -9083,27 +9349,15 @@ async fn create_ready_thermal_lease(
     while tokio::time::Instant::now() < deadline {
         match create_lease(client, resolved).await {
             Ok(lease) => {
-                match request_leased(
-                    client,
-                    resolved,
-                    &lease.lease_id,
-                    Method::GET,
-                    "/status",
-                    None,
-                )
-                .await
-                {
+                match request_thermal_status_with_retry(client, resolved, &lease.lease_id).await {
                     Ok(mut status) => {
                         if status.get("heaterEnabled").and_then(Value::as_bool) == Some(true) {
                             force_thermal_self_test_shutdown(client, resolved, &lease.lease_id)
                                 .await?;
-                            status = request_leased(
+                            status = request_thermal_status_with_retry(
                                 client,
                                 resolved,
                                 &lease.lease_id,
-                                Method::GET,
-                                "/status",
-                                None,
                             )
                             .await?;
                         }
@@ -10268,7 +10522,7 @@ mod tests {
     }
 
     #[test]
-    fn thermal_tuning_scout_validation_ignores_hold_limits() {
+    fn thermal_tuning_scout_validation_reports_failed_stage_limits() {
         let applied = vec![ThermalStageResult {
             target_temp_c: 140,
             rise_time_ms: 11_500,
@@ -10294,10 +10548,22 @@ mod tests {
             ThermalSelfTestEvaluationMode::TuningScout,
         );
 
-        assert_eq!(validation["passed"], true);
-        assert_eq!(
-            validation["failures"].as_array().map(|items| items.len()),
-            Some(0)
+        assert_eq!(validation["passed"], false);
+        let failures = validation["failures"].as_array().expect("failures array");
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure["reason"] == "overshoot")
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure["reason"] == "hold_p2p")
+        );
+        assert!(
+            failures
+                .iter()
+                .any(|failure| failure["reason"] == "full_speed_to_stable_missing")
         );
     }
 
@@ -11211,6 +11477,18 @@ mod tests {
     }
 
     #[test]
+    fn thermal_measurement_guard_rejects_sustained_guarded_samples() {
+        let mut tracker = ThermalMeasurementGuardTracker::default();
+
+        assert!(!tracker.observe(false, 0));
+        assert!(!tracker.observe(true, 1_000));
+        assert!(!tracker.observe(true, 2_999));
+        assert!(tracker.observe(true, 3_000));
+        assert!(!tracker.observe(false, 3_100));
+        assert!(!tracker.observe(true, 4_000));
+    }
+
+    #[test]
     fn thermal_timeout_tuning_raises_power_and_reduces_brake() {
         let previous = thermal_default_target_point(250);
         let tuned = tune_thermal_candidate_point(
@@ -12036,6 +12314,66 @@ mod tests {
     }
 
     #[test]
+    fn thermal_replay_uses_guarded_control_temperature_for_metrics() {
+        let samples = vec![
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "warmup",
+                "elapsedMs": 0,
+                "heaterTelemetry": { "currentTempC": 92.0, "heaterOutputPercent": 40 },
+                "status": {
+                    "heaterControlPhase": "approach",
+                    "heaterControlTempC": 92.0,
+                    "heaterFilteredTempC": 92.0,
+                    "currentTempC": 92.0
+                },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "hold",
+                "elapsedMs": 1_000,
+                "heaterTelemetry": { "currentTempC": 250.0, "heaterOutputPercent": 0 },
+                "status": {
+                    "heaterControlPhase": "hold",
+                    "heaterControlTempC": 100.4,
+                    "heaterFilteredTempC": 100.2,
+                    "currentTempC": 250.0,
+                    "heaterControlMeasurementGuarded": true
+                },
+            }),
+            json!({
+                "testPhase": "applied",
+                "targetTempC": 100,
+                "phase": "hold",
+                "elapsedMs": 2_000,
+                "heaterTelemetry": { "currentTempC": 248.0, "heaterOutputPercent": 0 },
+                "status": {
+                    "heaterControlPhase": "hold",
+                    "heaterControlTempC": 100.8,
+                    "heaterFilteredTempC": 100.5,
+                    "currentTempC": 248.0,
+                    "heaterControlMeasurementGuarded": true
+                },
+            }),
+        ];
+
+        let stage_samples = thermal_replay_stage_samples(&samples, 100).unwrap();
+        let analysis = thermal_replay_stage_analysis(&stage_samples, 100);
+
+        assert_eq!(analysis.first_hold_temp_c, Some(100.4));
+        assert!(analysis.hold_max_above_target_c.unwrap_or_default() < 1.0);
+        assert!(
+            analysis
+                .residual_heat_after_hold_entry_c
+                .unwrap_or_default()
+                < 1.0
+        );
+        assert_eq!(samples[1]["heaterTelemetry"]["currentTempC"], json!(250.0));
+    }
+
+    #[test]
     fn thermal_replay_analysis_classifies_underpowered_approach_curve() {
         let samples = vec![
             json!({
@@ -12437,11 +12775,13 @@ mod tests {
             candidate_profile_files: Vec::new(),
             output_dir: PathBuf::from("thermal-self-test-runs"),
             dry_run: true,
+            execution_deadline: None,
         };
         let selection = resolve_thermal_source_selection(&args).expect("source selection");
 
         assert_eq!(selection.resolved_bank, "pps5a");
         assert_eq!(thermal_effective_source_power_watts(&args, &selection), 100);
+        assert!(args.execution_deadline.is_none());
     }
 
     #[test]
@@ -13008,6 +13348,21 @@ mod tests {
     }
 
     #[test]
+    fn thermal_self_test_fault_attention_acknowledgement_keeps_heater_off() {
+        let mut body = thermal_self_test_runtime_body(false, 140);
+        body["faultAttentionAcknowledged"] = json!(true);
+        assert_eq!(
+            body,
+            json!({
+                "heaterEnabled": false,
+                "targetTempC": 140,
+                "activeCoolingEnabled": true,
+                "faultAttentionAcknowledged": true,
+            })
+        );
+    }
+
+    #[test]
     fn thermal_self_test_cooldown_body_clears_preview_and_enables_active_cooling() {
         assert_eq!(
             thermal_self_test_cooldown_runtime_body(),
@@ -13521,6 +13876,57 @@ mod tests {
     }
 
     #[test]
+    fn calibration_slot_commands_match_the_persisted_slot_contract() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "calibration",
+            "set-slot-fit",
+            "--device",
+            "bench",
+            "--channel",
+            "vin-adc",
+            "--slot",
+            "b",
+            "--gain",
+            "0.9723",
+            "--offset-mv",
+            "126.4",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::Calibration {
+                command: CalibrationCommand::SetSlotFit(args),
+            } => {
+                assert_eq!(args.target.device.as_deref(), Some("bench"));
+                assert_eq!(args.channel, "vin-adc");
+                assert_eq!(args.slot, "b");
+                assert!((args.gain - 0.9723).abs() < f32::EPSILON);
+                assert!((args.offset_mv - 126.4).abs() < f32::EPSILON);
+            }
+            other => panic!("unexpected command parsed: {other:?}"),
+        }
+
+        let fit_body = calibration_set_slot_fit_body("vin-adc", "B", 0.9723, 126.4).unwrap();
+        assert_eq!(fit_body["op"], "set_slot_fit");
+        assert_eq!(fit_body["channel"], "vin_adc");
+        assert_eq!(fit_body["slot"], "b");
+        assert!((fit_body["fit"]["gain"].as_f64().unwrap() - 0.9723).abs() < 0.000_001);
+        assert!((fit_body["fit"]["offsetMv"].as_f64().unwrap() - 126.4).abs() < 0.000_01);
+        assert_eq!(
+            calibration_set_active_slot_body("vin", "b").unwrap(),
+            json!({
+                "op": "set_active_slot",
+                "channel": "vin_adc",
+                "slot": "b",
+            })
+        );
+        assert!(calibration_set_slot_fit_body("vin", "b", 0.0, 1.0).is_err());
+        assert!(calibration_set_slot_fit_body("vin", "c", 1.0, 0.0).is_err());
+        assert!(calibration_set_slot_fit_body("vin", "b", 1.0, f32::NAN).is_err());
+    }
+
+    #[test]
     fn parses_pps_volts_as_100mv_steps() {
         assert_eq!(parse_pps_volts("10.4").unwrap(), 10_400);
         assert_eq!(parse_pps_volts("21").unwrap(), 21_000);
@@ -13578,6 +13984,55 @@ mod tests {
         assert_eq!(body["thermalProfileMode"], "100w");
         assert_eq!(body["thermalControlProfile"]["op"], "preview");
         assert!(body["thermalControlProfile"]["profile"].is_object());
+    }
+
+    #[test]
+    fn thermal_target_scoped_preview_is_complete_and_fits_the_usb_line() {
+        let profile = default_thermal_candidate_profile();
+        let expected = thermal_heater_parameters_value(140, Some(&profile), "preview");
+        let scoped = thermal_target_scoped_preview_profile_value(&profile, 140);
+        let points = scoped["points"].as_array().expect("preview points");
+        let non_null_points = points
+            .iter()
+            .filter(|point| !point.is_null())
+            .collect::<Vec<_>>();
+
+        assert_eq!(points.len(), THERMAL_CONTROL_PROFILE_MAX_POINTS);
+        assert_eq!(non_null_points.len(), 1);
+        assert_eq!(scoped["settings"], expected["settings"]);
+        assert_eq!(non_null_points[0]["targetTempC"], 140);
+        for field in [
+            "warmupPowerPermille",
+            "brakeDistanceCentiC",
+            "approachPowerPermille",
+            "approachFloorPowerPermille",
+            "approachDampingExponentPermille",
+            "approachTailWindowCentiC",
+            "holdPowerPermille",
+            "holdReheatPowerPermille",
+            "warmupReenterCentiC",
+            "holdEntryCentiC",
+            "holdExitCentiC",
+            "holdOnCentiC",
+            "holdOffCentiC",
+            "overshootCutoffCentiC",
+            "holdKpPermillePerC",
+            "holdKiPermillePerCTick",
+            "holdBlendTicks",
+            "approachLeadTicks",
+            "holdLeadTicks",
+        ] {
+            assert_eq!(non_null_points[0][field], expected[field], "{field}");
+        }
+
+        let body = thermal_profile_preview_runtime_body(ThermalProfileMode::W100, scoped);
+        assert!(
+            serde_json::to_vec(&body)
+                .expect("preview body serialization")
+                .len()
+                < 4_096,
+            "target-scoped preview must fit inside the firmware USB JSONL limit"
+        );
     }
 
     #[test]
