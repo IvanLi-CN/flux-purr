@@ -2977,6 +2977,7 @@ impl HoldPpsGovernor {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn request_mv(
         &mut self,
         phase: HeaterControlPhase,
@@ -3739,7 +3740,7 @@ where
     F: FnMut() -> Option<u16>,
     W: FnMut(),
 {
-    if retained_samples == 0 || phase_count == 0 || retained_samples % phase_count != 0 {
+    if retained_samples == 0 || phase_count == 0 || !retained_samples.is_multiple_of(phase_count) {
         return None;
     }
 
@@ -3764,7 +3765,7 @@ where
         max_mv = max_mv.max(sample_mv);
         valid_samples = valid_samples.saturating_add(1);
 
-        if valid_samples % samples_per_phase == 0 && valid_samples < retained_samples {
+        if valid_samples.is_multiple_of(samples_per_phase) && valid_samples < retained_samples {
             wait_for_next_phase();
         }
     }
