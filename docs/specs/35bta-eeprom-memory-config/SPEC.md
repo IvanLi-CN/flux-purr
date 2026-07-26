@@ -84,7 +84,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
-- Flash fallback 复用同一 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。仓库根 `espflash.toml` 必须让固件烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)，确保该分区属于固件正式 flash 合同。
+- Flash fallback 复用同一 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。仓库根 `espflash.toml` 必须让 ELF 烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)。支持 raw app artifact 时，devd 必须先写入由该 CSV 生成并受版本控制的 [`firmware/partitions.bin`](../../../firmware/partitions.bin) 到 `0x8000`，再写入 app 并显式 reset；两条安装路径都必须保证该分区属于正式 flash 合同。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)
