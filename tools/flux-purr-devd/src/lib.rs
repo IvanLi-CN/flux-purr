@@ -5350,6 +5350,7 @@ fn build_espflash_args(
             "Real flash requires an explicit serial port.",
         ));
     }
+    let partition_table = firmware_partition_table_path(root)?;
     if let Some(elf_image) = artifact.files.iter().find(|file| file.kind == "elf") {
         let path = resolve_artifact_path(root, &elf_image.path);
         let mut args = vec![
@@ -5364,13 +5365,8 @@ fn build_espflash_args(
             "--after".to_string(),
             "hard-reset".to_string(),
         ];
-        if let Some(partition_table) = root
-            .map(|root| root.join("firmware/partitions.csv"))
-            .filter(|path| path.is_file())
-        {
-            args.push("--partition-table".to_string());
-            args.push(partition_table.to_string_lossy().into_owned());
-        }
+        args.push("--partition-table".to_string());
+        args.push(partition_table.to_string_lossy().into_owned());
         args.push(path.to_string_lossy().into_owned());
         return Ok(args);
     }
@@ -5381,24 +5377,29 @@ fn build_espflash_args(
             "Artifact does not contain an ELF or raw app image.",
         ));
     };
-    let flash_address = app_image.flash_address.ok_or_else(|| {
-        HttpError::bad_request("missing_flash_address", "Missing app flash address.")
-    })?;
-    let path = resolve_artifact_path(root, &app_image.path);
-    Ok(vec![
-        "write-bin".to_string(),
-        "--chip".to_string(),
-        artifact.target_chip.clone(),
-        "--port".to_string(),
-        port_path.to_string(),
-        "--before".to_string(),
-        espflash_before_reset_mode(artifact, port_path).to_string(),
-        "--non-interactive".to_string(),
-        "--after".to_string(),
-        "hard-reset".to_string(),
-        flash_address.to_string(),
-        path.to_string_lossy().into_owned(),
-    ])
+    let _ = app_image;
+    Err(HttpError::bad_request(
+        "firmware_partition_table_required",
+        "App-only firmware artifacts are not flashable because they cannot install the required flux_cfg partition; use an ELF artifact.",
+    ))
+}
+
+fn firmware_partition_table_path(root: Option<&Path>) -> Result<PathBuf, HttpError> {
+    let Some(root) = root else {
+        return Err(HttpError::bad_request(
+            "firmware_partition_table_required",
+            "Firmware flashing requires an artifact root containing firmware/partitions.csv.",
+        ));
+    };
+    let partition_table = root.join("firmware/partitions.csv");
+    if partition_table.is_file() {
+        Ok(partition_table)
+    } else {
+        Err(HttpError::bad_request(
+            "firmware_partition_table_required",
+            "Firmware flashing requires firmware/partitions.csv so flux_cfg is installed.",
+        ))
+    }
 }
 
 fn espflash_before_reset_mode(artifact: &FirmwareArtifact, port_path: &str) -> &'static str {
@@ -6362,7 +6363,7 @@ mod tests {
     }
 
     #[test]
-    fn real_flash_args_write_raw_app_bin_with_explicit_address() {
+    fn real_flash_args_reject_raw_app_bin_without_partition_table_install() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -6383,24 +6384,16 @@ mod tests {
         };
 
         let dir = tempdir().unwrap();
-        let args =
-            build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
+        std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
+        std::fs::write(
+            dir.path().join("firmware/partitions.csv"),
+            "flux_cfg,data,0x06,0x110000,0x2000",
+        )
+        .unwrap();
+        let error = build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401")
+            .expect_err("app-only image cannot install the partition table");
 
-        assert_eq!(args[0], "write-bin");
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--port", "/dev/cu.usbmodem21221401"])
-        );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--before", "usb-reset"])
-        );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--after", "hard-reset"])
-        );
-        assert!(args.contains(&DEFAULT_APP_FLASH_ADDRESS.to_string()));
-        assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
+        assert_eq!(error.error.code, "firmware_partition_table_required");
     }
 
     #[test]

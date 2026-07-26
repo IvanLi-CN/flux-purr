@@ -4144,8 +4144,9 @@ fn write_flash_memory_record(
         }
         let absolute_offset = flash_memory_slot_offset_for_sequence(record.sequence);
         let mut region = entry.as_embedded_storage(flash);
-        if region
-            .write(absolute_offset, &bytes[..record_len])
+        // Storage::write performs a read-modify-erase-write for the selected sector,
+        // so unaligned record payloads are valid and the other 4KiB slot stays intact.
+        if Storage::write(&mut region, absolute_offset, &bytes[..record_len])
             .map_err(|_| MemoryCommitError::FlashWriteFailed)
             .is_err()
         {
