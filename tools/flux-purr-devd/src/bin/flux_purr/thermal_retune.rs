@@ -7,14 +7,16 @@ use reqwest::{Client, Method};
 use serde_json::{Value, json};
 
 use super::{
-    ThermalRetuneArgs, ThermalStageResult, parse_thermal_targets,
+    ThermalProfileMode, ThermalRetuneArgs, ThermalStageResult, parse_thermal_targets,
     parse_thermal_targets_from_summary, read_ndjson_values, request_with_lease, resolve_target,
     thermal_candidate_point_mut, thermal_candidate_profile_to_value,
+    thermal_heater_parameters_value, thermal_profile_preview_runtime_body,
     thermal_rebuild_profile_from_anchor_targets, thermal_replay_applied_profile,
     thermal_replay_full_speed_to_stable, thermal_replay_stage_analysis,
     thermal_replay_stage_samples, thermal_self_test_evaluation_mode_from_summary,
     thermal_stage_result_from_value, thermal_summary_attach_replay_source_analysis,
     tune_thermal_candidate_point, validate_thermal_applied_results,
+    verify_thermal_control_readback, verify_thermal_profile_mode_readback,
 };
 
 #[derive(Debug, Clone)]
@@ -27,6 +29,7 @@ pub(super) struct ThermalRetuneInput {
 pub(super) struct ThermalRetuneOutput {
     pub(super) summary: Value,
     pub(super) candidate_profile: Value,
+    profile_mode: Option<ThermalProfileMode>,
     summary_path: PathBuf,
 }
 
@@ -77,6 +80,7 @@ pub(super) fn retune_thermal_self_test_run(
         .into());
     }
     let target_temps_c = parse_thermal_targets_from_summary(&summary, "targetsC")?;
+    let profile_mode = thermal_retune_profile_mode(&summary);
     let optimize_targets_c = if let Some(optimize_targets_c) = input.optimize_targets_c.as_deref() {
         parse_thermal_targets(Some(optimize_targets_c))?
     } else {
@@ -140,6 +144,7 @@ pub(super) fn retune_thermal_self_test_run(
         "replayOf": summary_path,
         "target": summary.get("target").cloned().unwrap_or(Value::Null),
         "source": summary.get("source").cloned().unwrap_or(Value::Null),
+        "selectedMode": summary.get("selectedMode").cloned().unwrap_or(Value::Null),
         "parameters": {
             "targetsC": target_temps_c,
             "optimizeTargetsC": optimize_targets_c,
@@ -173,6 +178,7 @@ pub(super) fn retune_thermal_self_test_run(
     Ok(ThermalRetuneOutput {
         summary: replay_summary,
         candidate_profile: candidate_profile_value,
+        profile_mode,
         summary_path: replay_summary_path,
     })
 }
@@ -211,17 +217,33 @@ pub(super) async fn run_thermal_retune(
         }
     };
 
+    let profile_mode = match output.profile_mode {
+        Some(profile_mode) => profile_mode,
+        None => {
+            let error = io::Error::new(
+                io::ErrorKind::InvalidData,
+                "thermal retune preview apply requires run.json selectedMode=auto|65w|100w",
+            );
+            output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
+                ok: false,
+                target: target_value,
+                preview_response: None,
+                status_readback: None,
+                error: Some(error.to_string()),
+            })?;
+            return Err(error.into());
+        }
+    };
+
     let preview_response = match request_with_lease(
         client,
         resolved.clone(),
         Method::PUT,
         "/runtime",
-        Some(json!({
-            "thermalControlProfile": {
-                "op": "preview",
-                "profile": output.candidate_profile,
-            }
-        })),
+        Some(thermal_profile_preview_runtime_body(
+            profile_mode,
+            output.candidate_profile.clone(),
+        )),
     )
     .await
     {
@@ -251,15 +273,26 @@ pub(super) async fn run_thermal_retune(
             return Err(error);
         }
     };
-    if status
-        .get("thermalControlProfilePreview")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        let error = io::Error::new(
-            io::ErrorKind::InvalidData,
-            "thermal retune preview apply did not enable thermalControlProfilePreview",
+    let readback_result = (|| {
+        verify_thermal_profile_mode_readback(&status, profile_mode)?;
+        let target_temp_c = status
+            .get("targetTempC")
+            .and_then(Value::as_i64)
+            .and_then(|value| i16::try_from(value).ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "thermal retune preview status missing targetTempC",
+                )
+            })?;
+        let expected = thermal_heater_parameters_value(
+            target_temp_c,
+            Some(&output.candidate_profile),
+            "preview",
         );
+        verify_thermal_control_readback(&status, &expected, "preview")
+    })();
+    if let Err(error) = readback_result {
         output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
             ok: false,
             target: target_value,
@@ -267,7 +300,7 @@ pub(super) async fn run_thermal_retune(
             status_readback: Some(thermal_retune_status_summary(&status)),
             error: Some(error.to_string()),
         })?;
-        return Err(error.into());
+        return Err(error);
     }
 
     output.write_apply_preview_receipt(ThermalRetuneApplyReceipt {
@@ -278,6 +311,15 @@ pub(super) async fn run_thermal_retune(
         error: None,
     })?;
     Ok(output.summary)
+}
+
+fn thermal_retune_profile_mode(summary: &Value) -> Option<ThermalProfileMode> {
+    match summary.get("selectedMode").and_then(Value::as_str) {
+        Some("auto") => Some(ThermalProfileMode::Auto),
+        Some("65w") => Some(ThermalProfileMode::W65),
+        Some("100w") => Some(ThermalProfileMode::W100),
+        _ => None,
+    }
 }
 
 fn thermal_retune_status_summary(status: &Value) -> Value {

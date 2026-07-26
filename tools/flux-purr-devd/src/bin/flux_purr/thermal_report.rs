@@ -1116,9 +1116,6 @@ pub(super) fn write_preliminary_review_bundle(
         if let Some(rounds) = entry.get("rounds").and_then(Value::as_array) {
             if !rounds.is_empty() {
                 for attempt in rounds {
-                    if attempt.get("evidenceValid").and_then(Value::as_bool) == Some(false) {
-                        continue;
-                    }
                     for sample in attempt
                         .get("samples")
                         .and_then(Value::as_array)
@@ -1138,6 +1135,14 @@ pub(super) fn write_preliminary_review_bundle(
                             .get("selected")
                             .cloned()
                             .unwrap_or_else(|| json!(false));
+                        enriched["evidenceValid"] = attempt
+                            .get("evidenceValid")
+                            .cloned()
+                            .unwrap_or_else(|| json!(true));
+                        enriched["evidenceInvalidReason"] = attempt
+                            .get("evidenceInvalidReason")
+                            .cloned()
+                            .unwrap_or(Value::Null);
                         sample_lines.push_str(&serde_json::to_string(&enriched)?);
                         sample_lines.push('\n');
                     }
@@ -1584,6 +1589,17 @@ mod tests {
                             "controlTempC": 77.8
                         }
                     }]
+                }, {
+                    "round": 2,
+                    "attemptType": "validation_retry",
+                    "candidateName": "final-profile",
+                    "selected": false,
+                    "evidenceValid": false,
+                    "evidenceInvalidReason": "source_telemetry_stale",
+                    "samples": [{
+                        "t": 1.0,
+                        "temp": 77.5
+                    }]
                 }]
             })],
             "f293cc9c139e",
@@ -1610,6 +1626,17 @@ mod tests {
 
         let samples = fs::read_to_string(bundle_dir.join("samples.ndjson")).expect("samples");
         assert!(samples.contains(r#""targetTempC":80"#));
+        let sample_lines = samples
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("sample json"))
+            .collect::<Vec<_>>();
+        assert_eq!(sample_lines.len(), 2);
+        assert_eq!(sample_lines[0]["evidenceValid"], true);
+        assert_eq!(sample_lines[1]["evidenceValid"], false);
+        assert_eq!(
+            sample_lines[1]["evidenceInvalidReason"],
+            "source_telemetry_stale"
+        );
 
         let embedded_data = embedded_report_data(&bundle_dir);
         assert_eq!(embedded_data["runs"][0]["reviewOutcome"], "passed");

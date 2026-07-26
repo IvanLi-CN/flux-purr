@@ -3677,262 +3677,6 @@ fn thermal_replay_applied_profile(
     Ok(profile)
 }
 
-#[cfg(test)]
-async fn retune_thermal_self_test_run(
-    client: &Client,
-    default_devd: &str,
-    args: ThermalRetuneArgs,
-) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let apply_preview = args.apply_preview;
-    let target = args.target.clone();
-    let summary_path = args.run_dir.join("run.json");
-    let samples_path = args.run_dir.join("samples.ndjson");
-    let summary: Value = serde_json::from_slice(&fs::read(&summary_path)?)?;
-    if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "thermal retune requires a thermal self-test run.json",
-        )
-        .into());
-    }
-    let target_temps_c = parse_thermal_targets_from_summary(&summary, "targetsC")?;
-    let optimize_targets_c = if let Some(optimize_targets_c) = args.optimize_targets_c.as_deref() {
-        parse_thermal_targets(Some(optimize_targets_c))?
-    } else {
-        parse_thermal_targets_from_summary(&summary, "optimizeTargetsC")?
-    };
-    let original_applied = summary
-        .get("applied")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "thermal summary missing applied results",
-            )
-        })?;
-    let samples = read_ndjson_values(&samples_path)?;
-    let mut candidate_profile =
-        thermal_replay_applied_profile(&summary, &samples, &target_temps_c)?;
-    let mut candidate_profile_value = thermal_candidate_profile_to_value(&candidate_profile);
-    let mut applied_results = Vec::new();
-    let mut tuning_steps = Vec::<Value>::new();
-
-    for (stage_index, original_result) in original_applied.iter().enumerate() {
-        let mut replayed = thermal_stage_result_from_value(original_result)?;
-        let stage_samples = thermal_replay_stage_samples(&samples, replayed.target_temp_c)?;
-        replayed.sample_count = stage_samples.len();
-        replayed.analysis = thermal_replay_stage_analysis(&stage_samples, replayed.target_temp_c);
-        replayed.full_speed_to_stable =
-            thermal_replay_full_speed_to_stable(&stage_samples, replayed.target_temp_c);
-        if optimize_targets_c.contains(&replayed.target_temp_c) {
-            if let Some(point) =
-                thermal_candidate_point_mut(&mut candidate_profile, replayed.target_temp_c)
-            {
-                *point = tune_thermal_candidate_point(*point, &replayed);
-            }
-            thermal_rebuild_profile_from_anchor_targets(
-                &mut candidate_profile,
-                &optimize_targets_c,
-            );
-            candidate_profile_value = thermal_candidate_profile_to_value(&candidate_profile);
-            tuning_steps.push(json!({
-                "stageIndex": stage_index,
-                "targetTempC": replayed.target_temp_c,
-                "result": replayed.to_value(),
-                "candidateProfile": candidate_profile_value.clone(),
-            }));
-        }
-        applied_results.push(replayed);
-    }
-
-    let evaluation_mode = thermal_self_test_evaluation_mode_from_summary(&summary);
-    let validation =
-        validate_thermal_applied_results(&applied_results, &target_temps_c, evaluation_mode);
-    let replay_summary_path = args.run_dir.join("run.replayed.json");
-    let replay_candidate_path = args.run_dir.join("thermal-profile.replayed.candidate.json");
-    let mut replay_summary = json!({
-        "kind": "thermal_self_test_replay",
-        "ok": validation.get("passed").and_then(Value::as_bool) == Some(true),
-        "runId": summary.get("runId").cloned().unwrap_or(Value::Null),
-        "replayOf": summary_path,
-        "target": summary.get("target").cloned().unwrap_or(Value::Null),
-        "source": summary.get("source").cloned().unwrap_or(Value::Null),
-        "parameters": {
-            "targetsC": target_temps_c,
-            "optimizeTargetsC": optimize_targets_c,
-            "sampleIntervalMs": summary.pointer("/parameters/sampleIntervalMs").cloned().unwrap_or(Value::Null),
-            "effectiveSampleIntervalMs": summary.pointer("/parameters/effectiveSampleIntervalMs").cloned().unwrap_or(Value::Null),
-            "holdSeconds": summary.pointer("/parameters/holdSeconds").cloned().unwrap_or(Value::Null),
-            "stageTimeoutSeconds": summary.pointer("/parameters/stageTimeoutSeconds").cloned().unwrap_or(Value::Null),
-            "runtimeRearmAttempts": summary.pointer("/parameters/runtimeRearmAttempts").cloned().unwrap_or(Value::Null),
-            "cooldownTempC": summary.pointer("/parameters/cooldownTempC").cloned().unwrap_or(Value::Null),
-            "cooldownTimeoutSeconds": summary.pointer("/parameters/cooldownTimeoutSeconds").cloned().unwrap_or(Value::Null),
-            "limits": summary.pointer("/parameters/limits").cloned().unwrap_or(Value::Null),
-            "seedProfileFile": summary.pointer("/parameters/seedProfileFile").cloned().unwrap_or(Value::Null),
-            "evaluationMode": evaluation_mode.as_str(),
-        },
-        "files": {
-            "runDir": args.run_dir,
-            "summaryPath": replay_summary_path,
-            "samplesPath": samples_path,
-            "candidateProfilePath": replay_candidate_path,
-        },
-        "sampleCount": summary.get("sampleCount").cloned().unwrap_or(Value::Null),
-        "candidateProfile": candidate_profile_value.clone(),
-        "profilePersistence": "not_saved",
-        "tuningSteps": tuning_steps,
-        "applied": applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
-        "validation": validation,
-    });
-    thermal_summary_attach_replay_source_analysis(&mut replay_summary, &samples)?;
-    fs::write(
-        &replay_candidate_path,
-        serde_json::to_vec_pretty(&candidate_profile_value)?,
-    )?;
-    fs::write(
-        &replay_summary_path,
-        serde_json::to_vec_pretty(&replay_summary)?,
-    )?;
-    if !apply_preview {
-        return Ok(replay_summary);
-    }
-
-    let target_value = thermal_retune_requested_target_value(&target, default_devd);
-    let resolved = match resolve_target(target.clone(), default_devd) {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            replay_summary["applyPreview"] = json!({
-                "op": "thermalControlProfile.preview",
-                "ok": false,
-                "target": target_value,
-                "previewResponse": null,
-                "statusReadback": null,
-                "error": error.to_string(),
-            });
-            fs::write(
-                &replay_summary_path,
-                serde_json::to_vec_pretty(&replay_summary)?,
-            )?;
-            return Err(error);
-        }
-    };
-    let preview_response = match request_with_lease(
-        client,
-        resolved.clone(),
-        Method::PUT,
-        "/runtime",
-        Some(json!({
-            "thermalControlProfile": {
-                "op": "preview",
-                "profile": candidate_profile_value,
-            }
-        })),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            replay_summary["applyPreview"] = json!({
-                "op": "thermalControlProfile.preview",
-                "ok": false,
-                "target": target_value,
-                "previewResponse": null,
-                "statusReadback": null,
-                "error": error.to_string(),
-            });
-            fs::write(
-                &replay_summary_path,
-                serde_json::to_vec_pretty(&replay_summary)?,
-            )?;
-            return Err(error);
-        }
-    };
-    let status = match request_with_lease(client, resolved, Method::GET, "/status", None).await {
-        Ok(status) => status,
-        Err(error) => {
-            replay_summary["applyPreview"] = json!({
-                "op": "thermalControlProfile.preview",
-                "ok": false,
-                "target": target_value,
-                "previewResponse": thermal_retune_status_summary(&preview_response),
-                "statusReadback": null,
-                "error": error.to_string(),
-            });
-            fs::write(
-                &replay_summary_path,
-                serde_json::to_vec_pretty(&replay_summary)?,
-            )?;
-            return Err(error);
-        }
-    };
-    if status
-        .get("thermalControlProfilePreview")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        let error = io::Error::new(
-            io::ErrorKind::InvalidData,
-            "thermal retune preview apply did not enable thermalControlProfilePreview",
-        );
-        replay_summary["applyPreview"] = json!({
-            "op": "thermalControlProfile.preview",
-            "ok": false,
-            "target": target_value,
-            "previewResponse": thermal_retune_status_summary(&preview_response),
-            "statusReadback": thermal_retune_status_summary(&status),
-            "error": error.to_string(),
-        });
-        fs::write(
-            &replay_summary_path,
-            serde_json::to_vec_pretty(&replay_summary)?,
-        )?;
-        return Err(error.into());
-    }
-    replay_summary["applyPreview"] = json!({
-        "op": "thermalControlProfile.preview",
-        "ok": true,
-        "target": target_value,
-        "previewResponse": thermal_retune_status_summary(&preview_response),
-        "statusReadback": thermal_retune_status_summary(&status),
-        "error": null,
-    });
-    fs::write(
-        &replay_summary_path,
-        serde_json::to_vec_pretty(&replay_summary)?,
-    )?;
-    Ok(replay_summary)
-}
-
-#[cfg(test)]
-fn thermal_retune_requested_target_value(target: &TargetSelector, default_devd: &str) -> Value {
-    json!({
-        "deviceId": target.device,
-        "hardwareId": target.hardware,
-        "devd": default_devd,
-    })
-}
-
-#[cfg(test)]
-fn thermal_retune_status_summary(status: &Value) -> Value {
-    let mut summary = serde_json::Map::new();
-    for key in [
-        "deviceId",
-        "mode",
-        "targetTempC",
-        "currentTempC",
-        "heaterEnabled",
-        "thermalControlProfilePreview",
-    ] {
-        if let Some(value) = status.get(key) {
-            summary.insert(key.to_string(), value.clone());
-        }
-    }
-    if let Some(thermal_control) = status.get("thermalControl") {
-        summary.insert("thermalControl".to_string(), thermal_control.clone());
-    }
-    Value::Object(summary)
-}
-
 async fn collect_thermal_self_test(
     client: &Client,
     default_devd: &str,
@@ -14165,6 +13909,7 @@ mod tests {
                 },
                 "seedProfileFile": Value::Null,
             },
+            "selectedMode": "100w",
             "files": {
                 "runDir": run_dir,
                 "summaryPath": run_dir.join("run.json"),
@@ -14556,6 +14301,7 @@ mod tests {
     struct RetuneApplyTestState {
         runtime_requests: Arc<Mutex<Vec<Value>>>,
         preview_enabled_readback: bool,
+        profile_covers_target_readback: bool,
     }
 
     async fn create_retune_test_lease() -> Json<Value> {
@@ -14596,6 +14342,36 @@ mod tests {
         State(state): State<RetuneApplyTestState>,
         AxumPath(_device_id): AxumPath<String>,
     ) -> Json<Value> {
+        let request = state.runtime_requests.lock().unwrap().last().cloned();
+        let profile = request
+            .as_ref()
+            .and_then(|value| value.pointer("/thermalControlProfile/profile"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let expected = thermal_heater_parameters_value(60, Some(&profile), "preview");
+        let mut thermal_control = expected.as_object().cloned().unwrap_or_default();
+        if let Some(settings) = thermal_control
+            .remove("settings")
+            .and_then(|value| value.as_object().cloned())
+        {
+            thermal_control.extend(settings);
+        }
+        thermal_control.insert(
+            "profileActive".to_string(),
+            json!(state.preview_enabled_readback),
+        );
+        thermal_control.insert(
+            "profileCoversTarget".to_string(),
+            json!(state.profile_covers_target_readback),
+        );
+        thermal_control.insert(
+            "profileSource".to_string(),
+            json!(if state.preview_enabled_readback {
+                "preview"
+            } else {
+                "default"
+            }),
+        );
         Json(json!({
             "deviceId": "bench",
             "mode": "idle",
@@ -14603,10 +14379,9 @@ mod tests {
             "currentTempC": 25.0,
             "heaterEnabled": false,
             "thermalControlProfilePreview": state.preview_enabled_readback,
-            "thermalControl": {
-                "profileActive": state.preview_enabled_readback,
-                "source": if state.preview_enabled_readback { "preview" } else { "default" },
-            },
+            "thermalProfileMode": "100w",
+            "thermalProfileResolvedBank": "pps5a",
+            "thermalControl": thermal_control,
         }))
     }
 
@@ -14624,12 +14399,14 @@ mod tests {
 
     async fn spawn_retune_apply_server(
         preview_enabled_readback: bool,
+        profile_covers_target_readback: bool,
         fail_preview: bool,
     ) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
         let runtime_requests = Arc::new(Mutex::new(Vec::new()));
         let state = RetuneApplyTestState {
             runtime_requests: runtime_requests.clone(),
             preview_enabled_readback,
+            profile_covers_target_readback,
         };
         let runtime_route = if fail_preview {
             put(failing_retune_preview)
@@ -14805,9 +14582,10 @@ mod tests {
     async fn thermal_retune_apply_preview_writes_verified_receipt_and_uses_candidate() {
         let dir = tempfile::tempdir().unwrap();
         write_retune_fixture(dir.path());
-        let (base_url, runtime_requests, server) = spawn_retune_apply_server(true, false).await;
+        let (base_url, runtime_requests, server) =
+            spawn_retune_apply_server(true, true, false).await;
 
-        let summary = retune_thermal_self_test_run(
+        let summary = thermal_retune::run_thermal_retune(
             &Client::new(),
             &base_url,
             ThermalRetuneArgs {
@@ -14835,6 +14613,7 @@ mod tests {
         let requests = runtime_requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0]["leaseId"], "lease-retune");
+        assert_eq!(requests[0]["thermalProfileMode"], "100w");
         assert_eq!(
             requests[0]["thermalControlProfile"]["op"].as_str(),
             Some("preview")
@@ -14851,9 +14630,10 @@ mod tests {
     async fn thermal_retune_apply_preview_failure_preserves_replay_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         write_retune_fixture(dir.path());
-        let (base_url, _runtime_requests, server) = spawn_retune_apply_server(true, true).await;
+        let (base_url, _runtime_requests, server) =
+            spawn_retune_apply_server(true, true, true).await;
 
-        let error = retune_thermal_self_test_run(
+        let error = thermal_retune::run_thermal_retune(
             &Client::new(),
             &base_url,
             ThermalRetuneArgs {
@@ -14895,7 +14675,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_retune_fixture(dir.path());
 
-        let error = retune_thermal_self_test_run(
+        let error = thermal_retune::run_thermal_retune(
             &Client::new(),
             DEFAULT_DEVD_URL,
             ThermalRetuneArgs {
@@ -14934,7 +14714,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_retune_fixture(dir.path());
 
-        let error = retune_thermal_self_test_run(
+        let error = thermal_retune::run_thermal_retune(
             &Client::new(),
             DEFAULT_DEVD_URL,
             ThermalRetuneArgs {
@@ -14977,7 +14757,7 @@ mod tests {
         write_retune_fixture(dir.path());
 
         let missing_hardware_id = "missing-retune-hardware-7c6c7596f0b64e75";
-        let error = retune_thermal_self_test_run(
+        let error = thermal_retune::run_thermal_retune(
             &Client::new(),
             DEFAULT_DEVD_URL,
             ThermalRetuneArgs {
@@ -15014,9 +14794,10 @@ mod tests {
     async fn thermal_retune_apply_preview_requires_status_readback_preview_flag() {
         let dir = tempfile::tempdir().unwrap();
         write_retune_fixture(dir.path());
-        let (base_url, _runtime_requests, server) = spawn_retune_apply_server(false, false).await;
+        let (base_url, _runtime_requests, server) =
+            spawn_retune_apply_server(false, false, false).await;
 
-        let error = retune_thermal_self_test_run(
+        let error = thermal_retune::run_thermal_retune(
             &Client::new(),
             &base_url,
             ThermalRetuneArgs {
@@ -15036,10 +14817,47 @@ mod tests {
         let replay_summary: Value =
             serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
                 .unwrap();
-        assert!(error.contains("thermalControlProfilePreview"));
+        assert!(error.contains("preview"));
         assert_eq!(replay_summary["applyPreview"]["ok"], false);
         assert_eq!(
             replay_summary["applyPreview"]["statusReadback"]["thermalControlProfilePreview"],
+            false
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thermal_retune_apply_preview_requires_profile_to_cover_active_target() {
+        let dir = tempfile::tempdir().unwrap();
+        write_retune_fixture(dir.path());
+        let (base_url, _runtime_requests, server) =
+            spawn_retune_apply_server(true, false, false).await;
+
+        let error = thermal_retune::run_thermal_retune(
+            &Client::new(),
+            &base_url,
+            ThermalRetuneArgs {
+                target: TargetSelector {
+                    device: Some("bench".to_string()),
+                    hardware: None,
+                },
+                run_dir: dir.path().to_path_buf(),
+                optimize_targets_c: None,
+                apply_preview: true,
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+
+        let replay_summary: Value =
+            serde_json::from_slice(&fs::read(dir.path().join("run.replayed.json")).unwrap())
+                .unwrap();
+        assert!(error.contains("does not cover"));
+        assert_eq!(replay_summary["applyPreview"]["ok"], false);
+        assert_eq!(
+            replay_summary["applyPreview"]["statusReadback"]["thermalControl"]["profileCoversTarget"],
             false
         );
 
