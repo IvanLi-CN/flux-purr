@@ -14207,6 +14207,12 @@ mod tests {
             output.summary["kind"].as_str(),
             Some("thermal_self_test_replay")
         );
+        assert_eq!(
+            output.summary["parameters"]["evaluationMode"],
+            json!("hold-confirm")
+        );
+        assert!(output.summary["applied"][0]["analysis"]["approachSource"].is_object());
+        assert!(output.summary["applied"][0]["analysis"]["holdSource"].is_object());
         assert!(output.summary.get("applyPreview").is_none());
         assert!(dir.path().join("run.replayed.json").exists());
         assert!(

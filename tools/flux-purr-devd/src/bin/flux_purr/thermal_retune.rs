@@ -13,8 +13,8 @@ use super::{
     thermal_rebuild_profile_from_anchor_targets, thermal_replay_applied_profile,
     thermal_replay_full_speed_to_stable, thermal_replay_stage_analysis,
     thermal_replay_stage_samples, thermal_self_test_evaluation_mode_from_summary,
-    thermal_stage_result_from_value, tune_thermal_candidate_point,
-    validate_thermal_applied_results,
+    thermal_stage_result_from_value, thermal_summary_attach_replay_source_analysis,
+    tune_thermal_candidate_point, validate_thermal_applied_results,
 };
 
 #[derive(Debug, Clone)]
@@ -133,7 +133,7 @@ pub(super) fn retune_thermal_self_test_run(
     let replay_candidate_path = input
         .run_dir
         .join("thermal-profile.replayed.candidate.json");
-    let replay_summary = json!({
+    let mut replay_summary = json!({
         "kind": "thermal_self_test_replay",
         "ok": validation.get("passed").and_then(Value::as_bool) == Some(true),
         "runId": summary.get("runId").cloned().unwrap_or(Value::Null),
@@ -152,6 +152,7 @@ pub(super) fn retune_thermal_self_test_run(
             "cooldownTimeoutSeconds": summary.pointer("/parameters/cooldownTimeoutSeconds").cloned().unwrap_or(Value::Null),
             "limits": summary.pointer("/parameters/limits").cloned().unwrap_or(Value::Null),
             "seedProfileFile": summary.pointer("/parameters/seedProfileFile").cloned().unwrap_or(Value::Null),
+            "evaluationMode": evaluation_mode.as_str(),
         },
         "files": {
             "runDir": input.run_dir,
@@ -166,6 +167,7 @@ pub(super) fn retune_thermal_self_test_run(
         "applied": applied_results.iter().map(ThermalStageResult::to_value).collect::<Vec<_>>(),
         "validation": validation,
     });
+    thermal_summary_attach_replay_source_analysis(&mut replay_summary, &samples)?;
     write_json_pretty(&replay_candidate_path, &candidate_profile_value)?;
     write_json_pretty(&replay_summary_path, &replay_summary)?;
     Ok(ThermalRetuneOutput {

@@ -2886,14 +2886,6 @@ fn validate_thermal_control_profile_request(
                     "thermalControlProfile.profile.points must contain exactly 10 values.",
                 ));
             }
-            if request.op == ThermalControlProfileOp::Save
-                && profile.points.iter().flatten().count() > 6
-            {
-                return Err(HttpError::bad_request(
-                    "thermal_profile_too_many_saved_points",
-                    "saved thermal profiles support at most 6 populated points.",
-                ));
-            }
             if let Some(settings) = profile.settings.as_ref()
                 && (settings.temp_filter_alpha_permille == 0
                     || settings.temp_filter_alpha_permille > 1_000
@@ -2916,6 +2908,7 @@ fn validate_thermal_control_profile_request(
                     || !(100..=4_000).contains(&point.approach_damping_exponent_permille)
                     || point.hold_power_permille > 1_000
                     || point.hold_reheat_power_permille > 1_000
+                    || point.warmup_reenter_centi_c > 5_000
                     || point.hold_entry_centi_c > 5_000
                     || point.hold_exit_centi_c > 5_000
                     || point.hold_on_centi_c > 5_000
@@ -2929,7 +2922,7 @@ fn validate_thermal_control_profile_request(
                 {
                     return Err(HttpError::bad_request(
                         "invalid_thermal_profile",
-                        "thermal profile points must use positive brake distance, 0..1000 permille power, 100..4000 approach damping, <=5000 centi-C damping thresholds, <=10000 PI gains, and <=255 blend/lead ticks.",
+                        "thermal profile points must use positive brake distance, 0..1000 permille power, 100..4000 approach damping, <=5000 centi-C warmup/damping thresholds, <=10000 PI gains, and <=255 blend/lead ticks.",
                     ));
                 }
             }
@@ -6442,6 +6435,31 @@ mod tests {
         assert_eq!(error.error.code, "lease_expired");
     }
 
+    fn test_thermal_control_profile_point(target_temp_c: i16) -> ThermalControlProfilePoint {
+        ThermalControlProfilePoint {
+            target_temp_c,
+            brake_distance_centi_c: 1_000,
+            warmup_power_permille: 1_000,
+            warmup_reenter_centi_c: 400,
+            approach_power_permille: 500,
+            approach_floor_power_permille: 300,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 300,
+            hold_reheat_power_permille: 350,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 100,
+            hold_on_centi_c: 20,
+            hold_off_centi_c: 100,
+            overshoot_cutoff_centi_c: 200,
+            hold_kp_permille_per_c: 20,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 2,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 1,
+        }
+    }
+
     #[tokio::test]
     async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
         let state = AppState::test();
@@ -6576,6 +6594,13 @@ mod tests {
     async fn runtime_endpoint_saves_and_clears_saved_thermal_control_profile() {
         let state = AppState::test();
         let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let points = (0..FRONT_PANEL_PRESET_COUNT)
+            .map(|index| {
+                Some(test_thermal_control_profile_point(
+                    60 + i16::try_from(index).unwrap() * 20,
+                ))
+            })
+            .collect();
         let save = configure_runtime(
             State(state.clone()),
             AxumPath("mock-fp-lab-01".to_string()),
@@ -6597,39 +6622,7 @@ mod tests {
                     bank: None,
                     profile: Some(ThermalControlProfilePackage {
                         settings: None,
-                        points: vec![
-                            Some(ThermalControlProfilePoint {
-                                target_temp_c: 210,
-                                brake_distance_centi_c: 1_000,
-                                warmup_power_permille: 260,
-                                warmup_reenter_centi_c: 0,
-                                approach_power_permille: 260,
-                                approach_floor_power_permille: 180,
-                                approach_damping_exponent_permille: 1_000,
-                                approach_tail_window_centi_c: 0,
-                                hold_power_permille: 180,
-                                hold_reheat_power_permille: 0,
-                                hold_entry_centi_c: 0,
-                                hold_exit_centi_c: 0,
-                                hold_on_centi_c: 0,
-                                hold_off_centi_c: 0,
-                                overshoot_cutoff_centi_c: 0,
-                                hold_kp_permille_per_c: 0,
-                                hold_ki_permille_per_c_tick: 0,
-                                hold_blend_ticks: 0,
-                                approach_lead_ticks: 0,
-                                hold_lead_ticks: 0,
-                            }),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        ],
+                        points,
                     }),
                 }),
             }),
@@ -6685,6 +6678,26 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "invalid_thermal_profile");
+    }
+
+    #[test]
+    fn thermal_profile_rejects_out_of_range_warmup_reentry() {
+        let mut point = test_thermal_control_profile_point(140);
+        point.warmup_reenter_centi_c = 5_001;
+        let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
+        points[0] = Some(point);
+
+        let error = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::Preview,
+            bank: None,
+            profile: Some(ThermalControlProfilePackage {
+                settings: None,
+                points,
+            }),
+        })
+        .unwrap_err();
+
         assert_eq!(error.error.code, "invalid_thermal_profile");
     }
 
