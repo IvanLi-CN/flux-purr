@@ -1898,8 +1898,6 @@ async fn handle_heater_curve_command(
 const THERMAL_SUPPORTED_TARGETS_C: [i16; 11] =
     [60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250];
 const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
-const THERMAL_PPS3A_PERSISTED_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250];
-const THERMAL_PPS5A_PERSISTED_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 240];
 const THERMAL_SELF_TEST_DEFAULT_TARGETS_C: [i16; 3] = [60, 140, 220];
 const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = 10;
 const THERMAL_APPROACH_CURVE_PREFERRED_MS: u64 = 5_000;
@@ -1963,10 +1961,9 @@ async fn request_thermal_profile_persist_with_resolved_bank(
             && let Some(object) = thermal_control_profile.as_object_mut()
         {
             let profile = if op == "save" {
-                thermal_candidate_profile_to_value(&thermal_persisted_profile_for_bank(
+                thermal_candidate_profile_to_value(&thermal_profile_for_persistence(
                     &thermal_candidate_profile_from_value(profile),
-                    &bank,
-                ))
+                )?)
             } else {
                 profile
             };
@@ -4441,11 +4438,9 @@ async fn collect_single_thermal_self_test(
                 .as_bool()
                 == Some(true);
             if validation_passed && save_profile_on_pass {
-                let persisted_profile_value =
-                    thermal_candidate_profile_to_value(&thermal_persisted_profile_for_bank(
-                        &candidate_profile,
-                        source_selection.resolved_bank,
-                    ));
+                let persisted_profile_value = thermal_candidate_profile_to_value(
+                    &thermal_profile_for_persistence(&candidate_profile)?,
+                );
                 let save_status = request_leased(
                     client,
                     &resolved,
@@ -4661,25 +4656,19 @@ fn thermal_seed_candidate_profile() -> ThermalCandidateProfile {
     }
 }
 
-fn thermal_persisted_targets_for_bank(bank: &str) -> &'static [i16] {
-    match bank {
-        "pps5a" => &THERMAL_PPS5A_PERSISTED_TARGETS_C,
-        _ => &THERMAL_PPS3A_PERSISTED_TARGETS_C,
-    }
-}
-
-fn thermal_persisted_profile_for_bank(
+fn thermal_profile_for_persistence(
     profile: &ThermalCandidateProfile,
-    bank: &str,
-) -> ThermalCandidateProfile {
-    let points = thermal_persisted_targets_for_bank(bank)
-        .iter()
-        .filter_map(|target_temp_c| thermal_interpolated_candidate_point(profile, *target_temp_c))
-        .collect::<Vec<_>>();
-    ThermalCandidateProfile {
-        settings: profile.settings,
-        points,
+) -> Result<ThermalCandidateProfile, std::io::Error> {
+    if profile.points.len() > THERMAL_CONTROL_PROFILE_MAX_POINTS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "thermal profile has {} points; firmware supports at most {THERMAL_CONTROL_PROFILE_MAX_POINTS}",
+                profile.points.len()
+            ),
+        ));
     }
+    Ok(profile.clone())
 }
 
 fn thermal_default_settings() -> ThermalCandidateSettings {
@@ -12380,7 +12369,7 @@ mod tests {
     }
 
     #[test]
-    fn thermal_persisted_profile_projects_bank_specific_targets() {
+    fn thermal_persisted_profile_preserves_supplied_point_local_targets() {
         let profile = thermal_candidate_profile_from_value(json!({
             "points": [
                 {"targetTempC": 60, "brakeDistanceCentiC": 1100, "approachPowerPermille": 450, "approachFloorPowerPermille": 160, "approachDampingExponentPermille": 4000, "approachTailWindowCentiC": 375, "holdPowerPermille": 135, "holdReheatPowerPermille": 170, "holdEntryCentiC": 220, "holdExitCentiC": 400, "holdOnCentiC": 30, "holdOffCentiC": 40, "overshootCutoffCentiC": 50, "holdKpPermillePerC": 8, "holdKiPermillePerCTick": 1, "holdBlendTicks": 1, "approachLeadTicks": 6, "holdLeadTicks": 6, "warmupPowerPermille": 760},
@@ -12394,28 +12383,25 @@ mod tests {
             "settings": {}
         }));
 
-        let pps3a = thermal_persisted_profile_for_bank(&profile, "pps3a");
-        let pps5a = thermal_persisted_profile_for_bank(&profile, "pps5a");
+        let persisted =
+            thermal_profile_for_persistence(&profile).expect("seven points fit firmware");
 
-        assert_eq!(
-            pps3a
-                .points
+        assert_eq!(persisted, profile);
+    }
+
+    #[test]
+    fn thermal_persisted_profile_rejects_more_than_firmware_capacity() {
+        let profile = ThermalCandidateProfile {
+            settings: thermal_default_settings(),
+            points: THERMAL_SUPPORTED_TARGETS_C
                 .iter()
-                .map(|point| point.target_temp_c)
-                .collect::<Vec<_>>(),
-            vec![60, 100, 140, 180, 220, 250]
-        );
-        assert_eq!(
-            pps5a
-                .points
-                .iter()
-                .map(|point| point.target_temp_c)
-                .collect::<Vec<_>>(),
-            vec![60, 100, 140, 180, 220, 240]
-        );
-        let point_240 = thermal_candidate_point(&pps5a, 240).expect("240 point");
-        assert!(point_240.brake_distance_centi_c > 200);
-        assert!(point_240.brake_distance_centi_c < 400);
+                .copied()
+                .map(thermal_default_target_point)
+                .collect(),
+        };
+
+        let error = thermal_profile_for_persistence(&profile).unwrap_err();
+        assert!(error.to_string().contains("at most 10"));
     }
 
     #[test]
@@ -13781,6 +13767,32 @@ mod tests {
                 < 4_096,
             "target-scoped preview must fit inside the firmware USB JSONL limit"
         );
+    }
+
+    #[test]
+    fn thermal_nine_point_profile_save_fits_the_usb_line() {
+        let sparse_profile =
+            thermal_candidate_profile_from_value(default_thermal_candidate_profile());
+        let targets = [60, 80, 100, 120, 140, 160, 180, 220, 240];
+        let points = targets
+            .into_iter()
+            .map(|target_temp_c| {
+                thermal_interpolated_candidate_point(&sparse_profile, target_temp_c)
+                    .expect("full-batch target must materialize from the seed")
+            })
+            .collect();
+        let candidate = ThermalCandidateProfile {
+            settings: sparse_profile.settings,
+            points,
+        };
+        let profile = thermal_candidate_profile_to_value(
+            &thermal_profile_for_persistence(&candidate).expect("nine points fit firmware"),
+        );
+        let body = thermal_profile_preview_runtime_body(ThermalProfileMode::W100, profile);
+        let serialized = serde_json::to_vec(&body).expect("save body serialization");
+
+        assert!(serialized.len() > 4_096);
+        assert!(serialized.len() < 8 * 1024);
     }
 
     #[test]

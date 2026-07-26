@@ -23,7 +23,9 @@ pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
 pub const CAPABILITY_COUNT_MAX: usize = 10;
-pub const USB_LINE_MAX_LEN: usize = 4096;
+// A fully materialized 9-point thermal profile save request is about 5 KiB.
+// Keep one shared bound for firmware and devd JSONL frames so it can persist.
+pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
 pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
@@ -1726,6 +1728,7 @@ fn parse_calibration_config_op(value: Option<&str>) -> Result<CalibrationConfigO
 mod tests {
     use super::*;
     use crate::{FanCommand, FanPhase, snapshot_at};
+    use std::format;
 
     #[test]
     fn identity_lists_feature_capabilities() {
@@ -2426,6 +2429,32 @@ mod tests {
             6_100
         );
         assert_eq!(profile.settings.unwrap().heater_current_reserve_ma, 200);
+    }
+
+    #[test]
+    fn parses_nine_point_thermal_profile_save_within_usb_line_limit() {
+        let points = [60, 80, 100, 120, 140, 160, 180, 220, 240]
+            .into_iter()
+            .map(|target_temp_c| {
+                format!(
+                    r#"{{"targetTempC":{target_temp_c},"brakeDistanceCentiC":1000,"warmupPowerPermille":1000,"warmupReenterCentiC":1000,"approachPowerPermille":1000,"approachFloorPowerPermille":1000,"approachDampingExponentPermille":1000,"approachTailWindowCentiC":1000,"holdPowerPermille":1000,"holdReheatPowerPermille":1000,"holdEntryCentiC":1000,"holdExitCentiC":1000,"holdOnCentiC":1000,"holdOffCentiC":1000,"overshootCutoffCentiC":1000,"holdKpPermillePerC":1000,"holdKiPermillePerCTick":1000,"holdBlendTicks":1000,"approachLeadTicks":1000,"holdLeadTicks":1000}}"#
+                )
+            })
+            .collect::<std::vec::Vec<_>>()
+            .join(",");
+        let line = format!(
+            r#"{{"type":"runtime_config","requestId":"nine-point-save","thermalProfileMode":"100w","thermalControlProfile":{{"op":"save","bank":"pps5a","profile":{{"settings":{{"tempFilterAlphaPermille":1000,"warmupReenterCentiC":1000,"holdEntryCentiC":1000,"holdExitCentiC":1000,"holdOnCentiC":1000,"holdOffCentiC":1000,"overshootCutoffCentiC":1000,"approachMaxTicks":1000,"approachMinPowerRatioPermille":1000,"holdKpPermillePerC":1000,"holdKiPermillePerCTick":1000,"holdBlendTicks":1000,"holdReheatPowerPermille":1000,"approachLeadTicks":1000,"holdLeadTicks":1000,"autoAdjustableWorkingFloorMv":6100,"heaterCurrentReserveMa":1000}},"points":[{points},null]}}}}}}"#
+        );
+
+        assert!(line.len() > 4_096);
+        assert!(line.len() <= USB_LINE_MAX_LEN);
+        let UsbFrame::RuntimeConfig { request_id, config } = parse_usb_frame(&line).unwrap() else {
+            panic!("expected runtime config frame");
+        };
+        assert_eq!(request_id.as_str(), "nine-point-save");
+        let profile = config.thermal_control_profile.unwrap().profile.unwrap();
+        assert_eq!(profile.points.iter().flatten().count(), 9);
+        assert_eq!(profile.points[8].unwrap().target_temp_c, 240);
     }
 
     #[test]

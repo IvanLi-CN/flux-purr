@@ -88,6 +88,7 @@
   - `GPIO47` uses MCPWM at `100 Hz` for PPS and fixed-PD fallback. PPS voltage provides coarse power control; at the PPS floor and during bounded down-ramp, PWM continuously extends physical output down to `0%`. Each warmup entry applies a `1000 ms` linear physical-output soft start. HOLD inherits and locks the voltage established by Approach while PWM handles PI response. Firmware does not sweep voltage downward during HOLD; only sustained full PWM below target with insufficient rise may raise PPS in bounded `500 mV` steps at least `2 s` apart. Safe-limit convergence obeys the same step bound and cannot clamp directly to the PPS floor.
   - control interval is `50 ms (20 Hz)`
   - RTD open/short or ADC read failure forces heater fault-latch and duty `0%` without buzzer attention; valid temperature or raw ADC changes are never classified as a speed/discontinuity fault
+- USB JSONL control frames use an `8 KiB` shared firmware/devd limit. This accommodates a fully materialized nine-point thermal profile save or preview request; oversized frames are rejected at the transport boundary.
   - `temp >= 420°C` enters thermal runaway, forces duty `0%`, and rejects heater arm while the runaway alert remains unacknowledged; acknowledgement never bypasses the active absolute overtemperature cutoff
   - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
 - Fan control:

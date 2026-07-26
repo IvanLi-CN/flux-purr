@@ -66,7 +66,7 @@ const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
-const SERIAL_LINE_LIMIT: usize = 4_096;
+const SERIAL_LINE_LIMIT: usize = 8 * 1024;
 #[cfg(unix)]
 const LOCK_EX: i32 = 2;
 #[cfg(unix)]

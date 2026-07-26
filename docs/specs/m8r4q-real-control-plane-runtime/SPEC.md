@@ -147,6 +147,7 @@
 - `calibration_job`：`request_id` + `op=start|cancel` + optional `kind=vin_adc_auto|heater_curve_auto`；response 返回 calibration auto-job 状态。
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
+- USB JSONL 单帧上限为 `8 KiB`（包含换行）。firmware、native `devd` 与 Browser Web Serial 必须使用同一上限；该容量必须容纳完整 9 点、point-local 的 thermal profile preview/save 请求，超限请求必须在 transport 边界明确拒绝。`save` 必须保留所提供的每一个 `1..=10` point，不得按 profile bank 投影、插值重建或静默丢弃温度点。
 
 ### Browser Web Serial
 
