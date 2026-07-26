@@ -15,7 +15,7 @@
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo fmt --manifest-path firmware/Cargo.toml --check`
-- 最长 Wi-Fi 凭据、完整 calibration TLV 与六点 thermal profile 的 record round-trip 测试
+- 最长 Wi-Fi 凭据、完整 calibration TLV 与双 bank 各 10 点 thermal profile 的 v3 record round-trip 测试
 - 历史五点 profile 与新 point-local profile 总长度碰撞的迁移回归测试
 - Xtensa release build按 `SPEC.md` 的质量门槛执行。
 

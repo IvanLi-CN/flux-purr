@@ -7,16 +7,16 @@ use crate::frontpanel::{
 pub const M24C64_I2C_ADDRESS: u8 = 0x50;
 pub const M24C64_CAPACITY_BYTES: u16 = 8 * 1024;
 pub const M24C64_PAGE_SIZE: usize = 32;
-pub const MEMORY_SLOT_SIZE: usize = 1024;
-pub const MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
-pub const MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
-pub const PREVIOUS_MEMORY_SLOT_SIZE: usize = 2048;
-pub const PREVIOUS_MEMORY_SLOT_A_OFFSET: u16 = 0x1000;
-pub const PREVIOUS_MEMORY_SLOT_B_OFFSET: u16 = 0x1800;
+pub const MEMORY_SLOT_SIZE: usize = 2048;
+pub const MEMORY_SLOT_A_OFFSET: u16 = 0x1000;
+pub const MEMORY_SLOT_B_OFFSET: u16 = 0x1800;
+pub const PREVIOUS_MEMORY_SLOT_SIZE: usize = 1024;
+pub const PREVIOUS_MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
+pub const PREVIOUS_MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
 pub const LEGACY_MEMORY_SLOT_SIZE: usize = 512;
 pub const LEGACY_MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
 pub const LEGACY_MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
-pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 2;
+pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 3;
 pub const MEMORY_RECORD_HEADER_LEN: usize = 16;
 pub const MEMORY_RECORD_PAYLOAD_MAX: usize = MEMORY_SLOT_SIZE - MEMORY_RECORD_HEADER_LEN;
 pub const MEMORY_WIFI_SSID_MAX_LEN: usize = 32;
@@ -25,7 +25,7 @@ pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
-pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = 6;
+pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
 pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
 pub const THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT: u16 = 90;
@@ -1038,7 +1038,7 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     if bytes[0..4] != MEMORY_RECORD_MAGIC {
         return Err(MemoryDecodeError::BadMagic);
     }
-    if bytes[4] != 1 && bytes[4] != MEMORY_RECORD_FORMAT_VERSION {
+    if !matches!(bytes[4], 1 | 2 | MEMORY_RECORD_FORMAT_VERSION) {
         return Err(MemoryDecodeError::UnsupportedFormat(bytes[4]));
     }
     if bytes[5] as usize != MEMORY_RECORD_HEADER_LEN {
@@ -1063,7 +1063,10 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     }
 
     let sequence = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    let mut config = decode_config_payload(&bytes[MEMORY_RECORD_HEADER_LEN..payload_end])?;
+    let mut config = decode_config_payload(
+        &bytes[MEMORY_RECORD_HEADER_LEN..payload_end],
+        bytes[4] >= MEMORY_RECORD_FORMAT_VERSION,
+    )?;
     config.sanitize();
 
     Ok(MemoryRecord { sequence, config })
@@ -1222,7 +1225,10 @@ fn encode_config_payload(
     Ok(cursor)
 }
 
-fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError> {
+fn decode_config_payload(
+    bytes: &[u8],
+    wide_tlv_lengths: bool,
+) -> Result<MemoryConfig, MemoryDecodeError> {
     let mut config = MemoryConfig::default();
     let mut legacy_active_adc_calibration = AdcCalibrationConfig::default();
     let mut legacy_draft_adc_calibration = AdcCalibrationConfig::default();
@@ -1232,12 +1238,17 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
     let mut saw_legacy_draft = false;
     let mut cursor = 0;
     while cursor < bytes.len() {
-        if bytes.len().saturating_sub(cursor) < 2 {
+        let header_len = if wide_tlv_lengths { 3 } else { 2 };
+        if bytes.len().saturating_sub(cursor) < header_len {
             return Err(MemoryDecodeError::MalformedTlv);
         }
         let tag = bytes[cursor];
-        let len = bytes[cursor + 1] as usize;
-        cursor += 2;
+        let len = if wide_tlv_lengths {
+            u16::from_le_bytes([bytes[cursor + 1], bytes[cursor + 2]]) as usize
+        } else {
+            bytes[cursor + 1] as usize
+        };
+        cursor += header_len;
         if bytes.len().saturating_sub(cursor) < len {
             return Err(MemoryDecodeError::MalformedTlv);
         }
@@ -2425,19 +2436,19 @@ fn push_tlv(
     out: &mut [u8],
     cursor: &mut usize,
 ) -> Result<(), MemoryEncodeError> {
-    if value.len() > u8::MAX as usize {
+    if value.len() > u16::MAX as usize {
         return Err(MemoryEncodeError::PayloadTooLarge);
     }
     let next = cursor
-        .checked_add(2)
+        .checked_add(3)
         .and_then(|position| position.checked_add(value.len()))
         .ok_or(MemoryEncodeError::PayloadTooLarge)?;
     if next > out.len() {
         return Err(MemoryEncodeError::BufferTooSmall);
     }
     out[*cursor] = tag;
-    out[*cursor + 1] = value.len() as u8;
-    out[*cursor + 2..next].copy_from_slice(value);
+    out[*cursor + 1..*cursor + 3].copy_from_slice(&(value.len() as u16).to_le_bytes());
+    out[*cursor + 3..next].copy_from_slice(value);
     *cursor = next;
     Ok(())
 }
@@ -2724,7 +2735,10 @@ mod tests {
             .push_str("1234567890123456789012345678901234567890123456789012345678901234")
             .unwrap();
         let template = config.active_thermal_control_profile.points[0].unwrap();
-        for (slot, target_temp_c) in [60, 100, 140, 180, 220, 250].into_iter().enumerate() {
+        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180, 200, 220, 240]
+            .into_iter()
+            .enumerate()
+        {
             let point = Some(ThermalControlProfilePointConfig {
                 target_temp_c,
                 ..template
@@ -2787,16 +2801,18 @@ mod tests {
         let mut destination = MEMORY_RECORD_HEADER_LEN;
         while source < len {
             let tag = current[source];
-            let value_len = current[source + 1] as usize;
-            let value_end = source + 2 + value_len;
+            let value_len = u16::from_le_bytes([current[source + 1], current[source + 2]]) as usize;
+            let value_start = source + 3;
+            let value_end = value_start + value_len;
             if tag != TLV_THERMAL_CONTROL_PROFILE_PPS5A && tag != TLV_THERMAL_PROFILE_MODE {
                 bytes[destination] = if tag == TLV_THERMAL_CONTROL_PROFILE_PPS3A {
                     TLV_ACTIVE_THERMAL_CONTROL_PROFILE
                 } else {
                     tag
                 };
-                bytes[destination + 1..destination + 2 + value_len]
-                    .copy_from_slice(&current[source + 1..value_end]);
+                bytes[destination + 1] = value_len as u8;
+                bytes[destination + 2..destination + 2 + value_len]
+                    .copy_from_slice(&current[value_start..value_end]);
                 destination += 2 + value_len;
             }
             source = value_end;
@@ -3113,10 +3129,13 @@ mod tests {
     }
 
     #[test]
-    fn thermal_profile_persistence_caps_legacy_dense_profiles_to_six_points() {
+    fn thermal_profile_persistence_keeps_ten_dense_points() {
         let mut config = sample_config();
         let template = config.active_thermal_control_profile.points[0].unwrap();
-        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180].into_iter().enumerate() {
+        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180, 200, 220, 240]
+            .into_iter()
+            .enumerate()
+        {
             config.active_thermal_control_profile.points[slot] =
                 Some(ThermalControlProfilePointConfig {
                     target_temp_c,
@@ -3149,12 +3168,11 @@ mod tests {
             60
         );
         assert_eq!(
-            decoded.config.active_thermal_control_profile.points[5]
-                .expect("sixth point")
+            decoded.config.active_thermal_control_profile.points[9]
+                .expect("tenth point")
                 .target_temp_c,
-            160
+            240
         );
-        assert!(decoded.config.active_thermal_control_profile.points[6].is_none());
     }
 
     #[test]
@@ -3222,8 +3240,8 @@ mod tests {
         let mut cursor = 0usize;
         while cursor < payload.len() {
             let tag = payload[cursor];
-            let value_len = payload[cursor + 1] as usize;
-            let tlv_len = 2 + value_len;
+            let value_len = u16::from_le_bytes([payload[cursor + 1], payload[cursor + 2]]) as usize;
+            let tlv_len = 3 + value_len;
             if tag != TLV_ADC_CALIBRATION_REFERENCES && tag != TLV_ADC_CALIBRATION_TARGETS {
                 filtered_payload[filtered_len..filtered_len + tlv_len]
                     .copy_from_slice(&payload[cursor..cursor + tlv_len]);
@@ -3359,17 +3377,17 @@ mod tests {
         let payload_len = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
         let insert = MEMORY_RECORD_HEADER_LEN + payload_len;
         bytes[insert] = 0xee;
-        bytes[insert + 1] = 3;
-        bytes[insert + 2..insert + 5].copy_from_slice(&[1, 2, 3]);
-        let new_payload_len = payload_len + 5;
+        bytes[insert + 1..insert + 3].copy_from_slice(&3u16.to_le_bytes());
+        bytes[insert + 3..insert + 6].copy_from_slice(&[1, 2, 3]);
+        let new_payload_len = payload_len + 6;
         bytes[6..8].copy_from_slice(&(new_payload_len as u16).to_le_bytes());
         let crc = crc32_update(
             crc32(&bytes[0..12]),
-            &bytes[MEMORY_RECORD_HEADER_LEN..insert + 5],
+            &bytes[MEMORY_RECORD_HEADER_LEN..insert + 6],
         ) ^ 0xffff_ffff;
         bytes[12..16].copy_from_slice(&crc.to_le_bytes());
 
-        let decoded = decode_memory_record(&bytes[..len + 5]).unwrap();
+        let decoded = decode_memory_record(&bytes[..len + 6]).unwrap();
         assert_eq!(decoded.config, record.config);
     }
 

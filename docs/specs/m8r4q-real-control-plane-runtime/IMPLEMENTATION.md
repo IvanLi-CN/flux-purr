@@ -10,7 +10,7 @@
 
 ## Coverage / rollout summary
 
-- thermal profile persistence 已升级为固定 `pps3a` / `pps5a` 双 bank；每个 bank 最多持久化 `6` 个 populated anchors。EEPROM v2 使用固定 `1 KiB` slot，读取顺序为 `1 KiB v2 -> 512 B legacy`，旧单 profile 会迁移到 `pps3a` 且默认 mode 为 `65w`。
+- thermal profile persistence 使用固定 `pps3a` / `pps5a` 双 bank；每个 bank 最多持久化 `10` 个完整 point-local 目标点。EEPROM v3 使用固定 `2 KiB` slot 与 `u16` TLV length，读取顺序为 `2 KiB v3 -> 1 KiB v2 -> 512 B legacy`，旧单 profile 会迁移到 `pps3a` 且默认 mode 为 `65w`。
 - runtime status、runtime config、CLI 与 self-test 已统一支持 `thermalProfileMode=auto|65w|100w` 与 `thermalProfileResolvedBank`。显式 `65w` / `100w` 为强制档；`auto` 仅按 source capability class 在 `pps3a` / `pps5a` 间解析，不按 live current 自动回退。
 - `flux-purr thermal profile preview|save|clear-saved` 已是 bank-aware 路径。`preview` 仍是单一 RAM overlay；显式 `save` / `clear-saved` 会携带目标 bank，`auto` 下必须先应用 `thermalProfileMode=auto`，再从该请求的 status 回读 `thermalProfileResolvedBank`，最后才允许向 resolved bank 持久化。
 - `flux-purr thermal self-test` 已支持 source-aware `auto|65w|100w`。65W 维持 `20V / 3.25A` 语义，100W 使用 `21V / 5A` 语义。报告与 HTML 已保留 `selectedMode`、`resolvedBank`、`detectedSourceClass`、source preset/readback 以及 per-stage `analysis.approachSource` / `analysis.holdSource`。

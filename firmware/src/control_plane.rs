@@ -2158,9 +2158,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_command_save_caps_persisted_thermal_profile_points_to_six() {
+    fn runtime_command_save_keeps_all_thermal_profile_points() {
         let mut points = [None; FRONTPANEL_PRESET_COUNT];
-        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180].into_iter().enumerate() {
+        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180, 200, 220, 240]
+            .into_iter()
+            .enumerate()
+        {
             points[slot] = Some(ThermalControlProfilePointWire {
                 target_temp_c,
                 brake_distance_centi_c: 1_000,
@@ -2220,12 +2223,11 @@ mod tests {
             crate::memory::THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS
         );
         assert_eq!(
-            config.active_thermal_control_profile.points[5]
-                .expect("sixth point")
+            config.active_thermal_control_profile.points[9]
+                .expect("tenth point")
                 .target_temp_c,
-            160
+            240
         );
-        assert!(config.active_thermal_control_profile.points[6].is_none());
     }
 
     #[test]

@@ -99,7 +99,7 @@ pub(super) async fn run_flagship_tuning(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let target_selector = flagship_target_selector(&args);
     let tune_targets_c = parse_thermal_targets(Some(&args.tune_targets_c))?;
-    validate_flagship_scope(&tune_targets_c)?;
+    validate_flagship_scope(args.profile_mode, &tune_targets_c)?;
     let tuning_execution_order_c = build_recursive_tuning_execution_order(&tune_targets_c);
     let output_root = effective_output_root(&args.output_root);
     fs::create_dir_all(&output_root)?;
@@ -3079,8 +3079,12 @@ fn flagship_target_selector(args: &ThermalFlagshipTuneArgs) -> TargetSelector {
 }
 
 fn validate_flagship_scope(
+    profile_mode: ThermalProfileMode,
     tune_targets_c: &[i16],
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if profile_mode != ThermalProfileMode::W100 {
+        return Err("5A full-batch tuning requires --profile-mode 100w".into());
+    }
     if tune_targets_c.is_empty() {
         return Err("flagship tuning target list must be non-empty".into());
     }
@@ -3197,6 +3201,19 @@ mod tests {
             build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220, 240]),
             vec![60, 240, 140, 100, 80, 120, 180, 160, 220]
         );
+    }
+
+    #[test]
+    fn flagship_scope_rejects_non_100w_profile_modes() {
+        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 240]).is_ok());
+        for mode in [ThermalProfileMode::W65, ThermalProfileMode::Auto] {
+            assert_eq!(
+                validate_flagship_scope(mode, &[60, 240])
+                    .expect_err("non-100w mode must be rejected")
+                    .to_string(),
+                "5A full-batch tuning requires --profile-mode 100w"
+            );
+        }
     }
 
     #[test]
