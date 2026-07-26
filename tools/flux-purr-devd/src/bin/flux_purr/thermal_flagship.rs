@@ -852,7 +852,12 @@ async fn tune_flagship_target(
             break;
         };
         let chosen_profile = read_json(&selected_best.candidate_profile_file)?;
-        current_profile = normalize_sparse_profile_value(&chosen_profile, anchors_c)?;
+        current_profile = merge_target_candidate_into_profile(
+            &current_profile,
+            &chosen_profile,
+            target_temp_c,
+            anchors_c,
+        )?;
         write_json_pretty(
             &round_dir.join("accepted-sparse-profile.json"),
             &current_profile,
@@ -1001,6 +1006,27 @@ fn target_local_profile_window(
             points: vec![target_point],
         },
     ))
+}
+
+fn merge_target_candidate_into_profile(
+    current_profile: &Value,
+    target_profile: &Value,
+    target_temp_c: i16,
+    materialized_targets_c: &[i16],
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut merged = thermal_candidate_profile_from_value(current_profile.clone());
+    let selected = thermal_candidate_profile_from_value(target_profile.clone());
+    let selected_point = thermal_candidate_point(&selected, target_temp_c)
+        .ok_or_else(|| format!("selected profile missing {target_temp_c}C point"))?;
+    if let Some(point) = super::thermal_candidate_point_mut(&mut merged, target_temp_c) {
+        *point = selected_point;
+    } else {
+        merged.points.push(selected_point);
+    }
+    normalize_sparse_profile_value(
+        &thermal_candidate_profile_to_value(&merged),
+        materialized_targets_c,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2908,6 +2934,7 @@ fn sanitize_point(point: Option<&Value>, target_temp_c: Option<i16>) -> Option<V
         "approachTailWindowCentiC",
         "holdPowerPermille",
         "holdReheatPowerPermille",
+        "warmupReenterCentiC",
         "holdEntryCentiC",
         "holdExitCentiC",
         "holdOnCentiC",
@@ -3173,6 +3200,20 @@ mod tests {
     }
 
     #[test]
+    fn report_point_keeps_point_local_warmup_reentry() {
+        let point = sanitize_point(
+            Some(&json!({
+                "targetTempC": 140,
+                "warmupReenterCentiC": 875,
+            })),
+            Some(140),
+        )
+        .expect("sanitized point");
+
+        assert_eq!(point["warmupReenterCentiC"], json!(875));
+    }
+
+    #[test]
     fn interval_midpoint_prefers_lower_index_for_even_spans() {
         assert_eq!(interval_midpoint_index(0, 5), 2);
         assert_eq!(interval_midpoint_index(2, 7), 4);
@@ -3290,6 +3331,45 @@ mod tests {
         assert_ne!(
             explicit_point_value(&reseeded, 140),
             explicit_point_value(&current_profile, 140)
+        );
+    }
+
+    #[test]
+    fn target_scoped_batch_winner_preserves_frozen_neighbor_points() {
+        let targets = [60, 140, 240];
+        let current_profile = normalize_sparse_profile_value(
+            &json!({
+                "settings": {},
+                "points": [
+                    {"targetTempC": 60, "holdPowerPermille": 111},
+                    {"targetTempC": 140, "holdPowerPermille": 222},
+                    {"targetTempC": 240, "holdPowerPermille": 333}
+                ]
+            }),
+            &targets,
+        )
+        .expect("full profile");
+        let lower_before = explicit_point_value(&current_profile, 60).expect("60C point");
+        let upper_before = explicit_point_value(&current_profile, 240).expect("240C point");
+        let target_profile = target_local_profile_window(
+            &json!({
+                "settings": {},
+                "points": [{"targetTempC": 140, "holdPowerPermille": 777}]
+            }),
+            140,
+        )
+        .expect("target profile");
+
+        let merged =
+            merge_target_candidate_into_profile(&current_profile, &target_profile, 140, &targets)
+                .expect("merged profile");
+
+        assert_eq!(explicit_point_value(&merged, 60), Some(lower_before));
+        assert_eq!(explicit_point_value(&merged, 240), Some(upper_before));
+        assert_eq!(
+            explicit_point_value(&merged, 140)
+                .and_then(|point| point.get("holdPowerPermille").cloned()),
+            Some(json!(777))
         );
     }
 

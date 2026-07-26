@@ -9,12 +9,14 @@
 - EEPROM calibration persistence now keeps the ADC-domain pairs and the owner-entered physical references in separate TLVs, so RTD/VIN sample tables can render the original `referenceTempC` / `referenceVinMv` after refresh, reboot, export/import, or devd reconnect.
 - EEPROM 读写失败只记录日志并尝试 flash fallback；所有持久化后端都失败时回退默认/当前配置，不阻断 heater/fan 保护。
 - `MemoryConfig` 保存 `pps3a` / `pps5a` thermal control bank 与 `thermalProfileMode`。旧单档数据迁入 `pps3a`，缺失 mode 按 `65w` 恢复。
+- 新 thermal profile payload 使用 `TCP2` 布局标识；decoder 对无标识 payload 保持历史布局优先，避免仅凭总长度误判 point-local 格式。
 
 ## Validation
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo fmt --manifest-path firmware/Cargo.toml --check`
 - 最长 Wi-Fi 凭据、完整 calibration TLV 与六点 thermal profile 的 record round-trip 测试
+- 历史五点 profile 与新 point-local profile 总长度碰撞的迁移回归测试
 - Xtensa release build按 `SPEC.md` 的质量门槛执行。
 
 ## Remaining Work

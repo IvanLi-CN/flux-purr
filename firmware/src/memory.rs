@@ -75,6 +75,9 @@ const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_WARMUP: usize = 32;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN: usize = 34;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_HOLD_ON: usize = 36;
 const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER: usize = 38;
+const THERMAL_CONTROL_PROFILE_LAYOUT_MARKER: [u8; 4] = *b"TCP2";
+const THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN: usize =
+    THERMAL_CONTROL_PROFILE_LAYOUT_MARKER.len();
 const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_VALUE_MASK: u16 = 0x0fff;
 const THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C: u16 = 25;
 const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_LEGACY: usize =
@@ -93,9 +96,9 @@ const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_HOLD_ON: usize =
 const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER: usize =
     THERMAL_CONTROL_PROFILE_MAX_POINTS
         * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER;
-const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize =
-    THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
-        + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER;
+const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+    + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+    + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const PRESET_NONE_WIRE_VALUE: i16 = i16::MIN;
@@ -1326,13 +1329,13 @@ fn decode_config_payload(bytes: &[u8]) -> Result<MemoryConfig, MemoryDecodeError
             TLV_ACTIVE_HEATER_CURVE if len == HEATER_CURVE_MAX_POINTS * 4 => {
                 config.active_heater_curve = decode_heater_curve(value);
             }
-            TLV_ACTIVE_THERMAL_CONTROL_PROFILE if is_supported_thermal_control_profile_len(len) => {
+            TLV_ACTIVE_THERMAL_CONTROL_PROFILE if is_supported_thermal_control_profile(value) => {
                 config.active_thermal_control_profile = decode_thermal_control_profile(value);
             }
-            TLV_THERMAL_CONTROL_PROFILE_PPS3A if is_supported_thermal_control_profile_len(len) => {
+            TLV_THERMAL_CONTROL_PROFILE_PPS3A if is_supported_thermal_control_profile(value) => {
                 config.active_thermal_control_profile = decode_thermal_control_profile(value);
             }
-            TLV_THERMAL_CONTROL_PROFILE_PPS5A if is_supported_thermal_control_profile_len(len) => {
+            TLV_THERMAL_CONTROL_PROFILE_PPS5A if is_supported_thermal_control_profile(value) => {
                 config.thermal_control_profile_pps5a = decode_thermal_control_profile(value);
             }
             TLV_THERMAL_PROFILE_MODE if len == 1 => {
@@ -1597,11 +1600,16 @@ fn decode_heater_curve(bytes: &[u8]) -> HeaterCurveConfig {
 }
 
 fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mut [u8]) -> usize {
+    out[..THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN]
+        .copy_from_slice(&THERMAL_CONTROL_PROFILE_LAYOUT_MARKER);
+    let settings_start = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN;
+    let settings_end =
+        settings_start + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
     encode_thermal_control_profile_settings(
         &config.settings,
-        &mut out[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY],
+        &mut out[settings_start..settings_end],
     );
-    let mut cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
+    let mut cursor = settings_end;
     for point in config
         .points
         .into_iter()
@@ -1675,19 +1683,27 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     let mut cursor = 0;
     // Preserve the preceding on-device profile layout so an upgrade does not shift the
     // working-voltage floor or current reserve into the wrong fields.
-    let point_payload_len = if bytes.len()
-        >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
-        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+    let point_payload_len = if bytes.starts_with(&THERMAL_CONTROL_PROFILE_LAYOUT_MARKER)
+        && bytes.len()
+            >= THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+                + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+        && (bytes.len()
+            - THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
             % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
             == 0
-        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+        && (bytes.len()
+            - THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
             / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
             <= THERMAL_CONTROL_PROFILE_MAX_POINTS
     {
-        config.settings = decode_thermal_control_profile_settings(
-            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY],
-        );
-        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
+        let settings_start = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN;
+        let settings_end =
+            settings_start + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
+        config.settings =
+            decode_thermal_control_profile_settings(&bytes[settings_start..settings_end]);
+        cursor = settings_end;
         THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
     } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS
         && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS)
@@ -1845,6 +1861,21 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
         );
         cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_LEGACY;
         THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY
+    } else if bytes.len() >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
+            == 0
+        && (bytes.len() - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        // Compatibility for development builds that emitted the point-local layout before it
+        // gained an explicit marker. Legacy layouts above win whenever their lengths collide.
+        config.settings = decode_thermal_control_profile_settings(
+            &bytes[..THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY],
+        );
+        cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
+        THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
     } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER {
         THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
     } else if bytes.len() == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_HOLD_ON {
@@ -2087,7 +2118,22 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
 }
 
 #[allow(clippy::manual_is_multiple_of)]
-fn is_supported_thermal_control_profile_len(len: usize) -> bool {
+fn is_supported_thermal_control_profile(bytes: &[u8]) -> bool {
+    let len = bytes.len();
+    let marked_current = bytes.starts_with(&THERMAL_CONTROL_PROFILE_LAYOUT_MARKER)
+        && len
+            >= THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+                + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+        && (len
+            - THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            % THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
+            == 0
+        && (len
+            - THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            / THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
     let current_with_point_warmup_reenter = len
         >= THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
         && (len - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
@@ -2190,7 +2236,8 @@ fn is_supported_thermal_control_profile_len(len: usize) -> bool {
     let current_legacy_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN;
     let current_previous_points_only =
         len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_WARMUP;
-    current_with_point_warmup_reenter
+    marked_current
+        || current_with_point_warmup_reenter
         || previous_settings_with_current_points
         || current_with_settings
         || previous_current_with_settings
@@ -2889,15 +2936,100 @@ mod tests {
         let encoded_len = encode_thermal_control_profile(&decoded, &mut encoded);
         assert_eq!(
             encoded_len,
-            THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+            THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+                + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
         );
         assert_eq!(
-            u16::from_le_bytes([encoded[3 * 2], encoded[3 * 2 + 1]]),
+            &encoded[..THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN],
+            &THERMAL_CONTROL_PROFILE_LAYOUT_MARKER
+        );
+        let settings_start = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN;
+        assert_eq!(
+            u16::from_le_bytes([
+                encoded[settings_start + 3 * 2],
+                encoded[settings_start + 3 * 2 + 1],
+            ]),
             7_200
         );
         assert_eq!(
-            u16::from_le_bytes([encoded[4 * 2], encoded[4 * 2 + 1]]),
+            u16::from_le_bytes([
+                encoded[settings_start + 4 * 2],
+                encoded[settings_start + 4 * 2 + 1],
+            ]),
             350
+        );
+    }
+
+    #[test]
+    fn thermal_profile_layout_marker_prevents_legacy_five_point_collision() {
+        let mut legacy = [0u8; THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+            + 5 * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN];
+        let settings = sample_config().active_thermal_control_profile.settings;
+        let setting_values = [
+            settings.temp_filter_alpha_permille,
+            settings.warmup_reenter_centi_c,
+            settings.hold_entry_centi_c,
+            settings.hold_exit_centi_c,
+            settings.hold_on_centi_c,
+            settings.hold_off_centi_c,
+            settings.overshoot_cutoff_centi_c,
+            settings.approach_max_ticks,
+            settings.approach_min_power_ratio_permille,
+            settings.hold_kp_permille_per_c,
+            settings.hold_ki_permille_per_c_tick,
+            settings.hold_blend_ticks,
+            settings.hold_reheat_power_permille,
+            settings.approach_lead_ticks,
+            settings.hold_lead_ticks,
+            settings.auto_adjustable_working_floor_mv,
+            settings.heater_current_reserve_ma,
+        ];
+        for (index, value) in setting_values.into_iter().enumerate() {
+            let offset = index * 2;
+            legacy[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        for index in 0..5 {
+            let cursor = THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN
+                + index * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN;
+            let values = [
+                60 + index as u16 * 20,
+                500,
+                1_000,
+                800,
+                500,
+                1_000,
+                200,
+                220,
+                100,
+                200,
+                100,
+                200,
+                10,
+                1,
+                2,
+                3,
+                4,
+            ];
+            for (field_index, value) in values.into_iter().enumerate() {
+                let offset = cursor + field_index * 2;
+                legacy[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+
+        assert_eq!(
+            legacy.len(),
+            THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+                + 5 * THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER
+        );
+        let decoded = decode_thermal_control_profile(&legacy);
+        assert_eq!(decoded.settings, settings);
+        assert_eq!(
+            decoded.points[0].expect("first legacy point").target_temp_c,
+            60
+        );
+        assert_eq!(
+            decoded.points[4].expect("last legacy point").target_temp_c,
+            140
         );
     }
 

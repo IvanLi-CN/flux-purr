@@ -77,7 +77,7 @@
   - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config in two `1 KiB` slots at `0x0400` and `0x0800`; the previous `2 KiB` slots at `0x1000` / `0x1800` and legacy `512 B` slots at `0x0000` / `0x0200` remain read-only migration sources, with the highest valid sequence restored
   - if EEPROM access fails, the same record falls back to two slots in the final `8 KiB` of a writable data/NVS partition; each slot owns a separate `4 KiB` erase sector so a power loss during one write leaves the other record recoverable
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
-  - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended
+  - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:

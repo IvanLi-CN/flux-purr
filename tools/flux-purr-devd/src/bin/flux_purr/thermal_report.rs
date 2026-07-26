@@ -26,6 +26,7 @@ const POINT_FIELDS: &[&str] = &[
     "approachTailWindowCentiC",
     "holdPowerPermille",
     "holdReheatPowerPermille",
+    "warmupReenterCentiC",
     "holdEntryCentiC",
     "holdExitCentiC",
     "holdOnCentiC",
@@ -1391,7 +1392,8 @@ fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        render_baseline_html, sanitize_non_finite_json_numbers, write_preliminary_review_bundle,
+        render_baseline_html, sanitize_non_finite_json_numbers, sanitize_point,
+        write_preliminary_review_bundle,
     };
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1415,6 +1417,20 @@ mod tests {
             sanitized,
             r#"{"ok":[null,null,null],"label":"Infinity","nested":{"x":null}}"#
         );
+    }
+
+    #[test]
+    fn legacy_rerender_point_keeps_point_local_warmup_reentry() {
+        let point = sanitize_point(
+            Some(&json!({
+                "targetTempC": 140,
+                "warmupReenterCentiC": 875,
+            })),
+            Some(140),
+        )
+        .expect("sanitized point");
+
+        assert_eq!(point["warmupReenterCentiC"], json!(875));
     }
 
     #[test]

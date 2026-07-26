@@ -102,7 +102,7 @@
   - `0x32`: `pps3a` saved thermal control profile
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
-- 旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多六个压紧锚点，和完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
+- 新写入的 thermal profile payload 必须以 `TCP2` 布局标识开头，避免 point-local 布局与历史 settings/point 长度组合发生歧义；无标识的历史 payload 继续按旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多六个压紧锚点，和完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -118,6 +118,7 @@
 - Given EEPROM record 来自旧格式且没有 `0x22/0x23` reference TLV，When 固件解码，Then calibration sample 仍恢复为同样的 `observed_mv/expected_mv`，只是 reference 字段为空。
 - Given v1 或 legacy record 只含一个 saved thermal profile，When 解码，Then profile 写入 `pps3a` bank，`pps5a` 保持空 profile，mode 为 `65w`。
 - Given v2 record 同时含两个 thermal bank，When 重启恢复，Then 两个 bank、mode、Wi-Fi 凭据和 calibration state 都完整恢复。
+- Given 无标识历史 thermal profile 的 payload 长度与新 point-local 布局长度相同，When 固件升级后解码，Then 必须优先恢复历史 settings/point 布局，不得按新布局错位读取。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
