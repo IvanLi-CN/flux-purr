@@ -8,12 +8,7 @@ use std::{
 
 use serde_json::{Map, Value, json};
 
-const DEFAULT_PROFILE_MODE: &str = "100w";
-const DEFAULT_RESOLVED_BANK: &str = "pps5a";
-const DEFAULT_DETECTED_SOURCE_CLASS: &str = "pps5a";
-const DEFAULT_SOURCE_PRESET: &str = "21V / 5.0A";
-const DEFAULT_PROVIDER: &str = "IsolaPurr";
-const DEFAULT_PORT_PATH: &str = "/dev/cu.usbmodem2111401";
+const UNKNOWN_LEGACY_METADATA: &str = "unknown";
 const DATA_PLACEHOLDER: &str = "__THERMAL_REPORT_DATA__";
 const REPORT_TEMPLATE: &str = include_str!("thermal_preliminary_review_template.html");
 const POINT_FIELDS: &[&str] = &[
@@ -116,33 +111,33 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
                 .or_else(|| legacy_bundle.get("portPath"))
                 .and_then(Value::as_str)
         })
-        .unwrap_or(DEFAULT_PORT_PATH)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
         .to_string();
 
     let selected_mode = legacy_bundle
         .get("selectedMode")
         .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_PROFILE_MODE)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
         .to_string();
     let resolved_bank = legacy_bundle
         .get("resolvedBank")
         .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_RESOLVED_BANK)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
         .to_string();
     let detected_source_class = legacy_bundle
         .get("detectedSourceClass")
         .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_DETECTED_SOURCE_CLASS)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
         .to_string();
     let source_preset = legacy_bundle
         .get("sourcePreset")
         .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_SOURCE_PRESET)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
         .to_string();
     let provider = legacy_bundle
         .get("provider")
         .and_then(Value::as_str)
-        .unwrap_or(DEFAULT_PROVIDER)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
         .to_string();
     let generated_at = legacy_bundle
         .get("generatedAt")
@@ -1405,8 +1400,9 @@ fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        render_baseline_html, report_identity, sanitize_non_finite_json_numbers, sanitize_point,
-        tuning_workflow, write_preliminary_review_bundle,
+        ThermalLegacyReportInput, render_baseline_html, report_identity,
+        rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
+        sanitize_point, tuning_workflow, write_preliminary_review_bundle,
     };
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1444,6 +1440,55 @@ mod tests {
         .expect("sanitized point");
 
         assert_eq!(point["warmupReenterCentiC"], json!(875));
+    }
+
+    #[test]
+    fn legacy_rerender_does_not_invent_missing_hardware_metadata() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("thermal-legacy-metadata-test-{unique}"));
+        let input_dir = root.join("input");
+        let output_dir = root.join("output");
+        fs::create_dir_all(&input_dir).expect("create input directory");
+        fs::write(
+            input_dir.join("run.bundle.json"),
+            serde_json::to_vec(&json!({
+                "kind": "thermal_self_test_preliminary_bundle",
+                "runs": []
+            }))
+            .expect("serialize bundle"),
+        )
+        .expect("write bundle");
+        fs::write(
+            input_dir.join("thermal-profile.accepted.json"),
+            br#"{"settings":{},"points":[]}"#,
+        )
+        .expect("write profile");
+        fs::write(input_dir.join("samples.ndjson"), b"").expect("write samples");
+
+        rerender_legacy_preliminary_review_bundle(ThermalLegacyReportInput {
+            legacy_bundle_dir: input_dir,
+            output_dir: Some(output_dir.clone()),
+        })
+        .expect("rerender legacy bundle");
+
+        let bundle: Value = serde_json::from_slice(
+            &fs::read(output_dir.join("run.bundle.json")).expect("read output bundle"),
+        )
+        .expect("parse output bundle");
+        for field in [
+            "port",
+            "selectedMode",
+            "resolvedBank",
+            "detectedSourceClass",
+            "sourcePreset",
+            "provider",
+        ] {
+            assert_eq!(bundle[field], json!("unknown"), "field {field}");
+        }
+        fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]

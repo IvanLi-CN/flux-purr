@@ -2283,9 +2283,7 @@ struct BenchSourceTelemetrySampler {
 }
 
 impl BenchSourceTelemetrySampler {
-    // Real IsolaPurr USB-C telemetry can legitimately advance in multi-second bursts
-    // during high-load thermal HIL and recovery. Treat only sustained >25s gaps as stale.
-    const MAX_STALE_DURATION: Duration = Duration::from_secs(25);
+    const MAX_STALE_DURATION: Duration = Duration::from_secs(2);
 
     fn new(
         source_kind: BenchSourceKind,
@@ -13697,6 +13695,11 @@ mod tests {
 
     #[test]
     fn source_stale_error_classification_is_narrow() {
+        assert_eq!(
+            BenchSourceTelemetrySampler::MAX_STALE_DURATION,
+            Duration::from_secs(2)
+        );
+
         let stale = io::Error::other("isolapurr USB-C telemetry did not advance for 2100ms");
         assert!(thermal_source_telemetry_stale_error(&stale));
         assert!(thermal_source_probe_transient_error(&stale));

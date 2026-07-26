@@ -1222,56 +1222,37 @@ fn candidate_variants(
         target_temp_c,
     );
 
+    let trimmed_point = hold_ripple_trim_candidate(
+        current_point,
+        &scout_result,
+        &stability_evidence,
+        target_temp_c,
+    );
+    let conservative_point = conservative_high_side_candidate(
+        current_point,
+        &scout_result,
+        &stability_evidence,
+        target_temp_c,
+    );
+    let predicted_name = stability_failure_class(&scout_stage, &scout_samples, target_temp_c);
+    let evidence_specific = select_evidence_specific_candidate(
+        current_point,
+        predicted_point,
+        trimmed_point,
+        conservative_point,
+        predicted_name,
+    );
+
     let mut variants = vec![("current".to_string(), current_profile.clone())];
-    if let Some(trimmed_point) = hold_ripple_trim_candidate(
-        current_point,
-        &scout_result,
-        &stability_evidence,
-        target_temp_c,
-    ) {
-        let mut trimmed = current.clone();
-        if let Some(point) = super::thermal_candidate_point_mut(&mut trimmed, target_temp_c) {
-            *point = trimmed_point;
-        } else {
-            trimmed.points.push(trimmed_point);
-        }
-        variants.push((
-            "hold-ripple-trim".to_string(),
-            normalize_sparse_profile_value(
-                &thermal_candidate_profile_to_value(&trimmed),
-                materialized_targets_c,
-            )?,
-        ));
-    }
-    if let Some(conservative_point) = conservative_high_side_candidate(
-        current_point,
-        &scout_result,
-        &stability_evidence,
-        target_temp_c,
-    ) {
-        let mut conservative = current.clone();
-        if let Some(point) = super::thermal_candidate_point_mut(&mut conservative, target_temp_c) {
-            *point = conservative_point;
-        } else {
-            conservative.points.push(conservative_point);
-        }
-        variants.push((
-            "conservative-high-side".to_string(),
-            normalize_sparse_profile_value(
-                &thermal_candidate_profile_to_value(&conservative),
-                materialized_targets_c,
-            )?,
-        ));
-    }
-    if predicted_point != current_point {
+    if let Some((candidate_name, candidate_point)) = evidence_specific {
         let mut predicted = current.clone();
         if let Some(point) = super::thermal_candidate_point_mut(&mut predicted, target_temp_c) {
-            *point = predicted_point;
+            *point = candidate_point;
         } else {
-            predicted.points.push(predicted_point);
+            predicted.points.push(candidate_point);
         }
         variants.push((
-            stability_failure_class(&scout_stage, &scout_samples, target_temp_c),
+            candidate_name,
             normalize_sparse_profile_value(
                 &thermal_candidate_profile_to_value(&predicted),
                 materialized_targets_c,
@@ -1279,6 +1260,21 @@ fn candidate_variants(
         ));
     }
     Ok(variants)
+}
+
+fn select_evidence_specific_candidate(
+    current: ThermalCandidatePoint,
+    predicted: ThermalCandidatePoint,
+    hold_ripple_trim: Option<ThermalCandidatePoint>,
+    conservative_high_side: Option<ThermalCandidatePoint>,
+    predicted_name: String,
+) -> Option<(String, ThermalCandidatePoint)> {
+    hold_ripple_trim
+        .map(|point| ("hold-ripple-trim".to_string(), point))
+        .or_else(|| {
+            conservative_high_side.map(|point| ("conservative-high-side".to_string(), point))
+        })
+        .or_else(|| (predicted != current).then_some((predicted_name, predicted)))
 }
 
 fn hold_ripple_trim_candidate(
@@ -3163,6 +3159,7 @@ mod tests {
     use super::*;
     use crate::{
         ThermalApproachGuardAnalysis, ThermalFullSpeedStableAnalysis, ThermalStageAnalysis,
+        thermal_default_target_point,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -4767,6 +4764,29 @@ mod tests {
         assert_eq!(tuned.brake_distance_centi_c, current.brake_distance_centi_c);
         assert_eq!(tuned.hold_kp_permille_per_c, 16);
         assert_eq!(tuned.hold_blend_ticks, 3);
+    }
+
+    #[test]
+    fn tuning_batch_selects_only_one_evidence_specific_candidate() {
+        let current = thermal_default_target_point(100);
+        let mut predicted = current;
+        predicted.hold_power_permille += 1;
+        let mut ripple = current;
+        ripple.hold_kp_permille_per_c -= 1;
+        let mut conservative = current;
+        conservative.brake_distance_centi_c += 1;
+
+        let selected = select_evidence_specific_candidate(
+            current,
+            predicted,
+            Some(ripple),
+            Some(conservative),
+            "general".to_string(),
+        )
+        .expect("candidate");
+
+        assert_eq!(selected.0, "hold-ripple-trim");
+        assert_eq!(selected.1, ripple);
     }
 
     #[test]
