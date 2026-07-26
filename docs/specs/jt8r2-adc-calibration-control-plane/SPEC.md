@@ -69,7 +69,7 @@
 - VIN capture 必须把 `referenceVinMv` / `referenceVinVolts` 通过 `56 kOhm / 5.1 kOhm` 分压模型转换为 `expectedMv`。
 - `observedMv` 可由固件当前 raw ADC 读数填充；调试路径可显式传入 `observedMv` / `expectedMv`。
 - 导入/导出必须以完整 calibration state 为单位，包含共享样本、A/B 槽位与当前激活槽位。
-- 样本操作、槽位编辑和激活槽位切换都必须立即写 EEPROM；不存在额外 preview/apply 层。
+- 样本操作、槽位编辑和激活槽位切换都必须立即写入设备持久化后端；不存在额外 preview/apply 层。固件优先使用 EEPROM，EEPROM 不可达时使用 ESP flash fallback。
 - 运行时 ADC 修正必须统一读取当前 `activeSlot` 对应的 `gain + offset`。
 - `Status` / `runtime_config` 必须暴露当前 calibration mode live state：`mode`、`ppsEnabled`、`ppsMv`、`ppsMa`、`heaterEnabled`、`targetAdcMv`、`stable`、`stabilityErrorMv`、`error` 与 `job`。其中 `ppsMa` 只作为状态读数暴露，不作为 owner-facing 校准控制输入。
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
@@ -88,7 +88,7 @@
 - 样本变化只允许更新拟合建议值，不得自动覆盖 `A/B` 槽位。
 - `标定温度` 输入必须是纯手动 value；硬件上报温度只能作为 placeholder/辅助提示，不得自动写入 value。
 - 当 RTD/VIN calibration state 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
-- `加热曲线标定` 自动模式必须丢弃启动瞬态，在稳定温区内做分段统计和单调平滑，再生成 `heater_curve preview`；手动模式继续保留当前最终结果填写形态。
+- `加热曲线标定` 自动模式必须丢弃启动瞬态，在稳定温区内做分段统计和单调平滑，再生成 `heater_curve preview`；自动生成的每个温阻点不得低于硬件名义 `R20 + TCR` 模型对应阻值，防止把整机输入等效阻抗误写为过低的 heater resistance 并在 5A 高温调优时错误限功率；手动模式继续保留当前最终结果填写形态。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
 
 ### SHOULD
@@ -177,7 +177,8 @@ Arrays normalize to length `8`; empty slots are `null`.
 - Given `温度标定` mode is armed, When the operator toggles `开启加热`, Then Web must accept the action without imposing extra ADC-comparison gates and leave actual heating behavior to hardware feedback.
 - Given any calibration mode is armed, When the operator uses the heating control, Then Web presents that control as a Toggle switch rather than a text command button.
 - Given `温度标定` mode is armed, When hardware reports `heaterOutputPercent`, Then the status card must reflect that percentage through an energy-intensity visualization even if the heater switch is already on.
-- Given `加热曲线标定` auto is started, When stable bins are collected after startup transient, Then the generated curve is monotonic-smoothed into `heater_curve preview` and requires an explicit `Save`.
+- Given `加热曲线标定` auto is started, When stable bins are collected after startup transient, Then the generated curve includes low-temperature anchors from the heater hardware model, merges the stable-bin points, clamps each generated point to at least the hardware nominal `R20 + TCR` resistance floor, is monotonic-smoothed into `heater_curve preview`, and requires an explicit `Save`.
+- Given `heater_curve preview` is generated from high-temperature bins only, When firmware estimates heater resistance below the first measured bin, Then the estimate must be bounded by the low-temperature anchors instead of clamping the whole low-temperature range to the first high-temperature measurement.
 - Given any calibration mode switch is still on, When the operator attempts a page-internal view/device/calibration-tab change, Then Web blocks that navigation and shows an inline prompt near the switch to close calibration mode first before continuing.
 
 ## 非功能性验收 / 质量门槛

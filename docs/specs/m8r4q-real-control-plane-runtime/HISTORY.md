@@ -49,6 +49,7 @@
 
 - firmware approach 段的 near-target sustain floor 现已直接受 `holdReheatPowerPermille` 约束，而不是只在 `Hold -> Approach` 回升路径上才抬高到 reheat floor；同时 predictive coast 现在要求“实际误差 + 滤波误差”都已落入该温区 `holdExit` 守门范围，避免在仍显著低于目标时被预测项提前打成 `0%`。这一步直接针对 `140°C` 真机 HIL 中“接近目标后卡在 ~139°C 且 5 分钟超时”的证据。
 - thermal self-test 的默认开发梯子已改为 `60 / 140 / 220°C`；`250°C` 保留给最终完整验收，不再作为开发期默认目标。
+- 5A tuning 默认开发梯子已扩展为 full-batch：tuning anchors `60 / 100 / 140 / 180 / 220°C`，validation targets `80 / 120 / 160 / 240°C`。validation targets 用最终 review candidate profile 做独立 hold-confirm 验证，通过时只记录 `validation_passed`，不自动新增 tuning anchor。
 - full-speed-to-stable 判定按 SPEC 恢复为 `±1.5°C`、连续 hold `10s` 的真实稳定窗口；首次进入 hold 不再直接算稳定。离线重放后 `140°C` 仍通过，旧 `60°C` 通过结论被撤销。
 - candidate tuner 会把首次 hold 后仍继续上冲、且高侧显著大于低侧的形状判为残余热主导，优先增加 `brakeDistance / approachDamping / approachLead`，避免误入普通 hold ripple 分支继续抬高功率。
 - thermal profile settings 增加 EEPROM/API 可控的 `heaterCurrentReserveMa`；heater safe-max 从 capability/live current 的较小值中扣除该余量，避免把 source 限流预算全部分配给加热器后造成板级复位。
@@ -154,3 +155,4 @@
 - 用户级硬件记忆和默认 USB port 写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；运行中的 daemon 不因配置文件变化自动切换端口。
 - 发布收敛为单一 product tag `vX.Y.Z`；Web、firmware、host-tools 和 release manifest 挂同一 GitHub Release，manifest 的组件指纹决定是否需要升级。
 - Repo 级 skill 分层现已拆为 developer policy 与 user/developer operations：`skills/flux-purr-developer-policy` 负责开发者总约束分流，`skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 分别固化 released-user 路径与仓库内 developer operations/HIL 边界。
+- Thermal profile persistence retains all ten point-local targets in each `pps3a` / `pps5a` bank by using the EEPROM v3 record layout, removing the six-point truncation from saved full-batch profiles.

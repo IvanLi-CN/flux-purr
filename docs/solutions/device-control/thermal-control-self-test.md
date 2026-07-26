@@ -24,7 +24,7 @@ Flux Purr exposes:
 
 - a conservative firmware default controller
 - a RAM-only `thermalControlProfile.op=preview`
-- an EEPROM-backed `save` / `clear_saved` path
+- a persistent `save` / `clear_saved` path backed by EEPROM first and ESP flash fallback when EEPROM is unavailable
 - two persisted thermal banks: `pps3a` and `pps5a`
 - a user-facing profile mode: `auto | 65w | 100w`
 
@@ -33,16 +33,18 @@ Flux Purr exposes:
 The persisted profile is sparse by design:
 
 - preview may keep up to `10` RAM slots
-- EEPROM persists at most `6` populated anchors per bank
-- EEPROM v2 uses fixed `2 KiB` slots
-- read order is `2 KiB v2 -> 1 KiB v1 -> 512 B legacy`
+- persistent memory keeps at most `6` populated anchors per bank
+- EEPROM v2 uses fixed `1 KiB` slots
+- EEPROM read order is `1 KiB v2 -> 512 B legacy`; flash fallback uses the same record encoding and sequence selection
 - old single-profile records migrate into `pps3a` with mode `65w`
 
-The current tuning and acceptance convention is:
+The current 5A full-batch tuning and review convention is:
 
-- flagship tuning targets: `60 / 140 / 220°C`
-- sparse tuning anchors: `60 / 140 / 220°C`
-- supported explicit ladder: `60 / 100 / 140 / 180 / 220 / 250°C`
+- tuning anchors: `60 / 100 / 140 / 180 / 220°C`
+- validation targets: `80 / 120 / 160 / 240°C`
+- validation targets run after tuning with the final review candidate profile
+- a passing validation target records `validation_passed` and does not become a tuning anchor
+- supported explicit ladder: `60 / 80 / 100 / 120 / 140 / 160 / 180 / 200 / 220 / 240 / 250°C`
 - `300°C` remains outside first-version acceptance
 
 ## Artifact model
@@ -68,11 +70,18 @@ For approach-curve fitting, use the same canonical bundle shape. A dedicated `th
 
 When the bundle is a review-only checkpoint rather than a committed accepted baseline, keep the same four-file layout and mark it explicitly:
 
+- top-level `kind=thermal_self_test_preliminary_bundle`
 - top-level `bundleDisposition=preliminary_review`
 - top-level `acceptedProfileRole=review_candidate_snapshot`
 - `thermal-profile.accepted.json` means the current review candidate snapshot only; it is not a committed accepted baseline and it is not evidence that EEPROM has been saved
 
-Merged preliminary review bundles may also attach a per-target `holdCheck` block to the same `thermal_approach_characterization` payload. That block should summarize the single-target `60s` hold confirm for the same target and carry:
+The owner-facing compliant preliminary review bundle is now regenerated through the Rust CLI:
+
+- `flux-purr thermal report rerender-legacy --legacy-bundle-dir <dir> [--output-dir <dir>]`
+
+When an older `preliminary-review-*` legacy directory already exists, rerender it through this Rust CLI path rather than treating the legacy `run.bundle.json` as the owner-facing final report. The same command also accepts an already-compliant `thermal_self_test_preliminary_bundle` input and rewrites it into a fresh output directory, so the final `index.html + run.bundle.json + samples.ndjson + thermal-profile.accepted.json` package can stay on the Rust-owned path.
+
+Merged preliminary review bundles may also attach a per-target `holdCheck` block to the same `thermal_self_test_preliminary_bundle` payload. That block should summarize the single-target `60s` hold confirm for the same target and carry:
 
 - `confirmRunId`
 - `passed`
@@ -118,23 +127,26 @@ If a host path preserves an older reduced warmup value, it creates a false readb
 The RTD path has two distinct consumers and they must stay separated:
 
 - owner-facing temperature uses the current valid RTD sample
-- controller temperature uses the EMA state
+- controller input uses the last physically plausible RTD sample, then the EMA state
 - if RTD enters fault, owner-facing display keeps the last valid readout instead of synthesizing `0°C`
+- `heaterControlTempC` reports the sample actually accepted by the controller; `heaterControlMeasurementGuarded=true` records when a physically impossible single-sample jump was kept out of the control path
 
 Current control-path truth is:
 
 - control loop frequency: `20Hz`
 - RTD oversampling per control cycle: `64` kept conversions
-- settle discard per cycle: `8`
+- settle discard per cycle: `24`
 - minimum valid samples: `48`
 - default `tempFilterAlphaPermille`: `750`
 
-Do not insert any additional multi-sample window, median, clamp, or rate limiter before the EMA path. Those stages distort heating and cooling rate readback and make the controller react to an artificial temperature trace.
+The control-side plausibility gate is deliberately narrower than a smoothing filter: it only rejects a single sample whose change exceeds `35°C/s` at the actual control-cycle interval. It does not modify `currentTempC`, raw ADC telemetry, front-panel display, or formal report evidence; accepted control samples still go directly through the configured EMA. Do not add a multi-sample window or median filter.
+
+Offline retuning replays the existing `run.json` and `samples.ndjson` pair, writes `run.replayed.json` and `thermal-profile.replayed.candidate.json`, and may optionally apply the replayed candidate back as a RAM-only preview. When `--apply-preview` is used, the CLI must write replay artifacts first, send `thermalControlProfile.op=preview`, confirm `thermalControlProfilePreview=true` from status readback, and record the attempt in `run.replayed.json.applyPreview`. Replay apply must not save persistent memory.
 
 At PPS transition boundaries:
 
 - owner-facing temperature must continue to update from each valid RTD sample
-- only controller EMA and slope may remain guarded across the transition window
+- only controller input, EMA, and slope may remain guarded across the transition window; the physical-slew gate is independent of PPS transition handling and never changes owner-facing temperature
 
 ### Thermal-runaway attention and measurement-fault recovery
 
@@ -154,6 +166,10 @@ Thermal tuning automation should treat measurement faults and runaway attention 
 5. Retry only the same failed sub-step once.
 
 If three consecutive valid tests still carry transient sensor-fault or reminder evidence, stop the sprint and require manual inspection. Record the affected attempts and rerun those same attempts only after human confirmation that the hardware path is healthy again.
+
+`runtime-rearm-attempts` is a bounded autonomy knob, not a license for open-ended retries. The host may automatically recover only the same target after recoverable runtime interruptions, must return the runtime to cooldown before retrying, and must leave a failed receipt or run evidence behind when recovery does not converge.
+
+The live host runner does not classify temperature amplitude, direction, slope, or residual-heat staircases as environment faults. `currentTempC` (human-readable RTD temperature), `heaterFilteredTempC`, `heaterControlTempC` when exposed, and `rtdRawAdcMv` remain in the raw sample and contribute to the thermal metrics. Only firmware-reported sensor hard faults, overtemperature, runtime/device faults, source telemetry faults, or sustained sample-rate faults may terminate a live stage. The legacy `temperature_sample_glitch` stop reason remains parseable for historical bundles, but the current Rust live path must not generate it from a temperature change alone.
 
 ### Phase-transition and low-temperature guardrails
 
@@ -200,7 +216,7 @@ Ambient temperature is still useful, but only as an optional compensation term l
 
 Use sparse focused tuning during iteration. Reserve the full supported ladder for final acceptance.
 
-For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow per target:
+For the 5A full-batch tuning target set `60 / 100 / 140 / 180 / 220°C`, use a fixed budgeted workflow per tuning target:
 
 1. tuning scout
 2. target-local retune and one evidence-specific predicted point
@@ -208,7 +224,20 @@ For the flagship target set `60 / 140 / 220°C`, use a fixed budgeted workflow p
 4. repeat the same target-local scout/retune/batch loop while the per-target budget remains
 5. run a `60s` hold confirm every time a promotable candidate clears the gate
 
+Owner-facing execution boundary:
+
+- the supported 5A full-batch tuning execution surface is repo-local `flux-purr thermal tune`
+- the supported legacy/compliant bundle rewrite surface is repo-local `flux-purr thermal report rerender-legacy`
+- historical Python thermal tuning entrypoints are retired from the supported execution surface
+- real HIL, formal tuning, formal report generation, and owner-facing delivery must use the Rust CLI surfaces only
+
+After all tuning targets have reached a terminal disposition, run validation targets `80 / 120 / 160 / 240°C` with the final review candidate profile. Validation targets must appear in the same target cards, tabs, temperature/control/source charts, round table, and `samples.ndjson` as tuning targets, but with `targetRole=validation`, `candidateReady=false`, and a validation-specific disposition. Validation failure is evidence that the final profile did not cover the interpolation point; it must not silently mutate the profile or rerun as a new tuning anchor unless the operator starts a new tuning scope.
+
 The `60 / 220°C` focused re-test uses the same workflow with only those two values passed as anchors, validation targets, and tuning targets. Its seed contains only the requested explicit points; it must not materialize an unrelated interpolation target. A short-scout p2p result cannot create a Hold candidate. Only a candidate with valid `100%` warmup output, the target-specific stable-window gate, and its confirmation margin may be promoted to a `60s` Hold confirm. If a confirm fails thermally while budget remains, keep that failed confirm as valid evidence, use it to seed the next predicted correction through the next scout/batch loop, and continue the same target until it either completes, exhausts the budget, or becomes environment-blocked.
+
+If the tuning scout itself already proves that the current profile satisfies the dynamic gate with the required time margin, the Rust orchestration may promote that current profile directly into the `60s` Hold confirm. This avoids spending budget on a redundant batch rerun of the same current point and is especially important for `220°C`, where a single extra scout/batch cycle can consume the remaining budget before Hold confirm starts.
+
+When source telemetry goes stale mid-run, the Rust CLI must treat source recovery as a preview activation boundary. Recovering the bench source is not enough: the runner must reapply the preview profile, then verify `thermalProfileMode`, `thermalProfileResolvedBank`, `thermalControlProfilePreview`, and `thermalControl.profileSource=preview` before resuming the stage. If readback falls back to the default `65w / pps3a` profile, the run is invalid and must fail instead of generating tuning evidence from the wrong control bank.
 
 The flagship execution whitelist is fixed:
 
@@ -216,16 +245,17 @@ The flagship execution whitelist is fixed:
 - bind repo-local `flux-purr-devd` to the exact owner-authorized serial path only
 - confirm Flux Purr runtime readback shows `selectedMode=100w`, `resolvedBank=pps5a`, and `detectedSourceClass=pps5a` before heating
 - confirm IsolaPurr readback still shows `100W`, PD enabled, PPS enabled, `pd_pps_5a=true`, `pps3_limit_ma >= 5000`, and `tps_mode=auto_follow`
-- run only the explicit target order, with at most two evidence-specific tuning rounds plus one `60s` confirm per target; a target-local confirm failure ends that target without a recovery scout or another confirm
+- treat runtime arm/shutdown writes as asynchronous: after `PUT /runtime`, poll `/status` under the same lease until `targetTempC` and `heaterEnabled` match; shutdown also requires `activeCoolingEnabled=true`
+- run only the explicit target order, and keep the same target-local scout/retune/batch/confirm loop active while the per-target budget remains; do not add an independent hard cap on tuning rounds or hold confirms
 - keep `warmupPowerPermille=1000` and require actual warmup output to stay at `100%`
 
-The flagship sprint must not:
+The full-batch review must not:
 
-- add `80 / 100 / 120 / 160 / 180 / 240 / 250°C` runs
-- run the full ladder
+- add `80 / 120 / 160 / 240°C` as tuning anchors when they pass validation
+- run unrelated ladder points outside the declared tuning and validation target sets
 - collect default `0% / 25% / 50%` approach-only curves
 - flash firmware, reset the MCU, change selector, or switch to another serial path
-- save `pps5a` EEPROM or freeze a committed accepted baseline
+- save `pps5a` persistent profile or freeze a committed accepted baseline
 - restart from `60°C` after a later target fails; only the failed sub-step may be retried
 
 The target-specific start condition is fixed:
@@ -260,7 +290,7 @@ For candidate tuning:
 
 The saved-profile acceptance contract remains:
 
-- the flagship set `60 / 140 / 220°C` must pass in order before extending to interpolated non-flagship temperatures
+- the 5A full-batch tuning anchors `60 / 100 / 140 / 180 / 220°C` and validation targets `80 / 120 / 160 / 240°C` must pass before promoting the review candidate to a committed baseline
 - maximum overshoot `<= 3.0°C`
 - once hold sampling starts, continuous `60s` hold peak-to-peak `<= 3.0°C`
 - each stage stops on runtime reset, heater disarm, target mismatch, mode mismatch, source fault, or deadline expiry
@@ -333,7 +363,7 @@ If a run stops on `sensor-open`, `sensor-short`, or `adc-read-failed`, do not im
 
 Use this path only for transient measurement warnings that clear on the same hardware path. Do not use it to hide repeated sensor faults, runtime resets, or source-side capability loss.
 
-Do not add a `sensor-glitch` fault based on adjacent temperature or raw ADC deltas. A PPS request or VIN transition may trigger an immediate RTD reread, but a valid reread must continue through the established display/control sampling path; only open, short, ADC read failure, and absolute overtemperature are hard protection inputs.
+Do not add a `sensor-glitch` fault based on adjacent temperature or raw ADC deltas. A PPS request or VIN transition may trigger an immediate RTD reread; an implausible valid sample is retained as raw/human evidence and marked `heaterControlMeasurementGuarded` when it is excluded from PID input. Only open, short, ADC read failure, and absolute overtemperature are hard protection inputs.
 
 ### Recovering a dead local `devd`
 
