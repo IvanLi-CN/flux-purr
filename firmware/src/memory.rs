@@ -662,23 +662,67 @@ fn sanitize_thermal_control_profile(config: &mut ThermalControlProfileConfig) {
                 .approach_tail_window_centi_c
                 .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX),
             hold_power_permille: point.hold_power_permille.min(1_000),
-            hold_reheat_power_permille: point.hold_reheat_power_permille.min(1_000),
-            hold_entry_centi_c: point.hold_entry_centi_c.min(5_000),
-            hold_exit_centi_c: point.hold_exit_centi_c.min(5_000),
-            hold_on_centi_c: point.hold_on_centi_c.min(5_000),
-            hold_off_centi_c: point.hold_off_centi_c.min(5_000),
-            overshoot_cutoff_centi_c: point.overshoot_cutoff_centi_c.min(5_000),
-            hold_kp_permille_per_c: point.hold_kp_permille_per_c.min(10_000),
-            hold_ki_permille_per_c_tick: point.hold_ki_permille_per_c_tick.min(10_000),
-            hold_blend_ticks: point
-                .hold_blend_ticks
-                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
-            approach_lead_ticks: point
-                .approach_lead_ticks
-                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
-            hold_lead_ticks: point
-                .hold_lead_ticks
-                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+            hold_reheat_power_permille: if point.hold_reheat_power_permille == 0 {
+                config.settings.hold_reheat_power_permille
+            } else {
+                point.hold_reheat_power_permille.min(1_000)
+            },
+            hold_entry_centi_c: if point.hold_entry_centi_c == 0 {
+                config.settings.hold_entry_centi_c
+            } else {
+                point.hold_entry_centi_c.min(5_000)
+            },
+            hold_exit_centi_c: if point.hold_exit_centi_c == 0 {
+                config.settings.hold_exit_centi_c
+            } else {
+                point.hold_exit_centi_c.min(5_000)
+            },
+            hold_on_centi_c: if point.hold_on_centi_c == 0 {
+                config.settings.hold_on_centi_c
+            } else {
+                point.hold_on_centi_c.min(5_000)
+            },
+            hold_off_centi_c: if point.hold_off_centi_c == 0 {
+                config.settings.hold_off_centi_c
+            } else {
+                point.hold_off_centi_c.min(5_000)
+            },
+            overshoot_cutoff_centi_c: if point.overshoot_cutoff_centi_c == 0 {
+                config.settings.overshoot_cutoff_centi_c
+            } else {
+                point.overshoot_cutoff_centi_c.min(5_000)
+            },
+            hold_kp_permille_per_c: if point.hold_kp_permille_per_c == 0 {
+                config.settings.hold_kp_permille_per_c
+            } else {
+                point.hold_kp_permille_per_c.min(10_000)
+            },
+            hold_ki_permille_per_c_tick: if point.hold_ki_permille_per_c_tick == 0 {
+                config.settings.hold_ki_permille_per_c_tick
+            } else {
+                point.hold_ki_permille_per_c_tick.min(10_000)
+            },
+            hold_blend_ticks: if point.hold_blend_ticks == 0 {
+                config.settings.hold_blend_ticks
+            } else {
+                point
+                    .hold_blend_ticks
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+            },
+            approach_lead_ticks: if point.approach_lead_ticks == 0 {
+                config.settings.approach_lead_ticks
+            } else {
+                point
+                    .approach_lead_ticks
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+            },
+            hold_lead_ticks: if point.hold_lead_ticks == 0 {
+                config.settings.hold_lead_ticks
+            } else {
+                point
+                    .hold_lead_ticks
+                    .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX)
+            },
         };
         let _ = points.push(sanitized);
     }
@@ -2979,6 +3023,54 @@ mod tests {
             160
         );
         assert!(decoded.config.active_thermal_control_profile.points[6].is_none());
+    }
+
+    #[test]
+    fn thermal_profile_persistence_materializes_legacy_inherited_point_fields() {
+        let mut config = sample_config();
+        let profile = &mut config.active_thermal_control_profile;
+        profile.settings.warmup_reenter_centi_c = 620;
+        profile.settings.hold_entry_centi_c = 31;
+        profile.settings.hold_exit_centi_c = 142;
+        profile.settings.hold_on_centi_c = 18;
+        profile.settings.hold_off_centi_c = 77;
+        profile.settings.overshoot_cutoff_centi_c = 205;
+        profile.settings.hold_kp_permille_per_c = 27;
+        profile.settings.hold_ki_permille_per_c_tick = 1;
+        profile.settings.hold_blend_ticks = 4;
+        profile.settings.hold_reheat_power_permille = 390;
+        profile.settings.approach_lead_ticks = 3;
+        profile.settings.hold_lead_ticks = 2;
+        let point = profile.points[0].as_mut().expect("profile point");
+        point.warmup_reenter_centi_c = 0;
+        point.hold_entry_centi_c = 0;
+        point.hold_exit_centi_c = 0;
+        point.hold_on_centi_c = 0;
+        point.hold_off_centi_c = 0;
+        point.overshoot_cutoff_centi_c = 0;
+        point.hold_kp_permille_per_c = 0;
+        point.hold_ki_permille_per_c_tick = 0;
+        point.hold_blend_ticks = 0;
+        point.hold_reheat_power_permille = 0;
+        point.approach_lead_ticks = 0;
+        point.hold_lead_ticks = 0;
+
+        config.sanitize();
+        let expected = config.active_thermal_control_profile.points[0].expect("materialized point");
+        let record = MemoryRecord {
+            sequence: 45,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("profile encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("profile decodes");
+
+        assert_eq!(
+            decoded.config.active_thermal_control_profile.points[0],
+            Some(expected)
+        );
+        assert_eq!(expected.hold_ki_permille_per_c_tick, 1);
+        assert_eq!(expected.hold_reheat_power_permille, 390);
     }
 
     #[test]

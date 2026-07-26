@@ -408,8 +408,14 @@ const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
-#[cfg(target_arch = "xtensa")]
-const FLASH_MEMORY_REGION_SIZE: u32 = FlashStorage::SECTOR_SIZE;
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_MEMORY_ERASE_SECTOR_SIZE: u32 = 4_096;
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_MEMORY_SLOT_A_OFFSET: u32 = 0;
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_MEMORY_SLOT_B_OFFSET: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE;
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_MEMORY_REGION_SIZE: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE * 2;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -4062,6 +4068,15 @@ fn flash_memory_base_offset(partition_len: u32) -> Option<u32> {
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+const fn flash_memory_slot_offset_for_sequence(sequence: u32) -> u32 {
+    if sequence & 1 == 0 {
+        FLASH_MEMORY_SLOT_A_OFFSET
+    } else {
+        FLASH_MEMORY_SLOT_B_OFFSET
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 fn load_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
     let mut table_storage = [0u8; PARTITION_TABLE_MAX_LEN];
@@ -4086,12 +4101,12 @@ fn load_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
         let mut slot_a = [0u8; MEMORY_SLOT_SIZE];
         let mut slot_b = [0u8; MEMORY_SLOT_SIZE];
         let slot_a_read = region
-            .read(region_base + u32::from(MEMORY_SLOT_A_OFFSET), &mut slot_a)
+            .read(region_base + FLASH_MEMORY_SLOT_A_OFFSET, &mut slot_a)
             .map(|_| decode_memory_record(&slot_a))
             .ok()
             .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
         let slot_b_read = region
-            .read(region_base + u32::from(MEMORY_SLOT_B_OFFSET), &mut slot_b)
+            .read(region_base + FLASH_MEMORY_SLOT_B_OFFSET, &mut slot_b)
             .map(|_| decode_memory_record(&slot_b))
             .ok()
             .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
@@ -4139,7 +4154,7 @@ fn write_flash_memory_record(
             continue;
         };
         let absolute_offset =
-            region_base.saturating_add(u32::from(memory_slot_offset_for_sequence(record.sequence)));
+            region_base.saturating_add(flash_memory_slot_offset_for_sequence(record.sequence));
         let mut region = entry.as_embedded_storage(flash);
         if region
             .write(absolute_offset, &bytes[..record_len])
@@ -9521,14 +9536,22 @@ mod tests {
                         approach_tail_window_centi_c: 0,
                         hold_power_permille: 180,
                         hold_reheat_power_permille: 0,
-                        hold_entry_centi_c: 0,
-                        hold_exit_centi_c: 0,
-                        hold_on_centi_c: 0,
-                        hold_off_centi_c: 0,
-                        overshoot_cutoff_centi_c: 0,
-                        hold_kp_permille_per_c: 0,
-                        hold_ki_permille_per_c_tick: 0,
-                        hold_blend_ticks: 0,
+                        hold_entry_centi_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+                        hold_exit_centi_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+                        hold_on_centi_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+                        hold_off_centi_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+                        overshoot_cutoff_centi_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+                        hold_kp_permille_per_c:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+                        hold_ki_permille_per_c_tick:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+                        hold_blend_ticks:
+                            flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
                         approach_lead_ticks: 0,
                         hold_lead_ticks: 0,
                     })
@@ -12769,6 +12792,16 @@ mod tests {
         assert_eq!(apply_warmup_soft_start(80, 0), 0);
         assert_eq!(apply_warmup_soft_start(80, 50), 40);
         assert_eq!(apply_warmup_soft_start(80, 100), 80);
+    }
+
+    #[test]
+    fn flash_fallback_slots_use_distinct_erase_sectors() {
+        assert_eq!(flash_memory_slot_offset_for_sequence(2), 0);
+        assert_eq!(
+            flash_memory_slot_offset_for_sequence(3),
+            FLASH_MEMORY_ERASE_SECTOR_SIZE
+        );
+        assert_eq!(FLASH_MEMORY_REGION_SIZE, 2 * FLASH_MEMORY_ERASE_SECTOR_SIZE);
     }
 
     #[test]

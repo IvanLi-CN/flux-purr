@@ -2110,14 +2110,22 @@ mod tests {
                 approach_tail_window_centi_c: 0,
                 hold_power_permille: 180,
                 hold_reheat_power_permille: 0,
-                hold_entry_centi_c: 0,
-                hold_exit_centi_c: 0,
-                hold_on_centi_c: 0,
-                hold_off_centi_c: 0,
-                overshoot_cutoff_centi_c: 0,
-                hold_kp_permille_per_c: 0,
-                hold_ki_permille_per_c_tick: 0,
-                hold_blend_ticks: 0,
+                hold_entry_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+                hold_exit_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+                hold_on_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+                hold_off_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+                overshoot_cutoff_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+                hold_kp_permille_per_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+                hold_ki_permille_per_c_tick:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+                hold_blend_ticks:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
                 approach_lead_ticks: 0,
                 hold_lead_ticks: 0,
             })

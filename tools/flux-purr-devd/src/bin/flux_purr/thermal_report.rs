@@ -1325,8 +1325,8 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
         });
     let metric_gate = candidate_metric_gate(&entry);
     let candidate_ready =
-        target_role != "validation" && base_candidate_ready && metric_gate.unwrap_or(true);
-    if metric_gate == Some(false) {
+        target_role != "validation" && base_candidate_ready && metric_gate == Some(true);
+    if base_candidate_ready && metric_gate != Some(true) {
         entry["ok"] = json!(false);
     }
     entry["candidateReady"] = json!(candidate_ready);
@@ -1378,15 +1378,22 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
 }
 
 fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let data_json = serde_json::to_string(data)?;
+    let data_json = serde_json::to_string(data)?
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029");
     let template = REPORT_TEMPLATE.replace("{{", "{").replace("}}", "}");
     Ok(template.replace(DATA_PLACEHOLDER, &data_json))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_non_finite_json_numbers, write_preliminary_review_bundle};
-    use serde_json::json;
+    use super::{
+        render_baseline_html, sanitize_non_finite_json_numbers, write_preliminary_review_bundle,
+    };
+    use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs, path::Path};
 
@@ -1407,6 +1414,42 @@ mod tests {
         assert_eq!(
             sanitized,
             r#"{"ok":[null,null,null],"label":"Infinity","nested":{"x":null}}"#
+        );
+    }
+
+    #[test]
+    fn report_html_escapes_embedded_json_script_terminators() {
+        let data = json!({"label": "</script><script>alert('x')</script>&\u{2028}\u{2029}"});
+        let html = render_baseline_html(&data).expect("report html");
+
+        assert!(!html.contains("</script><script>alert('x')</script>"));
+        assert!(html.contains("\\u003c/script\\u003e"));
+        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
+        let data_end = html[data_start..]
+            .find(";\n  const COLORS")
+            .expect("embedded data terminator")
+            + data_start;
+        let decoded: Value = serde_json::from_str(&html[data_start..data_end]).expect("valid JSON");
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn candidate_ready_requires_complete_hard_metric_evidence() {
+        let entry = super::ensure_candidate_receipt_fields(json!({
+            "target": 100,
+            "targetRole": "tuning",
+            "candidateReady": true,
+            "candidateDisposition": "candidate_ready",
+            "budgetOutcome": "budget_exhausted",
+            "validTestCount": 4,
+            "point": {"targetTempC": 100}
+        }));
+
+        assert_eq!(entry["candidateReady"], json!(false));
+        assert_eq!(entry["reviewOutcome"], json!("failed"));
+        assert_eq!(
+            entry["candidateDisposition"],
+            json!("budget_exhausted_without_candidate")
         );
     }
 
@@ -1548,7 +1591,17 @@ mod tests {
                     "budgetOutcome": "budget_exhausted",
                     "validTestCount": 2,
                     "samples": [sample],
-                    "rounds": []
+                    "rounds": [],
+                    "result": {
+                        "stopReason": "completed",
+                        "maxOvershootC": 1.2,
+                        "holdPeakToPeakC": 1.8,
+                        "fullSpeedToStable": {
+                            "limitMs": 10000,
+                            "settleTimeMs": 6500,
+                            "failureReason": null
+                        }
+                    }
                 }),
             ],
             "f293cc9c139e",
@@ -1803,7 +1856,17 @@ mod tests {
                     "candidateDisposition": "acceptance_passed",
                     "candidateReady": true,
                     "samples": [{"t": 0.0, "temp": 60.0}],
-                    "rounds": []
+                    "rounds": [],
+                    "result": {
+                        "stopReason": "completed",
+                        "maxOvershootC": 1.0,
+                        "holdPeakToPeakC": 1.5,
+                        "fullSpeedToStable": {
+                            "limitMs": 10000,
+                            "settleTimeMs": 7000,
+                            "failureReason": null
+                        }
+                    }
                 }),
                 json!({
                     "target": 140,
