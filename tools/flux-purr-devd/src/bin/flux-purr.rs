@@ -1931,19 +1931,6 @@ fn expected_thermal_profile_mode_bank<'a>(
     }
 }
 
-async fn resolve_thermal_profile_runtime_bank(
-    client: &Client,
-    resolved: &ResolvedUsbTarget,
-    lease_id: &str,
-    expected_mode: ThermalProfileMode,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(bank) = expected_mode.explicit_bank() {
-        return Ok(bank.to_string());
-    }
-    let status = request_leased(client, resolved, lease_id, Method::GET, "/status", None).await?;
-    Ok(expected_thermal_profile_mode_bank(&status, expected_mode)?.to_string())
-}
-
 async fn request_thermal_profile_persist_with_resolved_bank(
     client: &Client,
     resolved: ResolvedUsbTarget,
@@ -1953,37 +1940,51 @@ async fn request_thermal_profile_persist_with_resolved_bank(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let lease = create_lease(client, &resolved).await?;
     let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-    let bank =
-        resolve_thermal_profile_runtime_bank(client, &resolved, &lease.lease_id, profile_mode)
-            .await?;
-    let mut thermal_control_profile = json!({
-        "op": op,
-        "bank": bank,
-    });
-    if let Some(profile) = profile
-        && let Some(object) = thermal_control_profile.as_object_mut()
-    {
-        let profile = if op == "save" {
-            thermal_candidate_profile_to_value(&thermal_persisted_profile_for_bank(
-                &thermal_candidate_profile_from_value(profile),
-                &bank,
-            ))
+    let result = async {
+        let bank = if let Some(bank) = profile_mode.explicit_bank() {
+            bank.to_string()
         } else {
-            profile
+            let status = request_leased(
+                client,
+                &resolved,
+                &lease.lease_id,
+                Method::PUT,
+                "/runtime",
+                Some(json!({ "thermalProfileMode": profile_mode.as_str() })),
+            )
+            .await?;
+            expected_thermal_profile_mode_bank(&status, profile_mode)?.to_string()
         };
-        object.insert("profile".to_string(), profile);
+        let mut thermal_control_profile = json!({
+            "op": op,
+            "bank": bank,
+        });
+        if let Some(profile) = profile
+            && let Some(object) = thermal_control_profile.as_object_mut()
+        {
+            let profile = if op == "save" {
+                thermal_candidate_profile_to_value(&thermal_persisted_profile_for_bank(
+                    &thermal_candidate_profile_from_value(profile),
+                    &bank,
+                ))
+            } else {
+                profile
+            };
+            object.insert("profile".to_string(), profile);
+        }
+        request_leased(
+            client,
+            &resolved,
+            &lease.lease_id,
+            Method::PUT,
+            "/runtime",
+            Some(json!({
+                "thermalProfileMode": profile_mode.as_str(),
+                "thermalControlProfile": thermal_control_profile,
+            })),
+        )
+        .await
     }
-    let result = request_leased(
-        client,
-        &resolved,
-        &lease.lease_id,
-        Method::PUT,
-        "/runtime",
-        Some(json!({
-            "thermalProfileMode": profile_mode.as_str(),
-            "thermalControlProfile": thermal_control_profile,
-        })),
-    )
     .await;
     let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
     heartbeat.abort();

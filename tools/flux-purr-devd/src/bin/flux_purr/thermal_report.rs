@@ -1215,7 +1215,7 @@ pub(super) fn write_preliminary_review_bundle(
         "resolvedBank": resolved_bank,
         "detectedSourceClass": detected_source_class,
         "tuningBudgetSeconds": tuning_budget_seconds,
-        "tuningWorkflow": "five_amp_batch",
+        "tuningWorkflow": tuning_workflow(resolved_bank),
         "tuningTargetsC": tuning_targets_c,
         "tuningExecutionOrderC": tuning_execution_order_c,
         "temperatureSemantics": temperature_semantics,
@@ -1248,10 +1248,11 @@ pub(super) fn write_preliminary_review_bundle(
         .map(|target| format!("{target}°C"))
         .collect::<Vec<_>>()
         .join(" / ");
+    let report_identity = report_identity(selected_mode, resolved_bank);
     let html_data = json!({
         "generatedAt": bundle.get("generatedAt").cloned().unwrap_or(Value::Null),
-        "title": format!("Flux Purr 100W / pps5a {target_label} preliminary review"),
-        "subtitle": format!("展示本次 5A full-batch 调优目标：{target_label}。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
+        "title": format!("Flux Purr {report_identity} {target_label} preliminary review"),
+        "subtitle": format!("展示本次 {report_identity} full-batch 调优目标：{target_label}。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "selectedMode": bundle.get("selectedMode").cloned().unwrap_or(Value::Null),
@@ -1279,6 +1280,18 @@ pub(super) fn write_preliminary_review_bundle(
     });
     fs::write(&index_html_path, render_baseline_html(&html_data)?)?;
     Ok(bundle)
+}
+
+fn tuning_workflow(resolved_bank: &str) -> &'static str {
+    match resolved_bank {
+        "pps5a" => "five_amp_batch",
+        "pps3a" => "three_amp_batch",
+        _ => "thermal_batch",
+    }
+}
+
+fn report_identity(selected_mode: &str, resolved_bank: &str) -> String {
+    format!("{} / {resolved_bank}", selected_mode.to_uppercase())
 }
 
 fn set_to_vec(values: BTreeSet<i64>) -> Vec<i64> {
@@ -1392,8 +1405,8 @@ fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        render_baseline_html, sanitize_non_finite_json_numbers, sanitize_point,
-        write_preliminary_review_bundle,
+        render_baseline_html, report_identity, sanitize_non_finite_json_numbers, sanitize_point,
+        tuning_workflow, write_preliminary_review_bundle,
     };
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1431,6 +1444,14 @@ mod tests {
         .expect("sanitized point");
 
         assert_eq!(point["warmupReenterCentiC"], json!(875));
+    }
+
+    #[test]
+    fn report_workflow_follows_the_resolved_profile_bank() {
+        assert_eq!(tuning_workflow("pps5a"), "five_amp_batch");
+        assert_eq!(tuning_workflow("pps3a"), "three_amp_batch");
+        assert_eq!(report_identity("100w", "pps5a"), "100W / pps5a");
+        assert_eq!(report_identity("65w", "pps3a"), "65W / pps3a");
     }
 
     #[test]

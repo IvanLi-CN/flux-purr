@@ -2671,28 +2671,28 @@ async fn configure_runtime(
     if let Some(calibration) = payload.calibration.as_ref() {
         apply_mock_calibration_runtime_config(&mut device.status, calibration);
     }
+    if payload.fault_attention_acknowledged == Some(true) {
+        device.status.fault_attention_pending = false;
+    }
     if let Some(mode) = payload.thermal_profile_mode.as_deref() {
-        if matches!(mode, "auto" | "65w" | "100w") {
-            device.status.thermal_profile_mode = mode.to_string();
-            device.status.thermal_profile_resolved_bank = if mode == "100w"
-                || (mode == "auto"
-                    && device.status.pps_capability_min_mv.unwrap_or(u16::MAX) <= 20_000
-                    && device.status.pps_capability_max_mv.unwrap_or(0) >= 20_000
-                    && device.status.pps_capability_max_ma.unwrap_or(0) >= 5_000)
-            {
-                "pps5a".to_string()
-            } else {
-                "pps3a".to_string()
-            };
-        }
+        device.status.thermal_profile_mode = mode.to_string();
+        device.status.thermal_profile_resolved_bank = if mode == "100w"
+            || (mode == "auto"
+                && device.status.pps_capability_min_mv.unwrap_or(u16::MAX) <= 20_000
+                && device.status.pps_capability_max_mv.unwrap_or(0) >= 20_000
+                && device.status.pps_capability_max_ma.unwrap_or(0) >= 5_000)
+        {
+            "pps5a".to_string()
+        } else {
+            "pps3a".to_string()
+        };
     }
     if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
-        let bank = thermal_control_profile.bank.as_deref().unwrap_or_else(|| {
-            match device.status.thermal_profile_mode.as_str() {
-                "100w" => "pps5a",
-                _ => "pps3a",
-            }
-        });
+        let bank = thermal_control_profile
+            .bank
+            .as_deref()
+            .unwrap_or(&device.status.thermal_profile_resolved_bank)
+            .to_string();
         match thermal_control_profile.op {
             ThermalControlProfileOp::Preview => {
                 device.preview_thermal_control_profile = thermal_control_profile.profile.clone();
@@ -2717,7 +2717,6 @@ async fn configure_runtime(
                 }
             }
         }
-        device.status.thermal_profile_resolved_bank = bank.to_string();
     }
     let active_profile = device.preview_thermal_control_profile.as_ref().or_else(|| {
         match device.status.thermal_profile_resolved_bank.as_str() {
@@ -2805,6 +2804,16 @@ fn apply_mock_calibration_runtime_config(
 
 fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
     if payload
+        .thermal_profile_mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "auto" | "65w" | "100w"))
+    {
+        return Err(HttpError::bad_request(
+            "invalid_thermal_profile_mode",
+            "thermalProfileMode must be auto, 65w, or 100w.",
+        ));
+    }
+    if payload
         .selected_preset_slot
         .is_some_and(|slot| slot >= FRONT_PANEL_PRESET_COUNT)
     {
@@ -2853,6 +2862,16 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
 fn validate_thermal_control_profile_request(
     request: &ThermalControlProfileRequest,
 ) -> Result<(), HttpError> {
+    if request
+        .bank
+        .as_deref()
+        .is_some_and(|bank| !matches!(bank, "pps3a" | "pps5a"))
+    {
+        return Err(HttpError::bad_request(
+            "invalid_thermal_profile_bank",
+            "thermalControlProfile.bank must be pps3a or pps5a.",
+        ));
+    }
     match request.op {
         ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save => {
             let profile = request.profile.as_ref().ok_or_else(|| {
@@ -4692,6 +4711,9 @@ fn runtime_config_matches_status(
         .manual_pps_ma
         .is_some_and(|manual_pps_ma| status.manual_pps_ma != Some(manual_pps_ma))
     {
+        return false;
+    }
+    if payload.fault_attention_acknowledged == Some(true) && status.fault_attention_pending {
         return false;
     }
     if let Some(calibration) = payload.calibration.as_ref() {
@@ -6667,6 +6689,88 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_rejects_unknown_thermal_profile_enums() {
+        let mut payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: None,
+            calibration: None,
+            thermal_profile_mode: Some("turbo".to_string()),
+            thermal_control_profile: None,
+        };
+        assert_eq!(
+            validate_runtime_config(&payload).unwrap_err().error.code,
+            "invalid_thermal_profile_mode"
+        );
+
+        payload.thermal_profile_mode = None;
+        payload.thermal_control_profile = Some(ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::ClearSaved,
+            bank: Some("pps9a".to_string()),
+            profile: None,
+        });
+        assert_eq!(
+            validate_runtime_config(&payload).unwrap_err().error.code,
+            "invalid_thermal_profile_bank"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_persistence_to_inactive_bank_does_not_switch_the_resolved_bank() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let status = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                fault_attention_acknowledged: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::Save,
+                    bank: Some("pps5a".to_string()),
+                    profile: Some(ThermalControlProfilePackage {
+                        settings: None,
+                        points: vec![None; FRONT_PANEL_PRESET_COUNT],
+                    }),
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(status.thermal_profile_resolved_bank, "pps3a");
+        assert_eq!(status.thermal_control.profile_source, "default");
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .devices
+                .get("mock-fp-lab-01")
+                .unwrap()
+                .saved_thermal_control_profile_pps5a
+                .is_some()
+        );
+    }
+
+    #[test]
     fn thermal_profile_preview_accepts_the_ch224q_5v_floor() {
         let result = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
             op: ThermalControlProfileOp::Preview,
@@ -7384,6 +7488,30 @@ mod tests {
         status.calibration.heater_enabled = false;
 
         assert!(!runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
+    fn runtime_config_matcher_requires_attention_to_be_cleared_after_acknowledgement() {
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: Some(true),
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.fault_attention_pending = true;
+        assert!(!runtime_config_matches_status(&payload, &status));
+        status.fault_attention_pending = false;
+        assert!(runtime_config_matches_status(&payload, &status));
     }
 
     #[test]
