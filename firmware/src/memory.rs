@@ -10,6 +10,9 @@ pub const M24C64_PAGE_SIZE: usize = 32;
 pub const MEMORY_SLOT_SIZE: usize = 1024;
 pub const MEMORY_SLOT_A_OFFSET: u16 = 0x0400;
 pub const MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
+pub const PREVIOUS_MEMORY_SLOT_SIZE: usize = 2048;
+pub const PREVIOUS_MEMORY_SLOT_A_OFFSET: u16 = 0x1000;
+pub const PREVIOUS_MEMORY_SLOT_B_OFFSET: u16 = 0x1800;
 pub const LEGACY_MEMORY_SLOT_SIZE: usize = 512;
 pub const LEGACY_MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
 pub const LEGACY_MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
@@ -1030,6 +1033,16 @@ pub fn select_latest_memory_record(
         (Err(_), Ok(right)) => Some(right),
         (Err(_), Err(_)) => None,
     }
+}
+
+pub fn select_latest_optional_memory_record(
+    left: Option<MemoryRecord>,
+    right: Option<MemoryRecord>,
+) -> Option<MemoryRecord> {
+    select_latest_memory_record(
+        left.ok_or(MemoryDecodeError::BadMagic),
+        right.ok_or(MemoryDecodeError::BadMagic),
+    )
 }
 
 fn encode_config_payload(
@@ -3173,6 +3186,20 @@ mod tests {
                 .sequence,
             3
         );
+    }
+
+    #[test]
+    fn latest_sequence_wins_across_active_previous_and_legacy_slots() {
+        let record = |sequence| MemoryRecord {
+            sequence,
+            config: MemoryConfig::default(),
+        };
+
+        let active_and_previous =
+            select_latest_optional_memory_record(Some(record(7)), Some(record(11)));
+        let selected = select_latest_optional_memory_record(active_and_previous, Some(record(5)));
+
+        assert_eq!(selected.expect("latest record").sequence, 11);
     }
 
     #[test]

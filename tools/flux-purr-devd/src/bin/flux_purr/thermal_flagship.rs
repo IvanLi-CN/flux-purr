@@ -3069,7 +3069,11 @@ fn effective_output_root(output_root: &Path) -> PathBuf {
 }
 
 fn cooldown_threshold(target_temp_c: i16) -> f64 {
-    f64::from((target_temp_c - 30).max(40))
+    if target_temp_c < 80 {
+        35.0
+    } else {
+        f64::from(target_temp_c - 40)
+    }
 }
 
 fn budget_elapsed_seconds(started_at: Instant) -> u64 {
@@ -3518,11 +3522,11 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_threshold_uses_target_minus_thirty_with_forty_degree_floor() {
-        assert_eq!(cooldown_threshold(60), 40.0);
-        assert_eq!(cooldown_threshold(80), 50.0);
-        assert_eq!(cooldown_threshold(120), 90.0);
-        assert_eq!(cooldown_threshold(240), 210.0);
+    fn cooldown_threshold_matches_the_full_batch_contract() {
+        assert_eq!(cooldown_threshold(60), 35.0);
+        assert_eq!(cooldown_threshold(80), 40.0);
+        assert_eq!(cooldown_threshold(120), 80.0);
+        assert_eq!(cooldown_threshold(240), 200.0);
     }
 
     #[test]

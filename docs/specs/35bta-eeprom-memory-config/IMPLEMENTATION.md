@@ -2,7 +2,7 @@
 
 ## Coverage
 
-- 固件 `memory` 模块使用 v2 `1024 bytes` active 双槽，位于 `0x0400` / `0x0800`；EEPROM 启动按 `1024B v2 -> 512B legacy` 顺序读取，写入只落 v2 槽。
+- 固件 `memory` 模块使用 v2 `1024 bytes` active 双槽，位于 `0x0400` / `0x0800`；EEPROM 启动同时读取 active `1024B`、previous `2048B`（`0x1000` / `0x1800`）与 legacy `512B` 双槽并选择最大 sequence，写入只落 active 双槽。
 - `flux-purr` runtime 在 CH224Q 请求完成后读取 EEPROM 与 ESP flash fallback，并在 UI 初始绘制前恢复可记忆字段。
 - 前面板接受交互后生成新的记忆配置；配置变化会触发约 `2s` debounce，优先写 EEPROM，EEPROM 不可达或写入失败时写入 ESP flash data/NVS 分区末端 fallback 区。
 - ADC calibration state 作为 `MemoryConfig` 字段持久化，并在启动后恢复给 RTD/VIN measurement path 和 control-plane response；其中包含共享样本、A/B 槽位与当前激活槽位。

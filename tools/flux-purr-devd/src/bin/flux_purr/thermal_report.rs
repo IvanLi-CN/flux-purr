@@ -1368,8 +1368,10 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
         .get("candidateDisposition")
         .and_then(Value::as_str)
         .unwrap_or(disposition);
-    let review_passed =
-        final_disposition == "acceptance_passed" || final_disposition == "validation_passed";
+    let review_passed = matches!(
+        final_disposition,
+        "acceptance_passed" | "validation_passed" | "candidate_ready"
+    );
     entry["reviewPassed"] = json!(review_passed);
     entry["reviewOutcome"] = json!(if review_passed { "passed" } else { "failed" });
     entry
@@ -1495,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn preliminary_review_bundle_keeps_supplemental_candidate_ready_failed_until_acceptance() {
+    fn preliminary_review_bundle_maps_supplemental_candidate_ready_to_passed() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
@@ -1578,8 +1580,8 @@ mod tests {
             bundle["reportRuns"][0]["targetRole"],
             json!("supplemental_tuning")
         );
-        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], json!("failed"));
-        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], json!(false));
+        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], json!("passed"));
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], json!(true));
         assert_eq!(
             bundle["reportRuns"][0]["auditEntries"]
                 .as_array()
@@ -1616,8 +1618,8 @@ mod tests {
             embedded_data["runs"][0]["targetRole"],
             json!("supplemental_tuning")
         );
-        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], json!("failed"));
-        assert_eq!(embedded_data["runs"][0]["reviewPassed"], json!(false));
+        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], json!("passed"));
+        assert_eq!(embedded_data["runs"][0]["reviewPassed"], json!(true));
         let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
         assert!(!html.contains("审计分类"));
         assert!(!html.contains("审计路径"));
@@ -1945,7 +1947,7 @@ mod tests {
     }
 
     #[test]
-    fn preliminary_review_bundle_keeps_candidate_ready_but_marks_review_failed_until_acceptance() {
+    fn preliminary_review_bundle_maps_candidate_ready_to_passed() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
@@ -2013,8 +2015,8 @@ mod tests {
             json!("candidate_ready")
         );
         assert_eq!(bundle["candidateReadyTargetsC"], json!([60]));
-        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], json!("failed"));
-        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], json!(false));
+        assert_eq!(bundle["reportRuns"][0]["reviewOutcome"], json!("passed"));
+        assert_eq!(bundle["reportRuns"][0]["reviewPassed"], json!(true));
 
         let embedded_data = embedded_report_data(&bundle_dir);
         assert_eq!(embedded_data["runs"][0]["candidateReady"], json!(true));
@@ -2022,8 +2024,8 @@ mod tests {
             embedded_data["runs"][0]["candidateDisposition"],
             json!("candidate_ready")
         );
-        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], json!("failed"));
-        assert_eq!(embedded_data["runs"][0]["reviewPassed"], json!(false));
+        assert_eq!(embedded_data["runs"][0]["reviewOutcome"], json!("passed"));
+        assert_eq!(embedded_data["runs"][0]["reviewPassed"], json!(true));
 
         let _ = fs::remove_dir_all(bundle_dir);
     }

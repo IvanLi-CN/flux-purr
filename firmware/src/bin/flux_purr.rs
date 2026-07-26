@@ -101,8 +101,9 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 use flux_purr_firmware::memory::{
     EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
     M24C64_I2C_ADDRESS, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
-    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, decode_memory_record, encode_memory_record,
-    select_latest_memory_record,
+    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
+    PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
+    encode_memory_record, select_latest_memory_record, select_latest_optional_memory_record,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -4053,17 +4054,6 @@ fn heater_curve_eeprom_probe_wire(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn select_latest_optional_memory_record(
-    a: Option<MemoryRecord>,
-    b: Option<MemoryRecord>,
-) -> Option<MemoryRecord> {
-    select_latest_memory_record(
-        a.ok_or(flux_purr_firmware::memory::MemoryDecodeError::BadMagic),
-        b.ok_or(flux_purr_firmware::memory::MemoryDecodeError::BadMagic),
-    )
-}
-
-#[cfg(target_arch = "xtensa")]
 fn flash_memory_base_offset(partition_len: u32) -> Option<u32> {
     if partition_len >= FLASH_MEMORY_REGION_SIZE {
         Some(partition_len - FLASH_MEMORY_REGION_SIZE)
@@ -4195,22 +4185,40 @@ fn load_eeprom_memory_record(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<Mem
         .map(|_| decode_memory_record(&slot_b))
         .ok()
         .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
-    let mut selected = select_latest_memory_record(slot_a_read, slot_b_read);
-    if selected.is_none() {
-        let mut legacy_slot_a = [0u8; LEGACY_MEMORY_SLOT_SIZE];
-        let mut legacy_slot_b = [0u8; LEGACY_MEMORY_SLOT_SIZE];
-        let legacy_slot_a_read = eeprom
-            .read_bytes(LEGACY_MEMORY_SLOT_A_OFFSET, &mut legacy_slot_a)
-            .map(|_| decode_memory_record(&legacy_slot_a))
-            .ok()
-            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
-        let legacy_slot_b_read = eeprom
-            .read_bytes(LEGACY_MEMORY_SLOT_B_OFFSET, &mut legacy_slot_b)
-            .map(|_| decode_memory_record(&legacy_slot_b))
-            .ok()
-            .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
-        selected = select_latest_memory_record(legacy_slot_a_read, legacy_slot_b_read);
-    }
+    let current = select_latest_memory_record(slot_a_read, slot_b_read);
+
+    let mut previous_slot_a = [0u8; PREVIOUS_MEMORY_SLOT_SIZE];
+    let mut previous_slot_b = [0u8; PREVIOUS_MEMORY_SLOT_SIZE];
+    let previous_slot_a_read = eeprom
+        .read_bytes(PREVIOUS_MEMORY_SLOT_A_OFFSET, &mut previous_slot_a)
+        .map(|_| decode_memory_record(&previous_slot_a))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let previous_slot_b_read = eeprom
+        .read_bytes(PREVIOUS_MEMORY_SLOT_B_OFFSET, &mut previous_slot_b)
+        .map(|_| decode_memory_record(&previous_slot_b))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let previous = select_latest_memory_record(previous_slot_a_read, previous_slot_b_read);
+
+    let mut legacy_slot_a = [0u8; LEGACY_MEMORY_SLOT_SIZE];
+    let mut legacy_slot_b = [0u8; LEGACY_MEMORY_SLOT_SIZE];
+    let legacy_slot_a_read = eeprom
+        .read_bytes(LEGACY_MEMORY_SLOT_A_OFFSET, &mut legacy_slot_a)
+        .map(|_| decode_memory_record(&legacy_slot_a))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let legacy_slot_b_read = eeprom
+        .read_bytes(LEGACY_MEMORY_SLOT_B_OFFSET, &mut legacy_slot_b)
+        .map(|_| decode_memory_record(&legacy_slot_b))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let legacy = select_latest_memory_record(legacy_slot_a_read, legacy_slot_b_read);
+
+    let selected = select_latest_optional_memory_record(
+        select_latest_optional_memory_record(current, previous),
+        legacy,
+    );
 
     if let Some(record) = &selected {
         info!(
@@ -8554,7 +8562,7 @@ async fn main(_spawner: Spawner) {
                         elapsed_ms,
                         measurement.temp_c,
                     );
-                    current_rtd_fault = overtemp_fault_from_control_temperature(latest_temp_c);
+                    current_rtd_fault = overtemp_fault_from_control_temperature(measurement.temp_c);
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
@@ -13608,7 +13616,7 @@ mod tests {
     }
 
     #[test]
-    fn implausible_rtd_overtemp_spike_does_not_become_control_fault() {
+    fn raw_rtd_overtemp_bypasses_the_control_slew_guard() {
         let mut measurement_guard = RtdControlMeasurementGuard::default();
         measurement_guard.reseed(140.0, 0);
 
@@ -13616,7 +13624,7 @@ mod tests {
         assert!(measurement_guard.guarded);
         assert_eq!(overtemp_fault_from_control_temperature(140.0), None);
         assert_eq!(
-            overtemp_fault_from_control_temperature(420.0),
+            overtemp_fault_from_control_temperature(430.0),
             Some(HeaterFaultReason::OverTemp)
         );
     }

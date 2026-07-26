@@ -52,7 +52,7 @@
 ### MUST
 
 - EEPROM 设备默认为 `M24C64`，7-bit I2C 首选地址 `0x50`，固件在 `0x50..0x57` 范围内探测以兼容实板地址脚差异；容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
-- record v2 使用双槽：slot A `0x0400`、slot B `0x0800`，每槽 `1024 bytes`。启动读取顺序固定为 v2 `1024B`、legacy `512B`（`0x0000` / `0x0200`）；旧槽仅作只读迁移回退，新写入只落 v2 槽。
+- record v2 使用双槽：slot A `0x0400`、slot B `0x0800`，每槽 `1024 bytes`。启动时同时读取 active `1024B`、previous `2048B`（`0x1000` / `0x1800`）与 legacy `512B`（`0x0000` / `0x0200`）双槽，并选择 CRC 合法且 `sequence` 最大的 record；旧槽仅作只读迁移回退，新写入只落 active 双槽。
 - 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash data/NVS 分区末端的 4KiB fallback 区保存同一 `MemoryRecord`。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
