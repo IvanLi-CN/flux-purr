@@ -18,9 +18,7 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
 use embedded_storage::{ReadStorage, Storage};
 #[cfg(target_arch = "xtensa")]
-use esp_bootloader_esp_idf::partitions::{
-    DataPartitionSubType, PARTITION_TABLE_MAX_LEN, PartitionType, read_partition_table,
-};
+use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 #[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
@@ -416,6 +414,8 @@ const FLASH_MEMORY_SLOT_A_OFFSET: u32 = 0;
 const FLASH_MEMORY_SLOT_B_OFFSET: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE;
 #[cfg(any(target_arch = "xtensa", test))]
 const FLASH_MEMORY_REGION_SIZE: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE * 2;
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_MEMORY_PARTITION_LABEL: &str = "flux_cfg";
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
@@ -4059,15 +4059,6 @@ fn heater_curve_eeprom_probe_wire(
     }
 }
 
-#[cfg(target_arch = "xtensa")]
-fn flash_memory_base_offset(partition_len: u32) -> Option<u32> {
-    if partition_len >= FLASH_MEMORY_REGION_SIZE {
-        Some(partition_len - FLASH_MEMORY_REGION_SIZE)
-    } else {
-        None
-    }
-}
-
 #[cfg(any(target_arch = "xtensa", test))]
 const fn flash_memory_slot_offset_for_sequence(sequence: u32) -> u32 {
     if sequence & 1 == 0 {
@@ -4090,23 +4081,22 @@ fn load_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
             continue;
         };
         if entry.is_read_only()
-            || entry.partition_type() != PartitionType::Data(DataPartitionSubType::Nvs)
+            || entry.raw_type() != 1
+            || entry.label_as_str() != FLASH_MEMORY_PARTITION_LABEL
+            || entry.len() < FLASH_MEMORY_REGION_SIZE
         {
             continue;
         }
-        let Some(region_base) = flash_memory_base_offset(entry.len()) else {
-            continue;
-        };
         let mut region = entry.as_embedded_storage(flash);
         let mut slot_a = [0u8; MEMORY_SLOT_SIZE];
         let mut slot_b = [0u8; MEMORY_SLOT_SIZE];
         let slot_a_read = region
-            .read(region_base + FLASH_MEMORY_SLOT_A_OFFSET, &mut slot_a)
+            .read(FLASH_MEMORY_SLOT_A_OFFSET, &mut slot_a)
             .map(|_| decode_memory_record(&slot_a))
             .ok()
             .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
         let slot_b_read = region
-            .read(region_base + FLASH_MEMORY_SLOT_B_OFFSET, &mut slot_b)
+            .read(FLASH_MEMORY_SLOT_B_OFFSET, &mut slot_b)
             .map(|_| decode_memory_record(&slot_b))
             .ok()
             .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
@@ -4121,7 +4111,7 @@ fn load_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
         return selected;
     }
 
-    info!("flash memory restore skipped: no writable nvs partition");
+    info!("flash memory restore skipped: no writable flux_cfg partition");
     None
 }
 
@@ -4146,15 +4136,13 @@ fn write_flash_memory_record(
             continue;
         };
         if entry.is_read_only()
-            || entry.partition_type() != PartitionType::Data(DataPartitionSubType::Nvs)
+            || entry.raw_type() != 1
+            || entry.label_as_str() != FLASH_MEMORY_PARTITION_LABEL
+            || entry.len() < FLASH_MEMORY_REGION_SIZE
         {
             continue;
         }
-        let Some(region_base) = flash_memory_base_offset(entry.len()) else {
-            continue;
-        };
-        let absolute_offset =
-            region_base.saturating_add(flash_memory_slot_offset_for_sequence(record.sequence));
+        let absolute_offset = flash_memory_slot_offset_for_sequence(record.sequence);
         let mut region = entry.as_embedded_storage(flash);
         if region
             .write(absolute_offset, &bytes[..record_len])
@@ -4176,7 +4164,7 @@ fn write_flash_memory_record(
         return Ok(());
     }
 
-    info!("flash memory commit skipped: no writable nvs partition");
+    info!("flash memory commit skipped: no writable flux_cfg partition");
     Err(MemoryCommitError::FlashUnavailable)
 }
 
@@ -5553,7 +5541,7 @@ fn usb_runtime_config_response(
                         result: None,
                         error: Some(ApiError::new(
                             "thermal_profile_too_many_saved_points",
-                            "saved thermal profiles support at most 6 populated points.",
+                            "saved thermal profiles support at most 10 populated points.",
                             false,
                         )),
                     },
@@ -12802,6 +12790,9 @@ mod tests {
             FLASH_MEMORY_ERASE_SECTOR_SIZE
         );
         assert_eq!(FLASH_MEMORY_REGION_SIZE, 2 * FLASH_MEMORY_ERASE_SECTOR_SIZE);
+        assert_eq!(FLASH_MEMORY_PARTITION_LABEL, "flux_cfg");
+        let partition_table = include_str!("../../partitions.csv");
+        assert!(partition_table.contains("flux_cfg,  data, 0x06,    0x110000, 0x2000"));
     }
 
     #[test]

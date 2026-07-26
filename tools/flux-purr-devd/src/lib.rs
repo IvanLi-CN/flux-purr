@@ -5352,7 +5352,7 @@ fn build_espflash_args(
     }
     if let Some(elf_image) = artifact.files.iter().find(|file| file.kind == "elf") {
         let path = resolve_artifact_path(root, &elf_image.path);
-        return Ok(vec![
+        let mut args = vec![
             "flash".to_string(),
             "--chip".to_string(),
             artifact.target_chip.clone(),
@@ -5363,8 +5363,16 @@ fn build_espflash_args(
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
-            path.to_string_lossy().into_owned(),
-        ]);
+        ];
+        if let Some(partition_table) = root
+            .map(|root| root.join("firmware/partitions.csv"))
+            .filter(|path| path.is_file())
+        {
+            args.push("--partition-table".to_string());
+            args.push(partition_table.to_string_lossy().into_owned());
+        }
+        args.push(path.to_string_lossy().into_owned());
+        return Ok(args);
     }
 
     let Some(app_image) = artifact.files.iter().find(|file| file.kind == "app") else {
@@ -6323,6 +6331,12 @@ mod tests {
         };
 
         let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
+        std::fs::write(
+            dir.path().join("firmware/partitions.csv"),
+            "flux_cfg,data,0x06,0x110000,0x2000",
+        )
+        .unwrap();
         let args =
             build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
 
@@ -6341,6 +6355,9 @@ mod tests {
         );
         assert!(!args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--partition-table" && pair[1].ends_with("firmware/partitions.csv")
+        }));
         assert!(!args.contains(&"65536".to_string()));
     }
 

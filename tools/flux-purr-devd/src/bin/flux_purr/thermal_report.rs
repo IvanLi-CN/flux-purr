@@ -1392,7 +1392,8 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
 }
 
 fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let data_json = serde_json::to_string(data)?
+    let escaped_data = escape_report_html_value(data);
+    let data_json = serde_json::to_string(&escaped_data)?
         .replace('&', "\\u0026")
         .replace('<', "\\u003c")
         .replace('>', "\\u003e")
@@ -1400,6 +1401,27 @@ fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Erro
         .replace('\u{2029}', "\\u2029");
     let template = REPORT_TEMPLATE.replace("{{", "{").replace("}}", "}");
     Ok(template.replace(DATA_PLACEHOLDER, &data_json))
+}
+
+fn escape_report_html_value(value: &Value) -> Value {
+    match value {
+        Value::String(value) => Value::String(
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&#39;"),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(escape_report_html_value).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), escape_report_html_value(value)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -1510,14 +1532,17 @@ mod tests {
         let html = render_baseline_html(&data).expect("report html");
 
         assert!(!html.contains("</script><script>alert('x')</script>"));
-        assert!(html.contains("\\u003c/script\\u003e"));
+        assert!(html.contains("\\u0026lt;/script\\u0026gt;"));
         let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
         let data_end = html[data_start..]
             .find(";\n  const COLORS")
             .expect("embedded data terminator")
             + data_start;
         let decoded: Value = serde_json::from_str(&html[data_start..data_end]).expect("valid JSON");
-        assert_eq!(decoded, data);
+        assert_eq!(
+            decoded,
+            json!({"label": "&lt;/script&gt;&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;\u{2028}\u{2029}"})
+        );
     }
 
     #[test]

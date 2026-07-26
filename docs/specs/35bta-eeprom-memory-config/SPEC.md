@@ -52,8 +52,8 @@
 ### MUST
 
 - EEPROM 设备默认为 `M24C64`，7-bit I2C 首选地址 `0x50`，固件在 `0x50..0x57` 范围内探测以兼容实板地址脚差异；容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
-- record v2 使用双槽：slot A `0x0400`、slot B `0x0800`，每槽 `1024 bytes`。启动时同时读取 active `1024B`、previous `2048B`（`0x1000` / `0x1800`）与 legacy `512B`（`0x0000` / `0x0200`）双槽，并选择 CRC 合法且 `sequence` 最大的 record；旧槽仅作只读迁移回退，新写入只落 active 双槽。
-- 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash data/NVS 分区末端的 8KiB fallback 区保存同一 `MemoryRecord`。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。
+- record v3 使用双槽：slot A `0x1000`、slot B `0x1800`，每槽 `2048 bytes`，TLV 长度使用 `u16`。启动时同时读取 active v3 `2048B`、previous v2 `1024B`（`0x0400` / `0x0800`）与 legacy `512B`（`0x0000` / `0x0200`）双槽，并选择 CRC 合法且 `sequence` 最大的 record；旧槽仅作只读迁移回退，新写入只落 active 双槽。
+- 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash 中标签为 `flux_cfg` 的专用 8KiB data partition 保存同一 `MemoryRecord`，不得直接占用或写入 NVS 管理范围。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
 - `selected_preset_slot` 越界时必须回到默认槽位。
@@ -84,7 +84,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
-- Flash fallback 复用同一 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中可写 `data/nvs` 分区末端 8KiB 区域；两个逻辑 slot 分别位于该区域的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。
+- Flash fallback 复用同一 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。仓库根 `espflash.toml` 必须让固件烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)，确保该分区属于固件正式 flash 合同。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)

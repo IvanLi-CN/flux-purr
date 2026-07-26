@@ -75,7 +75,7 @@
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
   - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config in two `2 KiB` slots at `0x1000` and `0x1800`; previous `1 KiB` slots at `0x0400` / `0x0800` and legacy `512 B` slots at `0x0000` / `0x0200` remain read-only migration sources, with the highest valid sequence restored
-  - if EEPROM access fails, the same record falls back to two slots in the final `8 KiB` of a writable data/NVS partition; each slot owns a separate `4 KiB` erase sector so a power loss during one write leaves the other record recoverable
+  - if EEPROM access fails, the same record falls back to two slots in the dedicated `flux_cfg` 8KiB data partition declared by `firmware/partitions.csv`; each slot owns a separate `4 KiB` erase sector so a power loss during one write leaves the other record recoverable without writing into NVS-managed space
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
   - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
@@ -196,6 +196,7 @@
 ## Notes
 
 - The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
+- The repository-root `espflash.toml` pins `firmware/partitions.csv`, so ELF flashing installs the dedicated `flux_cfg` fallback partition together with the normal NVS, PHY, and factory-app layout.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
 - Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
 - This round still does not implement touch input, tach feedback, external PID tuning, or closed-loop VIN/current power compensation.

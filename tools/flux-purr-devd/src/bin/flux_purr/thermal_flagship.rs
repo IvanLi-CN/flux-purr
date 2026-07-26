@@ -10,10 +10,10 @@ use reqwest::{Client, Method};
 use serde_json::{Value, json};
 
 use super::{
-    TargetSelector, ThermalCandidatePoint, ThermalCandidateProfile, ThermalFlagshipTuneArgs,
-    ThermalFullSpeedStableTracker, ThermalProfileMode, ThermalSelfTestArgs,
-    ThermalSelfTestEvaluationMode, ThermalStageResult, collect_batch_thermal_self_test,
-    collect_single_thermal_self_test, current_unix_millis,
+    THERMAL_CONTROL_PROFILE_MAX_POINTS, TargetSelector, ThermalCandidatePoint,
+    ThermalCandidateProfile, ThermalFlagshipTuneArgs, ThermalFullSpeedStableTracker,
+    ThermalProfileMode, ThermalSelfTestArgs, ThermalSelfTestEvaluationMode, ThermalStageResult,
+    collect_batch_thermal_self_test, collect_single_thermal_self_test, current_unix_millis,
     load_thermal_default_seed_candidate_profile, parse_thermal_targets, request_json,
     resolve_target, thermal_candidate_point, thermal_candidate_point_from_heater_parameters,
     thermal_candidate_profile_from_value, thermal_candidate_profile_to_value,
@@ -3084,6 +3084,12 @@ fn validate_flagship_scope(
     if tune_targets_c.is_empty() {
         return Err("flagship tuning target list must be non-empty".into());
     }
+    if tune_targets_c.len() > THERMAL_CONTROL_PROFILE_MAX_POINTS {
+        return Err(format!(
+            "flagship tuning supports at most {THERMAL_CONTROL_PROFILE_MAX_POINTS} target temperatures"
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -3211,6 +3217,17 @@ mod tests {
                 "5A full-batch tuning requires --profile-mode 100w"
             );
         }
+    }
+
+    #[test]
+    fn flagship_scope_rejects_target_sets_larger_than_profile_capacity() {
+        let targets = [60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 250];
+        assert_eq!(
+            validate_flagship_scope(ThermalProfileMode::W100, &targets)
+                .expect_err("oversized target set must be rejected")
+                .to_string(),
+            "flagship tuning supports at most 10 target temperatures"
+        );
     }
 
     #[test]
