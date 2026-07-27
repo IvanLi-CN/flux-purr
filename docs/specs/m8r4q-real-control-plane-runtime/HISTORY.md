@@ -1,5 +1,9 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-27
+
+- 更正 `2026-05-25` 的 executor arena 历史：`task-arena-size-32768` 不能容纳当前 `flux-purr` 主任务的 `33,344`-byte allocation，仍会在 pre-main 阶段触发 `task arena is full` panic 并被 RTC WDT 重启。固件现使用 `task-arena-size-65536`，为该任务保留足够静态 arena。
+
 ## 2026-07-19
 
 - `220°C` rerun3/rerun4/rerun5 的 current truth 已收口到同一高温点族。`2026-07-19` 的 rerun4 与 rerun5 都停在 `brake=701 / approachFloor=898 / damping=410 / lead=3 / holdEntry=159 / holdReheat=930`，失败形态也从早期的高侧 overshoot 收敛成低侧或低裕量：`missed_lower_band_before_limit`、`stable_window_broke_low` 与 `within_gate_low_margin`。这说明当前 `220°C` 剩余 blocker 已不是高侧余热，而是 low-side / low-margin plateau。
