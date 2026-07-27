@@ -86,7 +86,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
 `rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
 `faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
-`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the EEPROM-backed saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation and inherited defaults are applied. The current reserve is subtracted from the lower of PPS capability current and live CH224Q current before the heater voltage ceiling is calculated, leaving source margin for board power and conversion loss.
+`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the persistent saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation, legacy-profile inflate when importing old data, and safety clamps are applied. The current reserve is subtracted from the lower of PPS capability current and live CH224Q current before the heater voltage ceiling is calculated, leaving source margin for board power and conversion loss.
 
 ### `CalibrationState`
 
@@ -164,7 +164,7 @@ Calibration live control is PPS-only. Any requested PPS value must stay within t
 }
 ```
 
-Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in EEPROM and restored after reboot.
+Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in device memory and restored after reboot. Firmware uses external EEPROM as the primary memory backend and falls back to an ESP flash data/NVS sector when EEPROM is unavailable.
 
 ### `FirmwareArtifact`
 
@@ -191,7 +191,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`, while other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries flashed with `espflash write-bin`.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`, while other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the `flux_cfg` layout is installed and the application starts.
 
 ### `ApiError`
 
@@ -363,7 +363,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile.op=preview` installs a RAM-only profile containing exactly 10 point slots, where each non-null point carries all declared power and damping fields, including `warmupPowerPermille`, `approachDampingExponentPermille`, and `holdOnCentiC`. Profile settings include `heaterCurrentReserveMa` (`0..1000`, default `200`) and persist through `op=save`; `op=clear_preview` clears the RAM preview and must omit `profile`; `op=save` writes at most 6 populated anchors to EEPROM-backed active thermal control config; `op=clear_saved` clears that saved profile and must omit `profile`. Clients that arm a heater from a preview must read `status.thermalControl` after setting the target and reject the arm when its resolved values do not match the requested point. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile.op=preview` installs a RAM-only profile containing exactly 10 point slots, where each non-null point carries all declared power and damping fields, including `warmupPowerPermille`, `approachDampingExponentPermille`, and `holdOnCentiC`. Profile settings include `heaterCurrentReserveMa` (`0..1000`, default `200`) and persist through `op=save`; point-local `warmupReenterCentiC` and damping thresholds accept `0..5000` centi-C, where `0` is retained only for legacy profile inflation. `op=clear_preview` clears the RAM preview and must omit `profile`; `op=save` writes up to 10 populated target points to persistent active thermal control config; `op=clear_saved` clears that saved profile and must omit `profile`. Clients that arm a heater from a preview must read `status.thermalControl` after setting the target and reject the arm when its resolved values do not match the requested point. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
 
 `PUT /api/v1/devices/:id/calibration` body:
 
@@ -444,7 +444,7 @@ Apply copies draft calibration to active calibration and returns the updated `Ca
 }
 ```
 
-Save copies the preview curve to active curve and schedules EEPROM persistence. If no preview exists, the request is rejected with `heater_curve_preview_required`.
+Save copies the preview curve to active curve and schedules persistent memory commit. If no preview exists, the request is rejected with `heater_curve_preview_required`.
 
 `GET /api/v1/artifacts` response:
 
@@ -519,7 +519,10 @@ Core commands:
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`
-- `flux-purr thermal self-test --device <id> [--source-kind isolapurr] --source-id <bench-source-id> --source-url <lan-url> [--profile-mode auto|65w|100w] [--source-mode auto-follow|manual-forced]`
+- `flux-purr thermal self-test --device <id> [--source-kind isolapurr] --source-id <bench-source-id> --source-url <lan-url> [--profile-mode auto|65w|100w] [--source-power-watts <watts>] [--source-mode auto-follow|manual-forced] [--runtime-rearm-attempts <n>]`
+- `flux-purr thermal tune --device <id> --source-id <bench-source-id> --source-url <lan-url> --profile-mode 100w --source-power-watts 100` runs the Rust-owned 5A full-batch preliminary review workflow. The default same-rank tuning target set is `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`; the canonical execution order is the recursive split `60, 240, 140, 100, 80, 120, 180, 160, 220`. The bundle reports physical-order `tuningTargetsC`, actual-order `tuningExecutionOrderC`, and one owner-facing card/tab per physical target.
+- `flux-purr thermal retune --run-dir <dir> [--apply-preview --device <id>|--hardware <saved-id>]`
+- `flux-purr thermal report rerender-legacy --legacy-bundle-dir <dir> [--output-dir <dir>]`
 - Batch profile comparison repeats `--candidate-profile-file <path>` for one `--targets-c` value; candidates share one source/lease session, use `max(40C, target-30C)` as the restart threshold, produce separate reports, and never write EEPROM.
 - `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
@@ -701,7 +704,7 @@ The response returns the updated status:
 }
 ```
 
-`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. Both paths must reject any PPS request outside the hardware `5V~28V` range, outside the advertised capability, or off the required `100mV / 50mA` steps. `thermalControlProfile` supports `preview` / `clear_preview` for RAM-only preview state and `save` / `clear_saved` for EEPROM-backed active thermal profile state.
+`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. Both paths must reject any PPS request outside the hardware `5V~28V` range, outside the advertised capability, or off the required `100mV / 50mA` steps. `thermalControlProfile` supports `preview` / `clear_preview` for RAM-only preview state and `save` / `clear_saved` for persistent active thermal profile state.
 
 ### `calibration_config`
 
@@ -774,7 +777,7 @@ Supported operations are `preview` and `clear_preview`. The response returns `He
 }
 ```
 
-The response returns `HeaterCurveState`. Saved `active` curve is restored from EEPROM after reboot; preview is not restored.
+The response returns `HeaterCurveState`. Saved `active` curve is restored from persistent device memory after reboot; preview is not restored.
 
 ### `error`
 

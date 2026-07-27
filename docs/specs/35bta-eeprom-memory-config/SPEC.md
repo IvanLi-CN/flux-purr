@@ -51,14 +51,14 @@
 
 ### MUST
 
-- EEPROM 设备默认为 `M24C64`，7-bit I2C 地址 `0x50`，容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
-- record v2 使用双槽：slot A `0x1000`、slot B `0x1800`，每槽 `2048 bytes`。启动读取顺序固定为 v2 `2048B`、v1 `1024B`（`0x0400` / `0x0800`）、legacy `512B`（`0x0000` / `0x0200`）；旧槽仅作只读迁移回退，新写入只落 v2 槽。
-- 启动时读取两个槽，选择 CRC 合法且 `sequence` 最大的 record；两槽都无效时使用默认配置。
+- EEPROM 设备默认为 `M24C64`，7-bit I2C 首选地址 `0x50`，固件在 `0x50..0x57` 范围内探测以兼容实板地址脚差异；容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
+- record v3 使用双槽：slot A `0x1000`、slot B `0x1800`，每槽 `2048 bytes`，TLV 长度使用 `u16`。启动时同时读取 active v3 `2048B`、previous v2 `1024B`（`0x0400` / `0x0800`）与 legacy `512B`（`0x0000` / `0x0200`）双槽，并选择 CRC 合法且 `sequence` 最大的 record；旧槽仅作只读迁移回退，新写入只落 active 双槽。
+- 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash 中标签为 `flux_cfg` 的专用 8KiB data partition 保存同一 `MemoryRecord`，不得直接占用或写入 NVS 管理范围。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。
 - record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
 - `selected_preset_slot` 越界时必须回到默认槽位。
-- 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入 EEPROM。
-- EEPROM 读写失败不得阻断 heater/fan 保护逻辑。
+- 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
+- EEPROM 读写失败不得阻断 heater/fan 保护逻辑；fallback flash 不可用时保存失败必须可见，但不得屏蔽安全保护。
 - 日志不得输出 Wi-Fi 密码明文。
 
 ### SHOULD
@@ -69,13 +69,13 @@
 ## 功能与行为规格（Functional / Behavior Spec）
 
 - 启动流程：
-  - CH224Q 完成默认 PD 请求后，固件读取 EEPROM 记忆配置。
+  - CH224Q 完成默认 PD 请求后，固件读取 EEPROM 与 flash fallback 中可用的记忆配置。
   - 创建 `FrontPanelUiState` 后，把记忆配置应用到目标温度、当前预设槽、预设数组和主动降温策略位。
   - `heater_enabled` 保持运行时默认/安全策略，不从 EEPROM 恢复。
 - 写回流程：
   - 前面板已接受交互完成后，从 UI 状态生成下一份 `MemoryConfig`。
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
-  - deadline 到期后写入下一 record sequence 对应的槽；失败则重新排队。
+  - deadline 到期后写入下一 record sequence 对应的槽；EEPROM 不可用时写入 flash fallback；两者都失败则重新排队。
 - Wi-Fi 字段：
   - `ssid`、`password`、`autoReconnect`、`telemetryIntervalMs` 进入持久化模型。
   - 当前固件未实现 HTTP Wi-Fi 配置服务时，不额外虚构运行时联网行为。
@@ -84,6 +84,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
+- Flash fallback 复用同一 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。仓库根 `espflash.toml` 必须让 ELF 烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)。支持 raw app artifact 时，devd 必须先写入由该 CSV 生成并受版本控制的 [`firmware/partitions.bin`](../../../firmware/partitions.bin) 到 `0x8000`，再写入 app 并显式 reset；两条安装路径都必须保证该分区属于正式 flash 合同。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)
@@ -101,22 +102,23 @@
   - `0x32`: `pps3a` saved thermal control profile
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
-- 旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多六个压紧锚点，和完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
+- 新写入的 thermal profile payload 必须以 `TCP2` 布局标识开头，避免 point-local 布局与历史 settings/point 长度组合发生歧义；无标识的历史 payload 继续按旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多 10 个完整 point-local 压紧目标点，并与完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
 
 ## 验收标准（Acceptance Criteria）
 
-- Given EEPROM 两槽都为空或损坏，When 固件启动，Then UI 使用默认记忆配置且不 panic。
-- Given 两槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
+- Given EEPROM 与 flash fallback 都为空或损坏，When 固件启动，Then UI 使用默认记忆配置且不 panic。
+- Given 多个后端/槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
 - Given 最新槽 CRC 损坏且旧槽合法，When 固件启动，Then 回退到旧槽。
 - Given record payload 包含未知 TLV，When 解码，Then 忽略未知字段并保留已知字段。
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
-- Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一 EEPROM 槽。
-- Given heater 曾在重启前开启，When 固件重启，Then heater 不因 EEPROM 配置自动开启。
-- Given ADC calibration state 已写入 EEPROM，When 固件重启，Then 共享样本、A/B 槽位与当前激活槽位都恢复。
+- Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一持久化槽。
+- Given heater 曾在重启前开启，When 固件重启，Then heater 不因持久化配置自动开启。
+- Given ADC calibration state 已写入持久化后端，When 固件重启，Then 共享样本、A/B 槽位与当前激活槽位都恢复。
 - Given ADC calibration sample 在保存时带有 `referenceTempC` 或 `referenceVinMv`，When 固件重启或 control-plane 重新读取 calibration package，Then ADC-domain points 与原始 physical reference 都恢复，页面不需要靠 `expectedMv` 反推 owner-facing 标定值。
 - Given EEPROM record 来自旧格式且没有 `0x22/0x23` reference TLV，When 固件解码，Then calibration sample 仍恢复为同样的 `observed_mv/expected_mv`，只是 reference 字段为空。
 - Given v1 或 legacy record 只含一个 saved thermal profile，When 解码，Then profile 写入 `pps3a` bank，`pps5a` 保持空 profile，mode 为 `65w`。
 - Given v2 record 同时含两个 thermal bank，When 重启恢复，Then 两个 bank、mode、Wi-Fi 凭据和 calibration state 都完整恢复。
+- Given 无标识历史 thermal profile 的 payload 长度与新 point-local 布局长度相同，When 固件升级后解码，Then 必须优先恢复历史 settings/point 布局，不得按新布局错位读取。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -145,7 +147,7 @@
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 假设：M24C64 地址脚配置为 7-bit 地址 `0x50`。
+- 假设：M24C64 地址脚按硬件基线配置为 7-bit 地址 `0x50`；固件仍会探测 `0x50..0x57`。当实机 EEPROM 不响应时，flash fallback 必须维持保存/重启恢复能力，避免调优和校准流程被单一外设阻断。
 - 风险：当前实现未加密 Wi-Fi 密码；若后续威胁模型要求物理攻击防护，需要另开安全存储规格。
 - 风险：若后续新增更多高频配置项，需要重新评估 EEPROM 写入寿命与合并写策略。
 

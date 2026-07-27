@@ -59,13 +59,14 @@ const VIN_DIVIDER_R_LOW_OHMS: u32 = 5_100;
 const USER_CONFIG_FILE: &str = "config.json";
 const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
+const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
-const SERIAL_LINE_LIMIT: usize = 4_096;
+const SERIAL_LINE_LIMIT: usize = 8 * 1024;
 #[cfg(unix)]
 const LOCK_EX: i32 = 2;
 #[cfg(unix)]
@@ -424,6 +425,9 @@ impl DeviceRecord {
             current_ma: 840,
             board_temp_centi: 3_840,
             rtd_raw_adc_mv: Some(1_123),
+            rtd_raw_adc_min_mv: Some(1_122),
+            rtd_raw_adc_max_mv: Some(1_124),
+            rtd_raw_adc_spread_mv: Some(2),
             vin_raw_adc_mv: Some(1_678),
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: DEFAULT_PD_REQUEST_MV,
@@ -441,6 +445,8 @@ impl DeviceRecord {
             heater_control_phase: None,
             heater_error_c: None,
             heater_control_error_c: None,
+            heater_control_temp_c: None,
+            heater_control_measurement_guarded: false,
             heater_filtered_temp_c: None,
             heater_filtered_slope_c_per_s: None,
             heater_coast_active: false,
@@ -504,6 +510,9 @@ impl DeviceRecord {
             current_ma: 0,
             board_temp_centi: -100,
             rtd_raw_adc_mv: None,
+            rtd_raw_adc_min_mv: None,
+            rtd_raw_adc_max_mv: None,
+            rtd_raw_adc_spread_mv: None,
             vin_raw_adc_mv: None,
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: 0,
@@ -521,6 +530,8 @@ impl DeviceRecord {
             heater_control_phase: None,
             heater_error_c: None,
             heater_control_error_c: None,
+            heater_control_temp_c: None,
+            heater_control_measurement_guarded: false,
             heater_filtered_temp_c: None,
             heater_filtered_slope_c_per_s: None,
             heater_coast_active: false,
@@ -654,6 +665,12 @@ pub struct ControlPlaneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtd_raw_adc_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_min_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_max_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_raw_adc_spread_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vin_raw_adc_mv: Option<u16>,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
@@ -684,6 +701,10 @@ pub struct ControlPlaneStatus {
     pub heater_error_c: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_control_error_c: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_control_temp_c: Option<f32>,
+    #[serde(default)]
+    pub heater_control_measurement_guarded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_filtered_temp_c: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -782,6 +803,7 @@ struct MockThermalCandidatePoint {
     approach_tail_window_centi_c: u16,
     hold_power_permille: u16,
     hold_reheat_power_permille: u16,
+    warmup_reenter_centi_c: u16,
     hold_entry_centi_c: u16,
     hold_exit_centi_c: u16,
     hold_on_centi_c: u16,
@@ -941,6 +963,24 @@ pub struct HeaterCurvePackage {
 pub struct HeaterCurveState {
     pub active: HeaterCurvePackage,
     pub preview: Option<HeaterCurvePackage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eeprom_probe: Option<HeaterCurveEepromProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveEepromProbe {
+    pub present: bool,
+    #[serde(default)]
+    pub current_read_present: bool,
+    #[serde(default)]
+    pub random_read_present: bool,
+    #[serde(default)]
+    pub bus_current_read_addresses: Vec<Option<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 impl Default for HeaterCurvePackage {
@@ -956,6 +996,7 @@ impl Default for HeaterCurveState {
         Self {
             active: HeaterCurvePackage::default(),
             preview: None,
+            eeprom_probe: None,
         }
     }
 }
@@ -1228,6 +1269,8 @@ pub struct ThermalControlProfilePoint {
     #[serde(default)]
     pub hold_reheat_power_permille: u16,
     #[serde(default)]
+    pub warmup_reenter_centi_c: u16,
+    #[serde(default)]
     pub hold_entry_centi_c: u16,
     #[serde(default)]
     pub hold_exit_centi_c: u16,
@@ -1260,15 +1303,23 @@ pub struct ThermalControlProfilePackage {
 #[serde(rename_all = "camelCase")]
 pub struct ThermalControlProfileSettings {
     pub temp_filter_alpha_permille: u16,
+    #[serde(default)]
     pub warmup_reenter_centi_c: u16,
+    #[serde(default)]
     pub hold_entry_centi_c: u16,
+    #[serde(default)]
     pub hold_exit_centi_c: u16,
+    #[serde(default)]
     pub hold_on_centi_c: u16,
+    #[serde(default)]
     pub hold_off_centi_c: u16,
+    #[serde(default)]
     pub overshoot_cutoff_centi_c: u16,
     pub approach_max_ticks: u16,
     pub approach_min_power_ratio_permille: u16,
+    #[serde(default)]
     pub hold_kp_permille_per_c: u16,
+    #[serde(default)]
     pub hold_ki_permille_per_c_tick: u16,
     #[serde(default = "default_hold_blend_ticks")]
     pub hold_blend_ticks: u16,
@@ -1425,6 +1476,8 @@ struct UsbRuntimeConfigWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_ma: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    fault_attention_acknowledged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<&'a CalibrationControlRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_profile_mode: Option<&'a String>,
@@ -1445,6 +1498,7 @@ fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
         manual_pps_enabled: None,
         manual_pps_mv: None,
         manual_pps_ma: None,
+        fault_attention_acknowledged: None,
         calibration: None,
         thermal_profile_mode: Some(mode),
         thermal_control_profile: None,
@@ -2618,28 +2672,28 @@ async fn configure_runtime(
     if let Some(calibration) = payload.calibration.as_ref() {
         apply_mock_calibration_runtime_config(&mut device.status, calibration);
     }
+    if payload.fault_attention_acknowledged == Some(true) {
+        device.status.fault_attention_pending = false;
+    }
     if let Some(mode) = payload.thermal_profile_mode.as_deref() {
-        if matches!(mode, "auto" | "65w" | "100w") {
-            device.status.thermal_profile_mode = mode.to_string();
-            device.status.thermal_profile_resolved_bank = if mode == "100w"
-                || (mode == "auto"
-                    && device.status.pps_capability_min_mv.unwrap_or(u16::MAX) <= 20_000
-                    && device.status.pps_capability_max_mv.unwrap_or(0) >= 20_000
-                    && device.status.pps_capability_max_ma.unwrap_or(0) >= 5_000)
-            {
-                "pps5a".to_string()
-            } else {
-                "pps3a".to_string()
-            };
-        }
+        device.status.thermal_profile_mode = mode.to_string();
+        device.status.thermal_profile_resolved_bank = if mode == "100w"
+            || (mode == "auto"
+                && device.status.pps_capability_min_mv.unwrap_or(u16::MAX) <= 20_000
+                && device.status.pps_capability_max_mv.unwrap_or(0) >= 20_000
+                && device.status.pps_capability_max_ma.unwrap_or(0) >= 5_000)
+        {
+            "pps5a".to_string()
+        } else {
+            "pps3a".to_string()
+        };
     }
     if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
-        let bank = thermal_control_profile.bank.as_deref().unwrap_or_else(|| {
-            match device.status.thermal_profile_mode.as_str() {
-                "100w" => "pps5a",
-                _ => "pps3a",
-            }
-        });
+        let bank = thermal_control_profile
+            .bank
+            .as_deref()
+            .unwrap_or(&device.status.thermal_profile_resolved_bank)
+            .to_string();
         match thermal_control_profile.op {
             ThermalControlProfileOp::Preview => {
                 device.preview_thermal_control_profile = thermal_control_profile.profile.clone();
@@ -2664,7 +2718,6 @@ async fn configure_runtime(
                 }
             }
         }
-        device.status.thermal_profile_resolved_bank = bank.to_string();
     }
     let active_profile = device.preview_thermal_control_profile.as_ref().or_else(|| {
         match device.status.thermal_profile_resolved_bank.as_str() {
@@ -2752,6 +2805,16 @@ fn apply_mock_calibration_runtime_config(
 
 fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpError> {
     if payload
+        .thermal_profile_mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "auto" | "65w" | "100w"))
+    {
+        return Err(HttpError::bad_request(
+            "invalid_thermal_profile_mode",
+            "thermalProfileMode must be auto, 65w, or 100w.",
+        ));
+    }
+    if payload
         .selected_preset_slot
         .is_some_and(|slot| slot >= FRONT_PANEL_PRESET_COUNT)
     {
@@ -2800,6 +2863,16 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
 fn validate_thermal_control_profile_request(
     request: &ThermalControlProfileRequest,
 ) -> Result<(), HttpError> {
+    if request
+        .bank
+        .as_deref()
+        .is_some_and(|bank| !matches!(bank, "pps3a" | "pps5a"))
+    {
+        return Err(HttpError::bad_request(
+            "invalid_thermal_profile_bank",
+            "thermalControlProfile.bank must be pps3a or pps5a.",
+        ));
+    }
     match request.op {
         ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save => {
             let profile = request.profile.as_ref().ok_or_else(|| {
@@ -2814,34 +2887,18 @@ fn validate_thermal_control_profile_request(
                     "thermalControlProfile.profile.points must contain exactly 10 values.",
                 ));
             }
-            if request.op == ThermalControlProfileOp::Save
-                && profile.points.iter().flatten().count() > 6
-            {
-                return Err(HttpError::bad_request(
-                    "thermal_profile_too_many_saved_points",
-                    "saved thermal profiles support at most 6 populated points.",
-                ));
-            }
             if let Some(settings) = profile.settings.as_ref()
                 && (settings.temp_filter_alpha_permille == 0
                     || settings.temp_filter_alpha_permille > 1_000
-                    || settings.warmup_reenter_centi_c == 0
-                    || settings.hold_entry_centi_c == 0
-                    || settings.hold_exit_centi_c == 0
-                    || settings.hold_on_centi_c == 0
-                    || settings.overshoot_cutoff_centi_c == 0
                     || !(AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN..=PPS_HARDWARE_MAX_MV)
                         .contains(&settings.auto_adjustable_working_floor_mv)
                     || settings.heater_current_reserve_ma > 1_000
                     || settings.approach_min_power_ratio_permille > 1_000
-                    || !(1..=255).contains(&settings.approach_max_ticks)
-                    || !(1..=255).contains(&settings.hold_blend_ticks)
-                    || settings.approach_lead_ticks > 255
-                    || settings.hold_lead_ticks > 255)
+                    || !(1..=255).contains(&settings.approach_max_ticks))
             {
                 return Err(HttpError::bad_request(
                     "invalid_thermal_profile",
-                    "thermal profile settings must use non-zero centi-C thresholds, 1..1000 alpha, 5000..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, 1..255 approach/hold-blend ticks, and 0..255 predictive lead ticks.",
+                    "thermal profile settings must use 1..1000 alpha, 5000..28000 auto adjustable floor, 0..1000mA heater current reserve, 0..1000 approach-min ratio, and 1..255 approach max ticks.",
                 ));
             }
             for point in profile.points.iter().flatten() {
@@ -2852,6 +2909,7 @@ fn validate_thermal_control_profile_request(
                     || !(100..=4_000).contains(&point.approach_damping_exponent_permille)
                     || point.hold_power_permille > 1_000
                     || point.hold_reheat_power_permille > 1_000
+                    || point.warmup_reenter_centi_c > 5_000
                     || point.hold_entry_centi_c > 5_000
                     || point.hold_exit_centi_c > 5_000
                     || point.hold_on_centi_c > 5_000
@@ -2865,7 +2923,7 @@ fn validate_thermal_control_profile_request(
                 {
                     return Err(HttpError::bad_request(
                         "invalid_thermal_profile",
-                        "thermal profile points must use positive brake distance, 0..1000 permille power, 100..4000 approach damping, <=5000 centi-C damping thresholds, <=10000 PI gains, and <=255 blend/lead ticks.",
+                        "thermal profile points must use positive brake distance, 0..1000 permille power, 100..4000 approach damping, <=5000 centi-C warmup/damping thresholds, <=10000 PI gains, and <=255 blend/lead ticks.",
                     ));
                 }
             }
@@ -2998,6 +3056,7 @@ fn mock_thermal_default_target_point(target_temp_c: i16) -> MockThermalCandidate
         approach_tail_window_centi_c: 0,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c: 1_000,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -3085,6 +3144,9 @@ fn mock_thermal_profile_from_package(
                 hold_reheat_power_permille: point
                     .map(|point| point.hold_reheat_power_permille)
                     .unwrap_or(default_point.hold_reheat_power_permille),
+                warmup_reenter_centi_c: point
+                    .map(|point| point.warmup_reenter_centi_c)
+                    .unwrap_or(default_point.warmup_reenter_centi_c),
                 hold_entry_centi_c: point
                     .map(|point| point.hold_entry_centi_c)
                     .unwrap_or(default_point.hold_entry_centi_c),
@@ -3093,7 +3155,7 @@ fn mock_thermal_profile_from_package(
                     .unwrap_or(default_point.hold_exit_centi_c),
                 hold_on_centi_c: point
                     .map(|point| point.hold_on_centi_c)
-                    .unwrap_or(settings.hold_on_centi_c),
+                    .unwrap_or(default_point.hold_on_centi_c),
                 hold_off_centi_c: point
                     .map(|point| point.hold_off_centi_c)
                     .unwrap_or(default_point.hold_off_centi_c),
@@ -3227,6 +3289,11 @@ fn mock_thermal_interpolated_candidate_point(
             1_000,
         )) * low_temp_reheat_scale
             + 0.5) as u16,
+        warmup_reenter_centi_c: lerp(
+            lower.warmup_reenter_centi_c,
+            upper.warmup_reenter_centi_c,
+            5_000,
+        ),
         hold_entry_centi_c: lerp(lower.hold_entry_centi_c, upper.hold_entry_centi_c, 5_000),
         hold_exit_centi_c: lerp(lower.hold_exit_centi_c, upper.hold_exit_centi_c, 5_000),
         hold_on_centi_c: lerp(lower.hold_on_centi_c, upper.hold_on_centi_c, 5_000),
@@ -3247,11 +3314,7 @@ fn mock_thermal_interpolated_candidate_point(
                 upper.hold_ki_permille_per_c_tick,
                 10_000,
             );
-            if interpolated == 0 {
-                profile.settings.hold_ki_permille_per_c_tick
-            } else {
-                interpolated
-            }
+            interpolated.max(1)
         },
         hold_blend_ticks: lerp(
             lower.hold_blend_ticks,
@@ -3301,6 +3364,7 @@ fn mock_thermal_runtime(
         approach_damping_exponent_permille,
         hold_power_permille,
         hold_reheat_power_permille,
+        warmup_reenter_centi_c,
         hold_entry_centi_c,
         hold_exit_centi_c,
         hold_on_centi_c,
@@ -3321,6 +3385,7 @@ fn mock_thermal_runtime(
                 point.approach_damping_exponent_permille,
                 point.hold_power_permille,
                 point.hold_reheat_power_permille,
+                point.warmup_reenter_centi_c,
                 point.hold_entry_centi_c,
                 point.hold_exit_centi_c,
                 point.hold_on_centi_c,
@@ -3333,7 +3398,29 @@ fn mock_thermal_runtime(
                 point.hold_lead_ticks,
             )
         })
-        .unwrap_or_else(|| mock_thermal_default_target_values(target_temp_c));
+        .unwrap_or_else(|| {
+            let default_point = mock_thermal_default_target_point(target_temp_c);
+            (
+                default_point.brake_distance_centi_c,
+                default_point.warmup_power_permille,
+                default_point.approach_power_permille,
+                default_point.approach_floor_power_permille,
+                default_point.approach_damping_exponent_permille,
+                default_point.hold_power_permille,
+                default_point.hold_reheat_power_permille,
+                default_point.warmup_reenter_centi_c,
+                default_point.hold_entry_centi_c,
+                default_point.hold_exit_centi_c,
+                default_point.hold_on_centi_c,
+                default_point.hold_off_centi_c,
+                default_point.overshoot_cutoff_centi_c,
+                default_point.hold_kp_permille_per_c,
+                default_point.hold_ki_permille_per_c_tick,
+                default_point.hold_blend_ticks,
+                default_point.approach_lead_ticks,
+                default_point.hold_lead_ticks,
+            )
+        });
     let warmup_power_permille = if let Some(point) = point {
         point
             .warmup_power_permille
@@ -3371,7 +3458,7 @@ fn mock_thermal_runtime(
         approach_lead_ticks,
         hold_lead_ticks,
         temp_filter_alpha_permille: settings.temp_filter_alpha_permille,
-        warmup_reenter_centi_c: settings.warmup_reenter_centi_c,
+        warmup_reenter_centi_c,
         approach_max_ticks: settings.approach_max_ticks,
         approach_min_power_ratio_permille: settings.approach_min_power_ratio_permille,
         auto_adjustable_working_floor_mv: settings.auto_adjustable_working_floor_mv,
@@ -3822,6 +3909,7 @@ async fn serial_runtime_config(
         manual_pps_enabled: payload.manual_pps_enabled,
         manual_pps_mv: payload.manual_pps_mv,
         manual_pps_ma: payload.manual_pps_ma,
+        fault_attention_acknowledged: payload.fault_attention_acknowledged,
         calibration: payload.calibration.as_ref(),
         thermal_profile_mode: payload.thermal_profile_mode.as_ref(),
         thermal_control_profile: payload.thermal_control_profile.as_ref(),
@@ -4180,6 +4268,7 @@ fn serial_exchange_blocking(
     let mut next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
+    let mut discarding_overlong_line = false;
 
     while Instant::now() < deadline {
         match session.port.read(&mut read_buf) {
@@ -4194,7 +4283,7 @@ fn serial_exchange_blocking(
             }
             Ok(read) => {
                 for byte in &read_buf[..read] {
-                    if *byte == b'\n' {
+                    if serial_line_finished(&mut line, &mut discarding_overlong_line, *byte) {
                         emit_serial_log_line(state, events, device_id, &line);
                         match decode_usb_response_line(&line, request_id) {
                             Ok(Some(payload)) => {
@@ -4217,10 +4306,6 @@ fn serial_exchange_blocking(
                             }
                         }
                         line.clear();
-                    } else if line.len() < SERIAL_LINE_LIMIT {
-                        line.push(*byte);
-                    } else {
-                        line.clear();
                     }
                 }
             }
@@ -4239,12 +4324,15 @@ fn serial_exchange_blocking(
                 session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
                 next_silent_retry_at = Instant::now() + SERIAL_SILENT_RETRY_DELAY;
                 line.clear();
+                discarding_overlong_line = false;
             }
             Err(error) => return Err(serial_io_http_error(error)),
         }
     }
 
-    store_serial_session(&mut serial_sessions, port_path, session);
+    // A timeout can leave an incomplete response in the driver buffer. Do not
+    // reuse that session: the next RPC must start at a fresh JSONL boundary.
+    drop(session);
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",
@@ -4281,6 +4369,26 @@ fn emit_serial_log_line(
         inner.push_event(event.clone());
     }
     let _ = events.send(event);
+}
+
+fn serial_line_finished(line: &mut Vec<u8>, discarding_overlong_line: &mut bool, byte: u8) -> bool {
+    if byte == b'\n' {
+        if *discarding_overlong_line {
+            *discarding_overlong_line = false;
+            line.clear();
+            return false;
+        }
+        return true;
+    }
+    if !*discarding_overlong_line {
+        if line.len() < SERIAL_LINE_LIMIT {
+            line.push(byte);
+        } else {
+            line.clear();
+            *discarding_overlong_line = true;
+        }
+    }
+    false
 }
 
 type SerialSessionMap = HashMap<String, SerialSession>;
@@ -4597,6 +4705,9 @@ fn runtime_config_matches_status(
         .manual_pps_ma
         .is_some_and(|manual_pps_ma| status.manual_pps_ma != Some(manual_pps_ma))
     {
+        return false;
+    }
+    if payload.fault_attention_acknowledged == Some(true) && status.fault_attention_pending {
         return false;
     }
     if let Some(calibration) = payload.calibration.as_ref() {
@@ -5136,32 +5247,33 @@ async fn run_espflash(
     root: Option<&Path>,
     port_path: &str,
 ) -> Result<(), HttpError> {
-    let args = build_espflash_args(artifact, root, port_path)?;
+    let commands = build_espflash_args(artifact, root, port_path)?;
     let program = resolve_espflash_program();
-    let output = Command::new(&program)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|error| {
-            HttpError::internal_with_details(
-                "flash_tool_unavailable",
-                "Failed to start espflash.",
-                json!({
-                    "program": program,
-                    "error": error.to_string(),
-                }),
-            )
-        })?;
+    for args in commands {
+        let output = Command::new(&program)
+            .args(&args)
+            .output()
+            .await
+            .map_err(|error| {
+                HttpError::internal_with_details(
+                    "flash_tool_unavailable",
+                    "Failed to start espflash.",
+                    json!({
+                        "program": program,
+                        "error": error.to_string(),
+                    }),
+                )
+            })?;
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(HttpError::internal_with_details(
-            "flash_tool_failed",
-            "espflash returned a non-zero status.",
-            espflash_failure_details(&program, &args, &output),
-        ))
+        if !output.status.success() {
+            return Err(HttpError::internal_with_details(
+                "flash_tool_failed",
+                "espflash returned a non-zero status.",
+                espflash_failure_details(&program, &args, &output),
+            ));
+        }
     }
+    Ok(())
 }
 
 fn resolve_espflash_program() -> PathBuf {
@@ -5233,16 +5345,17 @@ fn build_espflash_args(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
-) -> Result<Vec<String>, HttpError> {
+) -> Result<Vec<Vec<String>>, HttpError> {
     if port_path.is_empty() {
         return Err(HttpError::bad_request(
             "missing_port",
             "Real flash requires an explicit serial port.",
         ));
     }
+    let partition_table = firmware_partition_table_path(root)?;
     if let Some(elf_image) = artifact.files.iter().find(|file| file.kind == "elf") {
         let path = resolve_artifact_path(root, &elf_image.path);
-        return Ok(vec![
+        let mut args = vec![
             "flash".to_string(),
             "--chip".to_string(),
             artifact.target_chip.clone(),
@@ -5253,8 +5366,11 @@ fn build_espflash_args(
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
-            path.to_string_lossy().into_owned(),
-        ]);
+        ];
+        args.push("--partition-table".to_string());
+        args.push(partition_table.to_string_lossy().into_owned());
+        args.push(path.to_string_lossy().into_owned());
+        return Ok(vec![args]);
     }
 
     let Some(app_image) = artifact.files.iter().find(|file| file.kind == "app") else {
@@ -5263,24 +5379,80 @@ fn build_espflash_args(
             "Artifact does not contain an ELF or raw app image.",
         ));
     };
-    let flash_address = app_image.flash_address.ok_or_else(|| {
+    let app_address = app_image.flash_address.ok_or_else(|| {
         HttpError::bad_request("missing_flash_address", "Missing app flash address.")
     })?;
-    let path = resolve_artifact_path(root, &app_image.path);
-    Ok(vec![
-        "write-bin".to_string(),
+    let partition_table_binary = firmware_partition_table_binary_path(root)?;
+    let app_path = resolve_artifact_path(root, &app_image.path);
+    let before = espflash_before_reset_mode(artifact, port_path);
+    let common = vec![
         "--chip".to_string(),
         artifact.target_chip.clone(),
         "--port".to_string(),
         port_path.to_string(),
-        "--before".to_string(),
-        espflash_before_reset_mode(artifact, port_path).to_string(),
         "--non-interactive".to_string(),
+    ];
+    let mut partition_table_args = vec!["write-bin".to_string()];
+    partition_table_args.extend(common.clone());
+    partition_table_args.extend([
+        "--before".to_string(),
+        before.to_string(),
         "--after".to_string(),
-        "hard-reset".to_string(),
-        flash_address.to_string(),
-        path.to_string_lossy().into_owned(),
-    ])
+        "no-reset".to_string(),
+        DEFAULT_PARTITION_TABLE_FLASH_ADDRESS.to_string(),
+        partition_table_binary.to_string_lossy().into_owned(),
+    ]);
+    let mut app_args = vec!["write-bin".to_string()];
+    app_args.extend(common.clone());
+    app_args.extend([
+        "--before".to_string(),
+        before.to_string(),
+        "--after".to_string(),
+        "no-reset".to_string(),
+        app_address.to_string(),
+        app_path.to_string_lossy().into_owned(),
+    ]);
+    // espflash write-bin leaves the target in its loader. Reset explicitly once both images land.
+    let mut reset_args = vec!["reset".to_string()];
+    reset_args.extend(common);
+    reset_args.extend(["--before".to_string(), before.to_string()]);
+    Ok(vec![partition_table_args, app_args, reset_args])
+}
+
+fn firmware_partition_table_path(root: Option<&Path>) -> Result<PathBuf, HttpError> {
+    let Some(root) = root else {
+        return Err(HttpError::bad_request(
+            "firmware_partition_table_required",
+            "Firmware flashing requires an artifact root containing firmware/partitions.csv.",
+        ));
+    };
+    let partition_table = root.join("firmware/partitions.csv");
+    if partition_table.is_file() {
+        Ok(partition_table)
+    } else {
+        Err(HttpError::bad_request(
+            "firmware_partition_table_required",
+            "Firmware flashing requires firmware/partitions.csv so flux_cfg is installed.",
+        ))
+    }
+}
+
+fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, HttpError> {
+    let Some(root) = root else {
+        return Err(HttpError::bad_request(
+            "firmware_partition_table_required",
+            "Raw app flashing requires an artifact root containing firmware/partitions.bin.",
+        ));
+    };
+    let partition_table = root.join("firmware/partitions.bin");
+    if partition_table.is_file() {
+        Ok(partition_table)
+    } else {
+        Err(HttpError::bad_request(
+            "firmware_partition_table_required",
+            "Raw app flashing requires firmware/partitions.bin so flux_cfg is installed.",
+        ))
+    }
 }
 
 fn espflash_before_reset_mode(artifact: &FirmwareArtifact, port_path: &str) -> &'static str {
@@ -6169,6 +6341,29 @@ mod tests {
     }
 
     #[test]
+    fn usb_runtime_wire_serializes_fault_attention_acknowledgement() {
+        let json = serde_json::to_value(UsbRuntimeConfigWire {
+            frame_type: "runtime_config",
+            request_id: "attention-test",
+            target_temp_c: Some(140),
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: Some(true),
+            heater_enabled: Some(false),
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: Some(true),
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        })
+        .unwrap();
+
+        assert_eq!(json["faultAttentionAcknowledged"], true);
+    }
+
+    #[test]
     fn real_flash_args_flash_elf_and_hard_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
@@ -6190,8 +6385,16 @@ mod tests {
         };
 
         let dir = tempdir().unwrap();
-        let args =
+        std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
+        std::fs::write(
+            dir.path().join("firmware/partitions.csv"),
+            "flux_cfg,data,0x06,0x110000,0x2000",
+        )
+        .unwrap();
+        let commands =
             build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
+        assert_eq!(commands.len(), 1);
+        let args = &commands[0];
 
         assert_eq!(args[0], "flash");
         assert!(
@@ -6208,11 +6411,14 @@ mod tests {
         );
         assert!(!args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--partition-table" && pair[1].ends_with("firmware/partitions.csv")
+        }));
         assert!(!args.contains(&"65536".to_string()));
     }
 
     #[test]
-    fn real_flash_args_write_raw_app_bin_with_explicit_address() {
+    fn real_flash_args_write_raw_app_bin_with_partition_table_and_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -6233,24 +6439,47 @@ mod tests {
         };
 
         let dir = tempdir().unwrap();
-        let args =
+        std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
+        std::fs::write(
+            dir.path().join("firmware/partitions.csv"),
+            "flux_cfg,data,0x06,0x110000,0x2000",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("firmware/partitions.bin"),
+            b"partition-table",
+        )
+        .unwrap();
+        let commands =
             build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
 
-        assert_eq!(args[0], "write-bin");
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0][0], "write-bin");
+        assert!(commands[0].windows(2).any(|pair| {
+            pair == [
+                DEFAULT_PARTITION_TABLE_FLASH_ADDRESS.to_string(),
+                dir.path()
+                    .join("firmware/partitions.bin")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        }));
+        assert_eq!(commands[1][0], "write-bin");
+        assert!(commands[1].windows(2).any(|pair| {
+            pair == [
+                DEFAULT_APP_FLASH_ADDRESS.to_string(),
+                dir.path()
+                    .join("firmware.bin")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]
+        }));
+        assert_eq!(commands[2][0], "reset");
         assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--port", "/dev/cu.usbmodem21221401"])
-        );
-        assert!(
-            args.windows(2)
+            commands[2]
+                .windows(2)
                 .any(|pair| pair == ["--before", "usb-reset"])
         );
-        assert!(
-            args.windows(2)
-                .any(|pair| pair == ["--after", "hard-reset"])
-        );
-        assert!(args.contains(&DEFAULT_APP_FLASH_ADDRESS.to_string()));
-        assert!(args.iter().any(|arg| arg.ends_with("firmware.bin")));
     }
 
     #[test]
@@ -6302,6 +6531,31 @@ mod tests {
         assert_eq!(error.error.code, "lease_expired");
     }
 
+    fn test_thermal_control_profile_point(target_temp_c: i16) -> ThermalControlProfilePoint {
+        ThermalControlProfilePoint {
+            target_temp_c,
+            brake_distance_centi_c: 1_000,
+            warmup_power_permille: 1_000,
+            warmup_reenter_centi_c: 400,
+            approach_power_permille: 500,
+            approach_floor_power_permille: 300,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 0,
+            hold_power_permille: 300,
+            hold_reheat_power_permille: 350,
+            hold_entry_centi_c: 150,
+            hold_exit_centi_c: 100,
+            hold_on_centi_c: 20,
+            hold_off_centi_c: 100,
+            overshoot_cutoff_centi_c: 200,
+            hold_kp_permille_per_c: 20,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 2,
+            approach_lead_ticks: 2,
+            hold_lead_ticks: 1,
+        }
+    }
+
     #[tokio::test]
     async fn runtime_endpoint_previews_and_clears_thermal_control_profile() {
         let state = AppState::test();
@@ -6332,6 +6586,7 @@ mod tests {
                                 target_temp_c: 100,
                                 brake_distance_centi_c: 700,
                                 warmup_power_permille: 320,
+                                warmup_reenter_centi_c: 0,
                                 approach_power_permille: 320,
                                 approach_floor_power_permille: 220,
                                 approach_damping_exponent_permille: 1_000,
@@ -6435,6 +6690,13 @@ mod tests {
     async fn runtime_endpoint_saves_and_clears_saved_thermal_control_profile() {
         let state = AppState::test();
         let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let points = (0..FRONT_PANEL_PRESET_COUNT)
+            .map(|index| {
+                Some(test_thermal_control_profile_point(
+                    60 + i16::try_from(index).unwrap() * 20,
+                ))
+            })
+            .collect();
         let save = configure_runtime(
             State(state.clone()),
             AxumPath("mock-fp-lab-01".to_string()),
@@ -6456,38 +6718,7 @@ mod tests {
                     bank: None,
                     profile: Some(ThermalControlProfilePackage {
                         settings: None,
-                        points: vec![
-                            Some(ThermalControlProfilePoint {
-                                target_temp_c: 210,
-                                brake_distance_centi_c: 1_000,
-                                warmup_power_permille: 260,
-                                approach_power_permille: 260,
-                                approach_floor_power_permille: 180,
-                                approach_damping_exponent_permille: 1_000,
-                                approach_tail_window_centi_c: 0,
-                                hold_power_permille: 180,
-                                hold_reheat_power_permille: 0,
-                                hold_entry_centi_c: 0,
-                                hold_exit_centi_c: 0,
-                                hold_on_centi_c: 0,
-                                hold_off_centi_c: 0,
-                                overshoot_cutoff_centi_c: 0,
-                                hold_kp_permille_per_c: 0,
-                                hold_ki_permille_per_c_tick: 0,
-                                hold_blend_ticks: 0,
-                                approach_lead_ticks: 0,
-                                hold_lead_ticks: 0,
-                            }),
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                            None,
-                        ],
+                        points,
                     }),
                 }),
             }),
@@ -6544,6 +6775,108 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.error.code, "invalid_thermal_profile");
+    }
+
+    #[test]
+    fn thermal_profile_rejects_out_of_range_warmup_reentry() {
+        let mut point = test_thermal_control_profile_point(140);
+        point.warmup_reenter_centi_c = 5_001;
+        let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
+        points[0] = Some(point);
+
+        let error = validate_thermal_control_profile_request(&ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::Preview,
+            bank: None,
+            profile: Some(ThermalControlProfilePackage {
+                settings: None,
+                points,
+            }),
+        })
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "invalid_thermal_profile");
+    }
+
+    #[test]
+    fn runtime_config_rejects_unknown_thermal_profile_enums() {
+        let mut payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: None,
+            calibration: None,
+            thermal_profile_mode: Some("turbo".to_string()),
+            thermal_control_profile: None,
+        };
+        assert_eq!(
+            validate_runtime_config(&payload).unwrap_err().error.code,
+            "invalid_thermal_profile_mode"
+        );
+
+        payload.thermal_profile_mode = None;
+        payload.thermal_control_profile = Some(ThermalControlProfileRequest {
+            op: ThermalControlProfileOp::ClearSaved,
+            bank: Some("pps9a".to_string()),
+            profile: None,
+        });
+        assert_eq!(
+            validate_runtime_config(&payload).unwrap_err().error.code,
+            "invalid_thermal_profile_bank"
+        );
+    }
+
+    #[tokio::test]
+    async fn mock_persistence_to_inactive_bank_does_not_switch_the_resolved_bank() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let status = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id,
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                fault_attention_acknowledged: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                thermal_control_profile: Some(ThermalControlProfileRequest {
+                    op: ThermalControlProfileOp::Save,
+                    bank: Some("pps5a".to_string()),
+                    profile: Some(ThermalControlProfilePackage {
+                        settings: None,
+                        points: vec![None; FRONT_PANEL_PRESET_COUNT],
+                    }),
+                }),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(status.thermal_profile_resolved_bank, "pps3a");
+        assert_eq!(status.thermal_control.profile_source, "default");
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .devices
+                .get("mock-fp-lab-01")
+                .unwrap()
+                .saved_thermal_control_profile_pps5a
+                .is_some()
+        );
     }
 
     #[test]
@@ -7054,6 +7387,26 @@ mod tests {
     }
 
     #[test]
+    fn serial_line_reader_discards_an_overlong_frame_before_the_next_response() {
+        let mut line = Vec::new();
+        let mut discarding = false;
+        for _ in 0..=SERIAL_LINE_LIMIT {
+            assert!(!serial_line_finished(&mut line, &mut discarding, b'x'));
+        }
+        assert!(discarding);
+        assert!(!serial_line_finished(&mut line, &mut discarding, b'\n'));
+        assert!(!discarding);
+        assert!(line.is_empty());
+
+        let response = br#"{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#;
+        for byte in response {
+            assert!(!serial_line_finished(&mut line, &mut discarding, *byte));
+        }
+        assert!(serial_line_finished(&mut line, &mut discarding, b'\n'));
+        assert!(decode_usb_response_line(&line, "req-1").unwrap().is_some());
+    }
+
+    #[test]
     fn usb_response_decoder_extracts_runtime_config_status_payload() {
         let payload = decode_usb_response_line(
             br#"{"type":"response","requestId":"runtime-1","ok":true,"result":{"status":{"mode":"sampling","uptimeSeconds":12,"currentTempC":194.0,"targetTempC":240,"heaterEnabled":true,"heaterOutputPercent":25,"activeCoolingEnabled":false,"fanDisplayState":"AUTO","fanEnabled":true,"fanPwmPermille":500,"voltageMv":20000,"currentMa":850,"boardTempCenti":1940,"pdRequestMv":20000,"pdContractMv":20000,"pdState":"ready","frontpanelKey":null,"network":{"state":"idle","dns":[],"wifiRssi":null}}}}"#,
@@ -7156,6 +7509,9 @@ mod tests {
             current_ma: 2_800,
             board_temp_centi: 3150,
             rtd_raw_adc_mv: Some(934),
+            rtd_raw_adc_min_mv: Some(933),
+            rtd_raw_adc_max_mv: Some(935),
+            rtd_raw_adc_spread_mv: Some(2),
             vin_raw_adc_mv: Some(1003),
             pd_request_mv: 12_000,
             pd_contract_mv: 12_000,
@@ -7173,6 +7529,8 @@ mod tests {
             heater_control_phase: None,
             heater_error_c: None,
             heater_control_error_c: None,
+            heater_control_temp_c: None,
+            heater_control_measurement_guarded: false,
             heater_filtered_temp_c: None,
             heater_filtered_slope_c_per_s: None,
             heater_coast_active: false,
@@ -7242,12 +7600,37 @@ mod tests {
     }
 
     #[test]
+    fn runtime_config_matcher_requires_attention_to_be_cleared_after_acknowledgement() {
+        let payload = RuntimeConfigRequest {
+            lease_id: "lease-1".to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: Some(true),
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        };
+        let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        status.fault_attention_pending = true;
+        assert!(!runtime_config_matches_status(&payload, &status));
+        status.fault_attention_pending = false;
+        assert!(runtime_config_matches_status(&payload, &status));
+    }
+
+    #[test]
     fn runtime_config_matcher_reconciles_preview_from_status_flag() {
         let mut points = vec![None; FRONT_PANEL_PRESET_COUNT];
         points[0] = Some(ThermalControlProfilePoint {
             target_temp_c: 120,
             brake_distance_centi_c: 700,
             warmup_power_permille: 320,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 320,
             approach_floor_power_permille: 220,
             approach_damping_exponent_permille: 1_000,
@@ -7308,6 +7691,7 @@ mod tests {
             target_temp_c: 220,
             brake_distance_centi_c: 520,
             warmup_power_permille: 1_000,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 760,
             approach_floor_power_permille: 600,
             approach_damping_exponent_permille: 550,

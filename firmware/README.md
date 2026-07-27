@@ -74,24 +74,26 @@
   - `heater_output_percent` is the live PID duty rendered in the Dashboard bottom bar
   - `fan_enabled` is the actual fan runtime state, not a mock toggle
 - EEPROM memory:
-  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config in two `1 KiB` slots at `0x0400` and `0x0800`; the former `512 B` slots at `0x0000` and `0x0200` remain a read-only migration fallback
+  - `M24C64` on shared `GPIO8/9` I2C stores versioned memory config in two `2 KiB` slots at `0x1000` and `0x1800`; previous `1 KiB` slots at `0x0400` / `0x0800` and legacy `512 B` slots at `0x0000` / `0x0200` remain read-only migration sources, with the highest valid sequence restored
+  - if EEPROM access fails, the same record falls back to two slots in the dedicated `flux_cfg` 8KiB data partition declared by `firmware/partitions.csv`; each slot owns a separate `4 KiB` erase sector so a power loss during one write leaves the other record recoverable without writing into NVS-managed space
   - persisted fields are `target_temp_c`, `selected_preset_slot`, `presets_c[10]`, `active_cooling_enabled`, and Wi-Fi config fields
-  - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended
+  - record payloads are TLV encoded with CRC validation; unknown TLVs are skipped so future fields can be appended, and newly persisted thermal-profile TLVs use an explicit `TCP2` layout marker while unmarked historical layouts remain readable
   - accepted front-panel edits debounce for about `2s` before writing the next slot
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
-  - the control loop runs at `10 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
+  - the control loop runs at `20 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
   - the controller uses model-assisted ramp/soak plus hold PI trimming: far from target it uses an approach power, inside the target-specific brake distance it ramps toward hold power, and in hold it trims around hold power with a small PI term
-  - optional `ThermalControlProfile` preview is RAM-only and can tune up to 10 target points with `targetTempC`, `brakeDistanceCentiC`, `approachPowerPermille`, and `holdPowerPermille`; missing points fall back to conservative defaults, and interpolated targets use linear interpolation
-  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend: `0%` keeps the MOS off and requests `12 V` or the source's higher PPS minimum; `1..100%` maps equivalent power into a `100 mV` aligned PPS voltage request from the source PPS minimum up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; WARMUP keeps this dynamic PPS control path; sub-`500 mV` target changes are suppressed and larger changes ramp by at most `500 mV` per request; same-APDO changes keep the MOS gate active and use a `25 ms` request transition gate, while APDO/AVS/fixed-PDO/fallback path changes blank the MOS and use a `275 ms` transition window; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
-  - if PPS does not cover `20 V`, capability data cannot be read, or a PPS/AVS write fails, firmware uses the `fixed-pd-pwm-fallback` backend and drives `GPIO47` as the original `2 kHz` heater PWM
-  - control interval is `100 ms (10 Hz)`
+  - optional `ThermalControlProfile` preview is RAM-only and can tune up to 10 target points; saved profiles persist all 10 fully materialized point-local parameter sets in redundant `2 KiB` records, while historical `1 KiB` records remain readable; missing points fall back to conservative defaults, and interpolated targets use linear interpolation
+  - if CH224Q power data contains a PPS APDO that covers `20 V`, firmware uses the `pps-mos` backend. When several APDOs cover `20 V`, it selects the highest current APDO, then highest maximum voltage, then lowest minimum voltage, so a wider `3 A` APDO cannot hide a `20 V / 5 A` APDO. Outside HOLD, armed `0%` keeps the MOS off and returns the request to the configured working floor through bounded `500 mV` steps (clamped to the source capability floor); HOLD keeps its locked PPS voltage while PWM is `0%`. `1..100%` maps equivalent power into a `100 mV` aligned PPS voltage request from the working floor up to a dynamic safe maximum derived from the live temperature estimate, the `3.2 ohm` heater profile, and the lower of PPS APDO current capability or a valid CH224Q status current reading; when the active request is at the floor or on a bounded down-ramp, the `100 Hz` MOS PWM continuously supplies the remaining `0..100%` power ratio; WARMUP keeps this dynamic PPS control path; sub-`500 mV` target changes are suppressed and larger changes ramp by at most `500 mV` per request; same-APDO changes keep the MOS gate active and wait `500 ms` between requests so the `300 ms` RTD control-sampling guard can complete, while APDO/AVS/fixed-PDO/fallback path changes blank the MOS and use a `275 ms` transition window; if that safe maximum drops below PPS minimum while heating, firmware temporarily requests fixed `9 V` and falls back to `GPIO47` PWM with duty capped by the same current limit until the safe maximum recovers with `200 mV` hysteresis
+  - `GPIO47` uses MCPWM at `100 Hz` for PPS and fixed-PD fallback. PPS voltage provides coarse power control; at the PPS floor and during bounded down-ramp, PWM continuously extends physical output down to `0%`. Each warmup entry applies a `1000 ms` linear physical-output soft start. HOLD inherits and locks the voltage established by Approach while PWM handles PI response. Firmware does not sweep voltage downward during HOLD; only sustained full PWM below target with insufficient rise may raise PPS in bounded `500 mV` steps at least `2 s` apart. Safe-limit convergence obeys the same step bound and cannot clamp directly to the PPS floor.
+  - control interval is `50 ms (20 Hz)`
   - RTD open/short or ADC read failure forces heater fault-latch and duty `0%` without buzzer attention; valid temperature or raw ADC changes are never classified as a speed/discontinuity fault
+- USB JSONL control frames use an `8 KiB` shared firmware/devd limit. This accommodates a fully materialized nine-point thermal profile save or preview request; oversized frames are rejected at the transport boundary.
   - `temp >= 420°C` enters thermal runaway, forces duty `0%`, and rejects heater arm while the runaway alert remains unacknowledged; acknowledgement never bypasses the active absolute overtemperature cutoff
   - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
 - Fan control:
-  - heater disabled + active cooling enabled: `40~60°C` runs at `GPIO36 duty=50%` (`500‰`), `>60°C` switches to full speed (`0‰`)
-  - once active cooling has the fan running and temperature drops below `40°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
+  - heater disabled + active cooling enabled: temporary cooling policy runs full speed at `>=35°C` (`GPIO36 duty=0%`, `0‰`)
+  - once active cooling has the fan running and temperature drops below `35°C`, the firmware drives `GPIO36 duty=100%` (`1000‰`) for `30s`, then stops the fan
   - heater enabled: `<=100°C` keeps the fan off; `>100°C` uses minimum-voltage enable pulses only while the live heater output is non-zero; the pulse on-window is twice the cooling-disabled pulse and capped at `50%`
   - active cooling disabled: `>100°C` minimum-voltage `0.2Hz` enable pulse capped at `25%`, `>350°C` heater lock + `50%` fan, `>360°C` full speed
   - unacknowledged thermal runaway forces the existing active-cooling envelope regardless of the owner policy: `>60°C` full speed and `40~60°C` at `50%`; the forced state ends at `<40°C` or on acknowledgement, whichever comes first
@@ -119,7 +121,7 @@
 
 - `GPIO8/9` host the shared I2C bus for `CH224Q` and `M24C64`.
 - The app runtime programs `CH224Q` register `0x0A` on boot and requests the feature-selected voltage (`20 V` by default, optional `12 V` / `28 V` build variants).
-- The runtime then reads CH224Q `0x60~0x8F` power data. If a PPS APDO covers `20 V`, heater control can switch to `pps-mos`; otherwise it remains on `fixed-pd-pwm-fallback`.
+- The runtime then reads CH224Q `0x60~0x8F` power data. If a PPS APDO covers `20 V`, heater control can switch to `pps-mos`; competing APDOs are selected by maximum current, maximum voltage, then minimum voltage. The live `0x50` current readback constrains safe power but does not alter the advertised capability class. Otherwise it remains on `fixed-pd-pwm-fallback`.
 - In `pps-mos`, CH224Q `0x53` is used for PPS voltage requests in `100 mV` units and `0x51/0x52` for AVS requests above the PPS range. AVS `25 mV` resolution is not used for first-version hold-power trimming. The first request writes the voltage register before writing `0x0A = 6` or `0x0A = 7`.
 - Firmware first tries `0x22`, then falls back to `0x23`; if neither address acknowledges after retries, boot aborts before the app runtime continues.
 - After boot request/settle, the runtime polls CH224Q status for observation and defmt logging only.
@@ -180,7 +182,7 @@
 - GPIO profile is locked to the S3 front-panel baseline (`24` firmware-active GPIO, center key on `GPIO0`).
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
-- `GPIO47` (chip pin `37`) controls the low-side heater MOSFET stage through the populated `68 Ohm` gate resistor. `BUK9Y14-40B,115` is the primary approved part and `PSMN1R4-40YLDX` is the approved pin-compatible substitute. In `pps-mos` mode the signal is a static off/on gate output; in fallback mode it remains the `2 kHz` heater PWM output.
+- `GPIO47` (chip pin `37`) controls the low-side heater MOSFET stage through the populated `68 Ohm` gate resistor and MCPWM at `100 Hz` in both PPS and fallback modes. `BUK9Y14-40B,115` is the primary approved part and `PSMN1R4-40YLDX` is the approved pin-compatible substitute.
 - `GPIO48` (chip pin `36`) is the active buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
@@ -195,6 +197,7 @@
 ## Notes
 
 - The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
+- The repository-root `espflash.toml` pins `firmware/partitions.csv`, so ELF flashing installs the dedicated `flux_cfg` fallback partition together with the normal NVS, PHY, and factory-app layout. `firmware/partitions.bin` is the checked-in equivalent for the supported raw-app devd path: devd writes it at `0x8000` before the app and then resets the target.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
 - Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
 - This round still does not implement touch input, tach feedback, external PID tuning, or closed-loop VIN/current power compensation.

@@ -1,5 +1,11 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-27
+
+- 纠正 CH224Q PPS APDO 选择合同：当多个 PPS APDO 都覆盖 `20V` 时，firmware 现在保持 capability 来自同一个 APDO，并按最大电流、最大电压、最小电压排序。此前宽范围 `3A` APDO 会先于 `20V/5A` APDO 被选中，导致 `auto` 100W source 错误解析为低电流 capability；新回归测试覆盖 `3.3~21V/3A + 5~20V/5A` 组合，要求回读 `5000..20000mV / 5000mA`。
+- 使用授权 `/dev/cu.usbmodem2111401`、IsolaPurr `f293cc9c139e` / `http://192.168.31.224` 和已更换的 5A eMarked 线材，完成该修复的 real-flash 与短 HIL receipt。source 保持 `100W`、PD/PPS、`pd_pps_5a=true`、`pps3_limit_ma=5000`、`tps_mode=auto_follow`；设备 readback 为 `ppsCapabilityMaxMa=5000`、`currentMa=5000`、`thermalProfileResolvedBank=pps5a` 且无 manual PPS override。`100°C / 120s` 短测约 `30s` 到达 `99.27°C`，后续采样在约 `99.3~99.9°C`；未见传感器硬 fault、过温、runtime reset、source stale 或端口切换。结束回读已关热、开启主动冷却。该记录不是 profile 调优、EEPROM save 或 frozen/accepted baseline。
+- 更正 `2026-05-25` 的 executor arena 历史：`task-arena-size-32768` 不能容纳当前 `flux-purr` 主任务的 `33,344`-byte allocation，仍会在 pre-main 阶段触发 `task arena is full` panic 并被 RTC WDT 重启。固件现使用 `task-arena-size-65536`，为该任务保留足够静态 arena。
+
 ## 2026-07-19
 
 - `220°C` rerun3/rerun4/rerun5 的 current truth 已收口到同一高温点族。`2026-07-19` 的 rerun4 与 rerun5 都停在 `brake=701 / approachFloor=898 / damping=410 / lead=3 / holdEntry=159 / holdReheat=930`，失败形态也从早期的高侧 overshoot 收敛成低侧或低裕量：`missed_lower_band_before_limit`、`stable_window_broke_low` 与 `within_gate_low_margin`。这说明当前 `220°C` 剩余 blocker 已不是高侧余热，而是 low-side / low-margin plateau。
@@ -49,6 +55,7 @@
 
 - firmware approach 段的 near-target sustain floor 现已直接受 `holdReheatPowerPermille` 约束，而不是只在 `Hold -> Approach` 回升路径上才抬高到 reheat floor；同时 predictive coast 现在要求“实际误差 + 滤波误差”都已落入该温区 `holdExit` 守门范围，避免在仍显著低于目标时被预测项提前打成 `0%`。这一步直接针对 `140°C` 真机 HIL 中“接近目标后卡在 ~139°C 且 5 分钟超时”的证据。
 - thermal self-test 的默认开发梯子已改为 `60 / 140 / 220°C`；`250°C` 保留给最终完整验收，不再作为开发期默认目标。
+- 5A tuning 默认开发梯子已扩展为 full-batch：tuning anchors `60 / 100 / 140 / 180 / 220°C`，validation targets `80 / 120 / 160 / 240°C`。validation targets 用最终 review candidate profile 做独立 hold-confirm 验证，通过时只记录 `validation_passed`，不自动新增 tuning anchor。
 - full-speed-to-stable 判定按 SPEC 恢复为 `±1.5°C`、连续 hold `10s` 的真实稳定窗口；首次进入 hold 不再直接算稳定。离线重放后 `140°C` 仍通过，旧 `60°C` 通过结论被撤销。
 - candidate tuner 会把首次 hold 后仍继续上冲、且高侧显著大于低侧的形状判为残余热主导，优先增加 `brakeDistance / approachDamping / approachLead`，避免误入普通 hold ripple 分支继续抬高功率。
 - thermal profile settings 增加 EEPROM/API 可控的 `heaterCurrentReserveMa`；heater safe-max 从 capability/live current 的较小值中扣除该余量，避免把 source 限流预算全部分配给加热器后造成板级复位。
@@ -154,3 +161,4 @@
 - 用户级硬件记忆和默认 USB port 写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；运行中的 daemon 不因配置文件变化自动切换端口。
 - 发布收敛为单一 product tag `vX.Y.Z`；Web、firmware、host-tools 和 release manifest 挂同一 GitHub Release，manifest 的组件指纹决定是否需要升级。
 - Repo 级 skill 分层现已拆为 developer policy 与 user/developer operations：`skills/flux-purr-developer-policy` 负责开发者总约束分流，`skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 分别固化 released-user 路径与仓库内 developer operations/HIL 边界。
+- Thermal profile persistence retains all ten point-local targets in each `pps3a` / `pps5a` bank by using the EEPROM v3 record layout, removing the six-point truncation from saved full-batch profiles.

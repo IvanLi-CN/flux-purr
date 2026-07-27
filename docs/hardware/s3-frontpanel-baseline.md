@@ -53,6 +53,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - Use I2C dynamic mode with 7-bit address `0x22` (fallback compatible `0x23`).
 - Support requests for `5/9/12/15/20/28 V`.
 - Keep PD state visible in firmware status model (`request` vs `contract` voltage).
+- The archived USB1 Type-C receptacle has no board-side eMarker simulation. A `20V/5A` contract therefore requires a compliant eMarked 5A USB-C cable and source negotiation; confirm it from CH224Q live-current readback instead of inferring it from the requested voltage.
 - The same MCU I2C bus also carries one `M24C64` EEPROM with `E0/E1/E2` strapped low.
 - The shared `SDA/SCL` bus uses `4.7 kOhm` pullups to `3V3`.
 
@@ -116,7 +117,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
   - `R_GATE = 68 Ohm`
   - `R_GPD = 100 kOhm`
   - retain direct `3.3 V` GPIO47 drive at the default approximately `20 mA` pin drive strength; do not add a gate driver or increase edge strength without gate-waveform and drain-overshoot evidence
-  - PWM start point `1 kHz ~ 2 kHz`
+  - PWM baseline `100 Hz` for PPS and fixed-PD fallback paths
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - In the implemented netlist, `GPIO35` first drives `FAN_EN_RAW`, then passes through a `2.2 kOhm` series resistor into the TPS62933 `EN` pin. The weak `100 kOhm` pulldown remains on the actual `FAN_EN` node.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.

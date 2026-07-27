@@ -23,7 +23,9 @@ pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
 pub const CAPABILITY_COUNT_MAX: usize = 10;
-pub const USB_LINE_MAX_LEN: usize = 4096;
+// A fully materialized 9-point thermal profile save request is about 5 KiB.
+// Keep one shared bound for firmware and devd JSONL frames so it can persist.
+pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
 pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
@@ -136,6 +138,12 @@ pub struct ControlPlaneStatus {
     pub current_ma: u32,
     pub board_temp_centi: i32,
     pub rtd_raw_adc_mv: u16,
+    #[serde(default)]
+    pub rtd_raw_adc_min_mv: u16,
+    #[serde(default)]
+    pub rtd_raw_adc_max_mv: u16,
+    #[serde(default)]
+    pub rtd_raw_adc_spread_mv: u16,
     pub vin_raw_adc_mv: u16,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
@@ -155,6 +163,10 @@ pub struct ControlPlaneStatus {
     pub heater_control_phase: Option<String<ERROR_CODE_MAX_LEN>>,
     pub heater_error_c: Option<f32>,
     pub heater_control_error_c: Option<f32>,
+    #[serde(default)]
+    pub heater_control_temp_c: Option<f32>,
+    #[serde(default)]
+    pub heater_control_measurement_guarded: bool,
     pub heater_filtered_temp_c: Option<f32>,
     #[serde(default)]
     pub heater_filtered_slope_c_per_s: Option<f32>,
@@ -244,6 +256,9 @@ impl ControlPlaneStatus {
             current_ma: status.current_ma,
             board_temp_centi: status.board_temp_centi,
             rtd_raw_adc_mv: status.rtd_raw_adc_mv,
+            rtd_raw_adc_min_mv: 0,
+            rtd_raw_adc_max_mv: 0,
+            rtd_raw_adc_spread_mv: 0,
             vin_raw_adc_mv: status.vin_raw_adc_mv,
             pd_request_mv: status.pd_request_mv,
             pd_contract_mv: status.pd_contract_mv,
@@ -261,6 +276,8 @@ impl ControlPlaneStatus {
             heater_control_phase: None,
             heater_error_c: None,
             heater_control_error_c: None,
+            heater_control_temp_c: None,
+            heater_control_measurement_guarded: false,
             heater_filtered_temp_c: None,
             heater_filtered_slope_c_per_s: None,
             heater_coast_active: false,
@@ -638,6 +655,8 @@ pub struct ThermalControlProfilePointWire {
     pub brake_distance_centi_c: u16,
     #[serde(default)]
     pub warmup_power_permille: u16,
+    #[serde(default)]
+    pub warmup_reenter_centi_c: u16,
     pub approach_power_permille: u16,
     pub approach_floor_power_permille: u16,
     #[serde(default = "default_approach_damping_exponent_permille_wire")]
@@ -727,6 +746,7 @@ impl From<ThermalControlProfilePointWire> for ThermalControlProfilePointConfig {
             target_temp_c: value.target_temp_c,
             brake_distance_centi_c: value.brake_distance_centi_c,
             warmup_power_permille: value.warmup_power_permille,
+            warmup_reenter_centi_c: value.warmup_reenter_centi_c,
             approach_power_permille: value.approach_power_permille,
             approach_floor_power_permille: value.approach_floor_power_permille,
             approach_damping_exponent_permille: value.approach_damping_exponent_permille,
@@ -933,11 +953,27 @@ pub struct HeaterCurvePackageWire {
     pub points: [Option<HeaterCurvePointWire>; HEATER_CURVE_MAX_POINTS],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurveStateWire {
     pub active: HeaterCurvePackageWire,
     pub preview: Option<HeaterCurvePackageWire>,
+    #[serde(default)]
+    pub eeprom_probe: Option<HeaterCurveEepromProbeWire>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveEepromProbeWire {
+    pub present: bool,
+    #[serde(default)]
+    pub current_read_present: bool,
+    #[serde(default)]
+    pub random_read_present: bool,
+    pub address: Option<u8>,
+    #[serde(default)]
+    pub bus_current_read_addresses: [Option<u8>; 16],
+    pub last_error: Option<String<ERROR_CODE_MAX_LEN>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1023,6 +1059,7 @@ pub fn heater_curve_state_from_memory(
     HeaterCurveStateWire {
         active: HeaterCurvePackageWire::from_memory(&config.active_heater_curve),
         preview: preview.map(HeaterCurvePackageWire::from_memory),
+        eeprom_probe: None,
     }
 }
 
@@ -1691,6 +1728,7 @@ fn parse_calibration_config_op(value: Option<&str>) -> Result<CalibrationConfigO
 mod tests {
     use super::*;
     use crate::{FanCommand, FanPhase, snapshot_at};
+    use std::format;
 
     #[test]
     fn identity_lists_feature_capabilities() {
@@ -2017,6 +2055,7 @@ mod tests {
             target_temp_c: 210,
             brake_distance_centi_c: 1_000,
             warmup_power_permille: 260,
+            warmup_reenter_centi_c: 0,
             approach_power_permille: 260,
             approach_floor_power_permille: 180,
             approach_damping_exponent_permille:
@@ -2065,6 +2104,8 @@ mod tests {
                 target_temp_c: 210,
                 brake_distance_centi_c: 1_000,
                 warmup_power_permille: 260,
+                warmup_reenter_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT,
                 approach_power_permille: 260,
                 approach_floor_power_permille: 180,
                 approach_damping_exponent_permille:
@@ -2072,14 +2113,22 @@ mod tests {
                 approach_tail_window_centi_c: 0,
                 hold_power_permille: 180,
                 hold_reheat_power_permille: 0,
-                hold_entry_centi_c: 0,
-                hold_exit_centi_c: 0,
-                hold_on_centi_c: 0,
-                hold_off_centi_c: 0,
-                overshoot_cutoff_centi_c: 0,
-                hold_kp_permille_per_c: 0,
-                hold_ki_permille_per_c_tick: 0,
-                hold_blend_ticks: 0,
+                hold_entry_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT,
+                hold_exit_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT,
+                hold_on_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT,
+                hold_off_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT,
+                overshoot_cutoff_centi_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT,
+                hold_kp_permille_per_c:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT,
+                hold_ki_permille_per_c_tick:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT,
+                hold_blend_ticks:
+                    crate::memory::THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT,
                 approach_lead_ticks: 0,
                 hold_lead_ticks: 0,
             })
@@ -2112,13 +2161,17 @@ mod tests {
     }
 
     #[test]
-    fn runtime_command_save_caps_persisted_thermal_profile_points_to_six() {
+    fn runtime_command_save_keeps_all_thermal_profile_points() {
         let mut points = [None; FRONTPANEL_PRESET_COUNT];
-        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180].into_iter().enumerate() {
+        for (slot, target_temp_c) in [60, 80, 100, 120, 140, 160, 180, 200, 220, 240]
+            .into_iter()
+            .enumerate()
+        {
             points[slot] = Some(ThermalControlProfilePointWire {
                 target_temp_c,
                 brake_distance_centi_c: 1_000,
                 warmup_power_permille: 260,
+                warmup_reenter_centi_c: 0,
                 approach_power_permille: 260,
                 approach_floor_power_permille: 180,
                 approach_damping_exponent_permille:
@@ -2173,12 +2226,11 @@ mod tests {
             crate::memory::THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS
         );
         assert_eq!(
-            config.active_thermal_control_profile.points[5]
-                .expect("sixth point")
+            config.active_thermal_control_profile.points[9]
+                .expect("tenth point")
                 .target_temp_c,
-            160
+            240
         );
-        assert!(config.active_thermal_control_profile.points[6].is_none());
     }
 
     #[test]
@@ -2336,6 +2388,7 @@ mod tests {
                 target_temp_c: 100,
                 brake_distance_centi_c: 700,
                 warmup_power_permille: 0,
+                warmup_reenter_centi_c: 0,
                 approach_power_permille: 420,
                 approach_floor_power_permille: 220,
                 approach_damping_exponent_permille:
@@ -2376,6 +2429,32 @@ mod tests {
             6_100
         );
         assert_eq!(profile.settings.unwrap().heater_current_reserve_ma, 200);
+    }
+
+    #[test]
+    fn parses_nine_point_thermal_profile_save_within_usb_line_limit() {
+        let points = [60, 80, 100, 120, 140, 160, 180, 220, 240]
+            .into_iter()
+            .map(|target_temp_c| {
+                format!(
+                    r#"{{"targetTempC":{target_temp_c},"brakeDistanceCentiC":1000,"warmupPowerPermille":1000,"warmupReenterCentiC":1000,"approachPowerPermille":1000,"approachFloorPowerPermille":1000,"approachDampingExponentPermille":1000,"approachTailWindowCentiC":1000,"holdPowerPermille":1000,"holdReheatPowerPermille":1000,"holdEntryCentiC":1000,"holdExitCentiC":1000,"holdOnCentiC":1000,"holdOffCentiC":1000,"overshootCutoffCentiC":1000,"holdKpPermillePerC":1000,"holdKiPermillePerCTick":1000,"holdBlendTicks":1000,"approachLeadTicks":1000,"holdLeadTicks":1000}}"#
+                )
+            })
+            .collect::<std::vec::Vec<_>>()
+            .join(",");
+        let line = format!(
+            r#"{{"type":"runtime_config","requestId":"nine-point-save","thermalProfileMode":"100w","thermalControlProfile":{{"op":"save","bank":"pps5a","profile":{{"settings":{{"tempFilterAlphaPermille":1000,"warmupReenterCentiC":1000,"holdEntryCentiC":1000,"holdExitCentiC":1000,"holdOnCentiC":1000,"holdOffCentiC":1000,"overshootCutoffCentiC":1000,"approachMaxTicks":1000,"approachMinPowerRatioPermille":1000,"holdKpPermillePerC":1000,"holdKiPermillePerCTick":1000,"holdBlendTicks":1000,"holdReheatPowerPermille":1000,"approachLeadTicks":1000,"holdLeadTicks":1000,"autoAdjustableWorkingFloorMv":6100,"heaterCurrentReserveMa":1000}},"points":[{points},null]}}}}}}"#
+        );
+
+        assert!(line.len() > 4_096);
+        assert!(line.len() <= USB_LINE_MAX_LEN);
+        let UsbFrame::RuntimeConfig { request_id, config } = parse_usb_frame(&line).unwrap() else {
+            panic!("expected runtime config frame");
+        };
+        assert_eq!(request_id.as_str(), "nine-point-save");
+        let profile = config.thermal_control_profile.unwrap().profile.unwrap();
+        assert_eq!(profile.points.iter().flatten().count(), 9);
+        assert_eq!(profile.points[8].unwrap().target_temp_c, 240);
     }
 
     #[test]
