@@ -55,6 +55,7 @@
 - `GPIO10/11/12/13` 应尽量对齐 `mains-aegis` 的 LCD cluster，其中 `GPIO10=LCD_DC`、`GPIO11=LCD_MOSI`、`GPIO12=LCD_SCLK`、`GPIO13=LCD_BLK`。
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
 - `GPIO47`（芯片 pin `37`）必须保留为 heater PWM 输出。
+- Heater 低边开关必须使用 `GPIO47 -> 68 Ohm -> gate` 与 `gate -> 100 kOhm -> source/GND` 的直接 `3.3 V` 栅极驱动网络；`BUK9Y14-40B,115` 保持主料，`PSMN1R4-40YLDX` 固定为批准的 `SOT669 / LFPAK56` 同引脚替代料；PPS 与 fixed-PD fallback 全路径均使用 `100Hz` MCPWM。
 - `GPIO48`（芯片 pin `36`）必须保留为 buzzer PWM / beep 输出。
 - `GPIO35` 必须直接拥有风扇 `EN` 控制路径，允许在 MCU 侧原始控制网与实际 `FAN_EN` 之间插入保护/串联电阻；`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO37/38/39` 必须分别冻结为 `RGB_B_PWM`、`RGB_G_PWM`、`RGB_R_PWM` 三路独立状态灯 PWM 输出。
@@ -120,6 +121,7 @@
 
 - Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 24 且不重复。
 - Given RGB 状态灯 GPIO 分配已冻结，When 检查 board profile 常量，Then `RGB_B/G/R` 分别固定为 `GPIO37/38/39`。
+- Given heater 开关 BOM 与归档网表，When 检查栅极网络和批准料号，Then `R_GATE = 68 Ohm`、`R_GPD = 100 kOhm`，且主料与替代料共享 `SOT669 / LFPAK56` 引脚定义和 `40 V` 漏源耐压等级。
 - Given CH224Q 适配层，When 对 `0x22/0x23` 进行解析并编码 `5/9/12/15/20/28V`，Then 地址解析与寄存器编码结果正确。
 - Given VIN sense 方案，When 按 `56 kOhm / 5.1 kOhm` 计算 `28V` 输入，Then ADC 引脚电压不高于 `2.337V`。
 - Given firmware 不再依赖 `TCA6408A`，When 构建 `firmware` crate，Then 不再存在 `tca6408a` 模块引用。

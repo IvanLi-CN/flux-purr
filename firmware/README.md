@@ -182,7 +182,7 @@
 - GPIO profile is locked to the S3 front-panel baseline (`24` firmware-active GPIO, center key on `GPIO0`).
 - LCD `DC/MOSI/SCLK/BLK` intentionally mirrors the `mains-aegis` S3 cluster on `GPIO10/11/12/13`.
 - LCD reset and chip-select are locked to `GPIO14/15` for the current front-panel wiring.
-- `GPIO47` (chip pin `37`) controls the low-side `BUK9Y14-40B,115` MOSFET stage through MCPWM at `100 Hz` in both PPS and fallback modes.
+- `GPIO47` (chip pin `37`) controls the low-side heater MOSFET stage through the populated `68 Ohm` gate resistor and MCPWM at `100 Hz` in both PPS and fallback modes. `BUK9Y14-40B,115` is the primary approved part and `PSMN1R4-40YLDX` is the approved pin-compatible substitute.
 - `GPIO48` (chip pin `36`) is the active buzzer PWM / tone output.
 - The board uses two `TPS62933DRLR` stages from the main input bus: one fixed `3.3 V` rail and one adjustable fan rail whose exact voltage behavior depends on the PCB variant and is not modeled in shared firmware.
 - `GPIO39/38/37` are frozen as the `RGB_R/G/B` PWM outputs for the discrete status LED, with `GPIO39` reusing the package `MTCK` signal under the default USB-JTAG configuration.
