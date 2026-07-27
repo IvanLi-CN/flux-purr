@@ -285,13 +285,16 @@ const fn pps_candidate_is_better(
     if candidate_covers_20v != previous_covers_20v {
         return candidate_covers_20v;
     }
+    if candidate_max_ma != previous_max_ma {
+        return candidate_max_ma > previous_max_ma;
+    }
     if candidate_max_mv != previous_max_mv {
         return candidate_max_mv > previous_max_mv;
     }
     if candidate_min_mv != previous_min_mv {
         return candidate_min_mv < previous_min_mv;
     }
-    candidate_max_ma > previous_max_ma
+    false
 }
 
 fn source_cap_pdo_window(bytes: &[u8]) -> Option<(usize, usize)> {
@@ -457,6 +460,22 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
         assert_eq!(capabilities.pps_max_ma, Some(3_000));
+    }
+
+    #[test]
+    fn prefers_the_highest_current_pps_apdo_that_covers_20v() {
+        let wide_three_amp_pps = (0b11_u32 << 30) | (210_u32 << 17) | (33_u32 << 8) | 60_u32;
+        let twenty_volt_five_amp_pps = (0b11_u32 << 30) | (200_u32 << 17) | (50_u32 << 8) | 100_u32;
+        let mut bytes = [0_u8; 8];
+        bytes[0..4].copy_from_slice(&wide_three_amp_pps.to_le_bytes());
+        bytes[4..8].copy_from_slice(&twenty_volt_five_amp_pps.to_le_bytes());
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
+
+        assert!(capabilities.pps_covers_20v);
+        assert_eq!(capabilities.pps_min_mv, Some(5_000));
+        assert_eq!(capabilities.pps_max_mv, Some(20_000));
+        assert_eq!(capabilities.pps_max_ma, Some(5_000));
     }
 
     #[test]

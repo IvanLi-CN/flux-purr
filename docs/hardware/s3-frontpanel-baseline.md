@@ -53,6 +53,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - Use I2C dynamic mode with 7-bit address `0x22` (fallback compatible `0x23`).
 - Support requests for `5/9/12/15/20/28 V`.
 - Keep PD state visible in firmware status model (`request` vs `contract` voltage).
+- The archived USB1 Type-C receptacle has no board-side eMarker simulation. A `20V/5A` contract therefore requires a compliant eMarked 5A USB-C cable and source negotiation; confirm it from CH224Q live-current readback instead of inferring it from the requested voltage.
 - The same MCU I2C bus also carries one `M24C64` EEPROM with `E0/E1/E2` strapped low.
 - The shared `SDA/SCL` bus uses `4.7 kOhm` pullups to `3V3`.
 

@@ -187,9 +187,12 @@ Thermal runs must evaluate the source and heater together.
 Current reusable rule set:
 
 - capability-class resolution is based on configured / advertised source capability, not live current
+- when multiple PPS APDOs cover `20V`, select one APDO by highest maximum current, then highest maximum voltage, then lowest minimum voltage; never combine fields from separate APDOs
 - explicit `65w` / `100w` are forced mode selections
 - safety limiting still uses live current plus `heaterCurrentReserveMa`
+- CH224Q `0x50` reports the active contract current and may reduce the safe current limit, but it must not promote a lower advertised capability into `pps5a`
 - current reserve remains part of the persisted settings and protects the board from consuming the full advertised source budget
+- a `20V/5A` live run requires a compliant eMarked 5A USB-C cable and both the source telemetry and CH224Q live-current readback must confirm the contract before heater arm
 
 ## Seed and baseline selection
 
