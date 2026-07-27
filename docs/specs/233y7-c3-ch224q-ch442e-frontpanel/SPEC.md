@@ -55,7 +55,7 @@
 - `GPIO10/11/12/13` 应尽量对齐 `mains-aegis` 的 LCD cluster，其中 `GPIO10=LCD_DC`、`GPIO11=LCD_MOSI`、`GPIO12=LCD_SCLK`、`GPIO13=LCD_BLK`。
 - `GPIO13` 必须直接输出 PWM 到 `LCD_BLK`。
 - `GPIO47`（芯片 pin `37`）必须保留为 heater PWM 输出。
-- Heater 低边开关必须使用 `GPIO47 -> 68 Ohm -> gate` 与 `gate -> 100 kOhm -> source/GND` 的直接 `3.3 V` 栅极驱动网络；`BUK9Y14-40B,115` 保持主料，`PSMN1R4-40YLDX` 固定为批准的 `SOT669 / LFPAK56` 同引脚替代料。
+- Heater 低边开关必须使用 `GPIO47 -> 68 Ohm -> gate` 与 `gate -> 100 kOhm -> source/GND` 的直接 `3.3 V` 栅极驱动网络；`BUK9Y14-40B,115` 保持主料，`PSMN1R4-40YLDX` 固定为批准的 `SOT669 / LFPAK56` 同引脚替代料；PPS 与 fixed-PD fallback 全路径均使用 `100Hz` MCPWM。
 - `GPIO48`（芯片 pin `36`）必须保留为 buzzer PWM / beep 输出。
 - `GPIO35` 必须直接拥有风扇 `EN` 控制路径，允许在 MCU 侧原始控制网与实际 `FAN_EN` 之间插入保护/串联电阻；`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO37/38/39` 必须分别冻结为 `RGB_B_PWM`、`RGB_G_PWM`、`RGB_R_PWM` 三路独立状态灯 PWM 输出。
