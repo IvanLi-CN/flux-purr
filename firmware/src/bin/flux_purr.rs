@@ -3708,21 +3708,45 @@ fn thermal_model_heater_allowed(
     if calibration.mode != CalibrationMode::Off {
         return true;
     }
-    let source_is_pps5a = resolve_thermal_profile_bank(
+    let source_bank = resolve_thermal_profile_bank(
         ThermalProfileMode::Auto,
         manual_pps.capability_min_mv,
         manual_pps.capability_max_mv,
         manual_pps.capability_max_ma,
-    ) == ThermalProfileBank::Pps5a;
-    source_is_pps5a
-        && memory_config
-            .thermal_plant_active
-            .is_some_and(|transaction| {
-                project_thermal_plant(&transaction, |raw| {
-                    projected_rtd_temperature_c(memory_config, raw)
-                })
-                .is_some()
+    );
+    let plant_is_available = memory_config
+        .thermal_plant_active
+        .is_some_and(|transaction| {
+            project_thermal_plant(&transaction, |raw| {
+                projected_rtd_temperature_c(memory_config, raw)
             })
+            .is_some()
+        });
+    if !plant_is_available {
+        return false;
+    }
+
+    match source_bank {
+        // The plant parameters are physical plate properties. A 5 A source
+        // may use the active plant directly, subject to the electrical limit
+        // applied at the actuator below.
+        ThermalProfileBank::Pps5a => true,
+        // 3 A has the same plant, but its available power must come from a
+        // measured R(T) curve rather than the nominal source V * I product.
+        // Do not unlock it from an uncalibrated default resistance estimate.
+        ThermalProfileBank::Pps3a => {
+            manual_pps
+                .capability_min_mv
+                .is_some_and(|value| value <= 20_000)
+                && manual_pps
+                    .capability_max_mv
+                    .is_some_and(|value| value >= 20_000)
+                && manual_pps
+                    .capability_max_ma
+                    .is_some_and(|value| value >= 3_000)
+                && has_calibrated_heater_resistance_curve(memory_config)
+        }
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4936,6 +4960,53 @@ fn heater_safe_max_mv_for_temp(
         .max(0.0)
         .min(f32::from(u16::MAX)) as u16;
     floor_mv_to_100mv(estimated_mv).min(source_voltage_max_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_available_power_mw_for_temp(
+    current_temp_c: f32,
+    capability_max_mv: Option<u16>,
+    capability_max_ma: Option<u16>,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+    active_thermal_settings: ThermalControlProfileSettings,
+) -> u32 {
+    let source_voltage_max_mv = capability_max_mv.unwrap_or(0).min(HEATER_ADJUSTABLE_MAX_MV);
+    let available_current_ma = heater_available_current_ma(
+        capability_max_ma.unwrap_or(0),
+        active_thermal_settings.heater_current_reserve_ma,
+    );
+    if source_voltage_max_mv == 0 || available_current_ma == 0 {
+        return 0;
+    }
+
+    let resistance_ohms =
+        estimated_heater_resistance_ohms(current_temp_c, preview_heater_curve, memory_config);
+    if !resistance_ohms.is_finite() || resistance_ohms <= 0.0 {
+        return 0;
+    }
+    let safe_max_mv = heater_safe_max_mv_for_temp(
+        current_temp_c,
+        available_current_ma,
+        source_voltage_max_mv,
+        preview_heater_curve,
+        memory_config,
+    );
+    ((f32::from(safe_max_mv) * f32::from(safe_max_mv) / resistance_ohms) / 1_000.0)
+        .max(0.0)
+        .min(u32::MAX as f32) as u32
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
+    memory_config
+        .active_heater_curve
+        .points
+        .iter()
+        .flatten()
+        .count()
+        >= 2
+        || projected_heater_curve(memory_config).is_some()
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -9367,9 +9438,19 @@ async fn main(_spawner: Spawner) {
             last_pd_observation = current_pd_observation;
             let runtime_plant =
                 thermal_plant_projection_for_runtime(&memory_config, calibration_runtime_state);
-            let max_power_mw = u32::from(manual_pps_state.capability_max_mv.unwrap_or(0))
-                .saturating_mul(u32::from(manual_pps_state.capability_max_ma.unwrap_or(0)))
-                / 1_000;
+            // The controller works in heater watts, not source capability
+            // watts. For a current-limited source, the achievable plate power
+            // is V^2/R(T), with V capped by the saved resistance curve and
+            // board-current reserve. This keeps the 3 A path on the same
+            // physical model as 5 A without another thermal calibration.
+            let max_power_mw = heater_available_power_mw_for_temp(
+                latest_temp_c,
+                manual_pps_state.capability_max_mv,
+                manual_pps_state.capability_max_ma,
+                preview_heater_curve.as_ref(),
+                &memory_config,
+                active_thermal_settings,
+            );
             let candidate_validation = calibration_runtime_state.mode
                 == CalibrationMode::ThermalPlant
                 && calibration_runtime_state.job.status != CalibrationJobStatus::Running;
@@ -13975,6 +14056,62 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_resistance_curve_sets_3a_plant_power_ceiling() {
+        let mut config = MemoryConfig::default();
+        config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
+            temp_centi_c: 2_000,
+            resistance_milliohms: 3_936,
+        });
+        config.active_heater_curve.points[1] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
+            temp_centi_c: 22_000,
+            resistance_milliohms: 5_674,
+        });
+        let settings = ThermalControlProfileSettings::default();
+
+        assert!(has_calibrated_heater_resistance_curve(&config));
+        let pps3a_power_mw = heater_available_power_mw_for_temp(
+            160.0,
+            Some(20_000),
+            Some(3_250),
+            None,
+            &config,
+            settings,
+        );
+        let pps5a_power_mw = heater_available_power_mw_for_temp(
+            160.0,
+            Some(21_000),
+            Some(5_000),
+            None,
+            &config,
+            settings,
+        );
+
+        // 3.25 A less the 200 mA board reserve is roughly a 48 W plate at
+        // this resistance, with no separate source-local thermal fit.
+        // 5 A remains materially higher and therefore needs no separate
+        // plant-loss or RTD calibration to distinguish the source classes.
+        assert!((46_000..=50_000).contains(&pps3a_power_mw));
+        assert!(pps5a_power_mw > 70_000);
+    }
+
+    #[test]
+    fn pps3a_heater_lock_requires_a_saved_resistance_curve() {
+        let mut config = MemoryConfig::default();
+        assert!(!has_calibrated_heater_resistance_curve(&config));
+
+        config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
+            temp_centi_c: 2_000,
+            resistance_milliohms: 4_000,
+        });
+        config.active_heater_curve.points[1] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
+            temp_centi_c: 20_000,
+            resistance_milliohms: 5_600,
+        });
+
+        assert!(has_calibrated_heater_resistance_curve(&config));
+    }
+
+    #[test]
     fn saved_heater_curve_wins_over_stale_raw_projection() {
         let mut config = MemoryConfig::default();
         config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
@@ -15158,10 +15295,31 @@ mod tests {
                 heater_controller: &mut controller,
             },
             15_000,
-            450,
+            700,
             42.0,
         ));
 
+        // The first accepted sample after the PPS transition is still
+        // observed at zero physical duty. Repeat after its unpowered-slew
+        // guard interval before requiring the control temperature to move.
+        let _ = apply_valid_rtd_measurement(
+            RuntimeDisplayTemperatureState {
+                ui_state: &mut ui_state,
+                latest_display_temp_c: &mut latest_display_temp_c,
+                latest_display_temp_i16: &mut latest_display_temp_i16,
+            },
+            RuntimeControlTemperatureState {
+                latest_control_temp_c: &mut latest_temp_c,
+                latest_control_temp_i16: &mut latest_temp_i16,
+                transition_guard: &mut guard,
+                measurement_guard: &mut measurement_guard,
+                control_measurement_guarded: &mut control_measurement_guarded,
+                heater_controller: &mut controller,
+            },
+            15_000,
+            1_000,
+            42.0,
+        );
         assert_eq!(latest_temp_c, 42.0);
         assert_eq!(latest_temp_i16, 42);
         assert_eq!(latest_display_temp_c, 42.0);

@@ -48,7 +48,7 @@
 
 ### MUST
 
-- Runtime status MUST expose the `pps5a` thermal plant state (`missing|candidate|active|invalid`),
+- Runtime status MUST expose the shared thermal plant state (`missing|candidate|active|invalid`),
   candidate transaction identity, projection validity, and heater lock reason. Control-plane model
   writes MUST be explicit `save_candidate` or `promote_candidate` operations; promotion MUST reject
   a mismatched transaction identity and MUST never accept a partial two-anchor payload.
