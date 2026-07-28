@@ -26,7 +26,7 @@ The production controller is:
 
 `Ctheta * dT/dt = Ph - kc * (T - Ta) - kr * (Tk^4 - TaK^4)`
 
-with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = Vmax(T)^2 / R(T)`, where `Vmax(T) = min(Vsource, Iavailable * R(T))` and `Iavailable` reserves board current. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
+with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = Vmax(T)^2 / R(T)`, where `Vmax(T) = min(Vsource, Iavailable * R(T))` and `Iavailable` reserves board current. `Vmax` is a heater-terminal constraint: the PPS request adds bounded live `Vpps - Vheater` path-drop compensation, then clamps at `Vsource`, so wiring loss cannot silently strand source power. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
 
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm or tune the current 5A model.
 

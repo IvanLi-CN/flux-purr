@@ -274,6 +274,10 @@ const HEATER_PPS_REQUEST_HYSTERESIS_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
+// VIN is measured at the heater while PPS is requested at the source.
+// Bound compensation so stale measurements cannot cause a large source jump.
+const HEATER_PPS_PATH_DROP_COMPENSATION_MAX_MV: u16 = 2_500;
+#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 10_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PPS_STEADY_DWELL_MS: u64 = 2_000;
@@ -4998,6 +5002,25 @@ fn heater_available_power_mw_for_temp(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn heater_source_request_ceiling_mv(
+    safe_heater_mv: u16,
+    current_request_mv: u16,
+    measured_heater_mv: u32,
+    source_voltage_max_mv: u16,
+) -> u16 {
+    let measured_heater_mv = measured_heater_mv.min(u32::from(u16::MAX)) as u16;
+    if measured_heater_mv == 0 || current_request_mv <= measured_heater_mv {
+        return safe_heater_mv.min(source_voltage_max_mv);
+    }
+    let path_drop_mv = current_request_mv
+        .saturating_sub(measured_heater_mv)
+        .min(HEATER_PPS_PATH_DROP_COMPENSATION_MAX_MV);
+    safe_heater_mv
+        .saturating_add(path_drop_mv)
+        .min(source_voltage_max_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
     memory_config
         .active_heater_curve
@@ -5312,6 +5335,7 @@ async fn apply_heater_power_output<PWM>(
     hold_pps_governor: &mut HoldPpsGovernor,
     manual_pps: &mut ManualPpsState,
     pd_observation: Option<PdStatusObservation>,
+    measured_heater_mv: u32,
     current_temp_c: f32,
     duty_percent: u8,
     heater_enabled: bool,
@@ -5470,6 +5494,12 @@ where
                 preview_heater_curve,
                 memory_config,
             );
+            let source_request_ceiling_mv = heater_source_request_ceiling_mv(
+                safe_max_mv,
+                current_request_mv,
+                measured_heater_mv,
+                adjustable_max_mv,
+            );
             let control_floor_mv = effective_auto_adjustable_working_floor_mv(
                 active_thermal_settings,
                 pps_min_mv,
@@ -5579,10 +5609,10 @@ where
                     current_limit_fixed_pwm_active: false,
                     current_limit_fixed_request_confirmed: false,
                 };
-                if current_request_mv <= safe_max_mv {
+                if current_request_mv <= source_request_ceiling_mv {
                     let settled_gate_duty_percent = heater_physical_pwm_percent(
                         duty_percent,
-                        safe_max_mv,
+                        source_request_ceiling_mv,
                         current_request_mv,
                         warmup_soft_start_percent,
                     );
@@ -5601,7 +5631,7 @@ where
                 current_request_mv,
                 idle_request_mv,
                 control_floor_mv,
-                safe_max_mv,
+                source_request_ceiling_mv,
             );
             let request_mv = if manual_pps_active {
                 automatic_request_mv
@@ -5614,7 +5644,7 @@ where
                         filtered_slope_c_per_s,
                         current_request_mv,
                         control_floor_mv,
-                        safe_max_mv,
+                        source_request_ceiling_mv,
                         now_ms,
                     )
                     .unwrap_or(automatic_request_mv)
@@ -5625,7 +5655,7 @@ where
             let request_transition_pending = !manual_pps_active && now_ms < next_request_at_ms;
             let gate_duty_percent = heater_physical_pwm_percent(
                 duty_percent,
-                safe_max_mv,
+                source_request_ceiling_mv,
                 current_request_mv,
                 warmup_soft_start_percent,
             );
@@ -5699,7 +5729,7 @@ where
             let active_request_gate_duty_percent = if request_transition_pending {
                 heater_physical_pwm_percent(
                     duty_percent,
-                    safe_max_mv,
+                    source_request_ceiling_mv,
                     current_request_mv,
                     warmup_soft_start_percent,
                 )
@@ -5713,11 +5743,12 @@ where
             );
             if voltage_changed || mode_changed {
                 info!(
-                    "heater pps request temp_c={=f32} control={=u8}% current_limit_ma={=u16} safe_max_mv={=u16} control_floor_mv={=u16} request_mv={=u16}",
+                    "heater pps request temp_c={=f32} control={=u8}% current_limit_ma={=u16} safe_heater_mv={=u16} source_ceiling_mv={=u16} control_floor_mv={=u16} request_mv={=u16}",
                     current_temp_c,
                     duty_percent,
                     effective_current_limit_ma,
                     safe_max_mv,
+                    source_request_ceiling_mv,
                     control_floor_mv,
                     request_mv,
                 );
@@ -8918,6 +8949,7 @@ async fn main(_spawner: Spawner) {
         &mut hold_pps_governor,
         &mut manual_pps_state,
         last_pd_observation,
+        latest_vin_mv,
         latest_temp_c,
         0,
         false,
@@ -9500,6 +9532,7 @@ async fn main(_spawner: Spawner) {
                 &mut hold_pps_governor,
                 &mut manual_pps_state,
                 current_pd_observation,
+                latest_vin_mv,
                 latest_temp_c,
                 requested_duty_percent,
                 ui_state.heater_enabled,
@@ -9660,6 +9693,7 @@ async fn main(_spawner: Spawner) {
                 &mut hold_pps_governor,
                 &mut manual_pps_state,
                 last_pd_observation,
+                latest_vin_mv,
                 latest_temp_c,
                 0,
                 false,
@@ -14092,6 +14126,22 @@ mod tests {
         // plant-loss or RTD calibration to distinguish the source classes.
         assert!((46_000..=50_000).contains(&pps3a_power_mw));
         assert!(pps5a_power_mw > 70_000);
+    }
+
+    #[test]
+    fn pps_request_compensates_measured_path_drop_without_relaxing_plate_limit() {
+        assert_eq!(
+            heater_source_request_ceiling_mv(17_300, 17_300, 15_900, 21_000),
+            18_700
+        );
+        assert_eq!(
+            heater_source_request_ceiling_mv(17_300, 17_300, 0, 21_000),
+            17_300
+        );
+        assert_eq!(
+            heater_source_request_ceiling_mv(20_000, 21_000, 17_000, 21_000),
+            21_000
+        );
     }
 
     #[test]
