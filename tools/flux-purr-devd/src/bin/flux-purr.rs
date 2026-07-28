@@ -673,7 +673,7 @@ struct ThermalSelfTestReportArgs {
         long = "run-dir",
         help = "Directory containing a completed thermal self-test run.json and samples.ndjson."
     )]
-    run_dir: PathBuf,
+    run_dir: Vec<PathBuf>,
     #[arg(
         long = "output-dir",
         help = "Output directory for the canonical HTML bundle. Defaults to a sibling <run-dir>-html-report directory."
@@ -2207,7 +2207,7 @@ async fn handle_thermal_command(
             ThermalReportCommand::RenderSelfTest(args) => {
                 thermal_report::render_self_test_evidence_bundle(
                     thermal_report::ThermalSelfTestReportInput {
-                        run_dir: args.run_dir,
+                        run_dirs: args.run_dir,
                         output_dir: args.output_dir,
                     },
                 )
@@ -2417,8 +2417,8 @@ const THERMAL_SOURCE_65W_POWER_WATTS: u64 = 65;
 const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
 const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
 const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
-const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 3;
-const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 100;
+const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 8;
+const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 250;
 const THERMAL_RUNTIME_READBACK_TIMEOUT_MS: u64 = 3_000;
 const THERMAL_RUNTIME_READBACK_POLL_MS: u64 = 100;
 const ISOLAPURR_LIVE_TELEMETRY_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -3949,6 +3949,13 @@ fn resolve_thermal_source_selection(
     })
 }
 
+fn thermal_self_test_uses_point_local_profile(
+    selection: &ThermalSourceSelection,
+    calibration_run: bool,
+) -> bool {
+    !calibration_run && selection.resolved_bank != "pps3a"
+}
+
 fn thermal_source_request(
     args: &ThermalSelfTestArgs,
     selection: &ThermalSourceSelection,
@@ -3994,6 +4001,8 @@ async fn collect_batch_thermal_self_test(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
     let source_selection = resolve_thermal_source_selection(&args)?;
+    let use_point_local_profile =
+        thermal_self_test_uses_point_local_profile(&source_selection, args.calibration_run);
     let source_power_watts = thermal_effective_source_power_watts(&args, &source_selection);
     let (source_voltage_mv, source_current_ma) = thermal_source_request(&args, &source_selection)?;
     let restart_temp_c = thermal_batch_restart_temp_c(target_temp_c, args.cooldown_temp_c);
@@ -4130,7 +4139,7 @@ async fn collect_batch_thermal_self_test(
                     &profile,
                     target_temp_c,
                     &heater_parameters,
-                    !args.calibration_run,
+                    use_point_local_profile,
                 )
                 .await?;
                 let result = run_thermal_stage(
@@ -4217,7 +4226,7 @@ async fn collect_batch_thermal_self_test(
             batch_error = Some(format!("thermal batch cleanup failed: {error}"));
         }
         let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-        if let Err(error) = set_thermal_bench_source_output_auto(
+        if let Err(error) = restore_thermal_bench_source_default(
             client,
             args.source_kind,
             &args.source_url,
@@ -4368,6 +4377,8 @@ async fn collect_single_thermal_self_test(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let resolved = resolve_target(args.target.clone(), default_devd)?;
     let source_selection = resolve_thermal_source_selection(&args)?;
+    let use_point_local_profile =
+        thermal_self_test_uses_point_local_profile(&source_selection, args.calibration_run);
     let source_power_watts = thermal_effective_source_power_watts(&args, &source_selection);
     let (source_voltage_mv, source_current_ma) = thermal_source_request(&args, &source_selection)?;
     let target_temps_c = parse_thermal_targets(args.targets_c.as_deref())?;
@@ -4491,7 +4502,7 @@ async fn collect_single_thermal_self_test(
                     &candidate_profile_value,
                     target_temp_c,
                     &heater_parameters,
-                    !args.calibration_run,
+                    use_point_local_profile,
                 )
                 .await?;
                 let result = run_thermal_stage(
@@ -4595,7 +4606,7 @@ async fn collect_single_thermal_self_test(
                             &candidate_profile_value,
                             target_temp_c,
                             &heater_parameters,
-                            !args.calibration_run,
+                            use_point_local_profile,
                         )
                         .await?;
                         let test_phase = if attempt_index == 0 {
@@ -4723,7 +4734,7 @@ async fn collect_single_thermal_self_test(
             run_error = Some(format!("thermal self-test cleanup failed: {error}"));
         }
         let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-        if let Err(error) = set_thermal_bench_source_output_auto(
+        if let Err(error) = restore_thermal_bench_source_default(
             client,
             args.source_kind,
             &args.source_url,
@@ -7263,6 +7274,8 @@ async fn run_thermal_stage(
     let mut runtime_rearm_attempts_remaining = args.runtime_rearm_attempts;
     let mut next_status = initial_status;
     let source_selection = resolve_thermal_source_selection(args)?;
+    let use_point_local_profile =
+        thermal_self_test_uses_point_local_profile(&source_selection, args.calibration_run);
     let source_power_watts = thermal_effective_source_power_watts(args, &source_selection);
 
     loop {
@@ -7331,7 +7344,7 @@ async fn run_thermal_stage(
                     runtime_profile,
                     target_temp_c,
                     heater_parameters,
-                    !args.calibration_run,
+                    use_point_local_profile,
                 )
                 .await?;
                 next_status = Some(next_arm_status);
@@ -7744,7 +7757,7 @@ fn validate_thermal_bench_source_tools(
     }
 }
 
-async fn set_thermal_bench_source_output_auto(
+async fn restore_thermal_bench_source_default(
     client: &Client,
     source_kind: BenchSourceKind,
     source_url: &str,
@@ -7752,6 +7765,11 @@ async fn set_thermal_bench_source_output_auto(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match source_kind {
         BenchSourceKind::Isolapurr => {
+            ensure_isolapurr_thermal_capability(
+                source_url,
+                source_id,
+                THERMAL_SOURCE_100W_POWER_WATTS as u16,
+            )?;
             set_isolapurr_output_auto(client, source_url, source_id).await
         }
     }
@@ -8035,7 +8053,7 @@ async fn prepare_thermal_source_and_lease(
     match create_ready_thermal_lease(client, resolved).await {
         Ok((lease, _status)) => Ok((telemetry, lease)),
         Err(error) => {
-            match set_thermal_bench_source_output_auto(client, source_kind, source_url, source_id)
+            match restore_thermal_bench_source_default(client, source_kind, source_url, source_id)
                 .await
             {
                 Ok(()) => Err(error),
@@ -12934,7 +12952,7 @@ mod tests {
             panic!("expected self-test report command");
         };
 
-        assert_eq!(args.run_dir, PathBuf::from("/tmp/raw-self-test"));
+        assert_eq!(args.run_dir, vec![PathBuf::from("/tmp/raw-self-test")]);
         assert_eq!(args.output_dir, Some(PathBuf::from("/tmp/html-bundle")));
     }
 
@@ -14121,6 +14139,29 @@ mod tests {
     }
 
     #[test]
+    fn pps3a_self_test_never_activates_point_local_preview() {
+        let pps3a = ThermalSourceSelection {
+            resolved_bank: "pps3a",
+            detected_source_class: "pps3a",
+            detected_source_class_basis: "configured_capability",
+            default_voltage_mv: 20_000,
+            default_current_ma: 3_250,
+        };
+        let pps5a = ThermalSourceSelection {
+            resolved_bank: "pps5a",
+            detected_source_class: "pps5a",
+            detected_source_class_basis: "configured_capability",
+            default_voltage_mv: 21_000,
+            default_current_ma: 5_000,
+        };
+
+        assert!(!thermal_self_test_uses_point_local_profile(&pps3a, false));
+        assert!(!thermal_self_test_uses_point_local_profile(&pps3a, true));
+        assert!(thermal_self_test_uses_point_local_profile(&pps5a, false));
+        assert!(!thermal_self_test_uses_point_local_profile(&pps5a, true));
+    }
+
+    #[test]
     fn calibration_heater_commands_accept_explicit_boolean_values() {
         let cli = Cli::try_parse_from([
             "flux-purr",
@@ -14963,6 +15004,26 @@ mod tests {
 
         assert_eq!(status["attempt"], 2);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thermal_status_retry_recovers_after_transient_usb_burst() {
+        let (resolved, attempts, server) = spawn_flaky_thermal_status_server(4, 150).await;
+
+        let status = request_thermal_status_with_retry_config(
+            &Client::new(),
+            &resolved,
+            "lease-test",
+            Duration::from_millis(50),
+            5,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["attempt"], 5);
+        assert_eq!(attempts.load(Ordering::SeqCst), 5);
 
         server.abort();
     }

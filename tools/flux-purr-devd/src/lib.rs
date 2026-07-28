@@ -975,10 +975,27 @@ pub struct HeaterCurvePoint {
     pub resistance_milliohms: u16,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveRawObservation {
+    pub raw_rtd_adc_mv: u16,
+    pub heater_voltage_mv: u16,
+    pub heater_current_ma: u16,
+    pub resistance_milliohms: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveRawObservations {
+    pub points: Vec<Option<HeaterCurveRawObservation>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurvePackage {
     pub points: Vec<Option<HeaterCurvePoint>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_observations: Option<HeaterCurveRawObservations>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1010,6 +1027,7 @@ impl Default for HeaterCurvePackage {
     fn default() -> Self {
         Self {
             points: vec![None; HEATER_CURVE_MAX_POINTS],
+            raw_observations: None,
         }
     }
 }
@@ -3804,6 +3822,16 @@ fn validate_heater_curve_package(package: &HeaterCurvePackage) -> Result<(), Htt
             "Heater curve supports at most 8 points.",
         ));
     }
+    if package
+        .raw_observations
+        .as_ref()
+        .is_some_and(|observations| observations.points.len() > HEATER_CURVE_MAX_POINTS)
+    {
+        return Err(HttpError::bad_request(
+            "heater_curve_raw_observations_too_large",
+            "Heater curve raw observations support at most 8 points.",
+        ));
+    }
     Ok(())
 }
 
@@ -3812,6 +3840,16 @@ fn normalize_heater_curve_package(mut package: HeaterCurvePackage) -> HeaterCurv
         .points
         .sort_by_key(|point| point.map(|point| point.temp_centi_c).unwrap_or(i16::MAX));
     package.points.resize(HEATER_CURVE_MAX_POINTS, None);
+    if let Some(raw_observations) = package.raw_observations.as_mut() {
+        raw_observations.points.sort_by_key(|observation| {
+            observation
+                .map(|observation| observation.raw_rtd_adc_mv)
+                .unwrap_or(u16::MAX)
+        });
+        raw_observations
+            .points
+            .resize(HEATER_CURVE_MAX_POINTS, None);
+    }
     package
 }
 

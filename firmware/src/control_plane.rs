@@ -7,11 +7,12 @@ use crate::{
     memory::{
         ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationChannel, AdcCalibrationFit,
         AdcCalibrationSample, AdcCalibrationSlotFit, AdcCalibrationSlotId, HEATER_CURVE_MAX_POINTS,
-        HeaterCurveConfig, HeaterCurvePoint, MEMORY_WIFI_PASSWORD_MAX_LEN,
-        MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, ThermalControlProfileConfig,
-        ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig,
-        ThermalPlantRawAnchor, ThermalPlantRawTransaction, ThermalProfileBank, ThermalProfileMode,
-        adc_calibration_fit, thermal_plant_raw_transaction_is_complete,
+        HeaterCurveConfig, HeaterCurvePoint, HeaterCurveRawObservation, HeaterCurveRawObservations,
+        MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig,
+        ThermalControlProfileConfig, ThermalControlProfilePointConfig,
+        ThermalControlProfileSettingsConfig, ThermalPlantRawAnchor, ThermalPlantRawTransaction,
+        ThermalProfileBank, ThermalProfileMode, adc_calibration_fit,
+        thermal_plant_raw_transaction_is_complete,
     },
 };
 
@@ -1059,6 +1060,45 @@ impl From<HeaterCurvePointWire> for HeaterCurvePoint {
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurvePackageWire {
     pub points: [Option<HeaterCurvePointWire>; HEATER_CURVE_MAX_POINTS],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_observations: Option<HeaterCurveRawObservationsWire>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveRawObservationWire {
+    pub raw_rtd_adc_mv: u16,
+    pub heater_voltage_mv: u16,
+    pub heater_current_ma: u16,
+    pub resistance_milliohms: u16,
+}
+
+impl From<HeaterCurveRawObservation> for HeaterCurveRawObservationWire {
+    fn from(value: HeaterCurveRawObservation) -> Self {
+        Self {
+            raw_rtd_adc_mv: value.raw_rtd_adc_mv,
+            heater_voltage_mv: value.heater_voltage_mv,
+            heater_current_ma: value.heater_current_ma,
+            resistance_milliohms: value.resistance_milliohms,
+        }
+    }
+}
+
+impl From<HeaterCurveRawObservationWire> for HeaterCurveRawObservation {
+    fn from(value: HeaterCurveRawObservationWire) -> Self {
+        Self {
+            raw_rtd_adc_mv: value.raw_rtd_adc_mv,
+            heater_voltage_mv: value.heater_voltage_mv,
+            heater_current_ma: value.heater_current_ma,
+            resistance_milliohms: value.resistance_milliohms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaterCurveRawObservationsWire {
+    pub points: [Option<HeaterCurveRawObservationWire>; HEATER_CURVE_MAX_POINTS],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,12 +1166,25 @@ pub struct CalibrationConfigCommand {
 }
 
 impl HeaterCurvePackageWire {
-    pub fn from_memory(config: &HeaterCurveConfig) -> Self {
+    pub fn from_memory(
+        config: &HeaterCurveConfig,
+        raw_observations: Option<&HeaterCurveRawObservations>,
+    ) -> Self {
         let mut points = [None; HEATER_CURVE_MAX_POINTS];
         for (index, point) in config.points.into_iter().enumerate() {
             points[index] = point.map(Into::into);
         }
-        Self { points }
+        let raw_observations = raw_observations.map(|raw_observations| {
+            let mut points = [None; HEATER_CURVE_MAX_POINTS];
+            for (index, point) in raw_observations.points.into_iter().enumerate() {
+                points[index] = point.map(Into::into);
+            }
+            HeaterCurveRawObservationsWire { points }
+        });
+        Self {
+            points,
+            raw_observations,
+        }
     }
 
     pub fn to_memory(self) -> HeaterCurveConfig {
@@ -1140,6 +1193,16 @@ impl HeaterCurvePackageWire {
             points[index] = point.map(Into::into);
         }
         HeaterCurveConfig { points }
+    }
+
+    pub fn raw_observations_to_memory(self) -> Option<HeaterCurveRawObservations> {
+        self.raw_observations.map(|raw_observations| {
+            let mut points = [None; HEATER_CURVE_MAX_POINTS];
+            for (index, point) in raw_observations.points.into_iter().enumerate() {
+                points[index] = point.map(Into::into);
+            }
+            HeaterCurveRawObservations { points }
+        })
     }
 }
 
@@ -1162,11 +1225,16 @@ pub fn calibration_state_from_memory(config: &MemoryConfig) -> CalibrationStateW
 
 pub fn heater_curve_state_from_memory(
     config: &MemoryConfig,
-    preview: Option<&HeaterCurveConfig>,
+    preview: Option<(&HeaterCurveConfig, Option<&HeaterCurveRawObservations>)>,
 ) -> HeaterCurveStateWire {
     HeaterCurveStateWire {
-        active: HeaterCurvePackageWire::from_memory(&config.active_heater_curve),
-        preview: preview.map(HeaterCurvePackageWire::from_memory),
+        active: HeaterCurvePackageWire::from_memory(
+            &config.active_heater_curve,
+            Some(&config.heater_curve_raw_observations),
+        ),
+        preview: preview.map(|(curve, raw_observations)| {
+            HeaterCurvePackageWire::from_memory(curve, raw_observations)
+        }),
         eeprom_probe: None,
     }
 }

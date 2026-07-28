@@ -120,6 +120,13 @@ impl ThermalPlantController {
         let near_target = error_c.abs() <= 3.0;
         let response_time_s = if near_target && target_temp_c >= 200.0 {
             3.0
+        } else if near_target && target_temp_c >= 160.0 {
+            // The 3 A path has a long measured transport delay. At the
+            // 160-180 C range, the middle-band gain leaves too much applied
+            // heat after the plate first enters the stability band. Use a
+            // shorter, still damped response time so the loss model removes
+            // that tail energy before it becomes a hold-window overshoot.
+            5.0
         } else if near_target {
             8.0
         } else {
@@ -127,6 +134,8 @@ impl ThermalPlantController {
         };
         let integration_time_s = if near_target && target_temp_c >= 200.0 {
             12.0
+        } else if near_target && target_temp_c >= 160.0 {
+            18.0
         } else if near_target {
             30.0
         } else {
@@ -341,6 +350,32 @@ mod tests {
         });
 
         assert!(output.requested_power_mw > output.loss_feedforward_mw + 20_000.0);
+    }
+
+    #[test]
+    fn high_intermediate_tail_brakes_before_the_stability_window() {
+        let mut controller = ThermalPlantController::default();
+        let model = ThermalPlantProjection {
+            convection_mw_per_c: 0.0,
+            radiation_mw_per_k4: 0.000_001_461_697_4,
+            thermal_capacity_mj_per_c: 42_576.72,
+            transport_delay_ms: 10_000,
+        };
+        let output = controller.update(ThermalPlantControlInput {
+            model,
+            target_temp_c: 180.0,
+            current_temp_c: 178.83,
+            ambient_temp_c: 33.91,
+            slope_c_per_s: 0.387,
+            dt_s: 0.05,
+            max_power_mw: 64_000.0,
+        });
+
+        // This is the 180 C HIL tail state. Keeping the middle-band gain here
+        // continued to inject roughly 65% output and broke the 10 s stable
+        // window with a small late overshoot.
+        assert!(output.requested_power_mw < 28_000.0);
+        assert!(output.requested_power_mw < output.loss_feedforward_mw);
     }
 
     #[test]

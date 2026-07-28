@@ -42,7 +42,7 @@ pub(super) struct ThermalLegacyReportInput {
 
 #[derive(Debug, Clone)]
 pub(super) struct ThermalSelfTestReportInput {
-    pub(super) run_dir: PathBuf,
+    pub(super) run_dirs: Vec<PathBuf>,
     pub(super) output_dir: Option<PathBuf>,
 }
 
@@ -202,13 +202,23 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
 pub(super) fn render_self_test_evidence_bundle(
     input: ThermalSelfTestReportInput,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let run_dir = absolute_path(&input.run_dir)?;
+    let run_dirs = input
+        .run_dirs
+        .iter()
+        .map(|path| absolute_path(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let run_dir = run_dirs.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "self-test report requires at least one raw run directory",
+        )
+    })?;
     let output_dir = absolute_path(
         &input
             .output_dir
-            .unwrap_or_else(|| infer_self_test_output_dir(&run_dir)),
+            .unwrap_or_else(|| infer_self_test_output_dir(run_dir)),
     )?;
-    if run_dir == output_dir {
+    if *run_dir == output_dir {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "self-test report output directory must be different from the raw run directory",
@@ -216,7 +226,11 @@ pub(super) fn render_self_test_evidence_bundle(
         .into());
     }
 
-    let summary = read_json(&run_dir.join("run.json"))?;
+    let summaries = run_dirs
+        .iter()
+        .map(|run_dir| read_json(&run_dir.join("run.json")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let summary = summaries.first().expect("non-empty raw run directories");
     if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -224,52 +238,66 @@ pub(super) fn render_self_test_evidence_bundle(
         )
         .into());
     }
-    if summary.get("complete").and_then(Value::as_bool) != Some(true) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "self-test report requires a completed thermal self-test",
-        )
-        .into());
+    let mut target_temps_c = Vec::new();
+    let mut stage_sources = BTreeMap::new();
+    let mut all_samples = BTreeMap::<i16, Vec<Value>>::new();
+    for (run_dir, summary) in run_dirs.iter().zip(summaries.iter()) {
+        if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "self-test report requires thermal_self_test run.json",
+            )
+            .into());
+        }
+        let samples = grouped_samples(&run_dir.join("samples.ndjson"))?;
+        let applied = summary
+            .get("applied")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "self-test run missing applied")
+            })?;
+        let run_id = summary
+            .get("runId")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown-self-test")
+            .to_string();
+        for target in self_test_targets(summary)? {
+            target_temps_c.push(target);
+            if let Some(stage) = applied.iter().find(|stage| {
+                stage.get("targetTempC").and_then(Value::as_i64) == Some(i64::from(target))
+            }) && stage.get("stopReason").and_then(Value::as_str) == Some("completed")
+            {
+                stage_sources.insert(
+                    target,
+                    (
+                        summary.clone(),
+                        run_id.clone(),
+                        stage.clone(),
+                        samples.get(&target).cloned().unwrap_or_default(),
+                    ),
+                );
+            }
+        }
+        for (target, samples) in samples {
+            all_samples.entry(target).or_default().extend(samples);
+        }
     }
-
-    let target_temps_c = self_test_targets(&summary)?;
-    let target_samples = grouped_samples(&run_dir.join("samples.ndjson"))?;
-    let applied = summary
-        .get("applied")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "self-test run missing applied")
-        })?;
+    let target_temps_c = unique_i16_preserve_order(target_temps_c);
     let hold_seconds = summary
         .pointer("/parameters/holdSeconds")
         .and_then(Value::as_u64)
         .unwrap_or_default();
-    let run_id = summary
-        .get("runId")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown-self-test");
-
     let entries = target_temps_c
         .iter()
         .map(|target_temp_c| {
-            let stage = applied
-                .iter()
-                .find(|entry| {
-                    entry.get("targetTempC").and_then(Value::as_i64)
-                        == Some(i64::from(*target_temp_c))
-                })
-                .ok_or_else(|| {
+            let (stage_summary, run_id, stage, raw_samples) =
+                stage_sources.get(target_temp_c).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("self-test run missing applied stage for {target_temp_c}C"),
+                        format!("self-test report has no completed stage for {target_temp_c}C"),
                     )
                 })?;
-            let samples = normalized_sorted_samples(
-                target_samples
-                    .get(target_temp_c)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            );
+            let samples = normalized_sorted_samples(raw_samples);
             if samples.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -278,7 +306,7 @@ pub(super) fn render_self_test_evidence_bundle(
                 .into());
             }
             Ok(self_test_report_entry(
-                &summary,
+                stage_summary,
                 run_id,
                 *target_temp_c,
                 stage,
@@ -320,12 +348,12 @@ pub(super) fn render_self_test_evidence_bundle(
         .or_else(|| summary.pointer("/target/portPath"))
         .and_then(Value::as_str)
         .unwrap_or(UNKNOWN_LEGACY_METADATA);
-    let active_model = thermal_plant_model_snapshot(&target_samples);
+    let active_model = thermal_plant_model_snapshot(&all_samples);
     let accepted_profile = json!({
         "kind": "thermal_plant_model_evidence",
         "role": "runtime_model_snapshot",
         "profileCompatibility": "not_a_point_local_profile",
-        "runId": run_id,
+        "runIds": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "model": active_model,
     });
 
@@ -354,7 +382,7 @@ pub(super) fn render_self_test_evidence_bundle(
     Ok(json!({
         "ok": true,
         "operation": "thermal_report.render_self_test_evidence_bundle",
-        "runDir": display_path(&run_dir),
+        "runDirs": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
         "outputDir": display_path(&output_dir),
         "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
         "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
@@ -633,7 +661,7 @@ fn non_finite_token_length(bytes: &[u8], index: usize) -> Option<usize> {
     const TOKENS: [&[u8]; 3] = [b"-Infinity", b"Infinity", b"NaN"];
     TOKENS
         .iter()
-        .find(|token| bytes[index..].starts_with(**token))
+        .find(|token| bytes[index..].starts_with(token))
         .and_then(|token| {
             let before_ok = index == 0 || is_json_token_delimiter(bytes[index.saturating_sub(1)]);
             let after_index = index + token.len();
@@ -929,9 +957,9 @@ fn legacy_preliminary_review_entries(
                     .and_then(Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter_map(|sample| {
+                    .map(|sample| {
                         let source = sample.get("sourceTelemetry").and_then(Value::as_object);
-                        Some(json!({
+                        json!({
                             "t": round_decimal(sample.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) / 1000.0, 3),
                             "temp": sample.get("currentTempC").cloned().unwrap_or(Value::Null),
                             "filtered": sample.get("heaterFilteredTempC").cloned().unwrap_or(Value::Null),
@@ -944,7 +972,7 @@ fn legacy_preliminary_review_entries(
                             "sourceVoltageV": number_to_json(source.and_then(|payload| payload.get("voltageMv").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
                             "sourceCurrentA": number_to_json(source.and_then(|payload| payload.get("currentMa").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
                             "sourcePowerW": number_to_json(source.and_then(|payload| payload.get("powerMw").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
-                        }))
+                        })
                     })
                     .collect(),
             );
@@ -1462,42 +1490,41 @@ pub(super) fn write_preliminary_review_bundle(
     let samples_path = bundle_dir.join("samples.ndjson");
     let mut sample_lines = String::new();
     for entry in &entries {
-        if let Some(rounds) = entry.get("rounds").and_then(Value::as_array) {
-            if !rounds.is_empty() {
-                for attempt in rounds {
-                    for sample in attempt
-                        .get("samples")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
-                        let mut enriched = sample.clone();
-                        enriched["targetTempC"] =
-                            entry.get("target").cloned().unwrap_or(Value::Null);
-                        enriched["attemptNumber"] =
-                            attempt.get("round").cloned().unwrap_or(Value::Null);
-                        enriched["attemptType"] =
-                            attempt.get("attemptType").cloned().unwrap_or(Value::Null);
-                        enriched["candidateName"] =
-                            attempt.get("candidateName").cloned().unwrap_or(Value::Null);
-                        enriched["selected"] = attempt
-                            .get("selected")
-                            .cloned()
-                            .unwrap_or_else(|| json!(false));
-                        enriched["evidenceValid"] = attempt
-                            .get("evidenceValid")
-                            .cloned()
-                            .unwrap_or_else(|| json!(true));
-                        enriched["evidenceInvalidReason"] = attempt
-                            .get("evidenceInvalidReason")
-                            .cloned()
-                            .unwrap_or(Value::Null);
-                        sample_lines.push_str(&serde_json::to_string(&enriched)?);
-                        sample_lines.push('\n');
-                    }
+        if let Some(rounds) = entry.get("rounds").and_then(Value::as_array)
+            && !rounds.is_empty()
+        {
+            for attempt in rounds {
+                for sample in attempt
+                    .get("samples")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let mut enriched = sample.clone();
+                    enriched["targetTempC"] = entry.get("target").cloned().unwrap_or(Value::Null);
+                    enriched["attemptNumber"] =
+                        attempt.get("round").cloned().unwrap_or(Value::Null);
+                    enriched["attemptType"] =
+                        attempt.get("attemptType").cloned().unwrap_or(Value::Null);
+                    enriched["candidateName"] =
+                        attempt.get("candidateName").cloned().unwrap_or(Value::Null);
+                    enriched["selected"] = attempt
+                        .get("selected")
+                        .cloned()
+                        .unwrap_or(Value::Bool(false));
+                    enriched["evidenceValid"] = attempt
+                        .get("evidenceValid")
+                        .cloned()
+                        .unwrap_or(Value::Bool(true));
+                    enriched["evidenceInvalidReason"] = attempt
+                        .get("evidenceInvalidReason")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    sample_lines.push_str(&serde_json::to_string(&enriched)?);
+                    sample_lines.push('\n');
                 }
-                continue;
             }
+            continue;
         }
         for sample in entry
             .get("samples")
@@ -1937,7 +1964,7 @@ mod tests {
         .expect("sample file");
 
         let result = render_self_test_evidence_bundle(ThermalSelfTestReportInput {
-            run_dir,
+            run_dirs: vec![run_dir],
             output_dir: Some(output_dir.clone()),
         })
         .expect("render self-test evidence");

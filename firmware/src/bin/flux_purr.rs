@@ -3614,6 +3614,18 @@ enum CalibrationJobData {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
+struct HeaterCurvePreview {
+    curve: HeaterCurveConfig,
+    raw_observations: Option<HeaterCurveRawObservations>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn preview_heater_curve_config(preview: Option<&HeaterCurvePreview>) -> Option<&HeaterCurveConfig> {
+    preview.map(|preview| &preview.curve)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct CalibrationRuntimeState {
     mode: CalibrationMode,
     pps_enabled: bool,
@@ -4880,8 +4892,13 @@ fn default_estimated_heater_resistance_ohms(current_temp_c: f32) -> f32 {
 #[cfg(any(target_arch = "xtensa", test))]
 fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveConfig> {
     let mut curve = HeaterCurveConfig::default();
-    let mut count = 0;
-    let mut last_resistance_milliohms = 0;
+    curve.points[0] = Some(default_heater_curve_point(HEATER_CURVE_COLD_ANCHOR_TEMP_C));
+    curve.points[1] = Some(default_heater_curve_point(HEATER_CURVE_R20_ANCHOR_TEMP_C));
+    let mut count = 2;
+    let mut observed_count = 0;
+    let mut last_resistance_milliohms = curve.points[1]
+        .map(|point| point.resistance_milliohms)
+        .unwrap_or_default();
     for observation in memory_config
         .heater_curve_raw_observations
         .points
@@ -4901,8 +4918,9 @@ fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveCon
             resistance_milliohms,
         });
         count += 1;
+        observed_count += 1;
     }
-    (count >= 2).then_some(curve)
+    (observed_count >= 2).then_some(curve)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4914,15 +4932,11 @@ fn estimated_heater_resistance_ohms(
     preview_heater_curve
         .and_then(|curve| heater_resistance_ohms_from_curve(curve, current_temp_c))
         .or_else(|| {
-            heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
-        })
-        .or_else(|| {
-            // Raw observations are retained for traceability and for recovery
-            // when no saved curve exists. They cannot override a newer saved
-            // calibration: an older raw snapshot may have been collected with
-            // a different current-sense interpretation.
             projected_heater_curve(memory_config)
                 .and_then(|curve| heater_resistance_ohms_from_curve(&curve, current_temp_c))
+        })
+        .or_else(|| {
+            heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
         })
         .unwrap_or_else(|| default_estimated_heater_resistance_ohms(current_temp_c))
 }
@@ -5487,13 +5501,14 @@ where
                 source_current_limit_ma,
                 active_thermal_settings.heater_current_reserve_ma,
             );
-            let safe_max_mv = heater_safe_max_mv_for_temp(
+            let persisted_safe_max_mv = heater_safe_max_mv_for_temp(
                 current_temp_c,
                 effective_current_limit_ma,
                 adjustable_max_mv,
                 preview_heater_curve,
                 memory_config,
             );
+            let safe_max_mv = persisted_safe_max_mv;
             let source_request_ceiling_mv = heater_source_request_ceiling_mv(
                 safe_max_mv,
                 current_request_mv,
@@ -6730,7 +6745,7 @@ fn push_heater_curve_point_monotonic(
 fn update_calibration_job_state(
     calibration: &mut CalibrationRuntimeState,
     memory_config: &mut MemoryConfig,
-    preview_heater_curve: &mut Option<HeaterCurveConfig>,
+    preview_heater_curve: &mut Option<HeaterCurvePreview>,
     manual_pps: &mut ManualPpsState,
     latest_rtd_raw_adc_mv: u16,
     latest_vin_raw_adc_mv: u16,
@@ -6953,9 +6968,10 @@ fn update_calibration_job_state(
                     );
                     return;
                 };
-                *preview_heater_curve = Some(preview);
-                memory_config.heater_curve_raw_observations = raw_observations;
-                memory_config.sanitize();
+                *preview_heater_curve = Some(HeaterCurvePreview {
+                    curve: preview,
+                    raw_observations: Some(raw_observations),
+                });
                 calibration.heater_enabled = false;
                 if manual_pps.owner == ManualPpsOwner::Calibration {
                     manual_pps.clear();
@@ -6990,7 +7006,7 @@ fn update_calibration_job_state(
             }
             let resistance_ohms = estimated_heater_resistance_ohms(
                 latest_temp_c,
-                preview_heater_curve.as_ref(),
+                preview_heater_curve_config(preview_heater_curve.as_ref()),
                 memory_config,
             )
             .max(0.1);
@@ -7333,7 +7349,7 @@ fn usb_heater_curve_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     config: HeaterCurveConfigCommand,
     memory_config: &MemoryConfig,
-    preview_heater_curve: &mut Option<HeaterCurveConfig>,
+    preview_heater_curve: &mut Option<HeaterCurvePreview>,
 ) -> UsbFrame {
     match config.op {
         HeaterCurveConfigOp::Preview => {
@@ -7344,11 +7360,15 @@ fn usb_heater_curve_config_response(
                     "Heater curve preview requires a package.",
                 );
             };
+            let raw_observations = package.raw_observations_to_memory();
             let mut curve = package.to_memory();
             curve.points.sort_unstable_by_key(|point| {
                 point.map(|point| point.temp_centi_c).unwrap_or(i16::MAX)
             });
-            *preview_heater_curve = Some(curve);
+            *preview_heater_curve = Some(HeaterCurvePreview {
+                curve,
+                raw_observations,
+            });
         }
         HeaterCurveConfigOp::ClearPreview => {
             *preview_heater_curve = None;
@@ -7358,7 +7378,9 @@ fn usb_heater_curve_config_response(
         request_id,
         UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
             memory_config,
-            preview_heater_curve.as_ref(),
+            preview_heater_curve
+                .as_ref()
+                .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
         )),
     )
 }
@@ -7796,7 +7818,7 @@ async fn handle_usb_control_line(
     controller: &mut FrontPanelInputController,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
-    preview_heater_curve: &mut Option<HeaterCurveConfig>,
+    preview_heater_curve: &mut Option<HeaterCurvePreview>,
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -7898,7 +7920,9 @@ async fn handle_usb_control_line(
                 request_id,
                 UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
                     memory_config,
-                    preview_heater_curve.as_ref(),
+                    preview_heater_curve
+                        .as_ref()
+                        .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
@@ -8047,7 +8071,10 @@ async fn handle_usb_control_line(
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
             if let Some(preview) = *preview_heater_curve {
                 let previous_memory_config = memory_config.clone();
-                memory_config.active_heater_curve = preview;
+                memory_config.active_heater_curve = preview.curve;
+                if let Some(raw_observations) = preview.raw_observations {
+                    memory_config.heater_curve_raw_observations = raw_observations;
+                }
                 memory_config.sanitize();
                 if let Err(error) =
                     commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
@@ -8066,7 +8093,9 @@ async fn handle_usb_control_line(
                     request_id,
                     UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
                         memory_config,
-                        preview_heater_curve.as_ref(),
+                        preview_heater_curve
+                            .as_ref()
+                            .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
                     )),
                 )
             } else {
@@ -8616,7 +8645,7 @@ async fn main(_spawner: Spawner) {
         .as_ref()
         .map(|record| record.config.clone())
         .unwrap_or_default();
-    let mut preview_heater_curve: Option<HeaterCurveConfig> = None;
+    let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_sequence = restored_memory_record
         .as_ref()
         .map(|record| record.sequence)
@@ -8958,7 +8987,7 @@ async fn main(_spawner: Spawner) {
         0.0,
         0,
         &mut last_heater_duty,
-        preview_heater_curve.as_ref(),
+        preview_heater_curve_config(preview_heater_curve.as_ref()),
         &memory_config,
         active_thermal_settings,
         0,
@@ -9479,7 +9508,7 @@ async fn main(_spawner: Spawner) {
                 latest_temp_c,
                 manual_pps_state.capability_max_mv,
                 manual_pps_state.capability_max_ma,
-                preview_heater_curve.as_ref(),
+                preview_heater_curve_config(preview_heater_curve.as_ref()),
                 &memory_config,
                 active_thermal_settings,
             );
@@ -9541,7 +9570,7 @@ async fn main(_spawner: Spawner) {
                 pid_snapshot.filtered_slope_c_per_s,
                 pid_snapshot.warmup_soft_start_percent,
                 &mut last_heater_duty,
-                preview_heater_curve.as_ref(),
+                preview_heater_curve_config(preview_heater_curve.as_ref()),
                 &memory_config,
                 active_thermal_settings,
                 elapsed_ms,
@@ -9702,7 +9731,7 @@ async fn main(_spawner: Spawner) {
                 -1.0,
                 0,
                 &mut last_heater_duty,
-                preview_heater_curve.as_ref(),
+                preview_heater_curve_config(preview_heater_curve.as_ref()),
                 &memory_config,
                 active_thermal_settings,
                 elapsed_ms,
@@ -14162,7 +14191,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_heater_curve_wins_over_stale_raw_projection() {
+    fn raw_heater_observations_reproject_after_temperature_calibration() {
         let mut config = MemoryConfig::default();
         config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
             temp_centi_c: 0,
@@ -14188,10 +14217,10 @@ mod tests {
             });
 
         let resistance = estimated_heater_resistance_ohms(216.7, None, &config);
-        assert!((resistance - 5.674).abs() < 0.001);
+        assert!(resistance < 5.674);
         assert_eq!(
             heater_safe_max_mv_for_temp(216.7, 4_700, 21_000, None, &config),
-            21_000
+            18_400
         );
     }
 
