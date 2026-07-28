@@ -9,8 +9,9 @@ use crate::{
         AdcCalibrationSample, AdcCalibrationSlotFit, AdcCalibrationSlotId, HEATER_CURVE_MAX_POINTS,
         HeaterCurveConfig, HeaterCurvePoint, MEMORY_WIFI_PASSWORD_MAX_LEN,
         MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig, ThermalControlProfileConfig,
-        ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, ThermalProfileBank,
-        ThermalProfileMode, adc_calibration_fit,
+        ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig,
+        ThermalPlantRawAnchor, ThermalPlantRawTransaction, ThermalProfileBank, ThermalProfileMode,
+        adc_calibration_fit, thermal_plant_raw_transaction_is_complete,
     },
 };
 
@@ -182,8 +183,13 @@ pub struct ControlPlaneStatus {
     pub thermal_profile_mode: String<ERROR_CODE_MAX_LEN>,
     #[serde(default = "default_thermal_profile_resolved_bank_wire")]
     pub thermal_profile_resolved_bank: String<ERROR_CODE_MAX_LEN>,
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "thermal_control_runtime_wire_is_default"
+    )]
     pub thermal_control: ThermalControlRuntimeWire,
+    #[serde(default)]
+    pub thermal_plant_model: ThermalPlantRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
 }
@@ -220,6 +226,23 @@ pub struct ThermalControlRuntimeWire {
     pub approach_min_power_ratio_permille: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
+}
+
+fn thermal_control_runtime_wire_is_default(value: &ThermalControlRuntimeWire) -> bool {
+    value == &ThermalControlRuntimeWire::default()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRuntimeWire {
+    pub state: String<ERROR_CODE_MAX_LEN>,
+    pub candidate_transaction_id: Option<u32>,
+    pub active_transaction_id: Option<u32>,
+    pub projection_valid: bool,
+    pub convection_mw_per_c: Option<f32>,
+    pub radiation_mw_per_k4: Option<f32>,
+    pub thermal_capacity_mj_per_c: Option<f32>,
+    pub transport_delay_ms: Option<u32>,
 }
 
 impl ControlPlaneStatus {
@@ -290,6 +313,7 @@ impl ControlPlaneStatus {
                 memory.thermal_profile_mode.default_bank().as_str(),
             ),
             thermal_control: ThermalControlRuntimeWire::default(),
+            thermal_plant_model: ThermalPlantRuntimeWire::default(),
             frontpanel_key: status.frontpanel_key.map(Into::into),
             network,
         }
@@ -314,6 +338,7 @@ pub enum CalibrationModeWire {
     VinAdc,
     RtdAdc,
     HeaterCurve,
+    ThermalPlant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,6 +346,7 @@ pub enum CalibrationModeWire {
 pub enum CalibrationJobKindWire {
     VinAdcAuto,
     HeaterCurveAuto,
+    ThermalPlantAuto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,6 +581,7 @@ pub struct RuntimeConfigCommand {
     pub calibration: Option<CalibrationControlCommand>,
     pub thermal_profile_mode: Option<ThermalProfileModeWire>,
     pub thermal_control_profile: Option<ThermalControlProfileCommand>,
+    pub thermal_plant_model: Option<ThermalPlantModelCommandWire>,
 }
 
 impl RuntimeConfigCommand {
@@ -599,8 +626,89 @@ impl RuntimeConfigCommand {
                 ThermalControlProfileOp::Preview | ThermalControlProfileOp::ClearPreview => {}
             }
         }
+        if let Some(command) = self.thermal_plant_model {
+            match command.op {
+                ThermalPlantModelOpWire::SaveCandidate => {
+                    if let Some(transaction) = command.transaction.map(Into::into)
+                        && thermal_plant_raw_transaction_is_complete(&transaction)
+                    {
+                        config.thermal_plant_candidate = Some(transaction);
+                    }
+                }
+                ThermalPlantModelOpWire::PromoteCandidate => {
+                    if config.thermal_plant_candidate.is_some_and(|candidate| {
+                        Some(candidate.transaction_id) == command.transaction_id
+                    }) {
+                        config.thermal_plant_active = config.thermal_plant_candidate;
+                    }
+                }
+                ThermalPlantModelOpWire::ClearCandidate => {
+                    config.thermal_plant_candidate = None;
+                }
+            }
+        }
         config.sanitize();
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalPlantModelOpWire {
+    SaveCandidate,
+    PromoteCandidate,
+    ClearCandidate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRawAnchorWire {
+    pub ambient_raw_rtd_adc_mv: u16,
+    pub target_raw_rtd_adc_mv: u16,
+    pub heater_voltage_mv: u16,
+    pub heater_current_ma: u16,
+    pub gate_off_idle_power_mw: u32,
+    pub steady_hold_power_mw: u32,
+    pub ramp_duration_ms: u32,
+    pub ramp_energy_mj: u32,
+}
+
+impl From<ThermalPlantRawAnchorWire> for ThermalPlantRawAnchor {
+    fn from(value: ThermalPlantRawAnchorWire) -> Self {
+        Self {
+            ambient_raw_rtd_adc_mv: value.ambient_raw_rtd_adc_mv,
+            target_raw_rtd_adc_mv: value.target_raw_rtd_adc_mv,
+            heater_voltage_mv: value.heater_voltage_mv,
+            heater_current_ma: value.heater_current_ma,
+            gate_off_idle_power_mw: value.gate_off_idle_power_mw,
+            steady_hold_power_mw: value.steady_hold_power_mw,
+            ramp_duration_ms: value.ramp_duration_ms,
+            ramp_energy_mj: value.ramp_energy_mj,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRawTransactionWire {
+    pub transaction_id: u32,
+    pub anchors: [ThermalPlantRawAnchorWire; 2],
+}
+
+impl From<ThermalPlantRawTransactionWire> for ThermalPlantRawTransaction {
+    fn from(value: ThermalPlantRawTransactionWire) -> Self {
+        Self {
+            transaction_id: value.transaction_id,
+            anchors: value.anchors.map(Into::into),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantModelCommandWire {
+    pub op: ThermalPlantModelOpWire,
+    pub transaction_id: Option<u32>,
+    pub transaction: Option<ThermalPlantRawTransactionWire>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1236,6 +1344,7 @@ struct UsbFrameWire {
     calibration: Option<CalibrationControlCommand>,
     thermal_profile_mode: Option<ThermalProfileModeWire>,
     thermal_control_profile: Option<ThermalControlProfileCommand>,
+    thermal_plant_model: Option<ThermalPlantModelCommandWire>,
     channel: Option<CalibrationChannelWire>,
     reference_temp_c: Option<f32>,
     reference_vin_mv: Option<u32>,
@@ -1297,6 +1406,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     calibration: value.calibration,
                     thermal_profile_mode: value.thermal_profile_mode,
                     thermal_control_profile: value.thermal_control_profile,
+                    thermal_plant_model: value.thermal_plant_model,
                 },
             }),
             "calibration_config" => Ok(UsbFrame::CalibrationConfig {
@@ -1380,6 +1490,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
@@ -1441,6 +1552,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.calibration = config.calibration;
                 wire.thermal_profile_mode = config.thermal_profile_mode;
                 wire.thermal_control_profile = config.thermal_control_profile;
+                wire.thermal_plant_model = config.thermal_plant_model;
             }
             UsbFrame::CalibrationConfig { request_id, config } => {
                 wire.frame_type = string("calibration_config");
@@ -2003,6 +2115,7 @@ mod tests {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -2038,6 +2151,7 @@ mod tests {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
@@ -2095,6 +2209,7 @@ mod tests {
                     points,
                 }),
             }),
+            thermal_plant_model: None,
         }
         .apply_to(&mut config);
 
@@ -2151,6 +2266,7 @@ mod tests {
                 bank: None,
                 profile: None,
             }),
+            thermal_plant_model: None,
         }
         .apply_to(&mut config);
 
@@ -2213,6 +2329,7 @@ mod tests {
                     points,
                 }),
             }),
+            thermal_plant_model: None,
         }
         .apply_to(&mut config);
 
@@ -2297,6 +2414,7 @@ mod tests {
                     calibration: None,
                     thermal_profile_mode: None,
                     thermal_control_profile: None,
+                    thermal_plant_model: None,
                 },
             }
         );
@@ -2319,6 +2437,7 @@ mod tests {
                 calibration: None,
                 thermal_profile_mode: Some(ThermalProfileModeWire::W100),
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             },
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
@@ -2363,6 +2482,7 @@ mod tests {
                     calibration: None,
                     thermal_profile_mode: None,
                     thermal_control_profile: None,
+                    thermal_plant_model: None,
                 },
             }
         );

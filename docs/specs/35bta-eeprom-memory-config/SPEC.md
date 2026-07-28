@@ -21,6 +21,7 @@
 - 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
 - 使用双槽 record、TLV payload 和 CRC，保证坏数据自动回退默认值、未知字段可跳过。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
+- 保存校准无关的 5A heater raw observations 与双点 thermal plant model transaction。
 
 ### Non-goals
 
@@ -102,6 +103,10 @@
   - `0x32`: `pps3a` saved thermal control profile
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
+  - `0x35`: `heater_curve_raw_observations`
+  - `0x36`: `pps5a_thermal_plant_candidate`
+  - `0x37`: `pps5a_thermal_plant_active`
+- 新记录不再写入 `0x32/0x33/0x34` point-local profile；解码器仅为旧 record 保留跳过/读取兼容，运行时不得使用其值。`0x35` 保存 raw RTD ADC、实测 V/I/R，`0x36/0x37` 保存环境/目标 raw RTD ADC、gate-off/hold power、ramp duration/energy 和 transaction identity。派生温度、曲线与系数不得成为唯一持久化真相源。
 - 新写入的 thermal profile payload 必须以 `TCP2` 布局标识开头，避免 point-local 布局与历史 settings/point 长度组合发生歧义；无标识的历史 payload 继续按旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多 10 个完整 point-local 压紧目标点，并与完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
 
 ## 验收标准（Acceptance Criteria）
@@ -119,6 +124,11 @@
 - Given v1 或 legacy record 只含一个 saved thermal profile，When 解码，Then profile 写入 `pps3a` bank，`pps5a` 保持空 profile，mode 为 `65w`。
 - Given v2 record 同时含两个 thermal bank，When 重启恢复，Then 两个 bank、mode、Wi-Fi 凭据和 calibration state 都完整恢复。
 - Given 无标识历史 thermal profile 的 payload 长度与新 point-local 布局长度相同，When 固件升级后解码，Then 必须优先恢复历史 settings/point 布局，不得按新布局错位读取。
+- Given RTD calibration active slot or fit changes, When memory is read again, Then raw heater and
+  thermal observations remain byte-for-byte stable and all derived values are rebuilt from the new
+  projection.
+- Given only one thermal-loss anchor is supplied, When candidate save is requested, Then no partial
+  candidate or active transaction is written.
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

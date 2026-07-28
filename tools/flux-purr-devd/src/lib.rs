@@ -62,10 +62,14 @@ const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
+const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_millis(750);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
-const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(250);
+// A read-only status request may be retried once before its 750ms deadline.
+// Retrying every 150ms queues duplicate JSONL commands on a momentarily slow
+// USB-JTAG link, which then creates multi-second gaps in the HIL sample stream.
+const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SERIAL_LINE_LIMIT: usize = 8 * 1024;
 #[cfg(unix)]
 const LOCK_EX: i32 = 2;
@@ -457,6 +461,7 @@ impl DeviceRecord {
             thermal_profile_mode: "65w".to_string(),
             thermal_profile_resolved_bank: "pps3a".to_string(),
             thermal_control: ThermalControlRuntime::default(),
+            thermal_plant_model: ThermalPlantRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -542,6 +547,7 @@ impl DeviceRecord {
             thermal_profile_mode: "65w".to_string(),
             thermal_profile_resolved_bank: "pps3a".to_string(),
             thermal_control: ThermalControlRuntime::default(),
+            thermal_plant_model: ThermalPlantRuntime::default(),
             frontpanel_key: None,
             network: network.clone(),
         };
@@ -725,6 +731,8 @@ pub struct ControlPlaneStatus {
     pub thermal_profile_resolved_bank: String,
     #[serde(default)]
     pub thermal_control: ThermalControlRuntime,
+    #[serde(default)]
+    pub thermal_plant_model: ThermalPlantRuntime,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
 }
@@ -761,6 +769,19 @@ pub struct ThermalControlRuntime {
     pub approach_min_power_ratio_permille: u16,
     pub auto_adjustable_working_floor_mv: u16,
     pub heater_current_reserve_ma: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRuntime {
+    pub state: String,
+    pub candidate_transaction_id: Option<u32>,
+    pub active_transaction_id: Option<u32>,
+    pub projection_valid: bool,
+    pub convection_mw_per_c: Option<f32>,
+    pub radiation_mw_per_k4: Option<f32>,
+    pub thermal_capacity_mj_per_c: Option<f32>,
+    pub transport_delay_ms: Option<u32>,
 }
 
 fn default_thermal_profile_mode() -> String {
@@ -830,6 +851,7 @@ pub enum CalibrationMode {
     VinAdc,
     RtdAdc,
     HeaterCurve,
+    ThermalPlant,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -837,6 +859,7 @@ pub enum CalibrationMode {
 pub enum CalibrationJobKind {
     VinAdcAuto,
     HeaterCurveAuto,
+    ThermalPlantAuto,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -922,7 +945,7 @@ pub enum CalibrationSlotId {
     B,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationSlotSet {
     pub a: CalibrationSlotFit,
@@ -958,7 +981,7 @@ pub struct HeaterCurvePackage {
     pub points: Vec<Option<HeaterCurvePoint>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurveState {
     pub active: HeaterCurvePackage,
@@ -991,23 +1014,13 @@ impl Default for HeaterCurvePackage {
     }
 }
 
-impl Default for HeaterCurveState {
-    fn default() -> Self {
-        Self {
-            active: HeaterCurvePackage::default(),
-            preview: None,
-            eeprom_probe: None,
-        }
-    }
-}
-
 impl Default for CalibrationState {
     fn default() -> Self {
         Self {
             rtd_adc: CalibrationChannelState::default(),
             vin_adc: CalibrationChannelState {
                 fitted_fit: fit_calibration_channel(
-                    &vec![None; ADC_CALIBRATION_MAX_SAMPLES],
+                    &[None; ADC_CALIBRATION_MAX_SAMPLES],
                     CalibrationChannel::VinAdc,
                 ),
                 ..CalibrationChannelState::default()
@@ -1033,15 +1046,6 @@ impl Default for CalibrationSlotFit {
         Self {
             gain: 1.0,
             offset_mv: 0.0,
-        }
-    }
-}
-
-impl Default for CalibrationSlotSet {
-    fn default() -> Self {
-        Self {
-            a: CalibrationSlotFit::default(),
-            b: CalibrationSlotFit::default(),
         }
     }
 }
@@ -1241,6 +1245,43 @@ pub struct RuntimeConfigRequest {
     pub calibration: Option<CalibrationControlRequest>,
     pub thermal_profile_mode: Option<String>,
     pub thermal_control_profile: Option<ThermalControlProfileRequest>,
+    pub thermal_plant_model: Option<ThermalPlantModelRequest>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalPlantModelOp {
+    SaveCandidate,
+    PromoteCandidate,
+    ClearCandidate,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRawAnchor {
+    pub ambient_raw_rtd_adc_mv: u16,
+    pub target_raw_rtd_adc_mv: u16,
+    pub heater_voltage_mv: u16,
+    pub heater_current_ma: u16,
+    pub gate_off_idle_power_mw: u32,
+    pub steady_hold_power_mw: u32,
+    pub ramp_duration_ms: u32,
+    pub ramp_energy_mj: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRawTransaction {
+    pub transaction_id: u32,
+    pub anchors: [ThermalPlantRawAnchor; 2],
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantModelRequest {
+    pub op: ThermalPlantModelOp,
+    pub transaction_id: Option<u32>,
+    pub transaction: Option<ThermalPlantRawTransaction>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1483,6 +1524,8 @@ struct UsbRuntimeConfigWire<'a> {
     thermal_profile_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thermal_plant_model: Option<&'a ThermalPlantModelRequest>,
 }
 
 #[cfg(test)]
@@ -1502,6 +1545,7 @@ fn encode_usb_runtime_mode_for_test(mode: &String) -> String {
         calibration: None,
         thermal_profile_mode: Some(mode),
         thermal_control_profile: None,
+        thermal_plant_model: None,
     })
     .expect("runtime mode wire must serialize")
 }
@@ -2446,10 +2490,10 @@ fn trim_device_record_for_list(mut device: DeviceRecord) -> DeviceRecord {
 }
 
 fn summarize_device_list_event(mut event: DevdEvent) -> DevdEvent {
-    if event.kind == "transport" {
-        if let Some(payload) = event.payload.as_object_mut() {
-            payload.remove("frame");
-        }
+    if event.kind == "transport"
+        && let Some(payload) = event.payload.as_object_mut()
+    {
+        payload.remove("frame");
     }
     event
 }
@@ -2719,7 +2763,36 @@ async fn configure_runtime(
             }
         }
     }
-    let active_profile = device.preview_thermal_control_profile.as_ref().or_else(|| {
+    if let Some(model) = payload.thermal_plant_model.as_ref() {
+        match model.op {
+            ThermalPlantModelOp::SaveCandidate => {
+                let transaction_id = model.transaction.map(|value| value.transaction_id);
+                device.status.thermal_plant_model.state = "candidate".to_string();
+                device.status.thermal_plant_model.candidate_transaction_id = transaction_id;
+            }
+            ThermalPlantModelOp::PromoteCandidate => {
+                if device.status.thermal_plant_model.candidate_transaction_id
+                    == model.transaction_id
+                {
+                    device.status.thermal_plant_model.state = "active".to_string();
+                    device.status.thermal_plant_model.active_transaction_id = model.transaction_id;
+                    device.status.thermal_plant_model.projection_valid = true;
+                }
+            }
+            ThermalPlantModelOp::ClearCandidate => {
+                device.status.thermal_plant_model.candidate_transaction_id = None;
+                if device
+                    .status
+                    .thermal_plant_model
+                    .active_transaction_id
+                    .is_none()
+                {
+                    device.status.thermal_plant_model.state = "missing".to_string();
+                }
+            }
+        }
+    }
+    let active_profile = device.preview_thermal_control_profile.as_ref().or({
         match device.status.thermal_profile_resolved_bank.as_str() {
             "pps5a" => device.saved_thermal_control_profile_pps5a.as_ref(),
             _ => device.saved_thermal_control_profile.as_ref(),
@@ -2789,7 +2862,7 @@ fn apply_mock_calibration_runtime_config(
     let observed_mv = match status.calibration.mode {
         CalibrationMode::RtdAdc => status.rtd_raw_adc_mv,
         CalibrationMode::VinAdc => status.vin_raw_adc_mv,
-        CalibrationMode::Off | CalibrationMode::HeaterCurve => None,
+        CalibrationMode::Off | CalibrationMode::HeaterCurve | CalibrationMode::ThermalPlant => None,
     };
 
     status.calibration.stability_error_mv = status
@@ -2856,6 +2929,57 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
     }
     if let Some(thermal_control_profile) = payload.thermal_control_profile.as_ref() {
         validate_thermal_control_profile_request(thermal_control_profile)?;
+    }
+    if let Some(model) = payload.thermal_plant_model.as_ref() {
+        validate_thermal_plant_model_request(model)?;
+    }
+    Ok(())
+}
+
+fn validate_thermal_plant_model_request(
+    request: &ThermalPlantModelRequest,
+) -> Result<(), HttpError> {
+    match request.op {
+        ThermalPlantModelOp::SaveCandidate => {
+            let transaction = request.transaction.ok_or_else(|| {
+                HttpError::bad_request(
+                    "thermal_plant_transaction_required",
+                    "save_candidate requires a complete two-anchor transaction.",
+                )
+            })?;
+            if transaction.transaction_id == 0
+                || transaction.anchors.iter().any(|anchor| {
+                    anchor.ambient_raw_rtd_adc_mv == 0
+                        || anchor.target_raw_rtd_adc_mv <= anchor.ambient_raw_rtd_adc_mv
+                        || anchor.heater_voltage_mv == 0
+                        || anchor.heater_current_ma == 0
+                        || anchor.steady_hold_power_mw <= anchor.gate_off_idle_power_mw
+                        || anchor.ramp_duration_ms == 0
+                        || anchor.ramp_energy_mj == 0
+                })
+            {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_plant_transaction",
+                    "thermal plant anchors must contain valid raw ADC, electrical, timing, and energy observations.",
+                ));
+            }
+        }
+        ThermalPlantModelOp::PromoteCandidate => {
+            if request.transaction_id.is_none() || request.transaction.is_some() {
+                return Err(HttpError::bad_request(
+                    "thermal_plant_transaction_id_required",
+                    "promote_candidate requires only transactionId.",
+                ));
+            }
+        }
+        ThermalPlantModelOp::ClearCandidate => {
+            if request.transaction_id.is_some() || request.transaction.is_some() {
+                return Err(HttpError::bad_request(
+                    "invalid_thermal_plant_clear",
+                    "clear_candidate does not accept transaction data.",
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2978,9 +3102,7 @@ fn mock_thermal_default_settings() -> MockThermalCandidateSettings {
     }
 }
 
-fn mock_thermal_default_target_values(
-    target_temp_c: i16,
-) -> (
+type MockThermalTargetValues = (
     u16,
     u16,
     u16,
@@ -2998,7 +3120,9 @@ fn mock_thermal_default_target_values(
     u16,
     u16,
     u16,
-) {
+);
+
+fn mock_thermal_default_target_values(target_temp_c: i16) -> MockThermalTargetValues {
     if target_temp_c <= 60 {
         (
             1_310, 1_000, 590, 510, 1_320, 60, 60, 200, 540, 30, 120, 150, 8, 2, 1, 4, 2,
@@ -3913,6 +4037,7 @@ async fn serial_runtime_config(
         calibration: payload.calibration.as_ref(),
         thermal_profile_mode: payload.thermal_profile_mode.as_ref(),
         thermal_control_profile: payload.thermal_control_profile.as_ref(),
+        thermal_plant_model: payload.thermal_plant_model.as_ref(),
     })
     .map_err(|_| HttpError::internal("failed to encode USB runtime request"))?;
     match serial_exchange(
@@ -4157,13 +4282,12 @@ async fn serial_exchange(
     retry_policy: SerialRetryPolicy,
 ) -> Result<Value, HttpError> {
     record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
-    let _serial_rpc = state.serial_rpc.lock().await;
     let serial_sessions = state.serial_sessions.clone();
     let worker_request_id = request_id.clone();
     let worker_device_id = device_id.to_string();
     let worker_events = state.events.clone();
     let worker_inner = state.inner.clone();
-    let result = tokio::task::spawn_blocking(move || {
+    let result = spawn_serial_worker(state.serial_rpc.clone(), move || {
         serial_exchange_blocking(
             &worker_inner,
             &worker_events,
@@ -4212,6 +4336,22 @@ async fn serial_exchange(
     result
 }
 
+async fn spawn_serial_worker<T, F>(
+    serial_rpc: Arc<tokio::sync::Mutex<()>>,
+    worker: F,
+) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let serial_rpc = serial_rpc.lock_owned().await;
+    tokio::task::spawn_blocking(move || {
+        let _serial_rpc = serial_rpc;
+        worker()
+    })
+    .await
+}
+
 fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
     if target.transport != DeviceTransport::NativeSerial {
         return Err(HttpError::bad_request(
@@ -4250,6 +4390,7 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serial_exchange_blocking(
     state: &Arc<Mutex<DevdState>>,
     events: &broadcast::Sender<DevdEvent>,
@@ -4260,8 +4401,8 @@ fn serial_exchange_blocking(
     request: &str,
     retry_policy: SerialRetryPolicy,
 ) -> Result<Value, HttpError> {
-    let deadline = Instant::now() + SERIAL_RPC_TIMEOUT;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    let deadline = Instant::now() + serial_rpc_timeout(retry_policy);
     let mut session = take_or_open_serial_session(&mut serial_sessions, port_path, deadline)?;
     session = write_serial_request_with_reopen(session, port_path, request, deadline)?;
 
@@ -4330,15 +4471,23 @@ fn serial_exchange_blocking(
         }
     }
 
-    // A timeout can leave an incomplete response in the driver buffer. Do not
-    // reuse that session: the next RPC must start at a fresh JSONL boundary.
-    drop(session);
+    // Keep the USB-JTAG session open after a timeout. Reopening this class of
+    // port can reset the MCU; JSONL newline framing and request-id matching let
+    // the next RPC discard any stale partial response without reopening it.
+    store_serial_session(&mut serial_sessions, port_path, session);
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
+    match retry_policy {
+        SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
+        SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
+    }
 }
 
 fn emit_serial_log_line(
@@ -4437,6 +4586,7 @@ impl SerialPortProcessLock {
             let lock_path = serial_lock_path(port_path);
             let file = File::options()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&lock_path)
@@ -4769,6 +4919,33 @@ fn runtime_config_matches_status(
             }
             ThermalControlProfileOp::ClearSaved => {
                 if status.thermal_control.profile_source == "saved" {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Some(model) = payload.thermal_plant_model.as_ref() {
+        match model.op {
+            ThermalPlantModelOp::SaveCandidate => {
+                if status.thermal_plant_model.candidate_transaction_id
+                    != model.transaction.map(|value| value.transaction_id)
+                {
+                    return false;
+                }
+            }
+            ThermalPlantModelOp::PromoteCandidate => {
+                if status.thermal_plant_model.active_transaction_id != model.transaction_id
+                    || !status.thermal_plant_model.projection_valid
+                {
+                    return false;
+                }
+            }
+            ThermalPlantModelOp::ClearCandidate => {
+                if status
+                    .thermal_plant_model
+                    .candidate_transaction_id
+                    .is_some()
+                {
                     return false;
                 }
             }
@@ -6015,8 +6192,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let port_path = dir.path().join("authorized-usbmodem");
         fs::write(&port_path, b"placeholder").unwrap();
-        let mut config = AppConfig::default();
-        config.serial_port = Some(port_path.clone());
+        let config = AppConfig {
+            serial_port: Some(port_path.clone()),
+            ..AppConfig::default()
+        };
         let state = AppState::new(config);
         let device = serial_device_record(port_path.to_str().unwrap(), None);
 
@@ -6357,6 +6536,7 @@ mod tests {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
         })
         .unwrap();
 
@@ -6522,6 +6702,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -6616,6 +6797,7 @@ mod tests {
                         ],
                     }),
                 }),
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -6646,6 +6828,7 @@ mod tests {
                     bank: None,
                     profile: None,
                 }),
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -6676,6 +6859,7 @@ mod tests {
                     bank: None,
                     profile: None,
                 }),
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -6721,6 +6905,7 @@ mod tests {
                         points,
                     }),
                 }),
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -6751,6 +6936,7 @@ mod tests {
                     bank: None,
                     profile: None,
                 }),
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -6813,6 +6999,7 @@ mod tests {
             calibration: None,
             thermal_profile_mode: Some("turbo".to_string()),
             thermal_control_profile: None,
+            thermal_plant_model: None,
         };
         assert_eq!(
             validate_runtime_config(&payload).unwrap_err().error.code,
@@ -6859,6 +7046,7 @@ mod tests {
                         points: vec![None; FRONT_PANEL_PRESET_COUNT],
                     }),
                 }),
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7007,6 +7195,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7058,6 +7247,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7087,6 +7277,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7114,6 +7305,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7162,6 +7354,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7210,6 +7403,7 @@ mod tests {
                 thermal_profile_mode: None,
                 fault_attention_acknowledged: None,
                 thermal_control_profile: None,
+                thermal_plant_model: None,
             }),
         )
         .await
@@ -7490,6 +7684,7 @@ mod tests {
             thermal_profile_mode: None,
             fault_attention_acknowledged: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
         };
         let status = ControlPlaneStatus {
             mode: "sampling".to_string(),
@@ -7540,6 +7735,7 @@ mod tests {
             thermal_profile_mode: "65w".to_string(),
             thermal_profile_resolved_bank: "pps3a".to_string(),
             thermal_control: ThermalControlRuntime::default(),
+            thermal_plant_model: ThermalPlantRuntime::default(),
             calibration: CalibrationRuntimeState {
                 mode: CalibrationMode::RtdAdc,
                 pps_enabled: true,
@@ -7589,6 +7785,7 @@ mod tests {
             thermal_profile_mode: None,
             fault_attention_acknowledged: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.calibration.mode = CalibrationMode::VinAdc;
@@ -7615,6 +7812,7 @@ mod tests {
             calibration: None,
             thermal_profile_mode: None,
             thermal_control_profile: None,
+            thermal_plant_model: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.fault_attention_pending = true;
@@ -7669,6 +7867,7 @@ mod tests {
                     points,
                 }),
             }),
+            thermal_plant_model: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.thermal_control_profile_preview = true;
@@ -7730,6 +7929,7 @@ mod tests {
                     points,
                 }),
             }),
+            thermal_plant_model: None,
         };
         let mut status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
         status.thermal_control = mock_thermal_runtime(
@@ -7899,6 +8099,22 @@ mod tests {
             retry_at,
             now
         ));
+        assert_eq!(
+            serial_rpc_timeout(SerialRetryPolicy::ReadOnly),
+            SERIAL_READ_ONLY_RPC_TIMEOUT
+        );
+        assert_eq!(
+            serial_rpc_timeout(SerialRetryPolicy::SingleShot),
+            SERIAL_RPC_TIMEOUT
+        );
+        assert!(SERIAL_SILENT_RETRY_DELAY < SERIAL_READ_ONLY_RPC_TIMEOUT);
+        assert!(SERIAL_SILENT_RETRY_DELAY.saturating_mul(2) >= SERIAL_READ_ONLY_RPC_TIMEOUT);
+        assert!(should_retry_silent_serial_request(
+            SerialRetryPolicy::ReadOnly,
+            now + SERIAL_SILENT_RETRY_DELAY,
+            now + SERIAL_SILENT_RETRY_DELAY,
+            now + SERIAL_READ_ONLY_RPC_TIMEOUT,
+        ));
     }
 
     #[test]
@@ -7966,6 +8182,34 @@ mod tests {
         let reopened =
             SerialPortProcessLock::acquire(port_path, Instant::now() + Duration::from_millis(250));
         assert!(reopened.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_keeps_serial_rpc_locked_until_worker_finishes() {
+        let serial_rpc = Arc::new(tokio::sync::Mutex::new(()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let worker_lock = serial_rpc.clone();
+        let request = tokio::spawn(async move {
+            spawn_serial_worker(worker_lock, move || {
+                started_tx.send(()).unwrap();
+                finish_rx.blocking_recv().unwrap();
+            })
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        request.abort();
+        tokio::task::yield_now().await;
+        assert!(serial_rpc.try_lock().is_err());
+
+        finish_tx.send(()).unwrap();
+        let _serial_rpc = tokio::time::timeout(Duration::from_secs(1), serial_rpc.lock())
+            .await
+            .unwrap();
     }
 
     fn test_artifact_with_file(root: &Path, relative_path: &str, bytes: &[u8]) -> FirmwareArtifact {

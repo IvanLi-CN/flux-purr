@@ -24,6 +24,7 @@ pub const MEMORY_WIFI_PASSWORD_MAX_LEN: usize = 64;
 pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
+pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
 pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
@@ -126,6 +127,9 @@ const TLV_ACTIVE_THERMAL_CONTROL_PROFILE: u8 = 0x31;
 const TLV_THERMAL_CONTROL_PROFILE_PPS3A: u8 = 0x32;
 const TLV_THERMAL_CONTROL_PROFILE_PPS5A: u8 = 0x33;
 const TLV_THERMAL_PROFILE_MODE: u8 = 0x34;
+const TLV_HEATER_CURVE_RAW_OBSERVATIONS: u8 = 0x35;
+const TLV_THERMAL_PLANT_CANDIDATE: u8 = 0x36;
+const TLV_THERMAL_PLANT_ACTIVE: u8 = 0x37;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryConfig {
@@ -139,6 +143,9 @@ pub struct MemoryConfig {
     pub telemetry_interval_ms: u32,
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
+    pub heater_curve_raw_observations: HeaterCurveRawObservations,
+    pub thermal_plant_candidate: Option<ThermalPlantRawTransaction>,
+    pub thermal_plant_active: Option<ThermalPlantRawTransaction>,
     /// The legacy field is the persisted 3 A / 65 W bank. Keeping its name makes
     /// v1 record migration explicit and avoids a silent behavior change for callers.
     pub active_thermal_control_profile: ThermalControlProfileConfig,
@@ -227,6 +234,45 @@ pub struct HeaterCurvePoint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaterCurveConfig {
     pub points: [Option<HeaterCurvePoint>; HEATER_CURVE_MAX_POINTS],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaterCurveRawObservation {
+    pub raw_rtd_adc_mv: u16,
+    pub heater_voltage_mv: u16,
+    pub heater_current_ma: u16,
+    pub resistance_milliohms: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaterCurveRawObservations {
+    pub points: [Option<HeaterCurveRawObservation>; HEATER_CURVE_MAX_POINTS],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPlantRawAnchor {
+    pub ambient_raw_rtd_adc_mv: u16,
+    pub target_raw_rtd_adc_mv: u16,
+    pub heater_voltage_mv: u16,
+    pub heater_current_ma: u16,
+    pub gate_off_idle_power_mw: u32,
+    pub steady_hold_power_mw: u32,
+    pub ramp_duration_ms: u32,
+    pub ramp_energy_mj: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPlantRawTransaction {
+    pub transaction_id: u32,
+    pub anchors: [ThermalPlantRawAnchor; THERMAL_PLANT_ANCHOR_COUNT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThermalPlantProjection {
+    pub convection_mw_per_c: f32,
+    pub radiation_mw_per_k4: f32,
+    pub thermal_capacity_mj_per_c: f32,
+    pub transport_delay_ms: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +366,14 @@ impl Default for AdcCalibrationChannelConfig {
 }
 
 impl Default for HeaterCurveConfig {
+    fn default() -> Self {
+        Self {
+            points: [None; HEATER_CURVE_MAX_POINTS],
+        }
+    }
+}
+
+impl Default for HeaterCurveRawObservations {
     fn default() -> Self {
         Self {
             points: [None; HEATER_CURVE_MAX_POINTS],
@@ -453,6 +507,9 @@ impl Default for MemoryConfig {
             telemetry_interval_ms: 500,
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
+            heater_curve_raw_observations: HeaterCurveRawObservations::default(),
+            thermal_plant_candidate: None,
+            thermal_plant_active: None,
             active_thermal_control_profile: ThermalControlProfileConfig::default(),
             thermal_control_profile_pps5a: ThermalControlProfileConfig::default(),
             thermal_profile_mode: ThermalProfileMode::W65,
@@ -474,6 +531,13 @@ impl MemoryConfig {
         }
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
+        sanitize_heater_curve_raw_observations(&mut self.heater_curve_raw_observations);
+        self.thermal_plant_candidate = self
+            .thermal_plant_candidate
+            .filter(thermal_plant_raw_transaction_is_complete);
+        self.thermal_plant_active = self
+            .thermal_plant_active
+            .filter(thermal_plant_raw_transaction_is_complete);
         sanitize_thermal_control_profile(&mut self.active_thermal_control_profile);
         sanitize_thermal_control_profile(&mut self.thermal_control_profile_pps5a);
     }
@@ -494,6 +558,122 @@ impl MemoryConfig {
             ThermalProfileBank::Pps5a => &mut self.thermal_control_profile_pps5a,
         }
     }
+}
+
+fn sanitize_heater_curve_raw_observations(config: &mut HeaterCurveRawObservations) {
+    let mut compacted = [None; HEATER_CURVE_MAX_POINTS];
+    let mut count = 0;
+    for point in config.points.iter().flatten().copied() {
+        if point.raw_rtd_adc_mv == 0
+            || point.heater_voltage_mv == 0
+            || point.heater_current_ma == 0
+            || point.resistance_milliohms == 0
+        {
+            continue;
+        }
+        compacted[count] = Some(point);
+        count += 1;
+    }
+    for index in 1..count {
+        let point = compacted[index];
+        let mut cursor = index;
+        while cursor > 0
+            && compacted[cursor - 1].map(|value| value.raw_rtd_adc_mv)
+                > point.map(|value| value.raw_rtd_adc_mv)
+        {
+            compacted[cursor] = compacted[cursor - 1];
+            cursor -= 1;
+        }
+        compacted[cursor] = point;
+    }
+    config.points = compacted;
+}
+
+pub fn thermal_plant_raw_transaction_is_complete(value: &ThermalPlantRawTransaction) -> bool {
+    value.transaction_id != 0
+        && value.anchors.iter().all(|anchor| {
+            anchor.ambient_raw_rtd_adc_mv > 0
+                && anchor.target_raw_rtd_adc_mv > anchor.ambient_raw_rtd_adc_mv
+                && anchor.heater_voltage_mv > 0
+                && anchor.heater_current_ma > 0
+                && anchor.steady_hold_power_mw > anchor.gate_off_idle_power_mw
+                && anchor.ramp_duration_ms > 0
+                && anchor.ramp_energy_mj > 0
+        })
+}
+
+pub fn project_thermal_plant(
+    value: &ThermalPlantRawTransaction,
+    mut temperature_from_raw_adc: impl FnMut(u16) -> Option<f32>,
+) -> Option<ThermalPlantProjection> {
+    if !thermal_plant_raw_transaction_is_complete(value) {
+        return None;
+    }
+    let mut delta_c = [0.0_f32; THERMAL_PLANT_ANCHOR_COUNT];
+    let mut radiation = [0.0_f32; THERMAL_PLANT_ANCHOR_COUNT];
+    let mut loss_mw = [0.0_f32; THERMAL_PLANT_ANCHOR_COUNT];
+    let mut capacity_sum = 0.0_f32;
+    let mut delay_sum = 0_u64;
+    for (index, anchor) in value.anchors.iter().enumerate() {
+        let ambient_c = temperature_from_raw_adc(anchor.ambient_raw_rtd_adc_mv)?;
+        let target_c = temperature_from_raw_adc(anchor.target_raw_rtd_adc_mv)?;
+        let span_c = target_c - ambient_c;
+        if !(5.0..=350.0).contains(&span_c) {
+            return None;
+        }
+        delta_c[index] = span_c;
+        let target_k2 = (target_c + 273.15) * (target_c + 273.15);
+        let ambient_k2 = (ambient_c + 273.15) * (ambient_c + 273.15);
+        radiation[index] = target_k2 * target_k2 - ambient_k2 * ambient_k2;
+        loss_mw[index] = (anchor.steady_hold_power_mw - anchor.gate_off_idle_power_mw) as f32;
+        capacity_sum += anchor.ramp_energy_mj as f32 / span_c;
+        delay_sum += u64::from(anchor.ramp_duration_ms);
+    }
+    let determinant = delta_c[0] * radiation[1] - delta_c[1] * radiation[0];
+    if !determinant.is_finite() || determinant.abs() < 1.0 {
+        return None;
+    }
+    let mut convection = (loss_mw[0] * radiation[1] - loss_mw[1] * radiation[0]) / determinant;
+    let mut radiation_coefficient =
+        (delta_c[0] * loss_mw[1] - delta_c[1] * loss_mw[0]) / determinant;
+    if convection < 0.0 || radiation_coefficient < 0.0 {
+        let convection_only = (delta_c[0] * loss_mw[0] + delta_c[1] * loss_mw[1])
+            / (delta_c[0] * delta_c[0] + delta_c[1] * delta_c[1]);
+        let radiation_only = (radiation[0] * loss_mw[0] + radiation[1] * loss_mw[1])
+            / (radiation[0] * radiation[0] + radiation[1] * radiation[1]);
+        let convection_residual_0 = loss_mw[0] - convection_only * delta_c[0];
+        let convection_residual_1 = loss_mw[1] - convection_only * delta_c[1];
+        let radiation_residual_0 = loss_mw[0] - radiation_only * radiation[0];
+        let radiation_residual_1 = loss_mw[1] - radiation_only * radiation[1];
+        let convection_error = convection_residual_0 * convection_residual_0
+            + convection_residual_1 * convection_residual_1;
+        let radiation_error = radiation_residual_0 * radiation_residual_0
+            + radiation_residual_1 * radiation_residual_1;
+        if convection_error <= radiation_error {
+            convection = convection_only.max(0.0);
+            radiation_coefficient = 0.0;
+        } else {
+            convection = 0.0;
+            radiation_coefficient = radiation_only.max(0.0);
+        }
+    }
+    let capacity = capacity_sum / THERMAL_PLANT_ANCHOR_COUNT as f32;
+    if !convection.is_finite()
+        || !radiation_coefficient.is_finite()
+        || !capacity.is_finite()
+        || convection < 0.0
+        || radiation_coefficient < 0.0
+        || !(100.0..=2_000_000.0).contains(&capacity)
+    {
+        return None;
+    }
+    Some(ThermalPlantProjection {
+        convection_mw_per_c: convection,
+        radiation_mw_per_k4: radiation_coefficient,
+        thermal_capacity_mj_per_c: capacity,
+        transport_delay_ms: (delay_sum / THERMAL_PLANT_ANCHOR_COUNT as u64).clamp(50, 10_000)
+            as u32,
+    })
 }
 
 pub fn heater_resistance_ohms_from_curve(
@@ -1195,33 +1375,63 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
-    let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
-    let thermal_profile_len = encode_thermal_control_profile(
-        &config.active_thermal_control_profile,
-        &mut thermal_profile_payload,
+    let has_new_thermal_data = config
+        .heater_curve_raw_observations
+        .points
+        .iter()
+        .any(Option::is_some)
+        || config.thermal_plant_candidate.is_some()
+        || config.thermal_plant_active.is_some();
+    if !has_new_thermal_data {
+        let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+        let thermal_profile_len = encode_thermal_control_profile(
+            &config.active_thermal_control_profile,
+            &mut thermal_profile_payload,
+        );
+        push_tlv(
+            TLV_THERMAL_CONTROL_PROFILE_PPS3A,
+            &thermal_profile_payload[..thermal_profile_len],
+            out,
+            &mut cursor,
+        )?;
+        let pps5a_profile_len = encode_thermal_control_profile(
+            &config.thermal_control_profile_pps5a,
+            &mut thermal_profile_payload,
+        );
+        push_tlv(
+            TLV_THERMAL_CONTROL_PROFILE_PPS5A,
+            &thermal_profile_payload[..pps5a_profile_len],
+            out,
+            &mut cursor,
+        )?;
+        let mode = match config.thermal_profile_mode {
+            ThermalProfileMode::Auto => 0,
+            ThermalProfileMode::W65 => 1,
+            ThermalProfileMode::W100 => 2,
+        };
+        push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
+    }
+    let mut raw_curve_payload = [0u8; HEATER_CURVE_MAX_POINTS * 8];
+    encode_heater_curve_raw_observations(
+        &config.heater_curve_raw_observations,
+        &mut raw_curve_payload,
     );
     push_tlv(
-        TLV_THERMAL_CONTROL_PROFILE_PPS3A,
-        &thermal_profile_payload[..thermal_profile_len],
+        TLV_HEATER_CURVE_RAW_OBSERVATIONS,
+        &raw_curve_payload,
         out,
         &mut cursor,
     )?;
-    let pps5a_profile_len = encode_thermal_control_profile(
-        &config.thermal_control_profile_pps5a,
-        &mut thermal_profile_payload,
-    );
-    push_tlv(
-        TLV_THERMAL_CONTROL_PROFILE_PPS5A,
-        &thermal_profile_payload[..pps5a_profile_len],
-        out,
-        &mut cursor,
-    )?;
-    let mode = match config.thermal_profile_mode {
-        ThermalProfileMode::Auto => 0,
-        ThermalProfileMode::W65 => 1,
-        ThermalProfileMode::W100 => 2,
-    };
-    push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
+    if let Some(candidate) = config.thermal_plant_candidate {
+        let mut payload = [0u8; 52];
+        encode_thermal_plant_raw_transaction(&candidate, &mut payload);
+        push_tlv(TLV_THERMAL_PLANT_CANDIDATE, &payload, out, &mut cursor)?;
+    }
+    if let Some(active) = config.thermal_plant_active {
+        let mut payload = [0u8; 52];
+        encode_thermal_plant_raw_transaction(&active, &mut payload);
+        push_tlv(TLV_THERMAL_PLANT_ACTIVE, &payload, out, &mut cursor)?;
+    }
     Ok(cursor)
 }
 
@@ -1356,6 +1566,15 @@ fn decode_config_payload(
                     _ => ThermalProfileMode::W65,
                 };
             }
+            TLV_HEATER_CURVE_RAW_OBSERVATIONS if len == HEATER_CURVE_MAX_POINTS * 8 => {
+                config.heater_curve_raw_observations = decode_heater_curve_raw_observations(value);
+            }
+            TLV_THERMAL_PLANT_CANDIDATE if len == 52 => {
+                config.thermal_plant_candidate = decode_thermal_plant_raw_transaction(value);
+            }
+            TLV_THERMAL_PLANT_ACTIVE if len == 52 => {
+                config.thermal_plant_active = decode_thermal_plant_raw_transaction(value);
+            }
             _ => {}
         }
     }
@@ -1369,6 +1588,104 @@ fn decode_config_payload(
         backfill_new_adc_calibration_defaults(&mut config.adc_calibration);
     }
     Ok(config)
+}
+
+fn encode_heater_curve_raw_observations(config: &HeaterCurveRawObservations, out: &mut [u8]) {
+    for (index, point) in config.points.iter().enumerate() {
+        let offset = index * 8;
+        let values = point
+            .map(|point| {
+                [
+                    point.raw_rtd_adc_mv,
+                    point.heater_voltage_mv,
+                    point.heater_current_ma,
+                    point.resistance_milliohms,
+                ]
+            })
+            .unwrap_or([u16::MAX; 4]);
+        for (field, value) in values.iter().enumerate() {
+            out[offset + field * 2..offset + field * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn decode_heater_curve_raw_observations(bytes: &[u8]) -> HeaterCurveRawObservations {
+    let mut config = HeaterCurveRawObservations::default();
+    for index in 0..HEATER_CURVE_MAX_POINTS {
+        let offset = index * 8;
+        let read = |field: usize| {
+            u16::from_le_bytes([bytes[offset + field * 2], bytes[offset + field * 2 + 1]])
+        };
+        let raw_rtd_adc_mv = read(0);
+        if raw_rtd_adc_mv != u16::MAX {
+            config.points[index] = Some(HeaterCurveRawObservation {
+                raw_rtd_adc_mv,
+                heater_voltage_mv: read(1),
+                heater_current_ma: read(2),
+                resistance_milliohms: read(3),
+            });
+        }
+    }
+    config
+}
+
+fn encode_thermal_plant_raw_transaction(value: &ThermalPlantRawTransaction, out: &mut [u8]) {
+    out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
+    let mut cursor = 4;
+    for anchor in value.anchors {
+        for field in [
+            anchor.ambient_raw_rtd_adc_mv,
+            anchor.target_raw_rtd_adc_mv,
+            anchor.heater_voltage_mv,
+            anchor.heater_current_ma,
+        ] {
+            out[cursor..cursor + 2].copy_from_slice(&field.to_le_bytes());
+            cursor += 2;
+        }
+        for field in [
+            anchor.gate_off_idle_power_mw,
+            anchor.steady_hold_power_mw,
+            anchor.ramp_duration_ms,
+            anchor.ramp_energy_mj,
+        ] {
+            out[cursor..cursor + 4].copy_from_slice(&field.to_le_bytes());
+            cursor += 4;
+        }
+    }
+}
+
+fn decode_thermal_plant_raw_transaction(bytes: &[u8]) -> Option<ThermalPlantRawTransaction> {
+    let transaction_id = u32::from_le_bytes(bytes[..4].try_into().ok()?);
+    let mut cursor = 4;
+    let mut anchors = [ThermalPlantRawAnchor {
+        ambient_raw_rtd_adc_mv: 0,
+        target_raw_rtd_adc_mv: 0,
+        heater_voltage_mv: 0,
+        heater_current_ma: 0,
+        gate_off_idle_power_mw: 0,
+        steady_hold_power_mw: 0,
+        ramp_duration_ms: 0,
+        ramp_energy_mj: 0,
+    }; THERMAL_PLANT_ANCHOR_COUNT];
+    for anchor in &mut anchors {
+        let read_u16 = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+        anchor.ambient_raw_rtd_adc_mv = read_u16(cursor);
+        anchor.target_raw_rtd_adc_mv = read_u16(cursor + 2);
+        anchor.heater_voltage_mv = read_u16(cursor + 4);
+        anchor.heater_current_ma = read_u16(cursor + 6);
+        cursor += 8;
+        let read_u32 = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        anchor.gate_off_idle_power_mw = read_u32(cursor);
+        anchor.steady_hold_power_mw = read_u32(cursor + 4);
+        anchor.ramp_duration_ms = read_u32(cursor + 8);
+        anchor.ramp_energy_mj = read_u32(cursor + 12);
+        cursor += 16;
+    }
+    let value = ThermalPlantRawTransaction {
+        transaction_id,
+        anchors,
+    };
+    thermal_plant_raw_transaction_is_complete(&value).then_some(value)
 }
 
 fn encode_adc_calibration_samples(config: &AdcCalibrationConfig, out: &mut [u8]) {
@@ -3460,5 +3777,89 @@ mod tests {
         assert_eq!(config.presets_c[0], Some(FRONTPANEL_TARGET_TEMP_MIN_C));
         assert_eq!(config.presets_c[1], Some(FRONTPANEL_TARGET_TEMP_MAX_C));
         assert_eq!(config.telemetry_interval_ms, 500);
+    }
+
+    fn sample_thermal_plant_transaction() -> ThermalPlantRawTransaction {
+        ThermalPlantRawTransaction {
+            transaction_id: 0x515a_0001,
+            anchors: [
+                ThermalPlantRawAnchor {
+                    ambient_raw_rtd_adc_mv: 250,
+                    target_raw_rtd_adc_mv: 800,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 1_500,
+                    gate_off_idle_power_mw: 100,
+                    steady_hold_power_mw: 6_500,
+                    ramp_duration_ms: 8_000,
+                    ramp_energy_mj: 44_000,
+                },
+                ThermalPlantRawAnchor {
+                    ambient_raw_rtd_adc_mv: 250,
+                    target_raw_rtd_adc_mv: 2_200,
+                    heater_voltage_mv: 18_000,
+                    heater_current_ma: 3_000,
+                    gate_off_idle_power_mw: 100,
+                    steady_hold_power_mw: 27_000,
+                    ramp_duration_ms: 4_000,
+                    ramp_energy_mj: 156_000,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn raw_thermal_data_roundtrips_without_legacy_profiles() {
+        let mut config = sample_config();
+        config.heater_curve_raw_observations.points[0] = Some(HeaterCurveRawObservation {
+            raw_rtd_adc_mv: 250,
+            heater_voltage_mv: 10_000,
+            heater_current_ma: 3_000,
+            resistance_milliohms: 3_333,
+        });
+        config.thermal_plant_candidate = Some(sample_thermal_plant_transaction());
+        let record = MemoryRecord {
+            sequence: 51,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("new model encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("new model decodes");
+
+        assert_eq!(
+            decoded.config.heater_curve_raw_observations,
+            record.config.heater_curve_raw_observations
+        );
+        assert_eq!(
+            decoded.config.thermal_plant_candidate,
+            record.config.thermal_plant_candidate
+        );
+        assert!(
+            decoded
+                .config
+                .active_thermal_control_profile
+                .points
+                .iter()
+                .all(Option::is_none)
+        );
+        assert!(len <= MEMORY_SLOT_SIZE);
+    }
+
+    #[test]
+    fn rtd_reprojection_changes_only_derived_thermal_model() {
+        let raw = sample_thermal_plant_transaction();
+        let original = project_thermal_plant(&raw, |adc| Some(adc as f32 / 10.0))
+            .expect("original projection");
+        let recalibrated = project_thermal_plant(&raw, |adc| Some(adc as f32 / 10.5))
+            .expect("recalibrated projection");
+
+        assert_eq!(raw, sample_thermal_plant_transaction());
+        assert_ne!(
+            original.convection_mw_per_c,
+            recalibrated.convection_mw_per_c
+        );
+        assert_ne!(
+            original.thermal_capacity_mj_per_c,
+            recalibrated.thermal_capacity_mj_per_c
+        );
     }
 }

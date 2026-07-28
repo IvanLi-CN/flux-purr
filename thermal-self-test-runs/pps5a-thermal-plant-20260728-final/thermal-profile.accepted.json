@@ -1,0 +1,9 @@
+{
+  "convectionMwPerC": 0,
+  "kind": "pps5a_thermal_plant_active",
+  "projectionValid": true,
+  "radiationMwPerK4": 1.4616974e-6,
+  "thermalCapacityMjPerC": 42576.72,
+  "transactionId": 1431374617,
+  "transportDelayMs": 10000
+}
