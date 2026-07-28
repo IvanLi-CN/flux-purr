@@ -371,6 +371,10 @@ struct ThermalModelPromoteArgs {
 #[derive(Debug, Subcommand)]
 enum ThermalReportCommand {
     #[command(
+        about = "Render a completed raw thermal self-test as the canonical four-file HTML evidence bundle."
+    )]
+    RenderSelfTest(ThermalSelfTestReportArgs),
+    #[command(
         about = "Rerender a legacy preliminary thermal review bundle into the canonical compliant HTML bundle."
     )]
     RerenderLegacy(ThermalLegacyReportArgs),
@@ -659,6 +663,20 @@ struct ThermalLegacyReportArgs {
     #[arg(
         long = "output-dir",
         help = "Output directory for the rerendered compliant bundle. Defaults to <legacy-bundle-dir>-rerendered."
+    )]
+    output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ThermalSelfTestReportArgs {
+    #[arg(
+        long = "run-dir",
+        help = "Directory containing a completed thermal self-test run.json and samples.ndjson."
+    )]
+    run_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Output directory for the canonical HTML bundle. Defaults to a sibling <run-dir>-html-report directory."
     )]
     output_dir: Option<PathBuf>,
 }
@@ -2186,6 +2204,14 @@ async fn handle_thermal_command(
             thermal_flagship::run_flagship_tuning(client, default_devd, args).await
         }
         ThermalCommand::Report { command } => match command {
+            ThermalReportCommand::RenderSelfTest(args) => {
+                thermal_report::render_self_test_evidence_bundle(
+                    thermal_report::ThermalSelfTestReportInput {
+                        run_dir: args.run_dir,
+                        output_dir: args.output_dir,
+                    },
+                )
+            }
             ThermalReportCommand::RerenderLegacy(args) => {
                 thermal_report::rerender_legacy_preliminary_review_bundle(
                     thermal_report::ThermalLegacyReportInput {
@@ -12873,13 +12899,43 @@ mod tests {
             panic!("expected thermal report command");
         };
 
-        let ThermalReportCommand::RerenderLegacy(args) = command;
+        let ThermalReportCommand::RerenderLegacy(args) = command else {
+            panic!("expected legacy rerender command");
+        };
 
         assert_eq!(args.legacy_bundle_dir, PathBuf::from("/tmp/legacy-bundle"));
         assert_eq!(
             args.output_dir,
             Some(PathBuf::from("/tmp/compliant-bundle"))
         );
+    }
+
+    #[test]
+    fn parses_thermal_report_render_self_test_command() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "report",
+            "render-self-test",
+            "--run-dir",
+            "/tmp/raw-self-test",
+            "--output-dir",
+            "/tmp/html-bundle",
+        ])
+        .expect("parse thermal self-test report command");
+
+        let Command::Thermal {
+            command: ThermalCommand::Report { command },
+        } = cli.command
+        else {
+            panic!("expected thermal report command");
+        };
+        let ThermalReportCommand::RenderSelfTest(args) = command else {
+            panic!("expected self-test report command");
+        };
+
+        assert_eq!(args.run_dir, PathBuf::from("/tmp/raw-self-test"));
+        assert_eq!(args.output_dir, Some(PathBuf::from("/tmp/html-bundle")));
     }
 
     #[test]
