@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "2757596f85397692429f4c11b290f93a2b377c3e",
+  "pr_number": 47,
+  "pr_title": "fix: replace invalid pps5a baseline submission",
+  "product": {
+    "effective_version": "0.12.2",
+    "tag": "v0.12.2"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "fdd63be00ddd031a13320d1650eca62debd9ce52",
+  "type_label": "type:patch"
+}
