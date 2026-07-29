@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "2505c1ded07051093eb5fb1996745bf4a861606c",
+  "pr_number": 50,
+  "pr_title": "docs(hardware): approve PSMN heater MOSFET substitute",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "8ed32dfb94b13155045926842ad25da10c08e8ba",
+  "type_label": "type:docs"
+}
