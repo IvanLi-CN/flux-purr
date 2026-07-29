@@ -1,0 +1,66 @@
+{
+  "sourceClass": "pps3a",
+  "measurement": "isolapurr_usb_c_telemetry",
+  "active": {
+    "points": [
+      {
+        "tempCentiC": 0,
+        "resistanceMilliohms": 2865
+      },
+      {
+        "tempCentiC": 2000,
+        "resistanceMilliohms": 2948
+      },
+      {
+        "tempCentiC": 14780,
+        "resistanceMilliohms": 5310
+      },
+      {
+        "tempCentiC": 18065,
+        "resistanceMilliohms": 5857
+      },
+      {
+        "tempCentiC": 21600,
+        "resistanceMilliohms": 6351
+      },
+      {
+        "tempCentiC": 23360,
+        "resistanceMilliohms": 6521
+      },
+      null,
+      null
+    ],
+    "rawObservations": {
+      "points": [
+        {
+          "rawRtdAdcMv": 1148,
+          "heaterVoltageMv": 13921,
+          "heaterCurrentMa": 2622,
+          "resistanceMilliohms": 5310
+        },
+        {
+          "rawRtdAdcMv": 1212,
+          "heaterVoltageMv": 15562,
+          "heaterCurrentMa": 2657,
+          "resistanceMilliohms": 5857
+        },
+        {
+          "rawRtdAdcMv": 1268,
+          "heaterVoltageMv": 17119,
+          "heaterCurrentMa": 2696,
+          "resistanceMilliohms": 6350
+        },
+        {
+          "rawRtdAdcMv": 1291,
+          "heaterVoltageMv": 17587,
+          "heaterCurrentMa": 2697,
+          "resistanceMilliohms": 6521
+        },
+        null,
+        null,
+        null,
+        null
+      ]
+    }
+  }
+}

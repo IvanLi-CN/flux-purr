@@ -2,6 +2,10 @@
 
 ## 状态
 
+> Current thermal-control contract: the `pps5a` thermal plant model defined below supersedes
+> the historical point-local `ThermalControlProfile` runtime. Historical profile payloads remain
+> decodable for record compatibility but are never selected as a heater-control fallback.
+
 - Status: 已完成
 - Created: 2026-04-21
 - Last: 2026-04-25
@@ -63,6 +67,29 @@
 
 ### MUST
 
+- Production heating MUST remain locked until a physically valid `pps5a` thermal plant model is
+  active. A protected model-calibration job MAY heat with the bounded bootstrap controller; no
+  ordinary runtime request may bypass this lock. `pps3a` / 65 W sources remain identifiable but
+  MUST return `thermal_model_missing_for_source_class` when heating is requested.
+- The sole production controller MUST implement the lumped thermal balance
+  `Ctheta*dT/dt = Ph - kc*(T-Ta) - kr*(Tk^4-TaK^4)` and a loss-feedforward predictive PI command
+  `sat(Ploss(T) + Kp*(e-tau_d*dT/dt) + Ki*integral(e))`. Saturation MUST use the temperature-aware
+  electrical power ceiling, and the integrator MUST use conditional anti-windup. The existing PPS
+  square-root voltage mapping, PWM power compensation, current reserve, source capability checks,
+  sensor faults, and absolute overtemperature protection remain mandatory actuator boundaries.
+- The plant controller's thermal target MUST equal the requested target temperature. It MUST NOT
+  apply target-specific temperature offsets or recover the historical point-local profile as a
+  hidden compensation path.
+- Model calibration MUST persist raw RTD ADC observations, ambient raw RTD ADC observations,
+  measured voltage/current/power, elapsed time, and delivered energy. Temperature-indexed heater
+  resistance and `kc/kr/Ctheta/tau_d` are derived projections. Changing RTD ADC calibration MUST
+  rebuild these projections without deleting or invalidating the raw observations; a projection
+  outside physical bounds locks heating while retaining the raw data.
+- A thermal-loss calibration transaction consists of exactly two complete steady-state anchors at
+  `80C` and `220C`, including gate-off idle power, hold power, and ramp energy. It is written
+  atomically as `candidate`. Only a successful nine-point `60/80/100/120/140/160/180/220/240C`
+  acceptance run may promote that same candidate atomically to `active`.
+
 - HIL host 的 warmup 满功率门禁以 `heaterOutputPercent=100%` 的逻辑命令为主，并要求软启动结束后 `heaterPhysicalOutputPercent >= 99%`。PPS 安全上限更新期间允许物理 PWM 在逻辑命令仍为满功率时短暂落在 `95%..99%`，但该瞬态连续时间不得超过 `2s`；低于 `95%`、持续超过 `2s` 或逻辑命令下降必须拒绝进入候选路径。这样既不把受安全限幅的短暂过渡误判为调优失败，也不掩盖真实的持续欠功率。
 
 - heater 控制周期固定为 `50ms (20Hz)` 的真实单调时间目标，不得用主循环迭代次数或固定累加值虚构 elapsed time。每个周期聚合 `64` 次 RTD ADC conversion，并保留分数毫伏均值，因此 RTD 转换总频率为至少 `1280Hz`；`GPIO47` 在 PPS 与 fixed-PD fallback 全路径统一由 MCPWM 外设输出 `100Hz` PWM。PPS 高于有效 floor 时由受温度/电流合同限制的可调 PD 请求承担粗粒度功率控制并保持 `100%` PWM；PPS 已到 floor 或 bounded down-ramp 尚未到达 floor 时，PWM 必须按请求功率与当前电压等效功率之比连续延伸到 `0%`。每次首次 arm、目标切换或 `Approach -> Warmup` 回退进入预热时，物理 PWM 必须执行 `1000ms` 线性软启动。首次进入 HOLD 后，PPS 必须锁定 Approach 建立的交接电压，由 PWM 对 PI 输出做快速响应；不得在 HOLD 内主动向下扫描 PPS。只有持续满 PWM、温度仍低于目标且升温率不足时，才允许以至少间隔 `2s`、单次最多 `500mV` 的步进上调 PPS。运行时 status 必须回显上一轮控制起点间隔 `heaterControlIntervalMs`、RTD 至功率写入完成的执行耗时 `heaterControlCycleMs`、滤波升温率 `heaterFilteredSlopeCPerS` 与 `heaterCoastActive`，供 HIL 判定实际节拍、coast 残余热及恢复供热时机。
@@ -72,7 +99,7 @@
 - per-target budget 必须是从 cooldown wait 开始、跨越 scout、每个 batch candidate 与 hold confirm 的单一单调 deadline；batch 内的 candidate 不得重置或穿透该 deadline。deadline 到期时，持有 lease 的 runner 必须先关 heater、释放 lease 并恢复 source，再以 `budget_exhausted` 收口该 target。
 - preliminary review 的 owner-facing 结果只允许 `passed` / `failed` 二元分类。每个 raw entry 与 `reportRuns` 主展示 entry 必须包含 `reviewOutcome` 与 `reviewPassed`；`candidateReady=true` 或 `candidateDisposition=acceptance_passed` 映射为 `passed`，其它情况映射为 `failed`。`candidate_ready`、`budget_exhausted_without_candidate`、`environment_blocked`、`not_executed_without_accepted_bounds` 等内部分类只能保留在 JSON 审计字段中，不得作为第三种结果状态，也不得显示在 summary card 主结论区域。
 - owner-facing 的 5A full-batch thermal tuning orchestration 必须走 repo-local `flux-purr thermal tune` Rust CLI；`flagship-tune` 只保留为兼容别名。历史 `scripts/thermal_tuning*` Python 入口已废弃并移出正式执行面；它们不得参与真实 HIL、正式调优、正式报告或验收证据生成。
-- 真实 5A flagship HIL 的预检与恢复合同必须固定。启动任一目标前，host 必须先完成 repo-local tuning/report/dynamic-gate 单元测试，使用 repo-local `flux-purr-devd` 绑定明确授权的单一串口，并确认 Flux Purr readback 与 source readback 同时满足 `selectedMode=100w`、`resolvedBank=pps5a`、`detectedSourceClass=pps5a`、`100W`、PD enabled、PPS enabled、`pd_pps_5a=true`、`pps3_limit_ma >= 5000` 与 `tps_mode=auto_follow`。若 source telemetry stale 超过 `2s`、低压卡死、明确的 `SensorShort / SensorOpen / AdcReadFailed`、runtime reset 或硬件无响应，只允许执行同一 source 的 USB-C 断电再上电恢复：`isolapurr power runtime output --enabled false`、确认 `runtime.output_enabled=false` 且 USB-C 已不再出力（`usb_c_actual.status != ok`，或 `usb_c_actual.current_ma=0` 且 `usb_c_actual.power_mw=0`）、等待 `2s`、`isolapurr power runtime output --enabled true`、确认 telemetry 恢复推进，并在重新开始前再次确认授权串口仍是原路径。`runtime.output_enabled` 是 IsolaPurr 运行时电源门控的事实源；`usb_c_power_enabled` 只表示 USB-C path 连接/能力状态，不得单独作为掉电成功判据。掉电期间若 macOS 枚举出其它 Espressif 串口，host 只能记录为证据，不得切换授权端口。温度或 raw ADC 的变化幅度、方向、斜率或连续趋势不得单独触发恢复，也不得单独终止 live stage；`currentTempC`、`heaterFilteredTempC`、固件提供的 `heaterControlTempC` 与 `rtdRawAdcMv` 必须保留在 raw samples 并进入正式热指标。只有固件报告的传感器硬故障、过温、runtime/device、source telemetry、持续采样率故障，或连续超过 `2s` 的固件 `heaterControlMeasurementGuarded=true` 才可将本轮判为环境失败；后者必须保留全部原始样本和 guard 证据，并以 `temperature_sample_glitch` 明确收口。该原因不得仅由 host 根据温度变化推断。该恢复耗时必须计入同一目标的 `20min` 预算。
+- 真实 5A flagship HIL 的预检与恢复合同必须固定。启动任一目标前，host 必须先完成 repo-local tuning/report/dynamic-gate 单元测试，使用 repo-local `flux-purr-devd` 绑定明确授权的单一串口，并确认 Flux Purr readback 与 source readback 同时满足 `selectedMode=100w`、`resolvedBank=pps5a`、`detectedSourceClass=pps5a`、`100W`、PD enabled、PPS enabled、`pd_pps_5a=true`、`pps3_limit_ma >= 5000` 与 `tps_mode=auto_follow`。若 source telemetry stale 超过 `2s`、低压卡死、明确的 `SensorShort / SensorOpen / AdcReadFailed`、runtime reset 或硬件无响应，只允许执行同一 source 的 USB-C 断电再上电恢复：`isolapurr power runtime output --enabled false`、确认 `runtime.output_enabled=false` 且 USB-C 已不再出力（`usb_c_actual.status != ok`，或 `usb_c_actual.current_ma=0` 且 `usb_c_actual.power_mw=0`）、等待 `2s`、`isolapurr power runtime output --enabled true`、确认 telemetry 恢复推进，并在重新开始前再次确认授权串口仍是原路径。`runtime.output_enabled` 是 IsolaPurr 运行时电源门控的事实源；`usb_c_power_enabled` 只表示 USB-C path 连接/能力状态，不得单独作为掉电成功判据。掉电期间若 macOS 枚举出其它 Espressif 串口，host 只能记录为证据，不得切换授权端口。温度或 raw ADC 的变化幅度、方向、斜率或连续趋势不得单独触发恢复，也不得单独终止 live stage；`currentTempC`、`heaterFilteredTempC`、固件提供的 `heaterControlTempC` 与 `rtdRawAdcMv` 必须保留在 raw samples。只有固件报告的传感器硬故障、过温、runtime/device、source telemetry、持续采样率故障，或连续超过 `2s` 的固件 `heaterControlMeasurementGuarded=true` 才可将本轮判为环境失败；后者必须保留全部原始样本和 guard 证据，并以 `temperature_sample_glitch` 明确收口。环境失败必须先停热并重新满足该目标的冷却阈值，然后从该目标的完整 stage 重新开始；作废尝试只能写入审计字段，绝不得进入 `applied`、热指标或九点验收。该恢复耗时必须计入同一目标的 `20min` 预算。
 - HIL / self-test 的 full-speed-to-stable 硬判定按目标温度动态选择门槛：`targetTempC <= 150°C` 时，从首次离开 `warmup` phase 到首次进入稳定窗口不得超过 `10_000ms`；`targetTempC > 150°C` 时不得超过 `5_000ms`。稳定窗口定义为：后续连续 `10s`、采样频率至少 `3Hz` 的样本中，`abs(currentTempC - targetTempC) <= 1.5°C`；控制器可以在该窗口内短暂使用 `approach` 补偿热损耗，phase 只作为诊断记录而不是物理稳定性的必要条件。超过对应门槛仍未存在已经开始的连续稳定窗口时，host 必须立即停热并以 `full_speed_to_stable_timeout` 结束 stage。脚本必须在每个 stage 的 `fullSpeedToStable.limitMs` 中写出实际使用的门槛，不得依赖人工观察。
 - self-test candidate 的在线识别不得在一次失败中同时搜索全部 profile 字段。脚本必须先按 full-speed-to-stable gate、是否进入 hold、overshoot、hold p2p、hold 高低侧误差、source telemetry 与同步样本归类故障，再生成候选。分类至少必须区分 `missed_lower_band_before_limit`、`missed_upper_band_before_limit`、`stable_window_broke_low`、`stable_window_broke_high` 与 `within_gate_low_margin`。`targetTempC <= 150°C` 的 full-speed-to-stable 门槛为 `10_000ms`，确认裕量为 `1_000ms`；`targetTempC > 150°C` 的门槛为 `5_000ms`，确认裕量为 `500ms`。裕量是短测候选排序与直接确认的优先信号，不是最终验收指标：短测已经满足动态 full-speed-to-stable 门槛、`maxOvershootC <= 3.0°C`、`holdPeakToPeakC <= 3.0°C`、stage `completed` 且存在 settle time 时，即使为 `within_gate_low_margin`，也只能进入一次完整 `60s` hold confirm；它绝不得直接成为最终候选或 `passed`。超过动态门槛、过冲超 `3.0°C`、hold p2p 超 `3.0°C`、stage 未 completed 或 settle time 缺失的短测不得进入 hold confirm 或最终候选。首次进入目标带后突破上界时必须增加刹车/lead 并降低低中温 Approach 能量；门槛时仍低于下界时只能渐进式减少刹车、提高 Approach 能量，不得把低中温刹车距离一步压到稳定带边界，也不得直接把 `approachPower / approachFloor` 拉到高功率上限。若已经存在有效 hold 样本且 hold p2p 超线，则不得让 full-speed failure 掩盖 hold ripple；低中温 hold confirm 的过冲或 p2p 失败必须 reseed 下一轮候选，方向为增加刹车/lead、降低 `approachPower / approachFloor`、降低过冲 cut-off 或 reheat 强度，而不是继续用同一短 scout 候选重试。`approachPower / approachFloor` 与 `holdPower / holdReheat` 是独立通道：尚无有效 hold 样本的 approach 失败不得抬高 hold 参数，`holdReheat` 不得被 `approachFloor` 强制抬高。采样、供电、通信或 runtime 故障不得修改 candidate。每次 candidate 更新后，所有运行时影响字段必须 materialize 到 profile 并通过 preview/save API 写入，禁止用替换固件的隐藏常量承载调参结果。
 - profile preview 必须只驻留 RAM。`runtime_config.thermalControlProfile.op=preview` 需要完整 profile，`op=clear_preview` 清除 preview；`op=save` 需要完整 profile 并写入 persistent active thermal profile，`op=clear_saved` 清除 persistent active profile；状态回显必须暴露 `thermalControlProfilePreview` 区分当前是否处于 RAM preview。
@@ -183,6 +210,7 @@ None
 - Given native/Web Serial status 被读取，When 固件发布当前温度，Then `boardTempCenti/currentTempC` 必须直接由内部浮点 RTD 测量值四舍五入到 `0.01°C`，不得从前面板 `0.1°C` 显示值反推；前面板显示精度不得限制控制环或遥测精度。When RTD 进入 fault，Then owner-facing 温度显示必须保留最近一次有效读数，而不是写成 `0°C`。
 - Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。
 - Given CH224Q power data 包含覆盖 `20V` 的 PPS APDO，When runtime 初始化 heater 后端，Then 选择 `pps-mos`；heater armed 且控制输出为 `0%` 时以单次最多 `500mV` 的步进回到有效工作下限并输出 `0%` PWM，heater disabled 时才恢复 idle `12V` 或更高 PPS minimum；`1..100%` 只在 `min(V_source_max, I_source_max * R_estimated(T))` 允许的范围内请求 PPS/AVS 电压，达到 floor 或处于 bounded down-ramp 时由 PWM 按等效功率连续降低。对于 `3.25A` source，`0C / 20C` 下的自动加热不得直接请求超出电流合同的电压；对于更低电流 source，fallback duty 必须继续被压到不高于该电流合同对应的等效占空比。PPS 高于 floor 时 GPIO47 为 `100%` PWM。
+- Given active thermal plant and a `20V / >=3A` PPS source, When runtime arms production heating, Then `pps3a` MUST use the same projected physical plant as `pps5a`; it may arm only when persisted raw heater observations yield at least two valid `R(T)` points. The thermal controller's saturation power MUST be `Pmax(T)=Vmax(T)^2/R(T)`, with `Vmax(T)=min(Vsource, Iavailable*R(T))` and the persisted board-current reserve removed from `Iavailable`. `Vmax` limits heater-terminal voltage; PPS requests MUST add only bounded, live-measured path-drop compensation and MUST remain no higher than `Vsource`. Changing RTD calibration may reproject these values but MUST NOT create, invalidate, or require a separate 3A heat-loss calibration.
 - Given WARMUP 正在通过同一个 PPS APDO 动态调整功率，When 新目标电压与当前请求不同，Then 单次请求最多变化 `500mV`、MOS 必须保持导通且相邻请求至少间隔 `500ms`，从而为 `300ms` RTD 稳定窗口保留明确余量；只有 APDO/AVS/固定 PDO/fallback 等离散路径发生变化时才允许关 MOS，并使用至少 `275ms` 的 transition window。任何新控制 tick 都不得覆盖尚未完成的 transition。
 - Given 控制器从 Approach 进入 HOLD，When PPS 已建立交接电压，Then 固件必须锁定该电压并只用 PWM 响应 PI 输出，不得主动向下扫描 PPS。When 物理 PWM 持续饱和、温度仍低于目标且升温率不足，Then 才允许至少间隔 `2s` 向上调整一次，每次最多 `500mV`。
 - Given heater 仍 armed、控制输出暂时降为 `0%` 且当前 phase 不是 HOLD，When PPS 请求需要回到工作下限，Then MOS 必须立即关闭，但 PPS 电压仍须以单次最多 `500mV` 的有界步进收敛，不得从当前高电压直接跳到工作下限。When 当前 phase 是 HOLD，Then MOS 必须立即关闭但 PPS 保持锁定电压。

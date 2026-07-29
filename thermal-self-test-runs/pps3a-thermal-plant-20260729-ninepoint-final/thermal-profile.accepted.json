@@ -1,0 +1,23 @@
+{
+  "kind": "thermal_plant_model_evidence",
+  "model": {
+    "activeTransactionId": 1431374617,
+    "candidateTransactionId": 1431374617,
+    "convectionMwPerC": 0.0,
+    "projectionValid": true,
+    "radiationMwPerK4": 1.4616974e-6,
+    "state": "active",
+    "thermalCapacityMjPerC": 42576.72,
+    "transportDelayMs": 10000
+  },
+  "profileCompatibility": "not_a_point_local_profile",
+  "role": "runtime_model_snapshot",
+  "runIds": [
+    "thermal-self-test-runs/pps3a-thermal-plant-20260729-ninepoint-final-raw/thermal-1785261843815-serial-303a-1001-a0-f2-62-f2-0d-6c",
+    "thermal-self-test-runs/pps3a-thermal-plant-20260729-140c-final2-raw/thermal-1785263371351-serial-303a-1001-a0-f2-62-f2-0d-6c",
+    "thermal-self-test-runs/pps3a-thermal-plant-20260729-160c-final-raw/thermal-1785263705121-serial-303a-1001-a0-f2-62-f2-0d-6c",
+    "thermal-self-test-runs/pps3a-thermal-plant-20260729-180c-final-raw/thermal-1785264098476-serial-303a-1001-a0-f2-62-f2-0d-6c",
+    "thermal-self-test-runs/pps3a-thermal-plant-20260729-220c-final-raw/thermal-1785264570623-serial-303a-1001-a0-f2-62-f2-0d-6c",
+    "thermal-self-test-runs/pps3a-thermal-plant-20260729-240c-curve-raw/thermal-1785261517668-serial-303a-1001-a0-f2-62-f2-0d-6c"
+  ]
+}

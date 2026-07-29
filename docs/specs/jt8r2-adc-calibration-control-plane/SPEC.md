@@ -52,6 +52,11 @@
 
 ### MUST
 
+- RTD calibration owns only the raw-ADC-to-temperature projection. Heater resistance and thermal
+  plant calibration MUST store their raw ADC observations independently. Activating another RTD
+  calibration slot MUST trigger projection rebuild and MUST NOT clear, rewrite, or mark those raw
+  observations stale.
+
 - 每个 channel 最多保存 `8` 个 user samples；样本结构必须保存 ADC 域点位 `{ observedMv, expectedMv }`，并在 RTD/VIN channel 上分别原样保存操作者输入的 `referenceTempC` / `referenceVinMv`。RTD 温度标定样本还必须保存 capture 当下的硬件目标 `targetAdcMv`。
 - Channel 名称固定为 `rtd_adc` 与 `vin_adc`。
 - 每个 ADC channel 必须持久化：

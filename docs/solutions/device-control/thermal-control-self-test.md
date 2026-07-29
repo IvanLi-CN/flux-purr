@@ -1,5 +1,5 @@
 ---
-title: Thermal control profile preview and self-test
+title: Thermal plant calibration and self-test
 module: device-control
 problem_type: thermal-hil
 component: firmware-cli-devd-isolapurr
@@ -14,38 +14,31 @@ related_specs:
   - docs/specs/m8r4q-real-control-plane-runtime/SPEC.md
 ---
 
-# Thermal control profile preview and self-test
+# Thermal plant calibration and self-test
 
 ## Context
 
-Thermal control tuning is a measured control workflow, not a fixed duty tweak.
+Thermal control validation is a measured control workflow, not a fixed duty tweak.
+
+The production `pps5a` path uses a calibration-independent thermal plant model. EEPROM retains raw RTD ADC, electrical, timing, and energy observations; RTD calibration only changes the projection from those observations, never the observations themselves. A complete `80C/220C` two-anchor transaction is written as `candidate` and becomes `active` only after the nine-point HIL gate passes.
+
+The production controller is:
+
+`Ctheta * dT/dt = Ph - kc * (T - Ta) - kr * (Tk^4 - TaK^4)`
+
+with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = Vmax(T)^2 / R(T)`, where `Vmax(T) = min(Vsource, Iavailable * R(T))` and `Iavailable` reserves board current. `Vmax` is a heater-terminal constraint: the PPS request adds bounded live `Vpps - Vheater` path-drop compensation, then clamps at `Vsource`, so wiring loss cannot silently strand source power. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
+
+Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm or tune the current 5A model.
 
 Flux Purr exposes:
 
-- a conservative firmware default controller
-- a RAM-only `thermalControlProfile.op=preview`
-- a persistent `save` / `clear_saved` path backed by EEPROM first and ESP flash fallback when EEPROM is unavailable
-- two persisted thermal banks: `pps3a` and `pps5a`
-- a user-facing profile mode: `auto | 65w | 100w`
+- `thermalPlantModel` state and candidate/active transaction identities in runtime status
+- protected `thermal_plant_auto` calibration at `80C` and `220C`
+- explicit `save_candidate`, `promote_candidate`, and `clear_candidate` control-plane operations
+- 5A heater-curve raw observations for reconstructing the resistance projection
+- canonical HTML HIL bundles generated through the Rust report renderer
 
-`auto` resolves the bank from the source capability class. Explicit `65w` and `100w` are forced selections and do not auto-fallback.
-
-The persisted profile is sparse by design:
-
-- preview may keep up to `10` RAM slots
-- persistent memory keeps at most `6` populated anchors per bank
-- EEPROM v2 uses fixed `1 KiB` slots
-- EEPROM read order is `1 KiB v2 -> 512 B legacy`; flash fallback uses the same record encoding and sequence selection
-- old single-profile records migrate into `pps3a` with mode `65w`
-
-The current 5A full-batch tuning and review convention is:
-
-- tuning anchors: `60 / 100 / 140 / 180 / 220°C`
-- validation targets: `80 / 120 / 160 / 240°C`
-- validation targets run after tuning with the final review candidate profile
-- a passing validation target records `validation_passed` and does not become a tuning anchor
-- supported explicit ladder: `60 / 80 / 100 / 120 / 140 / 160 / 180 / 200 / 220 / 240 / 250°C`
-- `300°C` remains outside first-version acceptance
+The current 5A acceptance ladder is `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`. Each point must complete a `60s` hold with `maxOvershootC <= 3.0C` and `holdPeakToPeakC <= 3.0C`; the dynamic full-speed-to-stable limit is `10s` through `150C` and `5s` above it.
 
 ## Artifact model
 
@@ -74,6 +67,8 @@ When the bundle is a review-only checkpoint rather than a committed accepted bas
 - top-level `bundleDisposition=preliminary_review`
 - top-level `acceptedProfileRole=review_candidate_snapshot`
 - `thermal-profile.accepted.json` means the current review candidate snapshot only; it is not a committed accepted baseline and it is not evidence that EEPROM has been saved
+
+This legacy renderer vocabulary is a report-format contract. For a thermal-plant run, the authoritative activation proof is the device status `thermalPlantModel.state=active`, matching candidate/active transaction IDs, and `projectionValid=true` after reboot.
 
 The owner-facing compliant preliminary review bundle is now regenerated through the Rust CLI:
 
