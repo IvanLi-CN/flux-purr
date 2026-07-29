@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "07974f0e9de60cea062cadfe89a0d1c82b8d31f9",
+  "pr_number": 55,
+  "pr_title": "fix(ci): preserve legacy release snapshot compatibility",
+  "product": {
+    "effective_version": "0.14.1",
+    "tag": "v0.14.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "4f485b86634da09fee5c6191aef1cd2a3f6ff738",
+  "type_label": "type:patch"
+}
