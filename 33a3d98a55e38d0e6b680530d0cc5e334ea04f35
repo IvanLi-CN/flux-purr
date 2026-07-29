@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "957caf8e6b72b36064dfca5bab7bcc60d5e91774",
+  "pr_number": 36,
+  "pr_title": "Add ADC calibration control plane",
+  "product": {
+    "effective_version": "0.8.0",
+    "tag": "v0.8.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "33a3d98a55e38d0e6b680530d0cc5e334ea04f35",
+  "type_label": "type:minor"
+}
