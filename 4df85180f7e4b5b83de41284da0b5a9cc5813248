@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "49474284d8e9e09af152c97244775c3ee28c1f6a",
+  "pr_number": 49,
+  "pr_title": "fix: submit compliant 5a preliminary report",
+  "product": {
+    "effective_version": "0.12.4",
+    "tag": "v0.12.4"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "4df85180f7e4b5b83de41284da0b5a9cc5813248",
+  "type_label": "type:patch"
+}
