@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "1ac29c20d642a826338029d066c96f3bcc587036",
+  "pr_number": 44,
+  "pr_title": "fix(web): polish calibration workbench",
+  "product": {
+    "effective_version": "0.11.1",
+    "tag": "v0.11.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "0d35362823dc2ac4fa12bb2f965b3d7ca7aa797b",
+  "type_label": "type:patch"
+}
