@@ -2075,6 +2075,9 @@ mod tests {
         assert_eq!(model["profileCompatibility"], "not_a_point_local_profile");
         assert_eq!(model["model"]["state"], "active");
         assert!(output_dir.join("index.html").is_file());
+        let html = fs::read_to_string(output_dir.join("index.html")).expect("report html");
+        assert!(html.contains("full-speed 实测"));
+        assert!(!html.contains("逼近阶段"));
         assert_eq!(
             fs::read_to_string(output_dir.join("samples.ndjson"))
                 .expect("report samples")
