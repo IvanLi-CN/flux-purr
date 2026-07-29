@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "dbe5a3d03a0c6027a7270943e5b8fdb3063b41e8",
+  "pr_number": 46,
+  "pr_title": "Stabilize flagship thermal tuning workflow and add PD100W PPS5A baseline bundle",
+  "product": {
+    "effective_version": "0.12.1",
+    "tag": "v0.12.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "1982837c1fed3ace4a5f79387471b8187717679e",
+  "type_label": "type:patch"
+}
