@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "ec9b3dc9ca9e03036ce63aebd4151e05ed0767bc",
+  "pr_number": 54,
+  "pr_title": "feat(thermal): validate calibrated 3A plant range",
+  "product": {
+    "effective_version": "0.14.0",
+    "tag": "v0.14.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "bf6b88fb0fe7c02ec51cf593908bdc753f290bca",
+  "type_label": "type:minor"
+}
