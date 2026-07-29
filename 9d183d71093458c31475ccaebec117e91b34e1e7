@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "50ad558b67cd3f4a2fe2102a23fc4041d64d8319",
+  "pr_number": 43,
+  "pr_title": "feat: add worktree bootstrap contract",
+  "product": {
+    "effective_version": "0.11.0",
+    "tag": "v0.11.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "9d183d71093458c31475ccaebec117e91b34e1e7",
+  "type_label": "type:minor"
+}
