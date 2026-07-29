@@ -305,6 +305,19 @@ pub(super) fn render_self_test_evidence_bundle(
                 )
                 .into());
             }
+            let replay_samples = super::thermal_replay_stage_samples(raw_samples, *target_temp_c)?;
+            let replay_analysis =
+                super::thermal_replay_full_speed_to_stable(&replay_samples, *target_temp_c);
+            let full_speed_to_stable = json!({
+                "limitMs": if *target_temp_c > 150 { 5_000 } else { 10_000 },
+                "stableBandC": 1.5,
+                "stableWindowMs": 10_000,
+                "warmupExitedAtMs": replay_analysis.warmup_exited_at_ms,
+                "stableWindowStartedAtMs": replay_analysis.stable_window_started_at_ms,
+                "stableWindowVerifiedAtMs": replay_analysis.stable_window_verified_at_ms,
+                "settleTimeMs": replay_analysis.settle_time_ms,
+                "failureReason": replay_analysis.failure_reason,
+            });
             Ok(self_test_report_entry(
                 stage_summary,
                 run_id,
@@ -312,6 +325,7 @@ pub(super) fn render_self_test_evidence_bundle(
                 stage,
                 samples,
                 hold_seconds,
+                full_speed_to_stable,
             ))
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?;
@@ -439,9 +453,45 @@ fn self_test_report_entry(
     stage: &Value,
     samples: Vec<Value>,
     hold_seconds: u64,
+    full_speed_to_stable: Value,
 ) -> Value {
-    let failures = validation_failures_for_target(summary, target_temp_c);
+    let mut failures = validation_failures_for_target(summary, target_temp_c);
     let stage_completed = stage.get("stopReason").and_then(Value::as_str) == Some("completed");
+    let full_speed_limit_ms = if target_temp_c > 150 { 5_000 } else { 10_000 };
+    let replay_gate_failure_reason = full_speed_to_stable
+        .get("failureReason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty())
+        .map(|_| "full_speed_to_stable")
+        .or_else(|| {
+            match full_speed_to_stable
+                .get("settleTimeMs")
+                .and_then(Value::as_u64)
+            {
+                Some(settle_time_ms) if settle_time_ms <= full_speed_limit_ms => None,
+                Some(_) => Some("full_speed_to_stable"),
+                None => Some("full_speed_to_stable_missing"),
+            }
+        });
+    if stage_completed
+        && !failures.iter().any(|failure| {
+            matches!(
+                failure.get("reason").and_then(Value::as_str),
+                Some("full_speed_to_stable" | "full_speed_to_stable_missing")
+            )
+        })
+        && let Some(reason) = replay_gate_failure_reason
+    {
+        failures.push(json!({
+            "targetTempC": target_temp_c,
+            "reason": reason,
+            "limit": full_speed_limit_ms,
+            "settleTimeMs": full_speed_to_stable.get("settleTimeMs").cloned().unwrap_or(Value::Null),
+            "warmupExitedAtMs": full_speed_to_stable.get("warmupExitedAtMs").cloned().unwrap_or(Value::Null),
+            "stableWindowStartedAtMs": full_speed_to_stable.get("stableWindowStartedAtMs").cloned().unwrap_or(Value::Null),
+            "failureReason": full_speed_to_stable.get("failureReason").cloned().unwrap_or(Value::Null),
+        }));
+    }
     let passed = stage_completed && failures.is_empty();
     let failure_reason = failures
         .first()
@@ -449,7 +499,6 @@ fn self_test_report_entry(
         .cloned()
         .or_else(|| stage.get("terminalRuntimeDropReason").cloned())
         .unwrap_or(Value::Null);
-    let full_speed_limit_ms = if target_temp_c > 150 { 5_000 } else { 10_000 };
     let time_spent_seconds = int_round_json(
         samples
             .last()
@@ -469,6 +518,8 @@ fn self_test_report_entry(
         "holdSource": stage.pointer("/analysis/holdSource").cloned().unwrap_or(Value::Null),
         "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
     });
+    let mut result = stage.clone();
+    result["fullSpeedToStable"] = full_speed_to_stable;
     let round = json!({
         "round": 1,
         "label": "runtime validation",
@@ -480,7 +531,7 @@ fn self_test_report_entry(
         "point": Value::Null,
         "samples": samples.clone(),
         "failures": failures.clone(),
-        "result": stage,
+        "result": result.clone(),
     });
     json!({
         "runId": run_id,
@@ -508,7 +559,7 @@ fn self_test_report_entry(
         "truthPoint": Value::Null,
         "pointSource": "thermal_plant_runtime",
         "rounds": [round],
-        "result": stage,
+        "result": result,
         "failures": failures,
         "samples": samples,
         "holdCheck": hold_check,
@@ -1716,7 +1767,8 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
     let metric_gate = candidate_metric_gate(&entry);
     let candidate_ready =
         target_role != "validation" && base_candidate_ready && metric_gate == Some(true);
-    if base_candidate_ready && metric_gate != Some(true) {
+    let metric_gate_failed = metric_gate != Some(true);
+    if (target_role == "validation" || base_candidate_ready) && metric_gate_failed {
         entry["ok"] = json!(false);
     }
     entry["candidateReady"] = json!(candidate_ready);
@@ -1729,25 +1781,30 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("");
     let ok = entry.get("ok").and_then(Value::as_bool).unwrap_or(false);
-    let disposition =
-        if target_role == "validation" && (ok || budget_outcome == "validation_passed") {
-            "validation_passed"
-        } else if target_role == "validation" && budget_outcome == "validation_failed" {
-            "validation_failed"
-        } else if target_role == "validation" && budget_outcome == "budget_exhausted" {
-            "validation_budget_exhausted"
-        } else if (ok || budget_outcome == "completed") && candidate_ready {
-            "acceptance_passed"
-        } else if candidate_ready {
-            "candidate_ready"
-        } else if budget_outcome == "environment_blocked" {
-            "environment_blocked"
-        } else if budget_outcome == "budget_exhausted" {
-            "budget_exhausted_without_candidate"
-        } else {
-            "not_available"
-        };
+    let disposition = if target_role == "validation"
+        && metric_gate == Some(true)
+        && (ok || budget_outcome == "validation_passed")
+    {
+        "validation_passed"
+    } else if target_role == "validation"
+        && (metric_gate_failed || budget_outcome == "validation_failed")
+    {
+        "validation_failed"
+    } else if target_role == "validation" && budget_outcome == "budget_exhausted" {
+        "validation_budget_exhausted"
+    } else if (ok || budget_outcome == "completed") && candidate_ready {
+        "acceptance_passed"
+    } else if candidate_ready {
+        "candidate_ready"
+    } else if budget_outcome == "environment_blocked" {
+        "environment_blocked"
+    } else if budget_outcome == "budget_exhausted" {
+        "budget_exhausted_without_candidate"
+    } else {
+        "not_available"
+    };
     if existing_disposition.as_deref().is_none()
+        || (target_role == "validation" && metric_gate_failed)
         || metric_gate == Some(false)
         || existing_disposition.as_deref() == Some("candidate_ready") && !candidate_ready
         || existing_disposition.as_deref() == Some("acceptance_passed") && !candidate_ready
@@ -1938,15 +1995,37 @@ mod tests {
         let samples = [
             json!({
                 "targetTempC": 240,
+                "testPhase": "applied",
                 "elapsedMs": 0,
                 "phase": "warmup",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
                 "status": {"currentTempC": 28.7, "heaterControlTempC": 28.7, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 100, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
                 "sourceTelemetry": {"voltageMv": 20000, "currentMa": 2700, "powerMw": 54000}
             }),
             json!({
                 "targetTempC": 240,
-                "elapsedMs": 60000,
+                "testPhase": "applied",
+                "elapsedMs": 1000,
+                "phase": "approach",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
+                "status": {"currentTempC": 230.0, "heaterControlTempC": 230.0, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 100, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
+                "sourceTelemetry": {"voltageMv": 20000, "currentMa": 2700, "powerMw": 54000}
+            }),
+            json!({
+                "targetTempC": 240,
+                "testPhase": "applied",
+                "elapsedMs": 2000,
                 "phase": "hold",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
+                "status": {"currentTempC": 239.0, "heaterControlTempC": 239.0, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 93, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
+                "sourceTelemetry": {"voltageMv": 20008, "currentMa": 2859, "powerMw": 57199}
+            }),
+            json!({
+                "targetTempC": 240,
+                "testPhase": "applied",
+                "elapsedMs": 12000,
+                "phase": "hold",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
                 "status": {"currentTempC": 240.2, "heaterControlTempC": 240.2, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 93, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
                 "sourceTelemetry": {"voltageMv": 20008, "currentMa": 2859, "powerMw": 57199}
             }),
@@ -1984,6 +2063,14 @@ mod tests {
         assert_eq!(bundle["reportRuns"][0]["target"], 240);
         assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
         assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
+        assert_eq!(
+            bundle["reportRuns"][0]["result"]["fullSpeedToStable"]["warmupExitedAtMs"],
+            1_000
+        );
+        assert_eq!(
+            bundle["reportRuns"][0]["result"]["fullSpeedToStable"]["settleTimeMs"],
+            1_000
+        );
         assert_eq!(bundle["reportRuns"][0]["holdCheck"]["holdSeconds"], 60);
         assert_eq!(model["profileCompatibility"], "not_a_point_local_profile");
         assert_eq!(model["model"]["state"], "active");
@@ -1993,7 +2080,7 @@ mod tests {
                 .expect("report samples")
                 .lines()
                 .count(),
-            2
+            4
         );
     }
 
@@ -2045,6 +2132,32 @@ mod tests {
     }
 
     #[test]
+    fn validation_review_cannot_pass_when_full_speed_gate_fails() {
+        let entry = super::ensure_candidate_receipt_fields(json!({
+            "target": 220,
+            "targetRole": "validation",
+            "ok": true,
+            "candidateReady": false,
+            "candidateDisposition": "validation_passed",
+            "budgetOutcome": "validation_passed",
+            "result": {
+                "stopReason": "completed",
+                "maxOvershootC": 1.0,
+                "holdPeakToPeakC": 1.0,
+                "fullSpeedToStable": {
+                    "settleTimeMs": 6_000,
+                    "limitMs": 5_000
+                }
+            }
+        }));
+
+        assert_eq!(entry["ok"], json!(false));
+        assert_eq!(entry["candidateDisposition"], json!("validation_failed"));
+        assert_eq!(entry["reviewPassed"], json!(false));
+        assert_eq!(entry["reviewOutcome"], json!("failed"));
+    }
+
+    #[test]
     fn preliminary_review_bundle_keeps_single_target_when_raw_entry_uses_legacy_validation_role() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2069,6 +2182,15 @@ mod tests {
                 "candidateDisposition": "validation_passed",
                 "budgetOutcome": "validation_passed",
                 "validTestCount": 1,
+                "result": {
+                    "stopReason": "completed",
+                    "maxOvershootC": 1.0,
+                    "holdPeakToPeakC": 1.0,
+                    "fullSpeedToStable": {
+                        "settleTimeMs": 2_000,
+                        "limitMs": 10_000
+                    }
+                },
                 "samples": [{
                     "t": 0.0,
                     "temp": 78.0,

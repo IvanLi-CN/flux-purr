@@ -2863,18 +2863,16 @@ impl ThermalFullSpeedStableTracker {
         &mut self,
         current_temp_c: f64,
         elapsed_ms: u64,
-        _control_phase: Option<&str>,
+        control_phase: Option<&str>,
     ) -> ThermalFullSpeedStableObservation {
         if self.warmup_exited_at_ms.is_none() {
-            // The control phase begins braking before the plate reaches hold.
-            // Start the high-power settle budget only at the physical hold
-            // threshold so constrained high-temperature paths are measured
-            // from the point where stability can actually be established.
-            if current_temp_c >= self.target_temp_c - 1.2 {
-                self.warmup_exited_at_ms = Some(elapsed_ms);
-            } else {
+            // The specification starts this budget at the first sample that
+            // leaves the firmware's full-power warmup phase. Temperature
+            // proximity is a result metric, not a valid timer origin.
+            if !matches!(control_phase, Some("approach" | "hold")) {
                 return ThermalFullSpeedStableObservation::Pending;
             }
+            self.warmup_exited_at_ms = Some(elapsed_ms);
         }
 
         let warmup_exited_at_ms = self.warmup_exited_at_ms.unwrap_or(elapsed_ms);
@@ -13064,13 +13062,36 @@ mod tests {
             tracker.observe(139.0, 12_250, Some("approach")),
             ThermalFullSpeedStableObservation::Verified
         );
-        assert_eq!(tracker.finalize().settle_time_ms, Some(0));
+        assert_eq!(tracker.finalize().settle_time_ms, Some(1_750));
 
         let analysis = tracker.finalize();
-        assert_eq!(analysis.warmup_exited_at_ms, Some(2_000));
+        assert_eq!(analysis.warmup_exited_at_ms, Some(250));
         assert_eq!(analysis.stable_window_started_at_ms, Some(2_000));
         assert_eq!(analysis.stable_window_verified_at_ms, Some(12_000));
-        assert_eq!(analysis.settle_time_ms, Some(0));
+        assert_eq!(analysis.settle_time_ms, Some(1_750));
+    }
+
+    #[test]
+    fn thermal_full_speed_tracker_starts_budget_when_warmup_phase_exits() {
+        let mut tracker = ThermalFullSpeedStableTracker::new(140);
+
+        assert_eq!(
+            tracker.observe(100.0, 0, Some("warmup")),
+            ThermalFullSpeedStableObservation::Pending
+        );
+        assert_eq!(
+            tracker.observe(132.0, 250, Some("approach")),
+            ThermalFullSpeedStableObservation::Pending
+        );
+        assert_eq!(
+            tracker.observe(139.2, 2_000, Some("hold")),
+            ThermalFullSpeedStableObservation::Pending
+        );
+
+        let analysis = tracker.finalize();
+        assert_eq!(analysis.warmup_exited_at_ms, Some(250));
+        assert_eq!(analysis.stable_window_started_at_ms, Some(2_000));
+        assert_eq!(analysis.settle_time_ms, Some(1_750));
     }
 
     #[test]
