@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "110f47787e28cf0f5e0bed8390f08eba5afaf4f3",
+  "pr_number": 57,
+  "pr_title": "fix(thermal): clarify approach and stability timing",
+  "product": {
+    "effective_version": "0.14.3",
+    "tag": "v0.14.3"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "5b8a418c93009c88237f78925a00125d68f9f7be",
+  "type_label": "type:patch"
+}
