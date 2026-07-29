@@ -9,6 +9,7 @@
 - `Release Product` 从 release snapshot 导出发布意图，并创建单一 product tag。
 - Release snapshot validation keeps historical schema-v1 component snapshots readable for version-baseline reconciliation while requiring newly generated snapshots to carry the single product record.
 - The workspace `Cargo.lock` is tracked so all host-tool release matrix builds can honor `cargo ... --locked`.
+- The Ubuntu host-tool release matrix job installs `pkg-config` and `libudev-dev` before the locked build so `libudev-sys` has its declared system dependency in the clean runner.
 - `.github/quality-gates.json` 声明主分支保护、签名提交、required checks，以及 owner PR 不强制 approval 的 review policy。
 
 ## Validation
