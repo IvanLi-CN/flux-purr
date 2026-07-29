@@ -13,7 +13,6 @@ web/test-results/
 # Rust
 /target/
 firmware/target/
-Cargo.lock
 
 # IDE / tools
 .vscode/
