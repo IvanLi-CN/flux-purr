@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "6769547fdc0aee6e53122ce47875cd52d1b4c234",
+  "pr_number": 38,
+  "pr_title": "docs: archive 7cm heater stack support boards",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "d47c707162bbb947793bf6deaa20849eba741e3f",
+  "type_label": "type:docs"
+}
