@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "897abea409466fa9a7ae93f4cc1c20c1c5f0a0e4",
+  "pr_number": 53,
+  "pr_title": "fix(firmware): prefer 5A PPS contracts",
+  "product": {
+    "effective_version": "0.13.2",
+    "tag": "v0.13.2"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "6f2d8872e63090c7d692fb0e1e23cd9e82f8d7ab",
+  "type_label": "type:patch"
+}
