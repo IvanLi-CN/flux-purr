@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "be38f944daa45baf5f0ef8d0ea798017e836052e",
+  "pr_number": 48,
+  "pr_title": "fix: remove unrelated thermal report bundle",
+  "product": {
+    "effective_version": "0.12.3",
+    "tag": "v0.12.3"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "68d6d36201ac43b300c9c14715f4fd7fe05ef8f6",
+  "type_label": "type:patch"
+}
