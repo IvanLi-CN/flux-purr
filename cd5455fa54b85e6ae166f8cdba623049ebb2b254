@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "9e1ddae8f199a0d857da4766b8b59140e667d972",
+  "pr_number": 34,
+  "pr_title": "docs: add 5.6cm enclosure model assets",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "cd5455fa54b85e6ae166f8cdba623049ebb2b254",
+  "type_label": "type:docs"
+}
