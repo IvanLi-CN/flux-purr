@@ -277,6 +277,11 @@ None
 
 ## Visual Evidence
 
+- 3A 九点 thermal-plant 合规摘要：9 个目标均为 `passed`，摘要卡直接显示 `full-speed 实测`、动态门槛、过冲与 hold 峰峰值；报告源为 `pps3a` / `f293cc9c139e`。
+
+PR: none
+![3A nine-point thermal report](./assets/pps3a-ninepoint-report.png)
+
 - Dashboard fan `OFF`：
 
 ![Dashboard fan off](./assets/dashboard-fan-off.png)

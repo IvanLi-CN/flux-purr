@@ -52,6 +52,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - `type:patch|minor|major` 必须驱动单一 product release 发布。
 - 发布 workflow 必须只在 `CI Main` 成功后或显式手动 backfill 时读取 release snapshot。
 - Product host-tools release builds MUST use the workspace's version-controlled `Cargo.lock` with `--locked`.
+- Ubuntu host-tools release jobs MUST install the system packages required by the locked workspace build, including `pkg-config` and `libudev-dev`, before running the release build.
 - 主分支 required checks 必须至少包含 `Validate PR labels`、`Firmware checks`、`Web checks`。
 
 ### SHOULD

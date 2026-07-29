@@ -183,6 +183,10 @@ jobs:
         with:
           toolchain: 1.91.0
 
+      - name: Install Linux host dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install --yes pkg-config libudev-dev
+
       - name: Build host tools
         run: cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bins
 
