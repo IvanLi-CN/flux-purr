@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "978a64f05018f0ca8642d6a4dc96ce270c9dde60",
+  "pr_number": 51,
+  "pr_title": "feat(thermal): migrate 5A tuning workflow to Rust",
+  "product": {
+    "effective_version": "0.13.0",
+    "tag": "v0.13.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "8f0287b3e4d331d0e9faeba0cfa85cd18de494a8",
+  "type_label": "type:minor"
+}
