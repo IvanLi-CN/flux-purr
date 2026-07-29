@@ -110,16 +110,35 @@ def validate_snapshot(payload: Any, target_sha: str) -> dict[str, Any]:
         raise SnapshotError("Release snapshot must include patch/minor/major release_level")
     if payload["release_enabled"]:
         product = payload.get("product")
-        if not isinstance(product, dict):
-            raise SnapshotError("Release snapshot must include product when release_enabled=true")
-        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(product.get("effective_version", ""))):
-            raise SnapshotError("Release snapshot product has invalid effective_version")
-        tag = str(product.get("tag", ""))
-        if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9a-f]{7})?", tag):
-            raise SnapshotError("Release snapshot product has invalid tag")
+        if product is not None:
+            if not isinstance(product, dict):
+                raise SnapshotError("Release snapshot product must be an object")
+            if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(product.get("effective_version", ""))):
+                raise SnapshotError("Release snapshot product has invalid effective_version")
+            tag = str(product.get("tag", ""))
+            if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9a-f]{7})?", tag):
+                raise SnapshotError("Release snapshot product has invalid tag")
+        else:
+            validate_legacy_components(payload.get("components"))
     if not payload["release_enabled"] and payload.get("release_level") not in {"", None}:
         raise SnapshotError("Non-release snapshot must not include release_level")
     return payload
+
+
+def validate_legacy_components(components: Any) -> None:
+    """Accept schema-v1 snapshots written before the single-product format."""
+    if not isinstance(components, dict):
+        raise SnapshotError("Release snapshot must include product or legacy components when release_enabled=true")
+    for component in ("web", "firmware"):
+        detail = components.get(component)
+        if not isinstance(detail, dict):
+            raise SnapshotError(f"Release snapshot missing legacy component {component}")
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(detail.get("effective_version", ""))):
+            raise SnapshotError(f"Release snapshot legacy component {component} has invalid effective_version")
+        expected_prefix = "web" if component == "web" else "fw"
+        tag = str(detail.get("tag", ""))
+        if not tag.startswith(f"{expected_prefix}/v"):
+            raise SnapshotError(f"Release snapshot legacy component {component} has invalid tag")
 
 
 def labels_with_prefix(labels: list[dict[str, Any]], prefix: str) -> list[str]:
@@ -191,10 +210,15 @@ def pending_stable_versions(notes_ref: str, target_sha: str) -> list[tuple[int, 
         payload = read_snapshot(notes_ref, sha)
         if not payload or not payload["release_enabled"] or payload["release_channel"] != "stable":
             continue
-        product = payload.get("product", {})
-        effective = product.get("effective_version") if isinstance(product, dict) else None
-        if isinstance(effective, str):
-            versions.append(parse_version(effective))
+        product = payload.get("product")
+        if isinstance(product, dict):
+            versions.append(parse_version(str(product["effective_version"])))
+            continue
+        components = payload["components"]
+        versions.extend(
+            parse_version(str(components[component]["effective_version"]))
+            for component in ("web", "firmware")
+        )
     return versions
 
 
