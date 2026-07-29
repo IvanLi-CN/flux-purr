@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "64d9c853ccdb4767b95e8ed37119091820e31ce7",
+  "pr_number": 32,
+  "pr_title": "feat: add Flux Purr CLI and product release flow",
+  "product": {
+    "effective_version": "0.6.0",
+    "tag": "v0.6.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "e12b05d0067fe6b9a14329a8a7261fc92382cab0",
+  "type_label": "type:minor"
+}
