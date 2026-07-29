@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "76481a9548eb0acad3c0eb07bcfa2560383c7668",
+  "pr_number": 42,
+  "pr_title": "feat(control-plane): add calibration mode workbench",
+  "product": {
+    "effective_version": "0.10.0",
+    "tag": "v0.10.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "f298d2490ad5ff6dc8147a31a246e5dd8e88f888",
+  "type_label": "type:minor"
+}
