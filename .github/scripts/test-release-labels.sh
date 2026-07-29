@@ -69,6 +69,47 @@ assert module.release_fields("type:minor", "channel:rc") == (True, "minor", "pr_
 assert module.release_fields("type:docs", "channel:stable") == (False, "", "skip_type_label")
 assert module.release_fields("type:skip", "channel:rc") == (False, "", "skip_type_label")
 
+legacy_target = "b" * 40
+legacy_snapshot = {
+    "schema_version": 1,
+    "target_sha": legacy_target,
+    "type_label": "type:minor",
+    "channel_label": "channel:stable",
+    "release_enabled": True,
+    "release_level": "minor",
+    "release_channel": "stable",
+    "release_reason": "frozen_pr_labels",
+    "components": {
+        "web": {"effective_version": "0.2.8", "tag": "web/v0.2.8"},
+        "firmware": {"effective_version": "0.2.5", "tag": "fw/v0.2.5"},
+    },
+}
+assert module.validate_snapshot(legacy_snapshot, legacy_target) == legacy_snapshot
+try:
+    module.validate_snapshot(
+        {key: value for key, value in legacy_snapshot.items() if key != "components"},
+        legacy_target,
+    )
+except module.SnapshotError:
+    pass
+else:
+    raise AssertionError("release snapshot without product or legacy components must fail")
+
+original_run_git = module.run_git
+original_read_snapshot = module.read_snapshot
+try:
+    def fake_pending_run_git(*args, check=True, **kwargs):
+        if args == ("rev-list", "--first-parent", "--reverse", legacy_target):
+            return SimpleNamespace(stdout="old\n" + legacy_target + "\n")
+        raise AssertionError(args)
+
+    module.run_git = fake_pending_run_git
+    module.read_snapshot = lambda notes_ref, sha: legacy_snapshot if sha == "old" else None
+    assert module.pending_stable_versions("refs/notes/test", legacy_target) == [(0, 2, 8), (0, 2, 5)]
+finally:
+    module.run_git = original_run_git
+    module.read_snapshot = original_read_snapshot
+
 original_git_output = module.git_output
 original_run_git = module.run_git
 try:

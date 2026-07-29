@@ -7,6 +7,7 @@
 - `Label Gate` 需要 `pull-requests: write` 权限，确保 `pull_request_target` 运行能创建冻结 marker comment。
 - `CI Main` 负责 `main` 上的非抢占式验证和 release snapshot 写入。
 - `Release Product` 从 release snapshot 导出发布意图，并创建单一 product tag。
+- Release snapshot validation keeps historical schema-v1 component snapshots readable for version-baseline reconciliation while requiring newly generated snapshots to carry the single product record.
 - `.github/quality-gates.json` 声明主分支保护、签名提交、required checks，以及 owner PR 不强制 approval 的 review policy。
 
 ## Validation

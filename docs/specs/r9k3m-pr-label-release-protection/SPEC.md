@@ -79,6 +79,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - 找不到与 PR head SHA 匹配的冻结 release intent marker 时，snapshot 生成失败。
 - 首次合入本机制时，若目标 commit 的父提交尚不具备冻结 marker gate，允许一次性从 PR 当前标签生成 rollout snapshot；后续 commit 必须存在冻结 marker。
 - Snapshot 缺失时，release workflow 失败而不是重新读取 PR 标签。
+- 历史 schema-v1 release snapshot 若使用旧 `components` 格式，必须保持可读并参与版本基线计算；新生成的 snapshot 必须使用单一 `product` 格式。
 - `type:docs` 或 `type:skip` 的 snapshot 导出 `release_enabled=false`。
 - 已存在 release tag 时，发布 workflow 跳过 tag 创建但继续保持 rerun 幂等。
 - 连续合入多个 stable release PR 时，后续 snapshot 必须把已冻结但尚未发布的前序 stable snapshot 纳入版本基线。
