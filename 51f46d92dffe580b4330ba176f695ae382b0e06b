@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "80abd78028c348a6c16a172bfdb2e9cbc30b5790",
+  "pr_number": 58,
+  "pr_title": "fix(thermal): remove approach duration from report",
+  "product": {
+    "effective_version": "0.14.4",
+    "tag": "v0.14.4"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "51f46d92dffe580b4330ba176f695ae382b0e06b",
+  "type_label": "type:patch"
+}
