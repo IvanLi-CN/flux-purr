@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "34a8ef97d8301e30ccdb4427fdc61bb504fab1d0",
+  "pr_number": 56,
+  "pr_title": "fix(release): track cargo lockfile",
+  "product": {
+    "effective_version": "0.14.2",
+    "tag": "v0.14.2"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "672eb481b03cea256fbb02406c1e1d88b5d42083",
+  "type_label": "type:patch"
+}
