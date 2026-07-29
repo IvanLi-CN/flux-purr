@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "16eedf956665ddd7bd12374237b51836d4cd26f6",
+  "pr_number": 35,
+  "pr_title": "feat: add manual PPS current control",
+  "product": {
+    "effective_version": "0.7.0",
+    "tag": "v0.7.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "0fe28ee9d42584474b7744ced8476e8f8c85ae92",
+  "type_label": "type:minor"
+}
