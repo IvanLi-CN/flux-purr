@@ -1679,7 +1679,7 @@ pub(super) fn write_preliminary_review_bundle(
     let html_data = json!({
         "generatedAt": bundle.get("generatedAt").cloned().unwrap_or(Value::Null),
         "title": format!("Flux Purr {report_identity} {target_label} preliminary review"),
-        "subtitle": format!("展示本次 {report_identity} full-batch 调优目标：{target_label}。full-speed-to-stable 按目标温度使用动态门槛：≤150°C 为 10s，>150°C 为 5s；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
+        "subtitle": format!("展示本次 {report_identity} full-batch 调优目标：{target_label}。主卡显示逼近用时与稳定用时，稳定窗口门槛作为判定依据；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "selectedMode": bundle.get("selectedMode").cloned().unwrap_or(Value::Null),
@@ -2076,7 +2076,9 @@ mod tests {
         assert_eq!(model["model"]["state"], "active");
         assert!(output_dir.join("index.html").is_file());
         let html = fs::read_to_string(output_dir.join("index.html")).expect("report html");
-        assert!(html.contains("full-speed 实测"));
+        assert!(html.contains("逼近用时"));
+        assert!(html.contains("稳定用时"));
+        assert!(!html.contains("full-speed 实测"));
         assert!(!html.contains("逼近阶段"));
         assert_eq!(
             fs::read_to_string(output_dir.join("samples.ndjson"))
