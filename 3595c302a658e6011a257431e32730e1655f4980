@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "b400d01f0bb26cca3ce9ba4c64b2a77f098e774e",
+  "pr_number": 52,
+  "pr_title": "fix(firmware): enlarge executor task arena",
+  "product": {
+    "effective_version": "0.13.1",
+    "tag": "v0.13.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "3595c302a658e6011a257431e32730e1655f4980",
+  "type_label": "type:patch"
+}
