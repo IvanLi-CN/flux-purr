@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "229d8cd571acb232aa0b917b9d7d2776f5394a1e",
+  "pr_number": 37,
+  "pr_title": "fix(firmware): clamp heater PPS voltage by temperature",
+  "product": {
+    "effective_version": "0.8.1",
+    "tag": "v0.8.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "e153257501173d78c2bd8af3c1997518c80726fb",
+  "type_label": "type:patch"
+}
