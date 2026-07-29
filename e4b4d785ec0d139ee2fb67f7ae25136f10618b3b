@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "07ea680049cfce2a0b8f0a2d5c4cb23446d3ef49",
+  "pr_number": 40,
+  "pr_title": "docs: split developer policy from operations skills",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "e4b4d785ec0d139ee2fb67f7ae25136f10618b3b",
+  "type_label": "type:docs"
+}
