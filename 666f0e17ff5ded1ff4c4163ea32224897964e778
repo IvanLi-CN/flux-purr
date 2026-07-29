@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "c1cbce9709e0b8b96274fa2c7fb9fa0f7b9515f1",
+  "pr_number": 33,
+  "pr_title": "docs: add 7cm heater plate variant",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "666f0e17ff5ded1ff4c4163ea32224897964e778",
+  "type_label": "type:docs"
+}
