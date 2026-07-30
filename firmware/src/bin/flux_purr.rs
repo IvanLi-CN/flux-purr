@@ -2,7 +2,12 @@
 #![cfg_attr(target_arch = "xtensa", no_main)]
 
 #[cfg(target_arch = "xtensa")]
-use core::panic::PanicInfo;
+use core::{
+    future::{Future, poll_fn},
+    panic::PanicInfo,
+    pin::Pin,
+    task::Poll,
+};
 #[cfg(target_arch = "xtensa")]
 use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
@@ -5909,6 +5914,36 @@ fn refresh_boot_status_light(
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn await_with_boot_status_light<F>(
+    future: F,
+    red: &mut Output<'_>,
+    green: &mut Output<'_>,
+    blue: &mut Output<'_>,
+    started_ms: u64,
+    last_output: &mut Option<RgbChannels>,
+) -> F::Output
+where
+    F: Future,
+{
+    let mut future = core::pin::pin!(future);
+    let mut refresh_timer = EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS);
+
+    poll_fn(|cx| {
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(output);
+        }
+
+        if Pin::new(&mut refresh_timer).poll(cx).is_ready() {
+            refresh_boot_status_light(red, green, blue, started_ms, last_output);
+            refresh_timer = EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS);
+        }
+
+        Poll::Pending
+    })
+    .await
+}
+
+#[cfg(target_arch = "xtensa")]
 fn refresh_status_light(
     red: &mut Output<'_>,
     green: &mut Output<'_>,
@@ -8691,7 +8726,14 @@ async fn main(_spawner: Spawner) {
     );
     let display_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        display.init(),
+        await_with_boot_status_light(
+            display.init(),
+            &mut status_light_red,
+            &mut status_light_green,
+            &mut status_light_blue,
+            status_light_started_ms,
+            &mut last_status_light_output,
+        ),
     )
     .await
     .is_ok_and(|result| result.is_ok());
@@ -8725,7 +8767,14 @@ async fn main(_spawner: Spawner) {
     );
     let startup_flush_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        display.flush(),
+        await_with_boot_status_light(
+            display.flush(),
+            &mut status_light_red,
+            &mut status_light_green,
+            &mut status_light_blue,
+            status_light_started_ms,
+            &mut last_status_light_output,
+        ),
     )
     .await
     .is_ok_and(|result| result.is_ok());
@@ -8816,6 +8865,13 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &usb_boot_memory_config,
+        );
+        refresh_boot_status_light(
+            &mut status_light_red,
+            &mut status_light_green,
+            &mut status_light_blue,
+            status_light_started_ms,
+            &mut last_status_light_output,
         );
         EmbassyTimer::after_millis(10).await;
     }
