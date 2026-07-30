@@ -2051,6 +2051,88 @@
     margin-block: 1.1rem;
   }
 
+  .industrial-lan-pairing-panel {
+    display: grid;
+    gap: 0.85rem;
+    margin-top: 1rem;
+    border: 1px solid rgba(72, 125, 154, 0.38);
+    border-radius: 10px;
+    background: rgba(213, 230, 234, 0.48);
+    padding: 1rem;
+  }
+
+  .industrial-lan-pairing-panel__heading {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    min-width: 0;
+  }
+
+  .industrial-lan-pairing-panel__icon {
+    display: grid;
+    flex: 0 0 auto;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border-radius: 8px;
+    background: #0f7890;
+    color: #f4ffff;
+  }
+
+  .industrial-lan-pairing-panel__heading strong,
+  .industrial-lan-pairing-panel__heading small,
+  .industrial-lan-pairing-panel__fields label span {
+    display: block;
+  }
+
+  .industrial-lan-pairing-panel__heading small {
+    margin-top: 0.12rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.76rem;
+  }
+
+  .industrial-lan-pairing-panel__fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(6rem, 8rem) auto;
+    gap: 0.65rem;
+    align-items: end;
+  }
+
+  .industrial-lan-pairing-panel__fields label {
+    min-width: 0;
+  }
+
+  .industrial-lan-pairing-panel__fields label span {
+    margin-bottom: 0.28rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 800;
+  }
+
+  .industrial-lan-pairing-panel__fields button {
+    min-height: 2.5rem;
+  }
+
+  .industrial-lan-pairing-panel__unsupported,
+  .industrial-lan-pairing-panel__message {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0;
+    color: var(--industrial-muted-text);
+    font-size: 0.82rem;
+    line-height: 1.45;
+  }
+
+  .industrial-lan-pairing-panel__message--paired {
+    color: #17794c;
+  }
+
+  .industrial-lan-pairing-panel__message--error {
+    color: #a13b3b;
+  }
+
   .industrial-device-select-view {
     align-content: start;
   }
@@ -2192,6 +2274,10 @@
 
   @media (max-width: 819px) {
     .industrial-add-device-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .industrial-lan-pairing-panel__fields {
       grid-template-columns: 1fr;
     }
   }
@@ -5306,11 +5392,11 @@
   }
 
   .industrial-slot-editor-card__header {
-    display: flex !important;
+    display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
-    grid-template-columns: none !important;
+    grid-template-columns: none;
     border-bottom: 1px solid color-mix(in oklch, var(--industrial-panel-border) 62%, transparent);
     padding: 1rem 1.08rem 0.88rem;
   }
@@ -5339,15 +5425,11 @@
     align-items: center;
     justify-content: center;
     min-width: 2rem;
-    border-width: 1px !important;
-    border-style: solid !important;
-    border-color: color-mix(
-      in oklch,
-      var(--industrial-panel-border-strong) 74%,
-      transparent
-    ) !important;
+    border-width: 1px;
+    border-style: solid;
+    border-color: color-mix(in oklch, var(--industrial-panel-border-strong) 74%, transparent);
     border-radius: 999px;
-    background-color: var(--industrial-panel) !important;
+    background-color: var(--industrial-panel);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.76);
     padding: 0.18rem 0.56rem;
     color: var(--industrial-text);
@@ -6295,4 +6377,16 @@
     padding: 0.22rem 0.42rem;
     font-size: 0.58rem;
   }
+}
+
+.industrial-ui-demo {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: var(--industrial-canvas);
+}
+
+.industrial-ui-demo .industrial-lan-pairing-panel {
+  width: min(100%, 560px);
 }

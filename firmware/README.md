@@ -139,11 +139,11 @@
   - `cargo build --manifest-path firmware/Cargo.toml --release`
 - Xtensa app runtime build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release`
-  - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,web_serial --bin flux-purr --release`
+  - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,web_serial,net_http --bin flux-purr --release`
 - Xtensa app runtime build (`12 V` variant):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-12v --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release`
 - Xtensa app runtime build (`28 V` variant):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-28v --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release`
 - Xtensa key-test calibration build:
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,frontpanel-key-test --bin flux-purr --release`
 
@@ -168,7 +168,7 @@
 - Typical flow:
   - `source /Users/ivan/export-esp.sh`
   - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release` (default `20 V` + real control-plane transport)
-  - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,web_serial,pd-request-12v` or `--no-default-features --features esp32s3,web_serial,pd-request-28v`
+  - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,web_serial,net_http,pd-request-12v` or `--no-default-features --features esp32s3,web_serial,net_http,pd-request-28v`
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
   - if selector is missing, `mcu-agentd --non-interactive selector list esp32s3_frontpanel`

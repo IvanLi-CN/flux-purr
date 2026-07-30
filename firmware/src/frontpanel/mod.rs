@@ -616,6 +616,9 @@ pub struct FrontPanelUiState {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub active_cooling_enabled: bool,
+    /// The four digits are set only while the physical WiFi Info page is
+    /// active. Leaving that page clears the code immediately.
+    pub wifi_pairing_code: Option<[u8; 4]>,
     pub key_test: KeyTestState,
 }
 
@@ -655,6 +658,7 @@ impl FrontPanelUiState {
                 Some(300),
             ],
             active_cooling_enabled: true,
+            wifi_pairing_code: None,
             key_test: KeyTestState::default(),
         }
     }
@@ -743,6 +747,18 @@ impl FrontPanelUiState {
             .unwrap_or(self.selected_preset_slot);
     }
 
+    pub fn enter_wifi_pairing(&mut self, code: [u8; 4]) {
+        self.route = FrontPanelRoute::WifiInfo;
+        self.wifi_pairing_code = code
+            .iter()
+            .all(|digit| digit.is_ascii_digit())
+            .then_some(code);
+    }
+
+    pub fn leave_wifi_pairing(&mut self) {
+        self.wifi_pairing_code = None;
+    }
+
     fn apply_app_event(&mut self, event: KeyEvent) -> bool {
         match self.route {
             FrontPanelRoute::KeyTest => {
@@ -825,6 +841,9 @@ impl FrontPanelUiState {
             }
             (FrontPanelKey::Center, KeyGesture::ShortPress) => {
                 self.route = self.selected_menu_item.route();
+                if self.route != FrontPanelRoute::WifiInfo {
+                    self.leave_wifi_pairing();
+                }
                 if self.route == FrontPanelRoute::PresetTemp {
                     self.ensure_selected_preset_slot();
                 }
@@ -874,6 +893,7 @@ impl FrontPanelUiState {
             }
             (FrontPanelKey::Center, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::LongPress) => {
+                self.leave_wifi_pairing();
                 self.route = FrontPanelRoute::Menu;
                 true
             }
@@ -898,6 +918,9 @@ impl FrontPanelUiState {
             (FrontPanelKey::Left, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::LongPress) => {
+                if self.route == FrontPanelRoute::WifiInfo {
+                    self.leave_wifi_pairing();
+                }
                 self.route = FrontPanelRoute::Menu;
                 true
             }

@@ -1,3 +1,5 @@
+use core::fmt::Write as _;
+
 use embedded_graphics::{
     pixelcolor::Rgb565,
     prelude::*,
@@ -201,7 +203,7 @@ pub fn render_frontpanel_ui_with_palette(
         FrontPanelRoute::Menu => draw_menu(canvas, state),
         FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, palette),
         FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state),
-        FrontPanelRoute::WifiInfo => draw_wifi_info(canvas),
+        FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state),
         FrontPanelRoute::DeviceInfo => draw_device_info(canvas),
     }
 }
@@ -895,10 +897,22 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     );
 }
 
-fn draw_wifi_info(canvas: &mut DisplayCanvas) {
+fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
     draw_text_mid(canvas, "SSID FLUXLAB", 8, 6, COLOR_TEXT);
     draw_text_mid(canvas, "RSSI -58DBM", 8, 19, COLOR_CYAN);
-    draw_text_mid(canvas, "IP 192.168.4.1", 8, 32, COLOR_WARNING);
+    let mut pairing = heapless::String::<16>::new();
+    let _ = pairing.push_str("PAIR ");
+    match state.wifi_pairing_code {
+        Some(code) => {
+            for digit in code {
+                let _ = pairing.write_char(char::from(digit));
+            }
+        }
+        None => {
+            let _ = pairing.push_str("----");
+        }
+    }
+    draw_text_mid(canvas, &pairing, 8, 32, COLOR_WARNING);
 }
 
 fn draw_device_info(canvas: &mut DisplayCanvas) {

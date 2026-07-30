@@ -4,9 +4,9 @@
 
 ## Current Status
 
-- Implementation: Web + browser Web Serial + `devd` + CLI + USB JSONL runtime loop 已覆盖 identity、network、status、runtime mutation、artifact verify、flash dry-run、real flash 与 monitor event 的真实传输路径
+- Implementation: Web + browser Web Serial + `devd` + CLI + USB JSONL + firmware `net_http` runtime 已覆盖 identity、network、status、runtime mutation、artifact verify、flash dry-run、real flash 与 monitor event 的真实传输路径
 - Lifecycle: active
-- Catalog note: 控制平面当前以 Web / native `devd` / CLI 为主，direct firmware HTTP 仍未实现
+- Catalog note: direct firmware HTTP 默认随 ESP32-S3 runtime 构建；LAN 保持可信私网边界，初始 WiFi 配置、firmware flash 与 token reset 仍仅限 USB/`devd`
 
 ## Coverage / rollout summary
 
@@ -52,7 +52,7 @@
 ## Remaining Gaps
 
 - `pps5a` accepted EEPROM save 与 frozen baseline bundle 仍未完成；100W 路径虽已有 approach characterization current truth，但尚未形成 committed accepted bundle。
-- direct firmware HTTP / `net_http` server 仍未实现；当前真实硬件 runtime 控制路径仍以 browser Web Serial 或 Web / CLI -> `devd` -> USB JSONL 为准。
+- WiFi-only pairing、DHCP/mDNS、lease competition 与 USB token reset 还没有真机 HIL receipt；当前验证停在 ESP32-S3 cross-check、host tests 与 mock-only Chromium flow。
 - 完整 artifact catalog 管理页不属于本 spec 范围。
 - macOS 打开 ESP32-S3 USB Serial/JTAG port 仍可能触发一次设备 reset；`devd` 的稳定性契约仍是避免 Web / daemon polling 期间反复 open / close 造成持续重启。
 

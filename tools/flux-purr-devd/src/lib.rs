@@ -32,6 +32,8 @@ use tokio::{process::Command, sync::broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+pub mod lan;
+
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
@@ -107,6 +109,8 @@ pub struct UserConfig {
     pub default_devd_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_serial_port: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lan_devices: Vec<lan::LanDeviceConfig>,
 }
 
 pub fn user_config_dir() -> io::Result<PathBuf> {
@@ -177,7 +181,13 @@ pub fn write_user_config(config: &UserConfig) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(config)?)
+    fs::write(&path, serde_json::to_vec_pretty(config)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 pub fn read_default_serial_port_from_user_config() -> Option<PathBuf> {
@@ -1244,7 +1254,17 @@ pub struct WifiConfigRequest {
     pub ssid: Option<String>,
     pub password: Option<String>,
     pub auto_reconnect: Option<bool>,
+    pub static_ipv4: Option<WifiStaticIpv4Request>,
     pub telemetry_interval_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiStaticIpv4Request {
+    pub address: [u8; 4],
+    pub prefix_len: u8,
+    pub gateway: [u8; 4],
+    pub dns: [u8; 4],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1508,6 +1528,8 @@ struct UsbWifiConfigWire<'a> {
     password: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     auto_reconnect: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    static_ipv4: Option<WifiStaticIpv4Request>,
     #[serde(skip_serializing_if = "Option::is_none")]
     telemetry_interval_ms: Option<u32>,
 }
@@ -1802,6 +1824,14 @@ pub struct BindRequest {
 pub fn app(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/health", get(health))
+        .route("/api/v1/lan/devices", get(list_lan_devices))
+        .route("/api/v1/lan/discovery/mdns", post(refresh_lan_mdns))
+        .route("/api/v1/lan/discovery/scan", post(scan_lan_cidr))
+        .route("/api/v1/lan/pair", post(pair_lan_device))
+        .route(
+            "/api/v1/devices/{device_id}/lan-pairing/reset",
+            post(reset_lan_pairing),
+        )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{device_id}/bind", post(bind_device))
         .route("/api/v1/devices/{device_id}/connect", post(connect_device))
@@ -1919,6 +1949,107 @@ async fn list_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
         .map(device_list_payload)
         .collect::<Vec<_>>();
     Ok(Json(json!({ "devices": devices })))
+}
+
+async fn list_lan_devices() -> Result<Json<Value>, HttpError> {
+    let config = read_user_config()
+        .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
+    let devices = config
+        .lan_devices
+        .iter()
+        .map(lan::LanDeviceSummary::from)
+        .collect::<Vec<_>>();
+    Ok(Json(
+        json!({ "devices": devices, "discovery": "manual-or-mdns-refresh" }),
+    ))
+}
+
+async fn refresh_lan_mdns() -> Result<Json<Value>, HttpError> {
+    let discovered = lan::discover_mdns(Duration::from_secs(2))
+        .await
+        .map_err(|error| HttpError::bad_request("lan_mdns_failed", &error.to_string()))?;
+    let devices = persist_lan_discoveries(discovered)?;
+    Ok(Json(
+        json!({ "devices": devices, "source": "explicit_mdns_refresh" }),
+    ))
+}
+
+async fn scan_lan_cidr(Json(request): Json<lan::LanScanRequest>) -> Result<Json<Value>, HttpError> {
+    let discovered = lan::discover_cidr(request)
+        .await
+        .map_err(|error| HttpError::bad_request("lan_scan_failed", &error.to_string()))?;
+    let devices = persist_lan_discoveries(discovered)?;
+    Ok(Json(
+        json!({ "devices": devices, "source": "explicit_cidr_scan" }),
+    ))
+}
+
+fn persist_lan_discoveries(
+    discoveries: Vec<lan::LanDiscovery>,
+) -> Result<Vec<lan::LanDeviceSummary>, HttpError> {
+    let mut config = read_user_config()
+        .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
+    let mut summaries = Vec::with_capacity(discoveries.len());
+    for discovery in discoveries {
+        let device = lan::device_from_discovery(discovery);
+        let id = device.id.clone();
+        lan::merge_lan_device(&mut config.lan_devices, device);
+        if let Some(saved) = config
+            .lan_devices
+            .iter()
+            .find(|candidate| candidate.id == id)
+        {
+            summaries.push(lan::LanDeviceSummary::from(saved));
+        }
+    }
+    write_user_config(&config)
+        .map_err(|_| HttpError::internal("failed to persist local LAN device registry"))?;
+    Ok(summaries)
+}
+
+async fn pair_lan_device(
+    Json(request): Json<lan::LanPairRequest>,
+) -> Result<Json<lan::LanDeviceSummary>, HttpError> {
+    let device = lan::pair_device(request)
+        .await
+        .map_err(|error| HttpError::bad_request("lan_pairing_failed", &error.to_string()))?;
+    let summary = lan::LanDeviceSummary::from(&device);
+    let mut config = read_user_config()
+        .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
+    lan::merge_lan_device(&mut config.lan_devices, device);
+    write_user_config(&config)
+        .map_err(|_| HttpError::internal("failed to persist local LAN device registry"))?;
+    Ok(Json(summary))
+}
+
+async fn reset_lan_pairing(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "LAN pairing reset is available only through an active USB/devd lease.",
+        ));
+    }
+    serial_clear_lan_pairing(&state, &target).await?;
+    state.emit(event(
+        &device_id,
+        "lan",
+        "LAN pairing token cleared through USB lease",
+        json!({ "token": "<redacted>" }),
+    ));
+    Ok(Json(json!({ "cleared": true })))
 }
 
 async fn bind_device(
@@ -2541,6 +2672,14 @@ async fn configure_wifi(
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<WifiConfigRequest>,
 ) -> Result<Json<Value>, HttpError> {
+    if let Some(static_ipv4) = payload.static_ipv4
+        && !static_ipv4_request_is_valid(static_ipv4)
+    {
+        return Err(HttpError::bad_request(
+            "invalid_static_ipv4",
+            "staticIpv4 requires a unicast address and a prefix length from 0 through 32.",
+        ));
+    }
     let target = {
         let mut state_lock = state.lock()?;
         state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
@@ -2628,6 +2767,18 @@ async fn configure_wifi(
     drop(state_lock);
     emit_wifi_config_event(&state, &device_id, &payload);
     Ok(Json(redacted))
+}
+
+fn static_ipv4_request_is_valid(value: WifiStaticIpv4Request) -> bool {
+    value.prefix_len <= 32
+        && is_unicast_static_ipv4(value.address)
+        && is_unicast_static_ipv4(value.gateway)
+        && is_unicast_static_ipv4(value.dns)
+}
+
+fn is_unicast_static_ipv4(address: [u8; 4]) -> bool {
+    let first = address[0];
+    first != 0 && first != 127 && first < 224
 }
 
 async fn configure_runtime(
@@ -4039,6 +4190,7 @@ async fn serial_wifi_config(
         ssid: payload.ssid.as_deref(),
         password: payload.password.as_deref(),
         auto_reconnect: payload.auto_reconnect,
+        static_ipv4: payload.static_ipv4,
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
@@ -4051,6 +4203,30 @@ async fn serial_wifi_config(
         SerialRetryPolicy::SingleShot,
     )
     .await
+}
+
+async fn serial_clear_lan_pairing(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<(), HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-lan-reset", now_millis());
+    let request = serde_json::to_string(&UsbRequestWire {
+        frame_type: "request",
+        request_id: &request_id,
+        op: "clear_lan_pairing_token",
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB LAN reset request"))?;
+    let _ = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    Ok(())
 }
 
 async fn serial_runtime_config(
@@ -7210,6 +7386,7 @@ mod tests {
                 ssid: Some("FluxPurr-Lab".to_string()),
                 password: Some("secret-pass".to_string()),
                 auto_reconnect: Some(true),
+                static_ipv4: None,
                 telemetry_interval_ms: Some(500),
             }),
         )
@@ -7578,6 +7755,12 @@ mod tests {
             ssid: Some("FluxPurr-Lab".to_string()),
             password: Some("secret-pass".to_string()),
             auto_reconnect: Some(true),
+            static_ipv4: Some(WifiStaticIpv4Request {
+                address: [192, 168, 31, 42],
+                prefix_len: 24,
+                gateway: [192, 168, 31, 1],
+                dns: [1, 1, 1, 1],
+            }),
             telemetry_interval_ms: Some(500),
         };
         let value = json!({
@@ -7589,6 +7772,25 @@ mod tests {
         });
         assert!(value.to_string().contains("<redacted>"));
         assert!(!value.to_string().contains("secret-pass"));
+    }
+
+    #[test]
+    fn static_ipv4_validation_rejects_non_unicast_values() {
+        let valid = WifiStaticIpv4Request {
+            address: [192, 168, 31, 42],
+            prefix_len: 24,
+            gateway: [192, 168, 31, 1],
+            dns: [1, 1, 1, 1],
+        };
+        assert!(static_ipv4_request_is_valid(valid));
+        assert!(!static_ipv4_request_is_valid(WifiStaticIpv4Request {
+            address: [224, 0, 0, 1],
+            ..valid
+        }));
+        assert!(!static_ipv4_request_is_valid(WifiStaticIpv4Request {
+            dns: [0, 0, 0, 0],
+            ..valid
+        }));
     }
 
     #[test]

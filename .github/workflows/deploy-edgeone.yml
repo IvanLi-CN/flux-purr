@@ -1,0 +1,43 @@
+name: Deploy Web to EdgeOne
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/deploy-edgeone.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: edgeone-web-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: EdgeOne web deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+      EDGEONE_PROJECT_NAME: ${{ secrets.EDGEONE_PROJECT_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+
+      - name: Install and build
+        run: |
+          bun install --cwd web --frozen-lockfile
+          bun run --cwd web build
+
+      - name: Deploy production bundle
+        run: |
+          test -n "$EDGEONE_API_TOKEN"
+          test -n "$EDGEONE_PROJECT_NAME"
+          npx --yes edgeone@1.6.18 makers deploy web/dist -n "$EDGEONE_PROJECT_NAME" -e production -t "$EDGEONE_API_TOKEN"

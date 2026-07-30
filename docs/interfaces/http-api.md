@@ -228,42 +228,25 @@ Errors must not include WiFi passwords, PSK values, or unrelated host paths.
 
 ## Device HTTP
 
-Direct device HTTP is a planned transport surface for a future firmware `net_http` server. Current ESP32-S3 release artifacts do not implement or advertise this transport; real hardware runtime control uses Browser Web Serial over USB JSONL or Native `devd` HTTP over USB JSONL.
+Direct device HTTP is the WiFi/LAN control plane. The device uses DHCP by default, sends its MAC-derived `flux-purr-<mac>` hostname as DHCP option 12, and announces `_http._tcp.local` with `api=v1`, `path=/api/v1`, `pairing=frontpanel`, and `device=<mac>` TXT metadata. USB/devd remains the only path for initial WiFi provisioning, firmware flash, static IPv4 configuration, and pairing-token reset.
 
-Base URL: `http://<device-ip>`.
+Base URL: `http://<device-ip>` or the MAC-derived `http://flux-purr-<mac>.local` hostname. Manual LAN targets must be RFC1918 IPv4 addresses or that device hostname; public and arbitrary DNS targets are rejected by Web and devd clients.
 
-- `GET /api/v1/identity`
-- `GET /api/v1/network`
-- `GET /api/v1/status`
-- `PUT /api/v1/wifi`
-- `POST /api/v1/reboot`
-- `GET /api/v1/events`
+Public endpoints:
 
-`PUT /api/v1/wifi` body:
+- `GET /health`
+- `GET /api/v1/pairing` returns whether a code is currently visible and remaining attempts, never the code.
+- `POST /api/v1/pairing/claim` accepts `{ "code": "4827" }` and returns the stable bearer token plus MAC-derived `deviceId` and `hostname` only after the physical WiFi Info page opens the pairing window.
 
-```json
-{
-  "op": "set",
-  "ssid": "FluxPurr-Lab",
-  "password": "<secret>",
-  "autoReconnect": true,
-  "telemetryIntervalMs": 500
-}
-```
+Token endpoints require `Authorization: Bearer <token>`:
 
-The response reports a redacted summary only:
+- `GET /api/v1/identity|network|status|events`
+- `POST /api/v1/leases`, `PUT|DELETE /api/v1/leases`
+- `PUT /api/v1/runtime|calibration|heater-curve|thermal-profile` and `POST /api/v1/calibration/job`
 
-```json
-{
-  "accepted": true,
-  "network": {
-    "state": "saving",
-    "ssid": "FluxPurr-Lab",
-    "wifiRssi": null,
-    "lastError": null
-  }
-}
-```
+LAN writes must additionally carry `X-Flux-Purr-Lease: <lease-id>`. A lease has a `30s` TTL and is renewed with `PUT /api/v1/leases`; only one LAN writer can own it. Token reset is intentionally absent from device HTTP.
+
+The device reflects `https://flux-purr.ivanli.cc` and explicit localhost development origins in CORS responses. Chromium private-network preflight receives `Access-Control-Allow-Private-Network: true`; Safari and other browsers without Chromium PNA support must not offer direct-LAN control. `GET /api/v1/events` returns one authorized `text/event-stream` status frame per connection, and the browser fetch-stream client reconnects without putting the token in a URL.
 
 ## Browser Web Serial
 
@@ -552,7 +535,7 @@ Core commands:
 - `flux-purr hardware available|recent|list|save|forget|path`
 - `flux-purr usb-port show|set <port>`
 
-`hardware` stores only current USB targets. LAN HTTP, mDNS, and desktop app discovery are reserved for future transports and must not be presented as current CLI capability.
+`hardware` stores USB targets. LAN records are stored separately in the same user configuration with their token excluded from CLI, daemon, trace, and error output. `flux-purr lan devices|refresh|scan|pair|status|runtime-set` operates a saved LAN target. `flux-purr lan request --id <id> --method get|post|put|delete --path <api-path> [--body|--body-file]` exposes the remaining authorized runtime, calibration, heater-curve, and thermal-profile API; every write creates and releases the device LAN lease around the request.
 
 `usb-port set` writes user configuration in the OS config directory, or under `FLUX_PURR_HOME` when set. A running daemon reads the default port only during startup, so it must be restarted after the default USB port changes.
 
