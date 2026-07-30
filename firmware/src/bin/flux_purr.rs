@@ -5914,12 +5914,13 @@ fn refresh_boot_status_light(
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn await_with_boot_status_light<F>(
+async fn await_with_status_light<F>(
     future: F,
     red: &mut Output<'_>,
     green: &mut Output<'_>,
     blue: &mut Output<'_>,
     started_ms: u64,
+    state: StatusLightState,
     last_output: &mut Option<RgbChannels>,
 ) -> F::Output
 where
@@ -5934,8 +5935,9 @@ where
         }
 
         if Pin::new(&mut refresh_timer).poll(cx).is_ready() {
-            refresh_boot_status_light(red, green, blue, started_ms, last_output);
+            refresh_status_light(red, green, blue, started_ms, state, last_output);
             refresh_timer = EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS);
+            let _ = Pin::new(&mut refresh_timer).poll(cx);
         }
 
         Poll::Pending
@@ -8726,12 +8728,13 @@ async fn main(_spawner: Spawner) {
     );
     let display_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        await_with_boot_status_light(
+        await_with_status_light(
             display.init(),
             &mut status_light_red,
             &mut status_light_green,
             &mut status_light_blue,
             status_light_started_ms,
+            StatusLightState::Booting,
             &mut last_status_light_output,
         ),
     )
@@ -8767,12 +8770,13 @@ async fn main(_spawner: Spawner) {
     );
     let startup_flush_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        await_with_boot_status_light(
+        await_with_status_light(
             display.flush(),
             &mut status_light_red,
             &mut status_light_green,
             &mut status_light_blue,
             status_light_started_ms,
+            StatusLightState::Booting,
             &mut last_status_light_output,
         ),
     )
@@ -9293,7 +9297,15 @@ async fn main(_spawner: Spawner) {
     );
     let initial_frontpanel_ui_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        flush_ui(&mut display, canvas, &ui_state),
+        await_with_status_light(
+            flush_ui(&mut display, canvas, &ui_state),
+            &mut status_light_red,
+            &mut status_light_green,
+            &mut status_light_blue,
+            status_light_started_ms,
+            initial_status_light_state,
+            &mut last_status_light_output,
+        ),
     )
     .await
     .is_ok_and(|result| result.is_ok());
