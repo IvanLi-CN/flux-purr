@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "299aab1547d01cc79fe09cb926471aae0b71a0c5",
+  "pr_number": 60,
+  "pr_title": "fix(firmware): preserve buzzer carrier across silence",
+  "product": {
+    "effective_version": "0.15.1",
+    "tag": "v0.15.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "142bc62730904bd156856bb405717ed7f0299e71",
+  "type_label": "type:patch"
+}
