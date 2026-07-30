@@ -7,6 +7,7 @@ pub mod control_plane;
 pub mod display;
 pub mod frontpanel;
 pub mod memory;
+pub mod status_light;
 pub mod thermal_plant;
 
 use core::sync::atomic::{AtomicU32, Ordering};

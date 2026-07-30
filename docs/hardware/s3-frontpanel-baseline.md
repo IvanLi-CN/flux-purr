@@ -109,6 +109,26 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 - `BUZZER_PWM` is directly driven by MCU `GPIO48` (chip pin `36`) and is reserved for buzzer beeps or passive-buzzer tone output via PWM.
 - The RGB status LED is directly driven by MCU `GPIO39/38/37` for `R/G/B` respectively, each as an independent PWM-capable output.
 - The archived 2026-04-22 main-board netlist keeps a second RGB LED footprint (`LED2`) on the same `LED_R/G/B` rails, but that footprint is marked DNI; the populated baseline still assumes exactly one RGB status LED and one ballast resistor per color.
+- `LED1` is a common-anode part (`COM+ -> 3V3`); `GPIO39/38/37` drive the R/G/B cathodes through their ballast resistors. A channel is on when its GPIO output is low. Firmware must initialize all three outputs high so boot/reset keeps the indicator dark until the status-light controller owns it.
+
+### RGB status-light language
+
+The indicator is a safety signal, not a duplicate of the display. Faults always preempt ordinary operating states; the firmware uses deterministic full-channel on/off patterns so it does not contend with the MCPWM resources reserved for fan, heater, and buzzer control.
+
+| Runtime condition | LED language |
+| --- | --- |
+| Starting | White, 350 ms on / 350 ms off |
+| Ready / idle | Solid green |
+| Heater armed | Solid amber |
+| Cooling with heater off | Blue, 350 ms pulse every 1.4 s |
+| Calibration active | Cyan, 500 ms on / 500 ms off |
+| Thermal model precondition blocks heating | Amber, 400 ms pulse every 1 s |
+| Cooling disabled overtemperature lock | Amber, three 160 ms flashes every 1.4 s |
+| RTD short/open or ADC failure | Magenta, two 180 ms flashes every 1.2 s |
+| Thermal runaway (`>=420C`) | Red, 125 ms on / 125 ms off |
+| Cleared thermal runaway awaiting acknowledgement | Red, 160 ms flash every 1 s |
+
+The supported fixed-PD fallback is not an LED fault. It preserves the selected runtime state because it remains a valid heating backend.
 - Heater switching baseline:
   - use low-side `NMOS`
   - primary approved part: `BUK9Y14-40B,115`

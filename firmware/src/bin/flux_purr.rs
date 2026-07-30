@@ -118,6 +118,10 @@ use flux_purr_firmware::memory::{
     ThermalPlantRawTransaction, ThermalProfileBank, ThermalProfileMode,
     heater_resistance_ohms_from_curve, project_thermal_plant,
 };
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::status_light::{
+    RgbChannels, StatusLightInputs, select_status_light_state, status_light_output,
+};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::thermal_plant::{ThermalPlantControlInput, ThermalPlantController};
 #[cfg(target_arch = "xtensa")]
@@ -350,6 +354,8 @@ const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 const BUZZER_PROTECTION_ALARM_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
+#[cfg(target_arch = "xtensa")]
+const STATUS_LIGHT_BOOT_DURATION_MS: u64 = 1_000;
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5851,6 +5857,37 @@ fn apply_buzzer_output<'a, PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn apply_status_light_output(
+    red: &mut Output<'_>,
+    green: &mut Output<'_>,
+    blue: &mut Output<'_>,
+    output: RgbChannels,
+    last_output: &mut Option<RgbChannels>,
+) {
+    if last_output.is_some_and(|last| last == output) {
+        return;
+    }
+
+    // LED1 is common-anode: low GPIO output sinks the selected color channel.
+    if output.red {
+        red.set_low();
+    } else {
+        red.set_high();
+    }
+    if output.green {
+        green.set_low();
+    } else {
+        green.set_high();
+    }
+    if output.blue {
+        blue.set_low();
+    } else {
+        blue.set_high();
+    }
+    *last_output = Some(output);
+}
+
+#[cfg(target_arch = "xtensa")]
 fn sync_frontpanel_runtime_state(
     ui_state: &mut FrontPanelUiState,
     fan_decision: FanPolicyDecision,
@@ -8677,6 +8714,26 @@ async fn main(_spawner: Spawner) {
     );
 
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
+    let mut status_light_red =
+        Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
+    let mut status_light_green =
+        Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
+    let mut status_light_blue =
+        Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
+    let mut last_status_light_output = None;
+    apply_status_light_output(
+        &mut status_light_red,
+        &mut status_light_green,
+        &mut status_light_blue,
+        status_light_output(
+            select_status_light_state(StatusLightInputs {
+                booting: true,
+                ..StatusLightInputs::default()
+            }),
+            0,
+        ),
+        &mut last_status_light_output,
+    );
     let pwm_clock_cfg =
         PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
             .expect("failed to derive MCPWM peripheral clock");
@@ -9817,6 +9874,26 @@ async fn main(_spawner: Spawner) {
             &pwm_clock_cfg,
             buzzer.tick(elapsed_ms),
             &mut buzzer_output_applied,
+        );
+
+        let status_light_state = select_status_light_state(StatusLightInputs {
+            booting: elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
+            thermal_runaway: is_overtemp_fault(current_rtd_fault),
+            thermal_runaway_attention_pending: attention_pending_after_fault_clear,
+            sensor_fault: is_sensor_fault(current_rtd_fault),
+            cooling_disabled_overtemp: cooling_disabled_lock_latched,
+            heater_interlocked: ui_state.heater_lock_reason
+                == Some(HeaterLockReason::ThermalModelMissingForSourceClass),
+            calibration_active: calibration_runtime_state.mode != CalibrationMode::Off,
+            heater_enabled: ui_state.heater_enabled,
+            fan_enabled: fan_command.enabled,
+        });
+        apply_status_light_output(
+            &mut status_light_red,
+            &mut status_light_green,
+            &mut status_light_blue,
+            status_light_output(status_light_state, elapsed_ms),
+            &mut last_status_light_output,
         );
 
         if needs_redraw {
