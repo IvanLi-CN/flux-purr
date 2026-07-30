@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "bd10bcfa7f330b47e6e09d91f28e363956781ba8",
+  "pr_number": 59,
+  "pr_title": "feat(firmware): add RGB status light language",
+  "product": {
+    "effective_version": "0.15.0",
+    "tag": "v0.15.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "12f439fd417d927b64e9689b3c7d05e7d99c5a2b",
+  "type_label": "type:minor"
+}
