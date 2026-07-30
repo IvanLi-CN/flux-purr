@@ -101,6 +101,10 @@ enum LanCommand {
     Scan(LanScanArgs),
     Pair(LanPairArgs),
     #[command(
+        about = "Read the current four-digit code through a USB/devd lease. The WiFi Info page must remain open."
+    )]
+    PairingCode(TargetSelector),
+    #[command(
         about = "Clear a LAN token only through a USB/devd lease; the device must be selected explicitly."
     )]
     Reset(TargetSelector),
@@ -1226,6 +1230,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 merge_lan_device(&mut config.lan_devices, device);
                 write_user_config(&config)?;
                 serde_json::to_value(summary)?
+            }
+            LanCommand::PairingCode(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::GET,
+                    "/lan-pairing/code",
+                    None,
+                )
+                .await?
             }
             LanCommand::Status(args) => {
                 let device = resolve_lan_target(&args.id)?;
@@ -10237,6 +10251,16 @@ fn redact_cli_sensitive(value: &Value) -> Value {
 }
 
 fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(active) = payload.get("active").and_then(Value::as_bool) {
+        if active {
+            let code = payload
+                .get("code")
+                .and_then(Value::as_str)
+                .ok_or("LAN pairing code response is missing the code")?;
+            return Ok(format!("LAN pairing code: {code}"));
+        }
+        return Ok("LAN pairing code is inactive. Open WiFi Info on the device first.".to_string());
+    }
     if let Some(devices) = payload.get("devices").and_then(Value::as_array) {
         return Ok(format!("Devices: {}", devices.len()));
     }
@@ -10434,6 +10458,14 @@ mod tests {
         let redacted = redact_cli_sensitive(&payload);
         assert_eq!(redacted["wifi"]["password"], "<redacted>");
         assert_eq!(redacted["token"], "<redacted>");
+    }
+
+    #[test]
+    fn renders_active_lan_pairing_code() {
+        assert_eq!(
+            render_human(&json!({ "active": true, "code": "4827" })).unwrap(),
+            "LAN pairing code: 4827"
+        );
     }
 
     #[test]

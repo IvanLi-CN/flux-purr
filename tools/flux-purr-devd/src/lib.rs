@@ -1258,6 +1258,15 @@ pub struct WifiConfigRequest {
     pub telemetry_interval_ms: Option<u32>,
 }
 
+/// The USB-only host-tool view of a transient, front-panel-scoped LAN pairing
+/// code. It is deliberately never persisted in daemon state or events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LanPairingCode {
+    pub active: bool,
+    pub code: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WifiStaticIpv4Request {
@@ -1832,6 +1841,10 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/devices/{device_id}/lan-pairing/reset",
             post(reset_lan_pairing),
         )
+        .route(
+            "/api/v1/devices/{device_id}/lan-pairing/code",
+            get(get_lan_pairing_code),
+        )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{device_id}/bind", post(bind_device))
         .route("/api/v1/devices/{device_id}/connect", post(connect_device))
@@ -2050,6 +2063,29 @@ async fn reset_lan_pairing(
         json!({ "token": "<redacted>" }),
     ));
     Ok(Json(json!({ "cleared": true })))
+}
+
+async fn get_lan_pairing_code(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<LanPairingCode>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "LAN pairing code is available only through an active USB/devd lease.",
+        ));
+    }
+    Ok(Json(serial_lan_pairing_code(&state, &target).await?))
 }
 
 async fn bind_device(
@@ -4229,6 +4265,36 @@ async fn serial_clear_lan_pairing(
     Ok(())
 }
 
+async fn serial_lan_pairing_code(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<LanPairingCode, HttpError> {
+    let code = serial_request_payload::<LanPairingCode>(
+        state,
+        target,
+        "get_lan_pairing_code",
+        "lan_pairing_code",
+    )
+    .await?;
+    validate_lan_pairing_code(code)
+}
+
+fn validate_lan_pairing_code(code: LanPairingCode) -> Result<LanPairingCode, HttpError> {
+    let valid_code = code
+        .code
+        .as_deref()
+        .is_some_and(|value| value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit()));
+    if (code.active && !valid_code) || (!code.active && code.code.is_some()) {
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_lan_pairing_code",
+            "USB response returned an invalid LAN pairing-code state.",
+            true,
+        ));
+    }
+    Ok(code)
+}
+
 async fn serial_runtime_config(
     state: &AppState,
     target: &DeviceRecord,
@@ -6033,6 +6099,8 @@ fn redact_sensitive_fields(value: &mut Value) {
             for (key, field) in object.iter_mut() {
                 if is_sensitive_field_key(key) {
                     *field = Value::String("<redacted>".to_string());
+                } else if key.eq_ignore_ascii_case("lan_pairing_code") {
+                    redact_lan_pairing_code(field);
                 } else {
                     redact_sensitive_fields(field);
                 }
@@ -6044,6 +6112,14 @@ fn redact_sensitive_fields(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+fn redact_lan_pairing_code(value: &mut Value) {
+    if let Value::Object(object) = value {
+        if let Some(code) = object.get_mut("code") {
+            *code = Value::String("<redacted>".to_string());
+        }
     }
 }
 
@@ -6332,6 +6408,67 @@ mod tests {
             !serde_json::to_string(&transport_event.payload)
                 .unwrap()
                 .contains("nested-secret")
+        );
+    }
+
+    #[test]
+    fn transport_events_redact_lan_pairing_codes() {
+        let state = AppState::test();
+        record_transport_event(
+            &state,
+            "mock-fp-lab-01",
+            "rx",
+            "usb_jsonl",
+            "pairing-code-1",
+            r#"{"type":"response","requestId":"pairing-code-1","ok":true,"result":{"lan_pairing_code":{"active":true,"code":"4827"}}}"#,
+        );
+
+        let inner = state.lock().unwrap();
+        let event = inner.devices["mock-fp-lab-01"]
+            .events
+            .iter()
+            .find(|event| event.kind == "transport")
+            .unwrap();
+        assert_eq!(
+            event.payload["frame"]["result"]["lan_pairing_code"]["code"],
+            "<redacted>"
+        );
+        assert!(
+            !serde_json::to_string(&event.payload)
+                .unwrap()
+                .contains("4827")
+        );
+    }
+
+    #[test]
+    fn lan_pairing_code_requires_a_consistent_active_state() {
+        assert!(
+            validate_lan_pairing_code(LanPairingCode {
+                active: true,
+                code: Some("4827".to_string()),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_lan_pairing_code(LanPairingCode {
+                active: false,
+                code: None,
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_lan_pairing_code(LanPairingCode {
+                active: true,
+                code: None,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_lan_pairing_code(LanPairingCode {
+                active: false,
+                code: Some("abcd".to_string()),
+            })
+            .is_err()
         );
     }
 

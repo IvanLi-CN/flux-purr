@@ -140,6 +140,16 @@ pub async fn leave_pairing() {
         .leave_pairing();
 }
 
+/// Reads the transient pairing code without extending or recreating the
+/// front-panel-scoped pairing window.
+pub async fn pairing_code() -> Option<[u8; 4]> {
+    CONTROL_STATE
+        .lock()
+        .await
+        .as_ref()
+        .and_then(NetHttpState::pairing_code)
+}
+
 pub async fn clear_token_from_usb() {
     CONTROL_STATE
         .lock()

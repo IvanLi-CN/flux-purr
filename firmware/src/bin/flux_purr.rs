@@ -68,11 +68,11 @@ use flux_purr_firmware::control_plane::ThermalControlProfileCommand;
 use flux_purr_firmware::control_plane::{
     ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
     CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire, ControlPlaneStatus,
-    Identity, RuntimeConfigCommand, ThermalControlProfileOp, ThermalControlProfilePointWire,
-    ThermalControlProfileSettingsWire, ThermalControlProfileWire, ThermalControlRuntimeWire,
-    ThermalPlantModelOpWire, ThermalPlantRuntimeWire, UsbFrame, UsbFrameError, UsbRequestOp,
-    UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
-    network_from_memory, parse_usb_frame, write_usb_frame,
+    Identity, LanPairingCode, RuntimeConfigCommand, ThermalControlProfileOp,
+    ThermalControlProfilePointWire, ThermalControlProfileSettingsWire, ThermalControlProfileWire,
+    ThermalControlRuntimeWire, ThermalPlantModelOpWire, ThermalPlantRuntimeWire, UsbFrame,
+    UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
+    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -7757,6 +7757,12 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+            UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "LAN pairing code is not available until runtime initialization completes.",
+                true,
+            ),
             UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
@@ -7922,6 +7928,12 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+            UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+                request_id,
+                "hardware_bringup_failed",
+                "LAN pairing code is unavailable because hardware bring-up did not complete.",
+                true,
+            ),
             UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
                 request_id,
                 "hardware_bringup_failed",
@@ -8075,6 +8087,24 @@ async fn process_control_line(
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+            UsbRequestOp::GetLanPairingCode => {
+                #[cfg(feature = "net_http")]
+                {
+                    let code = flux_purr_firmware::net::pairing_code().await;
+                    usb_response(
+                        request_id,
+                        UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
+                    )
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
             UsbRequestOp::ClearLanPairingToken => {
                 flux_purr_firmware::net::clear_token_from_usb().await;
                 memory_config.lan_pairing_token = None;
@@ -8281,6 +8311,21 @@ async fn process_control_line(
     (needs_redraw, response)
 }
 
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode {
+    let code = code.map(|digits| {
+        let mut rendered = heapless::String::new();
+        for digit in digits {
+            let _ = rendered.push(digit as char);
+        }
+        rendered
+    });
+    LanPairingCode {
+        active: code.is_some(),
+        code,
+    }
+}
+
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 fn lan_command_to_control_line(
     command: &ControlMailboxCommand,
@@ -8382,6 +8427,7 @@ fn lan_frame_response(
                 status.network = network;
                 lan_json_response(&status)
             }
+            UsbResponsePayload::LanPairingCode(value) => lan_json_response(value),
             UsbResponsePayload::Wifi(value) => lan_json_response(value),
             UsbResponsePayload::Calibration(value) => lan_json_response(value),
             UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),
