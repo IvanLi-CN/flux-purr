@@ -79,6 +79,7 @@
 - `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；LAN record 使用独立字段持久化 base URL、hostname、last IPv4 和 redacted token。
 - WiFi Info 进入时必须生成并显示新四位码；离开该页立即使 code 失效。每个窗口最多五次失败，成功返回 EEPROM 稳定 token；只有 USB/devd token-reset 可清除 token 和全部 LAN lease。
 - LAN public surface 仅限 health、pairing metadata 和 pairing claim；所有 identity/network/status/events 读取必须 bearer-auth，所有写操作还必须持有 30 秒设备 lease。LAN transport 只能把命令送入控制邮箱，不得直接修改 heater、PD 或 EEPROM runtime state。
+- WiFi station 的 driver buffers 必须按控制面流量有界配置；WiFi driver 或 LAN task 启动失败必须通过 `NetworkSummary.state=error` 暴露，并且不得阻断 USB JSONL control/recovery loop。
 - Web direct-LAN 仅允许 Chromium HTTPS origin `https://flux-purr.ivanli.cc` 通过 CORS/PNA 请求 HTTP 私网；Safari 必须明确显示不支持。Token 不得出现在 URL、trace、export 或错误内。
 - `flux-purr usb-port set` 必须写用户配置，并明确需要重启运行中的 `devd`。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。

@@ -9064,9 +9064,12 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "net_http")]
     flux_purr_firmware::net::apply_wifi_config(&memory_config).await;
     #[cfg(feature = "net_http")]
-    flux_purr_firmware::net::spawn(&_spawner, wifi_init, peripherals.WIFI, &memory_config)
-        .await
-        .expect("failed to spawn WiFi LAN control plane");
+    if let Err(error) =
+        flux_purr_firmware::net::spawn(&_spawner, wifi_init, peripherals.WIFI, &memory_config).await
+    {
+        warn!("LAN control plane startup failed: {=str}", error.message());
+        flux_purr_firmware::net::report_startup_failure(error).await;
+    }
     let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_sequence = restored_memory_record
         .as_ref()
