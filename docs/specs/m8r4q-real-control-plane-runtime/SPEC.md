@@ -153,7 +153,7 @@
 ### USB JSONL
 
 - `hello`：device 主动或 host 请求；返回 protocol、framing、identity、capabilities。
-- `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`set_log_level`。
+- `request`：`request_id` + `op`，支持 `get_identity`、`get_status`、`get_network`、`get_lan_pairing_code`、`set_log_level`。`get_lan_pairing_code` 仅通过 active USB/devd lease 使用，且只在物理 WiFi Info 页面仍打开时返回四位码；devd 传输事件必须脱敏该 code。
 - `wifi_config`：`request_id` + `op=set|clear` + credential fields；response 只包含 redacted summary。
 - `runtime_config`：`request_id` + runtime fields；支持 `thermalProfileMode`、`thermalControlProfile.bank` 与 `faultAttentionAcknowledged`。`thermalProfileMode` 只允许 `auto|65w|100w`，`thermalControlProfile.bank` 只允许 `pps3a|pps5a`，HTTP mock 与 native serial 必须在 dispatch 前使用相同校验。status 返回 `thermalProfileMode`、`thermalProfileResolvedBank` 与 `faultAttentionPending`；`auto` 的 resolved bank 只由 advertised PPS capability class 计算，不使用 live current。该 capability class 必须来自同一 selected PPS APDO：先要求覆盖 `20V`，再优先最大电流、最大电压和最小电压。CH224Q 安全限压和 reserve 仍使用 live current。持久化到非 active bank 不得改变 `thermalProfileResolvedBank`；`faultAttentionAcknowledged=true` 的超时回读只有在 `faultAttentionPending=false` 时才可判为成功。
 - `calibration_config`：`request_id` + calibration fields；response 返回 calibration state。校准领域契约见 `#jt8r2`。

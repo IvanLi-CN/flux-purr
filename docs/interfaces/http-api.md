@@ -293,6 +293,7 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/identity?lease_id=...`
 - `GET /api/v1/devices/:id/network?lease_id=...`
 - `GET /api/v1/devices/:id/status?lease_id=...`
+- `GET /api/v1/devices/:id/lan-pairing/code?lease_id=...`
 - `GET /api/v1/devices/:id/calibration?lease_id=...`
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...`
 - `GET /api/v1/devices/:id/events`
@@ -309,6 +310,8 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `POST /api/v1/devices/:id/flash`
 
 Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`, and leased read endpoints pass it as `?lease_id=...`; JSON-body write endpoints use `leaseId`.
+
+`GET /api/v1/devices/:id/lan-pairing/code?lease_id=...` is USB/devd-only and requires an active native-serial lease. It returns `{ "active": true, "code": "4827" }` only while the physical WiFi Info page remains open; otherwise it returns `{ "active": false }`. The daemon does not persist the code and redacts it from USB transport events. `flux-purr lan pairing-code --device <id>` presents this response for operator-assisted or agent-assisted Web pairing.
 
 `POST /api/v1/devices/:id/bind?lease_id=...` body:
 

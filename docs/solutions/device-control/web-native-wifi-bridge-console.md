@@ -154,7 +154,7 @@ USB serial 采用 newline-delimited JSON frame。建议最小协议能力如下�
 
 Flux Purr 的当前真实控制面有三条正规路径：浏览器 Web Serial、Web -> native `devd` -> USB JSONL，以及 Chromium HTTPS Web -> firmware `net_http`。命令行既可经 `flux-purr-devd` 走 USB JSONL，也可对已配对 LAN record 直接使用同一 HTTP v1 API。固件默认 artifact 包含 `web_serial` 与 `net_http`；WiFi STA 使用 DHCP hostname 与 `_http._tcp.local` DNS-SD，USB 是唯一的初始 WiFi 配置、静态 IPv4、flash 和 token reset 通道。
 
-这条边界很重要：Web 可以复用同一套 domain parser，但 UI capability gate 必须以当前 transport 暴露的能力为准。LAN 读取需要 bearer，写入需要 30 秒 device lease，设备 HTTP task 只通过控制邮箱转交主循环。WiFi provisioning、artifact verify、dry-run flash、USB trace 与 token reset 继续由 `devd` / USB 保护；token 不得写入 URL、trace、导出或错误。
+这条边界很重要：Web 可以复用同一套 domain parser，但 UI capability gate 必须以当前 transport 暴露的能力为准。LAN 读取需要 bearer，写入需要 30 秒 device lease，设备 HTTP task 只通过控制邮箱转交主循环。WiFi Info 页面生成的四位配对码可经持有 USB lease 的 `devd` / CLI 查询，页面离开即失效；该代码不持久化，也不得进入 trace、导出或错误。WiFi provisioning、artifact verify、dry-run flash、USB trace 与 token reset 继续由 `devd` / USB 保护；token 不得写入 URL、trace、导出或错误。
 
 CLI 不应该暴露 lease 细节给普通用户。`flux-purr` 应在每个需要设备控制权的命令中创建、heartbeat 和释放 lease；只有 `devd` HTTP contract 保留 `leaseId` 作为内部能力边界。用户级硬件记忆只记录当前 USB transport，`FLUX_PURR_HOME` 或 OS config 目录保存默认 USB port 与 saved hardware，运行中的 daemon 不因配置文件变化而静默切换端口。
 

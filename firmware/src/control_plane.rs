@@ -1738,6 +1738,7 @@ pub enum UsbRequestOp {
     GetIdentity,
     GetNetwork,
     GetStatus,
+    GetLanPairingCode,
     GetCalibration,
     GetCalibrationJob,
     GetHeaterCurve,
@@ -1751,6 +1752,7 @@ impl UsbRequestOp {
             Self::GetIdentity => "get_identity",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
+            Self::GetLanPairingCode => "get_lan_pairing_code",
             Self::GetCalibration => "get_calibration",
             Self::GetCalibrationJob => "get_calibration_job",
             Self::GetHeaterCurve => "get_heater_curve",
@@ -1807,11 +1809,22 @@ pub enum UsbResponsePayload {
     Identity(Identity),
     Network(NetworkSummary),
     Status(ControlPlaneStatus),
+    LanPairingCode(LanPairingCode),
     Wifi(RedactedWifiConfig),
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
     HeaterCurve(HeaterCurveStateWire),
     Ack,
+}
+
+/// A transient code is intentionally available through the already-authorized
+/// USB control channel so host tooling can complete a physical WiFi Info-page
+/// pairing flow. It never persists and becomes inactive when that page exits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanPairingCode {
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String<4>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1906,6 +1919,7 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_identity") => Ok(UsbRequestOp::GetIdentity),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
+        Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
         Some("get_calibration_job") => Ok(UsbRequestOp::GetCalibrationJob),
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
@@ -2524,6 +2538,34 @@ mod tests {
                 op: UsbRequestOp::ClearLanPairingToken,
             }
         );
+    }
+
+    #[test]
+    fn parses_and_writes_usb_lan_pairing_code_response() {
+        let frame = parse_usb_frame(
+            r#"{"type":"request","requestId":"pairing-code","op":"get_lan_pairing_code"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            UsbFrame::Request {
+                request_id: string("pairing-code"),
+                op: UsbRequestOp::GetLanPairingCode,
+            }
+        );
+
+        let response = UsbFrame::Response {
+            request_id: string("pairing-code"),
+            ok: true,
+            result: Some(UsbResponsePayload::LanPairingCode(LanPairingCode {
+                active: true,
+                code: Some(string("4827")),
+            })),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&response, &mut out).unwrap();
+        assert!(json.contains(r#""lan_pairing_code":{"active":true,"code":"4827"}"#));
     }
 
     #[test]
