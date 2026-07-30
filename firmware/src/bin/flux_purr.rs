@@ -5898,12 +5898,53 @@ fn refresh_boot_status_light(
     started_ms: u64,
     last_output: &mut Option<RgbChannels>,
 ) {
+    refresh_status_light(
+        red,
+        green,
+        blue,
+        started_ms,
+        StatusLightState::Booting,
+        last_output,
+    );
+}
+
+#[cfg(target_arch = "xtensa")]
+fn refresh_status_light(
+    red: &mut Output<'_>,
+    green: &mut Output<'_>,
+    blue: &mut Output<'_>,
+    started_ms: u64,
+    state: StatusLightState,
+    last_output: &mut Option<RgbChannels>,
+) {
     let elapsed_ms = Instant::now().as_millis().saturating_sub(started_ms);
     apply_status_light_output(
         red,
         green,
         blue,
-        status_light_output(StatusLightState::Booting, elapsed_ms),
+        status_light_output(state, elapsed_ms),
+        last_output,
+    );
+}
+
+#[cfg(target_arch = "xtensa")]
+fn refresh_key_test_status_light(
+    red: &mut Output<'_>,
+    green: &mut Output<'_>,
+    blue: &mut Output<'_>,
+    started_ms: u64,
+    last_output: &mut Option<RgbChannels>,
+) {
+    let elapsed_ms = Instant::now().as_millis().saturating_sub(started_ms);
+    let state = select_status_light_state(StatusLightInputs {
+        booting: elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
+        ..StatusLightInputs::default()
+    });
+    apply_status_light_output(
+        red,
+        green,
+        blue,
+        status_light_output(state, elapsed_ms),
         last_output,
     );
 }
@@ -7754,6 +7795,7 @@ async fn run_usb_recovery_control_loop(
     status_light_green: &mut Output<'_>,
     status_light_blue: &mut Output<'_>,
     status_light_started_ms: u64,
+    status_light_state: StatusLightState,
     last_status_light_output: &mut Option<RgbChannels>,
 ) -> ! {
     let mut elapsed_ms = 0_u64;
@@ -7776,11 +7818,12 @@ async fn run_usb_recovery_control_loop(
                 Err(_) => break,
             }
         }
-        refresh_boot_status_light(
+        refresh_status_light(
             status_light_red,
             status_light_green,
             status_light_blue,
             status_light_started_ms,
+            status_light_state,
             last_status_light_output,
         );
         EmbassyTimer::after_millis(20).await;
@@ -8468,7 +8511,7 @@ where
 
     let mut elapsed_ms: u64 = 0;
     loop {
-        refresh_boot_status_light(
+        refresh_key_test_status_light(
             status_light_red,
             status_light_green,
             status_light_blue,
@@ -8663,6 +8706,7 @@ async fn main(_spawner: Spawner) {
             &mut status_light_green,
             &mut status_light_blue,
             status_light_started_ms,
+            StatusLightState::Booting,
             &mut last_status_light_output,
         )
         .await;
@@ -8696,6 +8740,7 @@ async fn main(_spawner: Spawner) {
             &mut status_light_green,
             &mut status_light_blue,
             status_light_started_ms,
+            StatusLightState::Booting,
             &mut last_status_light_output,
         )
         .await;
@@ -9178,6 +9223,13 @@ async fn main(_spawner: Spawner) {
     .is_ok_and(|result| result.is_ok());
     if !initial_frontpanel_ui_ready {
         #[cfg(feature = "web_serial")]
+        let recovery_status_light_state = select_status_light_state(StatusLightInputs {
+            booting: true,
+            thermal_runaway: is_overtemp_fault(current_rtd_fault),
+            sensor_fault: is_sensor_fault(current_rtd_fault),
+            ..StatusLightInputs::default()
+        });
+        #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
             &mut usb_serial,
             &mut usb_rx_line,
@@ -9187,6 +9239,7 @@ async fn main(_spawner: Spawner) {
             &mut status_light_green,
             &mut status_light_blue,
             status_light_started_ms,
+            recovery_status_light_state,
             &mut last_status_light_output,
         )
         .await;
