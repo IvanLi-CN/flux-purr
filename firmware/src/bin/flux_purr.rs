@@ -55,7 +55,7 @@ use flux_purr_firmware::adapters::ch224q;
 use flux_purr_firmware::adapters::ch224q::Status;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
@@ -352,7 +352,7 @@ const HEATER_PWM_PERIOD_TICKS: u16 = 1_599;
 const HEATER_WARMUP_SOFT_START_MS: u64 = 1_000;
 #[cfg(target_arch = "xtensa")]
 const BUZZER_PWM_PERIOD_TICKS: u16 = 999;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_PROTECTION_ALARM_INTERVAL_MS: u64 = 1_000;
@@ -1515,12 +1515,22 @@ fn hold_effective_base_permille(
     hold_power_permille + ((hold_reheat_permille - hold_power_permille) * ratio)
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 struct BuzzerHardwareState {
     frequency_hz: Option<u32>,
     duty_percent: u8,
     generation: u32,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn buzzer_timer_reconfiguration_needed(
+    configured_frequency_hz: u32,
+    next_state: BuzzerHardwareState,
+) -> bool {
+    next_state
+        .frequency_hz
+        .is_some_and(|frequency_hz| frequency_hz != configured_frequency_hz)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5823,6 +5833,7 @@ fn apply_buzzer_output<'a, PWM>(
     peripheral_clock: &PeripheralClockConfig,
     output: BuzzerOutput,
     last_state: &mut BuzzerHardwareState,
+    configured_frequency_hz: &mut u32,
 ) where
     PWM: SetDutyCycle,
 {
@@ -5835,11 +5846,10 @@ fn apply_buzzer_output<'a, PWM>(
         return;
     }
 
-    let restart_needed = last_state.generation != next_state.generation
-        || last_state.frequency_hz != next_state.frequency_hz;
-
-    if restart_needed {
-        let next_frequency_hz = next_state.frequency_hz.unwrap_or(BUZZER_IDLE_FREQUENCY_HZ);
+    if buzzer_timer_reconfiguration_needed(*configured_frequency_hz, next_state) {
+        let next_frequency_hz = next_state
+            .frequency_hz
+            .expect("timer reconfiguration requires an audible buzzer frequency");
         let timer_cfg = peripheral_clock
             .timer_clock_with_frequency(
                 BUZZER_PWM_PERIOD_TICKS,
@@ -5850,8 +5860,10 @@ fn apply_buzzer_output<'a, PWM>(
         buzzer_timer.stop();
         buzzer_timer.set_counter(0, CounterDirection::Increasing);
         buzzer_timer.start(timer_cfg);
+        *configured_frequency_hz = next_frequency_hz;
     }
 
+    // Silence is duty=0, so preserve the carrier across same-frequency pulse gaps.
     let _ = buzzer_pwm.set_duty_cycle_percent(next_state.duty_percent);
     info!(
         "buzzer output -> freq_hz={=u32} duty={=u8}% gen={=u32}",
@@ -9165,6 +9177,7 @@ async fn main(_spawner: Spawner) {
     let mut next_protection_alarm_ms: Option<u64> = None;
     let mut next_attention_reminder_ms: Option<u64> = None;
     let mut buzzer_output_applied = BuzzerHardwareState::default();
+    let mut buzzer_timer_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
     if last_fault_present {
         let _ = buzzer.play(BuzzerCueId::ProtectionAlarm, 0);
         next_protection_alarm_ms = Some(BUZZER_PROTECTION_ALARM_INTERVAL_MS);
@@ -9175,6 +9188,7 @@ async fn main(_spawner: Spawner) {
         &pwm_clock_cfg,
         buzzer.tick(0),
         &mut buzzer_output_applied,
+        &mut buzzer_timer_frequency_hz,
     );
     let initial_status_light_elapsed_ms = Instant::now()
         .as_millis()
@@ -9984,6 +9998,7 @@ async fn main(_spawner: Spawner) {
             &pwm_clock_cfg,
             buzzer.tick(elapsed_ms),
             &mut buzzer_output_applied,
+            &mut buzzer_timer_frequency_hz,
         );
 
         let status_light_elapsed_ms = Instant::now()
@@ -10022,6 +10037,93 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_frequency_buzzer_retrigger_does_not_reconfigure_timer() {
+        let configured_frequency_hz = 1_080;
+        let active_state = BuzzerHardwareState {
+            frequency_hz: Some(1_080),
+            duty_percent: 50,
+            generation: 7,
+        };
+        let retriggered_state = BuzzerHardwareState {
+            generation: 8,
+            ..active_state
+        };
+
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            retriggered_state
+        ));
+    }
+
+    #[test]
+    fn buzzer_timer_keeps_the_carrier_through_ui_input_silence() {
+        let silent_state = BuzzerHardwareState {
+            frequency_hz: None,
+            duty_percent: 0,
+            generation: 1,
+        };
+        let ui_input_state = BuzzerHardwareState {
+            frequency_hz: Some(1_080),
+            duty_percent: 50,
+            generation: 2,
+        };
+        let heater_on_state = BuzzerHardwareState {
+            frequency_hz: Some(1_240),
+            duty_percent: 50,
+            generation: 3,
+        };
+
+        assert!(buzzer_timer_reconfiguration_needed(
+            BUZZER_IDLE_FREQUENCY_HZ,
+            ui_input_state
+        ));
+        assert!(!buzzer_timer_reconfiguration_needed(
+            ui_input_state.frequency_hz.unwrap(),
+            silent_state
+        ));
+        assert!(!buzzer_timer_reconfiguration_needed(
+            ui_input_state.frequency_hz.unwrap(),
+            ui_input_state
+        ));
+        assert!(buzzer_timer_reconfiguration_needed(
+            ui_input_state.frequency_hz.unwrap(),
+            heater_on_state
+        ));
+    }
+
+    #[test]
+    fn fast_ui_input_repeat_reuses_the_carrier_after_its_45ms_silence_gap() {
+        let mut buzzer = BuzzerController::new();
+        let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
+        let hardware_state = |output: BuzzerOutput| BuzzerHardwareState {
+            frequency_hz: output.frequency_hz,
+            duty_percent: output.duty_percent,
+            generation: output.generation,
+        };
+
+        let first_tone = hardware_state(buzzer.play(BuzzerCueId::UiInput, 0));
+        assert!(buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            first_tone
+        ));
+        configured_frequency_hz = first_tone.frequency_hz.unwrap();
+
+        let silence = hardware_state(buzzer.tick(45));
+        assert_eq!(silence.frequency_hz, None);
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            silence
+        ));
+
+        let fast_repeat_tone = hardware_state(buzzer.play(BuzzerCueId::UiInput, 60));
+        assert_eq!(fast_repeat_tone.frequency_hz, Some(1_080));
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            fast_repeat_tone
+        ));
+    }
 
     struct FakeUsbTx {
         capacity: usize,

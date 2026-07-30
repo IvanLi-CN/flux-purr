@@ -109,7 +109,7 @@
   - buzzer attention has only two owner-facing states: active thermal runaway and thermal-runaway acknowledgement pending
   - active thermal runaway (`temp >= 420°C`) replays the protection cue every `1s`; after temperature returns below `420°C`, an unacknowledged alert replays the reminder cue every `10s`
   - front-panel input or CLI/app runtime acknowledgement clears pending attention and the forced-fan latch, but cannot silence or clear active absolute overtemperature protection
-  - retriggering the same cue always restarts from the first note; the hardware PWM must not continue from the previous half-played frequency stage
+  - retriggering the same cue always restarts logical playback from the first note; when that note uses the active carrier frequency, GPIO48 retains its MCPWM phase across duty-zero silence gaps. A different next audible frequency must reconfigure the timer so a previous frequency stage cannot continue
 - PD policy:
   - default build requests `20 V` from `CH224Q`
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
