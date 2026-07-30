@@ -64,13 +64,16 @@ const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
-const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_millis(750);
+// Opening an ESP32-S3 USB Serial/JTAG port can reset the device. Read-only
+// requests are idempotent and must remain alive through USB enumeration,
+// front-panel startup, and PD bring-up so the first native CLI query is usable.
+const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
-// A read-only status request may be retried once before its 750ms deadline.
 // Retrying every 150ms queues duplicate JSONL commands on a momentarily slow
 // USB-JTAG link, which then creates multi-second gaps in the HIL sample stream.
+// The 500ms cadence accommodates a full startup window without flooding it.
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SERIAL_LINE_LIMIT: usize = 8 * 1024;
 #[cfg(unix)]
@@ -8485,7 +8488,7 @@ mod tests {
             SERIAL_RPC_TIMEOUT
         );
         assert!(SERIAL_SILENT_RETRY_DELAY < SERIAL_READ_ONLY_RPC_TIMEOUT);
-        assert!(SERIAL_SILENT_RETRY_DELAY.saturating_mul(2) >= SERIAL_READ_ONLY_RPC_TIMEOUT);
+        assert!(SERIAL_SILENT_RETRY_DELAY.saturating_mul(2) < SERIAL_READ_ONLY_RPC_TIMEOUT);
         assert!(should_retry_silent_serial_request(
             SerialRetryPolicy::ReadOnly,
             now + SERIAL_SILENT_RETRY_DELAY,
