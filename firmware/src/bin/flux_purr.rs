@@ -9215,6 +9215,26 @@ async fn main(_spawner: Spawner) {
         buzzer.tick(0),
         &mut buzzer_output_applied,
     );
+    let initial_status_light_elapsed_ms = Instant::now()
+        .as_millis()
+        .saturating_sub(status_light_started_ms);
+    let initial_status_light_state = select_status_light_state(StatusLightInputs {
+        booting: initial_status_light_elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
+        thermal_runaway: is_overtemp_fault(current_rtd_fault),
+        sensor_fault: is_sensor_fault(current_rtd_fault),
+        heater_interlocked: ui_state.heater_lock_reason
+            == Some(HeaterLockReason::ThermalModelMissingForSourceClass),
+        heater_enabled: ui_state.heater_enabled,
+        fan_enabled: fan_command.enabled,
+        ..StatusLightInputs::default()
+    });
+    apply_status_light_output(
+        &mut status_light_red,
+        &mut status_light_green,
+        &mut status_light_blue,
+        status_light_output(initial_status_light_state, initial_status_light_elapsed_ms),
+        &mut last_status_light_output,
+    );
     let initial_frontpanel_ui_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
         flush_ui(&mut display, canvas, &ui_state),
@@ -9222,13 +9242,6 @@ async fn main(_spawner: Spawner) {
     .await
     .is_ok_and(|result| result.is_ok());
     if !initial_frontpanel_ui_ready {
-        #[cfg(feature = "web_serial")]
-        let recovery_status_light_state = select_status_light_state(StatusLightInputs {
-            booting: true,
-            thermal_runaway: is_overtemp_fault(current_rtd_fault),
-            sensor_fault: is_sensor_fault(current_rtd_fault),
-            ..StatusLightInputs::default()
-        });
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
             &mut usb_serial,
@@ -9239,7 +9252,7 @@ async fn main(_spawner: Spawner) {
             &mut status_light_green,
             &mut status_light_blue,
             status_light_started_ms,
-            recovery_status_light_state,
+            initial_status_light_state,
             &mut last_status_light_output,
         )
         .await;
