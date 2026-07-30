@@ -61,9 +61,20 @@ export const ChromiumPairing: Story = {
   args: { pairDevice: mockPairing },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await userEvent.type(canvas.getByLabelText('四位配对码'), '4827')
-    await expect(canvas.getByRole('button', { name: '配对设备' })).toBeEnabled()
-    await userEvent.click(canvas.getByRole('button', { name: '配对设备' }))
+    const addressInput = canvas.getByLabelText('设备地址')
+    const codeInput = canvas.getByLabelText('四位配对码')
+    const pairButton = canvas.getByRole('button', { name: '配对设备' })
+
+    expect(pairButton.getBoundingClientRect().height).toBe(
+      addressInput.getBoundingClientRect().height
+    )
+    expect(codeInput.getBoundingClientRect().height).toBe(
+      addressInput.getBoundingClientRect().height
+    )
+
+    await userEvent.type(codeInput, '4827')
+    await expect(pairButton).toBeEnabled()
+    await userEvent.click(pairButton)
     await expect(canvas.getByText('已连接 flux-purr-001122334455')).toBeVisible()
   },
 }
