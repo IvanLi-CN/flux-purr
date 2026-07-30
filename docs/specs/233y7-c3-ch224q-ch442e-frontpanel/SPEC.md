@@ -60,6 +60,9 @@
 - `GPIO35` 必须直接拥有风扇 `EN` 控制路径，允许在 MCU 侧原始控制网与实际 `FAN_EN` 之间插入保护/串联电阻；`GPIO36` 必须直连 `FAN_PWM`。
 - `GPIO37/38/39` 必须分别冻结为 `RGB_B_PWM`、`RGB_G_PWM`、`RGB_R_PWM` 三路独立状态灯 PWM 输出。
 - 当前 populated baseline 只允许装配 1 颗 RGB 状态灯；若主板网表保留第二颗并联 RGB footprint，则它必须标记为 `DNI`，除非后续给第二颗补齐独立限流电阻。
+- RGB 状态灯必须按 `docs/hardware/s3-frontpanel-baseline.md` 的灯语表表达启动、待机、加热、冷却、校准、heater interlock 与安全 fault。热失控、热失控待确认、测温 fault、散热关闭过温 lock 的优先级必须高于所有普通工作态；受支持的 fixed-PD fallback 不得被误报为 fault。
+- `BOOT` 进入 ROM 下载模式时的绿色常亮为保留指示；应用固件不得在任何普通或故障灯语中输出纯绿色。待机 / idle 固定使用青色常亮。
+- `LED1` 为共阳极连接，`GPIO39/38/37` 必须以低电平点亮 R/G/B 通道。固件初始化阶段必须先将三路置高，避免 reset/boot 期间误亮；状态灯不得占用风扇、加热器或蜂鸣器已经保留的 MCPWM operator。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
 - `PT1000` 直连 ADC 的基线外围固定为：`R_REF=2.49 kOhm (0.1%)`、`R_SERIES=2.2 kOhm`、`C_ADC=100 nF`，并在 MCU ADC 侧增加低漏电 ESD 钳位。
@@ -93,6 +96,7 @@
 - LCD `DC/MOSI/SCLK/BLK` 与 `mains-aegis` 对齐为 `GPIO10/11/12/13`，`RES/CS` 继续由 MCU 直连，其中 `BLK` 支持 PWM。
 - Buzzer 输出由 `GPIO48` 提供；固件可将其作为普通 beep GPIO 或 PWM/LEDC 音调输出使用。
 - RGB 状态灯由 `GPIO39/38/37` 提供 `R/G/B` 三路 PWM；固件可按状态机需要输出静态颜色或亮度调制。
+- RGB 灯语由纯状态机根据 runtime 的安全状态、运行状态与单调时钟计算；fault 优先级固定为热失控、热失控待确认、测温 fault、散热关闭过温 lock、heater interlock，之后才是校准、启动、加热、冷却和待机。
 - `PT1000` 通过 `GPIO2` 进入 MCU ADC；固件按校准后的 ADC 电压换算温度，开路/短路应视为故障态而不是有效温度。
 - `GPIO35` 的风扇使能控制在实现上可以表现为 `FAN_EN_RAW -> series resistor -> FAN_EN`，但 firmware 仍将其视为单一使能输出所有权。
 - 设备状态快照继续输出 `frontpanel_key` 与 PD/风扇字段。
@@ -112,6 +116,7 @@
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Device REST API | HTTP | external | Modify | ../../interfaces/http-api.md | firmware + web | web console | `board` 示例切换为 `esp32-s3` |
 | Device status model | Rust type | internal | Modify | /firmware/src/lib.rs | firmware | firmware + web mock | 移除 expander 类型依赖，保留键值语义 |
+| `status_light::StatusLightInputs` + `status_light_output` | Rust firmware module | internal | New | `docs/hardware/s3-frontpanel-baseline.md` | `flux-purr` runtime | unit tests | deterministic RGB state selection and cadence |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -121,6 +126,10 @@
 
 - Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 24 且不重复。
 - Given RGB 状态灯 GPIO 分配已冻结，When 检查 board profile 常量，Then `RGB_B/G/R` 分别固定为 `GPIO37/38/39`。
+- Given `LED1` 共阳极连接，When firmware 输出 RGB 灯语，Then 选中的颜色通道必须以 GPIO low 点亮，未选通道保持 high。
+- Given 主人保持 `BOOT` 进入 ROM 下载模式，When 下载器显示绿色常亮，Then 应用固件的 Ready、加热、冷却、校准、interlock 与 fault 灯语均不得输出纯绿色。
+- Given 热失控、热失控待确认、RTD 测温 fault 或散热关闭过温 lock，When 它们与任意普通运行态同时出现，Then LED 必须显示对应 fault 灯语而非待机、加热、冷却或校准灯语。
+- Given runtime 运行于 supported fixed-PD fallback，When 无其他安全 fault，Then LED 必须继续表达当前工作态，且不得显示故障灯语。
 - Given heater 开关 BOM 与归档网表，When 检查栅极网络和批准料号，Then `R_GATE = 68 Ohm`、`R_GPD = 100 kOhm`，且主料与替代料共享 `SOT669 / LFPAK56` 引脚定义和 `40 V` 漏源耐压等级。
 - Given CH224Q 适配层，When 对 `0x22/0x23` 进行解析并编码 `5/9/12/15/20/28V`，Then 地址解析与寄存器编码结果正确。
 - Given VIN sense 方案，When 按 `56 kOhm / 5.1 kOhm` 计算 `28V` 输入，Then ADC 引脚电压不高于 `2.337V`。
@@ -156,6 +165,14 @@
 - `docs/hardware/tps62933-dual-rail-power-design.md`
 - `README.md`
 - `firmware/README.md`
+
+## Visual Evidence
+
+PR: none
+
+![RGB status-light language](./assets/status-light-language.png)
+
+The host-side preview calls `status_light_output` directly. Each row shows its state from left to right in `140 ms` samples; dark circles are channels off at that sample.
 
 ## 实现里程碑（Milestones / Delivery checklist）
 

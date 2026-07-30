@@ -159,6 +159,7 @@
 - PD 状态只做观测：即使 PD 丢失或降档，也不自动清空 `heater_enabled`。但 PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
 - 手动 PPS 覆盖激活期间，自动 heater backend 不再写 CH224Q 电压；固定 PD fallback 仍可继续使用 `GPIO47` PWM duty，`pps-mos` 仍可继续由 PID/MOS gate 表达加热输出。
 - 温度达到 `420°C` 时，runtime 进入 `热失控`：立即将 heater 输出归零，并每隔 `1s` 播放一次热失控提示。用户可以通过前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 确认收到告警；确认后停止待确认锁定与强制风扇状态，但温度仍为 `>=420°C` 时，绝对过温保护、停热和 `1s` 热失控提示不得解除。温度回到 `<420°C` 后，若告警已确认则恢复一般状态；若尚未确认则进入 `热失控待确认`，每 `10s` 蜂鸣提醒一次，并拒绝任何 heater arm 请求。强制风扇期间沿用现有主动降温包线：`>60°C` 全速、`40~60°C` 为 `50%`；温度 `<40°C` 或收到告警确认时结束强制风扇状态，两者任一先发生即可。风扇状态解除不等于自动重新 arm heater。
+- 前面板 RGB 指示灯必须复用相同的安全真相源：热失控显示红色急闪，已回落但待确认的热失控显示红色单闪；`SensorShort / SensorOpen / AdcReadFailed` 显示紫色双闪，散热关闭过温 lock 显示黄色三闪。普通状态不得覆盖这些灯语。
 
 ### Edge cases / errors
 
@@ -207,6 +208,7 @@ None
 - Given 热失控温度已回到 `<420°C`，When 告警此前已确认，Then runtime 恢复一般状态且 heater 保持关闭；When 告警尚未确认，Then 进入 `faultAttentionPending=true` 的热失控待确认状态、每 `10s` 蜂鸣一次，并继续拒绝 heater arm。
 - Given 热失控已锁存强制风扇，When 温度为 `>60°C`，Then 风扇必须全速运行；When 温度为 `40~60°C`，Then 风扇必须以 `50%` 运行；When 温度回到 `<40°C` 或收到告警确认，Then 强制风扇状态立即结束；When 仅温度回到 `<40°C` 但告警仍未确认，Then heater arm 禁止必须继续保持。
 - Given `SensorShort / SensorOpen / AdcReadFailed`，When 测温保护停热，Then runtime 必须报告测温无效并保留最后有效 owner-facing 温度，但不得蜂鸣、不得设置 `faultAttentionPending`。
+- Given 热失控、热失控待确认、测温 fault 或散热关闭过温 lock，When runtime 同时处于加热、冷却、校准或启动状态，Then RGB 状态灯必须仍显示对应安全灯语。
 - Given heater runtime 正常运行，When RTD 控制周期触发，Then 控制环必须以单调时钟按 `20Hz` 更新，每个周期聚合 `64` 次 ADC conversion，并把分数毫伏均值贯穿 calibration 与 PT1000 转换；RTD 转换总频率必须为至少 `1280Hz`。`tempFilterAlphaPermille` 默认值为 `750`，且必须继续由 thermal profile API/EEPROM 控制。status 必须同步发布 `heaterControlIntervalMs` 与 `heaterControlCycleMs`，且 HIL 原始样本必须保留这两个字段。
 - Given native/Web Serial status 被读取，When 固件发布当前温度，Then `boardTempCenti/currentTempC` 必须直接由内部浮点 RTD 测量值四舍五入到 `0.01°C`，不得从前面板 `0.1°C` 显示值反推；前面板显示精度不得限制控制环或遥测精度。When RTD 进入 fault，Then owner-facing 温度显示必须保留最近一次有效读数，而不是写成 `0°C`。
 - Given Dashboard 过温告警，When 页面刷新，Then 告警只占据 SET 行并以两关键帧闪烁，FAN 行不切换到告警文案。

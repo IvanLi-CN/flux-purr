@@ -2,7 +2,10 @@
 #![cfg_attr(target_arch = "xtensa", no_main)]
 
 #[cfg(target_arch = "xtensa")]
-use core::panic::PanicInfo;
+use core::{
+    panic::PanicInfo,
+    sync::atomic::{AtomicU8, Ordering},
+};
 #[cfg(target_arch = "xtensa")]
 use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
@@ -117,6 +120,11 @@ use flux_purr_firmware::memory::{
     ThermalControlProfilePointConfig, ThermalControlProfileSettingsConfig, ThermalPlantRawAnchor,
     ThermalPlantRawTransaction, ThermalProfileBank, ThermalProfileMode,
     heater_resistance_ohms_from_curve, project_thermal_plant,
+};
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::status_light::{
+    RgbChannels, StatusLightInputs, StatusLightState, select_status_light_state,
+    status_light_output,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::thermal_plant::{ThermalPlantControlInput, ThermalPlantController};
@@ -351,6 +359,8 @@ const BUZZER_PROTECTION_ALARM_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
+const STATUS_LIGHT_BOOT_DURATION_MS: u64 = 1_000;
+#[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(any(target_arch = "xtensa", test))]
 // Sample each 1 ms phase across the full 100 Hz MOS period. A contiguous ADC
@@ -427,6 +437,8 @@ const CH224Q_PD_SETTLE_MS: u64 = 150;
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
+#[cfg(target_arch = "xtensa")]
+const STATUS_LIGHT_BOOT_REFRESH_MS: u64 = 50;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5851,6 +5863,103 @@ fn apply_buzzer_output<'a, PWM>(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn apply_status_light_output(
+    red: &mut Output<'_>,
+    green: &mut Output<'_>,
+    blue: &mut Output<'_>,
+    output: RgbChannels,
+    last_output: &mut Option<RgbChannels>,
+) {
+    if last_output.is_some_and(|last| last == output) {
+        return;
+    }
+
+    // LED1 is common-anode: low GPIO output sinks the selected color channel.
+    if output.red {
+        red.set_low();
+    } else {
+        red.set_high();
+    }
+    if output.green {
+        green.set_low();
+    } else {
+        green.set_high();
+    }
+    if output.blue {
+        blue.set_low();
+    } else {
+        blue.set_high();
+    }
+    *last_output = Some(output);
+}
+
+#[cfg(target_arch = "xtensa")]
+static STATUS_LIGHT_STATE: AtomicU8 = AtomicU8::new(StatusLightState::Booting as u8);
+
+#[cfg(target_arch = "xtensa")]
+fn set_status_light_state(state: StatusLightState) {
+    STATUS_LIGHT_STATE.store(state as u8, Ordering::Relaxed);
+}
+
+#[cfg(target_arch = "xtensa")]
+fn status_light_state_from_code(code: u8) -> StatusLightState {
+    match code {
+        0 => StatusLightState::Booting,
+        1 => StatusLightState::Ready,
+        2 => StatusLightState::Heating,
+        3 => StatusLightState::Cooling,
+        4 => StatusLightState::Calibration,
+        5 => StatusLightState::HeaterInterlocked,
+        6 => StatusLightState::CoolingDisabledOvertemp,
+        7 => StatusLightState::SensorFault,
+        8 => StatusLightState::ThermalRunawayAttentionPending,
+        9 => StatusLightState::ThermalRunaway,
+        _ => StatusLightState::Booting,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[embassy_executor::task]
+async fn run_status_light_task(
+    mut red: Output<'static>,
+    mut green: Output<'static>,
+    mut blue: Output<'static>,
+    started_ms: u64,
+) -> ! {
+    let mut last_output = None;
+    loop {
+        refresh_status_light(
+            &mut red,
+            &mut green,
+            &mut blue,
+            started_ms,
+            status_light_state_from_code(STATUS_LIGHT_STATE.load(Ordering::Relaxed)),
+            &mut last_output,
+        );
+        EmbassyTimer::after_millis(20).await;
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn refresh_status_light(
+    red: &mut Output<'_>,
+    green: &mut Output<'_>,
+    blue: &mut Output<'_>,
+    started_ms: u64,
+    state: StatusLightState,
+    last_output: &mut Option<RgbChannels>,
+) {
+    let elapsed_ms = Instant::now().as_millis().saturating_sub(started_ms);
+    apply_status_light_output(
+        red,
+        green,
+        blue,
+        status_light_output(state, elapsed_ms),
+        last_output,
+    );
+}
+
+#[cfg(target_arch = "xtensa")]
 fn sync_frontpanel_runtime_state(
     ui_state: &mut FrontPanelUiState,
     fan_decision: FanPolicyDecision,
@@ -7692,7 +7801,9 @@ async fn run_usb_recovery_control_loop(
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     memory_config: &MemoryConfig,
+    status_light_state: StatusLightState,
 ) -> ! {
+    set_status_light_state(status_light_state);
     let mut elapsed_ms = 0_u64;
     loop {
         loop {
@@ -8322,8 +8433,10 @@ fn read_ch224q_power_data(
 async fn await_ch224q_pd_ready(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     address: Address,
+    mut refresh_boot_light: impl FnMut(),
 ) -> Option<(u8, Status, u8, u16)> {
     for attempt in 1..=CH224Q_STATUS_POLL_ATTEMPTS {
+        refresh_boot_light();
         let Some(status_raw) = read_ch224q_register(i2c, address, ch224q::STATUS_REGISTER) else {
             info!(
                 "ch224q status read failed addr=0x{=u8:02x} attempt={=u8}/{=u8}",
@@ -8331,7 +8444,7 @@ async fn await_ch224q_pd_ready(
                 attempt,
                 CH224Q_STATUS_POLL_ATTEMPTS,
             );
-            EmbassyTimer::after_millis(CH224Q_STATUS_POLL_DELAY_MS).await;
+            wait_for_ch224q_status_poll(&mut refresh_boot_light).await;
             continue;
         };
         let current_raw =
@@ -8350,10 +8463,18 @@ async fn await_ch224q_pd_ready(
         if status.pd_active && !status.epr_active {
             return Some((status_raw, status, current_raw, current_ma));
         }
-        EmbassyTimer::after_millis(CH224Q_STATUS_POLL_DELAY_MS).await;
+        wait_for_ch224q_status_poll(&mut refresh_boot_light).await;
     }
 
     None
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn wait_for_ch224q_status_poll(refresh_boot_light: &mut impl FnMut()) {
+    for _ in 0..(CH224Q_STATUS_POLL_DELAY_MS / STATUS_LIGHT_BOOT_REFRESH_MS) {
+        refresh_boot_light();
+        EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS).await;
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8361,6 +8482,7 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
+    status_light_started_ms: u64,
 ) -> !
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -8383,6 +8505,17 @@ where
 
     let mut elapsed_ms: u64 = 0;
     loop {
+        set_status_light_state(
+            if Instant::now()
+                .as_millis()
+                .saturating_sub(status_light_started_ms)
+                < STATUS_LIGHT_BOOT_DURATION_MS
+            {
+                StatusLightState::Booting
+            } else {
+                StatusLightState::Ready
+            },
+        );
         EmbassyTimer::after_millis(20).await;
         elapsed_ms = elapsed_ms.saturating_add(20);
 
@@ -8431,6 +8564,18 @@ async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(config);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
+    let status_light_red = Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
+    let status_light_green = Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
+    let status_light_blue = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
+    let status_light_started_ms = Instant::now().as_millis();
+    _spawner
+        .spawn(run_status_light_task(
+            status_light_red,
+            status_light_green,
+            status_light_blue,
+            status_light_started_ms,
+        ))
+        .expect("failed to spawn status-light task");
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
     #[cfg(feature = "web_serial")]
     let mut usb_serial = RawUsbSerialJtag::new(peripherals.USB_DEVICE);
@@ -8552,6 +8697,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &usb_boot_memory_config,
+            StatusLightState::Booting,
         )
         .await;
 
@@ -8580,6 +8726,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &usb_boot_memory_config,
+            StatusLightState::Booting,
         )
         .await;
 
@@ -8595,6 +8742,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_tx_buf,
             &usb_boot_memory_config,
         );
+        set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(20).await;
     }
     info!(
@@ -8612,7 +8760,7 @@ async fn main(_spawner: Spawner) {
             Output::new(peripherals.GPIO36, Level::Low, OutputConfig::default());
         _fan_pwm_safe.set_low();
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
-        run_key_test_runtime(&mut display, canvas, inputs).await;
+        run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await;
     }
 
     let mut pd_i2c = I2c::new(
@@ -8638,6 +8786,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_tx_buf,
             &usb_boot_memory_config,
         );
+        set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(10).await;
     }
     let restored_memory_record = load_memory_record(&mut pd_i2c, &mut flash_storage);
@@ -8745,7 +8894,10 @@ async fn main(_spawner: Spawner) {
         BUZZER_PWM_PERIOD_TICKS,
     );
     let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
-        await_ch224q_pd_ready(&mut pd_i2c, ch224q_address).await
+        await_ch224q_pd_ready(&mut pd_i2c, ch224q_address, || {
+            set_status_light_state(StatusLightState::Booting);
+        })
+        .await
     {
         info!(
             "heater runtime ready: gpio47 freq={=u32}Hz target={=i16}~{=i16}C cooling_lock>{=i16}C hard_cutoff={=i16}C pd_status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
@@ -9024,6 +9176,20 @@ async fn main(_spawner: Spawner) {
         buzzer.tick(0),
         &mut buzzer_output_applied,
     );
+    let initial_status_light_elapsed_ms = Instant::now()
+        .as_millis()
+        .saturating_sub(status_light_started_ms);
+    let initial_status_light_state = select_status_light_state(StatusLightInputs {
+        booting: initial_status_light_elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
+        thermal_runaway: is_overtemp_fault(current_rtd_fault),
+        sensor_fault: is_sensor_fault(current_rtd_fault),
+        heater_interlocked: ui_state.heater_lock_reason
+            == Some(HeaterLockReason::ThermalModelMissingForSourceClass),
+        heater_enabled: ui_state.heater_enabled,
+        fan_enabled: fan_command.enabled,
+        ..StatusLightInputs::default()
+    });
+    set_status_light_state(initial_status_light_state);
     let initial_frontpanel_ui_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
         flush_ui(&mut display, canvas, &ui_state),
@@ -9037,6 +9203,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &memory_config,
+            initial_status_light_state,
         )
         .await;
 
@@ -9818,6 +9985,23 @@ async fn main(_spawner: Spawner) {
             buzzer.tick(elapsed_ms),
             &mut buzzer_output_applied,
         );
+
+        let status_light_elapsed_ms = Instant::now()
+            .as_millis()
+            .saturating_sub(status_light_started_ms);
+        let status_light_state = select_status_light_state(StatusLightInputs {
+            booting: status_light_elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
+            thermal_runaway: is_overtemp_fault(current_rtd_fault),
+            thermal_runaway_attention_pending: attention_pending_after_fault_clear,
+            sensor_fault: is_sensor_fault(current_rtd_fault),
+            cooling_disabled_overtemp: cooling_disabled_lock_latched,
+            heater_interlocked: ui_state.heater_lock_reason
+                == Some(HeaterLockReason::ThermalModelMissingForSourceClass),
+            calibration_active: calibration_runtime_state.mode != CalibrationMode::Off,
+            heater_enabled: ui_state.heater_enabled,
+            fan_enabled: fan_command.enabled,
+        });
+        set_status_light_state(status_light_state);
 
         if needs_redraw {
             flush_ui(&mut display, canvas, &ui_state)
