@@ -6919,7 +6919,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
         std::fs::write(
             dir.path().join("firmware/partitions.csv"),
-            "flux_cfg,data,0x06,0x110000,0x2000",
+            "flux_cfg,data,0x06,0x210000,0x2000",
         )
         .unwrap();
         let commands =
@@ -6973,7 +6973,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("firmware")).unwrap();
         std::fs::write(
             dir.path().join("firmware/partitions.csv"),
-            "flux_cfg,data,0x06,0x110000,0x2000",
+            "flux_cfg,data,0x06,0x210000,0x2000",
         )
         .unwrap();
         std::fs::write(

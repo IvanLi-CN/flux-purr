@@ -14387,7 +14387,13 @@ mod tests {
         assert_eq!(FLASH_MEMORY_REGION_SIZE, 2 * FLASH_MEMORY_ERASE_SECTOR_SIZE);
         assert_eq!(FLASH_MEMORY_PARTITION_LABEL, "flux_cfg");
         let partition_table = include_str!("../../partitions.csv");
-        assert!(partition_table.contains("flux_cfg,  data, 0x06,    0x110000, 0x2000"));
+        assert!(partition_table.contains("flux_cfg,  data, 0x06,    0x210000, 0x2000"));
+
+        let expected = esp_idf_part::PartitionTable::try_from(partition_table.as_bytes().to_vec())
+            .unwrap()
+            .to_bin()
+            .unwrap();
+        assert_eq!(expected.as_slice(), include_bytes!("../../partitions.bin"));
     }
 
     #[test]
