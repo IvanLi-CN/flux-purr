@@ -1,10 +1,14 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-07-30
+
+- ESP32-S3 LAN control-plane 的 executor 内存契约固定为 `task-arena-size-81920`。测量的主循环任务为 `68,456` bytes，network/WiFi/mDNS/HTTP listener 合计约 `4.9 KiB`，总计约 `73.3 KiB`。HTTP listener 的大对象改为单客户端静态工作区，避免 `HttpGate`、邮箱命令和控制响应跨 `await` 时把 task arena 耗尽；WiFi 初始化后移至 USB recovery 初始化之后，使 LAN 启动失败不会阻断 USB JSONL 控制。
+
 ## 2026-07-27
 
 - 纠正 CH224Q PPS APDO 选择合同：当多个 PPS APDO 都覆盖 `20V` 时，firmware 现在保持 capability 来自同一个 APDO，并按最大电流、最大电压、最小电压排序。此前宽范围 `3A` APDO 会先于 `20V/5A` APDO 被选中，导致 `auto` 100W source 错误解析为低电流 capability；新回归测试覆盖 `3.3~21V/3A + 5~20V/5A` 组合，要求回读 `5000..20000mV / 5000mA`。
 - 使用授权 `/dev/cu.usbmodem2111401`、IsolaPurr `f293cc9c139e` / `http://192.168.31.224` 和已更换的 5A eMarked 线材，完成该修复的 real-flash 与短 HIL receipt。source 保持 `100W`、PD/PPS、`pd_pps_5a=true`、`pps3_limit_ma=5000`、`tps_mode=auto_follow`；设备 readback 为 `ppsCapabilityMaxMa=5000`、`currentMa=5000`、`thermalProfileResolvedBank=pps5a` 且无 manual PPS override。`100°C / 120s` 短测约 `30s` 到达 `99.27°C`，后续采样在约 `99.3~99.9°C`；未见传感器硬 fault、过温、runtime reset、source stale 或端口切换。结束回读已关热、开启主动冷却。该记录不是 profile 调优、EEPROM save 或 frozen/accepted baseline。
-- 更正 `2026-05-25` 的 executor arena 历史：`task-arena-size-32768` 不能容纳当前 `flux-purr` 主任务的 `33,344`-byte allocation，仍会在 pre-main 阶段触发 `task arena is full` panic 并被 RTC WDT 重启。固件现使用 `task-arena-size-65536`，为该任务保留足够静态 arena。
+- 更正 `2026-05-25` 的 executor arena 历史：`task-arena-size-32768` 不能容纳当前 `flux-purr` 主任务的 `33,344`-byte allocation，仍会在 pre-main 阶段触发 `task arena is full` panic 并被 RTC WDT 重启。后续 LAN control-plane 的完整内存契约见 `2026-07-30` 条目。
 
 ## 2026-07-19
 

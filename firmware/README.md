@@ -198,6 +198,7 @@
 
 - The repository-root `.cargo/config.toml` carries the `build-std` and `linkall.x` settings required for `--manifest-path firmware/Cargo.toml` invocations from the repo root.
 - The same config bounds the ESP WiFi station RX/TX pools for the low-throughput LAN control plane. If WiFi driver or LAN task startup cannot be completed, firmware publishes a network error and continues the USB JSONL recovery/control loop.
+- The ESP32-S3 executor reserves an 80 KiB shared task arena for the main loop and LAN tasks. HTTP request/response buffers and mailbox staging use one static single-client workspace so they do not consume async task-frame capacity.
 - The repository-root `espflash.toml` pins `firmware/partitions.csv`, so ELF flashing installs the dedicated `flux_cfg` fallback partition together with the normal NVS, PHY, and factory-app layout. `firmware/partitions.bin` is the checked-in equivalent for the supported raw-app devd path: devd writes it at `0x8000` before the app and then resets the target.
 - `firmware/build.rs` adds `defmt.x` for Xtensa builds, and `mcu-agentd.toml` stays pinned to `espflash` + `defmt` decoding.
 - Host checks keep using the std preview path so repository checks can run without Xtensa hardware.
