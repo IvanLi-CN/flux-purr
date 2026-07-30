@@ -117,8 +117,9 @@ The indicator is a safety signal, not a duplicate of the display. Faults always 
 
 | Runtime condition | LED language |
 | --- | --- |
+| ROM download mode (`BOOT` held) | Solid green, reserved for the downloader; application firmware never emits pure green |
 | Starting | White, 350 ms on / 350 ms off |
-| Ready / idle | Solid green |
+| Ready / idle | Solid cyan |
 | Heater armed | Solid amber |
 | Cooling with heater off | Blue, 350 ms pulse every 1.4 s |
 | Calibration active | Cyan, 500 ms on / 500 ms off |

@@ -10,7 +10,6 @@ pub struct RgbChannels {
 impl RgbChannels {
     pub const OFF: Self = Self::new(false, false, false);
     pub const RED: Self = Self::new(true, false, false);
-    pub const GREEN: Self = Self::new(false, true, false);
     pub const BLUE: Self = Self::new(false, false, true);
     pub const CYAN: Self = Self::new(false, true, true);
     pub const MAGENTA: Self = Self::new(true, false, true);
@@ -82,7 +81,8 @@ pub const fn status_light_output(state: StatusLightState, elapsed_ms: u64) -> Rg
                 RgbChannels::OFF
             }
         }
-        StatusLightState::Ready => RgbChannels::GREEN,
+        // Pure green is reserved for the ROM download-mode indication.
+        StatusLightState::Ready => RgbChannels::CYAN,
         StatusLightState::Heating => RgbChannels::AMBER,
         StatusLightState::Cooling => {
             if periodic_on(elapsed_ms, 1_400, 350) {
@@ -237,6 +237,18 @@ mod tests {
                 ..StatusLightInputs::default()
             }),
             StatusLightState::Calibration
+        );
+    }
+
+    #[test]
+    fn ready_state_leaves_solid_green_to_bootloader_mode() {
+        assert_eq!(
+            status_light_output(StatusLightState::Ready, 0),
+            RgbChannels::CYAN
+        );
+        assert_ne!(
+            status_light_output(StatusLightState::Ready, 0),
+            RgbChannels::new(false, true, false)
         );
     }
 

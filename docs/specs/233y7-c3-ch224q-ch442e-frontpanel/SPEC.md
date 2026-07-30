@@ -61,6 +61,7 @@
 - `GPIO37/38/39` 必须分别冻结为 `RGB_B_PWM`、`RGB_G_PWM`、`RGB_R_PWM` 三路独立状态灯 PWM 输出。
 - 当前 populated baseline 只允许装配 1 颗 RGB 状态灯；若主板网表保留第二颗并联 RGB footprint，则它必须标记为 `DNI`，除非后续给第二颗补齐独立限流电阻。
 - RGB 状态灯必须按 `docs/hardware/s3-frontpanel-baseline.md` 的灯语表表达启动、待机、加热、冷却、校准、heater interlock 与安全 fault。热失控、热失控待确认、测温 fault、散热关闭过温 lock 的优先级必须高于所有普通工作态；受支持的 fixed-PD fallback 不得被误报为 fault。
+- `BOOT` 进入 ROM 下载模式时的绿色常亮为保留指示；应用固件不得在任何普通或故障灯语中输出纯绿色。待机 / idle 固定使用青色常亮。
 - `LED1` 为共阳极连接，`GPIO39/38/37` 必须以低电平点亮 R/G/B 通道。固件初始化阶段必须先将三路置高，避免 reset/boot 期间误亮；状态灯不得占用风扇、加热器或蜂鸣器已经保留的 MCPWM operator。
 - `GPIO1` / `ADC1_CH0` 用于 `VIN` 采样，延续 `56 kOhm / 5.1 kOhm` 分压方案。
 - `GPIO2` / `ADC1_CH1` 用于 `PT1000` 采样。
@@ -126,6 +127,7 @@
 - Given `ESP32-S3FH4R2` board profile 已落地，When 运行 `gpio_map_is_valid`，Then 测试通过且 GPIO 总数为 24 且不重复。
 - Given RGB 状态灯 GPIO 分配已冻结，When 检查 board profile 常量，Then `RGB_B/G/R` 分别固定为 `GPIO37/38/39`。
 - Given `LED1` 共阳极连接，When firmware 输出 RGB 灯语，Then 选中的颜色通道必须以 GPIO low 点亮，未选通道保持 high。
+- Given 主人保持 `BOOT` 进入 ROM 下载模式，When 下载器显示绿色常亮，Then 应用固件的 Ready、加热、冷却、校准、interlock 与 fault 灯语均不得输出纯绿色。
 - Given 热失控、热失控待确认、RTD 测温 fault 或散热关闭过温 lock，When 它们与任意普通运行态同时出现，Then LED 必须显示对应 fault 灯语而非待机、加热、冷却或校准灯语。
 - Given runtime 运行于 supported fixed-PD fallback，When 无其他安全 fault，Then LED 必须继续表达当前工作态，且不得显示故障灯语。
 - Given heater 开关 BOM 与归档网表，When 检查栅极网络和批准料号，Then `R_GATE = 68 Ohm`、`R_GPD = 100 kOhm`，且主料与替代料共享 `SOT669 / LFPAK56` 引脚定义和 `40 V` 漏源耐压等级。
