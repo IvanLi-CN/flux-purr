@@ -226,8 +226,8 @@
 - `assets/web-app-live-no-device-selection.png`：Vite Web App live `demo=false` 无真实目标状态显示全宽设备选择页；空设备提示以轻量文本呈现，单行三张新增卡片可见，右侧全局日志列和分区标题隐藏。
 - `assets/web-app-live-preset-sync.png`：Storybook live Web Serial 场景覆盖 Settings preset 写入后从 status 回显；M5 被 Web 写为 disabled 后，summary、slot grid、selected editor 和 Runtime trace 保持一致。
 - `assets/web-dashboard-manual-pps-request-current.png`：Vite Web App demo Dashboard 高级 PPS 面板显示两行 voltage/current request 控制、capability 动态范围、Apply/Clear 与请求电流说明。
-- `assets/lan-pairing-desktop-success.png`：mock-only Chromium desktop 配对成功态，包含手动 HTTP 地址、四位码和稳定设备名。
-- `assets/lan-pairing-mobile-success.png`：mock-only Chromium mobile 配对成功态，确认输入和提交控件在窄视口换行且无重叠。
+- `assets/lan-pairing-desktop-success.png`：mock-only Chromium desktop 配对成功态，包含手动 HTTP 地址、四位码和稳定设备名；两个输入与提交按钮均为 36px 高。
+- `assets/lan-pairing-mobile-success.png`：mock-only Chromium mobile 配对成功态，确认输入和提交控件在窄视口换行、均为 36px 高且无重叠。
 
 ![LAN pairing desktop success](./assets/lan-pairing-desktop-success.png)
 

@@ -2110,10 +2110,6 @@
     font-weight: 800;
   }
 
-  .industrial-lan-pairing-panel__fields button {
-    min-height: 2.5rem;
-  }
-
   .industrial-lan-pairing-panel__unsupported,
   .industrial-lan-pairing-panel__message {
     display: flex;
