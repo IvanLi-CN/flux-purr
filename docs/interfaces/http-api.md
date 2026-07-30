@@ -230,6 +230,8 @@ Errors must not include WiFi passwords, PSK values, or unrelated host paths.
 
 Direct device HTTP is the WiFi/LAN control plane. The device uses DHCP by default, sends its MAC-derived `flux-purr-<mac>` hostname as DHCP option 12, and announces `_http._tcp.local` with `api=v1`, `path=/api/v1`, `pairing=frontpanel`, and `device=<mac>` TXT metadata. USB/devd remains the only path for initial WiFi provisioning, firmware flash, static IPv4 configuration, and pairing-token reset.
 
+The WiFi station uses bounded driver buffers sized for control traffic. A WiFi-driver or LAN-task startup failure is published in `NetworkSummary` as `state=error`; it must not prevent the USB JSONL control and recovery loop from becoming available.
+
 Base URL: `http://<device-ip>` or the MAC-derived `http://flux-purr-<mac>.local` hostname. Manual LAN targets must be RFC1918 IPv4 addresses or that device hostname; public and arbitrary DNS targets are rejected by Web and devd clients.
 
 Public endpoints:

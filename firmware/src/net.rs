@@ -68,6 +68,30 @@ struct ControlMailboxResponse {
     body: String<LAN_HTTP_BODY_MAX_LEN>,
 }
 
+/// A startup failure must never prevent the USB control plane from reaching
+/// its recovery loop. The public message is intentionally operational rather
+/// than exposing WiFi-driver internals to LAN clients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanStartupError {
+    WifiInitialization,
+    NetworkTaskCapacity,
+    WifiTaskCapacity,
+    HttpTaskCapacity,
+    MdnsTaskCapacity,
+}
+
+impl LanStartupError {
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::WifiInitialization => "WiFi driver initialization failed.",
+            Self::NetworkTaskCapacity
+            | Self::WifiTaskCapacity
+            | Self::HttpTaskCapacity
+            | Self::MdnsTaskCapacity => "LAN control task capacity is unavailable.",
+        }
+    }
+}
+
 #[derive(Clone)]
 struct WifiRuntimeConfig {
     ssid: String<MEMORY_WIFI_SSID_MAX_LEN>,
@@ -179,6 +203,18 @@ pub async fn apply_wifi_config(memory: &MemoryConfig) {
     WIFI_APPLY_SIGNAL.signal(());
 }
 
+/// Publish a failed LAN startup to USB status while keeping the main control
+/// loop available for recovery and later firmware servicing.
+pub async fn report_startup_failure(error: LanStartupError) {
+    let config = WIFI_CONFIG.lock().await.clone();
+    set_network_summary(network_failure(
+        &config,
+        NetworkState::Error,
+        error.message(),
+    ))
+    .await;
+}
+
 /// Returns the identity advertised by the initialized WiFi station. This is
 /// separate from the USB development placeholder because LAN clients persist
 /// it as their stable device key.
@@ -237,8 +273,9 @@ pub async fn spawn(
     init: &'static EspWifiController<'static>,
     wifi_peripheral: WIFI<'static>,
     memory: &MemoryConfig,
-) -> Option<()> {
-    let (controller, interfaces) = esp_wifi::wifi::new(init, wifi_peripheral).ok()?;
+) -> Result<(), LanStartupError> {
+    let (controller, interfaces) = esp_wifi::wifi::new(init, wifi_peripheral)
+        .map_err(|_| LanStartupError::WifiInitialization)?;
     let station = interfaces.sta;
     let names = device_names_from_mac(station.mac_address());
     WIFI_CONFIG.lock().await.hostname = Some(names.hostname.clone());
@@ -258,11 +295,19 @@ pub async fn spawn(
         seed,
     );
 
-    spawner.spawn(network_task(runner)).ok()?;
-    spawner.spawn(wifi_task(controller, stack)).ok()?;
-    spawner.spawn(http_task(stack)).ok()?;
-    spawner.spawn(mdns_task(stack, names)).ok()?;
-    Some(())
+    spawner
+        .spawn(network_task(runner))
+        .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
+    spawner
+        .spawn(wifi_task(controller, stack))
+        .map_err(|_| LanStartupError::WifiTaskCapacity)?;
+    spawner
+        .spawn(http_task(stack))
+        .map_err(|_| LanStartupError::HttpTaskCapacity)?;
+    spawner
+        .spawn(mdns_task(stack, names))
+        .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
+    Ok(())
 }
 
 #[embassy_executor::task]
