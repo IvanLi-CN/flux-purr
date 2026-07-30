@@ -6,14 +6,14 @@
 
 - PR #27 已把 Web、native USB daemon、USB CDC、WiFi provisioning、firmware flashing 与 monitoring 的长期架构沉淀到 `docs/solutions/device-control/web-native-wifi-bridge-console.md`。
 - `#hhwq8` 只冻结 mock-first Web demo，不代表真实 transport、daemon、USB CDC、WiFi HTTP 或真实 flashing 已交付。
-- 本规范冻结 Flux Purr 真实控制面 v1：同一领域契约通过 mock、browser Web Serial、USB serial 和 native `devd` 暴露，Web 只根据能力启用操作；direct firmware HTTP 属于后续 `net_http` server 能力，不得在固件实现前声明。
+- 本规范冻结 Flux Purr 真实控制面 v1：同一领域契约通过 mock、browser Web Serial、USB serial、native `devd` 和 WiFi/LAN HTTP 暴露；LAN 仅适用于可信私网，Web 只根据能力启用操作。
 
 ## 目标 / 非目标
 
 ### Goals
 
 - 定义 Web、firmware 与 `devd` 共享的 identity、network、status、USB JSONL、devd HTTP、firmware artifact 与 error envelope。
-- firmware 提供 feature-gated `web_serial` contract adapter，复用现有热控 runtime 和 EEPROM WiFi 字段；direct `net_http` 只有在固件 HTTP server 落地后才可声明。
+- firmware 提供 `web_serial` 与 `net_http` contract adapter，复用同一控制邮箱、热控 runtime 和 EEPROM WiFi 字段。
 - `devd` 作为 localhost HTTP daemon，提供 USB/serial discovery、lease、monitor、WiFi bridge、artifact verify、dry-run 与 real flash command boundary。
 - `flux-purr` 作为 released CLI，通过 `devd` 执行命令行硬件控制、用户级硬件记忆、USB 端口配置、artifact dry-run 与 guarded real flash。
 - ADC calibration control family 由 `#jt8r2` 约束，并复用本规格的 lease、USB JSONL、devd HTTP、CLI 与 Web capability boundary。
@@ -28,6 +28,7 @@
 - 不在无硬件环境声明 USB/WiFi/flash 已完成真机验证。
 - 不绕过 lease、confirmation、dry-run、artifact verification 或 secret redaction。
 - 不把 WiFi PSK、host path 细节或 raw secret trace 写入 UI history、logs 或 errors。
+- 不提供 LAN firmware flash、LAN 初始 WiFi provisioning、WAN 控制或设备端 TLS。
 
 ## 范围（Scope）
 
@@ -75,7 +76,10 @@
 - devd native serial discovery 必须只暴露当前明确授权的 MCU 端口；授权端口缺失时不得自动选择其它 `/dev/cu.*` 或 `/dev/tty.*` 设备。
 - `flux-purr` CLI 必须为 status/runtime/wifi/flash/monitor 操作自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出，不要求用户手填 `leaseId`。
 - `flux-purr pd pps set --volts <decimal> --amps <decimal> --device|--hardware` 与 `flux-purr pd pps clear --device|--hardware` 必须通过 lease 写 runtime contract；`--volts` 只接受 `0.1V` 步进、必须落在硬件 `5V~28V` 边界内且不高于实时 source capability，`--amps` 只接受 `0.05A` 步进且不高于 source capability。
-- `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；HTTP/LAN/mDNS 只能作为未来 transport 预留，不得伪装为当前能力。
+- `flux-purr hardware` 必须把 USB 设备记忆写入 OS 用户配置目录，`FLUX_PURR_HOME` 可覆盖；LAN record 使用独立字段持久化 base URL、hostname、last IPv4 和 redacted token。
+- WiFi Info 进入时必须生成并显示新四位码；离开该页立即使 code 失效。每个窗口最多五次失败，成功返回 EEPROM 稳定 token；只有 USB/devd token-reset 可清除 token 和全部 LAN lease。
+- LAN public surface 仅限 health、pairing metadata 和 pairing claim；所有 identity/network/status/events 读取必须 bearer-auth，所有写操作还必须持有 30 秒设备 lease。LAN transport 只能把命令送入控制邮箱，不得直接修改 heater、PD 或 EEPROM runtime state。
+- Web direct-LAN 仅允许 Chromium HTTPS origin `https://flux-purr.ivanli.cc` 通过 CORS/PNA 请求 HTTP 私网；Safari 必须明确显示不支持。Token 不得出现在 URL、trace、export 或错误内。
 - `flux-purr usb-port set` 必须写用户配置，并明确需要重启运行中的 `devd`。
 - lease 必须有 heartbeat、TTL、过期 cleanup 和 conflict response。
 - logs、trace、events 必须有固定上限；`devd` native USB JSONL TX/RX 必须作为 redacted `transport` events 进入 Runtime trace，保留 request ID、frame type 与 payload，WiFi password 等 secret 只能显示为 redacted。
@@ -110,6 +114,7 @@
 - `GET|PUT /api/v1/devices/:id/calibration`：读取、编辑共享样本与 A/B 槽位的 ADC calibration state；细节见 `../jt8r2-adc-calibration-control-plane/SPEC.md`。
 - `GET|POST /api/v1/devices/:id/calibration/job`：读取、启动或取消 calibration auto job；job 细节见 `../jt8r2-adc-calibration-control-plane/SPEC.md`。
 - `GET /api/v1/devices/:id/events`：SSE 输出 bounded events。
+- Firmware LAN: WiFi STA 默认 DHCP，并发送 MAC 派生 hostname；USB WiFi config 可选 static IPv4。设备通过 `_http._tcp.local` 广播 `api=v1`、`path=/api/v1`、`pairing=frontpanel` 和 stable `device` TXT metadata。`GET /health`、`GET /api/v1/pairing`、`POST /api/v1/pairing/claim` 是公开路由；`GET /api/v1/identity|network|status|events` 是 bearer 路由；`POST|PUT|DELETE /api/v1/leases` 管理单 writer lease；runtime、calibration、heater curve 与 thermal profile 写入要求 bearer + `X-Flux-Purr-Lease`。HTTP task 只能通过控制邮箱请求主循环，不得直接触碰热控、PD 或 EEPROM。
 - `PUT /api/v1/devices/:id/wifi`：通过 USB bridge 写 WiFi config；request/response 不回显 password。
 - `PUT /api/v1/devices/:id/runtime`：通过 USB bridge 写运行时控制项；支持 `target_temp_c`、`selected_preset_slot`、`presets_c`、`active_cooling_enabled`、`heater_enabled`、`manual_pps_enabled`、`manual_pps_mv`、`manual_pps_ma`、`fault_attention_acknowledged`、`calibration` 与 `thermal_control_profile` 的部分更新。
 - `GET /api/v1/artifacts`：返回 daemon 可见的本地固件构建产物 catalog，包含 file kind、path、size、sha256 与可选 flash address；本地 ESP32-S3 release ELF 必须作为 `elf` artifact 走 `espflash flash`。
@@ -221,7 +226,13 @@
 - `assets/web-app-live-no-device-selection.png`：Vite Web App live `demo=false` 无真实目标状态显示全宽设备选择页；空设备提示以轻量文本呈现，单行三张新增卡片可见，右侧全局日志列和分区标题隐藏。
 - `assets/web-app-live-preset-sync.png`：Storybook live Web Serial 场景覆盖 Settings preset 写入后从 status 回显；M5 被 Web 写为 disabled 后，summary、slot grid、selected editor 和 Runtime trace 保持一致。
 - `assets/web-dashboard-manual-pps-request-current.png`：Vite Web App demo Dashboard 高级 PPS 面板显示两行 voltage/current request 控制、capability 动态范围、Apply/Clear 与请求电流说明。
-PR: include
+- `assets/lan-pairing-desktop-success.png`：mock-only Chromium desktop 配对成功态，包含手动 HTTP 地址、四位码和稳定设备名。
+- `assets/lan-pairing-mobile-success.png`：mock-only Chromium mobile 配对成功态，确认输入和提交控件在窄视口换行且无重叠。
+
+![LAN pairing desktop success](./assets/lan-pairing-desktop-success.png)
+
+![LAN pairing mobile success](./assets/lan-pairing-mobile-success.png)
+
 ![Web Dashboard manual PPS current request](./assets/web-dashboard-manual-pps-request-current.png)
 - Chrome DevTools a11y snapshot on lease-managed `127.0.0.1:32082` against CORS-enabled `devd` `127.0.0.1:32083` verified the live Web page selects `USB JTAG/serial debug unit / DEVD` before daemon mock devices, reaches `LEASE ACTIVE`, displays real hardware PD/status values without mock simulation drift, shows WiFi state `DISABLED`, and includes bounded WiFi set/clear events in Runtime trace.
 

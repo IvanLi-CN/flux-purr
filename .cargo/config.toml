@@ -9,4 +9,4 @@ ESP_TARGET = "esp32s3"
 DEFMT_LOG = "info"
 
 [unstable]
-build-std = ["core"]
+build-std = ["core", "alloc"]

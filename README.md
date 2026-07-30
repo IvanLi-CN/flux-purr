@@ -10,6 +10,14 @@ The daemon is started with `flux-purr-devd serve`. Default bind is `127.0.0.1:30
 
 The user-facing command-line entry point is `flux-purr`. It talks to `flux-purr-devd`, creates and heartbeats device leases automatically, and covers `devices`, `status`, `runtime`, `wifi`, `flash`, `monitor`, `hardware`, and `usb-port` commands. User hardware memory and the default USB port live in the OS user config directory; `FLUX_PURR_HOME` overrides that location. `flux-purr usb-port set <port>` updates the remembered default for future daemon starts.
 
+## WiFi/LAN Control
+
+The ESP32-S3 firmware exposes a trusted-LAN HTTP v1 control plane after USB provisioning WiFi credentials. It uses DHCP by default, advertises a MAC-derived hostname through DHCP and `_http._tcp.local` mDNS/DNS-SD, and allows USB/devd to configure static IPv4 when needed. Entering the front-panel WiFi Info page creates a four-digit pairing code; leaving the page invalidates it immediately. Chromium users can pair at `https://flux-purr.ivanli.cc`, while Safari direct-LAN control is intentionally unsupported because it cannot meet the required private-network access flow.
+
+The stable token is stored only on the device and the local client record, never in URLs or user-facing logs. LAN writes use an exclusive 30-second lease. USB/devd remains the only route for initial WiFi setup, firmware flash, and pairing-token reset. See [the HTTP contract](docs/interfaces/http-api.md).
+
+The production Web bundle is deployed to EdgeOne from the `main` branch by `.github/workflows/deploy-edgeone.yml`. The repository requires restricted `EDGEONE_API_TOKEN` and `EDGEONE_PROJECT_NAME` secrets; the `flux-purr.ivanli.cc` custom-domain binding remains EdgeOne project configuration.
+
 ## Repository layout
 
 - `firmware/` - Rust `no_std` firmware domain crate (ESP32-S3 first)
@@ -106,10 +114,10 @@ PD request build variants:
 cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
 
 # 12 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-12v --bin flux-purr --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release
 
 # 28 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,pd-request-28v --bin flux-purr --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release
 ```
 
 Current hardware design notes and manufacturing support assets are frozen in:

@@ -11,7 +11,7 @@ use crate::{
         MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig,
         ThermalControlProfileConfig, ThermalControlProfilePointConfig,
         ThermalControlProfileSettingsConfig, ThermalPlantRawAnchor, ThermalPlantRawTransaction,
-        ThermalProfileBank, ThermalProfileMode, adc_calibration_fit,
+        ThermalProfileBank, ThermalProfileMode, WifiStaticIpv4Config, adc_calibration_fit,
         thermal_plant_raw_transaction_is_complete,
     },
 };
@@ -508,7 +508,41 @@ pub struct WifiConfigCommand {
     pub ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     pub password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
     pub auto_reconnect: Option<bool>,
+    /// `None` means the field was absent and therefore preserves the existing
+    /// address. `Some(None)` is an explicit JSON null that clears it.
+    pub static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
     pub telemetry_interval_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiStaticIpv4Wire {
+    pub address: [u8; 4],
+    pub prefix_len: u8,
+    pub gateway: [u8; 4],
+    pub dns: [u8; 4],
+}
+
+impl From<WifiStaticIpv4Wire> for WifiStaticIpv4Config {
+    fn from(value: WifiStaticIpv4Wire) -> Self {
+        Self {
+            address: value.address,
+            prefix_len: value.prefix_len,
+            gateway: value.gateway,
+            dns: value.dns,
+        }
+    }
+}
+
+impl From<WifiStaticIpv4Config> for WifiStaticIpv4Wire {
+    fn from(value: WifiStaticIpv4Config) -> Self {
+        Self {
+            address: value.address,
+            prefix_len: value.prefix_len,
+            gateway: value.gateway,
+            dns: value.dns,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -525,6 +559,7 @@ impl WifiConfigCommand {
                 config.wifi_ssid.clear();
                 config.wifi_password.clear();
                 config.wifi_auto_reconnect = false;
+                config.wifi_static_ipv4 = None;
             }
             WifiConfigOp::Set => {
                 config.wifi_ssid.clear();
@@ -537,6 +572,9 @@ impl WifiConfigCommand {
                 }
                 if let Some(auto_reconnect) = self.auto_reconnect {
                     config.wifi_auto_reconnect = auto_reconnect;
+                }
+                if let Some(static_ipv4) = self.static_ipv4 {
+                    config.wifi_static_ipv4 = static_ipv4.map(Into::into);
                 }
                 if let Some(interval) = self.telemetry_interval_ms {
                     config.telemetry_interval_ms = interval.max(1);
@@ -552,6 +590,7 @@ impl WifiConfigCommand {
             ssid: self.ssid.clone(),
             password: self.password.as_ref().map(|_| string("<redacted>")),
             auto_reconnect: self.auto_reconnect,
+            static_ipv4: self.static_ipv4.flatten(),
             telemetry_interval_ms: self.telemetry_interval_ms,
         }
     }
@@ -564,6 +603,7 @@ pub struct RedactedWifiConfig {
     pub ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     pub password: Option<String<16>>,
     pub auto_reconnect: Option<bool>,
+    pub static_ipv4: Option<WifiStaticIpv4Wire>,
     pub telemetry_interval_ms: Option<u32>,
 }
 
@@ -1399,6 +1439,7 @@ struct UsbFrameWire {
     ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
     auto_reconnect: Option<bool>,
+    static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
     telemetry_interval_ms: Option<u32>,
     target_temp_c: Option<i16>,
     selected_preset_slot: Option<usize>,
@@ -1456,6 +1497,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     ssid: value.ssid,
                     password: value.password,
                     auto_reconnect: value.auto_reconnect,
+                    static_ipv4: value.static_ipv4,
                     telemetry_interval_ms: value.telemetry_interval_ms,
                 },
             }),
@@ -1545,6 +1587,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             ssid: None,
             password: None,
             auto_reconnect: None,
+            static_ipv4: None,
             telemetry_interval_ms: None,
             target_temp_c: None,
             selected_preset_slot: None,
@@ -1604,6 +1647,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.ssid = config.ssid.clone();
                 wire.password = config.password.clone();
                 wire.auto_reconnect = config.auto_reconnect;
+                wire.static_ipv4 = config.static_ipv4;
                 wire.telemetry_interval_ms = config.telemetry_interval_ms;
             }
             UsbFrame::RuntimeConfig { request_id, config } => {
@@ -1698,6 +1742,7 @@ pub enum UsbRequestOp {
     GetCalibrationJob,
     GetHeaterCurve,
     SetLogLevel,
+    ClearLanPairingToken,
 }
 
 impl UsbRequestOp {
@@ -1710,6 +1755,7 @@ impl UsbRequestOp {
             Self::GetCalibrationJob => "get_calibration_job",
             Self::GetHeaterCurve => "get_heater_curve",
             Self::SetLogLevel => "set_log_level",
+            Self::ClearLanPairingToken => "clear_lan_pairing_token",
         }
     }
 }
@@ -1864,6 +1910,7 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_calibration_job") => Ok(UsbRequestOp::GetCalibrationJob),
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
+        Some("clear_lan_pairing_token") => Ok(UsbRequestOp::ClearLanPairingToken),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -2156,16 +2203,47 @@ mod tests {
             ssid: Some(string("FluxPurr-Lab")),
             password: Some(string("secret-pass")),
             auto_reconnect: Some(true),
+            static_ipv4: Some(Some(WifiStaticIpv4Wire {
+                address: [192, 168, 31, 42],
+                prefix_len: 24,
+                gateway: [192, 168, 31, 1],
+                dns: [1, 1, 1, 1],
+            })),
             telemetry_interval_ms: Some(750),
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
         assert_eq!(config.wifi_ssid.as_str(), "FluxPurr-Lab");
         assert_eq!(config.wifi_password.as_str(), "secret-pass");
+        assert_eq!(config.wifi_static_ipv4.unwrap().address, [192, 168, 31, 42]);
         assert_eq!(
             command.redacted_summary().password.as_deref(),
             Some("<redacted>")
         );
+    }
+
+    #[test]
+    fn wifi_command_preserves_static_ipv4_when_field_is_omitted() {
+        let mut config = MemoryConfig {
+            wifi_static_ipv4: Some(WifiStaticIpv4Config {
+                address: [192, 168, 31, 42],
+                prefix_len: 24,
+                gateway: [192, 168, 31, 1],
+                dns: [1, 1, 1, 1],
+            }),
+            ..MemoryConfig::default()
+        };
+        WifiConfigCommand {
+            op: WifiConfigOp::Set,
+            ssid: Some(string("FluxPurr-Lab")),
+            password: None,
+            auto_reconnect: None,
+            static_ipv4: None,
+            telemetry_interval_ms: None,
+        }
+        .apply_to(&mut config);
+
+        assert_eq!(config.wifi_static_ipv4.unwrap().address, [192, 168, 31, 42]);
     }
 
     #[test]
@@ -2429,6 +2507,21 @@ mod tests {
             UsbFrame::Request {
                 request_id: string("req-001"),
                 op: UsbRequestOp::GetStatus,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_usb_only_lan_pairing_reset_request() {
+        let frame = parse_usb_frame(
+            r#"{"type":"request","requestId":"reset-lan","op":"clear_lan_pairing_token"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            UsbFrame::Request {
+                request_id: string("reset-lan"),
+                op: UsbRequestOp::ClearLanPairingToken,
             }
         );
     }

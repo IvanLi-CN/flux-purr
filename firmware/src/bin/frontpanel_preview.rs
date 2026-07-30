@@ -224,7 +224,7 @@ impl PreviewPreset {
             }
             Self::WifiInfo => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
-                state.route = FrontPanelRoute::WifiInfo;
+                state.enter_wifi_pairing(*b"4827");
                 state
             }
             Self::DeviceInfo => {
