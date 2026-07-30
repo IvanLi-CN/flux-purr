@@ -24,6 +24,8 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_storage::{ReadStorage, Storage};
 #[cfg(target_arch = "xtensa")]
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use esp_hal::rng::Rng;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
@@ -39,7 +41,6 @@ use esp_hal::{
         operator::PwmPinConfig,
         timer::{CounterDirection, PwmWorkingMode},
     },
-    rng::Rng,
     spi::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
@@ -8106,15 +8107,28 @@ async fn process_control_line(
                 }
             }
             UsbRequestOp::ClearLanPairingToken => {
-                flux_purr_firmware::net::clear_token_from_usb().await;
-                memory_config.lan_pairing_token = None;
-                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                info!("LAN pairing token cleared by USB control request");
-                usb_response(request_id, UsbResponsePayload::Ack)
+                #[cfg(feature = "net_http")]
+                {
+                    flux_purr_firmware::net::clear_token_from_usb().await;
+                    memory_config.lan_pairing_token = None;
+                    *memory_commit_due_ms =
+                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                    info!("LAN pairing token cleared by USB control request");
+                    usb_response(request_id, UsbResponsePayload::Ack)
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
             }
         },
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
             config.apply_to(memory_config);
+            #[cfg(feature = "net_http")]
             flux_purr_firmware::net::apply_wifi_config(memory_config).await;
             apply_memory_config_to_ui(ui_state, memory_config);
             *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
@@ -8311,7 +8325,7 @@ async fn process_control_line(
     (needs_redraw, response)
 }
 
-#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode {
     let code = code.map(|digits| {
         let mut rendered = heapless::String::new();
@@ -8834,13 +8848,6 @@ async fn main(_spawner: Spawner) {
         .expect("failed to spawn status-light task");
     #[cfg(feature = "net_http")]
     static WIFI_INIT: StaticCell<esp_wifi::EspWifiController<'static>> = StaticCell::new();
-    #[cfg(feature = "net_http")]
-    let wifi_timer = TimerGroup::new(peripherals.TIMG1);
-    #[cfg(feature = "net_http")]
-    let wifi_init = WIFI_INIT.init(
-        esp_wifi::init(wifi_timer.timer0, Rng::new(peripherals.RNG))
-            .expect("failed to initialize ESP WiFi"),
-    );
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
     #[cfg(feature = "web_serial")]
     let mut usb_serial = RawUsbSerialJtag::new(peripherals.USB_DEVICE);
@@ -9064,11 +9071,29 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "net_http")]
     flux_purr_firmware::net::apply_wifi_config(&memory_config).await;
     #[cfg(feature = "net_http")]
-    if let Err(error) =
-        flux_purr_firmware::net::spawn(&_spawner, wifi_init, peripherals.WIFI, &memory_config).await
     {
-        warn!("LAN control plane startup failed: {=str}", error.message());
-        flux_purr_firmware::net::report_startup_failure(error).await;
+        let wifi_timer = TimerGroup::new(peripherals.TIMG1);
+        match esp_wifi::init(wifi_timer.timer0, Rng::new(peripherals.RNG)) {
+            Ok(controller) => {
+                let wifi_init = WIFI_INIT.init(controller);
+                if let Err(error) = flux_purr_firmware::net::spawn(
+                    &_spawner,
+                    wifi_init,
+                    peripherals.WIFI,
+                    &memory_config,
+                )
+                .await
+                {
+                    warn!("LAN control plane startup failed: {=str}", error.message());
+                    flux_purr_firmware::net::report_startup_failure(error).await;
+                }
+            }
+            Err(_) => {
+                let error = flux_purr_firmware::net::LanStartupError::WifiInitialization;
+                warn!("LAN control plane startup failed: {=str}", error.message());
+                flux_purr_firmware::net::report_startup_failure(error).await;
+            }
+        }
     }
     let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_sequence = restored_memory_record
@@ -9743,15 +9768,25 @@ async fn main(_spawner: Spawner) {
             if route_before != FrontPanelRoute::WifiInfo
                 && ui_state.route == FrontPanelRoute::WifiInfo
             {
-                let code = flux_purr_firmware::net::enter_pairing().await;
-                ui_state.enter_wifi_pairing(code);
-                info!("LAN pairing window opened from WiFi Info page");
+                #[cfg(feature = "net_http")]
+                {
+                    let code = flux_purr_firmware::net::enter_pairing().await;
+                    ui_state.enter_wifi_pairing(code);
+                    info!("LAN pairing window opened from WiFi Info page");
+                }
+                #[cfg(not(feature = "net_http"))]
+                ui_state.leave_wifi_pairing();
             } else if route_before == FrontPanelRoute::WifiInfo
                 && ui_state.route != FrontPanelRoute::WifiInfo
             {
-                flux_purr_firmware::net::leave_pairing().await;
+                #[cfg(feature = "net_http")]
+                {
+                    flux_purr_firmware::net::leave_pairing().await;
+                    ui_state.leave_wifi_pairing();
+                    info!("LAN pairing window closed after leaving WiFi Info page");
+                }
+                #[cfg(not(feature = "net_http"))]
                 ui_state.leave_wifi_pairing();
-                info!("LAN pairing window closed after leaving WiFi Info page");
             }
             if interaction_handled {
                 needs_redraw = true;

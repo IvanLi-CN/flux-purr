@@ -61,6 +61,37 @@ static WIFI_CONFIG: WifiConfigMutex = Mutex::new(WifiRuntimeConfig::empty());
 static WIFI_APPLY_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static LAN_RUNTIME: RuntimeStatusMutex = Mutex::new(LanRuntimeState::empty());
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
+static HTTP_WORKSPACE: StaticCell<HttpWorkspace> = StaticCell::new();
+
+// The HTTP task is single-client by design. Keeping its buffers outside the
+// Embassy task frame prevents the control plane from exhausting the shared
+// task arena before USB recovery can start.
+struct HttpWorkspace {
+    rx: [u8; HTTP_BUFFER_LEN],
+    tx: [u8; HTTP_BUFFER_LEN],
+    request: [u8; HTTP_BUFFER_LEN],
+    response: HttpResponse,
+    command: Option<ControlMailboxCommand>,
+    control_response: Option<ControlMailboxResponse>,
+}
+
+impl HttpWorkspace {
+    const fn new() -> Self {
+        Self {
+            rx: [0; HTTP_BUFFER_LEN],
+            tx: [0; HTTP_BUFFER_LEN],
+            request: [0; HTTP_BUFFER_LEN],
+            response: HttpResponse {
+                status: 500,
+                allow_origin: None,
+                allow_private_network: false,
+                body: String::new(),
+            },
+            command: None,
+            control_response: None,
+        }
+    }
+}
 
 struct ControlMailboxResponse {
     request_id: u32,
@@ -487,14 +518,20 @@ fn net_config(config: &WifiRuntimeConfig) -> NetConfig {
 
 #[embassy_executor::task]
 async fn http_task(stack: Stack<'static>) {
-    let mut rx = [0u8; HTTP_BUFFER_LEN];
-    let mut tx = [0u8; HTTP_BUFFER_LEN];
+    let workspace = HTTP_WORKSPACE.init_with(HttpWorkspace::new);
     loop {
         stack.wait_config_up().await;
-        let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
+        let mut socket = TcpSocket::new(stack, &mut workspace.rx, &mut workspace.tx);
         socket.set_timeout(Some(Duration::from_secs(5)));
         if socket.accept(HTTP_SERVICE_PORT).await.is_ok() {
-            let _ = handle_http_connection(&mut socket).await;
+            let _ = handle_http_connection(
+                &mut socket,
+                &mut workspace.request,
+                &mut workspace.response,
+                &mut workspace.command,
+                &mut workspace.control_response,
+            )
+            .await;
             socket.close();
             let _ = socket.flush().await;
         } else {
@@ -503,8 +540,18 @@ async fn http_task(stack: Stack<'static>) {
     }
 }
 
-async fn handle_http_connection(socket: &mut TcpSocket<'_>) -> Result<(), embassy_net::tcp::Error> {
-    let mut request_bytes = [0u8; HTTP_BUFFER_LEN];
+async fn handle_http_connection(
+    socket: &mut TcpSocket<'_>,
+    request_bytes: &mut [u8],
+    response_slot: &mut HttpResponse,
+    command_slot: &mut Option<ControlMailboxCommand>,
+    control_response_slot: &mut Option<ControlMailboxResponse>,
+) -> Result<(), embassy_net::tcp::Error> {
+    request_bytes.fill(0);
+    *command_slot = None;
+    *control_response_slot = None;
+    response_slot.allow_origin = None;
+    response_slot.allow_private_network = false;
     let mut total = 0usize;
     loop {
         let received = socket.read(&mut request_bytes[total..]).await?;
@@ -540,7 +587,13 @@ async fn handle_http_connection(socket: &mut TcpSocket<'_>) -> Result<(), embass
             "PUT" => HttpMethod::Put,
             "DELETE" => HttpMethod::Delete,
             "OPTIONS" => HttpMethod::Options,
-            _ => return write_http_response(socket, HttpResponse::new(405, r#"{"error":{"code":"method_not_allowed","message":"Unsupported HTTP method."}}"#)).await,
+            _ => {
+                *response_slot = HttpResponse::new(
+                    405,
+                    r#"{"error":{"code":"method_not_allowed","message":"Unsupported HTTP method."}}"#,
+                );
+                return write_http_response(socket, response_slot).await;
+            }
         };
         let _ = path.push_str(
             request_line
@@ -580,7 +633,11 @@ async fn handle_http_connection(socket: &mut TcpSocket<'_>) -> Result<(), embass
         method
     };
     if content_length > LAN_HTTP_BODY_MAX_LEN {
-        return write_http_response(socket, HttpResponse::new(400, r#"{"error":{"code":"body_too_large","message":"Request body exceeds the LAN API limit."}}"#)).await;
+        *response_slot = HttpResponse::new(
+            400,
+            r#"{"error":{"code":"body_too_large","message":"Request body exceeds the LAN API limit."}}"#,
+        );
+        return write_http_response(socket, response_slot).await;
     }
     let mut body_len = total.saturating_sub(header_end);
     while body_len < content_length && total < request_bytes.len() {
@@ -603,88 +660,104 @@ async fn handle_http_connection(socket: &mut TcpSocket<'_>) -> Result<(), embass
         body,
         entropy: random_entropy(),
     };
-    let gate = CONTROL_STATE
-        .lock()
-        .await
-        .as_mut()
-        .expect("LAN control state initialized")
-        .gate(Instant::now().as_millis(), request);
-    let response = match gate {
-        HttpGate::Respond(response) => response,
+    let dispatch = {
+        let gate = CONTROL_STATE
+            .lock()
+            .await
+            .as_mut()
+            .expect("LAN control state initialized")
+            .gate(Instant::now().as_millis(), request);
+        stage_http_gate(gate, command_slot, response_slot)
+    };
+    let Some((request_id, is_sse)) = dispatch else {
+        return write_http_response(socket, response_slot).await;
+    };
+    if CONTROL_MAILBOX
+        .try_send(command_slot.take().expect("LAN command staged"))
+        .is_err()
+    {
+        set_http_error(
+            response_slot,
+            503,
+            r#"{"error":{"code":"control_busy","message":"Control mailbox is busy."}}"#,
+        );
+        return write_http_response(socket, response_slot).await;
+    }
+    *control_response_slot = await_control_response(request_id).await;
+    let is_success = stage_control_response(response_slot, control_response_slot.take());
+    if is_sse && is_success {
+        return write_sse_status_event(
+            socket,
+            response_slot.body.as_str(),
+            response_slot.allow_origin.as_ref().map(String::as_str),
+        )
+        .await;
+    }
+    write_http_response(socket, response_slot).await
+}
+
+fn stage_http_gate(
+    gate: HttpGate,
+    command_slot: &mut Option<ControlMailboxCommand>,
+    response_slot: &mut HttpResponse,
+) -> Option<(u32, bool)> {
+    match gate {
+        HttpGate::Respond(response) => {
+            *response_slot = response;
+            None
+        }
         HttpGate::Dispatch {
             mut command,
             allow_origin,
         } => {
             command.request_id = next_control_request_id();
             let request_id = command.request_id;
-            if command.endpoint == crate::lan::LanEndpoint::Events
-                && command.method == HttpMethod::Get
-            {
-                if CONTROL_MAILBOX.try_send(command).is_err() {
-                    let mut response = HttpResponse::new(
-                        503,
-                        r#"{"error":{"code":"control_busy","message":"Control mailbox is busy."}}"#,
-                    );
-                    response.allow_origin = allow_origin;
-                    return write_http_response(socket, response).await;
-                }
-                return match await_control_response(request_id).await {
-                    Some(response) if response.status == 200 => {
-                        write_sse_status_event(socket, response.body.as_str(), allow_origin).await
-                    }
-                    Some(response) => {
-                        let mut response = HttpResponse::json(response.status, response.body);
-                        response.allow_origin = allow_origin;
-                        write_http_response(socket, response).await
-                    }
-                    None => {
-                        let mut response = HttpResponse::new(
-                            504,
-                            r#"{"error":{"code":"control_timeout","message":"Control loop did not respond."}}"#,
-                        );
-                        response.allow_origin = allow_origin;
-                        write_http_response(socket, response).await
-                    }
-                };
-            }
-            if CONTROL_MAILBOX.try_send(command).is_err() {
-                let mut response = HttpResponse::new(
-                    503,
-                    r#"{"error":{"code":"control_busy","message":"Control mailbox is busy."}}"#,
-                );
-                response.allow_origin = allow_origin;
-                response
-            } else {
-                match await_control_response(request_id).await {
-                    Some(control) => {
-                        let mut response = HttpResponse::json(control.status, control.body);
-                        response.allow_origin = allow_origin;
-                        response
-                    }
-                    None => {
-                        let mut response = HttpResponse::new(
-                            504,
-                            r#"{"error":{"code":"control_timeout","message":"Control loop did not respond."}}"#,
-                        );
-                        response.allow_origin = allow_origin;
-                        response
-                    }
-                }
-            }
+            let is_sse = command.endpoint == crate::lan::LanEndpoint::Events
+                && command.method == HttpMethod::Get;
+            response_slot.allow_origin = allow_origin;
+            *command_slot = Some(command);
+            Some((request_id, is_sse))
         }
-    };
-    write_http_response(socket, response).await
+    }
+}
+
+fn stage_control_response(
+    response_slot: &mut HttpResponse,
+    control: Option<ControlMailboxResponse>,
+) -> bool {
+    match control {
+        Some(control) => {
+            response_slot.status = control.status;
+            response_slot.body = control.body;
+            control.status == 200
+        }
+        None => {
+            set_http_error(
+                response_slot,
+                504,
+                r#"{"error":{"code":"control_timeout","message":"Control loop did not respond."}}"#,
+            );
+            false
+        }
+    }
+}
+
+fn set_http_error(response_slot: &mut HttpResponse, status: u16, body: &str) {
+    response_slot.status = status;
+    response_slot.allow_private_network = false;
+    response_slot.body.clear();
+    let _ = response_slot.body.push_str(body);
 }
 
 async fn write_http_response(
     socket: &mut TcpSocket<'_>,
-    response: HttpResponse,
+    response: &HttpResponse,
 ) -> Result<(), embassy_net::tcp::Error> {
     write_http_response_with_type(
         socket,
         response.status,
         response.body.as_str(),
-        response.allow_origin,
+        response.allow_origin.as_ref().map(String::as_str),
         response.allow_private_network,
         "application/json",
     )
@@ -694,26 +767,51 @@ async fn write_http_response(
 async fn write_sse_status_event(
     socket: &mut TcpSocket<'_>,
     status: &str,
-    allow_origin: Option<String<128>>,
+    allow_origin: Option<&str>,
 ) -> Result<(), embassy_net::tcp::Error> {
-    let mut event = String::<HTTP_BUFFER_LEN>::new();
-    let _ = write!(event, "event: status\ndata: {status}\n\n");
-    write_http_response_with_type(
+    const SSE_PREFIX: &[u8] = b"event: status\ndata: ";
+    const SSE_SUFFIX: &[u8] = b"\n\n";
+    write_http_response_headers(
         socket,
         200,
-        event.as_str(),
+        SSE_PREFIX.len() + status.len() + SSE_SUFFIX.len(),
         allow_origin,
         false,
         "text/event-stream",
     )
-    .await
+    .await?;
+    socket.write_all(SSE_PREFIX).await?;
+    socket.write_all(status.as_bytes()).await?;
+    socket.write_all(SSE_SUFFIX).await?;
+    socket.flush().await
 }
 
 async fn write_http_response_with_type(
     socket: &mut TcpSocket<'_>,
     response_status: u16,
     body: &str,
-    allow_origin: Option<String<128>>,
+    allow_origin: Option<&str>,
+    allow_private_network: bool,
+    content_type: &str,
+) -> Result<(), embassy_net::tcp::Error> {
+    write_http_response_headers(
+        socket,
+        response_status,
+        body.len(),
+        allow_origin,
+        allow_private_network,
+        content_type,
+    )
+    .await?;
+    socket.write_all(body.as_bytes()).await?;
+    socket.flush().await
+}
+
+async fn write_http_response_headers(
+    socket: &mut TcpSocket<'_>,
+    response_status: u16,
+    body_len: usize,
+    allow_origin: Option<&str>,
     allow_private_network: bool,
     content_type: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
@@ -735,7 +833,7 @@ async fn write_http_response_with_type(
     let _ = write!(
         header,
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Flux-Purr-Lease\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n",
-        body.len()
+        body_len
     );
     if content_type == "text/event-stream" {
         let _ = header.push_str("Cache-Control: no-cache\r\n");
@@ -750,9 +848,7 @@ async fn write_http_response_with_type(
         let _ = header.push_str("Access-Control-Allow-Private-Network: true\r\n");
     }
     let _ = header.push_str("\r\n");
-    socket.write_all(header.as_bytes()).await?;
-    socket.write_all(body.as_bytes()).await?;
-    socket.flush().await
+    socket.write_all(header.as_bytes()).await
 }
 
 #[embassy_executor::task]

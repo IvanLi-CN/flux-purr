@@ -40,6 +40,7 @@
 - `heaterCurrentReserveMa` 已进入 thermal profile settings、status 回显、preview/save API 与 EEPROM。heater safe-max 会在 source current capability 之上预留 reserve，而不是吃满整条 source 电流预算。
 - `devd` 提供 localhost daemon、授权端口 serial discovery、lease、bounded events、USB identity/network/status/WiFi/runtime bridge、artifact verify、dry-run 与 real flash command boundary。真实烧录路径固定为 repo-local `flux-purr -> devd -> espflash`，并继续受授权端口纪律保护。
 - `devd` 与相关 smoke 路径已固定几条 transport guardrail：显式 bind / serial / artifact root；授权串口缺失时拒绝自动切换到重新枚举端口；real flash 前释放 daemon-local serial session；浏览器与脚本通过 lease 复用同一设备会话而不是重复抢占串口。
+- ESP32-S3 executor 使用 `80 KiB` 的共享 task arena：主循环、network、WiFi、mDNS 与 HTTP listener 的测量总占用约 `73.3 KiB`。HTTP 的收发缓冲、解析请求、规范化控制命令和控制响应均保存在单客户端静态工作区，不能放入 async task frame；WiFi 初始化与 LAN task spawn 在 USB JSONL recovery 初始化之后执行，失败时发布网络错误但不阻断 USB 控制。
 - 当前控制平面已经具备 mock HTTP contract smoke、CLI-through-devd smoke、browser Web-to-devd smoke、runtime mutation/readback、artifact verify、flash dry-run、real flash、WiFi redaction 与 calibration/dashboard 关键路径的自动化或脚本化覆盖。
 
 ## Thermal acceptance state

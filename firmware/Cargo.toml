@@ -60,7 +60,9 @@ serde-json-core = "0.6.0"
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 defmt = "1.0.1"
-embassy-executor = { version = "0.7.0", features = ["task-arena-size-65536"] }
+# The main task and LAN service tasks fit within this bounded shared arena;
+# the HTTP workspace itself is statically allocated to preserve USB recovery.
+embassy-executor = { version = "0.7.0", features = ["task-arena-size-81920"] }
 embassy-time = "0.4.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
