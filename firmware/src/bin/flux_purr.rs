@@ -120,7 +120,8 @@ use flux_purr_firmware::memory::{
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::status_light::{
-    RgbChannels, StatusLightInputs, select_status_light_state, status_light_output,
+    RgbChannels, StatusLightInputs, StatusLightState, select_status_light_state,
+    status_light_output,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::thermal_plant::{ThermalPlantControlInput, ThermalPlantController};
@@ -433,6 +434,8 @@ const CH224Q_PD_SETTLE_MS: u64 = 150;
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
+#[cfg(target_arch = "xtensa")]
+const STATUS_LIGHT_BOOT_REFRESH_MS: u64 = 50;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -8359,8 +8362,10 @@ fn read_ch224q_power_data(
 async fn await_ch224q_pd_ready(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     address: Address,
+    mut refresh_boot_light: impl FnMut(),
 ) -> Option<(u8, Status, u8, u16)> {
     for attempt in 1..=CH224Q_STATUS_POLL_ATTEMPTS {
+        refresh_boot_light();
         let Some(status_raw) = read_ch224q_register(i2c, address, ch224q::STATUS_REGISTER) else {
             info!(
                 "ch224q status read failed addr=0x{=u8:02x} attempt={=u8}/{=u8}",
@@ -8368,7 +8373,7 @@ async fn await_ch224q_pd_ready(
                 attempt,
                 CH224Q_STATUS_POLL_ATTEMPTS,
             );
-            EmbassyTimer::after_millis(CH224Q_STATUS_POLL_DELAY_MS).await;
+            wait_for_ch224q_status_poll(&mut refresh_boot_light).await;
             continue;
         };
         let current_raw =
@@ -8387,10 +8392,18 @@ async fn await_ch224q_pd_ready(
         if status.pd_active && !status.epr_active {
             return Some((status_raw, status, current_raw, current_ma));
         }
-        EmbassyTimer::after_millis(CH224Q_STATUS_POLL_DELAY_MS).await;
+        wait_for_ch224q_status_poll(&mut refresh_boot_light).await;
     }
 
     None
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn wait_for_ch224q_status_poll(refresh_boot_light: &mut impl FnMut()) {
+    for _ in 0..(CH224Q_STATUS_POLL_DELAY_MS / STATUS_LIGHT_BOOT_REFRESH_MS) {
+        refresh_boot_light();
+        EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS).await;
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8721,6 +8734,7 @@ async fn main(_spawner: Spawner) {
     let mut status_light_blue =
         Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
     let mut last_status_light_output = None;
+    let status_light_started_ms = Instant::now().as_millis();
     apply_status_light_output(
         &mut status_light_red,
         &mut status_light_green,
@@ -8802,7 +8816,19 @@ async fn main(_spawner: Spawner) {
         BUZZER_PWM_PERIOD_TICKS,
     );
     let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
-        await_ch224q_pd_ready(&mut pd_i2c, ch224q_address).await
+        await_ch224q_pd_ready(&mut pd_i2c, ch224q_address, || {
+            let elapsed_ms = Instant::now()
+                .as_millis()
+                .saturating_sub(status_light_started_ms);
+            apply_status_light_output(
+                &mut status_light_red,
+                &mut status_light_green,
+                &mut status_light_blue,
+                status_light_output(StatusLightState::Booting, elapsed_ms),
+                &mut last_status_light_output,
+            );
+        })
+        .await
     {
         info!(
             "heater runtime ready: gpio47 freq={=u32}Hz target={=i16}~{=i16}C cooling_lock>{=i16}C hard_cutoff={=i16}C pd_status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
@@ -9876,8 +9902,11 @@ async fn main(_spawner: Spawner) {
             &mut buzzer_output_applied,
         );
 
+        let status_light_elapsed_ms = Instant::now()
+            .as_millis()
+            .saturating_sub(status_light_started_ms);
         let status_light_state = select_status_light_state(StatusLightInputs {
-            booting: elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
+            booting: status_light_elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
             thermal_runaway: is_overtemp_fault(current_rtd_fault),
             thermal_runaway_attention_pending: attention_pending_after_fault_clear,
             sensor_fault: is_sensor_fault(current_rtd_fault),
@@ -9892,7 +9921,7 @@ async fn main(_spawner: Spawner) {
             &mut status_light_red,
             &mut status_light_green,
             &mut status_light_blue,
-            status_light_output(status_light_state, elapsed_ms),
+            status_light_output(status_light_state, status_light_elapsed_ms),
             &mut last_status_light_output,
         );
 
