@@ -3,10 +3,8 @@
 
 #[cfg(target_arch = "xtensa")]
 use core::{
-    future::{Future, poll_fn},
     panic::PanicInfo,
-    pin::Pin,
-    task::Poll,
+    sync::atomic::{AtomicU8, Ordering},
 };
 #[cfg(target_arch = "xtensa")]
 use defmt::{info, warn};
@@ -5896,53 +5894,50 @@ fn apply_status_light_output(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn refresh_boot_status_light(
-    red: &mut Output<'_>,
-    green: &mut Output<'_>,
-    blue: &mut Output<'_>,
-    started_ms: u64,
-    last_output: &mut Option<RgbChannels>,
-) {
-    refresh_status_light(
-        red,
-        green,
-        blue,
-        started_ms,
-        StatusLightState::Booting,
-        last_output,
-    );
+static STATUS_LIGHT_STATE: AtomicU8 = AtomicU8::new(StatusLightState::Booting as u8);
+
+#[cfg(target_arch = "xtensa")]
+fn set_status_light_state(state: StatusLightState) {
+    STATUS_LIGHT_STATE.store(state as u8, Ordering::Relaxed);
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn await_with_status_light<F>(
-    future: F,
-    red: &mut Output<'_>,
-    green: &mut Output<'_>,
-    blue: &mut Output<'_>,
+fn status_light_state_from_code(code: u8) -> StatusLightState {
+    match code {
+        0 => StatusLightState::Booting,
+        1 => StatusLightState::Ready,
+        2 => StatusLightState::Heating,
+        3 => StatusLightState::Cooling,
+        4 => StatusLightState::Calibration,
+        5 => StatusLightState::HeaterInterlocked,
+        6 => StatusLightState::CoolingDisabledOvertemp,
+        7 => StatusLightState::SensorFault,
+        8 => StatusLightState::ThermalRunawayAttentionPending,
+        9 => StatusLightState::ThermalRunaway,
+        _ => StatusLightState::Booting,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[embassy_executor::task]
+async fn run_status_light_task(
+    mut red: Output<'static>,
+    mut green: Output<'static>,
+    mut blue: Output<'static>,
     started_ms: u64,
-    state: StatusLightState,
-    last_output: &mut Option<RgbChannels>,
-) -> F::Output
-where
-    F: Future,
-{
-    let mut future = core::pin::pin!(future);
-    let mut refresh_timer = EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS);
-
-    poll_fn(|cx| {
-        if let Poll::Ready(output) = future.as_mut().poll(cx) {
-            return Poll::Ready(output);
-        }
-
-        if Pin::new(&mut refresh_timer).poll(cx).is_ready() {
-            refresh_status_light(red, green, blue, started_ms, state, last_output);
-            refresh_timer = EmbassyTimer::after_millis(STATUS_LIGHT_BOOT_REFRESH_MS);
-            let _ = Pin::new(&mut refresh_timer).poll(cx);
-        }
-
-        Poll::Pending
-    })
-    .await
+) -> ! {
+    let mut last_output = None;
+    loop {
+        refresh_status_light(
+            &mut red,
+            &mut green,
+            &mut blue,
+            started_ms,
+            status_light_state_from_code(STATUS_LIGHT_STATE.load(Ordering::Relaxed)),
+            &mut last_output,
+        );
+        EmbassyTimer::after_millis(20).await;
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -5955,28 +5950,6 @@ fn refresh_status_light(
     last_output: &mut Option<RgbChannels>,
 ) {
     let elapsed_ms = Instant::now().as_millis().saturating_sub(started_ms);
-    apply_status_light_output(
-        red,
-        green,
-        blue,
-        status_light_output(state, elapsed_ms),
-        last_output,
-    );
-}
-
-#[cfg(target_arch = "xtensa")]
-fn refresh_key_test_status_light(
-    red: &mut Output<'_>,
-    green: &mut Output<'_>,
-    blue: &mut Output<'_>,
-    started_ms: u64,
-    last_output: &mut Option<RgbChannels>,
-) {
-    let elapsed_ms = Instant::now().as_millis().saturating_sub(started_ms);
-    let state = select_status_light_state(StatusLightInputs {
-        booting: elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
-        ..StatusLightInputs::default()
-    });
     apply_status_light_output(
         red,
         green,
@@ -7828,13 +7801,9 @@ async fn run_usb_recovery_control_loop(
     rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     memory_config: &MemoryConfig,
-    status_light_red: &mut Output<'_>,
-    status_light_green: &mut Output<'_>,
-    status_light_blue: &mut Output<'_>,
-    status_light_started_ms: u64,
     status_light_state: StatusLightState,
-    last_status_light_output: &mut Option<RgbChannels>,
 ) -> ! {
+    set_status_light_state(status_light_state);
     let mut elapsed_ms = 0_u64;
     loop {
         loop {
@@ -7855,14 +7824,6 @@ async fn run_usb_recovery_control_loop(
                 Err(_) => break,
             }
         }
-        refresh_status_light(
-            status_light_red,
-            status_light_green,
-            status_light_blue,
-            status_light_started_ms,
-            status_light_state,
-            last_status_light_output,
-        );
         EmbassyTimer::after_millis(20).await;
         elapsed_ms = elapsed_ms.saturating_add(20);
     }
@@ -8521,11 +8482,7 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
-    status_light_red: &mut Output<'a>,
-    status_light_green: &mut Output<'a>,
-    status_light_blue: &mut Output<'a>,
     status_light_started_ms: u64,
-    last_status_light_output: &mut Option<RgbChannels>,
 ) -> !
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -8548,12 +8505,16 @@ where
 
     let mut elapsed_ms: u64 = 0;
     loop {
-        refresh_key_test_status_light(
-            status_light_red,
-            status_light_green,
-            status_light_blue,
-            status_light_started_ms,
-            last_status_light_output,
+        set_status_light_state(
+            if Instant::now()
+                .as_millis()
+                .saturating_sub(status_light_started_ms)
+                < STATUS_LIGHT_BOOT_DURATION_MS
+            {
+                StatusLightState::Booting
+            } else {
+                StatusLightState::Ready
+            },
         );
         EmbassyTimer::after_millis(20).await;
         elapsed_ms = elapsed_ms.saturating_add(20);
@@ -8603,21 +8564,18 @@ async fn main(_spawner: Spawner) {
     let peripherals = esp_hal::init(config);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_hal_embassy::init(timg0.timer0);
-    let mut status_light_red =
-        Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
-    let mut status_light_green =
-        Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
-    let mut status_light_blue =
-        Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
-    let mut last_status_light_output = None;
+    let status_light_red = Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
+    let status_light_green = Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
+    let status_light_blue = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
     let status_light_started_ms = Instant::now().as_millis();
-    refresh_boot_status_light(
-        &mut status_light_red,
-        &mut status_light_green,
-        &mut status_light_blue,
-        status_light_started_ms,
-        &mut last_status_light_output,
-    );
+    _spawner
+        .spawn(run_status_light_task(
+            status_light_red,
+            status_light_green,
+            status_light_blue,
+            status_light_started_ms,
+        ))
+        .expect("failed to spawn status-light task");
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
     #[cfg(feature = "web_serial")]
     let mut usb_serial = RawUsbSerialJtag::new(peripherals.USB_DEVICE);
@@ -8728,15 +8686,7 @@ async fn main(_spawner: Spawner) {
     );
     let display_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        await_with_status_light(
-            display.init(),
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
-            StatusLightState::Booting,
-            &mut last_status_light_output,
-        ),
+        display.init(),
     )
     .await
     .is_ok_and(|result| result.is_ok());
@@ -8747,12 +8697,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &usb_boot_memory_config,
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
             StatusLightState::Booting,
-            &mut last_status_light_output,
         )
         .await;
 
@@ -8770,15 +8715,7 @@ async fn main(_spawner: Spawner) {
     );
     let startup_flush_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        await_with_status_light(
-            display.flush(),
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
-            StatusLightState::Booting,
-            &mut last_status_light_output,
-        ),
+        display.flush(),
     )
     .await
     .is_ok_and(|result| result.is_ok());
@@ -8789,12 +8726,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &usb_boot_memory_config,
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
             StatusLightState::Booting,
-            &mut last_status_light_output,
         )
         .await;
 
@@ -8810,13 +8742,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_tx_buf,
             &usb_boot_memory_config,
         );
-        refresh_boot_status_light(
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
-            &mut last_status_light_output,
-        );
+        set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(20).await;
     }
     info!(
@@ -8834,17 +8760,7 @@ async fn main(_spawner: Spawner) {
             Output::new(peripherals.GPIO36, Level::Low, OutputConfig::default());
         _fan_pwm_safe.set_low();
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
-        run_key_test_runtime(
-            &mut display,
-            canvas,
-            inputs,
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
-            &mut last_status_light_output,
-        )
-        .await;
+        run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await;
     }
 
     let mut pd_i2c = I2c::new(
@@ -8870,13 +8786,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_tx_buf,
             &usb_boot_memory_config,
         );
-        refresh_boot_status_light(
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
-            &mut last_status_light_output,
-        );
+        set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(10).await;
     }
     let restored_memory_record = load_memory_record(&mut pd_i2c, &mut flash_storage);
@@ -8985,16 +8895,7 @@ async fn main(_spawner: Spawner) {
     );
     let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
         await_ch224q_pd_ready(&mut pd_i2c, ch224q_address, || {
-            let elapsed_ms = Instant::now()
-                .as_millis()
-                .saturating_sub(status_light_started_ms);
-            apply_status_light_output(
-                &mut status_light_red,
-                &mut status_light_green,
-                &mut status_light_blue,
-                status_light_output(StatusLightState::Booting, elapsed_ms),
-                &mut last_status_light_output,
-            );
+            set_status_light_state(StatusLightState::Booting);
         })
         .await
     {
@@ -9288,24 +9189,10 @@ async fn main(_spawner: Spawner) {
         fan_enabled: fan_command.enabled,
         ..StatusLightInputs::default()
     });
-    apply_status_light_output(
-        &mut status_light_red,
-        &mut status_light_green,
-        &mut status_light_blue,
-        status_light_output(initial_status_light_state, initial_status_light_elapsed_ms),
-        &mut last_status_light_output,
-    );
+    set_status_light_state(initial_status_light_state);
     let initial_frontpanel_ui_ready = with_timeout(
         Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        await_with_status_light(
-            flush_ui(&mut display, canvas, &ui_state),
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
-            initial_status_light_state,
-            &mut last_status_light_output,
-        ),
+        flush_ui(&mut display, canvas, &ui_state),
     )
     .await
     .is_ok_and(|result| result.is_ok());
@@ -9316,12 +9203,7 @@ async fn main(_spawner: Spawner) {
             &mut usb_rx_line,
             &mut usb_tx_buf,
             &memory_config,
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_started_ms,
             initial_status_light_state,
-            &mut last_status_light_output,
         )
         .await;
 
@@ -10119,13 +10001,7 @@ async fn main(_spawner: Spawner) {
             heater_enabled: ui_state.heater_enabled,
             fan_enabled: fan_command.enabled,
         });
-        apply_status_light_output(
-            &mut status_light_red,
-            &mut status_light_green,
-            &mut status_light_blue,
-            status_light_output(status_light_state, status_light_elapsed_ms),
-            &mut last_status_light_output,
-        );
+        set_status_light_state(status_light_state);
 
         if needs_redraw {
             flush_ui(&mut display, canvas, &ui_state)
