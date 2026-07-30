@@ -5591,16 +5591,16 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
             "local-esp32s3-release",
             "Local ESP32-S3 release",
             "target/xtensa-esp32s3-none-elf/release/flux-purr",
-            "release + web_serial",
-            vec!["web_serial".to_string()],
+            "release + web_serial + net_http",
+            vec!["web_serial".to_string(), "net_http".to_string()],
             "elf",
         ),
         (
             "local-esp32s3-release-firmware-target",
             "Local ESP32-S3 release (legacy firmware target)",
             "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
-            "release + web_serial",
-            vec!["web_serial".to_string()],
+            "release + web_serial + net_http",
+            vec!["web_serial".to_string(), "net_http".to_string()],
             "elf",
         ),
         (
@@ -6837,8 +6837,8 @@ mod tests {
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].artifact_id, "local-esp32s3-release");
         assert_eq!(artifacts[0].target_chip, "esp32s3");
-        assert_eq!(artifacts[0].profile, "release + web_serial");
-        assert_eq!(artifacts[0].features, ["web_serial"]);
+        assert_eq!(artifacts[0].profile, "release + web_serial + net_http");
+        assert_eq!(artifacts[0].features, ["web_serial", "net_http"]);
         assert_eq!(artifacts[0].files[0].kind, "elf");
         assert_eq!(artifacts[0].files[0].size, 14);
         assert_eq!(artifacts[0].files[0].flash_address, None);
