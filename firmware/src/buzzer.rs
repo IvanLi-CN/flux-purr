@@ -343,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn retriggering_same_cue_bumps_generation_for_hardware_restart() {
+    fn retriggering_same_cue_bumps_generation_for_playback_restart() {
         let mut controller = BuzzerController::new();
 
         let first = controller.play(BuzzerCueId::HeaterOn, 0);
