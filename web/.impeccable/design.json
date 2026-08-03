@@ -1,0 +1,392 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-02T16:14:24Z",
+  "title": "Design System: Flux Purr Web Console",
+  "extensions": {
+    "colorMeta": {
+      "chassis": {
+        "role": "neutral",
+        "displayName": "Cool Chassis",
+        "canonical": "oklch(0.928 0.014 248)",
+        "tonalRamp": [
+          "oklch(0.15 0.014 248)",
+          "oklch(0.26 0.014 248)",
+          "oklch(0.37 0.014 248)",
+          "oklch(0.48 0.014 248)",
+          "oklch(0.60 0.014 248)",
+          "oklch(0.72 0.014 248)",
+          "oklch(0.84 0.014 248)",
+          "oklch(0.95 0.014 248)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Raised Panel",
+        "canonical": "oklch(0.968 0.007 235)",
+        "tonalRamp": [
+          "oklch(0.15 0.007 235)",
+          "oklch(0.26 0.007 235)",
+          "oklch(0.37 0.007 235)",
+          "oklch(0.48 0.007 235)",
+          "oklch(0.60 0.007 235)",
+          "oklch(0.72 0.007 235)",
+          "oklch(0.84 0.007 235)",
+          "oklch(0.95 0.007 235)"
+        ]
+      },
+      "recessed": {
+        "role": "neutral",
+        "displayName": "Recessed Grey",
+        "canonical": "oklch(0.89 0.018 241)",
+        "tonalRamp": [
+          "oklch(0.15 0.018 241)",
+          "oklch(0.26 0.018 241)",
+          "oklch(0.37 0.018 241)",
+          "oklch(0.48 0.018 241)",
+          "oklch(0.60 0.018 241)",
+          "oklch(0.72 0.018 241)",
+          "oklch(0.84 0.018 241)",
+          "oklch(0.95 0.018 241)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Instrument Ink",
+        "canonical": "oklch(0.302 0.026 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.026 255)",
+          "oklch(0.26 0.026 255)",
+          "oklch(0.37 0.026 255)",
+          "oklch(0.48 0.026 255)",
+          "oklch(0.60 0.026 255)",
+          "oklch(0.72 0.026 255)",
+          "oklch(0.84 0.026 255)",
+          "oklch(0.95 0.026 255)"
+        ]
+      },
+      "label-ink": {
+        "role": "neutral",
+        "displayName": "Stamped Label Ink",
+        "canonical": "oklch(0.392 0.022 252)",
+        "tonalRamp": [
+          "oklch(0.15 0.022 252)",
+          "oklch(0.26 0.022 252)",
+          "oklch(0.37 0.022 252)",
+          "oklch(0.48 0.022 252)",
+          "oklch(0.60 0.022 252)",
+          "oklch(0.72 0.022 252)",
+          "oklch(0.84 0.022 252)",
+          "oklch(0.95 0.022 252)"
+        ]
+      },
+      "signal-red": {
+        "role": "primary",
+        "displayName": "Signal Red",
+        "canonical": "oklch(0.58 0.209 25)",
+        "tonalRamp": [
+          "oklch(0.15 0.209 25)",
+          "oklch(0.26 0.209 25)",
+          "oklch(0.37 0.209 25)",
+          "oklch(0.48 0.209 25)",
+          "oklch(0.60 0.209 25)",
+          "oklch(0.72 0.209 25)",
+          "oklch(0.84 0.209 25)",
+          "oklch(0.95 0.209 25)"
+        ]
+      },
+      "signal-red-glow": {
+        "role": "primary",
+        "displayName": "Signal Red Glow",
+        "canonical": "oklch(0.676 0.18 22)",
+        "tonalRamp": [
+          "oklch(0.15 0.18 22)",
+          "oklch(0.26 0.18 22)",
+          "oklch(0.37 0.18 22)",
+          "oklch(0.48 0.18 22)",
+          "oklch(0.60 0.18 22)",
+          "oklch(0.72 0.18 22)",
+          "oklch(0.84 0.18 22)",
+          "oklch(0.95 0.18 22)"
+        ]
+      },
+      "shadow": {
+        "role": "neutral",
+        "displayName": "Structural Shadow",
+        "canonical": "oklch(0.79 0.02 248)",
+        "tonalRamp": [
+          "oklch(0.15 0.02 248)",
+          "oklch(0.26 0.02 248)",
+          "oklch(0.37 0.02 248)",
+          "oklch(0.48 0.02 248)",
+          "oklch(0.60 0.02 248)",
+          "oklch(0.72 0.02 248)",
+          "oklch(0.84 0.02 248)",
+          "oklch(0.95 0.02 248)"
+        ]
+      },
+      "deep-shadow": {
+        "role": "neutral",
+        "displayName": "Deep Structural Shadow",
+        "canonical": "oklch(0.738 0.023 247)",
+        "tonalRamp": [
+          "oklch(0.15 0.023 247)",
+          "oklch(0.26 0.023 247)",
+          "oklch(0.37 0.023 247)",
+          "oklch(0.48 0.023 247)",
+          "oklch(0.60 0.023 247)",
+          "oklch(0.72 0.023 247)",
+          "oklch(0.84 0.023 247)",
+          "oklch(0.95 0.023 247)"
+        ]
+      },
+      "highlight": {
+        "role": "neutral",
+        "displayName": "Top-left Highlight",
+        "canonical": "oklch(0.996 0.003 220)",
+        "tonalRamp": [
+          "oklch(0.15 0.003 220)",
+          "oklch(0.26 0.003 220)",
+          "oklch(0.37 0.003 220)",
+          "oklch(0.48 0.003 220)",
+          "oklch(0.60 0.003 220)",
+          "oklch(0.72 0.003 220)",
+          "oklch(0.84 0.003 220)",
+          "oklch(0.95 0.003 220)"
+        ]
+      },
+      "technical-charcoal": {
+        "role": "neutral",
+        "displayName": "Technical Charcoal",
+        "canonical": "oklch(0.302 0.026 255)",
+        "tonalRamp": [
+          "oklch(0.15 0.026 255)",
+          "oklch(0.26 0.026 255)",
+          "oklch(0.37 0.026 255)",
+          "oklch(0.48 0.026 255)",
+          "oklch(0.60 0.026 255)",
+          "oklch(0.72 0.026 255)",
+          "oklch(0.84 0.026 255)",
+          "oklch(0.95 0.026 255)"
+        ]
+      },
+      "technical-slate": {
+        "role": "neutral",
+        "displayName": "Technical Slate",
+        "canonical": "oklch(0.344 0.033 251)",
+        "tonalRamp": [
+          "oklch(0.15 0.033 251)",
+          "oklch(0.26 0.033 251)",
+          "oklch(0.37 0.033 251)",
+          "oklch(0.48 0.033 251)",
+          "oklch(0.60 0.033 251)",
+          "oklch(0.72 0.033 251)",
+          "oklch(0.84 0.033 251)",
+          "oklch(0.95 0.033 251)"
+        ]
+      },
+      "status-green": {
+        "role": "secondary",
+        "displayName": "Operational Green",
+        "canonical": "oklch(0.72 0.154 151)",
+        "tonalRamp": [
+          "oklch(0.15 0.154 151)",
+          "oklch(0.26 0.154 151)",
+          "oklch(0.37 0.154 151)",
+          "oklch(0.48 0.154 151)",
+          "oklch(0.60 0.154 151)",
+          "oklch(0.72 0.154 151)",
+          "oklch(0.84 0.154 151)",
+          "oklch(0.95 0.154 151)"
+        ]
+      },
+      "warning-yellow": {
+        "role": "tertiary",
+        "displayName": "Warning Yellow",
+        "canonical": "oklch(0.83 0.148 92)",
+        "tonalRamp": [
+          "oklch(0.15 0.148 92)",
+          "oklch(0.26 0.148 92)",
+          "oklch(0.37 0.148 92)",
+          "oklch(0.48 0.148 92)",
+          "oklch(0.60 0.148 92)",
+          "oklch(0.72 0.148 92)",
+          "oklch(0.84 0.148 92)",
+          "oklch(0.95 0.148 92)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Console Identity",
+        "purpose": "Product and current-workspace identity."
+      },
+      "title": { "displayName": "Module Title", "purpose": "Mounted panel and workflow headings." },
+      "body": {
+        "displayName": "Operating Copy",
+        "purpose": "Instructions, explanations, and navigation language."
+      },
+      "label": {
+        "displayName": "Instrument Label",
+        "purpose": "Measurements, identifiers, badges, timestamps, and control legends."
+      }
+    },
+    "shadows": [
+      {
+        "name": "module-lift",
+        "value": "8px 8px 16px oklch(0.79 0.02 248), -8px -8px 16px oklch(0.996 0.003 220)",
+        "purpose": "Mount panels and cards above the chassis."
+      },
+      {
+        "name": "control-lift",
+        "value": "5px 5px 10px oklch(0.79 0.02 248), -5px -5px 10px oklch(0.996 0.003 220)",
+        "purpose": "Make keys and secondary buttons manipulable."
+      },
+      {
+        "name": "pressed",
+        "value": "inset 6px 6px 12px oklch(0.79 0.02 248), inset -6px -6px 12px oklch(0.996 0.003 220)",
+        "purpose": "Show pressed controls and committed selection."
+      },
+      {
+        "name": "recessed",
+        "value": "inset 4px 4px 8px oklch(0.79 0.02 248), inset -4px -4px 8px oklch(0.996 0.003 220)",
+        "purpose": "Sink data wells, inputs, and screen surrounds."
+      },
+      {
+        "name": "signal-led",
+        "value": "0 0 10px 2px rgba(255, 71, 87, 0.55)",
+        "purpose": "Emit light from an active signal LED only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "mechanical-state",
+        "value": "180ms cubic-bezier(0.175, 0.885, 0.32, 1.05)",
+        "purpose": "Lift and press physical controls."
+      },
+      {
+        "name": "state-color",
+        "value": "180ms ease",
+        "purpose": "Change control and status color without lag."
+      }
+    ],
+    "breakpoints": [
+      { "name": "compact", "value": "640px" },
+      { "name": "stacked-workspace", "value": "760px" },
+      { "name": "two-column-control", "value": "820px" },
+      { "name": "wide-header", "value": "940px" },
+      { "name": "wide-workbench", "value": "1180px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The scarce signal-red command for the primary action in a workflow.",
+      "html": "<button class=\"ds-button-primary\">APPLY SETTINGS</button>",
+      "css": ".ds-button-primary { min-height: 48px; border: 1px solid rgba(255,255,255,.28); border-radius: 14px; background: oklch(0.58 0.209 25); color: #fff; padding: .75rem 1rem; font: 800 .78rem/1.2 'JetBrains Mono', monospace; letter-spacing: .05em; text-transform: uppercase; box-shadow: 4px 4px 8px rgba(166,50,60,.42), -4px -4px 8px rgba(255,100,110,.42); transition: transform 180ms cubic-bezier(.175,.885,.32,1.05), box-shadow 180ms ease; } .ds-button-primary:hover { transform: translateY(-2px); } .ds-button-primary:focus-visible { outline: 2px solid oklch(0.58 0.209 25); outline-offset: 3px; } .ds-button-primary:active { transform: translateY(2px); box-shadow: inset 6px 6px 12px rgba(166,50,60,.55), inset -6px -6px 12px rgba(255,100,110,.38); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A raised chassis key for ordinary commands.",
+      "html": "<button class=\"ds-button-secondary\">VERIFY ARTIFACT</button>",
+      "css": ".ds-button-secondary { min-height: 48px; border: 1px solid rgba(255,255,255,.52); border-radius: 14px; background: oklch(0.928 0.014 248); color: oklch(0.302 0.026 255); padding: .75rem 1rem; font: 800 .78rem/1.2 'JetBrains Mono', monospace; letter-spacing: .05em; text-transform: uppercase; box-shadow: 5px 5px 10px oklch(0.79 0.02 248), -5px -5px 10px oklch(0.996 0.003 220); transition: transform 180ms cubic-bezier(.175,.885,.32,1.05), box-shadow 180ms ease, color 180ms ease; } .ds-button-secondary:hover { transform: translateY(-2px); color: oklch(0.58 0.209 25); } .ds-button-secondary:focus-visible { outline: 2px solid oklch(0.58 0.209 25); outline-offset: 3px; } .ds-button-secondary:active { transform: translateY(2px); box-shadow: inset 6px 6px 12px oklch(0.79 0.02 248), inset -6px -6px 12px oklch(0.996 0.003 220); }"
+    },
+    {
+      "name": "Navigation Key",
+      "kind": "nav",
+      "refersTo": "navigation-key",
+      "description": "A physical view selector with label and technical caption.",
+      "html": "<button class=\"ds-nav-key\"><strong>Calibration</strong><small>WORKBENCH</small></button>",
+      "css": ".ds-nav-key { display: grid; gap: .14rem; min-width: 12rem; min-height: 48px; border: 1px solid rgba(255,255,255,.5); border-radius: 14px; background: oklch(0.928 0.014 248); color: oklch(0.302 0.026 255); padding: .68rem .85rem; text-align: left; box-shadow: 3px 3px 8px rgba(186,190,204,.72), -3px -3px 8px rgba(255,255,255,.86); transition: transform 180ms cubic-bezier(.175,.885,.32,1.05), color 180ms ease; } .ds-nav-key strong { font: 800 1rem/1.15 Manrope, sans-serif; } .ds-nav-key small { color: oklch(0.392 0.022 252); font: 800 .7rem/1.2 'JetBrains Mono', monospace; letter-spacing: .05em; } .ds-nav-key:hover { transform: translateY(-2px); color: oklch(0.58 0.209 25); } .ds-nav-key:focus-visible { outline: 2px solid oklch(0.58 0.209 25); outline-offset: 3px; } .ds-nav-key:active { transform: translateY(2px); box-shadow: inset 5px 5px 10px oklch(0.79 0.02 248), inset -5px -5px 10px oklch(0.996 0.003 220); }"
+    },
+    {
+      "name": "Data Input",
+      "kind": "input",
+      "refersTo": "data-input",
+      "description": "A recessed numeric or technical-value well.",
+      "html": "<label class=\"ds-data-field\"><span>TARGET TEMP</span><input value=\"180 C\" aria-label=\"Target temperature\"></label>",
+      "css": ".ds-data-field { display: grid; gap: .35rem; border-radius: 18px; background: oklch(0.928 0.014 248); padding: .62rem .72rem; color: oklch(0.392 0.022 252); font: 800 .7rem/1.2 'JetBrains Mono', monospace; letter-spacing: .05em; box-shadow: inset 4px 4px 8px oklch(0.79 0.02 248), inset -4px -4px 8px oklch(0.996 0.003 220); } .ds-data-field input { min-height: 44px; border: 0; background: transparent; color: oklch(0.302 0.026 255); font: 800 1.15rem/1.15 'JetBrains Mono', monospace; outline: none; } .ds-data-field:focus-within { outline: 2px solid oklch(0.58 0.209 25); outline-offset: 3px; }"
+    },
+    {
+      "name": "Raised Panel",
+      "kind": "card",
+      "refersTo": "raised-panel",
+      "description": "A mounted functional module with restrained corner fasteners.",
+      "html": "<section class=\"ds-panel\"><div class=\"ds-panel-title\">Thermal Runtime</div><p>Live state and controls remain in one mounted module.</p></section>",
+      "css": ".ds-panel { position: relative; max-width: 24rem; border: 1px solid rgba(255,255,255,.54); border-radius: 22px; background: radial-gradient(circle at 10% 8%, rgba(255,255,255,.86), transparent 24%), oklch(0.928 0.014 248); padding: 1rem; color: oklch(0.302 0.026 255); box-shadow: 8px 8px 16px oklch(0.79 0.02 248), -8px -8px 16px oklch(0.996 0.003 220); } .ds-panel::before { position: absolute; inset: 0; pointer-events: none; content: ''; background: radial-gradient(circle at 14px 14px, rgba(45,52,54,.18) 2px, transparent 3px), radial-gradient(circle at calc(100% - 14px) 14px, rgba(45,52,54,.18) 2px, transparent 3px), radial-gradient(circle at 14px calc(100% - 14px), rgba(45,52,54,.18) 2px, transparent 3px), radial-gradient(circle at calc(100% - 14px) calc(100% - 14px), rgba(45,52,54,.18) 2px, transparent 3px); } .ds-panel-title { position: relative; font: 800 1.35rem/1.1 Manrope, sans-serif; text-shadow: 0 1px 0 #fff; } .ds-panel p { position: relative; margin: .7rem 0 0; color: oklch(0.392 0.022 252); font: 600 1rem/1.45 Manrope, sans-serif; }"
+    },
+    {
+      "name": "Status Pill",
+      "kind": "chip",
+      "refersTo": "status-pill",
+      "description": "A recessed text-and-light device state indicator.",
+      "html": "<span class=\"ds-status\"><i aria-hidden=\"true\"></i> DEVICE READY</span>",
+      "css": ".ds-status { display: inline-flex; align-items: center; gap: .42rem; border: 1px solid rgba(163,177,198,.72); border-radius: 9999px; background: rgba(240,242,245,.74); padding: .45rem .65rem; color: oklch(0.392 0.022 252); font: 800 .7rem/1.2 'JetBrains Mono', monospace; letter-spacing: .06em; text-transform: uppercase; box-shadow: inset 2px 2px 4px rgba(186,190,204,.62), inset -2px -2px 4px rgba(255,255,255,.78); } .ds-status i { width: .6rem; height: .6rem; border-radius: 9999px; background: oklch(0.72 0.154 151); box-shadow: 0 0 10px 2px rgba(34,197,94,.7); } .ds-status:focus-visible { outline: 2px solid oklch(0.58 0.209 25); outline-offset: 3px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Instrument Panel",
+    "overview": "Flux Purr Web Console behaves like a compact bench instrument: every surface has physical position, every state has operational meaning, and the operator can scan a dense workspace without mistaking decoration for capability. Its industrial skeuomorphism comes from material logic rather than nostalgia. The system is tactile but disciplined. Raised controls invite manipulation, recessed fields and displays receive information, and dark technical surfaces isolate logs or device readouts. Screws, scanlines, texture, and LED glow are signature details only when they reinforce mounting, material, or status.",
+    "keyCharacteristics": [
+      "Light-mode cool-grey chassis with restrained signal color.",
+      "Top-left illumination and structurally paired highlights and shadows.",
+      "Recognizable controls with explicit hover, focus, pressed, selected, and disabled states.",
+      "Dense single-device workbench layouts that preserve transport and safety context.",
+      "Technical data in mono; interface language in a compact humanist sans."
+    ],
+    "rules": [
+      {
+        "name": "The Signal Discipline Rule",
+        "body": "Signal red owns interaction emphasis; green and yellow communicate device state and never become ordinary decorative accents.",
+        "section": "colors"
+      },
+      {
+        "name": "The Live-State Rule",
+        "body": "Live, mock, offline, degraded, and unsupported states must differ through words or shape as well as color.",
+        "section": "colors"
+      },
+      {
+        "name": "The Data Face Rule",
+        "body": "Measurements, identifiers, timestamps, and machine state use the mono face; prose and navigation stay in the humanist face.",
+        "section": "typography"
+      },
+      {
+        "name": "The One Bench Rule",
+        "body": "Keep one active device and its immediate workflow in view; do not turn the console into a fleet dashboard or a field of unrelated cards.",
+        "section": "layout"
+      },
+      {
+        "name": "The Fixed-Light Rule",
+        "body": "Highlights always come from the top-left; mixed lighting breaks the instrument illusion.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Structural Depth Rule",
+        "body": "Elevation must explain whether an element is mounted, manipulable, recessed, or emitting light. It is never ambient decoration.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Mounted-Part Rule",
+        "body": "A curve, border, groove, or fastener must clarify the physical role of the element it belongs to.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do preserve the top-left lighting model across every raised and recessed surface.",
+      "Do keep standard buttons, inputs, switches, segmented controls, and destructive actions recognizable.",
+      "Do show transport, lease, capability, and safety boundaries at the point of action.",
+      "Do use mechanical detail selectively to explain mounting, state, or interaction.",
+      "Do preserve responsive target sizes and visible keyboard focus."
+    ],
+    "donts": [
+      "Don't present mock or stale telemetry as live hardware state.",
+      "Don't turn the Web App into a marketing landing page, fleet dashboard, or generic SaaS settings shell.",
+      "Don't use signal red as broad decoration or use status green/yellow for ordinary interaction.",
+      "Don't nest decorative cards or give every region equal elevation.",
+      "Don't introduce glass surfaces, arbitrary gradients, inconsistent lighting, or ornamental mechanical clutter."
+    ]
+  }
+}
