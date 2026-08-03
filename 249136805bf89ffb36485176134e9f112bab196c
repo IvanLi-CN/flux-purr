@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "c4771d8907f62fc1fe7765c959f325d213d26ddd",
+  "pr_number": 61,
+  "pr_title": "docs(web): initialize Impeccable design context",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "249136805bf89ffb36485176134e9f112bab196c",
+  "type_label": "type:docs"
+}
