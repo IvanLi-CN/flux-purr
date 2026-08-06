@@ -26,11 +26,11 @@ use embassy_sync::{
     signal::Signal,
 };
 use embassy_time::{Duration, Instant, Timer, with_timeout};
-use embedded_io_async::Write as _;
+use embedded_io_async::Write;
 use esp_hal::{peripherals::WIFI, rng::Rng};
-use esp_wifi::{
-    EspWifiController,
-    wifi::{ClientConfiguration, Configuration, WifiController, WifiDevice, WifiEvent},
+use esp_radio::{
+    Controller as RadioController, init as radio_init,
+    wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent},
 };
 use heapless::{String, Vec};
 use static_cell::StaticCell;
@@ -58,10 +58,6 @@ const HTTP_CONNECTION_COUNT: usize = 3;
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
-const DEBUG_SPAWN_NETWORK_TASK: bool = true;
-const DEBUG_SPAWN_WIFI_TASK: bool = true;
-const DEBUG_SPAWN_HTTP_TASK: bool = true;
-const DEBUG_SPAWN_MDNS_TASK: bool = true;
 
 type ControlStateMutex = Mutex<CriticalSectionRawMutex, Option<NetHttpState>>;
 type WifiConfigMutex = Mutex<CriticalSectionRawMutex, WifiRuntimeConfig>;
@@ -88,6 +84,7 @@ static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMac
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
 static NET_RUNNER: StaticCell<embassy_net::Runner<'static, WifiDevice<'static>>> =
     StaticCell::new();
+static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new();
 static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
 static HTTP_WORKSPACE_0: StaticCell<HttpWorkspace> = StaticCell::new();
 static HTTP_WORKSPACE_1: StaticCell<HttpWorkspace> = StaticCell::new();
@@ -401,14 +398,23 @@ async fn await_control_response(
 /// Starts the DHCP/static-IP capable station, TCP server, and mDNS/DNS-SD
 /// responder. WiFi setup remains USB-only because this function receives its
 /// credentials from EEPROM-loaded `MemoryConfig`.
-pub async fn spawn(
+pub async fn spawn<F>(
     spawner: &Spawner,
-    init: &'static EspWifiController<'static>,
     wifi_peripheral: WIFI<'static>,
     memory: &MemoryConfig,
-) -> Result<(), LanStartupError> {
-    let (controller, interfaces) = esp_wifi::wifi::new(init, wifi_peripheral)
+    mut report_stage: F,
+) -> Result<(), LanStartupError>
+where
+    F: FnMut(&'static [u8]),
+{
+    report_stage(b"boot_stage=wifi_radio_init_start\n");
+    let radio = radio_init().map_err(|_| LanStartupError::WifiInitialization)?;
+    report_stage(b"boot_stage=wifi_radio_init_complete\n");
+    let radio = RADIO_CONTROLLER.init(radio);
+    report_stage(b"boot_stage=wifi_interface_init_start\n");
+    let (controller, interfaces) = wifi::new(radio, wifi_peripheral, Default::default())
         .map_err(|_| LanStartupError::WifiInitialization)?;
+    report_stage(b"boot_stage=wifi_interface_init_complete\n");
     let station = interfaces.sta;
     let names = device_names_from_mac(station.mac_address());
     // Boot restoration is initialization, not a live reconfiguration. Do not
@@ -418,12 +424,14 @@ pub async fn spawn(
     let mut initial_config = WifiRuntimeConfig::from_memory(memory);
     initial_config.hostname = Some(names.hostname.clone());
     *WIFI_CONFIG.lock().await = initial_config.clone();
+    report_stage(b"boot_stage=wifi_config_ready\n");
     let initial_event = if initial_config.is_configured() {
         ProvisioningEvent::ApplyConfig
     } else {
         ProvisioningEvent::ClearConfig
     };
     let _ = publish_wifi_event(&initial_config, initial_event, None).await;
+    report_stage(b"boot_stage=wifi_state_published\n");
     CONTROL_STATE
         .lock()
         .await
@@ -434,21 +442,19 @@ pub async fn spawn(
     let resources = NET_RESOURCES.init(StackResources::<8>::new());
     let seed = random_u64();
     let (stack, runner) = embassy_net::new(station, net_config(&initial_config), resources, seed);
+    report_stage(b"boot_stage=wifi_network_stack_ready\n");
     // Keep large drivers out of executor task frames so USB recovery and all
     // LAN tasks fit in the bounded shared arena.
     let runner = NET_RUNNER.init(runner);
     let controller = WIFI_CONTROLLER.init(controller);
 
-    if DEBUG_SPAWN_NETWORK_TASK {
-        spawner
-            .spawn(network_task(runner))
-            .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
-    }
-    if DEBUG_SPAWN_WIFI_TASK {
-        spawner
-            .spawn(wifi_task(controller, stack))
-            .map_err(|_| LanStartupError::WifiTaskCapacity)?;
-    }
+    spawner
+        .spawn(wifi_task(controller, stack))
+        .map_err(|_| LanStartupError::WifiTaskCapacity)?;
+    spawner
+        .spawn(network_task(runner))
+        .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
+    report_stage(b"boot_stage=wifi_core_tasks_spawned\n");
     let sockets = [
         TcpSocket::new(
             stack,
@@ -482,16 +488,13 @@ pub async fn spawn(
             })
             .await;
     }
-    if DEBUG_SPAWN_HTTP_TASK {
-        spawner
-            .spawn(http_listener_task(stack, *spawner))
-            .map_err(|_| LanStartupError::HttpTaskCapacity)?;
-    }
-    if DEBUG_SPAWN_MDNS_TASK {
-        spawner
-            .spawn(mdns_task(stack, names))
-            .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
-    }
+    spawner
+        .spawn(http_listener_task(stack, *spawner))
+        .map_err(|_| LanStartupError::HttpTaskCapacity)?;
+    spawner
+        .spawn(mdns_task(stack, names))
+        .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
+    report_stage(b"boot_stage=wifi_all_tasks_spawned\n");
     Ok(())
 }
 
@@ -560,13 +563,13 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
             continue;
         }
 
-        let client = Configuration::Client(ClientConfiguration {
-            ssid: alloc::string::String::from(config.ssid.as_str()),
-            password: alloc::string::String::from(config.password.as_str()),
-            ..Default::default()
-        });
+        let client = ModeConfig::Client(
+            ClientConfig::default()
+                .with_ssid(alloc::string::String::from(config.ssid.as_str()))
+                .with_password(alloc::string::String::from(config.password.as_str())),
+        );
         stack.set_config_v4(net_config(&config).ipv4);
-        if controller.set_configuration(&client).is_err()
+        if controller.set_config(&client).is_err()
             || (!matches!(controller.is_started(), Ok(true))
                 && controller.start_async().await.is_err())
         {
@@ -1303,10 +1306,9 @@ fn decode_pairing_code(value: u32) -> Option<[u8; 4]> {
 
 fn random_u32() -> u32 {
     // The ESP RNG peripheral is shareable and WiFi keeps the RF entropy source
-    // enabled. `Rng` is a zero-sized register facade, so stealing it here does
-    // not duplicate owned DMA/state and avoids weakening pairing to a counter.
-    let peripheral = unsafe { esp_hal::peripherals::RNG::steal() };
-    Rng::new(peripheral).random()
+    // enabled. The register facade has no owned state, avoiding a weaker
+    // counter-based pairing code.
+    Rng::new().random()
 }
 
 #[cfg(test)]

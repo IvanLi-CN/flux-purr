@@ -1,9 +1,9 @@
 {
-  "artifactId": "lan-hil-runtime-ticker",
-  "name": "Flux Purr LAN HIL runtime ticker",
+  "artifactId": "lan-hil-rtos-radio",
+  "name": "Flux Purr LAN HIL RTOS radio",
   "version": "0.1.0-hil",
-  "gitSha": "4a3c30c1c30d2650d16164017650f3c266e8aca1",
-  "buildId": "lan-hil-runtime-ticker",
+  "gitSha": "29cd3d2",
+  "buildId": "lan-hil-rtos-radio",
   "targetChip": "esp32s3",
   "profile": "release",
   "features": ["esp32s3", "web_serial", "net_http"],
@@ -12,8 +12,8 @@
     {
       "kind": "elf",
       "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
-      "sha256": "sha256:50d5ec0347a0b7140d7ffc6c64e879b4317e4131d36e3ae26eb76acd24aefd0c",
-      "size": 2308072,
+      "sha256": "sha256:d0709de84702b0f0fe0ce0ec38fa080beb93c3d5a85c448e30659c359306bd76",
+      "size": 2247924,
       "flashAddress": null
     }
   ]
