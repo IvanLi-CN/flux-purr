@@ -69,6 +69,8 @@ use flux_purr_firmware::control_plane::LanPairingCode;
 use flux_purr_firmware::control_plane::ThermalControlProfileCommand;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::WifiConfigReceipt;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::hello_frame;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
@@ -92,8 +94,6 @@ use flux_purr_firmware::control_plane::{
     CalibrationSampleWire, CalibrationSlotFitWire, CalibrationSlotIdWire, CalibrationStateWire,
     samples_from_wire,
 };
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-use flux_purr_firmware::control_plane::{hello_frame, log_frame};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
     FRONTPANEL_PRESET_COUNT, FRONTPANEL_TARGET_TEMP_MAX_C, FRONTPANEL_TARGET_TEMP_MIN_C,
@@ -286,8 +286,6 @@ const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
 // sub-second RTD quantisation into a multi-degree correction.
 #[cfg(any(target_arch = "xtensa", test))]
 const THERMAL_PLANT_SLOPE_FILTER_ALPHA: f32 = 0.025;
-#[cfg(any(target_arch = "xtensa", test))]
-const RUNTIME_INPUT_POLL_MAX_INTERVAL_MS: u64 = 20;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PHASE_HYSTERESIS_C: f32 = 0.10;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1462,13 +1460,6 @@ fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 
 fn scaled_hold_ki_for_control_interval(ki_per_profile_tick: f32) -> f32 {
     ki_per_profile_tick.max(0.0)
         * (HEATER_CONTROL_INTERVAL_MS as f32 / HEATER_PROFILE_TICK_MS as f32)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-fn heater_control_poll_wait_ms(elapsed_ms: u64, next_deadline_ms: u64) -> u64 {
-    next_deadline_ms
-        .saturating_sub(elapsed_ms)
-        .clamp(1, RUNTIME_INPUT_POLL_MAX_INTERVAL_MS)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -9661,7 +9652,7 @@ async fn main(_spawner: Spawner) {
     set_status_light_state(initial_status_light_state);
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_start\n");
-    let initial_frontpanel_ui_ready = true;
+    let initial_frontpanel_ui_ready = flush_ui(&mut display, canvas, &ui_state).is_ok();
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_complete\n");
     if !initial_frontpanel_ui_ready {
@@ -9679,12 +9670,6 @@ async fn main(_spawner: Spawner) {
         panic!("failed to draw initial frontpanel UI");
     }
     #[cfg(feature = "web_serial")]
-    usb_write_frame(
-        &mut usb_serial,
-        &log_frame("info", "frontpanel runtime ready"),
-        &mut usb_tx_buf,
-    );
-    #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ready\n");
     log_ui_state(&ui_state);
 
@@ -9696,23 +9681,22 @@ async fn main(_spawner: Spawner) {
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
     let mut first_runtime_probe = true;
     loop {
-        let elapsed_before_wait_ms = Instant::now()
-            .as_millis()
-            .saturating_sub(runtime_started_ms);
-        if !first_runtime_probe {
-            EmbassyTimer::after_millis(heater_control_poll_wait_ms(
-                elapsed_before_wait_ms,
-                next_control_deadline_ms,
-            ))
-            .await;
+        // Runtime timers can share interrupt state with peripheral bring-up on
+        // ESP32-S3. Yield cooperatively and use the monotonic clock for all
+        // deadlines so USB, WiFi, and HTTP tasks keep making progress even if
+        // a timer alarm is lost after initialization.
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_before\n");
+        }
+        embassy_futures::yield_now().await;
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_after\n");
         }
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
-        #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] timer\n");
-        }
 
         let raw_state = inputs.sample();
         let sample = controller.sample_with_capabilities(
@@ -9721,10 +9705,6 @@ async fn main(_spawner: Spawner) {
             ui_state.gesture_capabilities(),
         );
         let mut needs_redraw = false;
-        #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] inputs\n");
-        }
         #[cfg(feature = "web_serial")]
         loop {
             match usb_serial.read_byte() {
@@ -9780,10 +9760,6 @@ async fn main(_spawner: Spawner) {
                 Err(nb::Error::WouldBlock) => break,
                 Err(_) => break,
             }
-        }
-        #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] usb\n");
         }
 
         #[cfg(feature = "net_http")]
@@ -9900,10 +9876,6 @@ async fn main(_spawner: Spawner) {
         if let Some(token) = flux_purr_firmware::net::take_persisted_token_change().await {
             memory_config.lan_pairing_token = token;
             memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-        }
-        #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] lan\n");
         }
 
         if sample.raw_state != last_raw_state {
@@ -10125,13 +10097,6 @@ async fn main(_spawner: Spawner) {
         }
 
         if elapsed_ms >= next_control_deadline_ms {
-            #[cfg(feature = "web_serial")]
-            if first_runtime_probe {
-                let _ = usb_write_bytes_bounded(
-                    &mut usb_serial,
-                    b"[DEBUG-runtime-loop] control_start\n",
-                );
-            }
             let control_started_ms = elapsed_ms;
             heater_control_timing.interval_ms = control_started_ms
                 .saturating_sub(last_control_ms)
@@ -10154,10 +10119,6 @@ async fn main(_spawner: Spawner) {
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
             let current_request_mv = heater_power_backend.pd_request_mv();
             let mut rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
-            #[cfg(feature = "web_serial")]
-            if first_runtime_probe {
-                let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] adc\n");
-            }
             let first_rtd_snapshot = match &rtd_sample {
                 RtdSample::Valid(measurement) => {
                     (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -10290,10 +10251,6 @@ async fn main(_spawner: Spawner) {
             }
 
             let current_pd_observation = read_ch224q_status(&mut pd_i2c, ch224q_address);
-            #[cfg(feature = "web_serial")]
-            if first_runtime_probe {
-                let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] pd_read\n");
-            }
             if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
                 match current_pd_observation {
                     Some(observation) => info!(
@@ -10391,13 +10348,6 @@ async fn main(_spawner: Spawner) {
             .await
             {
                 needs_redraw = true;
-            }
-            #[cfg(feature = "web_serial")]
-            if first_runtime_probe {
-                let _ = usb_write_bytes_bounded(
-                    &mut usb_serial,
-                    b"[DEBUG-runtime-loop] heater_output\n",
-                );
             }
             heater_control_timing.cycle_ms = Instant::now()
                 .as_millis()
@@ -10616,11 +10566,6 @@ async fn main(_spawner: Spawner) {
         if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
             needs_redraw = true;
         }
-        #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] network\n");
-        }
-
         if maybe_play_protection_alarm(
             is_overtemp_fault(current_rtd_fault),
             &mut next_protection_alarm_ms,
@@ -10668,24 +10613,12 @@ async fn main(_spawner: Spawner) {
 
         ui_refresh_pending |= needs_redraw;
         if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
-            #[cfg(feature = "web_serial")]
-            let _ =
-                usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-refresh] flush_start\n");
             match flush_ui(&mut display, canvas, &ui_state).await {
                 Ok(()) => log_ui_state(&ui_state),
                 Err(_) => warn!("frontpanel UI refresh failed"),
             }
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(
-                &mut usb_serial,
-                b"[DEBUG-runtime-refresh] flush_complete\n",
-            );
             ui_refresh_pending = false;
             next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
-        }
-        #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] complete\n");
         }
         first_runtime_probe = false;
     }
@@ -12169,27 +12102,6 @@ mod tests {
 
         assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
         assert_eq!(snapshot.warmup_soft_start_percent, 0);
-    }
-
-    #[test]
-    fn heater_control_poll_wait_lands_on_the_next_deadline() {
-        assert_eq!(
-            heater_control_poll_wait_ms(0, HEATER_CONTROL_INTERVAL_MS),
-            RUNTIME_INPUT_POLL_MAX_INTERVAL_MS.min(HEATER_CONTROL_INTERVAL_MS)
-        );
-        assert_eq!(
-            heater_control_poll_wait_ms(
-                HEATER_CONTROL_INTERVAL_MS
-                    .saturating_mul(2)
-                    .saturating_sub(17),
-                HEATER_CONTROL_INTERVAL_MS.saturating_mul(2),
-            ),
-            17
-        );
-        assert_eq!(
-            heater_control_poll_wait_ms(HEATER_CONTROL_INTERVAL_MS, HEATER_CONTROL_INTERVAL_MS),
-            1
-        );
     }
 
     #[test]

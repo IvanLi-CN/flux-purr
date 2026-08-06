@@ -6,6 +6,7 @@
 //! EEPROM work.
 
 use core::{
+    cell::RefCell,
     fmt::Write as _,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -19,7 +20,10 @@ use embassy_net::{
     udp::{PacketMetadata, UdpSocket},
 };
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex, signal::Signal,
+    blocking_mutex::{Mutex as BlockingMutex, raw::CriticalSectionRawMutex},
+    channel::Channel,
+    mutex::Mutex,
+    signal::Signal,
 };
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embedded_io_async::Write as _;
@@ -54,15 +58,15 @@ const HTTP_CONNECTION_COUNT: usize = 3;
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
-const DEBUG_SPAWN_NETWORK_TASK: bool = false;
-const DEBUG_SPAWN_WIFI_TASK: bool = false;
-const DEBUG_SPAWN_HTTP_TASK: bool = false;
-const DEBUG_SPAWN_MDNS_TASK: bool = false;
+const DEBUG_SPAWN_NETWORK_TASK: bool = true;
+const DEBUG_SPAWN_WIFI_TASK: bool = true;
+const DEBUG_SPAWN_HTTP_TASK: bool = true;
+const DEBUG_SPAWN_MDNS_TASK: bool = true;
 
 type ControlStateMutex = Mutex<CriticalSectionRawMutex, Option<NetHttpState>>;
 type WifiConfigMutex = Mutex<CriticalSectionRawMutex, WifiRuntimeConfig>;
 type WifiProvisioningMutex = Mutex<CriticalSectionRawMutex, WifiProvisioningMachine>;
-type RuntimeStatusMutex = Mutex<CriticalSectionRawMutex, LanRuntimeState>;
+type RuntimeStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<LanRuntimeState>>;
 
 static CONTROL_STATE: ControlStateMutex = Mutex::new(None);
 // Each HTTP worker has one in-flight command and response. Request IDs prevent
@@ -79,7 +83,7 @@ static CONTROL_REVISION: AtomicU32 = AtomicU32::new(0);
 static PAIRING_CODE_MIRROR: AtomicU32 = AtomicU32::new(0);
 static WIFI_CONFIG: WifiConfigMutex = Mutex::new(WifiRuntimeConfig::empty());
 static WIFI_APPLY_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-static LAN_RUNTIME: RuntimeStatusMutex = Mutex::new(LanRuntimeState::empty());
+static LAN_RUNTIME: RuntimeStatusMutex = BlockingMutex::new(RefCell::new(LanRuntimeState::empty()));
 static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMachine::new());
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
 static NET_RUNNER: StaticCell<embassy_net::Runner<'static, WifiDevice<'static>>> =
@@ -324,7 +328,7 @@ pub async fn report_startup_failure(error: LanStartupError) {
 /// separate from the USB development placeholder because LAN clients persist
 /// it as their stable device key.
 pub async fn lan_identity() -> Identity {
-    let names = LAN_RUNTIME.lock().await.device_names.clone();
+    let names = LAN_RUNTIME.lock(|runtime| runtime.borrow().device_names.clone());
     names
         .as_ref()
         .map(identity_from_device_names)
@@ -335,7 +339,7 @@ pub async fn lan_identity() -> Identity {
 /// listener never infers connectivity from EEPROM because a saved SSID is not
 /// evidence that association and IPv4 configuration succeeded.
 pub async fn lan_network_summary() -> NetworkSummary {
-    LAN_RUNTIME.lock().await.network.clone().unwrap_or_default()
+    LAN_RUNTIME.lock(|runtime| runtime.borrow().network.clone().unwrap_or_default())
 }
 
 pub fn try_receive_command() -> Option<ControlMailboxCommand> {
@@ -426,7 +430,7 @@ pub async fn spawn(
         .as_mut()
         .expect("LAN control state initialized")
         .set_device_names(names.clone());
-    LAN_RUNTIME.lock().await.device_names = Some(names.clone());
+    LAN_RUNTIME.lock(|runtime| runtime.borrow_mut().device_names = Some(names.clone()));
     let resources = NET_RESOURCES.init(StackResources::<8>::new());
     let seed = random_u64();
     let (stack, runner) = embassy_net::new(station, net_config(&initial_config), resources, seed);
@@ -686,7 +690,7 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
 }
 
 async fn set_network_summary(summary: NetworkSummary) -> NetworkSummary {
-    LAN_RUNTIME.lock().await.network = Some(summary.clone());
+    LAN_RUNTIME.lock(|runtime| runtime.borrow_mut().network = Some(summary.clone()));
     summary
 }
 
