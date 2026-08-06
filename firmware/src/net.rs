@@ -54,6 +54,10 @@ const HTTP_CONNECTION_COUNT: usize = 3;
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
+const DEBUG_SPAWN_NETWORK_TASK: bool = false;
+const DEBUG_SPAWN_WIFI_TASK: bool = false;
+const DEBUG_SPAWN_HTTP_TASK: bool = false;
+const DEBUG_SPAWN_MDNS_TASK: bool = false;
 
 type ControlStateMutex = Mutex<CriticalSectionRawMutex, Option<NetHttpState>>;
 type WifiConfigMutex = Mutex<CriticalSectionRawMutex, WifiRuntimeConfig>;
@@ -431,12 +435,16 @@ pub async fn spawn(
     let runner = NET_RUNNER.init(runner);
     let controller = WIFI_CONTROLLER.init(controller);
 
-    spawner
-        .spawn(network_task(runner))
-        .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
-    spawner
-        .spawn(wifi_task(controller, stack))
-        .map_err(|_| LanStartupError::WifiTaskCapacity)?;
+    if DEBUG_SPAWN_NETWORK_TASK {
+        spawner
+            .spawn(network_task(runner))
+            .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
+    }
+    if DEBUG_SPAWN_WIFI_TASK {
+        spawner
+            .spawn(wifi_task(controller, stack))
+            .map_err(|_| LanStartupError::WifiTaskCapacity)?;
+    }
     let sockets = [
         TcpSocket::new(
             stack,
@@ -470,12 +478,16 @@ pub async fn spawn(
             })
             .await;
     }
-    spawner
-        .spawn(http_listener_task(stack, *spawner))
-        .map_err(|_| LanStartupError::HttpTaskCapacity)?;
-    spawner
-        .spawn(mdns_task(stack, names))
-        .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
+    if DEBUG_SPAWN_HTTP_TASK {
+        spawner
+            .spawn(http_listener_task(stack, *spawner))
+            .map_err(|_| LanStartupError::HttpTaskCapacity)?;
+    }
+    if DEBUG_SPAWN_MDNS_TASK {
+        spawner
+            .spawn(mdns_task(stack, names))
+            .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
+    }
     Ok(())
 }
 

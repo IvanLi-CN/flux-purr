@@ -6360,10 +6360,27 @@ async fn run_espflash_with_exclusive_serial(
     root: Option<&Path>,
     port_path: &str,
 ) -> Result<(), HttpError> {
-    let _serial_rpc = state.serial_rpc.lock().await;
+    let _serial_rpc =
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
     let program = resolve_espflash_program();
     run_flash_transaction_with_program(artifact, root, port_path, &program).await
+}
+
+async fn acquire_serial_rpc_with_timeout(
+    serial_rpc: Arc<tokio::sync::Mutex<()>>,
+    timeout: Duration,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, HttpError> {
+    tokio::time::timeout(timeout, serial_rpc.lock_owned())
+        .await
+        .map_err(|_| {
+            HttpError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "serial_lock_timeout",
+                "Timed out waiting for exclusive USB serial access.",
+                true,
+            )
+        })
 }
 
 fn drop_cached_serial_session(
@@ -7746,6 +7763,21 @@ mod tests {
 
         assert_eq!(error.error.code, "flash_tool_timeout");
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn flash_serial_lock_wait_is_bounded() {
+        let serial_rpc = Arc::new(tokio::sync::Mutex::new(()));
+        let held = serial_rpc.clone().lock_owned().await;
+
+        let started = Instant::now();
+        let error = acquire_serial_rpc_with_timeout(serial_rpc, Duration::from_millis(25))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.error.code, "serial_lock_timeout");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(held);
     }
 
     #[test]

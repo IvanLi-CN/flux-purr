@@ -9661,12 +9661,7 @@ async fn main(_spawner: Spawner) {
     set_status_light_state(initial_status_light_state);
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_start\n");
-    let initial_frontpanel_ui_ready = with_timeout(
-        Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        flush_ui(&mut display, canvas, &ui_state),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok());
+    let initial_frontpanel_ui_ready = true;
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_complete\n");
     if !initial_frontpanel_ui_ready {
@@ -9699,18 +9694,25 @@ async fn main(_spawner: Spawner) {
     let mut heater_control_timing = HeaterControlTiming::default();
     let mut ui_refresh_pending = false;
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
+    let mut first_runtime_probe = true;
     loop {
         let elapsed_before_wait_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
-        EmbassyTimer::after_millis(heater_control_poll_wait_ms(
-            elapsed_before_wait_ms,
-            next_control_deadline_ms,
-        ))
-        .await;
+        if !first_runtime_probe {
+            EmbassyTimer::after_millis(heater_control_poll_wait_ms(
+                elapsed_before_wait_ms,
+                next_control_deadline_ms,
+            ))
+            .await;
+        }
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] timer\n");
+        }
 
         let raw_state = inputs.sample();
         let sample = controller.sample_with_capabilities(
@@ -9719,6 +9721,10 @@ async fn main(_spawner: Spawner) {
             ui_state.gesture_capabilities(),
         );
         let mut needs_redraw = false;
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] inputs\n");
+        }
         #[cfg(feature = "web_serial")]
         loop {
             match usb_serial.read_byte() {
@@ -9774,6 +9780,10 @@ async fn main(_spawner: Spawner) {
                 Err(nb::Error::WouldBlock) => break,
                 Err(_) => break,
             }
+        }
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] usb\n");
         }
 
         #[cfg(feature = "net_http")]
@@ -9890,6 +9900,10 @@ async fn main(_spawner: Spawner) {
         if let Some(token) = flux_purr_firmware::net::take_persisted_token_change().await {
             memory_config.lan_pairing_token = token;
             memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+        }
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] lan\n");
         }
 
         if sample.raw_state != last_raw_state {
@@ -10111,6 +10125,13 @@ async fn main(_spawner: Spawner) {
         }
 
         if elapsed_ms >= next_control_deadline_ms {
+            #[cfg(feature = "web_serial")]
+            if first_runtime_probe {
+                let _ = usb_write_bytes_bounded(
+                    &mut usb_serial,
+                    b"[DEBUG-runtime-loop] control_start\n",
+                );
+            }
             let control_started_ms = elapsed_ms;
             heater_control_timing.interval_ms = control_started_ms
                 .saturating_sub(last_control_ms)
@@ -10133,6 +10154,10 @@ async fn main(_spawner: Spawner) {
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
             let current_request_mv = heater_power_backend.pd_request_mv();
             let mut rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
+            #[cfg(feature = "web_serial")]
+            if first_runtime_probe {
+                let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] adc\n");
+            }
             let first_rtd_snapshot = match &rtd_sample {
                 RtdSample::Valid(measurement) => {
                     (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -10265,6 +10290,10 @@ async fn main(_spawner: Spawner) {
             }
 
             let current_pd_observation = read_ch224q_status(&mut pd_i2c, ch224q_address);
+            #[cfg(feature = "web_serial")]
+            if first_runtime_probe {
+                let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] pd_read\n");
+            }
             if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
                 match current_pd_observation {
                     Some(observation) => info!(
@@ -10362,6 +10391,13 @@ async fn main(_spawner: Spawner) {
             .await
             {
                 needs_redraw = true;
+            }
+            #[cfg(feature = "web_serial")]
+            if first_runtime_probe {
+                let _ = usb_write_bytes_bounded(
+                    &mut usb_serial,
+                    b"[DEBUG-runtime-loop] heater_output\n",
+                );
             }
             heater_control_timing.cycle_ms = Instant::now()
                 .as_millis()
@@ -10580,6 +10616,10 @@ async fn main(_spawner: Spawner) {
         if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
             needs_redraw = true;
         }
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] network\n");
+        }
 
         if maybe_play_protection_alarm(
             is_overtemp_fault(current_rtd_fault),
@@ -10628,13 +10668,26 @@ async fn main(_spawner: Spawner) {
 
         ui_refresh_pending |= needs_redraw;
         if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
+            #[cfg(feature = "web_serial")]
+            let _ =
+                usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-refresh] flush_start\n");
             match flush_ui(&mut display, canvas, &ui_state).await {
                 Ok(()) => log_ui_state(&ui_state),
                 Err(_) => warn!("frontpanel UI refresh failed"),
             }
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(
+                &mut usb_serial,
+                b"[DEBUG-runtime-refresh] flush_complete\n",
+            );
             ui_refresh_pending = false;
             next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
         }
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"[DEBUG-runtime-loop] complete\n");
+        }
+        first_runtime_probe = false;
     }
 }
 
