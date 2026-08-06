@@ -360,7 +360,6 @@ export function degradeDevicesForRefreshError(devices: DeviceTarget[], error: un
     return {
       ...device,
       severity: 'warning' as const,
-      networkState: 'error' as const,
       transportIssue: message,
     }
   })
@@ -386,7 +385,6 @@ export function preserveLastLiveDevdTarget(
     {
       ...lastLiveDevdTarget,
       severity: 'warning' as const,
-      networkState: 'error' as const,
       transportIssue: issue,
     },
     ...baseDevices.filter((device) => device.id !== lastLiveDevdTarget.id),

@@ -9,7 +9,7 @@ use std::{
 
 use ipnet::Ipv4Net;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use reqwest::{Client, Url};
+use reqwest::{Client, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -69,7 +69,34 @@ impl From<&LanDeviceConfig> for LanDeviceSummary {
 #[serde(rename_all = "camelCase")]
 pub struct LanPairRequest {
     pub base_url: String,
-    pub code: String,
+    #[serde(default)]
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum LanPairingMode {
+    Required,
+    Optional,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LanPublicInfo {
+    ok: bool,
+    api: String,
+    device_id: String,
+    hostname: String,
+    pairing: LanPairingMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LanPairingMetadata {
+    mode: LanPairingMode,
+    active: bool,
+    attempts_remaining: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,8 +128,16 @@ pub enum LanClientError {
     InvalidUrl,
     #[error("pairing code must contain exactly four digits")]
     InvalidCode,
+    #[error("the connected device requires a four-digit pairing code")]
+    PairingCodeRequired,
+    #[error("the connected device does not support LAN pairing codes")]
+    PairingUnavailable,
+    #[error("device returned an invalid public LAN summary")]
+    InvalidPublicInfo,
     #[error("device returned an invalid pairing response")]
     InvalidPairingResponse,
+    #[error("device did not provide a valid control revision")]
+    InvalidControlRevision,
     #[error("LAN request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("LAN discovery failed: {0}")]
@@ -152,18 +187,18 @@ pub fn device_id_for_base_url(base_url: &str) -> String {
 pub fn http_client() -> Client {
     Client::builder()
         .timeout(LAN_REQUEST_TIMEOUT)
+        .redirect(Policy::none())
         .build()
         .expect("valid fixed LAN client configuration")
 }
 
 pub async fn pair_device(request: LanPairRequest) -> Result<LanDeviceConfig, LanClientError> {
-    if request.code.len() != 4 || !request.code.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(LanClientError::InvalidCode);
-    }
     let base_url = normalize_lan_base_url(&request.base_url)?;
+    let public_info = public_info(&base_url).await?;
+    let body = pairing_claim_body(public_info.pairing.mode, request.code)?;
     let response = http_client()
         .post(format!("{base_url}/api/v1/pairing/claim"))
-        .json(&json!({ "code": request.code }))
+        .json(&body)
         .send()
         .await?
         .error_for_status()?
@@ -199,6 +234,41 @@ pub async fn pair_device(request: LanPairRequest) -> Result<LanDeviceConfig, Lan
     })
 }
 
+async fn public_info(base_url: &str) -> Result<LanPublicInfo, LanClientError> {
+    let summary = http_client()
+        .get(format!("{base_url}/health"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<LanPublicInfo>()
+        .await?;
+    if !summary.ok
+        || summary.api != LAN_API_VERSION
+        || !is_device_id(&summary.device_id)
+        || summary.hostname.is_empty()
+        || (summary.pairing.mode == LanPairingMode::Required
+            && summary.pairing.attempts_remaining > 5)
+        || (summary.pairing.mode != LanPairingMode::Required && summary.pairing.active)
+    {
+        return Err(LanClientError::InvalidPublicInfo);
+    }
+    Ok(summary)
+}
+
+fn pairing_claim_body(mode: LanPairingMode, code: Option<String>) -> Result<Value, LanClientError> {
+    match mode {
+        LanPairingMode::Required => {
+            let code = code.ok_or(LanClientError::PairingCodeRequired)?;
+            if code.len() != 4 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(LanClientError::InvalidCode);
+            }
+            Ok(json!({ "code": code }))
+        }
+        LanPairingMode::Optional => Ok(json!({})),
+        LanPairingMode::Unavailable => Err(LanClientError::PairingUnavailable),
+    }
+}
+
 pub async fn authorized_json(
     device: &LanDeviceConfig,
     method: reqwest::Method,
@@ -211,19 +281,44 @@ pub async fn authorized_json(
         .as_deref()
         .filter(|token| is_token(token))
         .ok_or(LanClientError::InvalidPairingResponse)?;
+    let base_url = normalize_lan_base_url(&device.base_url)?;
     let url = format!(
         "{}/api/{LAN_API_VERSION}/{}",
-        device.base_url,
+        base_url,
         path.trim_start_matches('/')
     );
-    let mut request = http_client().request(method, url).bearer_auth(token);
+    let client = http_client();
+    let is_control_write = method != reqwest::Method::GET && path.trim_matches('/') != "leases";
+    let revision = if is_control_write {
+        let response = client
+            .get(format!("{base_url}/api/{LAN_API_VERSION}/status"))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?;
+        Some(control_revision(response.headers())?)
+    } else {
+        None
+    };
+    let mut request = client.request(method, url).bearer_auth(token);
     if let Some(lease_id) = lease_id {
         request = request.header("X-Flux-Purr-Lease", lease_id);
+    }
+    if let Some(revision) = revision {
+        request = request.header("X-Flux-Purr-Revision", revision);
     }
     if let Some(body) = body {
         request = request.json(&body);
     }
     Ok(request.send().await?.error_for_status()?.json().await?)
+}
+
+fn control_revision(headers: &reqwest::header::HeaderMap) -> Result<u32, LanClientError> {
+    headers
+        .get("X-Flux-Purr-Revision")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .ok_or(LanClientError::InvalidControlRevision)
 }
 
 /// Browse the device's advertised `_http._tcp.local.` service for a bounded
@@ -241,14 +336,17 @@ pub async fn discover_cidr(request: LanScanRequest) -> Result<Vec<LanDiscovery>,
         .cidr
         .parse::<Ipv4Net>()
         .map_err(|_| LanClientError::InvalidCidr)?;
-    let addresses: Vec<Ipv4Addr> = network.hosts().collect();
-    if addresses.is_empty() || addresses.len() > 256 || !network.addr().is_private() {
+    let host_bits = 32u32.saturating_sub(u32::from(network.prefix_len()));
+    let host_count = (1u64 << host_bits).saturating_sub(2);
+    if host_count == 0 || host_count > 256 || !network.addr().is_private() {
         return Err(LanClientError::InvalidCidr);
     }
+    let addresses: Vec<Ipv4Addr> = network.hosts().collect();
 
     let client = Client::builder()
         .connect_timeout(Duration::from_millis(450))
         .timeout(Duration::from_millis(900))
+        .redirect(Policy::none())
         .build()
         .map_err(LanClientError::Request)?;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(16));
@@ -274,7 +372,7 @@ pub async fn discover_cidr(request: LanScanRequest) -> Result<Vec<LanDiscovery>,
 pub fn merge_lan_device(devices: &mut Vec<LanDeviceConfig>, device: LanDeviceConfig) {
     if let Some(existing) = devices
         .iter_mut()
-        .find(|existing| existing.id == device.id || existing.base_url == device.base_url)
+        .find(|existing| existing.base_url == device.base_url)
     {
         let pairing_token = device
             .pairing_token
@@ -283,29 +381,47 @@ pub fn merge_lan_device(devices: &mut Vec<LanDeviceConfig>, device: LanDeviceCon
             pairing_token,
             ..device
         };
-    } else {
-        devices.push(device);
+        return;
     }
+
+    if let Some(existing) = devices.iter_mut().find(|existing| existing.id == device.id) {
+        // A discovery advertisement has no proof that it owns the existing
+        // token. Only a fresh pairing exchange may retarget a paired device.
+        if existing.pairing_token.is_some() && device.pairing_token.is_none() {
+            return;
+        }
+        let pairing_token = device
+            .pairing_token
+            .or_else(|| existing.pairing_token.clone());
+        *existing = LanDeviceConfig {
+            pairing_token,
+            ..device
+        };
+        return;
+    }
+
+    devices.push(device);
 }
 
-pub fn device_from_discovery(discovery: LanDiscovery) -> LanDeviceConfig {
+pub fn device_from_discovery(discovery: LanDiscovery) -> Option<LanDeviceConfig> {
+    let base_url = normalize_lan_base_url(&discovery.base_url).ok()?;
     let id = discovery
         .device_id
         .as_deref()
         .filter(|device_id| is_device_id(device_id))
         .map(|device_id| format!("lan-{}", device_id.to_ascii_lowercase()))
-        .unwrap_or_else(|| device_id_for_base_url(&discovery.base_url));
-    let last_ipv4 = Url::parse(&discovery.base_url)
+        .unwrap_or_else(|| device_id_for_base_url(&base_url));
+    let last_ipv4 = Url::parse(&base_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .filter(|host| host.parse::<Ipv4Addr>().is_ok());
-    LanDeviceConfig {
+    Some(LanDeviceConfig {
         id,
-        base_url: discovery.base_url,
+        base_url,
         hostname: discovery.hostname,
         last_ipv4,
         pairing_token: None,
-    }
+    })
 }
 
 fn discover_mdns_blocking(timeout: Duration) -> Result<Vec<LanDiscovery>, LanClientError> {
@@ -332,7 +448,11 @@ fn discover_mdns_blocking(timeout: Duration) -> Result<Vec<LanDiscovery>, LanCli
         {
             continue;
         }
-        let Some(address) = service.get_addresses_v4().into_iter().next() else {
+        let Some(address) = service
+            .get_addresses_v4()
+            .into_iter()
+            .find(|address| address.is_private())
+        else {
             continue;
         };
         let port = service.get_port();
@@ -386,6 +506,27 @@ fn is_device_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, response::Redirect, routing::get};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn parses_only_a_valid_device_control_revision() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        assert!(matches!(
+            control_revision(&headers),
+            Err(LanClientError::InvalidControlRevision)
+        ));
+        headers.insert("X-Flux-Purr-Revision", "42".parse().unwrap());
+        assert_eq!(control_revision(&headers).unwrap(), 42);
+    }
+
+    async fn redirect_to_target() -> Redirect {
+        Redirect::temporary("/target")
+    }
+
+    async fn redirect_target() -> &'static str {
+        "redirect followed"
+    }
 
     #[test]
     fn normalizes_manual_device_url_without_accepting_credentials_or_paths() {
@@ -419,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_refresh_preserves_a_paired_token_for_the_stable_device_id() {
+    fn discovery_refresh_cannot_retarget_a_paired_device() {
         let mut devices = vec![LanDeviceConfig {
             id: "lan-001122334455".into(),
             base_url: "http://192.168.1.18".into(),
@@ -434,14 +575,86 @@ mod tests {
                 hostname: Some("flux-purr-001122334455.local".into()),
                 device_id: Some("001122334455".into()),
                 source: LanDiscoverySource::Mdns,
-            }),
+            })
+            .unwrap(),
         );
         assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].base_url, "http://192.168.1.19");
+        assert_eq!(devices[0].base_url, "http://192.168.1.18");
         assert_eq!(
             devices[0].pairing_token.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
+    }
+
+    #[test]
+    fn discovery_records_reject_untrusted_addresses_before_persistence() {
+        assert!(
+            device_from_discovery(LanDiscovery {
+                base_url: "http://8.8.8.8".into(),
+                hostname: Some("flux-purr-001122334455.local".into()),
+                device_id: Some("001122334455".into()),
+                source: LanDiscoverySource::Mdns,
+            })
+            .is_none()
+        );
+        assert!(
+            device_from_discovery(LanDiscovery {
+                base_url: "http://192.168.1.19".into(),
+                hostname: Some("flux-purr-001122334455.local".into()),
+                device_id: Some("001122334455".into()),
+                source: LanDiscoverySource::Mdns,
+            })
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn fresh_pairing_may_retarget_a_paired_device() {
+        let mut devices = vec![LanDeviceConfig {
+            id: "lan-001122334455".into(),
+            base_url: "http://192.168.1.18".into(),
+            hostname: Some("flux-purr-001122334455.local".into()),
+            last_ipv4: Some("192.168.1.18".into()),
+            pairing_token: Some("a".repeat(64)),
+        }];
+
+        merge_lan_device(
+            &mut devices,
+            LanDeviceConfig {
+                id: "lan-001122334455".into(),
+                base_url: "http://192.168.1.19".into(),
+                hostname: Some("flux-purr-001122334455.local".into()),
+                last_ipv4: Some("192.168.1.19".into()),
+                pairing_token: Some("b".repeat(64)),
+            },
+        );
+
+        assert_eq!(devices[0].base_url, "http://192.168.1.19");
+        assert_eq!(
+            devices[0].pairing_token.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+    }
+
+    #[tokio::test]
+    async fn lan_http_client_does_not_follow_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/redirect", get(redirect_to_target))
+            .route("/target", get(redirect_target));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let response = http_client()
+            .get(format!("http://{address}/redirect"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        server.abort();
     }
 
     #[test]
@@ -470,6 +683,26 @@ mod tests {
         assert!(devices[0].pairing_token.as_deref().is_some_and(is_token));
     }
 
+    #[test]
+    fn pairing_claim_body_uses_the_connected_device_policy() {
+        assert_eq!(
+            pairing_claim_body(LanPairingMode::Required, Some("4827".to_string())).unwrap(),
+            json!({ "code": "4827" })
+        );
+        assert!(matches!(
+            pairing_claim_body(LanPairingMode::Required, None),
+            Err(LanClientError::PairingCodeRequired)
+        ));
+        assert_eq!(
+            pairing_claim_body(LanPairingMode::Optional, None).unwrap(),
+            json!({})
+        );
+        assert!(matches!(
+            pairing_claim_body(LanPairingMode::Unavailable, None),
+            Err(LanClientError::PairingUnavailable)
+        ));
+    }
+
     #[tokio::test]
     async fn cidr_scan_rejects_public_and_broad_ranges_before_probing() {
         assert!(matches!(
@@ -482,6 +715,13 @@ mod tests {
         assert!(matches!(
             discover_cidr(LanScanRequest {
                 cidr: "192.168.0.0/16".into()
+            })
+            .await,
+            Err(LanClientError::InvalidCidr)
+        ));
+        assert!(matches!(
+            discover_cidr(LanScanRequest {
+                cidr: "10.0.0.0/8".into()
             })
             .await,
             Err(LanClientError::InvalidCidr)

@@ -1,8 +1,37 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-08-05
+
+- Web Serial 连接曾把 `navigator.serial.requestPort()` 的无限等待直接映射为 `Web Serial (connecting)`，且点击后仍保留旧的 devd `Failed to fetch` 反馈。现将端口选择、打开和首次 probe 统一收敛为 `15s` 有界事务，开始时立即显示等待串口选择提示，超时后给出可重试错误并关闭迟到的端口；Storybook 固定覆盖该挂起路径。
+- 顶部目标选择器曾把同一硬件的 native DEVD、Web Serial、WiFi/LAN 与 bridge records 当成多台设备，用户无法确认要连接的物理设备。现按固件稳定 `identityId/deviceId` 合并为单张设备卡片，卡片显示 hostname 与设备 ID，并固定提供最多三种公开连接方式：WiFi/LAN、Web Serial 与桥接。DEVD USB 与 WiFi/LAN 发现结果只作为桥接方式的内部来源；重复记录按健康状态优先，避免旧地址或异常记录覆盖当前 target。
+- 设备卡片的三个连接方式与“添加设备”操作现在各自显示对应的 Lucide 图标，文字、次要地址和方向箭头保持原有布局，降低重复按钮的识别成本。
+- LAN pairing claim 曾生成缺少 `api` 字段结束引号的 `200` 响应，浏览器因此在领取 token 后抛出 JSON 解析异常；Web 又把该非协议化异常显示成对话框背后的通用连接失败。claim 响应现由 firmware host test 锁定合法字段边界，Web 将无法解析的成功响应归类为明确的协议错误，并在当前配对对话框内展示具体原因。
+- Claim 响应修正后，Web 的并发 identity/network/status probe 暴露了设备只有一个 HTTP workspace 与单一 response signal 的限制。控制面现使用 3 个独立 HTTP worker 支持并发读连接，响应按 worker 路由；mutation 继续由主循环串行执行，并以单调 control revision 拒绝过时写。Web 恢复并发 probe，devd/CLI 在写前读取 revision，客户端不再以串行请求掩盖设备端限制。
+- CIDR 扫描候选曾显示“选择”，点击后只回填地址，用户还必须再次点击上方“连接设备”，造成候选行主动作与实际意图不一致。现改为候选行直接显示并执行“连接”，复用同一 health、配对、probe 和 lease 流程；连接未完成前仍不注册或切换顶部目标。
+- 旧版固件在多个 bearer 读取同时到达时仍可能只接受一个 TCP 请求，导致 claim 已成功后 probe 被误报为“配对凭据已保存、读取状态中断”。固件现使用单一 TCP acceptor 和三个并发 worker；Web 仅对传输级失败执行一次串行兼容重试，并把 lease 失败与 probe/配对失败分开表达，避免把成功配对事实覆盖成 WiFi 错误。
+- 配对后的 control revision 曾只存在于内存 session；控制面随后从 localStorage 重新读取 session 时，第一次 runtime 写入会被 stale-write 保护拦截且没有设备请求。probe 现在把设备回报的 revision 持久化到同一 LAN session，刷新与自动恢复路径复用同一保护值。
+- 冷启动恢复的 WiFi 配置不再复用运行时 `apply_wifi_config` signal。旧路径在 task spawn 前留下 signal，首个 DHCP lease 成功后会立即把 station 断开，同时状态机仍停在 `connected` 并永久等待下一次配置，表现为 USB 回显 IP/RSSI 正常但路由器 ARP 与 `/health` 均不可达。启动配置现由 `net::spawn` 直接初始化；运行时 USB 配置仍走独立 apply signal。断线等待同时改为保留 pending driver event，避免 DHCP 与监听注册之间的竞态。
+- 授权端口 `/dev/cu.usbmodem2111401` 经 repo-local `flux-purr -> devd -> espflash` 重刷后保留 SSID `Ivan` 与九位密码长度。未再次提交 WiFi 表单的冷启动 trace 为 `connecting -> connected`，设备在 `192.168.31.189` 的匿名 `/health` 回显 `a0f262f20d6c / flux-purr-a0f262f20d6c`；该 receipt 证明 DHCP 后 HTTP 数据面可达，不替代尚未完成的 mDNS、配对、lease 与 Chromium 控制闭环。
+
+## 2026-08-04
+
+- DNS-SD 报文生成从 ESP 网络任务中抽为 host-testable `no_std` 模块；PTR 由错误的 cache-flush 独占记录修正为 shared `IN` record，SRV/TXT/A 保持 unique record 语义。桥接发现候选在配对、probe 和 LAN lease 完成前不再进入顶部目标列表，避免把“发现到地址”误报成“已连接设备”。
+- LAN 扫描结果的后置样式覆盖曾把结果列表间距压为 `0`，并让选中行失去稳定的内容边界；现已恢复结果行间距、内边距和选中态边框，同时明确“选择候选”与“连接设备”是两个动作。成功完成 health、配对和 lease 后，顶部设备选择器才出现并自动选中 hostname。
+- Web direct LAN 表单现在同时记忆设备地址和 CIDR 网段，并在面板重载时自动回填。此前只有 CIDR 偏好被恢复，设备地址会回到组件初始值，导致同一浏览器中重新进入面板时需要重复输入；两项记忆均只保存非敏感地址/网段，清空输入即删除，不保存密码、配对码或 bearer token。
+- Web direct LAN 的设备地址、CIDR 扫描和四位配对码改用三个独立的原生表单。键盘回车必须与主按钮复用同一控制路径，确保校验、loading、错误处理和防重复提交一致；表单不嵌套，避免回车冒泡触发错误动作。
+- LAN 扫描候选不再被视为已连接设备：选择候选只回填地址并保留顶部当前目标，只有匿名 health、配对、bearer probe 和 lease 全部完成后才注册稳定设备 ID。设备列表以固件 hostname 识别设备，IP 仅作为定位信息；这样可避免扫描结果、配对失败或租约冲突把不可控地址误报为在线目标。
+
+## 2026-08-03
+
+- Bridge 从“一次点击创建 pending device”收敛为两阶段显式选择：先选 DEVD 的 USB 或 WiFi/LAN 路径，再选具体候选设备。连接方式卡片本身不再产生目标，避免把 transport choice 伪装成已连接硬件。
+
+## 2026-08-02
+
+- Web direct LAN discovery 明确包含 operator 主动触发的受限私有 IPv4 CIDR scan。浏览器仅匿名探测公开 `/health`，不使用 mDNS、不后台扫描、不调用 `devd`；native discovery 保持独立，避免把浏览器直连和本机桥接混成同一程序路径。
+
 ## 2026-07-30
 
-- ESP32-S3 LAN control-plane 的 executor 内存契约固定为 `task-arena-size-81920`。测量的主循环任务为 `68,456` bytes，network/WiFi/mDNS/HTTP listener 合计约 `4.9 KiB`，总计约 `73.3 KiB`。HTTP listener 的大对象改为单客户端静态工作区，避免 `HttpGate`、邮箱命令和控制响应跨 `await` 时把 task arena 耗尽；WiFi 初始化后移至 USB recovery 初始化之后，使 LAN 启动失败不会阻断 USB JSONL 控制。
+- ESP32-S3 LAN control-plane 的 executor 内存契约固定为 `task-arena-size-81920`。早期实现曾用单个静态 HTTP workspace 避免 `HttpGate`、邮箱命令和控制响应跨 `await` 时把 task arena 耗尽；该限制后来由 3 个不进入 task frame 的静态 worker workspace 取代。WiFi 初始化仍后移至 USB recovery 初始化之后，使 LAN 启动失败不会阻断 USB JSONL 控制。
 
 ## 2026-07-27
 
@@ -165,4 +194,12 @@
 - 用户级硬件记忆和默认 USB port 写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；运行中的 daemon 不因配置文件变化自动切换端口。
 - 发布收敛为单一 product tag `vX.Y.Z`；Web、firmware、host-tools 和 release manifest 挂同一 GitHub Release，manifest 的组件指纹决定是否需要升级。
 - Repo 级 skill 分层现已拆为 developer policy 与 user/developer operations：`skills/flux-purr-developer-policy` 负责开发者总约束分流，`skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 分别固化 released-user 路径与仓库内 developer operations/HIL 边界。
-- Thermal profile persistence retains all ten point-local targets in each `pps3a` / `pps5a` bank by using the EEPROM v3 record layout, removing the six-point truncation from saved full-batch profiles.
+- Thermal profile persistence retains all ten point-local targets in each `pps3a` / `pps5a` bank by using the EEPROM v5 record layout, removing the six-point truncation from saved full-batch profiles; v1-v4 records remain readable through the compatibility decoder.
+
+## 2026-08-04
+
+- DEVD Bridge 的 WiFi/LAN 页面不再把 USB `/api/v1/devices` 空结果解释为没有 LAN 服务；它读取独立 LAN registry，并把 mDNS refresh 与 CIDR scan 暴露为 operator 显式动作。这样既保持 direct browser LAN 与 DEVD bridge 的所有权边界，也避免后台扫网。
+
+## 2026-08-05
+
+- 顶部 native target 名称改为固件 identity，而不是 USB product descriptor。选择器 trigger 与 dropdown item 分离渲染，避免 Radix 把双行下拉内容重复投影后造成文字重叠。

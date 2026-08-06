@@ -8,6 +8,8 @@ use embedded_graphics::{
 
 use crate::display::DisplayCanvas;
 
+use crate::control_plane::NetworkState;
+
 use super::{FrontPanelKey, FrontPanelMenuItem, FrontPanelRoute, FrontPanelUiState, KeyGesture};
 
 const COLOR_BG: Rgb565 = Rgb565::new(1, 4, 3);
@@ -898,8 +900,43 @@ fn draw_active_cooling(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
 }
 
 fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState) {
-    draw_text_mid(canvas, "SSID FLUXLAB", 8, 6, COLOR_TEXT);
-    draw_text_mid(canvas, "RSSI -58DBM", 8, 19, COLOR_CYAN);
+    let mut ssid = heapless::String::<40>::new();
+    let _ = ssid.push_str("SSID ");
+    let _ = ssid.push_str(state.network.ssid.as_deref().unwrap_or("--"));
+    draw_text_mid(canvas, &ssid, 8, 6, COLOR_TEXT);
+
+    let mut connection = heapless::String::<56>::new();
+    match state.network.state {
+        NetworkState::Connected => {
+            if let Some(ip) = state.network.ip.as_deref() {
+                let _ = connection.push_str(ip);
+            } else {
+                let _ = connection.push_str("CONNECTED");
+            }
+            if let Some(rssi) = state.network.wifi_rssi {
+                let _ = write!(&mut connection, " {rssi}DBM");
+            }
+        }
+        NetworkState::Disabled => {
+            let _ = connection.push_str("NOT CONFIGURED");
+        }
+        NetworkState::Idle => {
+            let _ = connection.push_str("IDLE");
+        }
+        NetworkState::Saving => {
+            let _ = connection.push_str("SAVING");
+        }
+        NetworkState::Connecting => {
+            let _ = connection.push_str("CONNECTING");
+        }
+        NetworkState::Error => {
+            let _ = connection.push_str("CONNECT ERROR");
+        }
+        NetworkState::Timeout => {
+            let _ = connection.push_str("CONNECT TIMEOUT");
+        }
+    }
+    draw_text_mid(canvas, &connection, 8, 19, COLOR_CYAN);
     let mut pairing = heapless::String::<16>::new();
     let _ = pairing.push_str("PAIR ");
     match state.wifi_pairing_code {

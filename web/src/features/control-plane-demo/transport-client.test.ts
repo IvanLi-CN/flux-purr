@@ -12,7 +12,53 @@ import {
   selectLatestDevdTransportIssueEvent,
 } from './transport-client'
 
+function jsonResponse(value: unknown) {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 describe('control-plane transport client', () => {
+  it('uses the dedicated devd LAN discovery endpoints', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ devices: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          devices: [
+            {
+              id: 'lan-flux-purr-a0f262f20d6c',
+              baseUrl: 'http://192.168.31.189',
+              hostname: 'flux-purr-a0f262f20d6c',
+              lastIpv4: '192.168.31.189',
+              paired: false,
+            },
+          ],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ devices: [] }))
+    const client = createControlPlaneHttpClient(fetcher)
+
+    await client.listDevdLanDevices('http://127.0.0.1:4170')
+    const mdns = await client.refreshDevdLanMdns('http://127.0.0.1:4170')
+    await client.scanDevdLanCidr('http://127.0.0.1:4170', '192.168.31.0/24')
+
+    expect(mdns[0]?.hostname).toBe('flux-purr-a0f262f20d6c')
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:4170/api/v1/lan/devices',
+      undefined
+    )
+    expect(fetcher).toHaveBeenNthCalledWith(2, 'http://127.0.0.1:4170/api/v1/lan/discovery/mdns', {
+      method: 'POST',
+    })
+    expect(fetcher).toHaveBeenNthCalledWith(3, 'http://127.0.0.1:4170/api/v1/lan/discovery/scan', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cidr: '192.168.31.0/24' }),
+    })
+  })
   it('maps devd records into demo device targets', () => {
     const record: DevdDeviceRecord = {
       id: 'mock-fp-lab-01',
@@ -134,6 +180,7 @@ describe('control-plane transport client', () => {
     expect(target.transport).toBe('devd')
     expect(target.uptime).toBe('01:01:01')
     expect(target.capabilities).toContain('wifi_config')
+    expect(target.wifiSsid).toBe('FluxPurr-Lab')
     expect(target.selectedPresetIndex).toBe(5)
     expect(target.presetsC?.[5]).toBe(220)
     expect(target.heaterLockReason).toBe('cooling-disabled-overtemp')
@@ -151,7 +198,7 @@ describe('control-plane transport client', () => {
   it('keeps daemon-local capabilities after a successful native firmware probe', () => {
     const record: DevdDeviceRecord = {
       id: 'serial-1',
-      displayName: 'Authorized USB target',
+      displayName: 'USB JTAG/serial debug unit',
       portPath: '/dev/cu.usbmodem21221401',
       transport: 'native_serial',
       connection: 'disconnected',
@@ -256,6 +303,8 @@ describe('control-plane transport client', () => {
       'monitor',
     ])
     expect(devdRecordToDeviceTarget(merged).capabilities).toContain('flash')
+    expect(devdRecordToDeviceTarget(merged).alias).toBe('flux-purr-s3-001')
+    expect(devdRecordToDeviceTarget(merged).alias).not.toBe(record.displayName)
   })
 
   it('surfaces the latest native serial bridge error on the devd target', () => {
@@ -1191,9 +1240,9 @@ describe('control-plane transport client', () => {
           op: 'set',
           ssid: 'FluxPurr-Lab',
           password: 'secret-pass',
-          autoReconnect: true,
           telemetryIntervalMs: 500,
         })
+        expect(body.autoReconnect).toBeUndefined()
         return {
           ok: true,
           json: async () => ({
@@ -1253,7 +1302,6 @@ describe('control-plane transport client', () => {
       op: 'set',
       ssid: 'FluxPurr-Lab',
       password: 'secret-pass',
-      autoReconnect: true,
       telemetryIntervalMs: 500,
     })
     const flash = await client.flashDevice('http://127.0.0.1:30080', 'native target', {

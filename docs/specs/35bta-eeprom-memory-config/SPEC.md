@@ -53,9 +53,10 @@
 ### MUST
 
 - EEPROM 设备默认为 `M24C64`，7-bit I2C 首选地址 `0x50`，固件在 `0x50..0x57` 范围内探测以兼容实板地址脚差异；容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
-- record v3 使用双槽：slot A `0x1000`、slot B `0x1800`，每槽 `2048 bytes`，TLV 长度使用 `u16`。启动时同时读取 active v3 `2048B`、previous v2 `1024B`（`0x0400` / `0x0800`）与 legacy `512B`（`0x0000` / `0x0200`）双槽，并选择 CRC 合法且 `sequence` 最大的 record；旧槽仅作只读迁移回退，新写入只落 active 双槽。
-- 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash 中标签为 `flux_cfg` 的专用 8KiB data partition 保存同一 `MemoryRecord`，不得直接占用或写入 NVS 管理范围。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。
-- record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值。
+- `MemoryRecord` 当前格式版本为 `v5`：header 的 byte `4` 保存 format version，byte `5` 保存 header length，bytes `6..8` 保存 payload length，bytes `8..12` 保存 `sequence`，bytes `12..16` 保存 CRC。v1-v5 均可解码；v1/v2 使用窄 TLV 长度，v3-v5 使用 `u16` TLV 长度。active 双槽位于 `0x1000` / `0x1800`，每槽 `2048 bytes`；previous 双槽为 `1024 bytes`（`0x0400` / `0x0800`），legacy 双槽为 `512 bytes`（`0x0000` / `0x0200`）。启动时选择 CRC 合法且 `sequence` 最大的 record。旧 EEPROM 槽只作为兼容读取源，选择出的旧配置先在 RAM 中完成字段迁移；后续成功提交配置时才以当前 v5 编码写入 active 槽，不在启动阶段强制重写 EEPROM。
+- 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash 中标签为 `flux_cfg` 的专用 8KiB data partition 保存同一 `MemoryRecord`，不得直接占用或写入 NVS 管理范围。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。升级前曾使用旧 factory-app 边界后 `0x110000` / `0x111000` raw 双槽的设备，若该区域仍含 CRC 合法 record，启动时必须将其迁移复制到当前 `flux_cfg`；新写入不得回到旧 raw 区域。
+- `devd` 的 real-flash 路径在写入任何应用镜像前，必须读取设备当前 `0x8000` partition table 并解析实际 `flux_cfg`。若目标 [`firmware/partitions.csv`](../../../firmware/partitions.csv) 改变该分区地址，`devd` 必须将当前完整 `flux_cfg`（或未分区 legacy raw 双槽）预写到目标 `flux_cfg` 地址，再原样读回验证；只有验证成功才可写入新 partition table 和 app。目标地址被当前 layout 占用、目标容量较小、读取/解析失败或逐字验证不一致时，必须拒绝应用烧录。临时副本不得进入日志、trace 或用户配置目录。EEPROM 不受该 flash layout 迁移影响。
+- record payload 必须使用 TLV，未知 TLV 必须跳过，缺失 TLV 必须使用默认值；v1/v2 的 TLV header 使用 `tag:u8 + len:u8`，v3-v5 使用 `tag:u8 + len:u16le`。
 - 温度字段恢复后必须 clamp 到 `0..400°C`。
 - `selected_preset_slot` 越界时必须回到默认槽位。
 - 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
@@ -78,14 +79,15 @@
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
   - deadline 到期后写入下一 record sequence 对应的槽；EEPROM 不可用时写入 flash fallback；两者都失败则重新排队。
 - Wi-Fi 字段：
-  - `ssid`、`password`、`autoReconnect`、`telemetryIntervalMs` 进入持久化模型。
+  - `ssid`、`password`、`telemetryIntervalMs` 进入持久化模型；自动重连是固件固定策略，不属于用户配置。
+  - 旧版本的 `wifi_auto_reconnect` TLV 继续读取以兼容已有记录，但加载与 sanitize 时始终归一化为 `true`。
   - 当前固件未实现 HTTP Wi-Fi 配置服务时，不额外虚构运行时联网行为。
 
 ## 接口契约（Interfaces & Contracts）
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
-- Flash fallback 复用同一 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。仓库根 `espflash.toml` 必须让 ELF 烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)。支持 raw app artifact 时，devd 必须先写入由该 CSV 生成并受版本控制的 [`firmware/partitions.bin`](../../../firmware/partitions.bin) 到 `0x8000`，再写入 app 并显式 reset；两条安装路径都必须保证该分区属于正式 flash 合同。
+- Flash fallback 复用同一当前 v5 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。为兼容此前位于 `0x110000` / `0x111000` 的 raw fallback 双槽，当前 runtime 只读探测其 CRC 合法 record，并在发现时立即以 v5 编码复制到 `flux_cfg`；此兼容读取不写旧区域。当前 `flux_cfg` 中的旧格式 record 仍按版本解码，后续成功提交时物化为 v5。仓库根 `espflash.toml` 必须让 ELF 烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)。支持 raw app artifact 时，devd 必须先写入由该 CSV 生成并受版本控制的 [`firmware/partitions.bin`](../../../firmware/partitions.bin) 到 `0x8000`，再写入 app 并显式 reset；两条安装路径都必须保证该分区属于正式 flash 合同。写入前 `devd` 以当前设备的 partition table 规划 `flux_cfg` 迁移；地址变化时先 read/verify 目标位置的完整 record，随后才允许安装目标 layout 和应用镜像。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
   - `0x01`: `target_temp_c` (`i16le`)
@@ -94,18 +96,26 @@
   - `0x04`: `active_cooling_enabled` (`u8 bool`)
   - `0x10`: `wifi_ssid` (`utf8 bytes`)
   - `0x11`: `wifi_password` (`utf8 bytes`)
-  - `0x12`: `wifi_auto_reconnect` (`u8 bool`)
+  - `0x12`: `wifi_auto_reconnect` (`u8 bool`, legacy compatibility; firmware always normalizes to `true`)
   - `0x13`: `telemetry_interval_ms` (`u32le`)
   - `0x20`: `adc_calibration_samples`
-  - `0x21`: `adc_calibration_references`
-  - `0x22`: `adc_calibration_slots`
-  - `0x23`: `adc_calibration_active_slot`
+  - `0x21`: legacy draft ADC calibration samples
+  - `0x22`: ADC calibration physical references
+  - `0x23`: legacy draft ADC calibration physical references
+  - `0x24`: ADC calibration targets
+  - `0x25`: legacy draft ADC calibration targets
+  - `0x26`: ADC calibration fit slots
+  - `0x27`: ADC calibration active slots
+  - `0x30`: legacy active thermal control profile
+  - `0x31`: legacy active thermal control profile with current layout
   - `0x32`: `pps3a` saved thermal control profile
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
   - `0x35`: `heater_curve_raw_observations`
   - `0x36`: `pps5a_thermal_plant_candidate`
   - `0x37`: `pps5a_thermal_plant_active`
+  - `0x38`: LAN pairing token
+  - `0x39`: static IPv4 configuration
 - 新记录不再写入 `0x32/0x33/0x34` point-local profile；解码器仅为旧 record 保留跳过/读取兼容，运行时不得使用其值。`0x35` 保存 raw RTD ADC、实测 V/I/R，`0x36/0x37` 保存环境/目标 raw RTD ADC、gate-off/hold power、ramp duration/energy 和 transaction identity。派生温度、曲线与系数不得成为唯一持久化真相源。
 - 新写入的 thermal profile payload 必须以 `TCP2` 布局标识开头，避免 point-local 布局与历史 settings/point 长度组合发生歧义；无标识的历史 payload 继续按旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多 10 个完整 point-local 压紧目标点，并与完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
 
@@ -114,13 +124,16 @@
 - Given EEPROM 与 flash fallback 都为空或损坏，When 固件启动，Then UI 使用默认记忆配置且不 panic。
 - Given 多个后端/槽都有合法 record，When 固件启动，Then 选择 `sequence` 最大的一槽。
 - Given 最新槽 CRC 损坏且旧槽合法，When 固件启动，Then 回退到旧槽。
+- Given 当前 `flux_cfg` 没有有效 record 且旧 raw fallback 双槽仍有 CRC 合法 record，When 固件启动，Then 恢复该 record 并以当前 v5 编码复制到当前 `flux_cfg`。
+- Given EEPROM previous/legacy 槽存在 CRC 合法的 v1-v4 record，When 固件启动，Then 按版本完成 RAM 内字段迁移并恢复配置；旧 EEPROM 槽不在启动阶段被重写，下一次成功配置提交必须以 v5 编码写入 active 槽。
+- Given 当前设备的 `flux_cfg` 位于旧 factory app 末尾且目标 app partition 会覆盖该地址，When `devd` 执行 real flash，Then 必须先在未分配的目标 `flux_cfg` 地址写入并逐字验证完整原始 record，验证成功后才写入 app；任一 preflight 步骤失败时 app 不得写入。
 - Given record payload 包含未知 TLV，When 解码，Then 忽略未知字段并保留已知字段。
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
 - Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一持久化槽。
 - Given heater 曾在重启前开启，When 固件重启，Then heater 不因持久化配置自动开启。
 - Given ADC calibration state 已写入持久化后端，When 固件重启，Then 共享样本、A/B 槽位与当前激活槽位都恢复。
 - Given ADC calibration sample 在保存时带有 `referenceTempC` 或 `referenceVinMv`，When 固件重启或 control-plane 重新读取 calibration package，Then ADC-domain points 与原始 physical reference 都恢复，页面不需要靠 `expectedMv` 反推 owner-facing 标定值。
-- Given EEPROM record 来自旧格式且没有 `0x22/0x23` reference TLV，When 固件解码，Then calibration sample 仍恢复为同样的 `observed_mv/expected_mv`，只是 reference 字段为空。
+- Given EEPROM record 来自旧格式且没有 `0x22/0x23/0x24/0x25` reference/target TLV，When 固件解码，Then calibration sample 仍恢复为同样的 `observed_mv/expected_mv`，只是缺失的 reference/target 字段使用默认值。
 - Given v1 或 legacy record 只含一个 saved thermal profile，When 解码，Then profile 写入 `pps3a` bank，`pps5a` 保持空 profile，mode 为 `65w`。
 - Given v2 record 同时含两个 thermal bank，When 重启恢复，Then 两个 bank、mode、Wi-Fi 凭据和 calibration state 都完整恢复。
 - Given 无标识历史 thermal profile 的 payload 长度与新 point-local 布局长度相同，When 固件升级后解码，Then 必须优先恢复历史 settings/point 布局，不得按新布局错位读取。

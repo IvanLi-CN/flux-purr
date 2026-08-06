@@ -25,7 +25,7 @@ use axum::{
     },
     routing::{delete, get, post, put},
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{process::Command, sync::broadcast};
@@ -62,6 +62,12 @@ const USER_CONFIG_FILE: &str = "config.json";
 const HARDWARE_REGISTRY_FILE: &str = "devices.json";
 const DEFAULT_APP_FLASH_ADDRESS: u64 = 0x10000;
 const DEFAULT_PARTITION_TABLE_FLASH_ADDRESS: u64 = 0x8000;
+const PARTITION_TABLE_FLASH_SIZE: u64 = 0x1000;
+const FLASH_CONFIG_MIN_SIZE: u64 = 0x2000;
+const LEGACY_FLASH_CONFIG_OFFSET: u64 = 0x110000;
+const LEGACY_FLASH_CONFIG_SIZE: u64 = 0x2000;
+const FLASH_CONFIG_LABEL: &str = "flux_cfg";
+const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 // Opening an ESP32-S3 USB Serial/JTAG port can reset the device. Read-only
@@ -399,6 +405,7 @@ impl DeviceRecord {
                 "network".to_string(),
                 "calibration".to_string(),
                 "wifi_config".to_string(),
+                "wifi_state_v2".to_string(),
                 "monitor".to_string(),
                 "firmware_check".to_string(),
                 "flash".to_string(),
@@ -406,7 +413,11 @@ impl DeviceRecord {
         };
         let network = NetworkSummary {
             state: NetworkState::Connected,
+            configuration_generation: 1,
+            transition_sequence: 1,
+            failure_code: None,
             ssid: Some("FluxPurr-Lab".to_string()),
+            wifi_password_length: 11,
             ip: Some("192.168.31.42".to_string()),
             gateway: Some("192.168.31.1".to_string()),
             dns: vec!["192.168.31.1".to_string()],
@@ -503,7 +514,11 @@ impl DeviceRecord {
     fn native_serial_placeholder(id: &str, display_name: String, port_path: String) -> Self {
         let network = NetworkSummary {
             state: NetworkState::Idle,
+            configuration_generation: 0,
+            transition_sequence: 0,
+            failure_code: None,
             ssid: None,
+            wifi_password_length: 0,
             ip: None,
             gateway: None,
             dns: Vec::new(),
@@ -647,16 +662,50 @@ pub enum NetworkState {
     Timeout,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkFailureCode {
+    DisconnectTimedOut,
+    ConfigurationFailed,
+    AssociationRejected,
+    AssociationTimedOut,
+    Ipv4TimedOut,
+    StationDisconnected,
+    LanStartupFailed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkSummary {
     pub state: NetworkState,
+    #[serde(default)]
+    pub configuration_generation: u32,
+    #[serde(default)]
+    pub transition_sequence: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<NetworkFailureCode>,
     pub ssid: Option<String>,
+    #[serde(default)]
+    pub wifi_password_length: u8,
     pub ip: Option<String>,
     pub gateway: Option<String>,
     pub dns: Vec<String>,
     pub wifi_rssi: Option<i16>,
     pub last_error: Option<String>,
+}
+
+impl NetworkSummary {
+    fn is_not_older_than(&self, current: &Self) -> bool {
+        self.configuration_generation > current.configuration_generation
+            || (self.configuration_generation == current.configuration_generation
+                && self.transition_sequence >= current.transition_sequence)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbWifiConfigReceipt {
+    network: NetworkSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1256,8 +1305,14 @@ pub struct WifiConfigRequest {
     pub op: WifiConfigOp,
     pub ssid: Option<String>,
     pub password: Option<String>,
-    pub auto_reconnect: Option<bool>,
-    pub static_ipv4: Option<WifiStaticIpv4Request>,
+    /// `None` preserves the stored static address, while `Some(None)` carries
+    /// an explicit JSON `null` to return the station to DHCP.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_static_ipv4_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub static_ipv4: Option<Option<WifiStaticIpv4Request>>,
     pub telemetry_interval_ms: Option<u32>,
 }
 
@@ -1277,6 +1332,18 @@ pub struct WifiStaticIpv4Request {
     pub prefix_len: u8,
     pub gateway: [u8; 4],
     pub dns: [u8; 4],
+}
+
+/// Preserve the three API states for `staticIpv4`: a missing field keeps the
+/// current mode, JSON `null` switches back to DHCP, and an object sets static
+/// IPv4. Nested `Option` derives otherwise merge the first two states.
+fn deserialize_static_ipv4_patch<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<WifiStaticIpv4Request>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<WifiStaticIpv4Request>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1539,9 +1606,7 @@ struct UsbWifiConfigWire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    auto_reconnect: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    static_ipv4: Option<WifiStaticIpv4Request>,
+    static_ipv4: Option<Option<WifiStaticIpv4Request>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     telemetry_interval_ms: Option<u32>,
 }
@@ -2007,7 +2072,9 @@ fn persist_lan_discoveries(
         .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
     let mut summaries = Vec::with_capacity(discoveries.len());
     for discovery in discoveries {
-        let device = lan::device_from_discovery(discovery);
+        let Some(device) = lan::device_from_discovery(discovery) else {
+            continue;
+        };
         let id = device.id.clone();
         lan::merge_lan_device(&mut config.lan_devices, device);
         if let Some(saved) = config
@@ -2075,17 +2142,20 @@ async fn get_lan_pairing_code(
 ) -> Result<Json<LanPairingCode>, HttpError> {
     let target = {
         let mut state_lock = state.lock()?;
-        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
-        state_lock
+        let target = state_lock
             .devices
             .get(&device_id)
             .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
-            .clone()
+            .clone();
+        if target.transport == DeviceTransport::NativeSerial {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        target
     };
     if target.transport != DeviceTransport::NativeSerial {
         return Err(HttpError::bad_request(
             "native_serial_required",
-            "LAN pairing code is available only through an active USB/devd lease.",
+            "LAN pairing code is available only through the USB/devd transport.",
         ));
     }
     Ok(Json(serial_lan_pairing_code(&state, &target).await?))
@@ -2711,7 +2781,7 @@ async fn configure_wifi(
     AxumPath(device_id): AxumPath<String>,
     Json(payload): Json<WifiConfigRequest>,
 ) -> Result<Json<Value>, HttpError> {
-    if let Some(static_ipv4) = payload.static_ipv4
+    if let Some(Some(static_ipv4)) = payload.static_ipv4
         && !static_ipv4_request_is_valid(static_ipv4)
     {
         return Err(HttpError::bad_request(
@@ -2729,28 +2799,19 @@ async fn configure_wifi(
             .clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        if let Err(error) = serial_wifi_config(&state, &target, &payload).await {
-            record_serial_bridge_error(&state, &device_id, "wifi_config", &error);
-            return Err(error);
-        }
-        let network = match serial_request_payload::<NetworkSummary>(
-            &state,
-            &target,
-            "get_network",
-            "network",
-        )
-        .await
-        {
+        let network = match serial_wifi_config(&state, &target, &payload).await {
             Ok(network) => network,
             Err(error) => {
-                record_serial_bridge_error(&state, &device_id, "network_after_wifi", &error);
+                record_serial_bridge_error(&state, &device_id, "wifi_config", &error);
                 return Err(error);
             }
         };
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
-            device.network = network.clone();
-            device.status.network = network.clone();
+            if network.is_not_older_than(&device.network) {
+                device.network = network.clone();
+                device.status.network = network.clone();
+            }
             device.connection = ConnectionState::Connected;
         }
         drop(state_lock);
@@ -2762,7 +2823,6 @@ async fn configure_wifi(
                 "op": payload.op,
                 "ssid": payload.ssid,
                 "password": payload.password.as_ref().map(|_| "<redacted>"),
-                "autoReconnect": payload.auto_reconnect,
                 "telemetryIntervalMs": payload.telemetry_interval_ms
             }
         })));
@@ -2773,24 +2833,7 @@ async fn configure_wifi(
         .devices
         .get_mut(&device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
-    match payload.op {
-        WifiConfigOp::Clear => {
-            device.network = NetworkSummary {
-                state: NetworkState::Disabled,
-                ssid: None,
-                ip: None,
-                gateway: None,
-                dns: Vec::new(),
-                wifi_rssi: None,
-                last_error: None,
-            };
-        }
-        WifiConfigOp::Set => {
-            device.network.state = NetworkState::Saving;
-            device.network.ssid = payload.ssid.clone();
-            device.network.last_error = None;
-        }
-    }
+    device.network = mock_network_after_wifi_config(&device.network, &payload);
     device.status.network = device.network.clone();
     let redacted = json!({
         "accepted": true,
@@ -2799,13 +2842,52 @@ async fn configure_wifi(
             "op": payload.op,
             "ssid": payload.ssid,
             "password": payload.password.as_ref().map(|_| "<redacted>"),
-            "autoReconnect": payload.auto_reconnect,
             "telemetryIntervalMs": payload.telemetry_interval_ms
         }
     });
     drop(state_lock);
     emit_wifi_config_event(&state, &device_id, &payload);
     Ok(Json(redacted))
+}
+
+fn mock_network_after_wifi_config(
+    current: &NetworkSummary,
+    payload: &WifiConfigRequest,
+) -> NetworkSummary {
+    match payload.op {
+        WifiConfigOp::Clear => NetworkSummary {
+            state: NetworkState::Disabled,
+            configuration_generation: current.configuration_generation.wrapping_add(1),
+            transition_sequence: current.transition_sequence.wrapping_add(1),
+            failure_code: None,
+            ssid: None,
+            wifi_password_length: 0,
+            ip: None,
+            gateway: None,
+            dns: Vec::new(),
+            wifi_rssi: None,
+            last_error: None,
+        },
+        WifiConfigOp::Set => {
+            let mut network = current.clone();
+            // The device receipt exposes only the public connection phase.
+            // Persistence/disconnect work is not a host-visible WiFi state.
+            network.state = NetworkState::Connecting;
+            network.configuration_generation = network.configuration_generation.wrapping_add(1);
+            network.transition_sequence = network.transition_sequence.wrapping_add(1);
+            network.failure_code = None;
+            network.ssid = payload.ssid.clone();
+            if let Some(password) = &payload.password {
+                network.wifi_password_length = password.len() as u8;
+            }
+            network.ip = None;
+            network.gateway = None;
+            network.dns.clear();
+            network.wifi_rssi = None;
+            network.last_error = None;
+            network
+        }
+    }
 }
 
 fn static_ipv4_request_is_valid(value: WifiStaticIpv4Request) -> bool {
@@ -4219,7 +4301,7 @@ async fn serial_wifi_config(
     state: &AppState,
     target: &DeviceRecord,
     payload: &WifiConfigRequest,
-) -> Result<Value, HttpError> {
+) -> Result<NetworkSummary, HttpError> {
     let port_path = native_port_path(target)?;
     let request_id = format!("devd-{}-wifi", now_millis());
     let request = serde_json::to_string(&UsbWifiConfigWire {
@@ -4228,12 +4310,11 @@ async fn serial_wifi_config(
         op: payload.op.usb_op(),
         ssid: payload.ssid.as_deref(),
         password: payload.password.as_deref(),
-        auto_reconnect: payload.auto_reconnect,
         static_ipv4: payload.static_ipv4,
         telemetry_interval_ms: payload.telemetry_interval_ms,
     })
     .map_err(|_| HttpError::internal("failed to encode USB WiFi request"))?;
-    serial_exchange(
+    let response = serial_exchange(
         state,
         &target.id,
         port_path,
@@ -4241,7 +4322,32 @@ async fn serial_wifi_config(
         request,
         SerialRetryPolicy::SingleShot,
     )
-    .await
+    .await?;
+    extract_wifi_config_network(response)
+}
+
+fn extract_wifi_config_network(result: Value) -> Result<NetworkSummary, HttpError> {
+    let receipt = extract_usb_payload::<UsbWifiConfigReceipt>(result, "wifi")?;
+    if receipt.network.configuration_generation == 0 || receipt.network.transition_sequence == 0 {
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_wifi_receipt",
+            "The device returned an unversioned WiFi receipt.",
+            true,
+        ));
+    }
+    if matches!(
+        receipt.network.state,
+        NetworkState::Idle | NetworkState::Saving | NetworkState::Timeout
+    ) {
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_wifi_receipt",
+            "The device returned a non-public WiFi state.",
+            false,
+        ));
+    }
+    Ok(receipt.network)
 }
 
 async fn serial_clear_lan_pairing(
@@ -4709,6 +4815,14 @@ fn serial_exchange_blocking(
                 for byte in &read_buf[..read] {
                     if serial_line_finished(&mut line, &mut discarding_overlong_line, *byte) {
                         emit_serial_log_line(state, events, device_id, &line);
+                        if serial_line_is_usb_reset_marker(&line) {
+                            // Opening an ESP32-S3 USB Serial/JTAG port can itself
+                            // trigger this reset. Keep the fd open so the firmware
+                            // can complete its startup and answer the request; an
+                            // actual I/O failure below remains the reopen signal.
+                            line.clear();
+                            continue;
+                        }
                         match decode_usb_response_line(&line, request_id) {
                             Ok(Some(payload)) => {
                                 store_serial_session(&mut serial_sessions, port_path, session);
@@ -4801,6 +4915,13 @@ fn emit_serial_log_line(
         inner.push_event(event.clone());
     }
     let _ = events.send(event);
+}
+
+fn serial_line_is_usb_reset_marker(line: &[u8]) -> bool {
+    matches!(
+        std::str::from_utf8(line).map(str::trim),
+        Ok("reset_reason=core_usb_uart" | "reset_reason=core_usb_jtag")
+    )
 }
 
 fn serial_line_finished(line: &mut Vec<u8>, discarding_overlong_line: &mut bool, byte: u8) -> bool {
@@ -5702,36 +5823,483 @@ fn resolve_verified_artifact_path(root: Option<&Path>, path: &str) -> io::Result
     Ok(candidate)
 }
 
-async fn run_espflash(
+async fn run_espflash_with_program(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
+    program: &Path,
 ) -> Result<(), HttpError> {
-    let commands = build_espflash_args(artifact, root, port_path)?;
-    let program = resolve_espflash_program();
-    for args in commands {
-        let output = Command::new(&program)
-            .args(&args)
-            .output()
-            .await
-            .map_err(|error| {
-                HttpError::internal_with_details(
-                    "flash_tool_unavailable",
-                    "Failed to start espflash.",
-                    json!({
-                        "program": program,
-                        "error": error.to_string(),
-                    }),
-                )
-            })?;
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        build_espflash_args_with_reset_mode(artifact, root, port_path, before_reset)
+    })
+    .await
+}
 
-        if !output.status.success() {
-            return Err(HttpError::internal_with_details(
-                "flash_tool_failed",
-                "espflash returned a non-zero status.",
-                espflash_failure_details(&program, &args, &output),
-            ));
+async fn run_espflash_with_reset_fallback_with_program<F>(
+    program: &Path,
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    build_commands: F,
+) -> Result<(), HttpError>
+where
+    F: Fn(&str) -> Result<Vec<Vec<String>>, HttpError>,
+{
+    let reset_modes = espflash_reset_modes(artifact, port_path);
+    for (mode_index, before_reset) in reset_modes.iter().enumerate() {
+        let commands = build_commands(before_reset)?;
+        let mut retry_with_next_reset = false;
+
+        for args in commands {
+            let output =
+                run_espflash_command_with_timeout(program, &args, ESPFLASH_COMMAND_TIMEOUT).await?;
+
+            if !output.status.success() {
+                retry_with_next_reset =
+                    mode_index + 1 < reset_modes.len() && espflash_connection_failed(&output);
+                if retry_with_next_reset {
+                    break;
+                }
+                return Err(HttpError::internal_with_details(
+                    "flash_tool_failed",
+                    "espflash returned a non-zero status.",
+                    espflash_failure_details(program, &args, &output),
+                ));
+            }
         }
+
+        if !retry_with_next_reset {
+            return Ok(());
+        }
+    }
+
+    Err(HttpError::internal(
+        "espflash did not complete a reset attempt.",
+    ))
+}
+
+async fn run_espflash_command_with_timeout(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> Result<Output, HttpError> {
+    let mut command = Command::new(program);
+    command.args(args).kill_on_drop(true);
+    tokio::time::timeout(timeout, command.output())
+        .await
+        .map_err(|_| {
+            HttpError::internal_with_details(
+                "flash_tool_timeout",
+                "espflash did not finish before the command deadline.",
+                json!({
+                    "program": program,
+                    "args": args,
+                    "timeoutMs": timeout.as_millis(),
+                }),
+            )
+        })?
+        .map_err(|error| {
+            HttpError::internal_with_details(
+                "flash_tool_unavailable",
+                "Failed to start espflash.",
+                json!({
+                    "program": program,
+                    "error": error.to_string(),
+                }),
+            )
+        })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlashPartitionRange {
+    label: String,
+    offset: u64,
+    size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FlashConfigMigrationPlan {
+    source: FlashPartitionRange,
+    destination: FlashPartitionRange,
+}
+
+struct FlashConfigStaging {
+    _workspace: tempfile::TempDir,
+    plan: FlashConfigMigrationPlan,
+    source_path: PathBuf,
+}
+
+fn flash_partition_ranges(table: &esp_idf_part::PartitionTable) -> Vec<FlashPartitionRange> {
+    table
+        .partitions()
+        .iter()
+        .map(|partition| FlashPartitionRange {
+            label: partition.name(),
+            offset: u64::from(partition.offset()),
+            size: u64::from(partition.size()),
+        })
+        .collect()
+}
+
+fn ranges_overlap(left: &FlashPartitionRange, right: &FlashPartitionRange) -> bool {
+    left.offset < right.offset.saturating_add(right.size)
+        && right.offset < left.offset.saturating_add(left.size)
+}
+
+fn range_contains(container: &FlashPartitionRange, value: &FlashPartitionRange) -> bool {
+    container.offset <= value.offset
+        && value.offset.saturating_add(value.size)
+            <= container.offset.saturating_add(container.size)
+}
+
+fn flash_partition_by_label<'a>(
+    partitions: &'a [FlashPartitionRange],
+    label: &str,
+) -> Option<&'a FlashPartitionRange> {
+    partitions.iter().find(|partition| partition.label == label)
+}
+
+fn plan_flash_config_migration(
+    current: &[FlashPartitionRange],
+    target: &[FlashPartitionRange],
+) -> Result<Option<FlashConfigMigrationPlan>, HttpError> {
+    let destination = flash_partition_by_label(target, FLASH_CONFIG_LABEL)
+        .cloned()
+        .ok_or_else(|| {
+            HttpError::bad_request(
+                "flash_config_destination_missing",
+                "The firmware partition table does not declare flux_cfg.",
+            )
+        })?;
+    if destination.size < FLASH_CONFIG_MIN_SIZE {
+        return Err(HttpError::bad_request(
+            "flash_config_destination_too_small",
+            "The target flux_cfg partition is too small to preserve device configuration.",
+        ));
+    }
+
+    let source = match flash_partition_by_label(current, FLASH_CONFIG_LABEL).cloned() {
+        Some(source) => {
+            if source.size < FLASH_CONFIG_MIN_SIZE {
+                return Err(HttpError::bad_request(
+                    "flash_config_source_too_small",
+                    "The current flux_cfg partition is too small to preserve device configuration.",
+                ));
+            }
+            source
+        }
+        None => {
+            let legacy = FlashPartitionRange {
+                label: "legacy_raw".to_string(),
+                offset: LEGACY_FLASH_CONFIG_OFFSET,
+                size: LEGACY_FLASH_CONFIG_SIZE,
+            };
+            let legacy_is_outside_current_layout = !current
+                .iter()
+                .any(|partition| ranges_overlap(partition, &legacy));
+            let legacy_is_inside_old_factory = current.iter().any(|partition| {
+                partition.label == "factory" && range_contains(partition, &legacy)
+            });
+            if !legacy_is_outside_current_layout && !legacy_is_inside_old_factory {
+                return Ok(None);
+            }
+            legacy
+        }
+    };
+
+    if source.size > destination.size {
+        return Err(HttpError::bad_request(
+            "flash_config_destination_too_small",
+            "The target flux_cfg partition is too small to preserve device configuration.",
+        ));
+    }
+    if source.offset != destination.offset
+        && current
+            .iter()
+            .any(|partition| ranges_overlap(partition, &destination))
+    {
+        return Err(HttpError::bad_request(
+            "flash_config_destination_in_use",
+            "The target flux_cfg address is used by the current device layout; refusing to flash.",
+        ));
+    }
+
+    Ok(Some(FlashConfigMigrationPlan {
+        source,
+        destination,
+    }))
+}
+
+fn parse_flash_partition_table(
+    bytes: Vec<u8>,
+    code: &str,
+    message: &str,
+) -> Result<Vec<FlashPartitionRange>, HttpError> {
+    if bytes.len() < 2 {
+        return Err(HttpError::bad_request(code, message));
+    }
+    let table = esp_idf_part::PartitionTable::try_from(bytes)
+        .map_err(|_| HttpError::bad_request(code, message))?;
+    Ok(flash_partition_ranges(&table))
+}
+
+fn target_flash_partition_ranges(
+    root: Option<&Path>,
+) -> Result<Vec<FlashPartitionRange>, HttpError> {
+    let path = firmware_partition_table_path(root)?;
+    let bytes = fs::read(path).map_err(|_| {
+        HttpError::bad_request(
+            "firmware_partition_table_invalid",
+            "Unable to read firmware/partitions.csv.",
+        )
+    })?;
+    parse_flash_partition_table(
+        bytes,
+        "firmware_partition_table_invalid",
+        "The firmware partition table is invalid.",
+    )
+}
+
+fn flash_config_staging_path(workspace: &Path, name: &str) -> PathBuf {
+    workspace.join(name)
+}
+
+fn build_espflash_read_flash_args(
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    before_reset: &str,
+    address: u64,
+    size: u64,
+    output_path: &Path,
+) -> Result<Vec<String>, HttpError> {
+    if port_path.is_empty() {
+        return Err(HttpError::bad_request(
+            "missing_port",
+            "Real flash requires an explicit serial port.",
+        ));
+    }
+    Ok(vec![
+        "read-flash".to_string(),
+        "--chip".to_string(),
+        artifact.target_chip.clone(),
+        "--port".to_string(),
+        port_path.to_string(),
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--non-interactive".to_string(),
+        "--after".to_string(),
+        "hard-reset".to_string(),
+        format!("0x{address:x}"),
+        format!("0x{size:x}"),
+        output_path.to_string_lossy().into_owned(),
+    ])
+}
+
+fn build_espflash_write_bin_args(
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    before_reset: &str,
+    address: u64,
+    input_path: &Path,
+) -> Result<Vec<String>, HttpError> {
+    if port_path.is_empty() {
+        return Err(HttpError::bad_request(
+            "missing_port",
+            "Real flash requires an explicit serial port.",
+        ));
+    }
+    Ok(vec![
+        "write-bin".to_string(),
+        "--chip".to_string(),
+        artifact.target_chip.clone(),
+        "--port".to_string(),
+        port_path.to_string(),
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--non-interactive".to_string(),
+        "--after".to_string(),
+        "hard-reset".to_string(),
+        format!("0x{address:x}"),
+        input_path.to_string_lossy().into_owned(),
+    ])
+}
+
+async fn stage_flash_config_before_app_flash_with_program(
+    program: &Path,
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+) -> Result<Option<FlashConfigStaging>, HttpError> {
+    let workspace = tempfile::tempdir().map_err(|_| {
+        HttpError::internal_with_details(
+            "flash_config_workspace_unavailable",
+            "Unable to create secure temporary storage for configuration preservation.",
+            json!({}),
+        )
+    })?;
+    let current_table_path = flash_config_staging_path(workspace.path(), "current-partitions.bin");
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_read_flash_args(
+            artifact,
+            port_path,
+            before_reset,
+            DEFAULT_PARTITION_TABLE_FLASH_ADDRESS,
+            PARTITION_TABLE_FLASH_SIZE,
+            &current_table_path,
+        )?])
+    })
+    .await?;
+
+    let current_table = fs::read(&current_table_path).map_err(|_| {
+        HttpError::bad_request(
+            "flash_partition_table_unreadable",
+            "Unable to read the current device partition table; refusing to flash.",
+        )
+    })?;
+    let current = parse_flash_partition_table(
+        current_table,
+        "flash_partition_table_invalid",
+        "The current device partition table is invalid; refusing to flash.",
+    )?;
+    let target = target_flash_partition_ranges(root)?;
+    let Some(plan) = plan_flash_config_migration(&current, &target)? else {
+        return Ok(None);
+    };
+
+    let source_path = flash_config_staging_path(workspace.path(), "flux_cfg-source.bin");
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_read_flash_args(
+            artifact,
+            port_path,
+            before_reset,
+            plan.source.offset,
+            plan.source.size,
+            &source_path,
+        )?])
+    })
+    .await?;
+    let source = fs::read(&source_path).map_err(|_| {
+        HttpError::bad_request(
+            "flash_config_backup_unreadable",
+            "Unable to read the current device configuration; refusing to flash.",
+        )
+    })?;
+    if source.len() != usize::try_from(plan.source.size).unwrap_or(usize::MAX) {
+        return Err(HttpError::bad_request(
+            "flash_config_backup_incomplete",
+            "The current device configuration could not be read completely; refusing to flash.",
+        ));
+    }
+
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_write_bin_args(
+            artifact,
+            port_path,
+            before_reset,
+            plan.destination.offset,
+            &source_path,
+        )?])
+    })
+    .await?;
+
+    let verification_path = flash_config_staging_path(workspace.path(), "flux_cfg-verify.bin");
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_read_flash_args(
+            artifact,
+            port_path,
+            before_reset,
+            plan.destination.offset,
+            plan.source.size,
+            &verification_path,
+        )?])
+    })
+    .await?;
+    let verification = fs::read(&verification_path).map_err(|_| {
+        HttpError::internal_with_details(
+            "flash_config_verify_unreadable",
+            "Unable to verify the preserved device configuration; refusing to flash.",
+            json!({}),
+        )
+    })?;
+    if verification != source {
+        return Err(HttpError::bad_request(
+            "flash_config_verify_failed",
+            "Device configuration preservation could not be verified; refusing to flash.",
+        ));
+    }
+    Ok(Some(FlashConfigStaging {
+        _workspace: workspace,
+        plan,
+        source_path,
+    }))
+}
+
+async fn restore_flash_config_after_app_flash_with_program(
+    program: &Path,
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    staging: &FlashConfigStaging,
+) -> Result<(), HttpError> {
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_write_bin_args(
+            artifact,
+            port_path,
+            before_reset,
+            staging.plan.destination.offset,
+            &staging.source_path,
+        )?])
+    })
+    .await?;
+
+    let verification_path =
+        flash_config_staging_path(staging._workspace.path(), "flux_cfg-verify-after-flash.bin");
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_read_flash_args(
+            artifact,
+            port_path,
+            before_reset,
+            staging.plan.destination.offset,
+            staging.plan.source.size,
+            &verification_path,
+        )?])
+    })
+    .await?;
+
+    let source = fs::read(&staging.source_path).map_err(|_| {
+        HttpError::internal_with_details(
+            "flash_config_backup_unreadable",
+            "Unable to read the preserved device configuration.",
+            json!({}),
+        )
+    })?;
+    let verification = fs::read(&verification_path).map_err(|_| {
+        HttpError::internal_with_details(
+            "flash_config_verify_unreadable",
+            "Unable to verify the restored device configuration.",
+            json!({}),
+        )
+    })?;
+    if verification != source {
+        return Err(HttpError::bad_request(
+            "flash_config_verify_failed",
+            "Device configuration restoration could not be verified.",
+        ));
+    }
+    Ok(())
+}
+
+async fn run_flash_transaction_with_program(
+    artifact: &FirmwareArtifact,
+    root: Option<&Path>,
+    port_path: &str,
+    program: &Path,
+) -> Result<(), HttpError> {
+    let staging =
+        stage_flash_config_before_app_flash_with_program(program, artifact, root, port_path)
+            .await?;
+    run_espflash_with_program(artifact, root, port_path, program).await?;
+    if let Some(staging) = staging.as_ref() {
+        restore_flash_config_after_app_flash_with_program(program, artifact, port_path, staging)
+            .await?;
     }
     Ok(())
 }
@@ -5768,6 +6336,11 @@ fn espflash_failure_details(program: &Path, args: &[String], output: &Output) ->
     })
 }
 
+fn espflash_connection_failed(output: &Output) -> bool {
+    bounded_espflash_output(&output.stderr).contains("Failed to connect to the device")
+        || bounded_espflash_output(&output.stdout).contains("Failed to connect to the device")
+}
+
 fn bounded_espflash_output(bytes: &[u8]) -> String {
     const MAX_OUTPUT_BYTES: usize = 4_096;
     let text = String::from_utf8_lossy(bytes);
@@ -5789,7 +6362,8 @@ async fn run_espflash_with_exclusive_serial(
 ) -> Result<(), HttpError> {
     let _serial_rpc = state.serial_rpc.lock().await;
     drop_cached_serial_session(&state.serial_sessions, port_path)?;
-    run_espflash(artifact, root, port_path).await
+    let program = resolve_espflash_program();
+    run_flash_transaction_with_program(artifact, root, port_path, &program).await
 }
 
 fn drop_cached_serial_session(
@@ -5801,10 +6375,11 @@ fn drop_cached_serial_session(
     Ok(())
 }
 
-fn build_espflash_args(
+fn build_espflash_args_with_reset_mode(
     artifact: &FirmwareArtifact,
     root: Option<&Path>,
     port_path: &str,
+    before_reset: &str,
 ) -> Result<Vec<Vec<String>>, HttpError> {
     if port_path.is_empty() {
         return Err(HttpError::bad_request(
@@ -5822,7 +6397,7 @@ fn build_espflash_args(
             "--port".to_string(),
             port_path.to_string(),
             "--before".to_string(),
-            espflash_before_reset_mode(artifact, port_path).to_string(),
+            before_reset.to_string(),
             "--non-interactive".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
@@ -5844,7 +6419,6 @@ fn build_espflash_args(
     })?;
     let partition_table_binary = firmware_partition_table_binary_path(root)?;
     let app_path = resolve_artifact_path(root, &app_image.path);
-    let before = espflash_before_reset_mode(artifact, port_path);
     let common = vec![
         "--chip".to_string(),
         artifact.target_chip.clone(),
@@ -5856,7 +6430,7 @@ fn build_espflash_args(
     partition_table_args.extend(common.clone());
     partition_table_args.extend([
         "--before".to_string(),
-        before.to_string(),
+        before_reset.to_string(),
         "--after".to_string(),
         "no-reset".to_string(),
         DEFAULT_PARTITION_TABLE_FLASH_ADDRESS.to_string(),
@@ -5866,7 +6440,7 @@ fn build_espflash_args(
     app_args.extend(common.clone());
     app_args.extend([
         "--before".to_string(),
-        before.to_string(),
+        before_reset.to_string(),
         "--after".to_string(),
         "no-reset".to_string(),
         app_address.to_string(),
@@ -5875,7 +6449,7 @@ fn build_espflash_args(
     // espflash write-bin leaves the target in its loader. Reset explicitly once both images land.
     let mut reset_args = vec!["reset".to_string()];
     reset_args.extend(common);
-    reset_args.extend(["--before".to_string(), before.to_string()]);
+    reset_args.extend(["--before".to_string(), before_reset.to_string()]);
     Ok(vec![partition_table_args, app_args, reset_args])
 }
 
@@ -5915,11 +6489,11 @@ fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, 
     }
 }
 
-fn espflash_before_reset_mode(artifact: &FirmwareArtifact, port_path: &str) -> &'static str {
+fn espflash_reset_modes(artifact: &FirmwareArtifact, port_path: &str) -> Vec<&'static str> {
     if artifact.target_chip == "esp32s3" && port_path.contains("usbmodem") {
-        "usb-reset"
+        vec!["usb-reset", "default-reset"]
     } else {
-        "default-reset"
+        vec!["default-reset"]
     }
 }
 
@@ -5948,21 +6522,6 @@ fn record_serial_bridge_error(
         && let Some(device) = state_lock.devices.get_mut(device_id)
     {
         device.connection = ConnectionState::Error;
-        device.network.state = if error.error.code == "usb_response_timeout" {
-            NetworkState::Timeout
-        } else {
-            NetworkState::Error
-        };
-        let preserve_missing_port_diagnostic = error.error.code == "serial_open_failed"
-            && device
-                .network
-                .last_error
-                .as_deref()
-                .is_some_and(|message| message.starts_with("Authorized serial port "));
-        if !preserve_missing_port_diagnostic {
-            device.network.last_error = Some(error.error.message.clone());
-        }
-        device.status.network = device.network.clone();
     }
     state.emit(event(
         device_id,
@@ -5986,7 +6545,6 @@ fn emit_wifi_config_event(state: &AppState, device_id: &str, payload: &WifiConfi
             "op": payload.op,
             "ssid": payload.ssid,
             "passwordPresent": payload.password.is_some(),
-            "autoReconnect": payload.auto_reconnect,
             "telemetryIntervalMs": payload.telemetry_interval_ms,
         }),
     ));
@@ -6119,10 +6677,10 @@ fn redact_sensitive_fields(value: &mut Value) {
 }
 
 fn redact_lan_pairing_code(value: &mut Value) {
-    if let Value::Object(object) = value {
-        if let Some(code) = object.get_mut("code") {
-            *code = Value::String("<redacted>".to_string());
-        }
+    if let Value::Object(object) = value
+        && let Some(code) = object.get_mut("code")
+    {
+        *code = Value::String("<redacted>".to_string());
     }
 }
 
@@ -6191,6 +6749,99 @@ fn sanitize_io_error(error: io::Error) -> HttpError {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn flash_partition_layout(entries: &[(&str, u64, u64)]) -> Vec<FlashPartitionRange> {
+        entries
+            .iter()
+            .map(|(label, offset, size)| FlashPartitionRange {
+                label: (*label).to_string(),
+                offset: *offset,
+                size: *size,
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    fn test_flash_artifact() -> FirmwareArtifact {
+        FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec![],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![ArtifactFile {
+                kind: "elf".to_string(),
+                path: "firmware.elf".to_string(),
+                sha256: "sha256:test".to_string(),
+                size: 4,
+                flash_address: None,
+            }],
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_flash_transaction_fixture(
+        root: &Path,
+        reject_staging_write: bool,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let firmware_dir = root.join("firmware");
+        fs::create_dir_all(&firmware_dir).unwrap();
+        fs::write(
+            firmware_dir.join("partitions.csv"),
+            "nvs,data,nvs,0x9000,0x6000\nfactory,app,factory,0x10000,0x200000\nflux_cfg,data,0x06,0x210000,0x2000\n",
+        )
+        .unwrap();
+        fs::write(root.join("firmware.elf"), b"ELF!").unwrap();
+
+        let current_table = esp_idf_part::PartitionTable::try_from(
+            b"nvs,data,nvs,0x9000,0x6000\nfactory,app,factory,0x10000,0x100000\nflux_cfg,data,0x06,0x110000,0x2000\n".to_vec(),
+        )
+        .unwrap()
+        .to_bin()
+        .unwrap();
+        let table_path = root.join("current-partitions.bin");
+        let source_path = root.join("current-flux-cfg.bin");
+        let destination_path = root.join("target-flux-cfg.bin");
+        let log_path = root.join("espflash-actions.log");
+        fs::write(&table_path, current_table).unwrap();
+        fs::write(&source_path, vec![0x5A; LEGACY_FLASH_CONFIG_SIZE as usize]).unwrap();
+        fs::write(
+            &destination_path,
+            vec![0xFF; LEGACY_FLASH_CONFIG_SIZE as usize],
+        )
+        .unwrap();
+
+        let stage_write = if reject_staging_write {
+            "exit 42".to_string()
+        } else {
+            format!("cp \"$last\" \"{}\"", destination_path.display())
+        };
+        let script = root.join("fake-espflash.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\naction=\"$1\"\nlast=\"\"\naddress=\"\"\nfor arg in \"$@\"; do\n  last=\"$arg\"\n  case \"$arg\" in\n    0x8000|0x110000|0x210000) address=\"$arg\" ;;\n  esac\ndone\nif [ \"$action\" = \"read-flash\" ]; then\n  case \"$address\" in\n    0x8000) cp \"{}\" \"$last\" ;;\n    0x110000) cp \"{}\" \"$last\" ;;\n    0x210000) cp \"{}\" \"$last\" ;;\n    *) exit 43 ;;\n  esac\n  exit 0\nfi\nif [ \"$action\" = \"write-bin\" ]; then\n  if [ \"$address\" = \"0x210000\" ]; then\n    {}\n  else\n    exit 44\n  fi\n  exit 0\nfi\nif [ \"$action\" = \"flash\" ]; then\n  exit 0\nfi\nexit 45\n",
+                log_path.display(),
+                table_path.display(),
+                source_path.display(),
+                destination_path.display(),
+                stage_write,
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        (script, source_path, destination_path)
+    }
 
     #[test]
     fn dev_cors_origin_guard_allows_only_local_development_origins() {
@@ -6624,10 +7275,14 @@ mod tests {
     }
 
     #[test]
-    fn serial_bridge_error_marks_device_and_records_event() {
+    fn serial_bridge_error_preserves_wifi_state_and_records_event() {
         let state = AppState::test();
         let mut serial_device = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
         serial_device.port_path = Some("/dev/cu.usbmodem-test".to_string());
+        serial_device.network.state = NetworkState::Connected;
+        serial_device.network.ssid = Some("FluxPurr-Lab".to_string());
+        serial_device.network.wifi_rssi = Some(-47);
+        serial_device.status.network = serial_device.network.clone();
         {
             let mut inner = state.lock().unwrap();
             inner
@@ -6647,11 +7302,12 @@ mod tests {
         let inner = state.lock().unwrap();
         let device = inner.devices.get("serial-known").unwrap();
         assert_eq!(device.connection, ConnectionState::Error);
-        assert_eq!(device.network.state, NetworkState::Timeout);
-        assert_eq!(
-            device.network.last_error.as_deref(),
-            Some("Timed out waiting for a matching USB JSONL response.")
-        );
+        assert_eq!(device.network.state, NetworkState::Connected);
+        assert_eq!(device.network.wifi_rssi, Some(-47));
+        assert_eq!(device.network.last_error, None);
+        assert_eq!(device.status.network.state, NetworkState::Connected);
+        assert_eq!(device.status.network.wifi_rssi, Some(-47));
+        assert_eq!(device.status.network.last_error, None);
         assert_eq!(device.events.len(), 1);
         assert_eq!(device.events[0].kind, "serial");
         assert_eq!(device.events[0].payload["stage"], "identity");
@@ -6925,8 +7581,13 @@ mod tests {
             "flux_cfg,data,0x06,0x210000,0x2000",
         )
         .unwrap();
-        let commands =
-            build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
+        let commands = build_espflash_args_with_reset_mode(
+            &artifact,
+            Some(dir.path()),
+            "/dev/cu.usbmodem21221401",
+            "usb-reset",
+        )
+        .unwrap();
         assert_eq!(commands.len(), 1);
         let args = &commands[0];
 
@@ -6984,8 +7645,13 @@ mod tests {
             b"partition-table",
         )
         .unwrap();
-        let commands =
-            build_espflash_args(&artifact, Some(dir.path()), "/dev/cu.usbmodem21221401").unwrap();
+        let commands = build_espflash_args_with_reset_mode(
+            &artifact,
+            Some(dir.path()),
+            "/dev/cu.usbmodem21221401",
+            "usb-reset",
+        )
+        .unwrap();
 
         assert_eq!(commands.len(), 3);
         assert_eq!(commands[0][0], "write-bin");
@@ -7031,8 +7697,342 @@ mod tests {
             files: vec![],
         };
         assert_eq!(
-            espflash_before_reset_mode(&artifact, "/dev/cu.usbserial-1410"),
-            "default-reset"
+            espflash_reset_modes(&artifact, "/dev/cu.usbserial-1410"),
+            ["default-reset"]
+        );
+    }
+
+    #[test]
+    fn usbmodem_flash_retries_default_reset_without_manual_boot_mode() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec![],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![],
+        };
+
+        assert_eq!(
+            espflash_reset_modes(&artifact, "/dev/cu.usbmodem2111401"),
+            ["usb-reset", "default-reset"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("stuck-espflash");
+        std::fs::write(&program, "#!/bin/sh\nsleep 5\n").unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        let started = Instant::now();
+        let error = run_espflash_command_with_timeout(
+            &program,
+            &["read-flash".to_string()],
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "flash_tool_timeout");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn flash_config_migration_stages_config_before_expanding_the_app_partition() {
+        let current = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x100000),
+            ("flux_cfg", 0x110000, 0x2000),
+        ]);
+        let target = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x2000),
+        ]);
+
+        assert_eq!(
+            plan_flash_config_migration(&current, &target).unwrap(),
+            Some(FlashConfigMigrationPlan {
+                source: FlashPartitionRange {
+                    label: "flux_cfg".to_string(),
+                    offset: 0x110000,
+                    size: 0x2000,
+                },
+                destination: FlashPartitionRange {
+                    label: "flux_cfg".to_string(),
+                    offset: 0x210000,
+                    size: 0x2000,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn flash_config_migration_keeps_a_backup_when_the_partition_is_unchanged() {
+        let layout = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x2000),
+        ]);
+
+        assert_eq!(
+            plan_flash_config_migration(&layout, &layout).unwrap(),
+            Some(FlashConfigMigrationPlan {
+                source: FlashPartitionRange {
+                    label: "flux_cfg".to_string(),
+                    offset: 0x210000,
+                    size: 0x2000,
+                },
+                destination: FlashPartitionRange {
+                    label: "flux_cfg".to_string(),
+                    offset: 0x210000,
+                    size: 0x2000,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn flash_config_migration_rejects_a_destination_used_by_the_current_layout() {
+        let current = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x100000),
+            ("flux_cfg", 0x110000, 0x2000),
+            ("reserved", 0x210000, 0x2000),
+        ]);
+        let target = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x2000),
+        ]);
+
+        let error = plan_flash_config_migration(&current, &target).unwrap_err();
+
+        assert_eq!(error.error.code, "flash_config_destination_in_use");
+    }
+
+    #[test]
+    fn flash_config_migration_rejects_a_smaller_destination_partition() {
+        let current = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x100000),
+            ("flux_cfg", 0x110000, 0x2000),
+        ]);
+        let target = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x1000),
+        ]);
+
+        let error = plan_flash_config_migration(&current, &target).unwrap_err();
+
+        assert_eq!(error.error.code, "flash_config_destination_too_small");
+    }
+
+    #[test]
+    fn flash_config_migration_preserves_an_unpartitioned_legacy_record() {
+        let current =
+            flash_partition_layout(&[("nvs", 0x9000, 0x6000), ("factory", 0x10000, 0x100000)]);
+        let target = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x2000),
+        ]);
+
+        assert_eq!(
+            plan_flash_config_migration(&current, &target).unwrap(),
+            Some(FlashConfigMigrationPlan {
+                source: FlashPartitionRange {
+                    label: "legacy_raw".to_string(),
+                    offset: LEGACY_FLASH_CONFIG_OFFSET,
+                    size: LEGACY_FLASH_CONFIG_SIZE,
+                },
+                destination: FlashPartitionRange {
+                    label: "flux_cfg".to_string(),
+                    offset: 0x210000,
+                    size: 0x2000,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn flash_config_migration_preserves_legacy_record_inside_old_factory_partition() {
+        let current =
+            flash_partition_layout(&[("nvs", 0x9000, 0x6000), ("factory", 0x10000, 0x200000)]);
+        let target = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x2000),
+        ]);
+
+        assert_eq!(
+            plan_flash_config_migration(&current, &target).unwrap(),
+            Some(FlashConfigMigrationPlan {
+                source: FlashPartitionRange {
+                    label: "legacy_raw".to_string(),
+                    offset: LEGACY_FLASH_CONFIG_OFFSET,
+                    size: LEGACY_FLASH_CONFIG_SIZE,
+                },
+                destination: FlashPartitionRange {
+                    label: "flux_cfg".to_string(),
+                    offset: 0x210000,
+                    size: 0x2000,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn flash_config_staging_commands_read_and_verify_before_app_flash() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec![],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![],
+        };
+        let source = Path::new("/private/tmp/flux_cfg-source.bin");
+        let read = build_espflash_read_flash_args(
+            &artifact,
+            "/dev/cu.usbmodem2111401",
+            "usb-reset",
+            LEGACY_FLASH_CONFIG_OFFSET,
+            LEGACY_FLASH_CONFIG_SIZE,
+            source,
+        )
+        .unwrap();
+        let write = build_espflash_write_bin_args(
+            &artifact,
+            "/dev/cu.usbmodem2111401",
+            "usb-reset",
+            0x210000,
+            source,
+        )
+        .unwrap();
+
+        assert_eq!(read[0], "read-flash");
+        assert!(
+            read.windows(2)
+                .any(|pair| pair == ["--after", "hard-reset"])
+        );
+        assert!(read.windows(2).any(|pair| pair == ["0x110000", "0x2000"]));
+        assert_eq!(write[0], "write-bin");
+        assert!(
+            write
+                .windows(2)
+                .any(|pair| pair == ["--after", "hard-reset"])
+        );
+        assert!(
+            write
+                .windows(2)
+                .any(|pair| pair == ["0x210000", source.to_str().unwrap()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn flash_transaction_restores_and_verifies_preserved_config_after_writing_the_app() {
+        let root = tempdir().unwrap();
+        let (program, source, destination) = write_flash_transaction_fixture(root.path(), false);
+
+        run_flash_transaction_with_program(
+            &test_flash_artifact(),
+            Some(root.path()),
+            "/dev/cu.usbmodem2111401",
+            &program,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            fs::read_to_string(root.path().join("espflash-actions.log"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec![
+                "read-flash",
+                "read-flash",
+                "write-bin",
+                "read-flash",
+                "flash",
+                "write-bin",
+                "read-flash"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn flash_transaction_never_writes_the_app_when_config_staging_fails() {
+        let root = tempdir().unwrap();
+        let (program, source, destination) = write_flash_transaction_fixture(root.path(), true);
+
+        let error = run_flash_transaction_with_program(
+            &test_flash_artifact(),
+            Some(root.path()),
+            "/dev/cu.usbmodem2111401",
+            &program,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "flash_tool_failed");
+        assert_ne!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            fs::read_to_string(root.path().join("espflash-actions.log"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["read-flash", "read-flash", "write-bin"]
+        );
+    }
+
+    #[test]
+    fn flash_partition_table_parser_rejects_truncated_device_data() {
+        let error = parse_flash_partition_table(
+            vec![0xAA],
+            "flash_partition_table_invalid",
+            "The current device partition table is invalid; refusing to flash.",
+        )
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "flash_partition_table_invalid");
+    }
+
+    #[test]
+    fn flash_config_migration_does_not_claim_data_from_an_overwritten_legacy_range() {
+        let current = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x100000),
+            ("reserved", 0x110000, 0x2000),
+        ]);
+        let target = flash_partition_layout(&[
+            ("nvs", 0x9000, 0x6000),
+            ("factory", 0x10000, 0x200000),
+            ("flux_cfg", 0x210000, 0x2000),
+        ]);
+
+        assert_eq!(
+            plan_flash_config_migration(&current, &target).unwrap(),
+            None
         );
     }
 
@@ -7064,6 +8064,42 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::FORBIDDEN);
         assert_eq!(error.error.code, "lease_expired");
+    }
+
+    #[tokio::test]
+    async fn native_serial_reads_and_pairing_code_require_an_active_lease() {
+        let state = AppState::test();
+        {
+            let mut state_lock = state.lock().unwrap();
+            state_lock.devices.insert(
+                "native-test".to_string(),
+                DeviceRecord::native_serial_placeholder(
+                    "native-test",
+                    "Native test target".to_string(),
+                    "/dev/null".to_string(),
+                ),
+            );
+        }
+
+        let pairing_error = get_lan_pairing_code(
+            State(state.clone()),
+            AxumPath("native-test".to_string()),
+            Query(LeaseQuery { lease_id: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(pairing_error.status, StatusCode::FORBIDDEN);
+        assert_eq!(pairing_error.error.code, "lease_required");
+
+        let status_error = device_status(
+            State(state),
+            AxumPath("native-test".to_string()),
+            Query(LeaseQuery { lease_id: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_error.status, StatusCode::FORBIDDEN);
+        assert_eq!(status_error.error.code, "lease_required");
     }
 
     fn test_thermal_control_profile_point(target_temp_c: i16) -> ThermalControlProfilePoint {
@@ -7525,7 +8561,6 @@ mod tests {
                 op: WifiConfigOp::Set,
                 ssid: Some("FluxPurr-Lab".to_string()),
                 password: Some("secret-pass".to_string()),
-                auto_reconnect: Some(true),
                 static_ipv4: None,
                 telemetry_interval_ms: Some(500),
             }),
@@ -7894,13 +8929,12 @@ mod tests {
             op: WifiConfigOp::Set,
             ssid: Some("FluxPurr-Lab".to_string()),
             password: Some("secret-pass".to_string()),
-            auto_reconnect: Some(true),
-            static_ipv4: Some(WifiStaticIpv4Request {
+            static_ipv4: Some(Some(WifiStaticIpv4Request {
                 address: [192, 168, 31, 42],
                 prefix_len: 24,
                 gateway: [192, 168, 31, 1],
                 dns: [1, 1, 1, 1],
-            }),
+            })),
             telemetry_interval_ms: Some(500),
         };
         let value = json!({
@@ -7912,6 +8946,96 @@ mod tests {
         });
         assert!(value.to_string().contains("<redacted>"));
         assert!(!value.to_string().contains("secret-pass"));
+    }
+
+    #[test]
+    fn wifi_receipt_rejects_unversioned_and_malformed_network_snapshots() {
+        let unversioned = extract_wifi_config_network(json!({
+            "wifi": {
+                "network": {
+                    "state": "saving",
+                    "ssid": null,
+                    "wifiPasswordLength": 0,
+                    "ip": null,
+                    "gateway": null,
+                    "dns": [],
+                    "wifiRssi": null,
+                    "lastError": null
+                }
+            }
+        }))
+        .unwrap_err();
+        assert_eq!(unversioned.error.code, "invalid_wifi_receipt");
+
+        let malformed =
+            extract_wifi_config_network(json!({ "wifi": { "network": 42 } })).unwrap_err();
+        assert_eq!(malformed.error.code, "usb_payload_decode_failed");
+
+        let non_public = extract_wifi_config_network(json!({
+            "wifi": {
+                "network": {
+                    "state": "saving",
+                    "configurationGeneration": 1,
+                    "transitionSequence": 1,
+                    "ssid": null,
+                    "wifiPasswordLength": 0,
+                    "ip": null,
+                    "gateway": null,
+                    "dns": [],
+                    "wifiRssi": null,
+                    "lastError": null
+                }
+            }
+        }))
+        .unwrap_err();
+        assert_eq!(non_public.error.code, "invalid_wifi_receipt");
+        assert_eq!(
+            non_public.error.message,
+            "The device returned a non-public WiFi state."
+        );
+    }
+
+    #[test]
+    fn wifi_static_ipv4_preserves_absent_and_forwards_explicit_dhcp_clear() {
+        let absent: WifiConfigRequest = serde_json::from_value(json!({
+            "leaseId": "lease-1",
+            "op": "set",
+            "autoReconnect": false
+        }))
+        .unwrap();
+        let clear: WifiConfigRequest = serde_json::from_value(json!({
+            "leaseId": "lease-1",
+            "op": "set",
+            "staticIpv4": null
+        }))
+        .unwrap();
+
+        assert!(absent.static_ipv4.is_none());
+        assert!(matches!(clear.static_ipv4, Some(None)));
+
+        let clear_wire = serde_json::to_value(UsbWifiConfigWire {
+            frame_type: "wifi_config",
+            request_id: "wifi-clear",
+            op: "set",
+            ssid: None,
+            password: None,
+            static_ipv4: clear.static_ipv4,
+            telemetry_interval_ms: None,
+        })
+        .unwrap();
+        let absent_wire = serde_json::to_value(UsbWifiConfigWire {
+            frame_type: "wifi_config",
+            request_id: "wifi-preserve",
+            op: "set",
+            ssid: None,
+            password: None,
+            static_ipv4: absent.static_ipv4,
+            telemetry_interval_ms: None,
+        })
+        .unwrap();
+
+        assert!(clear_wire["staticIpv4"].is_null());
+        assert!(absent_wire.get("staticIpv4").is_none());
     }
 
     #[test]
@@ -7978,6 +9102,25 @@ mod tests {
         }
         assert!(serial_line_finished(&mut line, &mut discarding, b'\n'));
         assert!(decode_usb_response_line(&line, "req-1").unwrap().is_some());
+    }
+
+    #[test]
+    fn usb_reset_markers_are_observed_without_reopening_the_session() {
+        assert!(serial_line_is_usb_reset_marker(
+            b"reset_reason=core_usb_uart"
+        ));
+        assert!(serial_line_is_usb_reset_marker(
+            b" reset_reason=core_usb_jtag\r"
+        ));
+        assert!(!serial_line_is_usb_reset_marker(
+            b"reset_reason=core_software"
+        ));
+        assert!(!serial_line_is_usb_reset_marker(
+            b"boot_stage=lan_heap_ready"
+        ));
+        assert!(!serial_line_is_usb_reset_marker(
+            br#"{\"type\":\"response\",\"requestId\":\"req-1\",\"ok\":true}"#
+        ));
     }
 
     #[test]
@@ -8131,7 +9274,11 @@ mod tests {
             frontpanel_key: None,
             network: NetworkSummary {
                 state: NetworkState::Idle,
+                configuration_generation: 0,
+                transition_sequence: 0,
+                failure_code: None,
                 ssid: None,
+                wifi_password_length: 0,
                 ip: None,
                 gateway: None,
                 dns: Vec::new(),
@@ -8616,6 +9763,55 @@ mod tests {
                 size: bytes.len() as u64,
                 flash_address: Some(0x10000),
             }],
+        }
+    }
+
+    #[test]
+    fn wifi_config_acceptance_replaces_stale_error_with_connecting_summary() {
+        let current = NetworkSummary {
+            state: NetworkState::Error,
+            configuration_generation: 4,
+            transition_sequence: 11,
+            failure_code: Some(NetworkFailureCode::AssociationRejected),
+            ssid: Some("Old-Network".to_string()),
+            wifi_password_length: 8,
+            ip: None,
+            gateway: None,
+            dns: Vec::new(),
+            wifi_rssi: None,
+            last_error: Some("WiFi association failed.".to_string()),
+        };
+        let payload = WifiConfigRequest {
+            lease_id: "lease-1".to_string(),
+            op: WifiConfigOp::Set,
+            ssid: Some("FluxPurr-Lab".to_string()),
+            password: Some("secret-pass".to_string()),
+            static_ipv4: None,
+            telemetry_interval_ms: Some(500),
+        };
+
+        let accepted = mock_network_after_wifi_config(&current, &payload);
+        assert_eq!(accepted.state, NetworkState::Connecting);
+        assert_eq!(accepted.configuration_generation, 5);
+        assert_eq!(accepted.transition_sequence, 12);
+        assert_eq!(accepted.ssid.as_deref(), Some("FluxPurr-Lab"));
+        assert_eq!(accepted.wifi_password_length, 11);
+        assert_eq!(accepted.last_error, None);
+    }
+
+    #[test]
+    fn golden_wifi_fixture_has_monotonic_versioned_snapshots() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../fixtures/wifi-provisioning-v2.json"))
+                .unwrap();
+        for trace in fixture["traces"].as_array().unwrap() {
+            let mut previous = 0;
+            for snapshot in trace["snapshots"].as_array().unwrap() {
+                assert!(snapshot["configurationGeneration"].as_u64().unwrap() > 0);
+                let sequence = snapshot["transitionSequence"].as_u64().unwrap();
+                assert!(sequence > previous);
+                previous = sequence;
+            }
         }
     }
 }

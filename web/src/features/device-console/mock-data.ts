@@ -19,7 +19,6 @@ export const mockStatus: DeviceStatus = {
 export const mockWifiConfig: WifiConfig = {
   ssid: 'FluxPurr-Lab',
   passwordMasked: '••••••••',
-  autoReconnect: true,
   telemetryIntervalMs: 500,
 }
 

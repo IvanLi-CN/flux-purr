@@ -21,7 +21,6 @@ export interface DeviceStatus {
 export interface WifiConfig {
   ssid: string
   passwordMasked: string
-  autoReconnect: boolean
   telemetryIntervalMs: number
 }
 

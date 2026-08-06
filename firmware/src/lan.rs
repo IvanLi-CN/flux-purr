@@ -14,6 +14,28 @@ pub const LAN_LEASE_TTL_MS: u64 = 30_000;
 pub const LAN_LEASE_ID_BYTES: usize = 12;
 pub const PROD_ALLOWED_ORIGIN: &str = "https://flux-purr.ivanli.cc";
 
+/// How a browser may obtain a LAN bearer token after it has established a
+/// public connection to the device. The current production default is
+/// [`Required`]; the other modes keep the HTTP v1 contract forward-compatible
+/// without exposing a transient code before a connection exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LanPairingMode {
+    #[default]
+    Required,
+    Optional,
+    Unavailable,
+}
+
+impl LanPairingMode {
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Required => "required",
+            Self::Optional => "optional",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LanToken([u8; LAN_TOKEN_BYTES]);
 
@@ -88,6 +110,7 @@ pub enum LanAccessError {
     PairingInactive,
     PairingLocked,
     PairingCodeInvalid,
+    PairingUnavailable,
     Unauthorized,
     LeaseBusy,
     LeaseRequired,

@@ -31,7 +31,11 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 ```json
 {
   "state": "connected",
+  "configurationGeneration": 7,
+  "transitionSequence": 19,
+  "failureCode": null,
   "ssid": "FluxPurr-Lab",
+  "wifiPasswordLength": 11,
   "ip": "192.168.31.42",
   "gateway": "192.168.31.1",
   "dns": ["192.168.31.1"],
@@ -40,7 +44,11 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 }
 ```
 
-`state`: `disabled | idle | saving | connecting | connected | error | timeout`.
+`state`: `disabled | connecting | connected | error` for device-published WiFi facts. `idle`, `saving`, and `timeout` are not valid firmware WiFi summary states; timeout is settled as `error`. `configurationGeneration` changes for every accepted set/clear configuration; `transitionSequence` increases on every accepted state transition. `failureCode` is absent for nonterminal states and is one of `disconnect_timed_out | configuration_failed | association_rejected | association_timed_out | ipv4_timed_out | station_disconnected | lan_startup_failed`. A configuration transaction makes at most three attempts in 30 seconds: disconnect is bounded at 3 seconds, association at 8 seconds per attempt, and IPv4/DHCP at 15 seconds per attempt, with the 30-second transaction deadline taking precedence. Recoverable failures remain `connecting`; once the attempt budget or transaction deadline is exhausted, the device publishes one terminal `error`. The same configuration generation never starts a background recovery; a new set/clear configuration is required.
+
+During firmware boot, before EEPROM/flash restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
+
+`ssid` is the device-confirmed configured network name and is safe to display in a configuration form. `wifiPasswordLength` is the saved WiFi password's UTF-8 byte length. The password itself is never returned by USB, LAN, devd, logs, events, errors, or exports.
 
 ### `Status`
 
@@ -236,9 +244,11 @@ Base URL: `http://<device-ip>` or the MAC-derived `http://flux-purr-<mac>.local`
 
 Public endpoints:
 
-- `GET /health`
-- `GET /api/v1/pairing` returns whether a code is currently visible and remaining attempts, never the code.
-- `POST /api/v1/pairing/claim` accepts `{ "code": "4827" }` and returns the stable bearer token plus MAC-derived `deviceId` and `hostname` only after the physical WiFi Info page opens the pairing window.
+- `GET /health` is the anonymous, low-frequency connection summary. It returns `api`, MAC-derived `deviceId` and `hostname`, firmware version, and `{ pairing: { mode, active, attemptsRemaining } }`; it never returns runtime telemetry, a code, or a bearer token. `mode` is `required` (current default), `optional` (the device may claim without a code), or `unavailable` (basic public information only).
+- `GET /api/v1/pairing` returns the same current policy and whether a code is currently visible, never the code.
+- `POST /api/v1/pairing/claim` returns the stable bearer token plus MAC-derived `deviceId` and `hostname`. `required` accepts `{ "code": "4827" }` only after the physical WiFi Info page opens the pairing window; `optional` accepts `{}`; `unavailable` rejects the claim with `pairing_unavailable`.
+
+Each endpoint accepts only the method shown here or in the token endpoint list. A method mismatch returns `405` before bearer authentication, LAN lease validation, or control-mailbox dispatch, so it cannot execute a mutation through an unintended route.
 
 Token endpoints require `Authorization: Bearer <token>`:
 
@@ -246,9 +256,15 @@ Token endpoints require `Authorization: Bearer <token>`:
 - `POST /api/v1/leases`, `PUT|DELETE /api/v1/leases`
 - `PUT /api/v1/runtime|calibration|heater-curve|thermal-profile` and `POST /api/v1/calibration/job`
 
-LAN writes must additionally carry `X-Flux-Purr-Lease: <lease-id>`. A lease has a `30s` TTL and is renewed with `PUT /api/v1/leases`; only one LAN writer can own it. Token reset is intentionally absent from device HTTP.
+The device accepts at least three simultaneous HTTP connections. Authenticated reads may be in flight concurrently; each response carries `X-Flux-Purr-Revision: <u32>`. Control mutations are serialized by the main-loop mailbox and must carry both `X-Flux-Purr-Lease: <lease-id>` and the most recently observed `X-Flux-Purr-Revision`. A missing revision returns `428 revision_required`; an outdated revision returns `409 stale_write` without executing the command. A successful mutation increments the revision and returns the new value. Clients must refresh after `stale_write` and must not automatically replay a side-effecting request. Lease create, heartbeat, and release are lease coordination operations and do not require a control revision. A lease has a `30s` TTL and only one LAN writer can own it. Token reset is intentionally absent from device HTTP.
 
 The device reflects `https://flux-purr.ivanli.cc` and explicit localhost development origins in CORS responses. Chromium private-network preflight receives `Access-Control-Allow-Private-Network: true`; Safari and other browsers without Chromium PNA support must not offer direct-LAN control. `GET /api/v1/events` returns one authorized `text/event-stream` status frame per connection, and the browser fetch-stream client reconnects without putting the token in a URL.
+
+### Browser direct-LAN flow
+
+The production Web app exposes direct LAN pairing only in `demo=false`, from the Add device page. It accepts only an RFC1918 HTTP root address or a MAC-derived `flux-purr-<mac>.local` hostname plus the four-digit code currently visible on the physical WiFi Info page. A successful claim stores the bearer token only in the current Web origin's local device record, probes `identity`, `network`, and `status`, selects the resulting LAN target, and creates a 30-second lease before enabling writes.
+
+On reload the Web app may probe only locally saved LAN records; it must not perform browser mDNS, CIDR, or background subnet discovery. The last operator-entered CIDR may be restored as a local form preference, but it must not start a scan by itself; the CIDR input, scan action, progress and discovered results stay visible throughout the direct-LAN workflow. A `401` removes only the affected local record. PNA/CORS rejection, unreachable address, expired or locked pairing code, and lease conflict/expiry are connection states rather than WiFi station failures. Direct LAN targets do not expose WiFi credential setup, firmware flashing, or token reset.
 
 ## Browser Web Serial
 
@@ -299,7 +315,7 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/calibration?lease_id=...`
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...`
 - `GET /api/v1/devices/:id/events`
-- `PUT /api/v1/devices/:id/wifi`
+- `PUT /api/v1/devices/:id/wifi`: WiFi provisioning is USB/devd-only. The live Web Settings form remains visible for a selected native `devd` device with `wifi_config`; without `wifi_state_v2` it locks every configuration control and reports that a protocol update is required. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. Its response is a redacted WiFi receipt with the device-published `NetworkSummary`; `devd` must reject an unversioned or malformed receipt. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. It never sends credentials over direct LAN or Web Serial.
 - `PUT /api/v1/devices/:id/runtime`
 - `PUT /api/v1/devices/:id/calibration`
 - `POST /api/v1/devices/:id/calibration/apply`
@@ -609,6 +625,8 @@ Each frame is UTF-8 JSON followed by `\n`.
 
 `op`: `get_identity | get_network | get_status | get_calibration | get_calibration_job | get_heater_curve | set_log_level`.
 
+The boot-time USB recovery loop may answer identity, but defers network and runtime status with retryable `startup_busy` until the main loop owns the restored configuration and live WiFi snapshot. This prevents a USB-open reset from being reported as lost WiFi credentials.
+
 ### `wifi_config`
 
 ```json
@@ -618,10 +636,13 @@ Each frame is UTF-8 JSON followed by `\n`.
   "op": "set",
   "ssid": "FluxPurr-Lab",
   "password": "<secret>",
-  "autoReconnect": true,
+  "staticIpv4": null,
   "telemetryIntervalMs": 500
 }
 ```
+
+WiFi automatic reconnect is a fixed firmware policy and is not a request parameter.
+`staticIpv4` is optional: omit it to preserve the stored addressing mode, provide an object to set a static address, or send `null` to clear a previous static address and return to DHCP.
 
 Responses must redact the password:
 
@@ -635,7 +656,6 @@ Responses must redact the password:
       "op": "set",
       "ssid": "FluxPurr-Lab",
       "password": "<redacted>",
-      "autoReconnect": true,
       "telemetryIntervalMs": 500
     }
   }

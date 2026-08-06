@@ -68,6 +68,19 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
+  it('closes a port that resolves after a cancelled connection attempt', async () => {
+    const serial = new DeferredSerial()
+    const client = new WebSerialControlPlaneClient({ serial })
+    const connection = client.connect()
+
+    await client.disconnect()
+    const port = new DeferredSerialPort()
+    serial.resolve(port)
+
+    await expect(connection).rejects.toMatchObject({ code: 'web_serial_closed' })
+    expect(port.closed).toBe(true)
+  })
+
   it('sends calibration auto-job frames over USB JSONL', async () => {
     const fake = new FakeSerial()
     const client = new WebSerialControlPlaneClient({ serial: fake })
@@ -128,6 +141,36 @@ class FakeSerial implements BrowserSerial {
 
   requestPort(): Promise<BrowserSerialPort> {
     return Promise.resolve(this.port)
+  }
+}
+
+class DeferredSerial implements BrowserSerial {
+  private resolvePort!: (port: BrowserSerialPort) => void
+  private readonly portPromise = new Promise<BrowserSerialPort>((resolve) => {
+    this.resolvePort = resolve
+  })
+
+  requestPort(): Promise<BrowserSerialPort> {
+    return this.portPromise
+  }
+
+  resolve(port: BrowserSerialPort) {
+    this.resolvePort(port)
+  }
+}
+
+class DeferredSerialPort implements BrowserSerialPort {
+  readonly readable = null
+  readonly writable = null
+  closed = false
+
+  open(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  close(): Promise<void> {
+    this.closed = true
+    return Promise.resolve()
   }
 }
 

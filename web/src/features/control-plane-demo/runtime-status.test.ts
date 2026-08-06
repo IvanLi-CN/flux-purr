@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
   createPendingHeaterFeedback,
+  deviceControlBlockReason,
   HEATER_CONFIRMATION_TIMEOUT_MS,
   resolvePendingHeaterConfirmation,
+  shouldAcquireLanLease,
 } from './runtime-status'
 import type { DeviceTarget } from './types'
 
@@ -155,5 +157,36 @@ describe('pending heater confirmation', () => {
         tone: 'warning',
       },
     })
+  })
+})
+
+describe('direct LAN lease guard', () => {
+  it('does not reacquire a lease after an explicit conflict or expiry', () => {
+    expect(shouldAcquireLanLease({ leaseState: 'none' })).toBe(true)
+    expect(shouldAcquireLanLease({ leaseState: 'active' })).toBe(true)
+    expect(shouldAcquireLanLease({ leaseState: 'conflict' })).toBe(false)
+    expect(shouldAcquireLanLease({ leaseState: 'expired' })).toBe(false)
+  })
+
+  it('blocks direct LAN writes until the device confirms an active lease', () => {
+    expect(
+      deviceControlBlockReason(
+        makeDevice({
+          transport: 'wifi',
+          baseUrl: 'http://192.168.1.18',
+          leaseState: 'none',
+        })
+      )
+    ).toBe('正在获取 LAN 控制租约，暂时无法下发控制。')
+
+    expect(
+      deviceControlBlockReason(
+        makeDevice({
+          transport: 'wifi',
+          baseUrl: 'http://192.168.1.18',
+          leaseState: 'active',
+        })
+      )
+    ).toBeNull()
   })
 })

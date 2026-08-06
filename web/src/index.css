@@ -1314,6 +1314,208 @@
     min-width: min(100%, 16rem);
   }
 
+  .industrial-device-picker {
+    position: relative;
+    min-width: 0;
+  }
+
+  .industrial-device-picker__trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .industrial-device-picker__trigger > svg {
+    flex: 0 0 auto;
+    color: var(--industrial-muted-text);
+    transition: transform 160ms ease;
+  }
+
+  .industrial-device-picker__popover {
+    position: absolute;
+    top: calc(100% + 0.45rem);
+    right: 0;
+    z-index: 60;
+    display: grid;
+    gap: 0.6rem;
+    width: min(38rem, calc(100vw - 2rem));
+    max-height: min(32rem, calc(100vh - 7rem));
+    overflow-y: auto;
+    border: 1px solid rgba(183, 192, 210, 0.92);
+    border-radius: 14px;
+    background: var(--industrial-bg);
+    padding: 0.65rem;
+    box-shadow:
+      10px 14px 26px rgba(88, 96, 116, 0.24),
+      inset 1px 1px 0 rgba(255, 255, 255, 0.7);
+  }
+
+  .industrial-device-choice-card {
+    display: grid;
+    gap: 0.58rem;
+    border: 1px solid rgba(255, 255, 255, 0.64);
+    border-radius: 12px;
+    background: rgba(213, 222, 234, 0.72);
+    padding: 0.72rem;
+    box-shadow:
+      4px 4px 9px var(--industrial-shadow),
+      -4px -4px 9px var(--industrial-light);
+  }
+
+  .industrial-device-choice-card__header {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 0.7rem;
+  }
+
+  .industrial-device-choice-card__header > span {
+    display: grid;
+    min-width: 0;
+    gap: 0.15rem;
+  }
+
+  .industrial-device-choice-card__header strong,
+  .industrial-device-choice-card__header small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-device-choice-card__header strong {
+    color: var(--industrial-text);
+    font-size: 0.86rem;
+    font-weight: 900;
+  }
+
+  .industrial-device-choice-card__header small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.64rem;
+    font-weight: 750;
+  }
+
+  .industrial-device-choice-card__header em {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.56);
+    padding: 0.28rem 0.42rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.58rem;
+    font-style: normal;
+    font-weight: 850;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .industrial-device-choice-card__connections {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 0.45rem;
+    min-width: 0;
+    margin: 0;
+    border: 0;
+    padding: 0;
+  }
+
+  .industrial-device-connection-button,
+  .industrial-device-picker__add {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-width: 0;
+    border: 1px solid rgba(255, 255, 255, 0.64);
+    border-radius: 9px;
+    background: rgba(240, 242, 245, 0.7);
+    color: var(--industrial-text);
+    cursor: pointer;
+    padding: 0.52rem 0.58rem;
+    text-align: left;
+    transition:
+      background 160ms ease,
+      color 160ms ease,
+      transform 160ms ease;
+  }
+
+  .industrial-device-connection-button:hover,
+  .industrial-device-picker__add:hover {
+    background: rgba(255, 255, 255, 0.88);
+    color: var(--industrial-accent);
+    transform: translateY(-1px);
+  }
+
+  .industrial-device-connection-button.is-active {
+    border-color: rgba(201, 20, 45, 0.48);
+    background: rgba(201, 20, 45, 0.1);
+    color: var(--industrial-accent);
+    box-shadow: inset 3px 3px 6px rgba(176, 26, 48, 0.1);
+  }
+
+  .industrial-device-connection-button:focus-visible,
+  .industrial-device-picker__add:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 2px;
+  }
+
+  .industrial-device-connection-button > span {
+    display: grid;
+    min-width: 0;
+    gap: 0.12rem;
+  }
+
+  .industrial-device-connection-button__icon {
+    width: 1rem;
+    height: 1rem;
+    flex: 0 0 auto;
+    color: var(--industrial-accent);
+  }
+
+  .industrial-device-connection-button strong,
+  .industrial-device-connection-button small {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-device-connection-button strong {
+    font-size: 0.72rem;
+    font-weight: 900;
+  }
+
+  .industrial-device-connection-button small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.58rem;
+    font-weight: 700;
+  }
+
+  .industrial-device-connection-button__arrow {
+    flex: 0 0 auto;
+    width: 0.9rem;
+    height: 0.9rem;
+    color: var(--industrial-muted-text);
+    transform: rotate(-90deg);
+  }
+
+  .industrial-device-picker__add {
+    justify-content: center;
+    gap: 0.42rem;
+    border-style: dashed;
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    font-weight: 850;
+  }
+
+  .industrial-device-picker__add > svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    flex: 0 0 auto;
+  }
+
   @media (max-width: 759px) {
     .industrial-shell--fixed {
       height: 100dvh;
@@ -1677,6 +1879,57 @@
     font-size: 0.82rem;
     font-weight: 800;
     letter-spacing: 0.01em;
+  }
+
+  .industrial-device-select-option {
+    display: grid;
+    min-width: 0;
+    gap: 0.12rem;
+  }
+
+  .industrial-device-select-value {
+    display: grid;
+    min-width: 0;
+    gap: 0.08rem;
+    line-height: 1.05;
+    text-align: left;
+  }
+
+  .industrial-device-select-option strong,
+  .industrial-device-select-option small,
+  .industrial-device-select-value strong,
+  .industrial-device-select-value small {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-device-select-option strong {
+    color: inherit;
+    font-size: 0.82rem;
+    font-weight: 850;
+  }
+
+  .industrial-device-select-value strong {
+    color: inherit;
+    font-size: 0.82rem;
+    font-weight: 850;
+  }
+
+  .industrial-device-select-option small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.64rem;
+    font-weight: 700;
+  }
+
+  .industrial-device-select-value small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.64rem;
+    font-weight: 700;
   }
 
   .industrial-select-item[data-highlighted] {
@@ -2061,11 +2314,157 @@
     padding: 1rem;
   }
 
+  .industrial-lan-pairing-story-surface .industrial-lan-pairing-panel {
+    margin-top: 0;
+  }
+
   .industrial-lan-pairing-panel__heading {
     display: flex;
     align-items: center;
     gap: 0.7rem;
     min-width: 0;
+  }
+
+  .industrial-bridge-target-panel {
+    display: grid;
+    gap: 0.85rem;
+    margin-top: 1rem;
+    border: 1px solid rgba(72, 125, 154, 0.38);
+    border-radius: 10px;
+    background: rgba(213, 230, 234, 0.48);
+    padding: 1rem;
+  }
+
+  .industrial-bridge-target-panel__heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .industrial-bridge-target-panel__heading strong,
+  .industrial-bridge-target-panel__heading small {
+    display: block;
+  }
+
+  .industrial-bridge-target-panel__heading small,
+  .industrial-bridge-target-panel__devices small,
+  .industrial-bridge-target-panel__empty {
+    color: var(--industrial-muted-text);
+    font-size: 0.74rem;
+  }
+
+  .industrial-bridge-target-panel__discovery {
+    display: grid;
+    gap: 0.7rem;
+    border-top: 1px solid rgba(72, 125, 154, 0.2);
+    padding-top: 0.85rem;
+  }
+
+  .industrial-bridge-target-panel__discovery-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .industrial-bridge-target-panel__discovery-heading strong,
+  .industrial-bridge-target-panel__discovery-heading small {
+    display: block;
+  }
+
+  .industrial-bridge-target-panel__discovery-heading small {
+    margin-top: 0.14rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.7rem;
+  }
+
+  .industrial-bridge-target-panel__cidr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: end;
+  }
+
+  .industrial-bridge-target-panel__cidr label {
+    grid-column: 1 / -1;
+    color: var(--industrial-muted-text);
+    font-size: 0.68rem;
+    font-weight: 800;
+  }
+
+  .industrial-bridge-target-panel__discovery [role="alert"] {
+    margin: 0;
+    color: var(--industrial-danger);
+    font-size: 0.72rem;
+  }
+
+  .industrial-bridge-target-panel__heading small {
+    margin-top: 0.18rem;
+  }
+
+  .industrial-bridge-target-panel__transport {
+    display: grid;
+    grid-template-columns: repeat(2, auto);
+    gap: 0.5rem;
+  }
+
+  .industrial-bridge-target-panel__transport [aria-pressed="true"] {
+    border-color: rgba(15, 120, 144, 0.48);
+    color: var(--industrial-accent);
+    box-shadow:
+      inset 3px 3px 6px var(--industrial-shadow),
+      inset -3px -3px 6px var(--industrial-light);
+  }
+
+  .industrial-bridge-target-panel__devices {
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .industrial-bridge-target-panel__devices > button {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    border: 1px solid rgba(95, 128, 148, 0.24);
+    border-radius: 7px;
+    background: rgba(250, 253, 253, 0.38);
+    padding: 0.65rem 0.75rem;
+    color: var(--industrial-text);
+    text-align: left;
+  }
+
+  .industrial-bridge-target-panel__devices > button.is-selected {
+    border-color: rgba(15, 120, 144, 0.52);
+    color: var(--industrial-accent);
+    box-shadow: inset 0 0 0 1px rgba(15, 120, 144, 0.16);
+  }
+
+  .industrial-bridge-target-panel__devices span,
+  .industrial-bridge-target-panel__devices strong,
+  .industrial-bridge-target-panel__devices small {
+    display: block;
+    min-width: 0;
+  }
+
+  .industrial-bridge-target-panel__devices em {
+    color: var(--industrial-muted-text);
+    font-size: 0.68rem;
+    font-style: normal;
+    font-weight: 800;
+  }
+
+  .industrial-bridge-target-panel__empty {
+    margin: 0;
+    border-top: 1px solid rgba(72, 125, 154, 0.2);
+    padding-top: 0.75rem;
+  }
+
+  .industrial-bridge-target-panel__actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .industrial-lan-pairing-panel__icon {
@@ -2081,7 +2480,8 @@
 
   .industrial-lan-pairing-panel__heading strong,
   .industrial-lan-pairing-panel__heading small,
-  .industrial-lan-pairing-panel__fields label span {
+  .industrial-lan-pairing-panel__connect-fields label span,
+  .industrial-lan-pairing-dialog__fields label span {
     display: block;
   }
 
@@ -2091,18 +2491,22 @@
     font-size: 0.76rem;
   }
 
-  .industrial-lan-pairing-panel__fields {
+  .industrial-lan-pairing-panel__connect-fields {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(6rem, 8rem) auto;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 0.65rem;
     align-items: end;
   }
 
-  .industrial-lan-pairing-panel__fields label {
+  .industrial-lan-pairing-panel__connect-fields label,
+  .industrial-lan-pairing-panel__scan-fields label,
+  .industrial-lan-pairing-dialog__fields label {
     min-width: 0;
   }
 
-  .industrial-lan-pairing-panel__fields label span {
+  .industrial-lan-pairing-panel__connect-fields label span,
+  .industrial-lan-pairing-panel__scan-fields label span,
+  .industrial-lan-pairing-dialog__fields label span {
     margin-bottom: 0.28rem;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
@@ -2127,6 +2531,261 @@
 
   .industrial-lan-pairing-panel__message--error {
     color: #a13b3b;
+  }
+
+  .industrial-lan-pairing-panel__scan {
+    display: grid;
+    gap: 0.7rem;
+    border-top: 1px solid rgba(72, 125, 154, 0.24);
+    padding-top: 0.85rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.65rem;
+    align-items: end;
+  }
+
+  .industrial-lan-pairing-panel__scan-status {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0;
+    color: var(--industrial-muted-text);
+    font-size: 0.78rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-status--error {
+    color: #a13b3b;
+  }
+
+  .industrial-lan-pairing-panel__scan-results {
+    display: grid;
+    gap: 0.45rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .industrial-lan-pairing-panel__scan-results li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    align-items: center;
+    border-top: 1px solid rgba(72, 125, 154, 0.18);
+    padding-top: 0.55rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-results span,
+  .industrial-lan-pairing-panel__scan-results strong,
+  .industrial-lan-pairing-panel__scan-results small {
+    display: block;
+    min-width: 0;
+  }
+
+  .industrial-lan-pairing-panel__scan-results small {
+    margin-top: 0.15rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.7rem;
+  }
+
+  .industrial-lan-pairing-panel__public-info {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin: 0;
+  }
+
+  .industrial-lan-pairing-panel__public-info div,
+  .industrial-lan-pairing-dialog__identity div {
+    min-width: 0;
+    border: 1px solid rgba(95, 128, 148, 0.24);
+    border-radius: 6px;
+    background: rgba(250, 253, 253, 0.38);
+    padding: 0.5rem 0.6rem;
+  }
+
+  .industrial-lan-pairing-panel__public-info dt,
+  .industrial-lan-pairing-dialog__identity dt {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.62rem;
+    font-weight: 800;
+  }
+
+  .industrial-lan-pairing-panel__public-info dd,
+  .industrial-lan-pairing-dialog__identity dd {
+    overflow: hidden;
+    margin: 0.18rem 0 0;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.72rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-lan-pairing-panel__pairing-action {
+    justify-self: start;
+  }
+
+  .industrial-lan-pairing-panel__scan {
+    display: grid;
+    gap: 0.65rem;
+    border-top: 1px solid rgba(95, 128, 148, 0.24);
+    padding-top: 0.85rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.65rem;
+    align-items: end;
+  }
+
+  .industrial-lan-pairing-panel__scan-status {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.78rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-status--error {
+    color: #a13b3b;
+  }
+
+  .industrial-lan-pairing-panel__scan-results {
+    display: grid;
+    gap: 0.55rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .industrial-lan-pairing-panel__scan-results li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-width: 0;
+    align-items: center;
+    gap: 0.75rem;
+    border: 1px solid rgba(95, 128, 148, 0.2);
+    border-radius: 8px;
+    background: rgba(250, 253, 253, 0.3);
+    padding: 0.65rem 0.75rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-results span,
+  .industrial-lan-pairing-panel__scan-results strong,
+  .industrial-lan-pairing-panel__scan-results small {
+    display: block;
+    min-width: 0;
+  }
+
+  .industrial-lan-pairing-panel__scan-results small {
+    margin-top: 0.16rem;
+    overflow: hidden;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .industrial-lan-pairing-panel__scan-results li.is-selected {
+    border-color: rgba(22, 131, 74, 0.42);
+    background: rgba(22, 131, 74, 0.08);
+  }
+
+  .industrial-lan-pairing-panel__scan-results li.is-selected strong {
+    color: #17794c;
+  }
+
+  .industrial-lan-pairing-panel__scan-results button[aria-pressed="true"] {
+    border-color: rgba(22, 131, 74, 0.58);
+    color: #17794c;
+  }
+
+  .industrial-lan-pairing-dialog-backdrop {
+    position: fixed;
+    z-index: 60;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 1rem;
+    background: rgba(27, 46, 58, 0.28);
+  }
+
+  .industrial-lan-pairing-dialog {
+    display: grid;
+    width: min(100%, 28rem);
+    gap: 0.85rem;
+    border: 1px solid rgba(72, 125, 154, 0.44);
+    border-radius: 8px;
+    background: var(--industrial-bg);
+    box-shadow: 8px 8px 18px rgba(41, 66, 80, 0.28);
+    padding: 1rem;
+  }
+
+  .industrial-lan-pairing-dialog__heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .industrial-lan-pairing-dialog__heading strong,
+  .industrial-lan-pairing-dialog__heading small {
+    display: block;
+  }
+
+  .industrial-lan-pairing-dialog__heading small {
+    margin-top: 0.14rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.7rem;
+  }
+
+  .industrial-lan-pairing-dialog__close {
+    flex: 0 0 auto;
+  }
+
+  .industrial-lan-pairing-dialog__identity {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+    margin: 0;
+  }
+
+  .industrial-lan-pairing-dialog__fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.65rem;
+    align-items: end;
+  }
+
+  .industrial-lan-pairing-dialog__claim {
+    display: grid;
+    gap: 0.55rem;
+  }
+
+  .industrial-lan-pairing-dialog__error {
+    color: var(--industrial-danger);
+    font-size: 0.78rem;
+    line-height: 1.45;
+  }
+
+  .industrial-lan-pairing-dialog__inactive {
+    display: grid;
+    gap: 0.7rem;
+  }
+
+  .industrial-lan-pairing-dialog__inactive p {
+    margin: 0;
+    color: var(--industrial-muted-text);
+    font-size: 0.82rem;
+    line-height: 1.45;
   }
 
   .industrial-device-select-view {
@@ -2273,7 +2932,29 @@
       grid-template-columns: 1fr;
     }
 
-    .industrial-lan-pairing-panel__fields {
+    .industrial-lan-pairing-panel__connect-fields,
+    .industrial-lan-pairing-panel__scan-fields,
+    .industrial-lan-pairing-dialog__fields,
+    .industrial-lan-pairing-panel__public-info,
+    .industrial-lan-pairing-dialog__identity {
+      grid-template-columns: 1fr;
+    }
+
+    .industrial-bridge-target-panel__heading {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .industrial-bridge-target-panel__transport {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .industrial-bridge-target-panel__discovery-heading {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .industrial-bridge-target-panel__cidr {
       grid-template-columns: 1fr;
     }
   }
@@ -2281,6 +2962,13 @@
   .industrial-add-device-option:hover {
     transform: translateY(-1px);
     color: var(--industrial-accent);
+  }
+
+  .industrial-add-device-option.is-selected {
+    color: var(--industrial-accent);
+    box-shadow:
+      inset 5px 5px 10px var(--industrial-shadow),
+      inset -5px -5px 10px var(--industrial-light);
   }
 
   .industrial-add-device-option:focus-visible {
@@ -3549,7 +4237,8 @@
   }
 
   .industrial-device-select {
-    min-height: 40px;
+    height: 48px;
+    min-height: 48px;
     border-radius: 12px;
     padding-block: 0.48rem;
     font-size: 0.8rem;
@@ -6385,4 +7074,250 @@
 
 .industrial-ui-demo .industrial-lan-pairing-panel {
   width: min(100%, 560px);
+}
+
+.industrial-wifi-settings {
+  display: grid;
+  gap: 0.72rem;
+  max-width: min(100%, 54rem);
+  container-type: inline-size;
+  border-top: 1px solid rgba(96, 111, 132, 0.26);
+  padding-top: 0.82rem;
+}
+
+.industrial-wifi-settings__header {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+}
+
+.industrial-wifi-settings__icon {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #0f7890;
+  color: #f4ffff;
+}
+
+.industrial-wifi-settings__header h3 {
+  margin: 0;
+  color: var(--industrial-text);
+  font-size: 0.96rem;
+  font-weight: 900;
+  line-height: 1.1;
+}
+
+.industrial-wifi-settings__header output {
+  display: flex;
+  align-items: baseline;
+  gap: 0.42rem;
+  margin-top: 0.14rem;
+  color: var(--industrial-muted-text);
+}
+
+.industrial-wifi-settings__header output strong {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 850;
+}
+
+.industrial-wifi-settings__header output small {
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.industrial-wifi-settings__support-message {
+  margin: -0.3rem 0 -0.08rem 2.62rem;
+  color: var(--industrial-muted-text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.industrial-wifi-settings__form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.58rem;
+}
+
+.industrial-wifi-settings__field {
+  display: grid;
+  min-width: 0;
+  gap: 0.28rem;
+}
+
+.industrial-wifi-settings__field > span {
+  color: var(--industrial-muted-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.industrial-wifi-settings__actions {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.46rem;
+}
+
+.industrial-wifi-settings__field [data-slot="input"],
+.industrial-wifi-settings__actions [data-slot="button"] {
+  height: 2.25rem;
+  min-height: 2.25rem;
+}
+
+.industrial-wifi-settings__submit {
+  min-width: 8.25rem;
+}
+
+.industrial-wifi-settings__toast {
+  position: fixed;
+  top: max(1.5rem, env(safe-area-inset-top));
+  left: 50%;
+  translate: -50% 0;
+  z-index: 140;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.62rem;
+  width: min(23rem, calc(100vw - 2rem));
+  min-height: 2.75rem;
+  border: 1px solid rgba(75, 96, 117, 0.28);
+  border-radius: 8px;
+  background: rgba(239, 244, 247, 0.98);
+  box-shadow:
+    0 12px 24px rgba(43, 55, 68, 0.18),
+    0 3px 8px rgba(43, 55, 68, 0.12);
+  padding: 0.58rem 0.58rem 0.58rem 0.72rem;
+  color: var(--industrial-text);
+  font-size: 0.76rem;
+  font-weight: 750;
+  line-height: 1.35;
+  animation: industrial-wifi-toast-enter 160ms ease-out;
+}
+
+.industrial-wifi-settings__toast[data-tone="success"] {
+  border-color: rgba(44, 132, 91, 0.36);
+  background: rgba(235, 247, 240, 0.98);
+}
+
+.industrial-wifi-settings__toast[data-tone="warning"] {
+  border-color: rgba(170, 112, 42, 0.38);
+  background: rgba(251, 244, 232, 0.98);
+}
+
+.industrial-wifi-settings__toast[data-tone="error"] {
+  border-color: rgba(180, 64, 70, 0.38);
+  background: rgba(252, 238, 239, 0.98);
+}
+
+.industrial-wifi-settings__toast-icon {
+  display: grid;
+  place-items: center;
+  color: #16788e;
+}
+
+.industrial-wifi-settings__toast[data-tone="success"] .industrial-wifi-settings__toast-icon {
+  color: #247c59;
+}
+
+.industrial-wifi-settings__toast[data-tone="warning"] .industrial-wifi-settings__toast-icon {
+  color: #9b672d;
+}
+
+.industrial-wifi-settings__toast[data-tone="error"] .industrial-wifi-settings__toast-icon {
+  color: #b43f49;
+}
+
+.industrial-wifi-settings__toast-icon svg,
+.industrial-wifi-settings__toast button svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.industrial-wifi-settings__toast button {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--industrial-muted-text);
+  cursor: pointer;
+}
+
+.industrial-wifi-settings__toast button:hover {
+  background: rgba(91, 110, 128, 0.1);
+  color: var(--industrial-text);
+}
+
+.industrial-wifi-settings__toast button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+@keyframes industrial-wifi-toast-enter {
+  from {
+    transform: translateY(-0.4rem);
+  }
+
+  to {
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 480px) {
+  .industrial-wifi-settings__toast {
+    top: max(1rem, env(safe-area-inset-top));
+  }
+}
+
+@media (max-width: 1040px) {
+  .industrial-wifi-settings__form {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__actions {
+    grid-column: span 1;
+  }
+}
+
+@media (max-width: 680px) {
+  .industrial-wifi-settings__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__actions {
+    grid-column: auto;
+  }
+
+  .industrial-wifi-settings__actions {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__submit {
+    min-width: 0;
+  }
+}
+
+@container (max-width: 680px) {
+  .industrial-wifi-settings__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__actions {
+    grid-column: auto;
+  }
+
+  .industrial-wifi-settings__actions {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__submit {
+    min-width: 0;
+  }
 }

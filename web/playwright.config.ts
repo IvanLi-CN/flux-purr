@@ -3,6 +3,7 @@ import { defineConfig } from '@playwright/test'
 const webPort = Number(process.env.E2E_WEB_PORT ?? 4173)
 const devdPort = Number(process.env.E2E_DEVD_PORT ?? 30081)
 const canReuseExistingServer = !process.env.CI && process.env.E2E_REUSE_SERVER === '1'
+const devdEnabled = process.env.E2E_DISABLE_DEVD === '1' ? '0' : '1'
 
 export default defineConfig({
   testDir: './e2e',
@@ -10,7 +11,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${webPort}`,
   },
   webServer: {
-    command: `VITE_FLUX_PURR_DEVD_URL=http://127.0.0.1:${devdPort} VITE_FLUX_PURR_ENABLE_DEVD=1 bun run dev --host 127.0.0.1 --port ${webPort}`,
+    command: `VITE_FLUX_PURR_DEVD_URL=http://127.0.0.1:${devdPort} VITE_FLUX_PURR_ENABLE_DEVD=${devdEnabled} bun run dev --host 127.0.0.1 --port ${webPort}`,
     url: `http://127.0.0.1:${webPort}`,
     reuseExistingServer: canReuseExistingServer,
     timeout: 120_000,

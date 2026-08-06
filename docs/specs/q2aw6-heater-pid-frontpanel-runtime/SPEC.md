@@ -346,7 +346,7 @@ PR: none
 - 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端只做 MOS 静态通断并通过 CH224Q PPS/AVS 调压；`fixed-pd-pwm-fallback` 保留原 `GPIO47` PWM 调功。
 - Approach 调优与验收以目标温度相关的 full-speed-to-stable gate、overshoot、hold p2p、hold 高低侧误差和 source telemetry 为真相源；默认 flagship sprint 不再额外采集 `0% / 25% / 50%` approach-only 曲线作为门槛。
 - CH224Q 仍作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
-- 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 使用 `2 KiB` v3 active 双槽和 `u16` TLV 长度，读取兼容 `1 KiB` v2 与 `512B` legacy 槽；EEPROM 不可达时 flash fallback 使用同一 record 编码和 sequence 选择规则，并且只允许写入专用 `flux_cfg` data partition，不得直接占用 NVS 管理范围。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
+- 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 当前写入 `MemoryRecord` v5，使用 `2 KiB` active 双槽和 `u16` TLV 长度，读取兼容 v1-v4 及 `1 KiB` previous / `512B` legacy 槽；旧 EEPROM record 在 RAM 中迁移，并在下一次成功提交时写成 v5。EEPROM 不可达时 flash fallback 使用同一 record 编码和 sequence 选择规则，并且只允许写入专用 `flux_cfg` data partition，不得直接占用 NVS 管理范围。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
 - saved profile 与 USB/WebSerial direct preview 必须经过同一组 thermal settings 限幅；控制器不得依赖 devd 客户端校验来保护 spike-reject、工作电压下限或电流余量。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
