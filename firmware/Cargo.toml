@@ -40,8 +40,10 @@ net_http = [
     "dep:embassy-net",
     "dep:embassy-sync",
     "dep:esp-alloc",
-    "dep:esp-wifi",
+    "dep:esp-radio",
     "dep:embedded-io-async",
+    "esp-rtos/esp-alloc",
+    "esp-rtos/esp-radio",
 ]
 pd-request-12v = []
 pd-request-20v = []
@@ -60,22 +62,20 @@ serde-json-core = "0.6.0"
 
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 defmt = "1.0.1"
-# The main task and LAN service tasks fit within this bounded shared arena;
-# the HTTP workspace itself is statically allocated to preserve USB recovery.
-embassy-executor = { version = "0.7.0", features = ["task-arena-size-81920"] }
-embassy-time = "0.4.0"
+embassy-executor = "0.9.0"
+embassy-time = "0.5.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-io-async = { version = "0.6.1", optional = true }
 embedded-storage = "0.3.1"
-esp-hal = { version = "1.0.0-rc.0", features = ["esp32s3", "unstable"] }
-esp-hal-embassy = { version = "0.9.1", features = ["esp32s3"] }
+esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable"] }
+esp-rtos = { version = "0.2.0", features = ["defmt", "embassy", "esp32s3"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
 esp-storage = { version = "0.7.0", features = ["esp32s3"] }
-embassy-net = { version = "0.6.0", default-features = false, features = ["dhcpv4", "dhcpv4-hostname", "medium-ethernet", "multicast", "tcp", "udp"], optional = true }
-embassy-sync = { version = "0.6.2", optional = true }
-esp-alloc = { version = "0.8.0", optional = true }
-esp-wifi = { version = "0.15.1", default-features = false, features = ["builtin-scheduler", "defmt", "esp-alloc", "esp32s3", "wifi"], optional = true }
+embassy-net = { version = "0.7.1", default-features = false, features = ["dhcpv4", "dhcpv4-hostname", "medium-ethernet", "multicast", "tcp", "udp"], optional = true }
+embassy-sync = { version = "0.7.0", optional = true }
+esp-alloc = { version = "0.9.0", optional = true }
+esp-radio = { version = "0.17.0", features = ["defmt", "esp32s3", "smoltcp", "unstable", "wifi"], optional = true }
 static_cell = "2.1.0"
 
 [dev-dependencies]

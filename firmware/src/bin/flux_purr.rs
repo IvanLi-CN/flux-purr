@@ -25,7 +25,6 @@ use embedded_storage::{ReadStorage, Storage};
 #[cfg(target_arch = "xtensa")]
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-use esp_hal::rng::Rng;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
@@ -8911,13 +8910,11 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
-    let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timg0.timer0);
     let status_light_red = Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
     let status_light_green = Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
     let status_light_blue = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
@@ -8931,7 +8928,9 @@ async fn main(_spawner: Spawner) {
         ))
         .expect("failed to spawn status-light task");
     #[cfg(feature = "net_http")]
-    static WIFI_INIT: StaticCell<esp_wifi::EspWifiController<'static>> = StaticCell::new();
+    init_lan_heap();
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0);
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
     #[cfg(feature = "web_serial")]
     let mut usb_serial = RawUsbSerialJtag::new(peripherals.USB_DEVICE);
@@ -8968,8 +8967,6 @@ async fn main(_spawner: Spawner) {
         );
         EmbassyTimer::after_millis(20).await;
     }
-    #[cfg(feature = "net_http")]
-    init_lan_heap();
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_heap_ready\n");
 
@@ -9041,10 +9038,10 @@ async fn main(_spawner: Spawner) {
     > = StaticCell::new();
     static CANVAS: StaticCell<DisplayCanvas> = StaticCell::new();
 
-    let driver_framebuffer = DRIVER_FB.init(
-        [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS],
-    );
-    let canvas = CANVAS.init(DisplayCanvas::new());
+    let driver_framebuffer = DRIVER_FB.init_with(|| {
+        [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS]
+    });
+    let canvas = CANVAS.init_with(DisplayCanvas::new);
 
     let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
         DISPLAY_PANEL_CONFIG,
@@ -9197,29 +9194,16 @@ async fn main(_spawner: Spawner) {
     {
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_init_start\n");
-        let wifi_timer = TimerGroup::new(peripherals.TIMG1);
-        match esp_wifi::init(wifi_timer.timer0, Rng::new(peripherals.RNG)) {
-            Ok(controller) => {
-                let wifi_init = WIFI_INIT.init(controller);
-                #[cfg(feature = "web_serial")]
-                let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_spawn_start\n");
-                if let Err(error) = flux_purr_firmware::net::spawn(
-                    &_spawner,
-                    wifi_init,
-                    peripherals.WIFI,
-                    &memory_config,
-                )
-                .await
-                {
-                    warn!("LAN control plane startup failed: {=str}", error.message());
-                    flux_purr_firmware::net::report_startup_failure(error).await;
-                }
-            }
-            Err(_) => {
-                let error = flux_purr_firmware::net::LanStartupError::WifiInitialization;
-                warn!("LAN control plane startup failed: {=str}", error.message());
-                flux_purr_firmware::net::report_startup_failure(error).await;
-            }
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_spawn_start\n");
+        if let Err(error) =
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
+                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
+            })
+            .await
+        {
+            warn!("LAN control plane startup failed: {=str}", error.message());
+            flux_purr_firmware::net::report_startup_failure(error).await;
         }
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_init_complete\n");
@@ -9681,10 +9665,7 @@ async fn main(_spawner: Spawner) {
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
     let mut first_runtime_probe = true;
     loop {
-        // Runtime timers can share interrupt state with peripheral bring-up on
-        // ESP32-S3. Yield cooperatively and use the monotonic clock for all
-        // deadlines so USB, WiFi, and HTTP tasks keep making progress even if
-        // a timer alarm is lost after initialization.
+        // Yield cooperatively while using the monotonic clock for deadlines.
         #[cfg(feature = "web_serial")]
         if first_runtime_probe {
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_before\n");
