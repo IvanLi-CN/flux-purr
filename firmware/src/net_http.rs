@@ -11,16 +11,17 @@ use serde::Deserialize;
 
 use crate::lan::{
     LAN_LEASE_ID_BYTES, LAN_TOKEN_HEX_LEN, LanAccessError, LanEndpoint, LanLease, LanLeaseState,
-    LanToken, PairingWindow, cors_allow_origin, private_network_preflight,
+    LanPairingMode, LanToken, PairingWindow, cors_allow_origin, private_network_preflight,
 };
 
 pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_SERVICE_TYPE: &str = "_http._tcp.local";
 pub const HTTP_SERVICE_PORT: u16 = 80;
 pub const HTTP_SERVICE_TXT: [&str; 3] = ["api=v1", "path=/api/v1", "pairing=frontpanel"];
-/// Matches the USB control-plane frame ceiling so a LAN request cannot lose a
-/// thermal profile or calibration package while crossing the shared mailbox.
-pub const LAN_HTTP_BODY_MAX_LEN: usize = crate::control_plane::USB_LINE_MAX_LEN - 128;
+/// The largest supported LAN mutation is the fully materialized nine-point
+/// thermal profile (5,401 bytes). Six KiB preserves protocol headroom while
+/// preventing each HTTP workspace copy from exhausting internal RAM.
+pub const LAN_HTTP_BODY_MAX_LEN: usize = 6 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -42,15 +43,36 @@ pub struct ControlMailboxCommand {
     /// Assigned by the TCP task immediately before the command enters the
     /// mailbox. A zero value is reserved for synchronous host-test dispatch.
     pub request_id: u32,
+    /// Identifies the HTTP worker that owns the response socket.
+    pub response_slot: u8,
     pub origin: CommandOrigin,
     pub endpoint: LanEndpoint,
     pub method: HttpMethod,
+    /// Optimistic concurrency precondition supplied by the client for writes.
+    pub expected_revision: Option<u32>,
     pub body: String<LAN_HTTP_BODY_MAX_LEN>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlMailboxError {
     Busy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlRevisionError {
+    Missing,
+    Stale,
+}
+
+pub const fn validate_control_revision(
+    expected: Option<u32>,
+    current: u32,
+) -> Result<(), ControlRevisionError> {
+    match expected {
+        None => Err(ControlRevisionError::Missing),
+        Some(value) if value != current => Err(ControlRevisionError::Stale),
+        Some(_) => Ok(()),
+    }
 }
 
 pub trait ControlMailbox {
@@ -89,14 +111,7 @@ pub fn device_names_from_mac(mac: [u8; 6]) -> DeviceNames {
 /// development USB placeholder. Pairing, mDNS, and authenticated LAN probes
 /// must expose the same stable identity to keep client registries collision-free.
 pub fn identity_from_device_names(names: &DeviceNames) -> crate::control_plane::Identity {
-    let mut identity = crate::control_plane::Identity::firmware_default();
-    identity.device_id.clear();
-    let _ = identity
-        .device_id
-        .push_str(core::str::from_utf8(&names.device_id).unwrap_or_default());
-    identity.hostname.clear();
-    let _ = identity.hostname.push_str(names.hostname.as_str());
-    identity
+    crate::control_plane::Identity::firmware_from_mac(names.mac)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -106,6 +121,7 @@ pub struct HttpRequest<'a> {
     pub origin: Option<&'a str>,
     pub authorization: Option<&'a str>,
     pub lease_id: Option<&'a str>,
+    pub expected_revision: Option<u32>,
     pub request_private_network: bool,
     pub body: &'a str,
     /// Entropy produced by the hardware RNG. It is never emitted in responses.
@@ -121,6 +137,7 @@ pub struct HttpResponse {
     pub status: u16,
     pub allow_origin: Option<String<128>>,
     pub allow_private_network: bool,
+    pub control_revision: Option<u32>,
     pub body: String<LAN_HTTP_BODY_MAX_LEN>,
 }
 
@@ -144,6 +161,7 @@ impl HttpResponse {
             status,
             allow_origin: None,
             allow_private_network: false,
+            control_revision: None,
             body: output,
         }
     }
@@ -153,6 +171,7 @@ impl HttpResponse {
             status,
             allow_origin: None,
             allow_private_network: false,
+            control_revision: None,
             body,
         }
     }
@@ -162,6 +181,7 @@ impl HttpResponse {
 pub struct NetHttpState {
     token: Option<LanToken>,
     pairing: PairingWindow,
+    pairing_mode: LanPairingMode,
     leases: LanLeaseState,
     token_dirty: bool,
     device_names: Option<DeviceNames>,
@@ -172,6 +192,7 @@ impl NetHttpState {
         Self {
             token: persisted_token.map(LanToken::new),
             pairing: PairingWindow::inactive(),
+            pairing_mode: LanPairingMode::Required,
             leases: LanLeaseState::default(),
             token_dirty: false,
             device_names: None,
@@ -182,7 +203,11 @@ impl NetHttpState {
         self.device_names = Some(names);
     }
 
-    pub fn pairing_code_from_random(&mut self, random: u32) -> [u8; 4] {
+    pub fn pairing_code_from_random(&mut self, random: u32) -> Option<[u8; 4]> {
+        if self.pairing_mode != LanPairingMode::Required {
+            self.pairing.leave();
+            return None;
+        }
         let mut code = [b'0'; 4];
         let mut value = random;
         for digit in code.iter_mut().rev() {
@@ -190,7 +215,7 @@ impl NetHttpState {
             value /= 10;
         }
         self.pairing.enter(code);
-        code
+        Some(code)
     }
 
     pub fn leave_pairing(&mut self) {
@@ -199,6 +224,16 @@ impl NetHttpState {
 
     pub const fn pairing_code(&self) -> Option<[u8; 4]> {
         self.pairing.code()
+    }
+
+    /// The firmware currently initializes this to `required`. Keeping the
+    /// policy explicit here lets a future physical configuration select a
+    /// code-exempt or code-unavailable device without changing HTTP clients.
+    pub fn set_pairing_mode(&mut self, mode: LanPairingMode) {
+        self.pairing_mode = mode;
+        if mode != LanPairingMode::Required {
+            self.pairing.leave();
+        }
     }
 
     pub const fn persisted_token(&self) -> Option<[u8; crate::lan::LAN_TOKEN_BYTES]> {
@@ -308,19 +343,14 @@ impl NetHttpState {
                 r#"{"error":{"code":"not_found","message":"Unknown API path."}}"#,
             ));
         };
+        if !endpoint_allows_method(endpoint, request.method) {
+            return HttpGate::Respond(HttpResponse::new(405, r#"{"error":"method_not_allowed"}"#));
+        }
         if endpoint == LanEndpoint::Health {
-            return HttpGate::Respond(HttpResponse::new(200, r#"{"ok":true,"api":"v1"}"#));
+            return HttpGate::Respond(self.public_health_response());
         }
         if endpoint == LanEndpoint::Pairing && request.method == HttpMethod::Get {
-            let remaining = 5u8.saturating_sub(self.pairing.failed_attempts());
-            let mut body = String::new();
-            let _ = write!(
-                body,
-                r#"{{"active":{},"attemptsRemaining":{}}}"#,
-                self.pairing.is_active(),
-                remaining
-            );
-            return HttpGate::Respond(HttpResponse::json(200, body));
+            return HttpGate::Respond(self.pairing_metadata_response());
         }
         if endpoint == LanEndpoint::PairingClaim && request.method == HttpMethod::Post {
             return HttpGate::Respond(self.claim_pairing(request));
@@ -341,14 +371,22 @@ impl NetHttpState {
                 r#"{"error":{"code":"lease_required","message":"An active LAN lease is required for writes."}}"#,
             ));
         }
+        if is_control_write(request.method, endpoint) && request.expected_revision.is_none() {
+            return HttpGate::Respond(HttpResponse::new(
+                428,
+                r#"{"error":{"code":"revision_required","message":"A current control revision is required for writes."}}"#,
+            ));
+        }
         let mut body = String::new();
         let _ = body.push_str(request.body);
         HttpGate::Dispatch {
             command: ControlMailboxCommand {
                 request_id: 0,
+                response_slot: 0,
                 origin: CommandOrigin::Lan,
                 endpoint,
                 method: request.method,
+                expected_revision: request.expected_revision,
                 body,
             },
             allow_origin: None,
@@ -356,11 +394,19 @@ impl NetHttpState {
     }
 
     fn claim_pairing(&mut self, request: HttpRequest<'_>) -> HttpResponse {
-        let Some(code) = pairing_claim_code(request.body) else {
-            return HttpResponse::new(400, r#"{"error":"pairing_code_invalid"}"#);
-        };
-        if let Err(error) = self.pairing.claim(code) {
-            return access_error_response(error);
+        match self.pairing_mode {
+            LanPairingMode::Required => {
+                let Some(code) = pairing_claim_code(request.body) else {
+                    return HttpResponse::new(400, r#"{"error":"pairing_code_invalid"}"#);
+                };
+                if let Err(error) = self.pairing.claim(code) {
+                    return access_error_response(error);
+                }
+            }
+            LanPairingMode::Optional => {}
+            LanPairingMode::Unavailable => {
+                return access_error_response(LanAccessError::PairingUnavailable);
+            }
         }
         let token = match self.token {
             Some(token) => token,
@@ -374,7 +420,7 @@ impl NetHttpState {
         let mut hex = String::<LAN_TOKEN_HEX_LEN>::new();
         token.write_hex(&mut hex);
         let mut body = String::new();
-        let _ = write!(body, r#"{{"token":"{}","api":"v1"#, hex);
+        let _ = write!(body, r#"{{"token":"{}","api":"v1""#, hex);
         if let Some(names) = &self.device_names {
             let device_id = core::str::from_utf8(&names.device_id).unwrap_or_default();
             let _ = write!(
@@ -384,6 +430,44 @@ impl NetHttpState {
             );
         }
         let _ = body.push('}');
+        HttpResponse::json(200, body)
+    }
+
+    /// Anonymous clients may poll this deliberately small summary at a low
+    /// rate. It proves which local device answered and communicates how a
+    /// bearer can be obtained, but never exposes operational status, a token,
+    /// or the front-panel pairing code.
+    fn public_health_response(&self) -> HttpResponse {
+        let identity = self
+            .device_names
+            .as_ref()
+            .map(identity_from_device_names)
+            .unwrap_or_else(crate::control_plane::Identity::firmware_default);
+        let attempts_remaining = 5u8.saturating_sub(self.pairing.failed_attempts());
+        let mut body = String::new();
+        let _ = write!(
+            body,
+            r#"{{"ok":true,"api":"v1","deviceId":"{}","hostname":"{}","firmwareVersion":"{}","pairing":{{"mode":"{}","active":{},"attemptsRemaining":{}}}}}"#,
+            identity.device_id,
+            identity.hostname,
+            identity.firmware_version,
+            self.pairing_mode.as_wire(),
+            self.pairing.is_active(),
+            attempts_remaining
+        );
+        HttpResponse::json(200, body)
+    }
+
+    fn pairing_metadata_response(&self) -> HttpResponse {
+        let attempts_remaining = 5u8.saturating_sub(self.pairing.failed_attempts());
+        let mut body = String::new();
+        let _ = write!(
+            body,
+            r#"{{"mode":"{}","active":{},"attemptsRemaining":{}}}"#,
+            self.pairing_mode.as_wire(),
+            self.pairing_mode == LanPairingMode::Required && self.pairing.is_active(),
+            attempts_remaining
+        );
         HttpResponse::json(200, body)
     }
 
@@ -444,11 +528,48 @@ fn endpoint_for_path(path: &str) -> Option<LanEndpoint> {
     }
 }
 
+fn endpoint_allows_method(endpoint: LanEndpoint, method: HttpMethod) -> bool {
+    matches!(
+        (endpoint, method),
+        (LanEndpoint::Health, HttpMethod::Get)
+            | (LanEndpoint::Pairing, HttpMethod::Get)
+            | (LanEndpoint::PairingClaim, HttpMethod::Post)
+            | (
+                LanEndpoint::Lease,
+                HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
+            )
+            | (
+                LanEndpoint::Identity
+                    | LanEndpoint::Network
+                    | LanEndpoint::Status
+                    | LanEndpoint::Events,
+                HttpMethod::Get
+            )
+            | (
+                LanEndpoint::Runtime | LanEndpoint::ThermalProfile,
+                HttpMethod::Put
+            )
+            | (
+                LanEndpoint::Calibration | LanEndpoint::HeaterCurve,
+                HttpMethod::Get | HttpMethod::Put
+            )
+            | (
+                LanEndpoint::CalibrationJob,
+                HttpMethod::Get | HttpMethod::Post
+            )
+            | (LanEndpoint::HeaterCurveSave, HttpMethod::Post)
+    )
+}
+
 fn is_write(method: HttpMethod) -> bool {
     matches!(
         method,
         HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
     )
+}
+
+fn is_control_write(method: HttpMethod, endpoint: LanEndpoint) -> bool {
+    is_write(method) && endpoint != LanEndpoint::Lease && endpoint != LanEndpoint::PairingClaim
 }
 
 fn access_error_response(error: LanAccessError) -> HttpResponse {
@@ -466,6 +587,11 @@ fn access_error_response(error: LanAccessError) -> HttpResponse {
         LanAccessError::PairingCodeInvalid => {
             (400, "pairing_code_invalid", "The pairing code is invalid.")
         }
+        LanAccessError::PairingUnavailable => (
+            403,
+            "pairing_unavailable",
+            "This device does not support LAN pairing codes.",
+        ),
         LanAccessError::Unauthorized => (401, "unauthorized", "Bearer token required."),
         LanAccessError::LeaseBusy => (409, "lease_busy", "Another LAN client owns the lease."),
         LanAccessError::LeaseRequired => {
@@ -561,6 +687,7 @@ mod tests {
             origin: Some("https://flux-purr.ivanli.cc"),
             authorization: None,
             lease_id: None,
+            expected_revision: None,
             request_private_network: false,
             body: "",
             entropy: [7; crate::lan::LAN_TOKEN_BYTES],
@@ -597,7 +724,7 @@ mod tests {
             &mut mailbox,
         );
         assert_eq!(inactive.status, 403);
-        assert_eq!(state.pairing_code_from_random(4827), *b"4827");
+        assert_eq!(state.pairing_code_from_random(4827), Some(*b"4827"));
         let paired = state.handle(
             0,
             HttpRequest {
@@ -608,6 +735,7 @@ mod tests {
         );
         assert_eq!(paired.status, 200);
         assert!(paired.body.contains("token"));
+        assert!(paired.body.contains(r#""api":"v1","deviceId""#));
         assert!(paired.body.contains("001122334455"));
         assert!(paired.body.contains("flux-purr-001122334455"));
         let token = state.persisted_token();
@@ -626,6 +754,69 @@ mod tests {
                 .status,
             403
         );
+    }
+
+    #[test]
+    fn public_health_exposes_basic_identity_and_required_pairing_without_bearer() {
+        let mut state = NetHttpState::new(None);
+        let mut mailbox = TestMailbox::default();
+        state.set_device_names(device_names_from_mac([0, 17, 34, 51, 68, 85]));
+
+        let health = state.handle(0, req(HttpMethod::Get, "/health"), &mut mailbox);
+
+        assert_eq!(health.status, 200);
+        assert!(health.body.contains(r#""deviceId":"001122334455""#));
+        assert!(
+            health
+                .body
+                .contains(r#""hostname":"flux-purr-001122334455""#)
+        );
+        assert!(health.body.contains(r#""mode":"required""#));
+        assert_eq!(mailbox.calls, 0);
+    }
+
+    #[test]
+    fn pairing_policy_distinguishes_required_optional_and_unavailable_claims() {
+        let mut state = NetHttpState::new(None);
+        let mut mailbox = TestMailbox::default();
+
+        state.set_pairing_mode(LanPairingMode::Optional);
+        assert_eq!(state.pairing_code_from_random(4827), None);
+        let optional_metadata =
+            state.handle(0, req(HttpMethod::Get, "/api/v1/pairing"), &mut mailbox);
+        assert!(optional_metadata.body.contains(r#""mode":"optional""#));
+        assert_eq!(
+            state
+                .handle(
+                    0,
+                    HttpRequest {
+                        body: "{}",
+                        ..req(HttpMethod::Post, "/api/v1/pairing/claim")
+                    },
+                    &mut mailbox
+                )
+                .status,
+            200
+        );
+
+        state.set_pairing_mode(LanPairingMode::Unavailable);
+        let unavailable_metadata =
+            state.handle(0, req(HttpMethod::Get, "/api/v1/pairing"), &mut mailbox);
+        assert!(
+            unavailable_metadata
+                .body
+                .contains(r#""mode":"unavailable""#)
+        );
+        let unavailable_claim = state.handle(
+            0,
+            HttpRequest {
+                body: "{}",
+                ..req(HttpMethod::Post, "/api/v1/pairing/claim")
+            },
+            &mut mailbox,
+        );
+        assert_eq!(unavailable_claim.status, 403);
+        assert!(unavailable_claim.body.contains("pairing_unavailable"));
     }
 
     #[test]
@@ -681,7 +872,7 @@ mod tests {
         );
         assert_eq!(lease.status, 200);
         let id = lease.body.split('"').nth(3).unwrap();
-        assert_eq!(state.handle(1, HttpRequest { authorization: Some("Bearer 0909090909090909090909090909090909090909090909090909090909090909"), lease_id: Some(id), body: r#"{"targetTempC":120}"#, ..req(HttpMethod::Put, "/api/v1/runtime") }, &mut mailbox).status, 200);
+        assert_eq!(state.handle(1, HttpRequest { authorization: Some("Bearer 0909090909090909090909090909090909090909090909090909090909090909"), lease_id: Some(id), expected_revision: Some(0), body: r#"{"targetTempC":120}"#, ..req(HttpMethod::Put, "/api/v1/runtime") }, &mut mailbox).status, 200);
         assert_eq!(mailbox.calls, 1);
         let response = state.handle(
             1,
@@ -697,5 +888,78 @@ mod tests {
             response.allow_origin.as_deref(),
             Some("https://flux-purr.ivanli.cc")
         );
+    }
+
+    #[test]
+    fn unsupported_methods_cannot_bypass_the_lan_lease() {
+        let mut state = NetHttpState::new(Some([9; crate::lan::LAN_TOKEN_BYTES]));
+        let mut mailbox = TestMailbox::default();
+        let bearer = "Bearer 0909090909090909090909090909090909090909090909090909090909090909";
+
+        let runtime = state.handle(
+            0,
+            HttpRequest {
+                authorization: Some(bearer),
+                body: r#"{"targetTempC":120}"#,
+                ..req(HttpMethod::Get, "/api/v1/runtime")
+            },
+            &mut mailbox,
+        );
+        let heater_curve_save = state.handle(
+            0,
+            HttpRequest {
+                authorization: Some(bearer),
+                ..req(HttpMethod::Get, "/api/v1/heater-curve/save")
+            },
+            &mut mailbox,
+        );
+
+        assert_eq!(runtime.status, 405);
+        assert_eq!(heater_curve_save.status, 405);
+        assert_eq!(mailbox.calls, 0);
+    }
+
+    #[test]
+    fn lan_writes_require_an_optimistic_revision_before_dispatch() {
+        let mut state = NetHttpState::new(Some([9; crate::lan::LAN_TOKEN_BYTES]));
+        let mut mailbox = TestMailbox::default();
+        let bearer = "Bearer 0909090909090909090909090909090909090909090909090909090909090909";
+        let lease = state.handle(
+            0,
+            HttpRequest {
+                authorization: Some(bearer),
+                ..req(HttpMethod::Post, "/api/v1/leases")
+            },
+            &mut mailbox,
+        );
+        let lease_id = lease.body.split('"').nth(3).unwrap();
+
+        let missing = state.handle(
+            1,
+            HttpRequest {
+                authorization: Some(bearer),
+                lease_id: Some(lease_id),
+                body: r#"{"targetTempC":120}"#,
+                ..req(HttpMethod::Put, "/api/v1/runtime")
+            },
+            &mut mailbox,
+        );
+
+        assert_eq!(missing.status, 428);
+        assert!(missing.body.contains("revision_required"));
+        assert_eq!(mailbox.calls, 0);
+    }
+
+    #[test]
+    fn stale_control_writes_are_rejected_before_hardware_execution() {
+        assert_eq!(
+            validate_control_revision(None, 7),
+            Err(ControlRevisionError::Missing)
+        );
+        assert_eq!(
+            validate_control_revision(Some(6), 7),
+            Err(ControlRevisionError::Stale)
+        );
+        assert_eq!(validate_control_revision(Some(7), 7), Ok(()));
     }
 }

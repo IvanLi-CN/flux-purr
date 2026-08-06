@@ -78,6 +78,7 @@ export function isDirectWebSerialDevice(device: Pick<DeviceTarget, 'baseUrl' | '
 export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarget {
   return {
     id: `web-serial-${probe.identity.deviceId}`,
+    identityId: probe.identity.deviceId,
     alias: probe.identity.hostname || probe.identity.deviceId,
     location: 'Browser Web Serial',
     transport: 'serial',
@@ -111,7 +112,9 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     heaterOutputPercent: probe.status.heaterOutputPercent,
     activeCoolingEnabled: probe.status.activeCoolingEnabled,
     fanState: probe.status.fanDisplayState,
+    wifiSsid: probe.network.ssid ?? null,
     wifiRssi: probe.network.wifiRssi ?? null,
+    wifiPasswordLength: probe.network.wifiPasswordLength ?? 0,
     capabilities: mergeCapabilities(probe.identity.capabilities, [
       'usb_jsonl',
       'status',
@@ -133,6 +136,7 @@ export class WebSerialControlPlaneClient {
   private lineBuffer = ''
   private readPump: Promise<void> | null = null
   private writeChain = Promise.resolve()
+  private connectionAttempt = 0
 
   constructor({
     serial = getBrowserSerial(),
@@ -153,14 +157,24 @@ export class WebSerialControlPlaneClient {
   }
 
   async connect() {
+    const attempt = ++this.connectionAttempt
     const port = await this.serial.requestPort()
+    if (attempt !== this.connectionAttempt) {
+      await port.close().catch(() => undefined)
+      throw new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
+    }
     await port.open({ baudRate: this.baudRate })
+    if (attempt !== this.connectionAttempt) {
+      await port.close().catch(() => undefined)
+      throw new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
+    }
     this.port = port
     this.readPump = this.readLoop()
     return this.probe()
   }
 
   async disconnect() {
+    this.connectionAttempt += 1
     const port = this.port
     this.port = null
     this.rejectAll(

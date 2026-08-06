@@ -9,6 +9,8 @@ import type {
   DevdDeviceList,
   DevdDeviceRecord,
   DevdEvent,
+  DevdLanDeviceList,
+  DevdLanDeviceSummary,
   DevdLease,
   FirmwareArtifactCatalog,
   FirmwareArtifactManifest,
@@ -58,6 +60,9 @@ export interface ControlPlaneHttpClient {
     status: ControlPlaneStatus
   }>
   listDevdDevices(devdBaseUrl: string): Promise<DevdDeviceRecord[]>
+  listDevdLanDevices(devdBaseUrl: string): Promise<DevdLanDeviceSummary[]>
+  refreshDevdLanMdns(devdBaseUrl: string): Promise<DevdLanDeviceSummary[]>
+  scanDevdLanCidr(devdBaseUrl: string, cidr: string): Promise<DevdLanDeviceSummary[]>
   bindDevdDevice(
     devdBaseUrl: string,
     deviceId: string,
@@ -156,6 +161,33 @@ export function createControlPlaneHttpClient(
     },
     async listDevdDevices(devdBaseUrl) {
       const response = await requestJson<DevdDeviceList>(fetcher, `${devdBaseUrl}/api/v1/devices`)
+      return response.devices
+    },
+    async listDevdLanDevices(devdBaseUrl) {
+      const response = await requestJson<DevdLanDeviceList>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/lan/devices`
+      )
+      return response.devices
+    },
+    async refreshDevdLanMdns(devdBaseUrl) {
+      const response = await requestJson<DevdLanDeviceList>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/lan/discovery/mdns`,
+        { method: 'POST' }
+      )
+      return response.devices
+    },
+    async scanDevdLanCidr(devdBaseUrl, cidr) {
+      const response = await requestJson<DevdLanDeviceList>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/lan/discovery/scan`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cidr }),
+        }
+      )
       return response.devices
     },
     bindDevdDevice(devdBaseUrl, deviceId, leaseId, request) {
@@ -329,11 +361,14 @@ export function createControlPlaneHttpClient(
 
 export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget {
   const transportIssue = devdTransportIssue(record)
+  const firmwareAlias = record.identity.hostname.trim() || record.identity.deviceId.trim()
   return {
     id: record.id,
-    alias: record.displayName,
+    identityId: record.identity.deviceId,
+    alias: firmwareAlias || (record.transport === 'native_serial' ? record.id : record.displayName),
     location: record.portPath ?? 'localhost devd',
     transport: record.transport === 'native_serial' ? 'devd' : 'mock',
+    bridgeTransport: record.transport === 'native_serial' ? 'usb' : undefined,
     severity: record.connection === 'connected' ? 'nominal' : 'warning',
     baseUrl: `devd://${record.id}`,
     firmware: record.identity.firmwareVersion,
@@ -366,7 +401,12 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
     fanState: record.status.fanDisplayState,
+    wifiSsid: record.network.ssid ?? null,
     wifiRssi: record.network.wifiRssi ?? null,
+    wifiPasswordLength: record.network.wifiPasswordLength ?? 0,
+    configurationGeneration: record.network.configurationGeneration ?? 0,
+    transitionSequence: record.network.transitionSequence ?? 0,
+    wifiFailureCode: record.network.failureCode ?? null,
     capabilities: record.identity.capabilities,
     networkState: record.network.state,
     leaseState: record.transport === 'native_serial' ? 'none' : undefined,

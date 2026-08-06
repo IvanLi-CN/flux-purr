@@ -8,6 +8,7 @@ import type {
   HeaterCurvePackage,
   HeaterCurveState,
 } from './contracts'
+import { ControlPlaneClientError } from './transport-client'
 import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 import {
   getBrowserSerial,
@@ -18,10 +19,12 @@ import {
 } from './web-serial'
 
 const WEB_SERIAL_POLL_MS = 1_000
+const WEB_SERIAL_CONNECT_TIMEOUT_MS = 15_000
 
 export interface LiveWebSerialOptions {
   enabled?: boolean
   clientFactory?: () => WebSerialControlPlaneClient
+  connectTimeoutMs?: number
 }
 
 export interface LiveWebSerialControls {
@@ -48,7 +51,11 @@ export interface LiveWebSerialControls {
 
 export function useLiveWebSerialScenario(
   scenario: ControlPlaneScenario,
-  { enabled = true, clientFactory }: LiveWebSerialOptions = {}
+  {
+    enabled = true,
+    clientFactory,
+    connectTimeoutMs = WEB_SERIAL_CONNECT_TIMEOUT_MS,
+  }: LiveWebSerialOptions = {}
 ): { scenario: ControlPlaneScenario; serial: LiveWebSerialControls } {
   const supported = enabled && isWebSerialSupported(getBrowserSerial())
   const clientRef = useRef<WebSerialControlPlaneClient | null>(null)
@@ -99,7 +106,15 @@ export function useLiveWebSerialScenario(
     let client: WebSerialControlPlaneClient | null = null
     try {
       client = clientFactory?.() ?? new WebSerialControlPlaneClient()
-      const probe = await client.connect()
+      const probe = await withTimeout(
+        client.connect(),
+        connectTimeoutMs,
+        new ControlPlaneClientError(
+          'Web Serial 连接超时，请重新选择设备。',
+          'web_serial_timeout',
+          true
+        )
+      )
       clientRef.current = client
       const nextDevice = webSerialProbeToDeviceTarget(probe)
       setDevice(nextDevice)
@@ -119,7 +134,7 @@ export function useLiveWebSerialScenario(
       appendEvent('browser Web Serial connection failed', 'warning')
       return false
     }
-  }, [appendEvent, clientFactory, enabled, supported])
+  }, [appendEvent, clientFactory, connectTimeoutMs, enabled, supported])
 
   const disconnect = useCallback(async () => {
     const client = clientRef.current
@@ -407,4 +422,24 @@ export function useLiveWebSerialScenario(
     scenario: serialScenario,
     serial,
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, error: Error): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => reject(error), timeoutMs)
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timer)
+        resolve(value)
+      },
+      (reason) => {
+        globalThis.clearTimeout(timer)
+        reject(reason)
+      }
+    )
+  })
 }

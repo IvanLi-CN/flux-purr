@@ -5,6 +5,10 @@ const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
 
 export const HEATER_CONFIRMATION_TIMEOUT_MS = 2_500
 
+export function shouldAcquireLanLease(device: Pick<DeviceTarget, 'leaseState'>) {
+  return device.leaseState !== 'conflict' && device.leaseState !== 'expired'
+}
+
 export interface RuntimeFeedback {
   title: string
   detail: string
@@ -44,7 +48,8 @@ export function heaterLockReasonText(reason: HeaterLockReason) {
 }
 
 export function deviceControlBlockReason(
-  device: Pick<DeviceTarget, 'severity' | 'leaseState' | 'transportIssue' | 'networkState'>
+  device: Pick<DeviceTarget, 'severity' | 'leaseState' | 'transportIssue' | 'networkState'> &
+    Partial<Pick<DeviceTarget, 'transport' | 'baseUrl'>>
 ) {
   if (device.severity === 'offline') {
     return '目标设备当前离线。'
@@ -56,6 +61,14 @@ export function deviceControlBlockReason(
 
   if (device.leaseState === 'expired') {
     return device.transportIssue ?? '当前设备租约已过期，请等待页面重新接管。'
+  }
+
+  if (
+    device.transport === 'wifi' &&
+    device.baseUrl?.startsWith('http://') &&
+    device.leaseState !== 'active'
+  ) {
+    return device.transportIssue ?? '正在获取 LAN 控制租约，暂时无法下发控制。'
   }
 
   const networkState = device.networkState

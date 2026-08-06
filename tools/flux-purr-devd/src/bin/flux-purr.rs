@@ -120,8 +120,11 @@ enum LanCommand {
 struct LanPairArgs {
     #[arg(long = "url")]
     base_url: String,
-    #[arg(long)]
-    code: String,
+    #[arg(
+        long,
+        help = "Required only when the connected device reports required pairing"
+    )]
+    code: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -1017,8 +1020,6 @@ struct WifiSetArgs {
     ssid: String,
     #[arg(long)]
     password: Option<String>,
-    #[arg(long = "auto-reconnect")]
-    auto_reconnect: Option<bool>,
     #[arg(long = "static-ip")]
     static_ip: Option<Ipv4Addr>,
     #[arg(long = "static-prefix-len")]
@@ -1183,6 +1184,28 @@ fn static_ipv4_value(
     })))
 }
 
+fn wifi_set_body(
+    ssid: String,
+    password: Option<String>,
+    static_ipv4: Option<Value>,
+    telemetry_interval_ms: Option<u32>,
+) -> Value {
+    let mut body = serde_json::Map::from_iter([
+        ("op".to_string(), json!(WifiConfigOp::Set)),
+        ("ssid".to_string(), json!(ssid)),
+    ]);
+    if let Some(password) = password {
+        body.insert("password".to_string(), json!(password));
+    }
+    if let Some(static_ipv4) = static_ipv4 {
+        body.insert("staticIpv4".to_string(), static_ipv4);
+    }
+    if let Some(interval) = telemetry_interval_ms {
+        body.insert("telemetryIntervalMs".to_string(), json!(interval));
+    }
+    Value::Object(body)
+}
+
 fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
     let first = address.octets()[0];
     first != 0 && first != 127 && first < 224
@@ -1232,12 +1255,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 serde_json::to_value(summary)?
             }
             LanCommand::PairingCode(selector) => {
-                request_with_lease(
+                request_device_read(
                     &client,
                     resolve_target(selector, &cli.devd)?,
-                    Method::GET,
                     "/lan-pairing/code",
-                    None,
                 )
                 .await?
             }
@@ -1266,35 +1287,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         },
         Command::Identity(selector) => {
-            request_with_lease(
-                &client,
-                resolve_target(selector, &cli.devd)?,
-                Method::GET,
-                "/identity",
-                None,
-            )
-            .await?
+            request_device_read(&client, resolve_target(selector, &cli.devd)?, "/identity").await?
         }
         Command::Status(selector) => {
-            request_with_lease(
-                &client,
-                resolve_target(selector, &cli.devd)?,
-                Method::GET,
-                "/status",
-                None,
-            )
-            .await?
+            request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status").await?
         }
         Command::Runtime { command } => match command {
             RuntimeCommand::Get(selector) => {
-                request_with_lease(
-                    &client,
-                    resolve_target(selector, &cli.devd)?,
-                    Method::GET,
-                    "/status",
-                    None,
-                )
-                .await?
+                request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status")
+                    .await?
             }
             RuntimeCommand::Set(args) => {
                 let resolved = resolve_target(args.target.clone(), &cli.devd)?;
@@ -1344,14 +1345,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     args.static_gateway,
                     args.static_dns,
                 )?;
-                let body = json!({
-                    "op": WifiConfigOp::Set,
-                    "ssid": args.ssid,
-                    "password": args.password,
-                    "autoReconnect": args.auto_reconnect,
-                    "staticIpv4": static_ipv4,
-                    "telemetryIntervalMs": args.telemetry_interval_ms,
-                });
+                let body = wifi_set_body(
+                    args.ssid,
+                    args.password,
+                    static_ipv4,
+                    args.telemetry_interval_ms,
+                );
                 request_with_lease(&client, resolved, Method::PUT, "/wifi", Some(body)).await?
             }
             WifiCommand::Clear(selector) => {
@@ -1443,6 +1442,14 @@ async fn request_with_lease(
         let _ = remember_usb(id, &resolved.device, &resolved.devd);
     }
     Ok(value)
+}
+
+async fn request_device_read(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    suffix: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_with_lease(client, resolved, Method::GET, suffix, None).await
 }
 
 async fn flash_with_lease(
@@ -10081,7 +10088,9 @@ fn persist_cli_lan_discoveries(
     let mut config = read_user_config()?;
     let mut summaries = Vec::with_capacity(discoveries.len());
     for discovery in discoveries {
-        let device = device_from_discovery(discovery);
+        let Some(device) = device_from_discovery(discovery) else {
+            continue;
+        };
         let id = device.id.clone();
         merge_lan_device(&mut config.lan_devices, device);
         let saved = config
@@ -15852,5 +15861,16 @@ mod tests {
             Some("1.1.1.1".parse().unwrap()),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn wifi_set_omits_unspecified_fields_but_keeps_explicit_empty_password() {
+        let omitted = super::wifi_set_body("Ivan".to_string(), None, None, None);
+        assert!(omitted.get("password").is_none());
+        assert!(omitted.get("staticIpv4").is_none());
+        assert!(omitted.get("telemetryIntervalMs").is_none());
+
+        let cleared = super::wifi_set_body("Ivan".to_string(), Some(String::new()), None, None);
+        assert_eq!(cleared["password"], "");
     }
 }

@@ -17,7 +17,11 @@
 
 - ADC calibration EEPROM payload 拆分为 ADC-domain sample TLV 与 physical-reference TLV，允许 RTD/VIN 样本在重启后同时恢复 `observed/expected` 和原始 `referenceTempC` / `referenceVinMv`。
 - 旧格式 record 若缺少 reference TLV，解码后继续保留既有 ADC-domain 样本，并把 reference 字段视为空值。
-- Active EEPROM records use redundant `2 KiB` slots with v3 `u16` TLV lengths so both thermal profile banks can retain ten complete point-local parameter sets; `1 KiB` v2 and `512 B` legacy slots remain read-only migration sources.
+- Active EEPROM records use redundant `2 KiB` slots with current v5 `u16` TLV lengths so both thermal profile banks can retain ten complete point-local parameter sets; `1 KiB` previous and `512 B` legacy slots remain read-only migration sources.
+
+## 2026-08-04
+
+- `MemoryRecord` header version is v5. Firmware decodes v1-v5, migrates legacy fields in RAM, and writes v5 on the next successful configuration commit. EEPROM old slots are not eagerly rewritten during boot; legacy raw flash fallback is copied to `flux_cfg` immediately when discovered.
 
 ## 2026-07-26
 

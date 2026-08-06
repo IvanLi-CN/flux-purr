@@ -33,43 +33,73 @@ use static_cell::StaticCell;
 
 use crate::{
     control_plane::{Identity, NetworkState, NetworkSummary},
+    mdns::build_http_announcement,
     memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
     net_http::{
-        ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HTTP_SERVICE_TXT, HTTP_SERVICE_TYPE,
-        HttpGate, HttpMethod, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN, NetHttpState,
-        device_names_from_mac, identity_from_device_names,
+        ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod, HttpRequest,
+        HttpResponse, LAN_HTTP_BODY_MAX_LEN, NetHttpState, device_names_from_mac,
+        identity_from_device_names,
+    },
+    wifi_state::{
+        SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
     },
 };
 
-const HTTP_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
+// TCP buffering only needs to cover in-flight segments: request parsing reads
+// the body incrementally into its dedicated workspace. Keeping these separate
+// avoids reserving the full request size three times per connection.
+const HTTP_TCP_BUFFER_LEN: usize = 2 * 1024;
+const HTTP_REQUEST_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
+const HTTP_CONNECTION_COUNT: usize = 3;
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
-const MDNS_TTL_SECS: u32 = 120;
+const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
 
 type ControlStateMutex = Mutex<CriticalSectionRawMutex, Option<NetHttpState>>;
 type WifiConfigMutex = Mutex<CriticalSectionRawMutex, WifiRuntimeConfig>;
+type WifiProvisioningMutex = Mutex<CriticalSectionRawMutex, WifiProvisioningMachine>;
 type RuntimeStatusMutex = Mutex<CriticalSectionRawMutex, LanRuntimeState>;
 
 static CONTROL_STATE: ControlStateMutex = Mutex::new(None);
-// The listener services one request at a time, so one in-flight command and
-// response is enough. Request IDs prevent a late answer for a timed-out
-// command from being attributed to the next request.
-static CONTROL_MAILBOX: Channel<CriticalSectionRawMutex, ControlMailboxCommand, 1> = Channel::new();
-static CONTROL_RESPONSE: Signal<CriticalSectionRawMutex, ControlMailboxResponse> = Signal::new();
+// Each HTTP worker has one in-flight command and response. Request IDs prevent
+// a late answer for a timed-out command from being attributed to another
+// connection while the bounded worker pool still permits concurrent reads.
+static CONTROL_MAILBOX: Channel<CriticalSectionRawMutex, ControlMailboxCommand, 4> = Channel::new();
+static CONTROL_RESPONSES: [Signal<CriticalSectionRawMutex, ControlMailboxResponse>;
+    HTTP_CONNECTION_COUNT] = [const { Signal::new() }; HTTP_CONNECTION_COUNT];
 static CONTROL_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
+static CONTROL_REVISION: AtomicU32 = AtomicU32::new(0);
+// USB/devd reads this mirror without taking the HTTP gate mutex. This keeps
+// physical pairing automation responsive even while a LAN request is being
+// authenticated or dispatched.
+static PAIRING_CODE_MIRROR: AtomicU32 = AtomicU32::new(0);
 static WIFI_CONFIG: WifiConfigMutex = Mutex::new(WifiRuntimeConfig::empty());
 static WIFI_APPLY_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static LAN_RUNTIME: RuntimeStatusMutex = Mutex::new(LanRuntimeState::empty());
+static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMachine::new());
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
-static HTTP_WORKSPACE: StaticCell<HttpWorkspace> = StaticCell::new();
+static NET_RUNNER: StaticCell<embassy_net::Runner<'static, WifiDevice<'static>>> =
+    StaticCell::new();
+static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
+static HTTP_WORKSPACE_0: StaticCell<HttpWorkspace> = StaticCell::new();
+static HTTP_WORKSPACE_1: StaticCell<HttpWorkspace> = StaticCell::new();
+static HTTP_WORKSPACE_2: StaticCell<HttpWorkspace> = StaticCell::new();
+static HTTP_RX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_RX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_TX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_TX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_TX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_SOCKETS: Channel<CriticalSectionRawMutex, HttpSocket, HTTP_CONNECTION_COUNT> =
+    Channel::new();
+static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_CONNECTION_COUNT> =
+    Channel::new();
 
-// The HTTP task is single-client by design. Keeping its buffers outside the
-// Embassy task frame prevents the control plane from exhausting the shared
-// task arena before USB recovery can start.
+// Request and response buffers stay outside the Embassy task frames. Socket
+// buffers are separate so an accepted TcpSocket can move into a worker task
+// and return to the idle pool without self-referential workspace state.
 struct HttpWorkspace {
-    rx: [u8; HTTP_BUFFER_LEN],
-    tx: [u8; HTTP_BUFFER_LEN],
-    request: [u8; HTTP_BUFFER_LEN],
+    request: [u8; HTTP_REQUEST_BUFFER_LEN],
     response: HttpResponse,
     command: Option<ControlMailboxCommand>,
     control_response: Option<ControlMailboxResponse>,
@@ -78,13 +108,12 @@ struct HttpWorkspace {
 impl HttpWorkspace {
     const fn new() -> Self {
         Self {
-            rx: [0; HTTP_BUFFER_LEN],
-            tx: [0; HTTP_BUFFER_LEN],
-            request: [0; HTTP_BUFFER_LEN],
+            request: [0; HTTP_REQUEST_BUFFER_LEN],
             response: HttpResponse {
                 status: 500,
                 allow_origin: None,
                 allow_private_network: false,
+                control_revision: None,
                 body: String::new(),
             },
             command: None,
@@ -93,10 +122,25 @@ impl HttpWorkspace {
     }
 }
 
+struct HttpWorkspaceSlot {
+    workspace: &'static mut HttpWorkspace,
+    response_slot: u8,
+}
+
+/// `TcpSocket` is intentionally `!Send` because embassy-net protects the
+/// stack with a single-core `RefCell`. The socket pool only moves ownership
+/// between non-Send tasks on that same executor; no socket is ever accessed
+/// concurrently. The wrapper makes that ownership transfer explicit to the
+/// static channel without exposing the socket to another executor or core.
+struct HttpSocket(TcpSocket<'static>);
+
+unsafe impl Send for HttpSocket {}
+
 struct ControlMailboxResponse {
     request_id: u32,
     status: u16,
     body: String<LAN_HTTP_BODY_MAX_LEN>,
+    revision: u32,
 }
 
 /// A startup failure must never prevent the USB control plane from reaching
@@ -161,7 +205,9 @@ impl WifiRuntimeConfig {
         Self {
             ssid: memory.wifi_ssid.clone(),
             password: memory.wifi_password.clone(),
-            auto_reconnect: memory.wifi_auto_reconnect,
+            // Reconnect is a device policy. Legacy EEPROM values are read for
+            // migration, but never become a runtime configuration input.
+            auto_reconnect: true,
             static_ipv4: memory.wifi_static_ipv4,
             hostname: None,
         }
@@ -175,15 +221,22 @@ impl WifiRuntimeConfig {
 /// Initialize the pairing/token state before any task can serve LAN traffic.
 pub async fn initialize_control_state(token: Option<[u8; crate::lan::LAN_TOKEN_BYTES]>) {
     *CONTROL_STATE.lock().await = Some(NetHttpState::new(token));
+    PAIRING_CODE_MIRROR.store(0, Ordering::Release);
+    CONTROL_REVISION.store(0, Ordering::Release);
 }
 
-pub async fn enter_pairing() -> [u8; 4] {
-    CONTROL_STATE
+pub async fn enter_pairing() -> Option<[u8; 4]> {
+    let code = CONTROL_STATE
         .lock()
         .await
         .as_mut()
         .expect("LAN control state initialized")
-        .pairing_code_from_random(random_u32())
+        .pairing_code_from_random(random_u32());
+    PAIRING_CODE_MIRROR.store(
+        code.map(encode_pairing_code).unwrap_or(0),
+        Ordering::Release,
+    );
+    code
 }
 
 pub async fn leave_pairing() {
@@ -193,16 +246,25 @@ pub async fn leave_pairing() {
         .as_mut()
         .expect("LAN control state initialized")
         .leave_pairing();
+    PAIRING_CODE_MIRROR.store(0, Ordering::Release);
+}
+
+/// Applies a future physical pairing-policy setting without leaving a stale
+/// code visible to USB automation. The production default remains `required`.
+pub async fn set_pairing_mode(mode: crate::lan::LanPairingMode) {
+    CONTROL_STATE
+        .lock()
+        .await
+        .as_mut()
+        .expect("LAN control state initialized")
+        .set_pairing_mode(mode);
+    PAIRING_CODE_MIRROR.store(0, Ordering::Release);
 }
 
 /// Reads the transient pairing code without extending or recreating the
 /// front-panel-scoped pairing window.
-pub async fn pairing_code() -> Option<[u8; 4]> {
-    CONTROL_STATE
-        .lock()
-        .await
-        .as_ref()
-        .and_then(NetHttpState::pairing_code)
+pub fn pairing_code() -> Option<[u8; 4]> {
+    decode_pairing_code(PAIRING_CODE_MIRROR.load(Ordering::Acquire))
 }
 
 pub async fn clear_token_from_usb() {
@@ -223,26 +285,34 @@ pub async fn take_persisted_token_change() -> Option<Option<[u8; crate::lan::LAN
         .take_persisted_token_change()
 }
 
-pub async fn apply_wifi_config(memory: &MemoryConfig) {
+pub async fn apply_wifi_config(memory: &MemoryConfig) -> NetworkSummary {
     let mut config = WifiRuntimeConfig::from_memory(memory);
     let mut current = WIFI_CONFIG.lock().await;
     config.hostname = current.hostname.clone();
     *current = config;
-    let summary = network_summary_for_config(&current, NetworkState::Saving);
+    let config = current.clone();
     drop(current);
-    set_network_summary(summary).await;
+    let event = if config.is_configured() {
+        ProvisioningEvent::ApplyConfig
+    } else {
+        ProvisioningEvent::ClearConfig
+    };
+    let summary = publish_wifi_event(&config, event, None)
+        .await
+        .expect("WiFi configuration events are always accepted");
     WIFI_APPLY_SIGNAL.signal(());
+    summary
 }
 
 /// Publish a failed LAN startup to USB status while keeping the main control
 /// loop available for recovery and later firmware servicing.
 pub async fn report_startup_failure(error: LanStartupError) {
     let config = WIFI_CONFIG.lock().await.clone();
-    set_network_summary(network_failure(
+    let _ = publish_wifi_event(
         &config,
-        NetworkState::Error,
-        error.message(),
-    ))
+        ProvisioningEvent::LanStartupFailed,
+        Some(error.message()),
+    )
     .await;
 }
 
@@ -268,11 +338,29 @@ pub fn try_receive_command() -> Option<ControlMailboxCommand> {
     CONTROL_MAILBOX.try_receive().ok()
 }
 
-pub fn respond_to_command(request_id: u32, status: u16, body: String<LAN_HTTP_BODY_MAX_LEN>) {
-    CONTROL_RESPONSE.signal(ControlMailboxResponse {
+pub fn current_control_revision() -> u32 {
+    CONTROL_REVISION.load(Ordering::Acquire)
+}
+
+pub fn respond_to_command(
+    response_slot: u8,
+    request_id: u32,
+    status: u16,
+    body: String<LAN_HTTP_BODY_MAX_LEN>,
+    advance_revision: bool,
+) {
+    let revision = if advance_revision && status == 200 {
+        CONTROL_REVISION
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1)
+    } else {
+        current_control_revision()
+    };
+    CONTROL_RESPONSES[usize::from(response_slot)].signal(ControlMailboxResponse {
         request_id,
         status,
         body,
+        revision,
     });
 }
 
@@ -285,11 +373,17 @@ fn next_control_request_id() -> u32 {
     }
 }
 
-async fn await_control_response(request_id: u32) -> Option<ControlMailboxResponse> {
+async fn await_control_response(
+    response_slot: u8,
+    request_id: u32,
+) -> Option<ControlMailboxResponse> {
     loop {
-        let response = with_timeout(Duration::from_secs(3), CONTROL_RESPONSE.wait())
-            .await
-            .ok()?;
+        let response = with_timeout(
+            Duration::from_secs(3),
+            CONTROL_RESPONSES[usize::from(response_slot)].wait(),
+        )
+        .await
+        .ok()?;
         if response.request_id == request_id {
             return Some(response);
         }
@@ -309,7 +403,19 @@ pub async fn spawn(
         .map_err(|_| LanStartupError::WifiInitialization)?;
     let station = interfaces.sta;
     let names = device_names_from_mac(station.mac_address());
-    WIFI_CONFIG.lock().await.hostname = Some(names.hostname.clone());
+    // Boot restoration is initialization, not a live reconfiguration. Do not
+    // leave an apply signal pending: consuming it after the first DHCP lease
+    // would disconnect the station while the state machine still says
+    // `connected`, then wait forever for another configuration request.
+    let mut initial_config = WifiRuntimeConfig::from_memory(memory);
+    initial_config.hostname = Some(names.hostname.clone());
+    *WIFI_CONFIG.lock().await = initial_config.clone();
+    let initial_event = if initial_config.is_configured() {
+        ProvisioningEvent::ApplyConfig
+    } else {
+        ProvisioningEvent::ClearConfig
+    };
+    let _ = publish_wifi_event(&initial_config, initial_event, None).await;
     CONTROL_STATE
         .lock()
         .await
@@ -319,12 +425,11 @@ pub async fn spawn(
     LAN_RUNTIME.lock().await.device_names = Some(names.clone());
     let resources = NET_RESOURCES.init(StackResources::<8>::new());
     let seed = random_u64();
-    let (stack, runner) = embassy_net::new(
-        station,
-        net_config(&WifiRuntimeConfig::from_memory(memory)),
-        resources,
-        seed,
-    );
+    let (stack, runner) = embassy_net::new(station, net_config(&initial_config), resources, seed);
+    // Keep large drivers out of executor task frames so USB recovery and all
+    // LAN tasks fit in the bounded shared arena.
+    let runner = NET_RUNNER.init(runner);
+    let controller = WIFI_CONTROLLER.init(controller);
 
     spawner
         .spawn(network_task(runner))
@@ -332,8 +437,41 @@ pub async fn spawn(
     spawner
         .spawn(wifi_task(controller, stack))
         .map_err(|_| LanStartupError::WifiTaskCapacity)?;
+    let sockets = [
+        TcpSocket::new(
+            stack,
+            HTTP_RX_0.init([0; HTTP_TCP_BUFFER_LEN]),
+            HTTP_TX_0.init([0; HTTP_TCP_BUFFER_LEN]),
+        ),
+        TcpSocket::new(
+            stack,
+            HTTP_RX_1.init([0; HTTP_TCP_BUFFER_LEN]),
+            HTTP_TX_1.init([0; HTTP_TCP_BUFFER_LEN]),
+        ),
+        TcpSocket::new(
+            stack,
+            HTTP_RX_2.init([0; HTTP_TCP_BUFFER_LEN]),
+            HTTP_TX_2.init([0; HTTP_TCP_BUFFER_LEN]),
+        ),
+    ];
+    let workspaces = [
+        HTTP_WORKSPACE_0.init_with(HttpWorkspace::new),
+        HTTP_WORKSPACE_1.init_with(HttpWorkspace::new),
+        HTTP_WORKSPACE_2.init_with(HttpWorkspace::new),
+    ];
+    for (response_slot, (mut socket, workspace)) in sockets.into_iter().zip(workspaces).enumerate()
+    {
+        socket.set_timeout(Some(Duration::from_secs(5)));
+        HTTP_SOCKETS.send(HttpSocket(socket)).await;
+        HTTP_WORKSPACES
+            .send(HttpWorkspaceSlot {
+                workspace,
+                response_slot: response_slot as u8,
+            })
+            .await;
+    }
     spawner
-        .spawn(http_task(stack))
+        .spawn(http_listener_task(stack, *spawner))
         .map_err(|_| LanStartupError::HttpTaskCapacity)?;
     spawner
         .spawn(mdns_task(stack, names))
@@ -342,26 +480,69 @@ pub async fn spawn(
 }
 
 #[embassy_executor::task]
-async fn network_task(mut runner: embassy_net::Runner<'static, WifiDevice<'static>>) {
+async fn network_task(runner: &'static mut embassy_net::Runner<'static, WifiDevice<'static>>) {
     runner.run().await;
 }
 
+enum WifiFailureFollowUp {
+    RetryStarted,
+    ConfigurationChanged,
+    AwaitReconfiguration,
+}
+
+async fn progress_wifi_failure(
+    config: &WifiRuntimeConfig,
+    event: ProvisioningEvent,
+    message: &'static str,
+) -> WifiFailureFollowUp {
+    let Some(summary) = publish_wifi_event(config, event, Some(message)).await else {
+        return WifiFailureFollowUp::ConfigurationChanged;
+    };
+    let settled = matches!(summary.state, NetworkState::Error);
+    if settled {
+        return WifiFailureFollowUp::AwaitReconfiguration;
+    }
+
+    let delay = Duration::from_secs(2);
+    match select(WIFI_APPLY_SIGNAL.wait(), Timer::after(delay)).await {
+        Either::First(()) => WifiFailureFollowUp::ConfigurationChanged,
+        Either::Second(()) => {
+            let latest_config = WIFI_CONFIG.lock().await.clone();
+            let _ = publish_wifi_event(&latest_config, ProvisioningEvent::RetryDelayElapsed, None)
+                .await;
+            WifiFailureFollowUp::RetryStarted
+        }
+    }
+}
+
 #[embassy_executor::task]
-async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'static>) {
+async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stack<'static>) {
+    let mut retry_pending = false;
     loop {
         let config = WIFI_CONFIG.lock().await.clone();
         if !config.is_configured() {
             let _ = controller.stop_async().await;
-            set_network_summary(NetworkSummary::default()).await;
+            if !matches!(wifi_state().await, NetworkState::Disabled) {
+                let _ = publish_wifi_event(&config, ProvisioningEvent::ClearConfig, None).await;
+            }
             WIFI_APPLY_SIGNAL.wait().await;
             continue;
         }
 
-        set_network_summary(network_summary_for_config(
-            &config,
-            NetworkState::Connecting,
-        ))
-        .await;
+        if matches!(wifi_state().await, NetworkState::Disabled) {
+            let _ = publish_wifi_event(&config, ProvisioningEvent::ApplyConfig, None).await;
+        }
+        if retry_pending {
+            let _ = publish_wifi_event(&config, ProvisioningEvent::RetryDelayElapsed, None).await;
+            retry_pending = false;
+        }
+        if matches!(wifi_state().await, NetworkState::Saving) {
+            let _ = publish_wifi_event(&config, ProvisioningEvent::DisconnectCompleted, None).await;
+        }
+        if !matches!(wifi_state().await, NetworkState::Connecting) {
+            WIFI_APPLY_SIGNAL.wait().await;
+            continue;
+        }
 
         let client = Configuration::Client(ClientConfiguration {
             ssid: alloc::string::String::from(config.ssid.as_str()),
@@ -373,99 +554,195 @@ async fn wifi_task(mut controller: WifiController<'static>, stack: Stack<'static
             || (!matches!(controller.is_started(), Ok(true))
                 && controller.start_async().await.is_err())
         {
-            set_network_summary(network_failure(
+            let follow_up = progress_wifi_failure(
                 &config,
-                NetworkState::Error,
+                ProvisioningEvent::DriverConfigurationFailed,
                 "WiFi configuration could not be applied.",
-            ))
+            )
             .await;
-            Timer::after(Duration::from_secs(2)).await;
+            if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+                WIFI_APPLY_SIGNAL.wait().await;
+            }
             continue;
         }
-        if controller.connect_async().await.is_err() {
-            set_network_summary(network_failure(
-                &config,
-                NetworkState::Error,
-                "WiFi association failed.",
-            ))
-            .await;
-            Timer::after(Duration::from_secs(2)).await;
+        let _ = publish_wifi_event(&config, ProvisioningEvent::DriverConfigured, None).await;
+        let association = with_timeout(
+            Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
+            controller.connect_async(),
+        )
+        .await;
+        if !matches!(association, Ok(Ok(()))) {
+            let event = if association.is_err() {
+                ProvisioningEvent::AssociationTimedOut
+            } else {
+                ProvisioningEvent::AssociationFailed
+            };
+            let follow_up = progress_wifi_failure(&config, event, "WiFi association failed.").await;
+            if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+                WIFI_APPLY_SIGNAL.wait().await;
+            }
             continue;
         }
+        let _ = publish_wifi_event(&config, ProvisioningEvent::AssociationSucceeded, None).await;
         if with_timeout(Duration::from_secs(15), stack.wait_config_up())
             .await
             .is_err()
         {
             let _ = controller.disconnect_async().await;
-            set_network_summary(network_failure(
+            let follow_up = progress_wifi_failure(
                 &config,
-                NetworkState::Timeout,
+                ProvisioningEvent::Ipv4TimedOut,
                 "Timed out waiting for IPv4 configuration.",
-            ))
+            )
             .await;
-            Timer::after(Duration::from_secs(2)).await;
+            if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+                WIFI_APPLY_SIGNAL.wait().await;
+            }
             continue;
         }
 
-        set_network_summary(network_connected(&config, &stack, &controller)).await;
+        let connected = apply_wifi_transition(ProvisioningEvent::Ipv4Configured)
+            .await
+            .expect("IPv4 configuration follows a connecting state");
+        let mut summary = network_connected(&config, &stack, &controller);
+        summary.state = connected.state;
+        summary.failure_code = connected.failure_code;
+        summary.configuration_generation = connected.configuration_generation;
+        summary.transition_sequence = connected.transition_sequence;
+        set_network_summary(summary).await;
 
         match select(
-            controller.wait_for_event(WifiEvent::StaDisconnected),
+            // Do not use `wait_for_event` here: esp-wifi clears the requested
+            // event before waiting, which loses a disconnect that races with
+            // DHCP completion and leaves the device reporting a stale link.
+            controller.wait_for_events(WifiEvent::StaDisconnected.into(), false),
             WIFI_APPLY_SIGNAL.wait(),
         )
         .await
         {
-            Either::First(()) if config.auto_reconnect => {
-                set_network_summary(network_summary_for_config(
+            Either::First(_) if config.auto_reconnect => {
+                let _ = publish_wifi_event(
                     &config,
-                    NetworkState::Connecting,
-                ))
+                    ProvisioningEvent::StationDisconnected {
+                        auto_reconnect: true,
+                    },
+                    None,
+                )
                 .await;
-                Timer::after(Duration::from_secs(2)).await
+                Timer::after(Duration::from_secs(2)).await;
+                retry_pending = true;
             }
-            Either::First(()) => {
-                set_network_summary(network_failure(
+            Either::First(_) => {
+                let _ = publish_wifi_event(
                     &config,
-                    NetworkState::Error,
-                    "WiFi station disconnected.",
-                ))
+                    ProvisioningEvent::StationDisconnected {
+                        auto_reconnect: false,
+                    },
+                    Some("WiFi station disconnected."),
+                )
                 .await;
                 WIFI_APPLY_SIGNAL.wait().await
             }
             Either::Second(()) => {
-                let _ = controller.disconnect_async().await;
-                set_network_summary(network_summary_for_config(&config, NetworkState::Saving))
+                let disconnected = with_timeout(
+                    Duration::from_millis(SAVING_TIMEOUT_MS as u64),
+                    controller.disconnect_async(),
+                )
+                .await;
+                let latest_config = WIFI_CONFIG.lock().await.clone();
+                if disconnected.is_ok() {
+                    let _ = publish_wifi_event(
+                        &latest_config,
+                        ProvisioningEvent::DisconnectCompleted,
+                        None,
+                    )
                     .await;
+                } else {
+                    let follow_up = progress_wifi_failure(
+                        &latest_config,
+                        ProvisioningEvent::DisconnectTimedOut,
+                        "Timed out while stopping WiFi.",
+                    )
+                    .await;
+                    if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
+                        WIFI_APPLY_SIGNAL.wait().await;
+                    }
+                }
             }
         }
     }
 }
 
-async fn set_network_summary(summary: NetworkSummary) {
-    LAN_RUNTIME.lock().await.network = Some(summary);
+async fn set_network_summary(summary: NetworkSummary) -> NetworkSummary {
+    LAN_RUNTIME.lock().await.network = Some(summary.clone());
+    summary
 }
 
 fn network_summary_for_config(config: &WifiRuntimeConfig, state: NetworkState) -> NetworkSummary {
-    if !config.is_configured() {
-        return NetworkSummary::default();
-    }
+    let public_state = match state {
+        // The adapter keeps the disconnect stage private. The device only
+        // publishes the user-visible connection phase.
+        NetworkState::Saving => NetworkState::Connecting,
+        // A bounded timeout is a settled failure, never a fourth WiFi state.
+        NetworkState::Timeout => NetworkState::Error,
+        NetworkState::Idle => {
+            if config.is_configured() {
+                NetworkState::Connecting
+            } else {
+                NetworkState::Disabled
+            }
+        }
+        other => other,
+    };
     NetworkSummary {
-        state,
-        ssid: Some(config.ssid.clone()),
+        state: public_state,
+        ssid: config.is_configured().then(|| config.ssid.clone()),
+        wifi_password_length: config
+            .is_configured()
+            .then_some(config.password.len() as u8)
+            .unwrap_or(0),
         ..NetworkSummary::default()
     }
 }
 
-fn network_failure(
+fn network_summary_for_transition(
     config: &WifiRuntimeConfig,
-    state: NetworkState,
-    message: &str,
+    transition: crate::wifi_state::WifiTransition,
+    message: Option<&str>,
 ) -> NetworkSummary {
-    let mut summary = network_summary_for_config(config, state);
-    let mut error = String::new();
-    let _ = error.push_str(message);
-    summary.last_error = Some(error);
+    let mut summary = network_summary_for_config(config, transition.state);
+    summary.configuration_generation = transition.configuration_generation;
+    summary.transition_sequence = transition.transition_sequence;
+    summary.failure_code = transition.failure_code;
+    if let Some(message) = message
+        && transition.failure_code.is_some()
+    {
+        let mut error = String::new();
+        let _ = error.push_str(message);
+        summary.last_error = Some(error);
+    }
     summary
+}
+
+async fn publish_wifi_event(
+    config: &WifiRuntimeConfig,
+    event: ProvisioningEvent,
+    message: Option<&str>,
+) -> Option<NetworkSummary> {
+    let transition = apply_wifi_transition(event).await?;
+    Some(set_network_summary(network_summary_for_transition(config, transition, message)).await)
+}
+
+async fn apply_wifi_transition(event: ProvisioningEvent) -> Option<WifiTransition> {
+    let transition = WIFI_PROVISIONING
+        .lock()
+        .await
+        .apply_at(event, Instant::now().as_millis());
+    transition.accepted.then_some(transition)
+}
+
+async fn wifi_state() -> NetworkState {
+    WIFI_PROVISIONING.lock().await.state()
 }
 
 fn network_connected(
@@ -517,41 +794,65 @@ fn net_config(config: &WifiRuntimeConfig) -> NetConfig {
 }
 
 #[embassy_executor::task]
-async fn http_task(stack: Stack<'static>) {
-    let workspace = HTTP_WORKSPACE.init_with(HttpWorkspace::new);
+async fn http_listener_task(stack: Stack<'static>, spawner: Spawner) {
     loop {
         stack.wait_config_up().await;
-        let mut socket = TcpSocket::new(stack, &mut workspace.rx, &mut workspace.tx);
-        socket.set_timeout(Some(Duration::from_secs(5)));
-        if socket.accept(HTTP_SERVICE_PORT).await.is_ok() {
-            let _ = handle_http_connection(
-                &mut socket,
-                &mut workspace.request,
-                &mut workspace.response,
-                &mut workspace.command,
-                &mut workspace.control_response,
-            )
-            .await;
-            socket.close();
-            let _ = socket.flush().await;
-        } else {
+        let workspace = HTTP_WORKSPACES.receive().await;
+        let HttpSocket(mut socket) = HTTP_SOCKETS.receive().await;
+        if socket.accept(HTTP_SERVICE_PORT).await.is_err() {
+            HTTP_WORKSPACES.send(workspace).await;
+            HTTP_SOCKETS.send(HttpSocket(socket)).await;
             Timer::after(Duration::from_millis(200)).await;
+            continue;
         }
+
+        // The idle socket count and worker pool are identical, so a valid
+        // accepted socket always has a worker slot available.
+        let _ = spawner.spawn(http_connection_task(HttpSocket(socket), workspace));
     }
+}
+
+#[embassy_executor::task(pool_size = HTTP_CONNECTION_COUNT)]
+async fn http_connection_task(socket: HttpSocket, slot: HttpWorkspaceSlot) {
+    let mut socket = socket.0;
+    let HttpWorkspaceSlot {
+        workspace,
+        response_slot,
+    } = slot;
+    let _ = handle_http_connection(
+        &mut socket,
+        &mut workspace.request,
+        &mut workspace.response,
+        &mut workspace.command,
+        &mut workspace.control_response,
+        response_slot,
+    )
+    .await;
+    socket.close();
+    let _ = socket.flush().await;
+    HTTP_WORKSPACES
+        .send(HttpWorkspaceSlot {
+            workspace,
+            response_slot,
+        })
+        .await;
+    HTTP_SOCKETS.send(HttpSocket(socket)).await;
 }
 
 async fn handle_http_connection(
     socket: &mut TcpSocket<'_>,
     request_bytes: &mut [u8],
-    response_slot: &mut HttpResponse,
+    response: &mut HttpResponse,
     command_slot: &mut Option<ControlMailboxCommand>,
     control_response_slot: &mut Option<ControlMailboxResponse>,
+    worker_slot: u8,
 ) -> Result<(), embassy_net::tcp::Error> {
     request_bytes.fill(0);
     *command_slot = None;
     *control_response_slot = None;
-    response_slot.allow_origin = None;
-    response_slot.allow_private_network = false;
+    response.allow_origin = None;
+    response.allow_private_network = false;
+    response.control_revision = None;
     let mut total = 0usize;
     loop {
         let received = socket.read(&mut request_bytes[total..]).await?;
@@ -575,6 +876,7 @@ async fn handle_http_connection(
     let mut origin = None::<String<128>>;
     let mut authorization = None::<String<96>>;
     let mut lease_id = None::<String<32>>;
+    let mut expected_revision = None::<u32>;
     let mut private_network = false;
     let mut content_length = 0usize;
     let method = {
@@ -588,11 +890,11 @@ async fn handle_http_connection(
             "DELETE" => HttpMethod::Delete,
             "OPTIONS" => HttpMethod::Options,
             _ => {
-                *response_slot = HttpResponse::new(
+                *response = HttpResponse::new(
                     405,
                     r#"{"error":{"code":"method_not_allowed","message":"Unsupported HTTP method."}}"#,
                 );
-                return write_http_response(socket, response_slot).await;
+                return write_http_response(socket, response).await;
             }
         };
         let _ = path.push_str(
@@ -623,6 +925,9 @@ async fn handle_http_connection(
                 let _ = copied.push_str(value);
                 lease_id = Some(copied);
             }
+            if key.eq_ignore_ascii_case("X-Flux-Purr-Revision") {
+                expected_revision = value.parse().ok();
+            }
             if key.eq_ignore_ascii_case("Access-Control-Request-Private-Network") {
                 private_network = value.eq_ignore_ascii_case("true");
             }
@@ -633,11 +938,11 @@ async fn handle_http_connection(
         method
     };
     if content_length > LAN_HTTP_BODY_MAX_LEN {
-        *response_slot = HttpResponse::new(
+        *response = HttpResponse::new(
             400,
             r#"{"error":{"code":"body_too_large","message":"Request body exceeds the LAN API limit."}}"#,
         );
-        return write_http_response(socket, response_slot).await;
+        return write_http_response(socket, response).await;
     }
     let mut body_len = total.saturating_sub(header_end);
     while body_len < content_length && total < request_bytes.len() {
@@ -656,6 +961,7 @@ async fn handle_http_connection(
         origin: origin.as_ref().map(String::as_str),
         authorization: authorization.as_ref().map(String::as_str),
         lease_id: lease_id.as_ref().map(String::as_str),
+        expected_revision,
         request_private_network: private_network,
         body,
         entropy: random_entropy(),
@@ -667,39 +973,40 @@ async fn handle_http_connection(
             .as_mut()
             .expect("LAN control state initialized")
             .gate(Instant::now().as_millis(), request);
-        stage_http_gate(gate, command_slot, response_slot)
+        stage_http_gate(gate, command_slot, response, worker_slot)
     };
     let Some((request_id, is_sse)) = dispatch else {
-        return write_http_response(socket, response_slot).await;
+        return write_http_response(socket, response).await;
     };
     if CONTROL_MAILBOX
         .try_send(command_slot.take().expect("LAN command staged"))
         .is_err()
     {
         set_http_error(
-            response_slot,
+            response,
             503,
             r#"{"error":{"code":"control_busy","message":"Control mailbox is busy."}}"#,
         );
-        return write_http_response(socket, response_slot).await;
+        return write_http_response(socket, response).await;
     }
-    *control_response_slot = await_control_response(request_id).await;
-    let is_success = stage_control_response(response_slot, control_response_slot.take());
+    *control_response_slot = await_control_response(worker_slot, request_id).await;
+    let is_success = stage_control_response(response, control_response_slot.take());
     if is_sse && is_success {
         return write_sse_status_event(
             socket,
-            response_slot.body.as_str(),
-            response_slot.allow_origin.as_ref().map(String::as_str),
+            response.body.as_str(),
+            response.allow_origin.as_ref().map(String::as_str),
         )
         .await;
     }
-    write_http_response(socket, response_slot).await
+    write_http_response(socket, response).await
 }
 
 fn stage_http_gate(
     gate: HttpGate,
     command_slot: &mut Option<ControlMailboxCommand>,
     response_slot: &mut HttpResponse,
+    worker_slot: u8,
 ) -> Option<(u32, bool)> {
     match gate {
         HttpGate::Respond(response) => {
@@ -711,6 +1018,7 @@ fn stage_http_gate(
             allow_origin,
         } => {
             command.request_id = next_control_request_id();
+            command.response_slot = worker_slot;
             let request_id = command.request_id;
             let is_sse = command.endpoint == crate::lan::LanEndpoint::Events
                 && command.method == HttpMethod::Get;
@@ -729,6 +1037,7 @@ fn stage_control_response(
         Some(control) => {
             response_slot.status = control.status;
             response_slot.body = control.body;
+            response_slot.control_revision = Some(control.revision);
             control.status == 200
         }
         None => {
@@ -759,6 +1068,7 @@ async fn write_http_response(
         response.body.as_str(),
         response.allow_origin.as_ref().map(String::as_str),
         response.allow_private_network,
+        response.control_revision,
         "application/json",
     )
     .await
@@ -777,6 +1087,7 @@ async fn write_sse_status_event(
         SSE_PREFIX.len() + status.len() + SSE_SUFFIX.len(),
         allow_origin,
         false,
+        Some(current_control_revision()),
         "text/event-stream",
     )
     .await?;
@@ -792,6 +1103,7 @@ async fn write_http_response_with_type(
     body: &str,
     allow_origin: Option<&str>,
     allow_private_network: bool,
+    control_revision: Option<u32>,
     content_type: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
     write_http_response_headers(
@@ -800,6 +1112,7 @@ async fn write_http_response_with_type(
         body.len(),
         allow_origin,
         allow_private_network,
+        control_revision,
         content_type,
     )
     .await?;
@@ -813,6 +1126,7 @@ async fn write_http_response_headers(
     body_len: usize,
     allow_origin: Option<&str>,
     allow_private_network: bool,
+    control_revision: Option<u32>,
     content_type: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
     let status = match response_status {
@@ -824,6 +1138,7 @@ async fn write_http_response_headers(
         404 => "404 Not Found",
         405 => "405 Method Not Allowed",
         409 => "409 Conflict",
+        428 => "428 Precondition Required",
         429 => "429 Too Many Requests",
         503 => "503 Service Unavailable",
         504 => "504 Gateway Timeout",
@@ -832,9 +1147,12 @@ async fn write_http_response_headers(
     let mut header = String::<384>::new();
     let _ = write!(
         header,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Flux-Purr-Lease\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Flux-Purr-Lease, X-Flux-Purr-Revision\r\nAccess-Control-Expose-Headers: X-Flux-Purr-Revision\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n",
         body_len
     );
+    if let Some(revision) = control_revision {
+        let _ = write!(header, "X-Flux-Purr-Revision: {revision}\r\n");
+    }
     if content_type == "text/event-stream" {
         let _ = header.push_str("Cache-Control: no-cache\r\n");
     }
@@ -924,137 +1242,11 @@ async fn send_mdns_to(
     ip: Ipv4Address,
     endpoint: IpEndpoint,
 ) -> Result<(), ()> {
-    let length = build_mdns_announcement(buffer, names, ip).ok_or(())?;
+    let length = build_http_announcement(buffer, names, ip.octets()).ok_or(())?;
     socket
         .send_to(&buffer[..length], endpoint)
         .await
         .map_err(|_| ())
-}
-
-fn build_mdns_announcement(
-    buffer: &mut [u8],
-    names: &DeviceNames,
-    ip: Ipv4Address,
-) -> Option<usize> {
-    let hostname = names.hostname.as_str();
-    let mut host_fqdn = String::<48>::new();
-    host_fqdn.push_str(hostname).ok()?;
-    host_fqdn.push_str(".local").ok()?;
-    let mut instance = String::<80>::new();
-    instance.push_str(hostname).ok()?;
-    instance.push_str(".").ok()?;
-    instance.push_str(HTTP_SERVICE_TYPE).ok()?;
-    buffer[..12].copy_from_slice(&[0, 0, 0x84, 0, 0, 0, 0, 4, 0, 0, 0, 0]);
-    let mut at = 12;
-    at = dns_record_ptr(buffer, at, HTTP_SERVICE_TYPE, instance.as_str())?;
-    at = dns_record_srv(
-        buffer,
-        at,
-        instance.as_str(),
-        HTTP_SERVICE_PORT,
-        host_fqdn.as_str(),
-    )?;
-    at = dns_record_txt(buffer, at, instance.as_str(), names)?;
-    dns_record_a(buffer, at, host_fqdn.as_str(), ip)
-}
-
-fn dns_name(buffer: &mut [u8], mut at: usize, name: &str) -> Option<usize> {
-    for label in name.split('.') {
-        let bytes = label.as_bytes();
-        if bytes.is_empty() || bytes.len() > 63 || at + bytes.len() + 1 > buffer.len() {
-            return None;
-        }
-        buffer[at] = bytes.len() as u8;
-        at += 1;
-        buffer[at..at + bytes.len()].copy_from_slice(bytes);
-        at += bytes.len();
-    }
-    if at >= buffer.len() {
-        return None;
-    }
-    buffer[at] = 0;
-    Some(at + 1)
-}
-
-fn dns_header(buffer: &mut [u8], at: usize, ty: u16, data_len: u16) -> Option<usize> {
-    if at + 10 > buffer.len() {
-        return None;
-    }
-    buffer[at..at + 2].copy_from_slice(&ty.to_be_bytes());
-    buffer[at + 2..at + 4].copy_from_slice(&0x8001u16.to_be_bytes());
-    buffer[at + 4..at + 8].copy_from_slice(&MDNS_TTL_SECS.to_be_bytes());
-    buffer[at + 8..at + 10].copy_from_slice(&data_len.to_be_bytes());
-    Some(at + 10)
-}
-
-fn dns_record_ptr(buffer: &mut [u8], at: usize, name: &str, target: &str) -> Option<usize> {
-    let at = dns_name(buffer, at, name)?;
-    let data_at = dns_header(buffer, at, 12, 0)?;
-    let end = dns_name(buffer, data_at, target)?;
-    buffer[at + 8..at + 10].copy_from_slice(&((end - data_at) as u16).to_be_bytes());
-    Some(end)
-}
-
-fn dns_record_srv(
-    buffer: &mut [u8],
-    at: usize,
-    name: &str,
-    port: u16,
-    target: &str,
-) -> Option<usize> {
-    let at = dns_name(buffer, at, name)?;
-    let data_at = dns_header(buffer, at, 33, 0)?;
-    if data_at + 6 > buffer.len() {
-        return None;
-    }
-    buffer[data_at..data_at + 2].copy_from_slice(&0u16.to_be_bytes());
-    buffer[data_at + 2..data_at + 4].copy_from_slice(&0u16.to_be_bytes());
-    buffer[data_at + 4..data_at + 6].copy_from_slice(&port.to_be_bytes());
-    let end = dns_name(buffer, data_at + 6, target)?;
-    buffer[at + 8..at + 10].copy_from_slice(&((end - data_at) as u16).to_be_bytes());
-    Some(end)
-}
-
-fn dns_record_txt(buffer: &mut [u8], at: usize, name: &str, names: &DeviceNames) -> Option<usize> {
-    let at = dns_name(buffer, at, name)?;
-    let data_at = dns_header(buffer, at, 16, 0)?;
-    let mut end = data_at;
-    for entry in HTTP_SERVICE_TXT {
-        let bytes = entry.as_bytes();
-        if bytes.len() > 255 || end + bytes.len() + 1 > buffer.len() {
-            return None;
-        }
-        buffer[end] = bytes.len() as u8;
-        end += 1;
-        buffer[end..end + bytes.len()].copy_from_slice(bytes);
-        end += bytes.len();
-    }
-    let mut device = String::<20>::new();
-    let _ = write!(
-        device,
-        "device={}",
-        core::str::from_utf8(&names.device_id).ok()?
-    );
-    let bytes = device.as_bytes();
-    if bytes.len() > 255 || end + bytes.len() + 1 > buffer.len() {
-        return None;
-    }
-    buffer[end] = bytes.len() as u8;
-    end += 1;
-    buffer[end..end + bytes.len()].copy_from_slice(bytes);
-    end += bytes.len();
-    buffer[at + 8..at + 10].copy_from_slice(&((end - data_at) as u16).to_be_bytes());
-    Some(end)
-}
-
-fn dns_record_a(buffer: &mut [u8], at: usize, name: &str, ip: Ipv4Address) -> Option<usize> {
-    let at = dns_name(buffer, at, name)?;
-    let data_at = dns_header(buffer, at, 1, 4)?;
-    if data_at + 4 > buffer.len() {
-        return None;
-    }
-    buffer[data_at..data_at + 4].copy_from_slice(&ip.octets());
-    Some(data_at + 4)
 }
 
 fn random_u64() -> u64 {
@@ -1069,10 +1261,75 @@ fn random_entropy() -> [u8; crate::lan::LAN_TOKEN_BYTES] {
     out
 }
 
+fn encode_pairing_code(code: [u8; 4]) -> u32 {
+    let mut value = 0u32;
+    for digit in code {
+        value = value
+            .saturating_mul(10)
+            .saturating_add(u32::from(digit.saturating_sub(b'0')));
+    }
+    // Zero represents inactive, while 0000 remains a valid four-digit code.
+    value.saturating_add(1)
+}
+
+fn decode_pairing_code(value: u32) -> Option<[u8; 4]> {
+    let mut value = value.checked_sub(1)?;
+    if value > 9_999 {
+        return None;
+    }
+    let mut code = [b'0'; 4];
+    for digit in code.iter_mut().rev() {
+        *digit = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    Some(code)
+}
+
 fn random_u32() -> u32 {
     // The ESP RNG peripheral is shareable and WiFi keeps the RF entropy source
     // enabled. `Rng` is a zero-sized register facade, so stealing it here does
     // not duplicate owned DMA/state and avoids weakening pairing to a counter.
     let peripheral = unsafe { esp_hal::peripherals::RNG::steal() };
     Rng::new(peripheral).random()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_pairing_code, encode_pairing_code};
+
+    #[test]
+    fn pairing_code_mirror_preserves_leading_zeroes() {
+        assert_eq!(
+            decode_pairing_code(encode_pairing_code(*b"0042")),
+            Some(*b"0042")
+        );
+    }
+
+    #[test]
+    fn pairing_code_mirror_reserves_zero_for_inactive() {
+        assert_eq!(decode_pairing_code(0), None);
+    }
+
+    #[test]
+    fn public_wifi_summary_normalizes_internal_states() {
+        let mut configured = WifiRuntimeConfig::empty();
+        configured.ssid.push_str("FluxPurr-Lab").unwrap();
+
+        assert_eq!(
+            network_summary_for_config(&configured, NetworkState::Saving).state,
+            NetworkState::Connecting
+        );
+        assert_eq!(
+            network_summary_for_config(&configured, NetworkState::Timeout).state,
+            NetworkState::Error
+        );
+        assert_eq!(
+            network_summary_for_config(&configured, NetworkState::Idle).state,
+            NetworkState::Connecting
+        );
+        assert_eq!(
+            network_summary_for_config(&WifiRuntimeConfig::empty(), NetworkState::Idle).state,
+            NetworkState::Disabled
+        );
+    }
 }

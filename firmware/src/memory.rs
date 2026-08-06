@@ -552,6 +552,8 @@ impl Default for MemoryConfig {
 impl MemoryConfig {
     pub fn sanitize(&mut self) {
         self.target_temp_c = clamp_temp_c(self.target_temp_c);
+        // Automatic WiFi recovery is a device safety policy, not user configuration.
+        self.wifi_auto_reconnect = true;
         if self.selected_preset_slot >= FRONTPANEL_PRESET_COUNT {
             self.selected_preset_slot = MemoryConfig::default().selected_preset_slot;
         }
@@ -2865,7 +2867,7 @@ mod tests {
             target_temp_c: 222,
             selected_preset_slot: 4,
             active_cooling_enabled: false,
-            wifi_auto_reconnect: false,
+            wifi_auto_reconnect: true,
             telemetry_interval_ms: 1_250,
             ..MemoryConfig::default()
         };
@@ -2987,6 +2989,18 @@ mod tests {
             config.adc_calibration.vin.slots.a,
             AdcCalibrationSlotFit::default()
         );
+    }
+
+    #[test]
+    fn sanitize_forces_wifi_auto_reconnect_policy_on() {
+        let mut config = MemoryConfig {
+            wifi_auto_reconnect: false,
+            ..MemoryConfig::default()
+        };
+
+        config.sanitize();
+
+        assert!(config.wifi_auto_reconnect);
     }
 
     #[test]

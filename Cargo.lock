@@ -1362,6 +1362,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "esp-idf-part",
  "ipnet",
  "mdns-sd",
  "reqwest",
@@ -1406,6 +1407,7 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde-json-core",
+ "serde_json",
  "static_cell",
 ]
 
@@ -1496,7 +1498,6 @@ source = "git+https://github.com/IvanLi-CN/gc9d01-rs?rev=6b75d9dc818be04e57932b7
 dependencies = [
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
- "embedded-hal-async",
  "maybe-async-cfg",
 ]
 

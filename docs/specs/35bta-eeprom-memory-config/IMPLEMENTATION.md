@@ -2,9 +2,11 @@
 
 ## Coverage
 
-- 固件 `memory` 模块使用 v3 `2048 bytes` active 双槽，位于 `0x1000` / `0x1800`，并使用 `u16` TLV 长度；EEPROM 启动同时读取 active v3 `2048B`、previous v2 `1024B`（`0x0400` / `0x0800`）与 legacy `512B` 双槽并选择最大 sequence，写入只落 active 双槽。
+- 固件 `memory` 模块当前写入 `MemoryRecord` v5：`2048 bytes` active 双槽位于 `0x1000` / `0x1800`，使用 `u16` TLV 长度；解码兼容 v1-v5。EEPROM 启动同时读取 active `2048B`、previous `1024B`（`0x0400` / `0x0800`）与 legacy `512B` 双槽并选择最大 sequence。旧 EEPROM record 只在 RAM 中迁移，后续成功提交才物化为 v5 并写入 active 槽。
 - `flux-purr` runtime 在 CH224Q 请求完成后读取 EEPROM 与 ESP flash fallback，并在 UI 初始绘制前恢复可记忆字段。
 - 前面板接受交互后生成新的记忆配置；配置变化会触发约 `2s` debounce，优先写 EEPROM，EEPROM 不可达或写入失败时写入专用 `flux_cfg` 8KiB data partition。flash 双槽各自占用独立 4KiB erase sector，避免写入期间掉电同时破坏两份 record，也不绕过 NVS allocator 写入 NVS 管理范围。
+- runtime 先读取当前 `flux_cfg`；没有有效 record 时只读探测旧 factory-app 边界后的 `0x110000` / `0x111000` raw fallback 双槽。发现 CRC 合法 record 后立即复制到当前分区，后续写入只使用 `flux_cfg`。
+- `devd` real flash 在取得 serial 排他锁后，先读取设备的真实 partition table。若目标 `flux_cfg` 地址变化，daemon 读取完整当前 `flux_cfg` 或未分区 legacy raw 双槽，在目标地址预写并逐字读回验证；目标地址被当前 partition 占用、容量不足或任意 read/write/verify 失败时，daemon 在 app 写入前拒绝操作。临时副本仅存在于受限临时目录，不会写入日志、trace 或本地设备记录。
 - ADC calibration state 作为 `MemoryConfig` 字段持久化，并在启动后恢复给 RTD/VIN measurement path 和 control-plane response；其中包含共享样本、A/B 槽位与当前激活槽位。
 - EEPROM calibration persistence now keeps the ADC-domain pairs and the owner-entered physical references in separate TLVs, so RTD/VIN sample tables can render the original `referenceTempC` / `referenceVinMv` after refresh, reboot, export/import, or devd reconnect.
 - EEPROM 读写失败只记录日志并尝试 flash fallback；所有持久化后端都失败时回退默认/当前配置，不阻断 heater/fan 保护。
@@ -15,7 +17,8 @@
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo fmt --manifest-path firmware/Cargo.toml --check`
-- 最长 Wi-Fi 凭据、完整 calibration TLV 与双 bank 各 10 点 thermal profile 的 v3 record round-trip 测试
+- 最长 Wi-Fi 凭据、完整 calibration TLV 与双 bank 各 10 点 thermal profile 的 v5 record round-trip 测试
+- v1-v4 record header/TLV 解码、旧 calibration/profile 字段迁移与 v5 sanitize 归一化测试
 - 历史五点 profile 与新 point-local profile 总长度碰撞的迁移回归测试
 - Xtensa release build按 `SPEC.md` 的质量门槛执行。
 

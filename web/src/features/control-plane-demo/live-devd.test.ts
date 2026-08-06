@@ -104,6 +104,7 @@ describe('live devd selection', () => {
       makeDevice('native-1', 'devd', 'active'),
       makeDevice('fixture', 'mock', 'none'),
     ]
+    devices[0].networkState = 'connected'
 
     const degraded = degradeDevicesForRefreshError(devices, new Error('Failed to fetch'))
 
@@ -113,7 +114,7 @@ describe('live devd selection', () => {
       id: 'native-1',
       transport: 'devd',
       severity: 'warning',
-      networkState: 'error',
+      networkState: 'connected',
       transportIssue: 'Failed to fetch',
       leaseState: 'active',
     })
@@ -143,6 +144,7 @@ describe('live devd selection', () => {
       makeDevice('native-1', 'devd', 'active'),
       makeDevice('fixture', 'mock', 'none'),
     ]
+    currentDevices[0].networkState = 'connected'
     const nextDevices = [makeDevice('fixture-2', 'mock', 'none')]
 
     const preserved = preserveLastLiveDevdTarget(nextDevices, currentDevices)
@@ -152,7 +154,7 @@ describe('live devd selection', () => {
       id: 'native-1',
       transport: 'devd',
       severity: 'warning',
-      networkState: 'error',
+      networkState: 'connected',
       leaseState: 'active',
       transportIssue:
         'Authorized native serial target is temporarily unavailable; keeping the last live target until polling recovers.',
@@ -234,7 +236,7 @@ describe('live devd selection', () => {
 
     expect(reconnecting).toMatchObject({
       id: 'native-1',
-      alias: 'Authorized USB target',
+      alias: 'native-1',
       location: '/dev/cu.usbmodem-native-1',
       transport: 'devd',
       severity: 'warning',
@@ -242,6 +244,7 @@ describe('live devd selection', () => {
       leaseState: 'expired',
       transportIssue: '正在重新接管本机 devd 租约，请稍候。',
     })
+    expect(reconnecting.alias).not.toBe('Authorized USB target')
     expect(reconnecting.leaseId).toBeUndefined()
   })
 

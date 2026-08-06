@@ -1,0 +1,68 @@
+{
+  "version": "wifi_state_v2",
+  "states": ["disabled", "connecting", "connected", "error"],
+  "failureCodes": [
+    "disconnect_timed_out",
+    "configuration_failed",
+    "association_rejected",
+    "association_timed_out",
+    "ipv4_timed_out",
+    "station_disconnected",
+    "lan_startup_failed"
+  ],
+  "transaction": {
+    "savingTimeoutMs": 3000,
+    "maxAttempts": 3,
+    "timeoutMs": 30000
+  },
+  "traces": [
+    {
+      "name": "transient_retry_success",
+      "snapshots": [
+        { "state": "connecting", "configurationGeneration": 1, "transitionSequence": 1 },
+        { "state": "connecting", "configurationGeneration": 2, "transitionSequence": 2 },
+        { "state": "connecting", "configurationGeneration": 2, "transitionSequence": 3 },
+        { "state": "connected", "configurationGeneration": 2, "transitionSequence": 4 }
+      ]
+    },
+    {
+      "name": "invalid_credentials_terminal_error",
+      "snapshots": [
+        { "state": "connecting", "configurationGeneration": 3, "transitionSequence": 5 },
+        { "state": "connecting", "configurationGeneration": 3, "transitionSequence": 6 },
+        { "state": "error", "configurationGeneration": 3, "transitionSequence": 7, "failureCode": "association_rejected" }
+      ]
+    },
+    {
+      "name": "ipv4_terminal_timeout",
+      "snapshots": [
+        { "state": "connecting", "configurationGeneration": 4, "transitionSequence": 8 },
+        { "state": "error", "configurationGeneration": 4, "transitionSequence": 9, "failureCode": "ipv4_timed_out" }
+      ]
+    },
+    {
+      "name": "terminal_error_requires_new_configuration",
+      "snapshots": [
+        { "state": "connecting", "configurationGeneration": 5, "transitionSequence": 10 },
+        { "state": "error", "configurationGeneration": 5, "transitionSequence": 11, "failureCode": "association_rejected" },
+        { "state": "error", "configurationGeneration": 5, "transitionSequence": 12, "failureCode": "association_rejected" },
+        { "state": "connecting", "configurationGeneration": 6, "transitionSequence": 13 },
+        { "state": "connected", "configurationGeneration": 6, "transitionSequence": 14 }
+      ]
+    },
+    {
+      "name": "clear_config",
+      "snapshots": [
+        { "state": "disabled", "configurationGeneration": 7, "transitionSequence": 15 }
+      ]
+    }
+  ],
+  "outOfOrderDelivery": {
+    "receipt": { "state": "connecting", "configurationGeneration": 6, "transitionSequence": 16 },
+    "snapshots": [
+      { "state": "connecting", "configurationGeneration": 6, "transitionSequence": 16 },
+      { "state": "error", "configurationGeneration": 5, "transitionSequence": 99, "failureCode": "association_rejected" },
+      { "state": "connected", "configurationGeneration": 6, "transitionSequence": 17 }
+    ]
+  }
+}
