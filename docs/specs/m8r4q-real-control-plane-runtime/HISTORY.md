@@ -5,6 +5,7 @@
 - Web Serial 连接曾把 `navigator.serial.requestPort()` 的无限等待直接映射为 `Web Serial (connecting)`，且点击后仍保留旧的 devd `Failed to fetch` 反馈。现将端口选择、打开和首次 probe 统一收敛为 `15s` 有界事务，开始时立即显示等待串口选择提示，超时后给出可重试错误并关闭迟到的端口；Storybook 固定覆盖该挂起路径。
 - 顶部目标选择器曾把同一硬件的 native DEVD、Web Serial、WiFi/LAN 与 bridge records 当成多台设备，用户无法确认要连接的物理设备。现按固件稳定 `identityId/deviceId` 合并为单张设备卡片，卡片显示 hostname 与设备 ID，并固定提供最多三种公开连接方式：WiFi/LAN、Web Serial 与桥接。DEVD USB 与 WiFi/LAN 发现结果只作为桥接方式的内部来源；重复记录按健康状态优先，避免旧地址或异常记录覆盖当前 target。
 - 设备卡片的三个连接方式与“添加设备”操作现在各自显示对应的 Lucide 图标，文字、次要地址和方向箭头保持原有布局，降低重复按钮的识别成本。
+- 设备卡片曾用 `auto-fit` 把唯一连接方式拉伸为整行，顶部触发器也同时显示 CSS select 箭头与组件 Chevron。连接方式现固定为最多三列，单个方式保持三分之一宽度；触发器只保留一个随展开状态旋转的 Chevron。
 - LAN pairing claim 曾生成缺少 `api` 字段结束引号的 `200` 响应，浏览器因此在领取 token 后抛出 JSON 解析异常；Web 又把该非协议化异常显示成对话框背后的通用连接失败。claim 响应现由 firmware host test 锁定合法字段边界，Web 将无法解析的成功响应归类为明确的协议错误，并在当前配对对话框内展示具体原因。
 - Claim 响应修正后，Web 的并发 identity/network/status probe 暴露了设备只有一个 HTTP workspace 与单一 response signal 的限制。控制面现使用 3 个独立 HTTP worker 支持并发读连接，响应按 worker 路由；mutation 继续由主循环串行执行，并以单调 control revision 拒绝过时写。Web 恢复并发 probe，devd/CLI 在写前读取 revision，客户端不再以串行请求掩盖设备端限制。
 - CIDR 扫描候选曾显示“选择”，点击后只回填地址，用户还必须再次点击上方“连接设备”，造成候选行主动作与实际意图不一致。现改为候选行直接显示并执行“连接”，复用同一 health、配对、probe 和 lease 流程；连接未完成前仍不注册或切换顶部目标。

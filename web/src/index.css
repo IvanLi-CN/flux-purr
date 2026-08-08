@@ -1324,6 +1324,7 @@
     align-items: center;
     justify-content: space-between;
     width: 100%;
+    background: var(--industrial-bg);
     cursor: pointer;
     text-align: left;
   }
@@ -1414,7 +1415,7 @@
 
   .industrial-device-choice-card__connections {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.45rem;
     min-width: 0;
     margin: 0;
