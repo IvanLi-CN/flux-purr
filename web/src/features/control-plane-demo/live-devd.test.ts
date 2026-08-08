@@ -11,6 +11,7 @@ import {
   releaseDevdLeaseOnPageHide,
   resolveDevdLease,
   selectPreferredLiveDevdDeviceId,
+  shouldHoldDevdLease,
   writeStoredDevdLeaseId,
   writeStoredLiveDevdTarget,
 } from './live-devd'
@@ -19,6 +20,13 @@ import type { ControlPlaneHttpClient } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('live devd selection', () => {
+  it('does not hold a USB bridge lease while a direct LAN target is selected', () => {
+    expect(shouldHoldDevdLease('lan-a0f262f20d6c')).toBe(false)
+    expect(shouldHoldDevdLease('serial-303a-1001-A0:F2:62:F2:0D:6C', true)).toBe(false)
+    expect(shouldHoldDevdLease('serial-303a-1001-A0:F2:62:F2:0D:6C')).toBe(true)
+    expect(shouldHoldDevdLease(null)).toBe(true)
+  })
+
   it('prefers active devd targets before fixtures', () => {
     const devices: DeviceTarget[] = [
       makeDevice('fixture', 'mock', 'none'),

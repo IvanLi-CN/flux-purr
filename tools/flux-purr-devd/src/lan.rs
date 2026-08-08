@@ -8,7 +8,7 @@ use std::{
 };
 
 use ipnet::Ipv4Net;
-use mdns_sd::{ServiceDaemon, ServiceEvent};
+use mdns_sd_discovery::{BrowseEvent, DiscoveredService, ServiceBrowserBuilder};
 use reqwest::{Client, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -324,9 +324,7 @@ fn control_revision(headers: &reqwest::header::HeaderMap) -> Result<u32, LanClie
 /// Browse the device's advertised `_http._tcp.local.` service for a bounded
 /// period. It is called only by an explicit refresh command or API request.
 pub async fn discover_mdns(timeout: Duration) -> Result<Vec<LanDiscovery>, LanClientError> {
-    tokio::task::spawn_blocking(move || discover_mdns_blocking(timeout))
-        .await
-        .map_err(|error| LanClientError::Discovery(error.to_string()))?
+    discover_mdns_native(timeout).await
 }
 
 /// Probe a user-provided private IPv4 CIDR. Broad ranges are rejected before
@@ -424,61 +422,61 @@ pub fn device_from_discovery(discovery: LanDiscovery) -> Option<LanDeviceConfig>
     })
 }
 
-fn discover_mdns_blocking(timeout: Duration) -> Result<Vec<LanDiscovery>, LanClientError> {
-    let daemon =
-        ServiceDaemon::new().map_err(|error| LanClientError::Discovery(error.to_string()))?;
-    let receiver = daemon
-        .browse("_http._tcp.local.")
+async fn discover_mdns_native(timeout: Duration) -> Result<Vec<LanDiscovery>, LanClientError> {
+    let mut builder = ServiceBrowserBuilder::new();
+    builder.service_type("_http._tcp").domain("local");
+    let mut browser = builder
+        .browse()
+        .await
         .map_err(|error| LanClientError::Discovery(error.to_string()))?;
     let deadline =
         Instant::now() + timeout.clamp(Duration::from_millis(250), Duration::from_secs(8));
     let mut found = BTreeMap::new();
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(event) = receiver.recv_timeout(remaining) else {
+        let Ok(Some(event)) = tokio::time::timeout(remaining, browser.recv()).await else {
             break;
         };
-        let ServiceEvent::ServiceResolved(service) = event else {
+        let event = event.map_err(|error| LanClientError::Discovery(error.to_string()))?;
+        let BrowseEvent::Found(service) = event else {
             continue;
         };
-        if !service
-            .get_properties()
-            .iter()
-            .any(|property| property.key() == "api" && property.val_str() == "v1")
-        {
-            continue;
+        if let Some(discovery) = discovery_from_native_service(&service) {
+            found.insert(discovery.base_url.clone(), discovery);
         }
-        let Some(address) = service
-            .get_addresses_v4()
-            .into_iter()
-            .find(|address| address.is_private())
-        else {
-            continue;
-        };
-        let port = service.get_port();
-        let base_url = if port == 80 {
-            format!("http://{address}")
-        } else {
-            format!("http://{address}:{port}")
-        };
-        found.insert(
-            base_url.clone(),
-            LanDiscovery {
-                base_url,
-                hostname: Some(service.get_hostname().trim_end_matches('.').to_string()),
-                device_id: service
-                    .get_properties()
-                    .iter()
-                    .find(|property| property.key() == "device")
-                    .map(|property| property.val_str())
-                    .filter(|device_id| is_device_id(device_id))
-                    .map(str::to_owned),
-                source: LanDiscoverySource::Mdns,
-            },
-        );
     }
-    let _ = daemon.shutdown();
     Ok(found.into_values().collect())
+}
+
+fn discovery_from_native_service(service: &DiscoveredService) -> Option<LanDiscovery> {
+    if service.service_type != "_http._tcp"
+        || service.domain.trim_end_matches('.') != "local"
+        || service.txt("api") != Some(b"v1")
+    {
+        return None;
+    }
+    let address = service.addresses.iter().find_map(|address| match address {
+        IpAddr::V4(address) if address.is_private() => Some(*address),
+        _ => None,
+    })?;
+    let base_url = if service.port == 80 {
+        format!("http://{address}")
+    } else {
+        format!("http://{address}:{}", service.port)
+    };
+    Some(LanDiscovery {
+        base_url,
+        hostname: Some(service.host_name.trim_end_matches('.').to_string()),
+        device_id: service
+            .txt_records
+            .iter()
+            .find(|property| property.key == "device")
+            .and_then(|property| property.value.as_deref())
+            .and_then(|value| core::str::from_utf8(value).ok())
+            .filter(|device_id| is_device_id(device_id))
+            .map(str::to_owned),
+        source: LanDiscoverySource::Mdns,
+    })
 }
 
 async fn probe_discovery_candidate(client: &Client, address: IpAddr) -> Option<LanDiscovery> {
@@ -507,7 +505,57 @@ fn is_device_id(value: &str) -> bool {
 mod tests {
     use super::*;
     use axum::{Router, response::Redirect, routing::get};
+    use mdns_sd_discovery::TxtRecord;
     use tokio::net::TcpListener;
+
+    fn native_service(address: IpAddr, api: &[u8]) -> DiscoveredService {
+        DiscoveredService {
+            name: "flux-purr-a0f262f20d6c".into(),
+            service_type: "_http._tcp".into(),
+            domain: "local".into(),
+            host_name: "flux-purr-a0f262f20d6c.local.".into(),
+            port: 80,
+            addresses: vec![address],
+            txt_records: vec![
+                TxtRecord {
+                    key: "api".into(),
+                    value: Some(api.to_vec()),
+                },
+                TxtRecord {
+                    key: "device".into(),
+                    value: Some(b"a0f262f20d6c".to_vec()),
+                },
+            ],
+            interface_index: None,
+        }
+    }
+
+    #[test]
+    fn native_mdns_service_maps_only_private_flux_purr_v1_endpoints() {
+        let discovery = discovery_from_native_service(&native_service(
+            "192.168.31.189".parse().unwrap(),
+            b"v1",
+        ))
+        .unwrap();
+        assert_eq!(discovery.base_url, "http://192.168.31.189");
+        assert_eq!(
+            discovery.hostname.as_deref(),
+            Some("flux-purr-a0f262f20d6c.local")
+        );
+        assert_eq!(discovery.device_id.as_deref(), Some("a0f262f20d6c"));
+
+        assert!(
+            discovery_from_native_service(&native_service("8.8.8.8".parse().unwrap(), b"v1"))
+                .is_none()
+        );
+        assert!(
+            discovery_from_native_service(&native_service(
+                "192.168.31.189".parse().unwrap(),
+                b"v2",
+            ))
+            .is_none()
+        );
+    }
 
     #[test]
     fn parses_only_a_valid_device_control_revision() {

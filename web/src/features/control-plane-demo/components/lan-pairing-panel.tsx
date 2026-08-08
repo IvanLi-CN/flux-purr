@@ -16,6 +16,7 @@ import {
   probeLanDevice,
   scanLanSubnet,
   storeLanAddress,
+  storeLanDeviceSession,
   storeLanScanCidr,
 } from '../lan-client'
 import { ControlPlaneClientError } from '../transport-client'
@@ -149,6 +150,9 @@ export function LanPairingPanel({
       return
     }
 
+    // A successful injected pairing path must establish the same persisted
+    // session boundary as the production claim client before control leasing.
+    storeLanDeviceSession(result.session)
     setState('paired')
     setPairingDialogOpen(false)
     setMessage(
@@ -509,7 +513,10 @@ function defaultScanCidr(address: string) {
 async function pairLanDevice(address: string, code?: string): Promise<LanPairingResult> {
   const session = await claimLanPairing(address, code)
   try {
-    const probe = await probeLanDevice(session)
+    // The pairing claim owns the firmware's heavy request workspace. Run the
+    // first authenticated probe serially so its TCP connection has fully
+    // returned before ordinary concurrent snapshot reads resume.
+    const probe = await probeLanDevice(session, undefined, 'serial')
     return { session, probe }
   } catch (error) {
     if (

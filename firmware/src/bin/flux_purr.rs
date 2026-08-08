@@ -24,7 +24,6 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_storage::{ReadStorage, Storage};
 #[cfg(target_arch = "xtensa")]
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 #[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
@@ -130,13 +129,13 @@ use flux_purr_firmware::memory::{
     ThermalPlantRawTransaction, ThermalProfileBank, ThermalProfileMode,
     heater_resistance_ohms_from_curve, project_thermal_plant,
 };
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use flux_purr_firmware::net_http::{ControlMailboxCommand, HttpMethod, LAN_HTTP_BODY_MAX_LEN};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::status_light::{
     RgbChannels, StatusLightInputs, StatusLightState, select_status_light_state,
     status_light_output,
 };
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-use flux_purr_firmware::net_http::{ControlMailboxCommand, HttpMethod, LAN_HTTP_BODY_MAX_LEN};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::thermal_plant::{ThermalPlantControlInput, ThermalPlantController};
 #[cfg(target_arch = "xtensa")]
@@ -218,7 +217,16 @@ unsafe impl defmt::Logger for UsbControlNoopLogger {
 #[cfg(target_arch = "xtensa")]
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {}
+    unsafe extern "C" {
+        fn esp_rom_output_tx_one_char(value: u8) -> i32;
+    }
+
+    for byte in b"panic=firmware_fault\n" {
+        // SAFETY: this ROM routine is available on ESP32-S3 and accepts one byte.
+        unsafe { esp_rom_output_tx_one_char(*byte) };
+    }
+    esp_hal::rom::ets_delay_us(250_000);
+    esp_hal::system::software_reset()
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -432,10 +440,9 @@ const PT1000_C: f32 = -4.183e-12;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
 #[cfg(any(target_arch = "xtensa", test))]
-// Use the board's effective RTD divider rail instead of the ideal 3V3 nominal.
-// Runtime samples on the current hardware land near ambient only when the divider
-// is solved against ~3.0 V; hardcoding 3.3 V biases the PT1000 reading low.
-const RTD_DIVIDER_SUPPLY_MV: u16 = 3_000;
+// The production divider is driven directly from 3V3. Board-specific ADC error
+// belongs in the persisted RTD ADC calibration, not in the divider topology.
+const RTD_DIVIDER_SUPPLY_MV: u16 = 3_300;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -487,10 +494,19 @@ const LEGACY_FLASH_MEMORY_SLOT_B_OFFSET: u32 =
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn eager_display_delay(milliseconds: u64, delay_us: impl FnOnce(u32)) -> core::future::Ready<()> {
+    let microseconds = milliseconds.saturating_mul(1_000).min(u32::MAX as u64) as u32;
+    delay_us(microseconds);
+    core::future::ready(())
+}
+
 #[cfg(target_arch = "xtensa")]
 impl Gc9d01Timer for DisplayTimer {
-    async fn after_millis(milliseconds: u64) {
-        EmbassyTimer::after_millis(milliseconds).await;
+    fn after_millis(milliseconds: u64) -> impl core::future::Future<Output = ()> {
+        // The synchronous gc9d01 transform does not poll the returned future.
+        // Execute the panel timing delay eagerly before returning a ready future.
+        eager_display_delay(milliseconds, esp_hal::rom::ets_delay_us)
     }
 }
 
@@ -5211,6 +5227,32 @@ fn current_limit_fixed_pwm_duty_percent(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn fixed_pd_pwm_duty_percent(
+    duty_percent: u8,
+    current_temp_c: f32,
+    fixed_mv: u16,
+    negotiated_current_ma: u16,
+    reserve_ma: u16,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> u8 {
+    if duty_percent == 0 || fixed_mv == 0 {
+        return 0;
+    }
+
+    let available_current_ma = heater_available_current_ma(negotiated_current_ma, reserve_ma);
+    let safe_mv = heater_safe_max_mv_for_temp(
+        current_temp_c,
+        available_current_ma,
+        fixed_mv,
+        preview_heater_curve,
+        memory_config,
+    );
+    let capped_percent = (u32::from(safe_mv) * 100 / u32::from(fixed_mv)).min(100) as u8;
+    duty_percent.min(capped_percent)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn heater_request_mv_from_power_percent(duty_percent: u8, floor_mv: u16, ceiling_mv: u16) -> u16 {
     let bounded_min_mv = floor_mv.clamp(CH224Q_ADJUSTABLE_REQUEST_MIN_MV, HEATER_ADJUSTABLE_MAX_MV);
     let bounded_max_mv = ceiling_mv
@@ -5568,9 +5610,22 @@ where
                     return false;
                 }
             }
+            let negotiated_current_ma = pd_observation
+                .filter(|observation| observation.status.pd_active)
+                .map(|observation| observation.current_ma)
+                .unwrap_or(0);
+            let safe_duty_percent = fixed_pd_pwm_duty_percent(
+                duty_percent,
+                current_temp_c,
+                fixed_request.millivolts(),
+                negotiated_current_ma,
+                active_thermal_settings.heater_current_reserve_ma,
+                preview_heater_curve,
+                memory_config,
+            );
             apply_heater_duty(
                 heater_pwm,
-                apply_warmup_soft_start(duty_percent, warmup_soft_start_percent),
+                apply_warmup_soft_start(safe_duty_percent, warmup_soft_start_percent),
                 last_physical_duty_percent,
             );
             false
@@ -5799,9 +5854,22 @@ where
                         fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                     };
                     if fixed_request_confirmed {
+                        let negotiated_current_ma = pd_observation
+                            .filter(|observation| observation.status.pd_active)
+                            .map(|observation| observation.current_ma)
+                            .unwrap_or(0);
+                        let safe_duty_percent = fixed_pd_pwm_duty_percent(
+                            duty_percent,
+                            current_temp_c,
+                            DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                            negotiated_current_ma,
+                            active_thermal_settings.heater_current_reserve_ma,
+                            preview_heater_curve,
+                            memory_config,
+                        );
                         apply_heater_duty(
                             heater_pwm,
-                            apply_warmup_soft_start(duty_percent, warmup_soft_start_percent),
+                            apply_warmup_soft_start(safe_duty_percent, warmup_soft_start_percent),
                             last_physical_duty_percent,
                         );
                     }
@@ -6229,7 +6297,7 @@ fn usb_runtime_status(
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn usb_runtime_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-    config: RuntimeConfigCommand,
+    mut config: RuntimeConfigCommand,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -6386,6 +6454,11 @@ fn usb_runtime_config_response(
         }
     }
     config.apply_to(memory_config);
+    if config.heater_enabled == Some(true)
+        && !thermal_model_heater_allowed(memory_config, context.calibration, *manual_pps)
+    {
+        config.heater_enabled = Some(false);
+    }
     apply_memory_config_to_ui(ui_state, memory_config);
     if let Some(heater_enabled) = config.heater_enabled {
         ui_state.heater_enabled = heater_enabled;
@@ -7838,6 +7911,14 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 "LAN pairing code is not available until runtime initialization completes.",
                 true,
             ),
+            UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
+                usb_error_response_with_retryable(
+                    request_id,
+                    "startup_busy",
+                    "LAN pairing window is not available until runtime initialization completes.",
+                    true,
+                )
+            }
             UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
@@ -8009,6 +8090,14 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                 "LAN pairing code is unavailable because hardware bring-up did not complete.",
                 true,
             ),
+            UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
+                usb_error_response_with_retryable(
+                    request_id,
+                    "hardware_bringup_failed",
+                    "LAN pairing window is unavailable because hardware bring-up did not complete.",
+                    true,
+                )
+            }
             UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
                 request_id,
                 "hardware_bringup_failed",
@@ -8133,10 +8222,13 @@ async fn process_control_line(
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
             ),
-            UsbRequestOp::GetNetwork => usb_response(
-                request_id,
-                UsbResponsePayload::Network(flux_purr_firmware::net::lan_network_summary().await),
-            ),
+            UsbRequestOp::GetNetwork => {
+                #[cfg(feature = "net_http")]
+                let network = flux_purr_firmware::net::lan_network_summary().await;
+                #[cfg(not(feature = "net_http"))]
+                let network = network_from_memory(memory_config);
+                usb_response(request_id, UsbResponsePayload::Network(network))
+            }
             UsbRequestOp::GetStatus => usb_response(
                 request_id,
                 UsbResponsePayload::Status(usb_runtime_status(
@@ -8176,6 +8268,44 @@ async fn process_control_line(
                         request_id,
                         UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
                     )
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
+            UsbRequestOp::OpenLanPairingWindow => {
+                #[cfg(feature = "net_http")]
+                {
+                    let code = flux_purr_firmware::net::enter_pairing().await;
+                    ui_state.enter_wifi_pairing(code);
+                    needs_redraw = true;
+                    usb_response(
+                        request_id,
+                        UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
+                    )
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
+            UsbRequestOp::CloseLanPairingWindow => {
+                #[cfg(feature = "net_http")]
+                {
+                    flux_purr_firmware::net::leave_pairing().await;
+                    ui_state.leave_wifi_pairing();
+                    ui_state.route = FrontPanelRoute::Dashboard;
+                    needs_redraw = true;
+                    usb_response(request_id, UsbResponsePayload::Ack)
                 }
                 #[cfg(not(feature = "net_http"))]
                 {
@@ -8838,7 +8968,7 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     status_light_started_ms: u64,
 ) -> !
 where
-    BUS: embedded_hal_async::spi::SpiDevice,
+    BUS: embedded_hal::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
@@ -8851,9 +8981,7 @@ where
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    flush_ui(display, canvas, &ui_state)
-        .await
-        .expect("failed to draw initial key-test UI");
+    flush_ui(display, canvas, &ui_state).expect("failed to draw initial key-test UI");
     log_ui_state(&ui_state);
 
     let mut elapsed_ms: u64 = 0;
@@ -8901,9 +9029,7 @@ where
         }
 
         if needs_redraw {
-            flush_ui(display, canvas, &ui_state)
-                .await
-                .expect("failed to refresh key-test UI");
+            flush_ui(display, canvas, &ui_state).expect("failed to refresh key-test UI");
             log_ui_state(&ui_state);
         }
     }
@@ -8955,18 +9081,6 @@ async fn main(_spawner: Spawner) {
         &mut usb_tx_buf,
         &usb_boot_memory_config,
     );
-    // Give the host an explicit recovery window before optional LAN state is
-    // initialized. A WiFi failure must not turn a USB request into silence.
-    for _ in 0..25 {
-        #[cfg(feature = "web_serial")]
-        poll_usb_early_control(
-            &mut usb_serial,
-            &mut usb_rx_line,
-            &mut usb_tx_buf,
-            &usb_boot_memory_config,
-        );
-        EmbassyTimer::after_millis(20).await;
-    }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_heap_ready\n");
 
@@ -9664,6 +9778,10 @@ async fn main(_spawner: Spawner) {
     let mut ui_refresh_pending = false;
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
     let mut first_runtime_probe = true;
+    // USB automation can open WiFi Info after this loop has already sampled
+    // the keys. Do not let an event from that older sample immediately close
+    // the newly opened pairing window.
+    let mut suppress_pairing_input_until_released = false;
     loop {
         // Yield cooperatively while using the monotonic clock for deadlines.
         #[cfg(feature = "web_serial")]
@@ -9686,6 +9804,7 @@ async fn main(_spawner: Spawner) {
             ui_state.gesture_capabilities(),
         );
         let mut needs_redraw = false;
+        let route_before_usb_control = ui_state.route;
         #[cfg(feature = "web_serial")]
         loop {
             match usb_serial.read_byte() {
@@ -9741,6 +9860,11 @@ async fn main(_spawner: Spawner) {
                 Err(nb::Error::WouldBlock) => break,
                 Err(_) => break,
             }
+        }
+        let pairing_opened_by_usb = route_before_usb_control != FrontPanelRoute::WifiInfo
+            && ui_state.route == FrontPanelRoute::WifiInfo;
+        if pairing_opened_by_usb {
+            suppress_pairing_input_until_released = true;
         }
 
         #[cfg(feature = "net_http")]
@@ -9907,6 +10031,9 @@ async fn main(_spawner: Spawner) {
         }
 
         for event in sample.events {
+            if suppress_pairing_input_until_released {
+                continue;
+            }
             let route_before = ui_state.route;
             let heater_enabled_before = ui_state.heater_enabled;
             let active_cooling_enabled_before = ui_state.active_cooling_enabled;
@@ -10053,6 +10180,12 @@ async fn main(_spawner: Spawner) {
                     );
                 }
             }
+        }
+        if suppress_pairing_input_until_released
+            && !pairing_opened_by_usb
+            && sample.raw_state.first_pressed().is_none()
+        {
+            suppress_pairing_input_until_released = false;
         }
         if suppress_attention_ack_input
             && suppress_attention_ack_waits_for_event
@@ -10594,7 +10727,7 @@ async fn main(_spawner: Spawner) {
 
         ui_refresh_pending |= needs_redraw;
         if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
-            match flush_ui(&mut display, canvas, &ui_state).await {
+            match flush_ui(&mut display, canvas, &ui_state) {
                 Ok(()) => log_ui_state(&ui_state),
                 Err(_) => warn!("frontpanel UI refresh failed"),
             }
@@ -10701,6 +10834,18 @@ mod tests {
             configured_frequency_hz,
             fast_repeat_tone
         ));
+    }
+
+    #[test]
+    fn synchronous_display_delay_runs_before_the_future_is_polled() {
+        let mut observed_us = 0;
+
+        let unpolled = eager_display_delay(120, |microseconds| {
+            observed_us = microseconds;
+        });
+
+        assert_eq!(observed_us, 120_000);
+        drop(unpolled);
     }
 
     struct FakeUsbTx {
@@ -11007,7 +11152,7 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: Some(false),
-                heater_enabled: Some(true),
+                heater_enabled: Some(false),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
@@ -11038,11 +11183,59 @@ mod tests {
                 assert_eq!(request_id.as_str(), "runtime-1");
                 assert_eq!(status.target_temp_c, 240);
                 assert!(!status.active_cooling_enabled);
-                assert!(status.heater_enabled);
-                assert_eq!(status.heater_lock_reason, None);
+                assert!(!status.heater_enabled);
                 assert_eq!(status.uptime_seconds, 12);
                 assert_eq!(memory_config.target_temp_c, 240);
                 assert!(!memory_config.active_cooling_enabled);
+            }
+            other => panic!("unexpected runtime config response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_config_response_rejects_heater_arm_when_thermal_model_is_missing() {
+        let mut request_id = heapless::String::new();
+        request_id.push_str("runtime-heater-model-missing").unwrap();
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps = ManualPpsState::default();
+        let mut thermal_profile_preview = None;
+
+        let (response, _) = usb_runtime_config_response(
+            request_id,
+            RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: Some(true),
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                fault_attention_acknowledged: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                thermal_control_profile: None,
+                thermal_plant_model: None,
+            },
+            &mut ui_state,
+            &mut memory_config,
+            &mut manual_pps,
+            &mut thermal_profile_preview,
+            test_usb_runtime_status_context(),
+        );
+
+        match response {
+            UsbFrame::Response {
+                ok: true,
+                result: Some(UsbResponsePayload::Status(status)),
+                error: None,
+                ..
+            } => {
+                assert!(!status.heater_enabled);
+                assert_eq!(status.heater_output_percent, 0);
+                assert_eq!(status.heater_physical_output_percent, 0);
+                assert!(!ui_state.heater_enabled);
             }
             other => panic!("unexpected runtime config response: {other:?}"),
         }
@@ -15212,6 +15405,24 @@ mod tests {
     }
 
     #[test]
+    fn fixed_pd_runtime_caps_cold_plate_duty_to_the_negotiated_current_budget() {
+        let config = MemoryConfig::default();
+
+        assert_eq!(
+            fixed_pd_pwm_duty_percent(100, 20.0, 12_000, 3_250, 200, None, &config,),
+            80
+        );
+        assert_eq!(
+            fixed_pd_pwm_duty_percent(50, 20.0, 12_000, 3_250, 200, None, &config,),
+            50
+        );
+        assert_eq!(
+            fixed_pd_pwm_duty_percent(100, 20.0, 12_000, 0, 200, None, &config),
+            0
+        );
+    }
+
+    #[test]
     fn heater_backend_uses_pps_mos_only_when_pps_covers_20v() {
         let backend = select_heater_power_backend(
             Some(ch224q::AdjustablePowerCapabilities {
@@ -15843,6 +16054,14 @@ mod tests {
         assert!(lower_temp < midpoint_temp);
         assert!(midpoint_temp < upper_temp);
         assert!((midpoint_temp - ((lower_temp + upper_temp) * 0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn rtd_uses_the_documented_3v3_divider_supply() {
+        let temperature_c =
+            pt1000_temperature_c_from_resistance(rtd_resistance_ohms_from_mv(1_030).unwrap());
+
+        assert!((30.0..=36.0).contains(&temperature_c));
     }
 
     #[test]

@@ -12,10 +12,10 @@ pub mod frontpanel;
 pub mod lan;
 pub mod mdns;
 pub mod memory;
-pub mod status_light;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub mod net;
 pub mod net_http;
+pub mod status_light;
 pub mod thermal_plant;
 pub mod wifi_state;
 

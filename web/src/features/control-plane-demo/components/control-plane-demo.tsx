@@ -92,6 +92,11 @@ import {
   mergeDeviceChoices,
 } from '../device-target-picker'
 import {
+  knownWebSerialDeviceToTarget,
+  listKnownWebSerialDevices,
+  rememberKnownWebSerialDevice,
+} from '../known-web-serial-devices'
+import {
   authorizedLanRequest,
   createLanLease,
   isDirectLanDevice,
@@ -108,7 +113,12 @@ import {
   upsertLanDeviceTarget,
   writeLanRuntime,
 } from '../lan-client'
-import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
+import {
+  defaultDevdBaseUrl,
+  type LiveDevdOptions,
+  shouldHoldDevdLease,
+  useLiveDevdScenario,
+} from '../live-devd'
 import {
   type LiveWebSerialControls,
   type LiveWebSerialOptions,
@@ -119,11 +129,15 @@ import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
   HEATER_CONFIRMATION_TIMEOUT_MS,
+  heaterConfirmationNowMs,
   heaterLockReasonText,
+  lanLeaseAcquisitionRequest,
+  lanLeaseHeartbeatFailureDetail,
   type PendingHeaterConfirmation,
   resolvePendingHeaterConfirmation,
   runtimeHeaterState,
-  shouldAcquireLanLease,
+  shouldReacquireLanLeaseOnExplicitSelection,
+  shouldReplacePassiveFeedbackWithHeaterLock,
 } from '../runtime-status'
 import {
   artifactToManifest,
@@ -154,6 +168,8 @@ export interface LanRuntimeDependencies {
   releaseLease?: typeof releaseLanLease
   startLeaseHeartbeat?: typeof startLanLeaseHeartbeat
   streamEvents?: typeof streamLanEvents
+  probeDevice?: typeof probeLanDevice
+  writeRuntime?: typeof writeLanRuntime
 }
 
 type LanPairingOverrides = Omit<LanPairingPanelProps, 'onPaired'>
@@ -434,7 +450,17 @@ export function ControlPlaneDemo({
   lanPairing,
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
-  const liveDevdScenario = useLiveDevdScenario(scenario, devd)
+  const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
+  const [activeView, setActiveView] = useState<ConsoleView>(initialView)
+  const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
+    useState<AddDeviceKind>(defaultAddDeviceKind)
+  const liveDevdScenario = useLiveDevdScenario(scenario, {
+    ...devd,
+    leaseEnabled: shouldHoldDevdLease(
+      selectedDeviceId,
+      activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
+    ),
+  })
   const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(
     liveDevdScenario,
     webSerialOptions
@@ -450,16 +476,18 @@ export function ControlPlaneDemo({
       releaseLease: lanRuntimeOptions?.releaseLease ?? releaseLanLease,
       startLeaseHeartbeat: lanRuntimeOptions?.startLeaseHeartbeat ?? startLanLeaseHeartbeat,
       streamEvents: lanRuntimeOptions?.streamEvents ?? streamLanEvents,
+      probeDevice: lanRuntimeOptions?.probeDevice ?? probeLanDevice,
+      writeRuntime: lanRuntimeOptions?.writeRuntime ?? writeLanRuntime,
     }),
     [
       lanRuntimeOptions?.createLease,
       lanRuntimeOptions?.releaseLease,
       lanRuntimeOptions?.startLeaseHeartbeat,
       lanRuntimeOptions?.streamEvents,
+      lanRuntimeOptions?.probeDevice,
+      lanRuntimeOptions?.writeRuntime,
     ]
   )
-  const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
-  const [activeView, setActiveView] = useState<ConsoleView>(initialView)
   const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
@@ -490,9 +518,13 @@ export function ControlPlaneDemo({
     Record<string, { rtdTempC: number; vinMv: number }>
   >({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
-  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>([])
-  const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
-    useState<AddDeviceKind>(defaultAddDeviceKind)
+  const persistKnownWebSerialDevices =
+    !allowDemoControls && webSerialOptions?.persistKnownDevices !== false
+  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() =>
+    persistKnownWebSerialDevices
+      ? listKnownWebSerialDevices().map(knownWebSerialDeviceToTarget)
+      : []
+  )
   const [wifiSnapshotsByDevice, setWifiSnapshotsByDevice] = useState<
     Record<string, NetworkSummary>
   >({})
@@ -509,7 +541,7 @@ export function ControlPlaneDemo({
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
   const [pendingHeaterConfirmation, setPendingHeaterConfirmation] =
     useState<PendingHeaterConfirmation | null>(null)
-  const [heaterConfirmationTick, setHeaterConfirmationTick] = useState(0)
+  const [heaterConfirmationNow, setHeaterConfirmationNow] = useState(0)
   const [calibrationLeaveGuard, setCalibrationLeaveGuard] =
     useState<CalibrationLeaveGuardState | null>(null)
   const [feedback, setFeedback] = useState<ActionFeedback>({
@@ -547,6 +579,15 @@ export function ControlPlaneDemo({
     pendingDeviceModeRef.current = allowDemoControls
     setPendingDevices([])
   }, [allowDemoControls])
+
+  useEffect(() => {
+    if (!persistKnownWebSerialDevices) return
+    setPendingDevices((current) => {
+      const remembered = listKnownWebSerialDevices().map(knownWebSerialDeviceToTarget)
+      const rememberedIds = new Set(remembered.map((device) => device.id))
+      return [...remembered, ...current.filter((device) => !rememberedIds.has(device.id))]
+    })
+  }, [persistKnownWebSerialDevices])
 
   useEffect(() => {
     if (allowDemoControls) {
@@ -625,8 +666,35 @@ export function ControlPlaneDemo({
       return
     }
 
+    const connectedTarget = activeScenario.devices.find(
+      (device) => device.id === webSerial.deviceId
+    )
+    if (persistKnownWebSerialDevices && connectedTarget) {
+      const deviceId = connectedTarget.identityId ?? connectedTarget.id.replace(/^web-serial-/, '')
+      const remembered = {
+        deviceId,
+        hostname: connectedTarget.alias,
+        firmwareVersion: connectedTarget.firmware,
+        buildId: connectedTarget.buildId,
+      }
+      rememberKnownWebSerialDevice(remembered)
+      const hint = knownWebSerialDeviceToTarget(remembered)
+      setPendingDevices((current) => {
+        const existing = current.find((device) => device.id === hint.id)
+        if (
+          existing?.alias === hint.alias &&
+          existing.firmware === hint.firmware &&
+          existing.buildId === hint.buildId
+        ) {
+          return current
+        }
+        return [hint, ...current.filter((device) => device.id !== hint.id)]
+      })
+    }
+
     const currentSelection = deviceOptions.find((device) => device.id === preferredSelectedDeviceId)
     const shouldAdoptWebSerialTarget =
+      selectedAddDeviceKind === 'web-serial' ||
       !currentSelection ||
       isNoLiveTargetDevice(currentSelection) ||
       isPendingDeviceChoice(currentSelection)
@@ -634,7 +702,27 @@ export function ControlPlaneDemo({
     if (shouldAdoptWebSerialTarget && preferredSelectedDeviceId !== webSerial.deviceId) {
       setSelectedDeviceId(webSerial.deviceId)
     }
-  }, [deviceOptions, preferredSelectedDeviceId, webSerial.deviceId, webSerial.state])
+  }, [
+    deviceOptions,
+    preferredSelectedDeviceId,
+    activeScenario.devices,
+    persistKnownWebSerialDevices,
+    selectedAddDeviceKind,
+    webSerial.deviceId,
+    webSerial.state,
+  ])
+
+  useEffect(() => {
+    if (selectedAddDeviceKind !== 'web-serial' || webSerial.state !== 'error') {
+      return
+    }
+
+    setFeedback({
+      title: 'Web Serial unavailable',
+      detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+      tone: 'warning',
+    })
+  }, [selectedAddDeviceKind, webSerial.error, webSerial.state])
 
   useEffect(() => {
     const nextSelectedDevice = activeScenario.devices.find(
@@ -916,26 +1004,39 @@ export function ControlPlaneDemo({
   const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
   const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
   const lanDeviceBaseUrl = isDirectLanDevice(visibleDevice) ? visibleDevice.baseUrl : undefined
-  const lanDeviceAlias = lanDeviceId
-    ? pendingDevices.find((device) => device.id === lanDeviceId)?.alias
-    : undefined
   const lanLease = lanDeviceId ? lanLeasesByDevice[lanDeviceId] : undefined
+  const lanLeaseRequest = useMemo(
+    () =>
+      lanLeaseAcquisitionRequest(
+        {
+          id: visibleDevice.id,
+          alias: visibleDevice.alias,
+          baseUrl: visibleDevice.baseUrl,
+          transport: visibleDevice.transport,
+          leaseState: visibleDevice.leaseState,
+        },
+        Boolean(lanLease)
+      ),
+    [
+      lanLease,
+      visibleDevice.alias,
+      visibleDevice.baseUrl,
+      visibleDevice.id,
+      visibleDevice.leaseState,
+      visibleDevice.transport,
+    ]
+  )
 
   useEffect(() => {
-    if (!lanDeviceId || !lanDeviceBaseUrl) {
+    if (!lanLeaseRequest) {
       return
     }
-    if (lanLease) {
-      return
-    }
-    if (!shouldAcquireLanLease(visibleDevice)) {
-      return
-    }
-    const session = loadLanDeviceSession(lanDeviceBaseUrl)
+    const { alias, baseUrl, deviceId } = lanLeaseRequest
+    const session = loadLanDeviceSession(baseUrl)
     if (!session) {
       setPendingDevices((current) =>
         current.map((device) =>
-          device.id === lanDeviceId
+          device.id === deviceId
             ? {
                 ...device,
                 networkState: 'error',
@@ -954,12 +1055,12 @@ export function ControlPlaneDemo({
           void lanRuntime.releaseLease(session, created.leaseId).catch(() => undefined)
           return
         }
-        setLanLeasesByDevice((current) => ({ ...current, [lanDeviceId]: created }))
+        setLanLeasesByDevice((current) => ({ ...current, [deviceId]: created }))
         setFeedback((current) =>
           current.title === 'LAN 设备已配对' || current.title === '正在获取 LAN 租约'
             ? {
                 title: 'LAN 设备已连接',
-                detail: `${lanDeviceAlias ?? 'LAN 设备'} 已取得控制 lease。`,
+                detail: `${alias} 已取得控制 lease。`,
                 tone: 'success',
               }
             : current
@@ -969,7 +1070,7 @@ export function ControlPlaneDemo({
         if (retired) return
         setPendingDevices((current) =>
           current.map((device) =>
-            device.id === lanDeviceId
+            device.id === deviceId
               ? {
                   ...device,
                   leaseState: 'conflict',
@@ -982,7 +1083,7 @@ export function ControlPlaneDemo({
     return () => {
       retired = true
     }
-  }, [lanDeviceAlias, lanDeviceBaseUrl, lanDeviceId, lanLease, lanRuntime, visibleDevice])
+  }, [lanLeaseRequest, lanRuntime])
 
   useEffect(() => {
     if (!lanDeviceId || !lanDeviceBaseUrl || !lanLease) {
@@ -993,7 +1094,7 @@ export function ControlPlaneDemo({
       return
     }
     let retired = false
-    const stopHeartbeat = lanRuntime.startLeaseHeartbeat(session, lanLease, () => {
+    const stopHeartbeat = lanRuntime.startLeaseHeartbeat(session, lanLease, (error) => {
       if (retired) return
       setLanLeasesByDevice((current) => {
         if (current[lanDeviceId]?.leaseId !== lanLease.leaseId) {
@@ -1009,7 +1110,7 @@ export function ControlPlaneDemo({
             ? {
                 ...device,
                 leaseState: 'expired',
-                transportIssue: 'LAN lease 心跳失败，请重新选择设备。',
+                transportIssue: lanLeaseHeartbeatFailureDetail(error.message),
               }
             : device
         )
@@ -1151,6 +1252,14 @@ export function ControlPlaneDemo({
       return
     }
 
+    if (
+      activeView === 'add-device' &&
+      selectedAddDeviceKind === 'web-serial' &&
+      (webSerial.state === 'connecting' || webSerial.state === 'error')
+    ) {
+      return
+    }
+
     const blockedReason = deviceControlBlockReason(visibleDevice)
     if (!blockedReason) {
       return
@@ -1172,7 +1281,7 @@ export function ControlPlaneDemo({
         tone: 'warning',
       }
     })
-  }, [visibleDevice, visibleDeviceIsLive])
+  }, [activeView, selectedAddDeviceKind, visibleDevice, visibleDeviceIsLive, webSerial.state])
 
   useEffect(() => {
     if (!visibleDeviceIsLive || !visibleDevice.heaterLockReason) {
@@ -1181,6 +1290,9 @@ export function ControlPlaneDemo({
 
     const detail = heaterLockReasonText(visibleDevice.heaterLockReason)
     setFeedback((current) => {
+      if (!shouldReplacePassiveFeedbackWithHeaterLock(current.title)) {
+        return current
+      }
       if (current.title === '加热安全锁已触发' && current.detail === detail) {
         return current
       }
@@ -1202,7 +1314,7 @@ export function ControlPlaneDemo({
       HEATER_CONFIRMATION_TIMEOUT_MS - (Date.now() - pendingHeaterConfirmation.requestedAtMs)
     )
     const timer = window.setTimeout(() => {
-      setHeaterConfirmationTick((current) => current + 1)
+      setHeaterConfirmationNow(Date.now())
     }, remainingMs)
 
     return () => window.clearTimeout(timer)
@@ -1224,7 +1336,9 @@ export function ControlPlaneDemo({
       }
       return {
         title: '运行时已同步',
-        detail: '当前热控状态来自 devd 固件状态。',
+        detail: isDirectWebSerialDevice(visibleDevice)
+          ? '当前热控状态来自浏览器 Web Serial。'
+          : '当前热控状态来自 devd 固件状态。',
         tone: 'info',
       }
     })
@@ -1493,7 +1607,7 @@ export function ControlPlaneDemo({
     const resolution = resolvePendingHeaterConfirmation(
       pendingHeaterConfirmation,
       visibleDevice,
-      pendingHeaterConfirmation.requestedAtMs + heaterConfirmationTick
+      heaterConfirmationNowMs(pendingHeaterConfirmation.requestedAtMs, heaterConfirmationNow)
     )
     if (resolution.outcome === 'pending') {
       return
@@ -1504,7 +1618,7 @@ export function ControlPlaneDemo({
     emitEvent('heater', resolution.eventMessage, resolution.eventTone)
   }, [
     emitEvent,
-    heaterConfirmationTick,
+    heaterConfirmationNow,
     pendingHeaterConfirmation,
     visibleDevice,
     visibleDeviceIsLive,
@@ -1588,10 +1702,39 @@ export function ControlPlaneDemo({
           return false
         }
         try {
-          await writeLanRuntime(session, visibleDevice.leaseId, patch)
+          const preflight = await lanRuntime.probeDevice(session, undefined, 'serial')
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === visibleDevice.id ? applyLanStatus(device, preflight.status) : device
+            )
+          )
+          const updatedStatus = await lanRuntime.writeRuntime(session, visibleDevice.leaseId, patch)
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === visibleDevice.id ? applyLanStatus(device, updatedStatus) : device
+            )
+          )
           return true
         } catch (error) {
-          const detail = error instanceof Error ? error.message : failureMessage
+          const staleWrite =
+            error instanceof ControlPlaneClientError && error.code === 'stale_write'
+          if (staleWrite) {
+            try {
+              const refreshed = await lanRuntime.probeDevice(session, undefined, 'serial')
+              setPendingDevices((current) =>
+                current.map((device) =>
+                  device.id === visibleDevice.id ? applyLanStatus(device, refreshed.status) : device
+                )
+              )
+            } catch {
+              // The original stale-write result remains the actionable failure.
+            }
+          }
+          const detail = staleWrite
+            ? '设备控制状态已变化，已读取最新状态；请确认后重新提交。'
+            : error instanceof Error
+              ? error.message
+              : failureMessage
           setFeedback({ title: 'LAN runtime update failed', detail, tone: 'warning' })
           emitEvent('lan', failureMessage, 'warning')
           return false
@@ -1628,6 +1771,8 @@ export function ControlPlaneDemo({
       controlClient,
       devdBaseUrl,
       emitEvent,
+      lanRuntime.probeDevice,
+      lanRuntime.writeRuntime,
       visibleDevice,
       webSerial,
     ]
@@ -1866,6 +2011,32 @@ export function ControlPlaneDemo({
         nextLabel: nextDevice?.alias ?? '切换设备',
       },
       () => {
+        if (
+          nextDevice &&
+          isDirectWebSerialDevice(nextDevice) &&
+          (webSerial.state !== 'connected' || webSerial.deviceId !== nextDevice.id)
+        ) {
+          setSelectedAddDeviceKind('web-serial')
+          setFeedback({
+            title: '正在验证 Web Serial 设备',
+            detail: `正在通过浏览器已授权串口核对 ${nextDevice.alias} 的设备 ID。`,
+            tone: 'info',
+          })
+          emitEvent('webserial', `verifying remembered device ${nextDevice.alias}`, 'info')
+          void handleWebSerialConnect({ replaceExisting: true }).then((connected) => {
+            if (connected) setActiveView('dashboard')
+          })
+          return
+        }
+        if (nextDevice && shouldReacquireLanLeaseOnExplicitSelection(nextDevice)) {
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === nextDevice.id
+                ? { ...device, leaseState: 'none', transportIssue: undefined }
+                : device
+            )
+          )
+        }
         setSelectedDeviceId(deviceId)
         setFlashRun({ status: 'idle', progress: 0 })
         flashCompletionEmittedRef.current = false
@@ -1896,27 +2067,16 @@ export function ControlPlaneDemo({
     flashCompletionEmittedRef.current = false
 
     if (kind === 'web-serial' && !allowDemoControls) {
-      if (webSerial.state === 'connected') {
-        if (webSerial.deviceId) {
-          setSelectedDeviceId(webSerial.deviceId)
-          setActiveView('dashboard')
-        }
-        setFeedback({
-          title: 'Web Serial already connected',
-          detail: 'The browser Web Serial target is already listed in the target selector.',
-          tone: 'info',
-        })
-        emitEvent('webserial', 'browser Web Serial target already connected', 'info')
-        return
-      }
-
       setFeedback({
         title: '正在连接 Web Serial',
         detail: '正在等待浏览器选择串口；连接超时后会自动结束并允许重试。',
         tone: 'info',
       })
       emitEvent('webserial', 'waiting for browser Web Serial port selection', 'info')
-      const connected = await handleWebSerialConnect()
+      const connected = await handleWebSerialConnect({
+        forcePortSelection: true,
+        replaceExisting: true,
+      })
       if (connected) {
         setActiveView('dashboard')
       }
@@ -2043,19 +2203,11 @@ export function ControlPlaneDemo({
     ]
   )
 
-  async function handleWebSerialConnect() {
-    if (webSerial.state === 'connected') {
-      await webSerial.disconnect()
-      setFeedback({
-        title: 'Web Serial disconnected',
-        detail: 'Browser direct USB control is closed.',
-        tone: 'info',
-      })
-      emitEvent('webserial', 'browser direct USB control disconnected', 'info')
-      return false
-    }
-
-    const connected = await webSerial.connect()
+  async function handleWebSerialConnect(options?: {
+    forcePortSelection?: boolean
+    replaceExisting?: boolean
+  }) {
+    const connected = await webSerial.connect(options)
     setFeedback(
       connected
         ? {
@@ -2109,7 +2261,20 @@ export function ControlPlaneDemo({
           { targetTempC: clampedTarget },
           'target temperature update was not accepted by devd'
         )
-        if (liveUpdated || targetTempCommitVersionRef.current[deviceId] !== nextVersion) {
+        if (targetTempCommitVersionRef.current[deviceId] !== nextVersion) {
+          return
+        }
+        if (liveUpdated) {
+          setFeedback({
+            title: 'Target updated',
+            detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
+            tone: 'success',
+          })
+          emitEvent(
+            'thermal',
+            `target temperature updated to ${formatTemp(clampedTarget)}`,
+            'success'
+          )
           return
         }
         setTargetTempByDevice((current) => {
@@ -2120,12 +2285,14 @@ export function ControlPlaneDemo({
       }, 180)
     }
 
-    setFeedback({
-      title: 'Target updated',
-      detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
-      tone: 'success',
-    })
-    emitEvent('thermal', `target temperature updated to ${formatTemp(clampedTarget)}`, 'success')
+    if (!visibleDeviceIsLive) {
+      setFeedback({
+        title: 'Target updated',
+        detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
+        tone: 'success',
+      })
+      emitEvent('thermal', `target temperature updated to ${formatTemp(clampedTarget)}`, 'success')
+    }
   }
 
   const handleFanPolicyChange = async (fanState: DeviceTarget['fanState']) => {
@@ -2314,10 +2481,12 @@ export function ControlPlaneDemo({
       return
     }
     if (visibleDeviceIsLive) {
+      const requestedAtMs = Date.now()
+      setHeaterConfirmationNow(requestedAtMs)
       setPendingHeaterConfirmation({
         deviceId: visibleDevice.id,
         requestedEnabled: nextHeaterEnabled,
-        requestedAtMs: Date.now(),
+        requestedAtMs,
       })
       setFeedback(createPendingHeaterFeedback(nextHeaterEnabled))
       return
@@ -4533,10 +4702,7 @@ function AddDeviceChoices({
   selectedKind?: AddDeviceKind
 }) {
   const webSerialDisabled =
-    !allowDemoControls &&
-    (webSerial.state === 'unsupported' ||
-      webSerial.state === 'connecting' ||
-      webSerial.state === 'connected')
+    !allowDemoControls && (webSerial.state === 'unsupported' || webSerial.state === 'connecting')
 
   return (
     <div className="industrial-add-device-grid">
@@ -4546,11 +4712,9 @@ function AddDeviceChoices({
         const label =
           item.kind === 'web-serial' && webSerial.state === 'connecting'
             ? 'Web Serial (connecting)'
-            : item.kind === 'web-serial' && webSerial.state === 'connected'
-              ? 'Web Serial connected'
-              : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
-                ? 'Web Serial unavailable'
-                : item.label
+            : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
+              ? 'Web Serial unavailable'
+              : item.label
 
         return (
           <button

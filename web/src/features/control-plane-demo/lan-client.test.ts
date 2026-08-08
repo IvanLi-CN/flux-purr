@@ -12,6 +12,7 @@ import {
   probeLanDevice,
   scanLanSubnet,
   storeLanAddress,
+  storeLanDeviceSession,
   storeLanScanCidr,
   streamLanEvents,
   upsertLanDeviceTarget,
@@ -198,7 +199,7 @@ describe('LAN browser client', () => {
     expect(fetcher).toHaveBeenCalledTimes(3)
   })
 
-  it('probes identity, network, and status concurrently and remembers the newest revision', async () => {
+  it('limits the initial LAN probe to the two device HTTP workers and remembers the newest revision', async () => {
     let activeRequests = 0
     let maximumActiveRequests = 0
     const requestOrder: string[] = []
@@ -237,7 +238,7 @@ describe('LAN browser client', () => {
       expect(requestOrder).toEqual(
         expect.arrayContaining(['/api/v1/identity', '/api/v1/network', '/api/v1/status'])
       )
-      expect(maximumActiveRequests).toBe(3)
+      expect(maximumActiveRequests).toBe(2)
       expect(session.controlRevision).toBe(7)
       expect(JSON.parse(records.get('flux-purr:lan-device:http://192.168.1.10') ?? '{}')).toEqual(
         expect.objectContaining({ controlRevision: 7 })
@@ -247,7 +248,70 @@ describe('LAN browser client', () => {
     }
   })
 
-  it('falls back to a serial probe when concurrent reads hit a transport limit', async () => {
+  it('keeps the first probe after pairing serial until the claim socket is released', async () => {
+    let activeRequests = 0
+    let maximumActiveRequests = 0
+    const requestOrder: string[] = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      activeRequests += 1
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests)
+      requestOrder.push(new URL(String(input)).pathname)
+      await new Promise((resolve) => setTimeout(resolve, 1))
+      activeRequests -= 1
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+      })
+    }) as unknown as typeof fetch
+
+    await probeLanDevice(
+      { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) },
+      fetcher,
+      'serial'
+    )
+
+    expect(maximumActiveRequests).toBe(1)
+    expect(requestOrder).toEqual(['/api/v1/identity', '/api/v1/network', '/api/v1/status'])
+  })
+
+  it('replaces a persisted revision with the serial preflight revision after a device reboot', async () => {
+    const records = new Map<string, string>()
+    vi.stubGlobal('window', {
+      localStorage: {
+        get length() {
+          return records.size
+        },
+        clear: () => records.clear(),
+        getItem: (key: string) => records.get(key) ?? null,
+        key: (index: number) => Array.from(records.keys())[index] ?? null,
+        removeItem: (key: string) => records.delete(key),
+        setItem: (key: string, value: string) => records.set(key, value),
+      },
+    })
+    const session: import('./lan-client').LanDeviceSession = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 42,
+    }
+    const fetcher = vi.fn(async () => {
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+      })
+    }) as unknown as typeof fetch
+
+    try {
+      await probeLanDevice(session, fetcher, 'serial')
+      expect(session.controlRevision).toBe(7)
+      expect(JSON.parse(records.get('flux-purr:lan-device:http://192.168.1.10') ?? '{}')).toEqual(
+        expect.objectContaining({ controlRevision: 7 })
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls back to a serial probe when the two-worker read batch hits a transport limit', async () => {
     let activeRequests = 0
     let concurrentFailure = false
     const fetcher = vi.fn(async (_input: RequestInfo | URL) => {
@@ -271,7 +335,7 @@ describe('LAN browser client', () => {
       probeLanDevice({ baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }, fetcher)
     ).resolves.toBeDefined()
     expect(concurrentFailure).toBe(true)
-    expect(fetcher).toHaveBeenCalledTimes(6)
+    expect(fetcher).toHaveBeenCalledTimes(5)
   })
 
   it('sends the last device revision with a LAN write', async () => {
@@ -294,6 +358,55 @@ describe('LAN browser client', () => {
     await writeLanRuntime(session, 'lease-1', { targetTempC: 120 }, fetcher)
 
     expect(session.controlRevision).toBe(8)
+  })
+
+  it('persists a successful LAN write revision for the next reloaded write', async () => {
+    const records = new Map<string, string>()
+    vi.stubGlobal('window', {
+      localStorage: {
+        get length() {
+          return records.size
+        },
+        clear: () => records.clear(),
+        getItem: (key: string) => records.get(key) ?? null,
+        key: (index: number) => Array.from(records.keys())[index] ?? null,
+        removeItem: (key: string) => records.delete(key),
+        setItem: (key: string, value: string) => records.set(key, value),
+      },
+    })
+    const revisions: string[] = []
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const revision = (init?.headers as Record<string, string>)['X-Flux-Purr-Revision']
+      revisions.push(revision)
+      return new Response(JSON.stringify({ accepted: true }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': String(Number(revision) + 1),
+        },
+      })
+    }) as unknown as typeof fetch
+    const initialSession = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 7,
+    }
+
+    try {
+      storeLanDeviceSession(initialSession)
+      await writeLanRuntime(initialSession, 'lease-1', { targetTempC: 120 }, fetcher)
+
+      const reloadedSession = loadLanDeviceSession(initialSession.baseUrl)
+      expect(reloadedSession?.controlRevision).toBe(8)
+      if (!reloadedSession) {
+        throw new Error('expected persisted LAN session')
+      }
+      await writeLanRuntime(reloadedSession, 'lease-1', { targetTempC: 121 }, fetcher)
+
+      expect(revisions).toEqual(['7', '8'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('validates manual addresses and pairing codes before issuing a request', async () => {

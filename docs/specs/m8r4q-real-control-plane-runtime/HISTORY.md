@@ -2,14 +2,28 @@
 
 ## 2026-08-05
 
-- Web Serial 连接曾把 `navigator.serial.requestPort()` 的无限等待直接映射为 `Web Serial (connecting)`，且点击后仍保留旧的 devd `Failed to fetch` 反馈。现将端口选择、打开和首次 probe 统一收敛为 `15s` 有界事务，开始时立即显示等待串口选择提示，超时后给出可重试错误并关闭迟到的端口；Storybook 固定覆盖该挂起路径。
+- 浏览器现在记忆已成功确认的 Web Serial 设备身份，并把该连接方式保留在对应设备卡片中。设备卡片快速连接会优先复用唯一授权端口，但仍以固件 `deviceId` 重新验证；USB 设备已替换时，实际硬件会作为另一台设备注册，旧记录保持离线，不会因浏览器授权仍存在而误合并。
+- Add device 的 Web Serial 卡片不再因已有浏览器串口会话而禁用，也不再把点击解释成“返回当前设备”。添加动作在用户手势内强制打开原生端口选择器，选中新端口后安全替换旧会话；取消选择时继续保留当前设备。
+- 固件缺少 thermal model 时，`runtime_config` 曾先回包 `heaterEnabled=true`，随后状态轮询才回到安全锁定的 `false`，造成 Web 出现短暂成功或永久等待。响应现在在应用前归一化为设备事实，Web 的确认计时使用真实时间戳并在 2.5 秒内收敛到明确拒绝；浏览器点击加热不会触发复位或虚构输出。
+- 浏览器 Web Serial 的首次设备选择必须在点击手势内同步调用 `requestPort`；授权端口查询移至稳定页面生命周期，确保复用已授权端口不会阻断首次授权。取消原生选择器、超时和安全锁状态分别归属明确的 UI 状态，不再相互覆盖。
+- LAN lease 心跳的设备协议错误保留为可操作的页面反馈；只有浏览器未获得响应时才使用泛化 transport 结果，过期 lease 不得继续参与写入。
+- Browser direct-LAN runtime 写入在旧 session revision 与设备状态竞争时，现会在 PUT 前读取最新 snapshot；若写入仍被 `stale_write` 拒绝，只回读一次并恢复 UI 到设备事实，绝不自动重放原控制命令或报告成功。
+
+- 生产板环境温度约 `31°C` 时，稳定 RTD 原始读数约 `1030mV` 被旧 `3000mV` 分压假设误算为约 `78°C`。硬件基线实际为 `3V3 -> 2.49 kOhm -> PT1000`，运行时恢复 `3300mV` 电路模型；同一真机读数回报 `33.42°C`。ADC 个体误差继续由持久化 RTD calibration 承担，不再污染分压拓扑常量。
+- Web Serial 连接曾把 `navigator.serial.requestPort()` 的无限等待直接映射为 `Web Serial (connecting)`，且点击后仍保留旧的 devd `Failed to fetch` 反馈。连接事务现以 `60s` 为总预算，端口打开后为 ESP32-S3 USB Serial/JTAG 重启保留 `10s` 稳定期，再执行可重试的首次 probe；开始时立即显示等待串口选择提示，超时后给出可重试错误并关闭迟到的端口。
+- Browser Web Serial 曾使用 `2 KiB` 单行缓冲，而 firmware 与 native devd 的 USB JSONL 合同为 `8 KiB`。identity/network 能被读取，但完整 status 超过浏览器上限后被静默丢弃，最终表现为连接超时。浏览器 reader 现与协议统一为 `8 KiB`，测试用超过 `2 KiB` 的 status fixture 锁定该回归；真机已通过 identity/network/status 和 `runtime_config` 写入回读。
+- Browser Web Serial 曾静默丢弃 firmware 的 reset/panic 标记，设备复位后页面只能留下旧状态或泛化断线。reader 现仅接受协议定义的 `reset_reason=` 与 `panic=` 标记，清除复位前 snapshot 并显示设备报告的原因；任意 boot chatter 仍不会改变 UI 状态。
 - 顶部目标选择器曾把同一硬件的 native DEVD、Web Serial、WiFi/LAN 与 bridge records 当成多台设备，用户无法确认要连接的物理设备。现按固件稳定 `identityId/deviceId` 合并为单张设备卡片，卡片显示 hostname 与设备 ID，并固定提供最多三种公开连接方式：WiFi/LAN、Web Serial 与桥接。DEVD USB 与 WiFi/LAN 发现结果只作为桥接方式的内部来源；重复记录按健康状态优先，避免旧地址或异常记录覆盖当前 target。
 - 设备卡片的三个连接方式与“添加设备”操作现在各自显示对应的 Lucide 图标，文字、次要地址和方向箭头保持原有布局，降低重复按钮的识别成本。
 - 设备卡片曾用 `auto-fit` 把唯一连接方式拉伸为整行，顶部触发器也同时显示 CSS select 箭头与组件 Chevron。连接方式现固定为最多三列，单个方式保持三分之一宽度；触发器只保留一个随展开状态旋转的 Chevron。
 - LAN pairing claim 曾生成缺少 `api` 字段结束引号的 `200` 响应，浏览器因此在领取 token 后抛出 JSON 解析异常；Web 又把该非协议化异常显示成对话框背后的通用连接失败。claim 响应现由 firmware host test 锁定合法字段边界，Web 将无法解析的成功响应归类为明确的协议错误，并在当前配对对话框内展示具体原因。
-- Claim 响应修正后，Web 的并发 identity/network/status probe 暴露了设备只有一个 HTTP workspace 与单一 response signal 的限制。控制面现使用 3 个独立 HTTP worker 支持并发读连接，响应按 worker 路由；mutation 继续由主循环串行执行，并以单调 control revision 拒绝过时写。Web 恢复并发 probe，devd/CLI 在写前读取 revision，客户端不再以串行请求掩盖设备端限制。
+- Claim 响应修正后，Web 的并发 identity/network/status probe 暴露了设备只有一个 HTTP workspace 与单一 response signal 的限制。控制面使用两个静态 TCP socket 支持两个同时在途连接；identity/network 从发布快照直接回答，不消耗唯一的 mutation-capable workspace，status、SSE 与写入继续由主控制循环串行执行，并以单调 control revision 拒绝过时写。这个模型避免为常用只读 probe 扩增大 request buffer，也不把资源受限伪装成 PNA 或 WiFi station failure。Web 保持并发 probe，devd/CLI 在写前读取 revision，客户端不再以串行请求掩盖设备端限制。
+- 设备重启后 LAN lease 会自然从设备内存消失，但已配对 bearer token 仍有效。direct LAN 在 operator 重新选择该连接方式时把 expired 重新申请为可控 lease；心跳失败本身保持 expired 和只读，只有设备明确返回 conflict 才保持冲突，避免静默抢占或把重启后的设备永久显示为 lease 失效。
+- 原生 USB I/O 若被前一个请求占用，后续 devd 请求不能无限等待互斥锁。串口 worker 以有限等待返回 `serial_lock_timeout`，页面保持 transport 原因而不覆盖最后一次 WiFi 网络事实；物理连接恢复后可重新取得同一互斥会话。
+- 真机 Chromium 配对显示 `200` 但 identity/network body 为空时，根因是 CORS、PNA、revision 与响应终止行总长超过 `384` 字节，heapless header 被静默截断。响应头现由纯 formatter 在固定 `640` 字节容量内完整构造并由 host test 验证，真机的跨域 bearer identity readback 已返回完整 JSON。
+- 已配对 LAN target 从 Bridge 切回 WiFi/LAN 时曾持续显示禁用控件。lease effect 依赖完整的 `visibleDevice`，每次 DEVD poll 都会取消在途请求；现收敛为稳定连接字段，真机切回 WiFi/LAN 后重新取得 lease 并恢复控制。Web Serial 同时优先复用唯一的既有浏览器授权端口，避免不必要的选择器。
 - CIDR 扫描候选曾显示“选择”，点击后只回填地址，用户还必须再次点击上方“连接设备”，造成候选行主动作与实际意图不一致。现改为候选行直接显示并执行“连接”，复用同一 health、配对、probe 和 lease 流程；连接未完成前仍不注册或切换顶部目标。
-- 旧版固件在多个 bearer 读取同时到达时仍可能只接受一个 TCP 请求，导致 claim 已成功后 probe 被误报为“配对凭据已保存、读取状态中断”。固件现使用单一 TCP acceptor 和三个并发 worker；Web 仅对传输级失败执行一次串行兼容重试，并把 lease 失败与 probe/配对失败分开表达，避免把成功配对事实覆盖成 WiFi 错误。
+- 旧版固件在多个 bearer 读取同时到达时仍可能只接受一个 TCP 请求，导致 claim 已成功后 probe 被误报为“配对凭据已保存、读取状态中断”。固件现使用单一 TCP acceptor 和两个静态 socket；identity/network 走发布快照，唯一 mutation-capable workspace 承担 status、SSE 与写入。Web 仅对旧设备的传输级失败执行一次串行兼容重试，并把 lease 失败与 probe/配对失败分开表达，避免把成功配对事实覆盖成 WiFi 错误。
 - 配对后的 control revision 曾只存在于内存 session；控制面随后从 localStorage 重新读取 session 时，第一次 runtime 写入会被 stale-write 保护拦截且没有设备请求。probe 现在把设备回报的 revision 持久化到同一 LAN session，刷新与自动恢复路径复用同一保护值。
 - 冷启动恢复的 WiFi 配置不再复用运行时 `apply_wifi_config` signal。旧路径在 task spawn 前留下 signal，首个 DHCP lease 成功后会立即把 station 断开，同时状态机仍停在 `connected` 并永久等待下一次配置，表现为 USB 回显 IP/RSSI 正常但路由器 ARP 与 `/health` 均不可达。启动配置现由 `net::spawn` 直接初始化；运行时 USB 配置仍走独立 apply signal。断线等待同时改为保留 pending driver event，避免 DHCP 与监听注册之间的竞态。
 - 授权端口 `/dev/cu.usbmodem2111401` 经 repo-local `flux-purr -> devd -> espflash` 重刷后保留 SSID `Ivan` 与九位密码长度。未再次提交 WiFi 表单的冷启动 trace 为 `connecting -> connected`，设备在 `192.168.31.189` 的匿名 `/health` 回显 `a0f262f20d6c / flux-purr-a0f262f20d6c`；该 receipt 证明 DHCP 后 HTTP 数据面可达，不替代尚未完成的 mDNS、配对、lease 与 Chromium 控制闭环。
@@ -32,7 +46,7 @@
 
 ## 2026-07-30
 
-- ESP32-S3 LAN control-plane 的 executor 内存契约固定为 `task-arena-size-81920`。早期实现曾用单个静态 HTTP workspace 避免 `HttpGate`、邮箱命令和控制响应跨 `await` 时把 task arena 耗尽；该限制后来由 3 个不进入 task frame 的静态 worker workspace 取代。WiFi 初始化仍后移至 USB recovery 初始化之后，使 LAN 启动失败不会阻断 USB JSONL 控制。
+- ESP32-S3 LAN control-plane 的 Embassy executor 内存契约固定为 `task-arena-size-81920`。HTTP workspace 不进入 async task frame；两个 worker 使用静态 TCP 缓冲、一个静态 workspace 与一个回收堆 workspace，在支持 Web 与 DEVD/CLI 并发读的同时保留主栈及 WiFi/executor 内存余量。WiFi 初始化仍后移至 USB recovery 初始化之后，使 LAN 启动失败不会阻断 USB JSONL 控制。
 
 ## 2026-07-27
 
@@ -167,6 +181,7 @@
 - 授权端口 `/dev/cu.usbmodem21221401` 上完成 Web -> `devd` -> USB JSONL -> firmware 浏览器验证：Web 自动选中 `USB JTAG/serial debug unit / DEVD`，达到 active lease，读取真实 PD/status/network，并通过 active lease 执行 runtime 写入。
 - 授权端口 WiFi provisioning 复验完成：临时 SSID set、clear、restore 与 redacted bounded events 通过 smoke；最终直接 USB JSONL clear 后 `get_network` 返回 `state=disabled`、`ssid=null`。
 - `devd` native serial RPC 改为复用持久 per-port session，并让 port-scoped process lock 跟打开的 fd 同生命周期，避免 Web/devd polling 每轮重新打开 ESP32-S3 USB Serial/JTAG 造成持续 reset；硬件验证显示首次 open 仍可能 reset，但后续 API/Web polling 和安全 runtime 写入期间 uptime 单调增加。
+- Browser Web Serial 曾在 `port.open()` 后主动写 DTR/RTS，并固定等待 10 秒，把 USB Serial/JTAG 复位误当成连接初始化。连接客户端现不再触碰控制线或等待预期复位，打开后直接执行有界只读 probe；复位只能由固件诊断行明确报告，设备连接不得改变运行状态。
 - Web runtime target control 改为在 devd/firmware 确认 `PUT /runtime` 成功后立即回显目标温度，并在下一轮真实 polling 对齐后清理临时覆盖，减少 live 硬件控制时的回显等待。
 - Web Settings fan policy segmented control 改为在 devd runtime 写入成功后立即回显 operator 选择，避免按钮组选中态与反馈文本分裂；当前 firmware status 的 `fanDisplayState` 仍代表实际风扇显示状态。
 
@@ -204,3 +219,4 @@
 ## 2026-08-05
 
 - 顶部 native target 名称改为固件 identity，而不是 USB product descriptor。选择器 trigger 与 dropdown item 分离渲染，避免 Radix 把双行下拉内容重复投影后造成文字重叠。
+- 物理 WiFi Info 页面仍是四位 LAN pairing code 的唯一可用窗口，但已授权 USB/devd CLI 可以显式打开、读取并关闭该窗口。这样自动化能完成真实浏览器配对，同时不会把 code 或窗口控制暴露给 LAN。

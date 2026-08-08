@@ -3,8 +3,13 @@ import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
   HEATER_CONFIRMATION_TIMEOUT_MS,
+  heaterConfirmationNowMs,
+  lanLeaseAcquisitionRequest,
+  lanLeaseHeartbeatFailureDetail,
   resolvePendingHeaterConfirmation,
   shouldAcquireLanLease,
+  shouldReacquireLanLeaseOnExplicitSelection,
+  shouldReplacePassiveFeedbackWithHeaterLock,
 } from './runtime-status'
 import type { DeviceTarget } from './types'
 
@@ -67,6 +72,11 @@ function makeDevice(overrides: Partial<DeviceTarget> = {}): DeviceTarget {
 }
 
 describe('pending heater confirmation', () => {
+  it('uses the timer timestamp after the confirmation deadline fires', () => {
+    expect(heaterConfirmationNowMs(1_000, 0)).toBe(1_000)
+    expect(heaterConfirmationNowMs(1_000, 3_500)).toBe(3_500)
+  })
+
   it('reports a neutral waiting state immediately after a live resume request', () => {
     expect(createPendingHeaterFeedback(true)).toEqual({
       title: 'Heater resume requested',
@@ -161,11 +171,30 @@ describe('pending heater confirmation', () => {
 })
 
 describe('direct LAN lease guard', () => {
-  it('does not reacquire a lease after an explicit conflict or expiry', () => {
+  it('preserves a protocol heartbeat failure instead of replacing it with a generic error', () => {
+    expect(lanLeaseHeartbeatFailureDetail(' Another LAN client owns the lease. ')).toBe(
+      'LAN lease 心跳失败：Another LAN client owns the lease.'
+    )
+    expect(lanLeaseHeartbeatFailureDetail('')).toBe('LAN lease 心跳失败，请重新选择设备。')
+  })
+
+  it('does not reacquire a heartbeat-expired lease or steal an explicit conflict', () => {
     expect(shouldAcquireLanLease({ leaseState: 'none' })).toBe(true)
     expect(shouldAcquireLanLease({ leaseState: 'active' })).toBe(true)
     expect(shouldAcquireLanLease({ leaseState: 'conflict' })).toBe(false)
     expect(shouldAcquireLanLease({ leaseState: 'expired' })).toBe(false)
+  })
+
+  it('only reopens an expired lease after the operator explicitly reselects direct LAN', () => {
+    expect(
+      shouldReacquireLanLeaseOnExplicitSelection({ transport: 'wifi', leaseState: 'expired' })
+    ).toBe(true)
+    expect(
+      shouldReacquireLanLeaseOnExplicitSelection({ transport: 'devd', leaseState: 'expired' })
+    ).toBe(false)
+    expect(
+      shouldReacquireLanLeaseOnExplicitSelection({ transport: 'wifi', leaseState: 'conflict' })
+    ).toBe(false)
   })
 
   it('blocks direct LAN writes until the device confirms an active lease', () => {
@@ -188,5 +217,36 @@ describe('direct LAN lease guard', () => {
         })
       )
     ).toBeNull()
+  })
+
+  it('keeps LAN lease acquisition stable across unrelated status refreshes', () => {
+    const target = makeDevice({
+      id: 'lan-a0f262f20d6c',
+      alias: 'flux-purr-a0f262f20d6c',
+      transport: 'wifi',
+      baseUrl: 'http://192.168.31.189',
+      leaseState: 'none',
+    })
+
+    expect(lanLeaseAcquisitionRequest(target, false)).toEqual({
+      deviceId: 'lan-a0f262f20d6c',
+      baseUrl: 'http://192.168.31.189',
+      alias: 'flux-purr-a0f262f20d6c',
+    })
+    const refreshedTarget = { ...target, currentTempC: 31.2, boardTempC: 32.1 }
+    expect(lanLeaseAcquisitionRequest(refreshedTarget, false)).toEqual(
+      lanLeaseAcquisitionRequest(target, false)
+    )
+    expect(lanLeaseAcquisitionRequest(target, true)).toBeNull()
+
+    expect(lanLeaseAcquisitionRequest({ ...target, leaseState: 'expired' }, false)).toBeNull()
+  })
+})
+
+describe('heater lock feedback priority', () => {
+  it('does not replace an in-flight connection or result with a persistent heater lock reminder', () => {
+    expect(shouldReplacePassiveFeedbackWithHeaterLock('正在连接 Web Serial')).toBe(false)
+    expect(shouldReplacePassiveFeedbackWithHeaterLock('Web Serial unavailable')).toBe(false)
+    expect(shouldReplacePassiveFeedbackWithHeaterLock('LAN 设备已连接')).toBe(false)
   })
 })

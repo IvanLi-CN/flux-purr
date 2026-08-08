@@ -1816,6 +1816,8 @@ pub enum UsbRequestOp {
     GetNetwork,
     GetStatus,
     GetLanPairingCode,
+    OpenLanPairingWindow,
+    CloseLanPairingWindow,
     GetCalibration,
     GetCalibrationJob,
     GetHeaterCurve,
@@ -1830,6 +1832,8 @@ impl UsbRequestOp {
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
             Self::GetLanPairingCode => "get_lan_pairing_code",
+            Self::OpenLanPairingWindow => "open_lan_pairing_window",
+            Self::CloseLanPairingWindow => "close_lan_pairing_window",
             Self::GetCalibration => "get_calibration",
             Self::GetCalibrationJob => "get_calibration_job",
             Self::GetHeaterCurve => "get_heater_curve",
@@ -1998,6 +2002,8 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
+        Some("open_lan_pairing_window") => Ok(UsbRequestOp::OpenLanPairingWindow),
+        Some("close_lan_pairing_window") => Ok(UsbRequestOp::CloseLanPairingWindow),
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
         Some("get_calibration_job") => Ok(UsbRequestOp::GetCalibrationJob),
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
@@ -2761,6 +2767,33 @@ mod tests {
             UsbFrame::Request {
                 request_id: string("reset-lan"),
                 op: UsbRequestOp::ClearLanPairingToken,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_usb_only_lan_pairing_window_requests() {
+        let open = parse_usb_frame(
+            r#"{"type":"request","requestId":"pairing-open","op":"open_lan_pairing_window"}"#,
+        )
+        .unwrap();
+        let close = parse_usb_frame(
+            r#"{"type":"request","requestId":"pairing-close","op":"close_lan_pairing_window"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            open,
+            UsbFrame::Request {
+                request_id: string("pairing-open"),
+                op: UsbRequestOp::OpenLanPairingWindow,
+            }
+        );
+        assert_eq!(
+            close,
+            UsbFrame::Request {
+                request_id: string("pairing-close"),
+                op: UsbRequestOp::CloseLanPairingWindow,
             }
         );
     }

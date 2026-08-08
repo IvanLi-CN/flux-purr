@@ -1913,6 +1913,10 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/devices/{device_id}/lan-pairing/code",
             get(get_lan_pairing_code),
         )
+        .route(
+            "/api/v1/devices/{device_id}/lan-pairing/window",
+            post(open_lan_pairing_window).delete(close_lan_pairing_window),
+        )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{device_id}/bind", post(bind_device))
         .route("/api/v1/devices/{device_id}/connect", post(connect_device))
@@ -2159,6 +2163,59 @@ async fn get_lan_pairing_code(
         ));
     }
     Ok(Json(serial_lan_pairing_code(&state, &target).await?))
+}
+
+async fn open_lan_pairing_window(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<LanPairingCode>, HttpError> {
+    let target = native_lan_pairing_target(&state, &device_id, query.lease_id.as_deref())?;
+    let code = serial_open_lan_pairing_window(&state, &target).await?;
+    state.emit(event(
+        &device_id,
+        "lan",
+        "LAN pairing window opened through USB lease",
+        json!({ "code": "<redacted>" }),
+    ));
+    Ok(Json(code))
+}
+
+async fn close_lan_pairing_window(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = native_lan_pairing_target(&state, &device_id, query.lease_id.as_deref())?;
+    serial_close_lan_pairing_window(&state, &target).await?;
+    state.emit(event(
+        &device_id,
+        "lan",
+        "LAN pairing window closed through USB lease",
+        json!({ "code": "<redacted>" }),
+    ));
+    Ok(Json(json!({ "closed": true })))
+}
+
+fn native_lan_pairing_target(
+    state: &AppState,
+    device_id: &str,
+    lease_id: Option<&str>,
+) -> Result<DeviceRecord, HttpError> {
+    let mut state_lock = state.lock()?;
+    let target = state_lock
+        .devices
+        .get(device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+        .clone();
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "LAN pairing window is available only through the USB/devd transport.",
+        ));
+    }
+    state_lock.require_lease(device_id, lease_id)?;
+    Ok(target)
 }
 
 async fn bind_device(
@@ -4388,6 +4445,44 @@ async fn serial_lan_pairing_code(
     validate_lan_pairing_code(code)
 }
 
+async fn serial_open_lan_pairing_window(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<LanPairingCode, HttpError> {
+    let code = serial_request_payload::<LanPairingCode>(
+        state,
+        target,
+        "open_lan_pairing_window",
+        "lan_pairing_code",
+    )
+    .await?;
+    validate_lan_pairing_code(code)
+}
+
+async fn serial_close_lan_pairing_window(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<(), HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-lan-pairing-close", now_millis());
+    let request = serde_json::to_string(&UsbRequestWire {
+        frame_type: "request",
+        request_id: &request_id,
+        op: "close_lan_pairing_window",
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB LAN pairing-window close request"))?;
+    let _ = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    Ok(())
+}
+
 fn validate_lan_pairing_code(code: LanPairingCode) -> Result<LanPairingCode, HttpError> {
     let valid_code = code
         .code
@@ -4688,8 +4783,7 @@ async fn serial_exchange(
             retry_policy,
         )
     })
-    .await
-    .map_err(|_| HttpError::internal("serial worker failed"))?;
+    .await?;
 
     match &result {
         Ok(payload) => record_transport_event(
@@ -4728,17 +4822,30 @@ async fn serial_exchange(
 async fn spawn_serial_worker<T, F>(
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
     worker: F,
-) -> Result<T, tokio::task::JoinError>
+) -> Result<T, HttpError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let serial_rpc = serial_rpc.lock_owned().await;
+    spawn_serial_worker_with_timeout(serial_rpc, SERIAL_RPC_TIMEOUT, worker).await
+}
+
+async fn spawn_serial_worker_with_timeout<T, F>(
+    serial_rpc: Arc<tokio::sync::Mutex<()>>,
+    lock_timeout: Duration,
+    worker: F,
+) -> Result<T, HttpError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let serial_rpc = acquire_serial_rpc_with_timeout(serial_rpc, lock_timeout).await?;
     tokio::task::spawn_blocking(move || {
         let _serial_rpc = serial_rpc;
         worker()
     })
     .await
+    .map_err(|_| HttpError::internal("serial worker failed"))
 }
 
 fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
@@ -8099,7 +8206,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_serial_reads_and_pairing_code_require_an_active_lease() {
+    async fn native_serial_reads_and_pairing_window_operations_require_an_active_lease() {
         let state = AppState::test();
         {
             let mut state_lock = state.lock().unwrap();
@@ -8122,6 +8229,16 @@ mod tests {
         .unwrap_err();
         assert_eq!(pairing_error.status, StatusCode::FORBIDDEN);
         assert_eq!(pairing_error.error.code, "lease_required");
+
+        let pairing_window_error = open_lan_pairing_window(
+            State(state.clone()),
+            AxumPath("native-test".to_string()),
+            Query(LeaseQuery { lease_id: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(pairing_window_error.status, StatusCode::FORBIDDEN);
+        assert_eq!(pairing_window_error.error.code, "lease_required");
 
         let status_error = device_status(
             State(state),
@@ -9764,6 +9881,12 @@ mod tests {
         request.abort();
         tokio::task::yield_now().await;
         assert!(serial_rpc.try_lock().is_err());
+
+        let error =
+            spawn_serial_worker_with_timeout(serial_rpc.clone(), Duration::from_millis(25), || ())
+                .await
+                .unwrap_err();
+        assert_eq!(error.error.code, "serial_lock_timeout");
 
         finish_tx.send(()).unwrap();
         let _serial_rpc = tokio::time::timeout(Duration::from_secs(1), serial_rpc.lock())

@@ -44,6 +44,7 @@ const DEVD_EVENT_KINDS = [
 
 export interface LiveDevdOptions {
   enabled?: boolean
+  leaseEnabled?: boolean
   devdBaseUrl?: string | null
   httpClient?: ControlPlaneHttpClient
   includeMockDevices?: boolean
@@ -63,10 +64,17 @@ export function defaultDevdBaseUrl() {
   return env.VITE_FLUX_PURR_DEVD_URL ?? 'http://127.0.0.1:30080'
 }
 
+/** Discovery remains available for every connection mode; only the bridge
+ * selection is allowed to retain the exclusive USB control lease. */
+export function shouldHoldDevdLease(selectedDeviceId: string | null, addingDirectLan = false) {
+  return !addingDirectLan && !selectedDeviceId?.startsWith('lan-')
+}
+
 export function useLiveDevdScenario(
   scenario: ControlPlaneScenario,
   {
     enabled = true,
+    leaseEnabled = true,
     devdBaseUrl = defaultDevdBaseUrl(),
     httpClient,
     includeMockDevices = true,
@@ -163,6 +171,16 @@ export function useLiveDevdScenario(
           return
         }
 
+        if (!leaseEnabled) {
+          await releaseActiveLease()
+          if (!cancelled) {
+            setDevices(replaceDevice(baseDevices, devdRecordToDeviceTarget(liveRecord)))
+            setRefreshState('ready')
+          }
+          refreshInFlightRef.current = false
+          return
+        }
+
         if (liveRecord.connection === 'busy') {
           activeLeaseRef.current = null
           activeLeaseDeviceIdRef.current = null
@@ -235,7 +253,7 @@ export function useLiveDevdScenario(
       setStreamEvents([])
       void releaseActiveLease()
     }
-  }, [client, devdBaseUrl, enabled, includeMockDevices])
+  }, [client, devdBaseUrl, enabled, includeMockDevices, leaseEnabled])
 
   useEffect(() => {
     if (!enabled || !devdBaseUrl || !liveDevdDeviceId || typeof EventSource === 'undefined') {

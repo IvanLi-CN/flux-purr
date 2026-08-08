@@ -54,6 +54,8 @@ export interface LanProbe {
   status: ControlPlaneStatus
 }
 
+export type LanProbeMode = 'concurrent' | 'serial'
+
 export function isDirectLanDevice(device: Pick<DeviceTarget, 'baseUrl' | 'transport'>) {
   return device.transport === 'wifi' && device.baseUrl.startsWith('http://')
 }
@@ -483,18 +485,32 @@ export function startLanLeaseHeartbeat(
 
 export async function probeLanDevice(
   session: LanDeviceSession,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  mode: LanProbeMode = 'concurrent'
 ): Promise<LanProbe> {
   const headers = bearerHeaders(session)
-  const rememberRevision = (revision: number) => {
-    session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
-  }
+  const rememberRevision =
+    mode === 'serial'
+      ? (revision: number) => {
+          // A complete serial probe has one ordered response chain ending in
+          // status, so it is authoritative across a device reboot where the
+          // in-memory control revision restarts at a lower value.
+          session.controlRevision = revision
+        }
+      : (revision: number) => {
+          session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
+        }
   const persistProbe = (probe: LanProbe) => {
     // The control revision is learned from the device response headers. Keep
     // it with the saved session so a later runtime write cannot be rejected
     // merely because it reloaded the same paired device from local storage.
     storeLanDeviceSession(session)
     return probe
+  }
+  if (mode === 'serial') {
+    return persistProbe(
+      await probeLanDeviceRequests(session, fetcher, headers, rememberRevision, false)
+    )
   }
   try {
     return persistProbe(
@@ -527,11 +543,13 @@ async function probeLanDeviceRequests(
   const request = <T>(path: string) =>
     lanRequest<T>(fetcher, session.baseUrl, path, { headers }, rememberRevision)
   if (concurrent) {
-    const [identity, network, status] = await Promise.all([
+    // Firmware exposes two HTTP workers. Start only the two independent reads
+    // together, then free a worker before asking the device for runtime status.
+    const [identity, network] = await Promise.all([
       request<Identity>('/api/v1/identity'),
       request<NetworkSummary>('/api/v1/network'),
-      request<ControlPlaneStatus>('/api/v1/status'),
     ])
+    const status = await request<ControlPlaneStatus>('/api/v1/status')
     return { identity, network, status }
   }
 
@@ -562,7 +580,7 @@ export async function writeLanRuntime(
       body: JSON.stringify(body),
     },
     (next) => {
-      session.controlRevision = next
+      rememberLanControlRevision(session, next)
     }
   )
 }
@@ -593,7 +611,7 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
       ...(body ? { body: JSON.stringify(body) } : {}),
     },
     (next) => {
-      session.controlRevision = next
+      rememberLanControlRevision(session, next)
     }
   )
 }
@@ -692,6 +710,11 @@ function requireLanControlRevision(session: LanDeviceSession) {
     )
   }
   return session.controlRevision as number
+}
+
+function rememberLanControlRevision(session: LanDeviceSession, revision: number) {
+  session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
+  storeLanDeviceSession(session)
 }
 
 function bearerHeaders(session: LanDeviceSession) {
