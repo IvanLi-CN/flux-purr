@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex},
@@ -10,7 +11,12 @@ use std::{
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use flux_purr_devd::{
     DEFAULT_DEVD_URL, FirmwareArtifact, FirmwareArtifactCatalog, WifiConfigOp,
-    hardware_registry_path, read_user_config, write_user_config,
+    hardware_registry_path,
+    lan::{
+        LanDeviceConfig, LanPairRequest, LanScanRequest, authorized_json, device_from_discovery,
+        discover_cidr, discover_mdns, merge_lan_device, pair_device,
+    },
+    read_user_config, write_user_config,
 };
 use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};
@@ -38,6 +44,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Devices,
+    Lan {
+        #[command(subcommand)]
+        command: LanCommand,
+    },
     Identity(TargetSelector),
     Status(TargetSelector),
     Runtime {
@@ -78,6 +88,119 @@ enum Command {
         #[command(subcommand)]
         command: UsbPortCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum LanCommand {
+    Devices,
+    #[command(
+        about = "Explicitly browse Flux Purr mDNS records. This never starts a background scan."
+    )]
+    Refresh,
+    #[command(about = "Explicitly probe a private IPv4 CIDR (at most 256 hosts).")]
+    Scan(LanScanArgs),
+    Pair(LanPairArgs),
+    #[command(
+        about = "Read the current four-digit code through a USB/devd lease. The WiFi Info page must remain open."
+    )]
+    PairingCode(TargetSelector),
+    #[command(
+        about = "Open the physical WiFi Info pairing window through a USB/devd lease and return its four-digit code."
+    )]
+    PairingOpen(TargetSelector),
+    #[command(
+        about = "Close the physical WiFi Info pairing window through a USB/devd lease and invalidate its code."
+    )]
+    PairingClose(TargetSelector),
+    #[command(
+        about = "Clear a LAN token only through a USB/devd lease; the device must be selected explicitly."
+    )]
+    Reset(TargetSelector),
+    Status(LanTargetArgs),
+    RuntimeSet(LanRuntimeSetArgs),
+    #[command(
+        about = "Send a complete authorized LAN API operation. Writes acquire and release a temporary device lease."
+    )]
+    Request(LanRequestArgs),
+}
+
+#[derive(Debug, Args)]
+struct LanPairArgs {
+    #[arg(long = "url")]
+    base_url: String,
+    #[arg(
+        long,
+        help = "Required only when the connected device reports required pairing"
+    )]
+    code: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct LanScanArgs {
+    #[arg(long)]
+    cidr: String,
+}
+
+#[derive(Debug, Args)]
+struct LanTargetArgs {
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Debug, Args)]
+struct LanRuntimeSetArgs {
+    #[command(flatten)]
+    target: LanTargetArgs,
+    #[arg(long = "target-temp-c")]
+    target_temp_c: Option<i16>,
+    #[arg(long = "active-cooling")]
+    active_cooling: Option<bool>,
+    #[arg(long = "heater-enabled")]
+    heater_enabled: Option<bool>,
+}
+
+#[derive(Debug, Args)]
+struct LanRequestArgs {
+    #[command(flatten)]
+    target: LanTargetArgs,
+    #[arg(long, value_enum)]
+    method: LanHttpMethod,
+    #[arg(
+        long,
+        help = "API path below /api/v1, for example calibration or thermal-profile."
+    )]
+    path: String,
+    #[arg(
+        long,
+        conflicts_with = "body_file",
+        help = "JSON request body for POST or PUT."
+    )]
+    body: Option<String>,
+    #[arg(
+        long = "body-file",
+        conflicts_with = "body",
+        help = "Path to a JSON request body."
+    )]
+    body_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LanHttpMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+}
+
+impl LanHttpMethod {
+    const fn as_reqwest(self) -> Method {
+        match self {
+            Self::Get => Method::GET,
+            Self::Post => Method::POST,
+            Self::Put => Method::PUT,
+            Self::Delete => Method::DELETE,
+        }
+    }
 }
 
 #[derive(Debug, Args, Clone)]
@@ -905,8 +1028,14 @@ struct WifiSetArgs {
     ssid: String,
     #[arg(long)]
     password: Option<String>,
-    #[arg(long = "auto-reconnect")]
-    auto_reconnect: Option<bool>,
+    #[arg(long = "static-ip")]
+    static_ip: Option<Ipv4Addr>,
+    #[arg(long = "static-prefix-len")]
+    static_prefix_len: Option<u8>,
+    #[arg(long = "static-gateway")]
+    static_gateway: Option<Ipv4Addr>,
+    #[arg(long = "static-dns")]
+    static_dns: Option<Ipv4Addr>,
     #[arg(long = "telemetry-interval-ms")]
     telemetry_interval_ms: Option<u32>,
 }
@@ -1012,6 +1141,84 @@ impl Default for HardwareRegistry {
     }
 }
 
+fn static_ipv4_value(
+    address: Option<Ipv4Addr>,
+    prefix_len: Option<u8>,
+    gateway: Option<Ipv4Addr>,
+    dns: Option<Ipv4Addr>,
+) -> Result<Option<Value>, io::Error> {
+    let Some(address) = address else {
+        if prefix_len.is_some() || gateway.is_some() || dns.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--static-prefix-len, --static-gateway, and --static-dns require --static-ip",
+            ));
+        }
+        return Ok(None);
+    };
+    let prefix_len = prefix_len.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--static-ip requires --static-prefix-len",
+        )
+    })?;
+    let gateway = gateway.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--static-ip requires --static-gateway",
+        )
+    })?;
+    let dns = dns.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--static-ip requires --static-dns",
+        )
+    })?;
+    if prefix_len > 32
+        || !is_unicast_static_ipv4(address)
+        || !is_unicast_static_ipv4(gateway)
+        || !is_unicast_static_ipv4(dns)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--static-ip must be a unicast IPv4 address with a prefix length from 0 through 32",
+        ));
+    }
+    Ok(Some(json!({
+        "address": address.octets(),
+        "prefixLen": prefix_len,
+        "gateway": gateway.octets(),
+        "dns": dns.octets(),
+    })))
+}
+
+fn wifi_set_body(
+    ssid: String,
+    password: Option<String>,
+    static_ipv4: Option<Value>,
+    telemetry_interval_ms: Option<u32>,
+) -> Value {
+    let mut body = serde_json::Map::from_iter([
+        ("op".to_string(), json!(WifiConfigOp::Set)),
+        ("ssid".to_string(), json!(ssid)),
+    ]);
+    if let Some(password) = password {
+        body.insert("password".to_string(), json!(password));
+    }
+    if let Some(static_ipv4) = static_ipv4 {
+        body.insert("staticIpv4".to_string(), static_ipv4);
+    }
+    if let Some(interval) = telemetry_interval_ms {
+        body.insert("telemetryIntervalMs".to_string(), json!(interval));
+    }
+    Value::Object(body)
+}
+
+fn is_unicast_static_ipv4(address: Ipv4Addr) -> bool {
+    let first = address.octets()[0];
+    first != 0 && first != 127 && first < 224
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
@@ -1020,36 +1227,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Devices => {
             request_json(&client, Method::GET, &cli.devd, "/api/v1/devices", None).await?
         }
-        Command::Identity(selector) => {
-            request_with_lease(
-                &client,
-                resolve_target(selector, &cli.devd)?,
-                Method::GET,
-                "/identity",
-                None,
-            )
-            .await?
-        }
-        Command::Status(selector) => {
-            request_with_lease(
-                &client,
-                resolve_target(selector, &cli.devd)?,
-                Method::GET,
-                "/status",
-                None,
-            )
-            .await?
-        }
-        Command::Runtime { command } => match command {
-            RuntimeCommand::Get(selector) => {
+        Command::Lan { command } => match command {
+            LanCommand::Devices => {
+                let config = read_user_config()?;
+                json!({
+                    "devices": config.lan_devices.iter().map(flux_purr_devd::lan::LanDeviceSummary::from).collect::<Vec<_>>()
+                })
+            }
+            LanCommand::Refresh => {
+                json!({ "devices": persist_cli_lan_discoveries(discover_mdns(Duration::from_secs(2)).await?)? })
+            }
+            LanCommand::Scan(args) => {
+                json!({ "devices": persist_cli_lan_discoveries(discover_cidr(LanScanRequest { cidr: args.cidr }).await?)? })
+            }
+            LanCommand::Reset(target) => {
                 request_with_lease(
                     &client,
-                    resolve_target(selector, &cli.devd)?,
-                    Method::GET,
-                    "/status",
+                    resolve_target(target, &cli.devd)?,
+                    Method::POST,
+                    "/lan-pairing/reset",
                     None,
                 )
                 .await?
+            }
+            LanCommand::Pair(args) => {
+                let device = pair_device(LanPairRequest {
+                    base_url: args.base_url,
+                    code: args.code,
+                })
+                .await?;
+                let summary = flux_purr_devd::lan::LanDeviceSummary::from(&device);
+                let mut config = read_user_config()?;
+                merge_lan_device(&mut config.lan_devices, device);
+                write_user_config(&config)?;
+                serde_json::to_value(summary)?
+            }
+            LanCommand::PairingCode(selector) => {
+                request_device_read(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    "/lan-pairing/code",
+                )
+                .await?
+            }
+            LanCommand::PairingOpen(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::POST,
+                    "/lan-pairing/window",
+                    None,
+                )
+                .await?
+            }
+            LanCommand::PairingClose(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::DELETE,
+                    "/lan-pairing/window",
+                    None,
+                )
+                .await?
+            }
+            LanCommand::Status(args) => {
+                let device = resolve_lan_target(&args.id)?;
+                authorized_json(&device, Method::GET, "status", None, None).await?
+            }
+            LanCommand::RuntimeSet(args) => {
+                let device = resolve_lan_target(&args.target.id)?;
+                let body = json!({
+                    "targetTempC": args.target_temp_c,
+                    "activeCoolingEnabled": args.active_cooling,
+                    "heaterEnabled": args.heater_enabled,
+                });
+                lan_api_request(&device, Method::PUT, "runtime", Some(body)).await?
+            }
+            LanCommand::Request(args) => {
+                let device = resolve_lan_target(&args.target.id)?;
+                let body = match (args.body, args.body_file) {
+                    (Some(value), None) => Some(serde_json::from_str(&value)?),
+                    (None, Some(path)) => Some(read_json_file(&path)?),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => unreachable!("clap rejects conflicting body arguments"),
+                };
+                lan_api_request(&device, args.method.as_reqwest(), &args.path, body).await?
+            }
+        },
+        Command::Identity(selector) => {
+            request_device_read(&client, resolve_target(selector, &cli.devd)?, "/identity").await?
+        }
+        Command::Status(selector) => {
+            request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status").await?
+        }
+        Command::Runtime { command } => match command {
+            RuntimeCommand::Get(selector) => {
+                request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status")
+                    .await?
             }
             RuntimeCommand::Set(args) => {
                 let resolved = resolve_target(args.target.clone(), &cli.devd)?;
@@ -1093,13 +1367,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Wifi { command } => match command {
             WifiCommand::Set(args) => {
                 let resolved = resolve_target(args.target.clone(), &cli.devd)?;
-                let body = json!({
-                    "op": WifiConfigOp::Set,
-                    "ssid": args.ssid,
-                    "password": args.password,
-                    "autoReconnect": args.auto_reconnect,
-                    "telemetryIntervalMs": args.telemetry_interval_ms,
-                });
+                let static_ipv4 = static_ipv4_value(
+                    args.static_ip,
+                    args.static_prefix_len,
+                    args.static_gateway,
+                    args.static_dns,
+                )?;
+                let body = wifi_set_body(
+                    args.ssid,
+                    args.password,
+                    static_ipv4,
+                    args.telemetry_interval_ms,
+                );
                 request_with_lease(&client, resolved, Method::PUT, "/wifi", Some(body)).await?
             }
             WifiCommand::Clear(selector) => {
@@ -1193,6 +1472,14 @@ async fn request_with_lease(
     Ok(value)
 }
 
+async fn request_device_read(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    suffix: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_with_lease(client, resolved, Method::GET, suffix, None).await
+}
+
 async fn flash_with_lease(
     client: &Client,
     resolved: ResolvedUsbTarget,
@@ -1266,11 +1553,11 @@ async fn request_leased(
         suffix
     );
     let mut url = api_url(&resolved.devd, &path)?;
-    match method {
-        Method::GET | Method::POST if body.is_none() => {
-            url.query_pairs_mut().append_pair("lease_id", lease_id);
-        }
-        _ => {}
+    if body.is_none() {
+        // Lease-bearing control endpoints can be GET, POST, or DELETE. A
+        // body-less DELETE still needs the same query lease as a body-less
+        // read, otherwise the daemon correctly rejects the operation.
+        url.query_pairs_mut().append_pair("lease_id", lease_id);
     }
     let mut request = client.request(method, url);
     if let Some(mut body) = body {
@@ -9813,6 +10100,78 @@ fn resolve_target(
     }
 }
 
+fn resolve_lan_target(
+    id: &str,
+) -> Result<LanDeviceConfig, Box<dyn std::error::Error + Send + Sync>> {
+    read_user_config()?
+        .lan_devices
+        .into_iter()
+        .find(|device| device.id == id)
+        .ok_or_else(|| format!("saved LAN device not found: {id}").into())
+}
+
+fn persist_cli_lan_discoveries(
+    discoveries: Vec<flux_purr_devd::lan::LanDiscovery>,
+) -> Result<Vec<flux_purr_devd::lan::LanDeviceSummary>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut config = read_user_config()?;
+    let mut summaries = Vec::with_capacity(discoveries.len());
+    for discovery in discoveries {
+        let Some(device) = device_from_discovery(discovery) else {
+            continue;
+        };
+        let id = device.id.clone();
+        merge_lan_device(&mut config.lan_devices, device);
+        let saved = config
+            .lan_devices
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .ok_or("failed to persist LAN discovery")?;
+        summaries.push(flux_purr_devd::lan::LanDeviceSummary::from(saved));
+    }
+    write_user_config(&config)?;
+    Ok(summaries)
+}
+
+async fn lan_api_request(
+    device: &LanDeviceConfig,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let path = normalize_lan_api_path(path)?;
+    let requires_lease = method != Method::GET && path != "leases";
+    if !requires_lease {
+        return Ok(authorized_json(device, method, &path, None, body).await?);
+    }
+
+    let lease = authorized_json(device, Method::POST, "leases", None, None).await?;
+    let lease_id = lease
+        .get("leaseId")
+        .and_then(Value::as_str)
+        .ok_or("LAN lease response missing leaseId")?
+        .to_owned();
+    let result = authorized_json(device, method, &path, Some(&lease_id), body).await;
+    let _ = authorized_json(device, Method::DELETE, "leases", Some(&lease_id), None).await;
+    Ok(result?)
+}
+
+fn normalize_lan_api_path(value: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = value.trim().trim_matches('/');
+    if path.is_empty()
+        || path.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        })
+    {
+        return Err("LAN API path must be a relative /api/v1 path without traversal".into());
+    }
+    Ok(path.to_owned())
+}
+
 fn api_url(base: &str, path: &str) -> Result<Url, Box<dyn std::error::Error + Send + Sync>> {
     let mut url = Url::parse(base)?;
     url.set_path(path);
@@ -9929,6 +10288,16 @@ fn redact_cli_sensitive(value: &Value) -> Value {
 }
 
 fn render_human(payload: &Value) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(active) = payload.get("active").and_then(Value::as_bool) {
+        if active {
+            let code = payload
+                .get("code")
+                .and_then(Value::as_str)
+                .ok_or("LAN pairing code response is missing the code")?;
+            return Ok(format!("LAN pairing code: {code}"));
+        }
+        return Ok("LAN pairing code is inactive. Open WiFi Info on the device first.".to_string());
+    }
     if let Some(devices) = payload.get("devices").and_then(Value::as_array) {
         return Ok(format!("Devices: {}", devices.len()));
     }
@@ -10126,6 +10495,14 @@ mod tests {
         let redacted = redact_cli_sensitive(&payload);
         assert_eq!(redacted["wifi"]["password"], "<redacted>");
         assert_eq!(redacted["token"], "<redacted>");
+    }
+
+    #[test]
+    fn renders_active_lan_pairing_code() {
+        assert_eq!(
+            render_human(&json!({ "active": true, "code": "4827" })).unwrap(),
+            "LAN pairing code: 4827"
+        );
     }
 
     #[test]
@@ -15501,5 +15878,27 @@ mod tests {
     fn cooldown_target_reached_allows_quantized_edge_without_hiding_real_overshoot() {
         assert!(super::cooldown_target_reached(35.1, 35.0));
         assert!(!super::cooldown_target_reached(35.2, 35.0));
+    }
+
+    #[test]
+    fn static_ipv4_cli_validation_rejects_multicast_values() {
+        let result = super::static_ipv4_value(
+            Some("224.0.0.1".parse().unwrap()),
+            Some(24),
+            Some("192.168.31.1".parse().unwrap()),
+            Some("1.1.1.1".parse().unwrap()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn wifi_set_omits_unspecified_fields_but_keeps_explicit_empty_password() {
+        let omitted = super::wifi_set_body("Ivan".to_string(), None, None, None);
+        assert!(omitted.get("password").is_none());
+        assert!(omitted.get("staticIpv4").is_none());
+        assert!(omitted.get("telemetryIntervalMs").is_none());
+
+        let cleared = super::wifi_set_body("Ivan".to_string(), Some(String::new()), None, None);
+        assert_eq!(cleared["password"], "");
     }
 }

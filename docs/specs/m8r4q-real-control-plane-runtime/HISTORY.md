@@ -1,10 +1,71 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+## 2026-08-05
+
+- Direct-LAN 写入曾在 `stale_write` 后只显示失败或只更新 runtime snapshot，导致 calibration 与 heater-curve 工作区保留过时事实；各类写入现在只回读一次对应资源并替换其 state map，拒绝原写入且禁止自动重放。DEVD LAN bridge 曾把设备 HTTP 错误改写为本地 bridge error；adapter 现在保留远端 status 与完整 error envelope，包括 unauthorized。CI 在 Storybook interaction 前准备 Chromium，EdgeOne 只消费成功 push 运行生成的 verified artifact。
+- Add Device 的桥接页曾无条件渲染全局“最近操作”，导致后台 native target 轮询错误与当前桥接配置混在一起。桥接路径现只呈现面板自身的发现、选择和错误状态，LAN 候选确认也在面板内完成。
+- `flux-purr-devd serve` 曾在省略 `--serial-port` 时依次读取环境变量、用户配置和硬编码具体端口，随后又把 `serial_port=None` 错误实现成不发现任何 USB，导致多设备环境只能看到既有 LAN 记录。无参数启动现在保持 `serial_port=None`，枚举全部符合项目 USB 身份规则的未验证 transport 候选，但不自动选择、打开或探测；只有显式 flag 或 operator 选择才确定 USB 目标。
+- Runtime trace 的 live adapter 曾把事件反转为新到旧，而“跟随尾部”仍滚到数组末项，导致按钮实际追随最旧事件。所有来源现统一按旧到新进入 UI，operator actions 追加到末尾，摘要与虚拟滚动尾部共同指向最新事件。
+- DEVD 为缺席授权串口生成的诊断占位曾被 Web 当成真实桥接 target，并把串口路径派生键标成设备 ID。transport adapter 现以显式可连接事实区分占位与真实设备；占位只保留 record ID 与 port path 用于诊断，固件身份字段保持为空，不进入设备卡片或连接方式集合。
+- 浏览器现在记忆已成功确认的 Web Serial 设备身份，并把该连接方式保留在对应设备卡片中。设备卡片快速连接会优先复用唯一授权端口，但仍以固件 `deviceId` 重新验证；USB 设备已替换时，实际硬件会作为另一台设备注册，旧记录保持离线，不会因浏览器授权仍存在而误合并。
+- Add device 的 Web Serial 卡片不再因已有浏览器串口会话而禁用，也不再把点击解释成“返回当前设备”。添加动作在用户手势内强制打开原生端口选择器，选中新端口后安全替换旧会话；取消选择时继续保留当前设备。
+- 固件缺少 thermal model 时，`runtime_config` 曾先回包 `heaterEnabled=true`，随后状态轮询才回到安全锁定的 `false`，造成 Web 出现短暂成功或永久等待。响应现在在应用前归一化为设备事实，Web 的确认计时使用真实时间戳并在 2.5 秒内收敛到明确拒绝；浏览器点击加热不会触发复位或虚构输出。
+- 浏览器 Web Serial 的首次设备选择必须在点击手势内同步调用 `requestPort`；授权端口查询移至稳定页面生命周期，确保复用已授权端口不会阻断首次授权。取消原生选择器、超时和安全锁状态分别归属明确的 UI 状态，不再相互覆盖。
+- Web Serial 连接完成后，连接事务的自动选择标记曾持续存在，导致用户在同一设备卡片中点击 WiFi/LAN 后又被异步 Web Serial effect 立即切回。显式连接方式选择现在会结束旧 transport 的自动采用意图；已连接通道继续保留，但不得夺回当前 target。
+- 已配对 LAN session 曾只持久化地址、token 与可选 hostname，页面刷新后必须等待在线 probe 才能重建设备卡片；设备暂时不可达时 WiFi/LAN 连接方式因此完全消失。成功 probe 现在补齐稳定设备身份摘要，恢复流程先显示离线 LAN 通道再异步刷新，普通 transport 失败不会删除已知连接方式。
+- LAN bearer 请求曾在任意 `401` 时删除整个本地 session，把“授权失效”错误地当作“设备不存在”。本地记录现在分别保存设备身份与 authorization state；`401` 只停用旧凭据并要求重新配对，设备记忆持续保留，直到用户主动遗忘或同一地址确认已经更换为不同 device ID。
+- live devd scenario 曾在每次状态重算时注入 `devd reachable` synthetic event，并用字符串 `live` 充当时间；切换连接方式因此反复看到同一条伪日志且时间列无时间。连接状态现只存在于 target 状态，Runtime trace 只保留真实事件并统一显示本地 `HH:mm:ss`。
+- Browser Web Serial 曾把来源标识 `web` 写入时间列；事件追加边界现直接生成本地 `HH:mm:ss`，使浏览器直连与 daemon 事件使用相同的时间契约。
+- live operator action 曾复用 demo 固定时钟，导致真实切换通道的 Runtime trace 显示伪造历史时间；live 路径现与 Browser Web Serial 一样在追加时生成本地 `HH:mm:ss`。Web Serial 身份记忆也不再因 firmware/build 元数据缺失而丢弃已确认的稳定 device ID。
+- 已保存 LAN session 曾在匿名 health 后被忽略，页面每次重新要求四位码；连接现在先验证 health `deviceId` 与 session identity 一致，再恢复 bearer probe 和 lease。地址复用到不同设备时只删除旧 session，不向新设备发送旧 bearer。
+- LAN lease 心跳的设备协议错误保留为可操作的页面反馈；只有浏览器未获得响应时才使用泛化 transport 结果，过期 lease 不得继续参与写入。
+- Browser direct-LAN runtime 写入在旧 session revision 与设备状态竞争时，现会在 PUT 前读取最新 snapshot；若写入仍被 `stale_write` 拒绝，只回读一次并恢复 UI 到设备事实，绝不自动重放原控制命令或报告成功。
+
+- 生产板环境温度约 `31°C` 时，稳定 RTD 原始读数约 `1030mV` 被旧 `3000mV` 分压假设误算为约 `78°C`。硬件基线实际为 `3V3 -> 2.49 kOhm -> PT1000`，运行时恢复 `3300mV` 电路模型；同一真机读数回报 `33.42°C`。ADC 个体误差继续由持久化 RTD calibration 承担，不再污染分压拓扑常量。
+- Web Serial 连接曾把 `navigator.serial.requestPort()` 的无限等待直接映射为 `Web Serial (connecting)`，且点击后仍保留旧的 devd `Failed to fetch` 反馈。连接事务现以 `60s` 为总预算，端口打开后不写 DTR/RTS、不等待设备重启，直接执行有界只读 probe；开始时立即显示等待串口选择提示，超时后给出可重试错误并关闭迟到的端口。
+- Browser Web Serial 曾使用 `2 KiB` 单行缓冲，而 firmware 与 native devd 的 USB JSONL 合同为 `8 KiB`。identity/network 能被读取，但完整 status 超过浏览器上限后被静默丢弃，最终表现为连接超时。浏览器 reader 现与协议统一为 `8 KiB`，测试用超过 `2 KiB` 的 status fixture 锁定该回归；真机已通过 identity/network/status 和 `runtime_config` 写入回读。
+- Browser Web Serial 曾静默丢弃 firmware 的 reset/panic 标记，设备复位后页面只能留下旧状态或泛化断线。reader 现仅接受协议定义的 `reset_reason=` 与 `panic=` 标记，清除复位前 snapshot 并显示设备报告的原因；任意 boot chatter 仍不会改变 UI 状态。
+- 顶部目标选择器曾把同一硬件的 native DEVD、Web Serial、WiFi/LAN 与 bridge records 当成多台设备，用户无法确认要连接的物理设备。现按固件稳定 `identityId/deviceId` 合并为单张设备卡片，卡片显示 hostname 与设备 ID，并固定提供最多三种公开连接方式：WiFi/LAN、Web Serial 与桥接。DEVD USB 与 WiFi/LAN 发现结果只作为桥接方式的内部来源；重复记录按健康状态优先，避免旧地址或异常记录覆盖当前 target。
+- 设备卡片的三个连接方式与“添加设备”操作现在各自显示对应的 Lucide 图标，文字、次要地址和方向箭头保持原有布局，降低重复按钮的识别成本。
+- 设备卡片曾用 `auto-fit` 把唯一连接方式拉伸为整行，顶部触发器也同时显示 CSS select 箭头与组件 Chevron。连接方式现固定为最多三列，单个方式保持三分之一宽度；触发器只保留一个随展开状态旋转的 Chevron。
+- LAN pairing claim 曾生成缺少 `api` 字段结束引号的 `200` 响应，浏览器因此在领取 token 后抛出 JSON 解析异常；Web 又把该非协议化异常显示成对话框背后的通用连接失败。claim 响应现由 firmware host test 锁定合法字段边界，Web 将无法解析的成功响应归类为明确的协议错误，并在当前配对对话框内展示具体原因。
+- Claim 响应修正后，Web 的并发 identity/network/status probe 暴露了设备只有一个 HTTP workspace 与单一 response signal 的限制。控制面使用两个静态 TCP socket 支持两个同时在途连接；identity/network 从发布快照直接回答，不消耗唯一的 mutation-capable workspace，status、SSE 与写入继续由主控制循环串行执行，并以单调 control revision 拒绝过时写。这个模型避免为常用只读 probe 扩增大 request buffer，也不把资源受限伪装成 PNA 或 WiFi station failure。Web 保持并发 probe，devd/CLI 在写前读取 revision，客户端不再以串行请求掩盖设备端限制。
+- 设备重启后 LAN lease 会自然从设备内存消失，但已配对 bearer token 仍有效。direct LAN 在 operator 重新选择该连接方式时把 expired 重新申请为可控 lease；心跳失败本身保持 expired 和只读，只有设备明确返回 conflict 才保持冲突，避免静默抢占或把重启后的设备永久显示为 lease 失效。
+- 原生 USB I/O 若被前一个请求占用，后续 devd 请求不能无限等待互斥锁。串口 worker 以有限等待返回 `serial_lock_timeout`，页面保持 transport 原因而不覆盖最后一次 WiFi 网络事实；物理连接恢复后可重新取得同一互斥会话。
+- 真机 Chromium 配对显示 `200` 但 identity/network body 为空时，根因是 CORS、PNA、revision 与响应终止行总长超过 `384` 字节，heapless header 被静默截断。响应头现由纯 formatter 在固定 `640` 字节容量内完整构造并由 host test 验证，真机的跨域 bearer identity readback 已返回完整 JSON。
+- 已配对 LAN target 从 Bridge 切回 WiFi/LAN 时曾持续显示禁用控件。lease effect 依赖完整的 `visibleDevice`，每次 DEVD poll 都会取消在途请求；现收敛为稳定连接字段，真机切回 WiFi/LAN 后重新取得 lease 并恢复控制。Web Serial 同时优先复用唯一的既有浏览器授权端口，避免不必要的选择器。
+- CIDR 扫描候选曾显示“选择”，点击后只回填地址，用户还必须再次点击上方“连接设备”，造成候选行主动作与实际意图不一致。现改为候选行直接显示并执行“连接”，复用同一 health、配对、probe 和 lease 流程；连接未完成前仍不注册或切换顶部目标。
+- 旧版固件在多个 bearer 读取同时到达时仍可能只接受一个 TCP 请求，导致 claim 已成功后 probe 被误报为“配对凭据已保存、读取状态中断”。固件现使用单一 TCP acceptor 和两个静态 socket；identity/network 走发布快照，唯一 mutation-capable workspace 承担 status、SSE 与写入。Web 仅对旧设备的传输级失败执行一次串行兼容重试，并把 lease 失败与 probe/配对失败分开表达，避免把成功配对事实覆盖成 WiFi 错误。
+- 配对后的 control revision 曾只存在于内存 session；控制面随后从 localStorage 重新读取 session 时，第一次 runtime 写入会被 stale-write 保护拦截且没有设备请求。probe 现在把设备回报的 revision 持久化到同一 LAN session，刷新与自动恢复路径复用同一保护值。
+- 冷启动恢复的 WiFi 配置不再复用运行时 `apply_wifi_config` signal。旧路径在 task spawn 前留下 signal，首个 DHCP lease 成功后会立即把 station 断开，同时状态机仍停在 `connected` 并永久等待下一次配置，表现为 USB 回显 IP/RSSI 正常但路由器 ARP 与 `/health` 均不可达。启动配置现由 `net::spawn` 直接初始化；运行时 USB 配置仍走独立 apply signal。断线等待同时改为保留 pending driver event，避免 DHCP 与监听注册之间的竞态。
+- 授权端口 `/dev/cu.usbmodem2111401` 经 repo-local `flux-purr -> devd -> espflash` 重刷后保留 SSID `Ivan` 与九位密码长度。未再次提交 WiFi 表单的冷启动 trace 为 `connecting -> connected`，设备在 `192.168.31.189` 的匿名 `/health` 回显 `a0f262f20d6c / flux-purr-a0f262f20d6c`；该 receipt 证明 DHCP 后 HTTP 数据面可达，不替代尚未完成的 mDNS、配对、lease 与 Chromium 控制闭环。
+
+## 2026-08-04
+
+- DNS-SD 报文生成从 ESP 网络任务中抽为 host-testable `no_std` 模块；PTR 由错误的 cache-flush 独占记录修正为 shared `IN` record，SRV/TXT/A 保持 unique record 语义。桥接发现候选在配对、probe 和 LAN lease 完成前不再进入顶部目标列表，避免把“发现到地址”误报成“已连接设备”。
+- LAN 扫描结果的后置样式覆盖曾把结果列表间距压为 `0`，并让选中行失去稳定的内容边界；现已恢复结果行间距、内边距和选中态边框，同时明确“选择候选”与“连接设备”是两个动作。成功完成 health、配对和 lease 后，顶部设备选择器才出现并自动选中 hostname。
+- Web direct LAN 表单现在同时记忆设备地址和 CIDR 网段，并在面板重载时自动回填。此前只有 CIDR 偏好被恢复，设备地址会回到组件初始值，导致同一浏览器中重新进入面板时需要重复输入；两项记忆均只保存非敏感地址/网段，清空输入即删除，不保存密码、配对码或 bearer token。
+- Web direct LAN 的设备地址、CIDR 扫描和四位配对码改用三个独立的原生表单。键盘回车必须与主按钮复用同一控制路径，确保校验、loading、错误处理和防重复提交一致；表单不嵌套，避免回车冒泡触发错误动作。
+- LAN 扫描候选不再被视为已连接设备：选择候选只回填地址并保留顶部当前目标，只有匿名 health、配对、bearer probe 和 lease 全部完成后才注册稳定设备 ID。设备列表以固件 hostname 识别设备，IP 仅作为定位信息；这样可避免扫描结果、配对失败或租约冲突把不可控地址误报为在线目标。
+
+## 2026-08-03
+
+- Bridge 从“一次点击创建 pending device”收敛为两阶段显式选择：先选 DEVD 的 USB 或 WiFi/LAN 路径，再选具体候选设备。连接方式卡片本身不再产生目标，避免把 transport choice 伪装成已连接硬件。
+- USB Bridge 候选曾以状态标签和底部“连接所选设备”表达操作，既无法说明正在识别哪一项，也可能让 USB 产品描述被误认为硬件身份。候选现在逐行提供连接按钮，连接过程通过 identity-first 模态框结算；协议或稳定身份不匹配统一视为未知设备并拒绝注册，只有 operator 确认成功结果后才进入设备列表。
+
+## 2026-08-02
+
+- Web direct LAN discovery 明确包含 operator 主动触发的受限私有 IPv4 CIDR scan。浏览器仅匿名探测公开 `/health`，不使用 mDNS、不后台扫描、不调用 `devd`；native discovery 保持独立，避免把浏览器直连和本机桥接混成同一程序路径。
+
+## 2026-07-30
+
+- ESP32-S3 LAN control-plane 的 Embassy executor 内存契约固定为 `task-arena-size-81920`。HTTP workspace 不进入 async task frame；两个 worker 使用静态 TCP 缓冲、一个静态 workspace 与一个回收堆 workspace，在支持 Web 与 DEVD/CLI 并发读的同时保留主栈及 WiFi/executor 内存余量。USB JSONL 在启动阶段持续可轮询，但固件不为主机重枚举设置阻塞恢复窗口；LAN 启动失败也不得阻断 USB 控制。
+
 ## 2026-07-27
 
 - 纠正 CH224Q PPS APDO 选择合同：当多个 PPS APDO 都覆盖 `20V` 时，firmware 现在保持 capability 来自同一个 APDO，并按最大电流、最大电压、最小电压排序。此前宽范围 `3A` APDO 会先于 `20V/5A` APDO 被选中，导致 `auto` 100W source 错误解析为低电流 capability；新回归测试覆盖 `3.3~21V/3A + 5~20V/5A` 组合，要求回读 `5000..20000mV / 5000mA`。
 - 使用授权 `/dev/cu.usbmodem2111401`、IsolaPurr `f293cc9c139e` / `http://192.168.31.224` 和已更换的 5A eMarked 线材，完成该修复的 real-flash 与短 HIL receipt。source 保持 `100W`、PD/PPS、`pd_pps_5a=true`、`pps3_limit_ma=5000`、`tps_mode=auto_follow`；设备 readback 为 `ppsCapabilityMaxMa=5000`、`currentMa=5000`、`thermalProfileResolvedBank=pps5a` 且无 manual PPS override。`100°C / 120s` 短测约 `30s` 到达 `99.27°C`，后续采样在约 `99.3~99.9°C`；未见传感器硬 fault、过温、runtime reset、source stale 或端口切换。结束回读已关热、开启主动冷却。该记录不是 profile 调优、EEPROM save 或 frozen/accepted baseline。
-- 更正 `2026-05-25` 的 executor arena 历史：`task-arena-size-32768` 不能容纳当前 `flux-purr` 主任务的 `33,344`-byte allocation，仍会在 pre-main 阶段触发 `task arena is full` panic 并被 RTC WDT 重启。固件现使用 `task-arena-size-65536`，为该任务保留足够静态 arena。
+- 更正 `2026-05-25` 的 executor arena 历史：`task-arena-size-32768` 不能容纳当前 `flux-purr` 主任务的 `33,344`-byte allocation，仍会在 pre-main 阶段触发 `task arena is full` panic 并被 RTC WDT 重启。后续 LAN control-plane 的完整内存契约见 `2026-07-30` 条目。
 
 ## 2026-07-19
 
@@ -133,6 +194,7 @@
 - 授权端口 `/dev/cu.usbmodem21221401` 上完成 Web -> `devd` -> USB JSONL -> firmware 浏览器验证：Web 自动选中 `USB JTAG/serial debug unit / DEVD`，达到 active lease，读取真实 PD/status/network，并通过 active lease 执行 runtime 写入。
 - 授权端口 WiFi provisioning 复验完成：临时 SSID set、clear、restore 与 redacted bounded events 通过 smoke；最终直接 USB JSONL clear 后 `get_network` 返回 `state=disabled`、`ssid=null`。
 - `devd` native serial RPC 改为复用持久 per-port session，并让 port-scoped process lock 跟打开的 fd 同生命周期，避免 Web/devd polling 每轮重新打开 ESP32-S3 USB Serial/JTAG 造成持续 reset；硬件验证显示首次 open 仍可能 reset，但后续 API/Web polling 和安全 runtime 写入期间 uptime 单调增加。
+- Browser Web Serial 曾在 `port.open()` 后主动写 DTR/RTS，并固定等待 10 秒，把 USB Serial/JTAG 复位误当成连接初始化。连接客户端现不再触碰控制线或等待预期复位，打开后直接执行有界只读 probe；复位只能由固件诊断行明确报告，设备连接不得改变运行状态。
 - Web runtime target control 改为在 devd/firmware 确认 `PUT /runtime` 成功后立即回显目标温度，并在下一轮真实 polling 对齐后清理临时覆盖，减少 live 硬件控制时的回显等待。
 - Web Settings fan policy segmented control 改为在 devd runtime 写入成功后立即回显 operator 选择，避免按钮组选中态与反馈文本分裂；当前 firmware status 的 `fanDisplayState` 仍代表实际风扇显示状态。
 
@@ -156,9 +218,25 @@
 ## 2026-05-30
 
 - 决策：命令行正规控制面是 released `flux-purr` CLI，经 `flux-purr-devd` 操作 USB/flash/monitor 主机特权能力；浏览器 Web Serial 保留为浏览器访问硬件的正规路径。
-- `flux-purr-devd` 启动形态收敛为 `serve` 子命令，默认 `127.0.0.1:30080`，保留环境变量兼容，并在无显式 serial port 时读取用户级默认 USB port。
+- `flux-purr-devd` 启动形态使用 `serve` 子命令并默认绑定 `127.0.0.1:30080`；serial port 只接受显式 flag，无参数实例不选择 USB 设备。
 - `flux-purr` CLI 覆盖 devices/identity/status/runtime/wifi/flash/monitor/hardware/usb-port，自动创建、heartbeat 和释放 lease，支持 human 输出与 `--json` 输出。
-- 用户级硬件记忆和默认 USB port 写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；运行中的 daemon 不因配置文件变化自动切换端口。
+- 用户级硬件记忆写入 OS config directory，`FLUX_PURR_HOME` 可覆盖；daemon 不从该记录隐式选择 USB 端口。
 - 发布收敛为单一 product tag `vX.Y.Z`；Web、firmware、host-tools 和 release manifest 挂同一 GitHub Release，manifest 的组件指纹决定是否需要升级。
 - Repo 级 skill 分层现已拆为 developer policy 与 user/developer operations：`skills/flux-purr-developer-policy` 负责开发者总约束分流，`skills/flux-purr-user-operations` 与 `skills/flux-purr-developer-operations` 分别固化 released-user 路径与仓库内 developer operations/HIL 边界。
-- Thermal profile persistence retains all ten point-local targets in each `pps3a` / `pps5a` bank by using the EEPROM v3 record layout, removing the six-point truncation from saved full-batch profiles.
+- Thermal profile persistence retains all ten point-local targets in each `pps3a` / `pps5a` bank by using the EEPROM v5 record layout, removing the six-point truncation from saved full-batch profiles; v1-v4 records remain readable through the compatibility decoder.
+
+## 2026-08-04
+
+- DEVD Bridge 的 WiFi/LAN 页面不再把 USB `/api/v1/devices` 空结果解释为没有 LAN 服务；它读取独立 LAN registry，并把 mDNS refresh 与 CIDR scan 暴露为 operator 显式动作。这样既保持 direct browser LAN 与 DEVD bridge 的所有权边界，也避免后台扫网。
+
+## 2026-08-05
+
+- 顶部 native target 名称改为固件 identity，而不是 USB product descriptor。选择器 trigger 与 dropdown item 分离渲染，避免 Radix 把双行下拉内容重复投影后造成文字重叠。
+- 物理 WiFi Info 页面仍是四位 LAN pairing code 的唯一可用窗口，但已授权 USB/devd CLI 可以显式打开、读取并关闭该窗口。这样自动化能完成真实浏览器配对，同时不会把 code 或窗口控制暴露给 LAN。
+- DEVD LAN bridge 将一次连接定义为 daemon 内完成的身份、网络和状态验证，而不是让 Web 在 verified response 后再次创建识别 lease。这样 bridge 初始化与后续控制 lease 形成明确边界，不会把同一浏览器的并发动作误报为冲突。
+- LAN HTTP gate 曾只在入队时检查 lease，使排队写可能在 lease 过期后仍进入控制循环。mailbox 现在保留入队时的 lease ID，执行点再次验证 active 状态并以 `lease_expired` 结算过期命令。
+- DEVD LAN bridge 曾把控制写局限于 daemon 本地记录，无法证明设备已写入。bridge 现在为每次远端写创建短期 device lease，以设备 status revision 完成 preflight 后转发真实请求，并在终态释放 lease。CI 随之覆盖 devd/CLI、Web unit、Storybook 和 E2E；EdgeOne 只部署成功 CI Main 的 verified Web artifact。
+- USB Serial/JTAG 的连接不把 DTR/RTS 变更作为初始化步骤。Browser Web Serial 与 DEVD 都只打开端口并执行有界只读 probe，硬件复位只能由设备明确诊断上报。
+- Browser Web Serial 的成功状态会结算先前的同通道失败反馈；“最近操作”不再能在已连接 target 旁保留过期的 `Web Serial unavailable`，也不会替换其它通道或运行操作的反馈。
+- Web Serial 成功 probe 在 transport 层立即保存最小身份，而不是等待页面的后续 effect；已记忆通道在页面重挂载后仍与同一设备的 LAN/Bridge 通道合并。DEVD bootstrap/unavailable 不是控制目标，不会再向无关页面写入租约重连反馈。
+- DEVD 设备列表刷新失败时，保留的不可用占位曾与旧的模拟 target ID 一起返回，使 live 页面误回退到添加设备页。占位现作为只读诊断当前目标保持 Dashboard 上下文；它持续禁用写入，且不会进入设备卡片或连接方式列表。

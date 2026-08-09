@@ -1,6 +1,8 @@
 #![cfg_attr(target_arch = "xtensa", no_std)]
 #![cfg_attr(target_arch = "xtensa", no_main)]
 
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use core::fmt::Write as _;
 #[cfg(target_arch = "xtensa")]
 use core::{
     panic::PanicInfo,
@@ -11,7 +13,7 @@ use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
 use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
-use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
+use embassy_time::{Instant, Timer as EmbassyTimer};
 #[cfg(target_arch = "xtensa")]
 use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
@@ -59,8 +61,14 @@ use flux_purr_firmware::board::s3_frontpanel;
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use flux_purr_firmware::control_plane::LanPairingCode;
 #[cfg(test)]
 use flux_purr_firmware::control_plane::ThermalControlProfileCommand;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::WifiConfigReceipt;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::hello_frame;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
@@ -84,14 +92,14 @@ use flux_purr_firmware::control_plane::{
     CalibrationSampleWire, CalibrationSlotFitWire, CalibrationSlotIdWire, CalibrationStateWire,
     samples_from_wire,
 };
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-use flux_purr_firmware::control_plane::{hello_frame, log_frame};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
     FRONTPANEL_PRESET_COUNT, FRONTPANEL_TARGET_TEMP_MAX_C, FRONTPANEL_TARGET_TEMP_MIN_C,
     FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRuntimeMode,
     FrontPanelUiState, HeaterLockReason,
 };
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use flux_purr_firmware::lan::LanEndpoint;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::memory::{
     ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationSample, HEATER_CURVE_MAX_POINTS, HeaterCurvePoint,
@@ -121,6 +129,8 @@ use flux_purr_firmware::memory::{
     ThermalPlantRawTransaction, ThermalProfileBank, ThermalProfileMode,
     heater_resistance_ohms_from_curve, project_thermal_plant,
 };
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use flux_purr_firmware::net_http::{ControlMailboxCommand, HttpMethod, LAN_HTTP_BODY_MAX_LEN};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::status_light::{
     RgbChannels, StatusLightInputs, StatusLightState, select_status_light_state,
@@ -148,11 +158,21 @@ use flux_purr_firmware::{
 use gc9d01::{GC9D01, Timer as Gc9d01Timer};
 #[cfg(target_arch = "xtensa")]
 use micromath::F32Ext;
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+use serde::Serialize;
 #[cfg(target_arch = "xtensa")]
 use static_cell::StaticCell;
 
 #[cfg(target_arch = "xtensa")]
 esp_bootloader_esp_idf::esp_app_desc!();
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn init_lan_heap() {
+    // The post-boot DRAM2 region is reserved for large uninitialized storage.
+    // Keeping the WiFi heap there preserves headroom for the application stack
+    // and prevents LAN support from destabilizing USB/front-panel startup.
+    esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 72 * 1024);
+}
 
 #[cfg(target_arch = "xtensa")]
 fn reset_reason_log_line(reason: Option<SocResetReason>) -> &'static str {
@@ -197,7 +217,16 @@ unsafe impl defmt::Logger for UsbControlNoopLogger {
 #[cfg(target_arch = "xtensa")]
 #[panic_handler]
 fn panic(_info: &PanicInfo<'_>) -> ! {
-    loop {}
+    unsafe extern "C" {
+        fn esp_rom_output_tx_one_char(value: u8) -> i32;
+    }
+
+    for byte in b"panic=firmware_fault\n" {
+        // SAFETY: this ROM routine is available on ESP32-S3 and accepts one byte.
+        unsafe { esp_rom_output_tx_one_char(*byte) };
+    }
+    esp_hal::rom::ets_delay_us(250_000);
+    esp_hal::system::software_reset()
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -265,8 +294,6 @@ const HEATER_CONTROL_INTERVAL_MS: u64 = 50;
 #[cfg(any(target_arch = "xtensa", test))]
 const THERMAL_PLANT_SLOPE_FILTER_ALPHA: f32 = 0.025;
 #[cfg(any(target_arch = "xtensa", test))]
-const RUNTIME_INPUT_POLL_MAX_INTERVAL_MS: u64 = 20;
-#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_HOLD_PHASE_HYSTERESIS_C: f32 = 0.10;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
@@ -306,8 +333,8 @@ const HEATER_PPS_LARGE_TRANSITION_MS: u64 = 275;
 const FAN_PULSE_PERIOD_MS: u64 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATING_FAN_PULSE_MAX_DUTY_PERCENT: u8 = 50;
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-const DISPLAY_BRINGUP_TIMEOUT_MS: u64 = 1_500;
+#[cfg(target_arch = "xtensa")]
+const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 const USB_CONTROL_LINE_CAPACITY: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -413,10 +440,9 @@ const PT1000_C: f32 = -4.183e-12;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
 #[cfg(any(target_arch = "xtensa", test))]
-// Use the board's effective RTD divider rail instead of the ideal 3V3 nominal.
-// Runtime samples on the current hardware land near ambient only when the divider
-// is solved against ~3.0 V; hardcoding 3.3 V biases the PT1000 reading low.
-const RTD_DIVIDER_SUPPLY_MV: u16 = 3_000;
+// The production divider is driven directly from 3V3. Board-specific ADC error
+// belongs in the persisted RTD ADC calibration, not in the divider topology.
+const RTD_DIVIDER_SUPPLY_MV: u16 = 3_300;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -453,14 +479,34 @@ const FLASH_MEMORY_SLOT_B_OFFSET: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE;
 const FLASH_MEMORY_REGION_SIZE: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE * 2;
 #[cfg(any(target_arch = "xtensa", test))]
 const FLASH_MEMORY_PARTITION_LABEL: &str = "flux_cfg";
+// Firmware releases predating the LAN app partition expansion stored the
+// flash fallback immediately after the former 1 MiB factory app partition.
+// New firmware reads these two sectors as a migration source until the next
+// successful configuration commit persists the record under the new table.
+#[cfg(any(target_arch = "xtensa", test))]
+const LEGACY_FLASH_MEMORY_PARTITION_OFFSET: u32 = 0x110000;
+#[cfg(any(target_arch = "xtensa", test))]
+const LEGACY_FLASH_MEMORY_SLOT_A_OFFSET: u32 = LEGACY_FLASH_MEMORY_PARTITION_OFFSET;
+#[cfg(any(target_arch = "xtensa", test))]
+const LEGACY_FLASH_MEMORY_SLOT_B_OFFSET: u32 =
+    LEGACY_FLASH_MEMORY_PARTITION_OFFSET + FLASH_MEMORY_ERASE_SECTOR_SIZE;
 
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn eager_display_delay(milliseconds: u64, delay_us: impl FnOnce(u32)) -> core::future::Ready<()> {
+    let microseconds = milliseconds.saturating_mul(1_000).min(u32::MAX as u64) as u32;
+    delay_us(microseconds);
+    core::future::ready(())
+}
+
 #[cfg(target_arch = "xtensa")]
 impl Gc9d01Timer for DisplayTimer {
-    async fn after_millis(milliseconds: u64) {
-        EmbassyTimer::after_millis(milliseconds).await;
+    fn after_millis(milliseconds: u64) -> impl core::future::Future<Output = ()> {
+        // The synchronous gc9d01 transform does not poll the returned future.
+        // Execute the panel timing delay eagerly before returning a ready future.
+        eager_display_delay(milliseconds, esp_hal::rom::ets_delay_us)
     }
 }
 
@@ -1429,13 +1475,6 @@ fn scaled_filter_alpha_for_control_interval(alpha_per_profile_tick: f32) -> f32 
 fn scaled_hold_ki_for_control_interval(ki_per_profile_tick: f32) -> f32 {
     ki_per_profile_tick.max(0.0)
         * (HEATER_CONTROL_INTERVAL_MS as f32 / HEATER_PROFILE_TICK_MS as f32)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-fn heater_control_poll_wait_ms(elapsed_ms: u64, next_deadline_ms: u64) -> u64 {
-    next_deadline_ms
-        .saturating_sub(elapsed_ms)
-        .clamp(1, RUNTIME_INPUT_POLL_MAX_INTERVAL_MS)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4546,6 +4585,52 @@ fn load_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn load_legacy_flash_memory_record(flash: &mut FlashStorage) -> Option<MemoryRecord> {
+    let mut slot_a = [0u8; MEMORY_SLOT_SIZE];
+    let mut slot_b = [0u8; MEMORY_SLOT_SIZE];
+    let slot_a_read = flash
+        .read(LEGACY_FLASH_MEMORY_SLOT_A_OFFSET, &mut slot_a)
+        .map(|_| decode_memory_record(&slot_a))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let slot_b_read = flash
+        .read(LEGACY_FLASH_MEMORY_SLOT_B_OFFSET, &mut slot_b)
+        .map(|_| decode_memory_record(&slot_b))
+        .ok()
+        .unwrap_or(Err(flux_purr_firmware::memory::MemoryDecodeError::BadMagic));
+    let selected = select_latest_memory_record(slot_a_read, slot_b_read);
+    if let Some(record) = &selected {
+        info!(
+            "legacy flash memory restore source active seq={=u32}",
+            record.sequence
+        );
+    }
+    selected
+}
+
+#[cfg(target_arch = "xtensa")]
+fn load_flash_memory_record_with_legacy_migration(
+    flash: &mut FlashStorage,
+) -> Option<MemoryRecord> {
+    if let Some(record) = load_flash_memory_record(flash) {
+        return Some(record);
+    }
+    let record = load_legacy_flash_memory_record(flash)?;
+    match write_flash_memory_record(flash, &record) {
+        Ok(()) => info!(
+            "legacy flash memory migration committed seq={=u32}",
+            record.sequence
+        ),
+        Err(error) => info!(
+            "legacy flash memory migration deferred seq={=u32} reason={=str}",
+            record.sequence,
+            error.code()
+        ),
+    }
+    Some(record)
+}
+
+#[cfg(target_arch = "xtensa")]
 fn write_flash_memory_record(
     flash: &mut FlashStorage,
     record: &MemoryRecord,
@@ -4678,7 +4763,7 @@ fn load_memory_record(
 ) -> Option<MemoryRecord> {
     select_latest_optional_memory_record(
         load_eeprom_memory_record(i2c),
-        load_flash_memory_record(flash),
+        load_flash_memory_record_with_legacy_migration(flash),
     )
 }
 
@@ -4888,6 +4973,7 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         wifi_ssid: previous.wifi_ssid.clone(),
         wifi_password: previous.wifi_password.clone(),
         wifi_auto_reconnect: previous.wifi_auto_reconnect,
+        wifi_static_ipv4: previous.wifi_static_ipv4,
         telemetry_interval_ms: previous.telemetry_interval_ms,
         adc_calibration: previous.adc_calibration,
         active_heater_curve: previous.active_heater_curve,
@@ -4897,6 +4983,7 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         active_thermal_control_profile: previous.active_thermal_control_profile,
         thermal_control_profile_pps5a: previous.thermal_control_profile_pps5a,
         thermal_profile_mode: previous.thermal_profile_mode,
+        lan_pairing_token: previous.lan_pairing_token,
     }
 }
 
@@ -5131,6 +5218,32 @@ fn current_limit_fixed_pwm_duty_percent(
     let safe_mv = heater_safe_max_mv_for_temp(
         current_temp_c,
         effective_current_limit_ma,
+        fixed_mv,
+        preview_heater_curve,
+        memory_config,
+    );
+    let capped_percent = (u32::from(safe_mv) * 100 / u32::from(fixed_mv)).min(100) as u8;
+    duty_percent.min(capped_percent)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fixed_pd_pwm_duty_percent(
+    duty_percent: u8,
+    current_temp_c: f32,
+    fixed_mv: u16,
+    negotiated_current_ma: u16,
+    reserve_ma: u16,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> u8 {
+    if duty_percent == 0 || fixed_mv == 0 {
+        return 0;
+    }
+
+    let available_current_ma = heater_available_current_ma(negotiated_current_ma, reserve_ma);
+    let safe_mv = heater_safe_max_mv_for_temp(
+        current_temp_c,
+        available_current_ma,
         fixed_mv,
         preview_heater_curve,
         memory_config,
@@ -5497,9 +5610,22 @@ where
                     return false;
                 }
             }
+            let negotiated_current_ma = pd_observation
+                .filter(|observation| observation.status.pd_active)
+                .map(|observation| observation.current_ma)
+                .unwrap_or(0);
+            let safe_duty_percent = fixed_pd_pwm_duty_percent(
+                duty_percent,
+                current_temp_c,
+                fixed_request.millivolts(),
+                negotiated_current_ma,
+                active_thermal_settings.heater_current_reserve_ma,
+                preview_heater_curve,
+                memory_config,
+            );
             apply_heater_duty(
                 heater_pwm,
-                apply_warmup_soft_start(duty_percent, warmup_soft_start_percent),
+                apply_warmup_soft_start(safe_duty_percent, warmup_soft_start_percent),
                 last_physical_duty_percent,
             );
             false
@@ -5728,9 +5854,22 @@ where
                         fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                     };
                     if fixed_request_confirmed {
+                        let negotiated_current_ma = pd_observation
+                            .filter(|observation| observation.status.pd_active)
+                            .map(|observation| observation.current_ma)
+                            .unwrap_or(0);
+                        let safe_duty_percent = fixed_pd_pwm_duty_percent(
+                            duty_percent,
+                            current_temp_c,
+                            DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                            negotiated_current_ma,
+                            active_thermal_settings.heater_current_reserve_ma,
+                            preview_heater_curve,
+                            memory_config,
+                        );
                         apply_heater_duty(
                             heater_pwm,
-                            apply_warmup_soft_start(duty_percent, warmup_soft_start_percent),
+                            apply_warmup_soft_start(safe_duty_percent, warmup_soft_start_percent),
                             last_physical_duty_percent,
                         );
                     }
@@ -6092,7 +6231,7 @@ fn usb_runtime_status(
         },
         memory_config,
         (context.elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
-        network_from_memory(memory_config),
+        ui_state.network.clone(),
     )
     .with_runtime_target_temp_c(ui_state.target_temp_c);
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
@@ -6158,7 +6297,7 @@ fn usb_runtime_status(
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn usb_runtime_config_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
-    config: RuntimeConfigCommand,
+    mut config: RuntimeConfigCommand,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
@@ -6315,6 +6454,11 @@ fn usb_runtime_config_response(
         }
     }
     config.apply_to(memory_config);
+    if config.heater_enabled == Some(true)
+        && !thermal_model_heater_allowed(memory_config, context.calibration, *manual_pps)
+    {
+        config.heater_enabled = Some(false);
+    }
     apply_memory_config_to_ui(ui_state, memory_config);
     if let Some(heater_enabled) = config.heater_enabled {
         ui_state.heater_enabled = heater_enabled;
@@ -7690,6 +7834,18 @@ fn usb_response(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn hardware_identity() -> Identity {
+    #[cfg(target_arch = "xtensa")]
+    {
+        Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address())
+    }
+    #[cfg(not(target_arch = "xtensa"))]
+    {
+        Identity::firmware_from_mac([0xa0, 0xf2, 0x62, 0xf2, 0x0d, 0x6c])
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn usb_error_response(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     code: &'static str,
@@ -7719,11 +7875,19 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(Identity::firmware_default()),
+                UsbResponsePayload::Identity(hardware_identity()),
             ),
-            UsbRequestOp::GetNetwork => usb_response(
+            // The boot-time memory argument is still the zero-value placeholder
+            // until the main loop has completed EEPROM/flash restoration. Never
+            // expose it as a network snapshot: a configured device would appear
+            // transiently disabled or connected with no address and the host
+            // could persist that false state. The devd read path retries this
+            // explicit startup boundary until the runtime owns the snapshot.
+            UsbRequestOp::GetNetwork => usb_error_response_with_retryable(
                 request_id,
-                UsbResponsePayload::Network(network_from_memory(memory_config)),
+                "startup_busy",
+                "Network status is not available until memory and WiFi initialization completes.",
+                true,
             ),
             UsbRequestOp::GetCalibration => usb_response(
                 request_id,
@@ -7741,6 +7905,26 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+            UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "LAN pairing code is not available until runtime initialization completes.",
+                true,
+            ),
+            UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
+                usb_error_response_with_retryable(
+                    request_id,
+                    "startup_busy",
+                    "LAN pairing window is not available until runtime initialization completes.",
+                    true,
+                )
+            }
+            UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "LAN pairing reset is not available until runtime initialization completes.",
+                true,
+            ),
             UsbRequestOp::GetStatus => usb_error_response_with_retryable(
                 request_id,
                 "startup_busy",
@@ -7874,7 +8058,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(Identity::firmware_default()),
+                UsbResponsePayload::Identity(hardware_identity()),
             ),
             UsbRequestOp::GetNetwork => usb_response(
                 request_id,
@@ -7900,6 +8084,26 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+            UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
+                request_id,
+                "hardware_bringup_failed",
+                "LAN pairing code is unavailable because hardware bring-up did not complete.",
+                true,
+            ),
+            UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
+                usb_error_response_with_retryable(
+                    request_id,
+                    "hardware_bringup_failed",
+                    "LAN pairing window is unavailable because hardware bring-up did not complete.",
+                    true,
+                )
+            }
+            UsbRequestOp::ClearLanPairingToken => usb_error_response_with_retryable(
+                request_id,
+                "hardware_bringup_failed",
+                "LAN pairing reset is unavailable because hardware bring-up did not complete.",
+                true,
+            ),
         },
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
@@ -7934,10 +8138,8 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-async fn handle_usb_control_line(
+async fn process_control_line(
     line: &str,
-    usb: &mut RawUsbSerialJtag,
-    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     controller: &mut FrontPanelInputController,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
@@ -7972,7 +8174,7 @@ async fn handle_usb_control_line(
     latest_vin_mv: u32,
     last_heater_duty: u8,
     heater_control_timing: HeaterControlTiming,
-) -> bool {
+) -> (bool, UsbFrame) {
     let mut needs_redraw = false;
     let active_thermal_control_profile = active_thermal_control_profile(
         memory_config,
@@ -8008,16 +8210,25 @@ async fn handle_usb_control_line(
             latest_vin_raw_adc_mv,
             vin_mv: latest_vin_mv,
         };
+    #[cfg(feature = "net_http")]
+    if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
+        // Status and network requests must observe the same device-owned
+        // snapshot even during the first control-loop ticks after boot.
+        needs_redraw = true;
+    }
     let response = match parse_usb_frame(line) {
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(Identity::firmware_default()),
+                UsbResponsePayload::Identity(hardware_identity()),
             ),
-            UsbRequestOp::GetNetwork => usb_response(
-                request_id,
-                UsbResponsePayload::Network(network_from_memory(memory_config)),
-            ),
+            UsbRequestOp::GetNetwork => {
+                #[cfg(feature = "net_http")]
+                let network = flux_purr_firmware::net::lan_network_summary().await;
+                #[cfg(not(feature = "net_http"))]
+                let network = network_from_memory(memory_config);
+                usb_response(request_id, UsbResponsePayload::Network(network))
+            }
             UsbRequestOp::GetStatus => usb_response(
                 request_id,
                 UsbResponsePayload::Status(usb_runtime_status(
@@ -8049,15 +8260,97 @@ async fn handle_usb_control_line(
                 )),
             ),
             UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
+            UsbRequestOp::GetLanPairingCode => {
+                #[cfg(feature = "net_http")]
+                {
+                    let code = flux_purr_firmware::net::pairing_code();
+                    usb_response(
+                        request_id,
+                        UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
+                    )
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
+            UsbRequestOp::OpenLanPairingWindow => {
+                #[cfg(feature = "net_http")]
+                {
+                    let code = flux_purr_firmware::net::enter_pairing().await;
+                    ui_state.enter_wifi_pairing(code);
+                    needs_redraw = true;
+                    usb_response(
+                        request_id,
+                        UsbResponsePayload::LanPairingCode(lan_pairing_code_payload(code)),
+                    )
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
+            UsbRequestOp::CloseLanPairingWindow => {
+                #[cfg(feature = "net_http")]
+                {
+                    flux_purr_firmware::net::leave_pairing().await;
+                    ui_state.leave_wifi_pairing();
+                    ui_state.route = FrontPanelRoute::Dashboard;
+                    needs_redraw = true;
+                    usb_response(request_id, UsbResponsePayload::Ack)
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
+            UsbRequestOp::ClearLanPairingToken => {
+                #[cfg(feature = "net_http")]
+                {
+                    flux_purr_firmware::net::clear_token_from_usb().await;
+                    memory_config.lan_pairing_token = None;
+                    *memory_commit_due_ms =
+                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                    info!("LAN pairing token cleared by USB control request");
+                    usb_response(request_id, UsbResponsePayload::Ack)
+                }
+                #[cfg(not(feature = "net_http"))]
+                {
+                    usb_error_response(
+                        request_id,
+                        "lan_unavailable",
+                        "LAN pairing is disabled in this firmware build.",
+                    )
+                }
+            }
         },
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
             config.apply_to(memory_config);
+            #[cfg(feature = "net_http")]
+            let network = flux_purr_firmware::net::apply_wifi_config(memory_config).await;
+            #[cfg(not(feature = "net_http"))]
+            let network = network_from_memory(memory_config);
             apply_memory_config_to_ui(ui_state, memory_config);
             *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             needs_redraw = true;
             usb_response(
                 request_id,
-                UsbResponsePayload::Wifi(config.redacted_summary()),
+                UsbResponsePayload::Wifi(WifiConfigReceipt {
+                    wifi: config.redacted_summary(),
+                    network,
+                }),
             )
         }
         Ok(UsbFrame::RuntimeConfig {
@@ -8122,18 +8415,14 @@ async fn handle_usb_control_line(
                     .await
                     {
                         *memory_config = previous_memory_config;
-                        return {
-                            usb_write_response_frame(
-                                usb,
-                                &usb_error_response(
-                                    model_write_request_id,
-                                    error.code(),
-                                    error.message(),
-                                ),
-                                tx_buf,
-                            );
-                            needs_redraw
-                        };
+                        return (
+                            needs_redraw,
+                            usb_error_response(
+                                model_write_request_id,
+                                error.code(),
+                                error.message(),
+                            ),
+                        );
                     }
                     *memory_commit_due_ms = None;
                 } else {
@@ -8161,16 +8450,14 @@ async fn handle_usb_control_line(
                     *memory_commit_due_ms = None;
                 } else {
                     *memory_config = previous_memory_config;
-                    usb_write_response_frame(
-                        usb,
-                        &usb_error_response(
+                    return (
+                        needs_redraw,
+                        usb_error_response(
                             request_id,
                             "memory_commit_failed",
                             "Calibration draft could not be persisted.",
                         ),
-                        tx_buf,
                     );
-                    return needs_redraw;
                 }
             }
             response
@@ -8204,12 +8491,10 @@ async fn handle_usb_control_line(
                         .await
                 {
                     *memory_config = previous_memory_config;
-                    usb_write_response_frame(
-                        usb,
-                        &usb_error_response(request_id, error.code(), error.message()),
-                        tx_buf,
+                    return (
+                        needs_redraw,
+                        usb_error_response(request_id, error.code(), error.message()),
                     );
-                    return needs_redraw;
                 }
                 *memory_commit_due_ms = None;
                 usb_response(
@@ -8252,8 +8537,194 @@ async fn handle_usb_control_line(
         },
     };
 
-    usb_write_response_frame(usb, &response, tx_buf);
-    needs_redraw
+    (needs_redraw, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode {
+    let code = code.map(|digits| {
+        let mut rendered = heapless::String::new();
+        for digit in digits {
+            let _ = rendered.push(digit as char);
+        }
+        rendered
+    });
+    LanPairingCode {
+        active: code.is_some(),
+        code,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_command_to_control_line(
+    command: &ControlMailboxCommand,
+) -> Result<heapless::String<USB_CONTROL_LINE_CAPACITY>, &'static str> {
+    let request_op = match (command.endpoint, command.method) {
+        (LanEndpoint::Identity, HttpMethod::Get) => Some("get_identity"),
+        (LanEndpoint::Network, HttpMethod::Get) => Some("get_network"),
+        (LanEndpoint::Status | LanEndpoint::Events, HttpMethod::Get) => Some("get_status"),
+        (LanEndpoint::Calibration, HttpMethod::Get) => Some("get_calibration"),
+        (LanEndpoint::CalibrationJob, HttpMethod::Get) => Some("get_calibration_job"),
+        (LanEndpoint::HeaterCurve, HttpMethod::Get) => Some("get_heater_curve"),
+        _ => None,
+    };
+    let mut line = heapless::String::new();
+    if let Some(op) = request_op {
+        write!(
+            line,
+            r#"{{"type":"request","requestId":"lan","op":"{op}"}}"#
+        )
+        .map_err(|_| "LAN request is too large")?;
+        return Ok(line);
+    }
+
+    // Saving the current heater-curve preview has no payload in the shared
+    // USB JSONL contract. Do not force it through the JSON-object adapter.
+    if command.endpoint == LanEndpoint::HeaterCurveSave {
+        write!(line, r#"{{"type":"heater_curve_save","requestId":"lan"}}"#)
+            .map_err(|_| "LAN request is too large")?;
+        return Ok(line);
+    }
+
+    // The LAN API keeps a thermal-profile payload focused on the profile
+    // operation itself. USB JSONL carries the same operation under runtime
+    // config's `thermalControlProfile` field.
+    if command.endpoint == LanEndpoint::ThermalProfile {
+        let body = command.body.as_str().trim();
+        if !body.starts_with('{') || !body.ends_with('}') {
+            return Err("LAN command body must be a JSON object");
+        }
+        write!(
+            line,
+            r#"{{"type":"runtime_config","requestId":"lan","thermalControlProfile":{body}}}"#
+        )
+        .map_err(|_| "LAN request is too large")?;
+        return Ok(line);
+    }
+
+    let frame_type = match command.endpoint {
+        LanEndpoint::Runtime => "runtime_config",
+        LanEndpoint::Calibration => "calibration_config",
+        LanEndpoint::CalibrationJob => "calibration_job",
+        LanEndpoint::HeaterCurve => "heater_curve_config",
+        _ => return Err("LAN endpoint does not accept this method"),
+    };
+    let fields = command
+        .body
+        .as_str()
+        .trim()
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+        .ok_or("LAN command body must be a JSON object")?
+        .trim();
+    write!(line, r#"{{"type":"{frame_type}","requestId":"lan""#)
+        .map_err(|_| "LAN request is too large")?;
+    if !fields.is_empty() {
+        line.push(',').map_err(|_| "LAN request is too large")?;
+        line.push_str(fields)
+            .map_err(|_| "LAN request is too large")?;
+    }
+    line.push('}').map_err(|_| "LAN request is too large")?;
+    Ok(line)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_error_json(code: &str, message: &str) -> heapless::String<LAN_HTTP_BODY_MAX_LEN> {
+    let mut body = heapless::String::new();
+    let _ = write!(
+        body,
+        r#"{{"error":{{"code":"{code}","message":"{message}"}}}}"#
+    );
+    body
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_frame_response(
+    frame: &UsbFrame,
+    network: flux_purr_firmware::control_plane::NetworkSummary,
+) -> (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>) {
+    match frame {
+        UsbFrame::Response {
+            ok: true,
+            result: Some(result),
+            ..
+        } => match result {
+            UsbResponsePayload::Identity(value) => lan_json_response(value),
+            UsbResponsePayload::Network(value) => lan_json_response(value),
+            UsbResponsePayload::Status(value) => {
+                let mut status = value.clone();
+                status.network = network;
+                lan_json_response(&status)
+            }
+            UsbResponsePayload::LanPairingCode(value) => lan_json_response(value),
+            UsbResponsePayload::Wifi(value) => lan_json_response(value),
+            UsbResponsePayload::Calibration(value) => lan_json_response(value),
+            UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),
+            UsbResponsePayload::HeaterCurve(value) => lan_json_response(value),
+            UsbResponsePayload::Ack => {
+                let mut body = heapless::String::new();
+                let _ = body.push_str(r#"{"accepted":true}"#);
+                (200, body)
+            }
+        },
+        UsbFrame::Response {
+            error: Some(error), ..
+        }
+        | UsbFrame::Error { error, .. } => (
+            lan_error_status(error.code.as_str()),
+            lan_error_json(error.code.as_str(), error.message.as_str()),
+        ),
+        _ => (
+            500,
+            lan_error_json(
+                "invalid_control_response",
+                "Control loop returned an invalid LAN response.",
+            ),
+        ),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_json_response<T: Serialize>(value: &T) -> (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>) {
+    let mut buffer = [0u8; LAN_HTTP_BODY_MAX_LEN];
+    match serde_json_core::to_slice(value, &mut buffer) {
+        Ok(written) => match core::str::from_utf8(&buffer[..written]) {
+            Ok(json) => {
+                let mut body = heapless::String::new();
+                let _ = body.push_str(json);
+                (200, body)
+            }
+            Err(_) => (
+                500,
+                lan_error_json(
+                    "invalid_control_response",
+                    "Control response was not valid UTF-8.",
+                ),
+            ),
+        },
+        Err(_) => (
+            500,
+            lan_error_json(
+                "response_too_large",
+                "Control response exceeded the LAN envelope.",
+            ),
+        ),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_error_status(code: &str) -> u16 {
+    if code.starts_with("invalid_")
+        || code.ends_with("_required")
+        || matches!(
+            code,
+            "malformed_json" | "unsupported_frame" | "unsupported_lan_command"
+        )
+    {
+        400
+    } else {
+        409
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8263,7 +8734,7 @@ fn present_ui<'a, BUS, DC, RST>(
     state: &FrontPanelUiState,
 ) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
-    BUS: embedded_hal_async::spi::SpiDevice,
+    BUS: embedded_hal::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
@@ -8281,20 +8752,20 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-async fn flush_ui<'a, BUS, DC, RST>(
+fn flush_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
 ) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
-    BUS: embedded_hal_async::spi::SpiDevice,
+    BUS: embedded_hal::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
 {
     present_ui(display, canvas, state)?;
-    display.flush().await
+    display.flush()
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8497,7 +8968,7 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     status_light_started_ms: u64,
 ) -> !
 where
-    BUS: embedded_hal_async::spi::SpiDevice,
+    BUS: embedded_hal::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
@@ -8510,9 +8981,7 @@ where
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    flush_ui(display, canvas, &ui_state)
-        .await
-        .expect("failed to draw initial key-test UI");
+    flush_ui(display, canvas, &ui_state).expect("failed to draw initial key-test UI");
     log_ui_state(&ui_state);
 
     let mut elapsed_ms: u64 = 0;
@@ -8560,22 +9029,22 @@ where
         }
 
         if needs_redraw {
-            flush_ui(display, canvas, &ui_state)
-                .await
-                .expect("failed to refresh key-test UI");
+            flush_ui(display, canvas, &ui_state).expect("failed to refresh key-test UI");
             log_ui_state(&ui_state);
         }
     }
 }
 
 #[cfg(target_arch = "xtensa")]
-#[esp_hal_embassy::main]
+#[esp_rtos::main]
 async fn main(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
+    #[cfg(feature = "net_http")]
+    init_lan_heap();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timg0.timer0);
+    esp_rtos::start(timg0.timer0);
     let status_light_red = Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
     let status_light_green = Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
     let status_light_blue = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
@@ -8600,7 +9069,7 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     usb_write_frame(
         &mut usb_serial,
-        &hello_frame(Identity::firmware_default()),
+        &hello_frame(hardware_identity()),
         &mut usb_tx_buf,
     );
     #[cfg(feature = "web_serial")]
@@ -8612,7 +9081,11 @@ async fn main(_spawner: Spawner) {
         &mut usb_tx_buf,
         &usb_boot_memory_config,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_heap_ready\n");
 
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=frontpanel_inputs_start\n");
     info!(
         "boot display_dc={=u8} mosi={=u8} sclk={=u8} blk={=u8} res={=u8} cs={=u8}",
         s3_frontpanel::PIN_LCD_DC,
@@ -8649,6 +9122,8 @@ async fn main(_spawner: Spawner) {
         left: Input::new(peripherals.GPIO18, input_cfg),
         up: Input::new(peripherals.GPIO21, input_cfg),
     };
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=frontpanel_inputs_ready\n");
 
     let spi = Spi::new(
         peripherals.SPI2,
@@ -8658,8 +9133,9 @@ async fn main(_spawner: Spawner) {
     )
     .expect("failed to create SPI2")
     .with_sck(peripherals.GPIO12)
-    .with_mosi(peripherals.GPIO11)
-    .into_async();
+    .with_mosi(peripherals.GPIO11);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_spi_ready\n");
 
     let cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
@@ -8676,10 +9152,10 @@ async fn main(_spawner: Spawner) {
     > = StaticCell::new();
     static CANVAS: StaticCell<DisplayCanvas> = StaticCell::new();
 
-    let driver_framebuffer = DRIVER_FB.init(
-        [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS],
-    );
-    let canvas = CANVAS.init(DisplayCanvas::new());
+    let driver_framebuffer = DRIVER_FB.init_with(|| {
+        [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS]
+    });
+    let canvas = CANVAS.init_with(DisplayCanvas::new);
 
     let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
         DISPLAY_PANEL_CONFIG,
@@ -8688,6 +9164,8 @@ async fn main(_spawner: Spawner) {
         rst,
         driver_framebuffer,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_start\n");
 
     info!(
         "init panel width={=u16} height={=u16} dx={=u16} dy={=u16}",
@@ -8696,12 +9174,9 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.dx,
         DISPLAY_PANEL_CONFIG.dy,
     );
-    let display_ready = with_timeout(
-        Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        display.init(),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok());
+    let display_ready = display.init().is_ok();
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_complete\n");
     if !display_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -8717,6 +9192,8 @@ async fn main(_spawner: Spawner) {
         panic!("failed to initialize GC9D01 display");
     }
 
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_render_start\n");
     render_scene(SceneId::StartupCalibration, canvas);
     display.write_area(
         0,
@@ -8725,12 +9202,11 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.height,
         canvas.pixels(),
     );
-    let startup_flush_ready = with_timeout(
-        Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        display.flush(),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok());
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_flush_start\n");
+    let startup_flush_ready = display.flush().is_ok();
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_flush_complete\n");
     if !startup_flush_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -8757,6 +9233,8 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(20).await;
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_dwell_complete\n");
     info!(
         "frontpanel runtime mode={=str}",
         runtime_mode_label(runtime_mode)
@@ -8774,7 +9252,8 @@ async fn main(_spawner: Spawner) {
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
         run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await;
     }
-
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_i2c_init_start\n");
     let mut pd_i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_hz(CH224Q_I2C_FREQUENCY_HZ)),
@@ -8782,7 +9261,13 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create I2C0")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_i2c_init_complete\n");
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_request_start\n");
     let ch224q_address = request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await;
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_request_complete\n");
     let mut flash_storage = FlashStorage::new();
     info!(
         "pd request locked addr=0x{=u8:02x} target_mv={=u16} settle_ms={=u64}",
@@ -8801,11 +9286,41 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(10).await;
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_settle_complete\n");
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=memory_load_start\n");
     let restored_memory_record = load_memory_record(&mut pd_i2c, &mut flash_storage);
     let mut memory_config = restored_memory_record
         .as_ref()
         .map(|record| record.config.clone())
         .unwrap_or_default();
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=memory_load_complete\n");
+    #[cfg(feature = "net_http")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_start\n");
+    #[cfg(feature = "net_http")]
+    flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
+    #[cfg(feature = "net_http")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_complete\n");
+    #[cfg(feature = "net_http")]
+    {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_init_start\n");
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_spawn_start\n");
+        if let Err(error) =
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
+                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
+            })
+            .await
+        {
+            warn!("LAN control plane startup failed: {=str}", error.message());
+            flux_purr_firmware::net::report_startup_failure(error).await;
+        }
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_init_complete\n");
+    }
     let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_sequence = restored_memory_record
         .as_ref()
@@ -8815,7 +9330,7 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     usb_write_frame(
         &mut usb_serial,
-        &hello_frame(Identity::firmware_default()),
+        &hello_frame(hardware_identity()),
         &mut usb_tx_buf,
     );
     #[cfg(feature = "web_serial")]
@@ -8826,17 +9341,23 @@ async fn main(_spawner: Spawner) {
         &memory_config,
     );
 
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_start\n");
     let mut adc1_config = AdcConfig::new();
     let mut vin_adc_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO1, RTD_SAMPLE_ATTENUATION);
     let mut rtd_adc_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO2, RTD_SAMPLE_ATTENUATION);
     let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_complete\n");
     info!(
         "adc monitor active: vin_gpio1 rtd_gpio2 atten={=str} samples={=u8} interval_ms={=u64}",
         "6dB", RTD_SAMPLE_COUNT as u8, RTD_LOG_INTERVAL_MS,
     );
 
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
     let pwm_clock_cfg =
         PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
@@ -8901,10 +9422,14 @@ async fn main(_spawner: Spawner) {
         .expect("failed to derive buzzer PWM timer clock");
     mcpwm.timer2.start(buzzer_timer_cfg);
     let _ = buzzer_pwm.set_duty_cycle_percent(0);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_complete\n");
     info!(
         "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
         BUZZER_PWM_PERIOD_TICKS,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_status_wait_start\n");
     let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
         await_ch224q_pd_ready(&mut pd_i2c, ch224q_address, || {
             set_status_light_state(StatusLightState::Booting);
@@ -8938,6 +9463,8 @@ async fn main(_spawner: Spawner) {
         );
         read_ch224q_status(&mut pd_i2c, ch224q_address)
     };
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_status_wait_complete\n");
     let mut last_pd_status_log_key = pd_status_log_key(last_pd_observation);
     let active_thermal_settings =
         ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
@@ -8953,8 +9480,12 @@ async fn main(_spawner: Spawner) {
         active_thermal_settings.auto_adjustable_working_floor_mv,
         active_thermal_settings.heater_current_reserve_ma,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_power_data_start\n");
     let power_data_capabilities = read_ch224q_power_data(&mut pd_i2c, ch224q_address)
         .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes));
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_power_data_complete\n");
     match power_data_capabilities {
         Some(capabilities) => info!(
             "ch224q power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16} pps_max_ma={=u16}",
@@ -9001,7 +9532,11 @@ async fn main(_spawner: Spawner) {
         ),
     }
 
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_start\n");
     let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_complete\n");
     let mut controller = FrontPanelInputController::new(
         FrontPanelKeyMap::default(),
         FrontPanelInputTimings::default(),
@@ -9071,6 +9606,8 @@ async fn main(_spawner: Spawner) {
             );
         }
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_start\n");
     if let Some((raw_adc_mv, corrected_adc_mv, vin_mv)) =
         read_calibrated_vin_mv(&mut adc1, &mut vin_adc_pin, &memory_config)
     {
@@ -9081,6 +9618,8 @@ async fn main(_spawner: Spawner) {
             raw_adc_mv, corrected_adc_mv, vin_mv,
         );
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_complete\n");
     let mut last_heater_duty = 0_u8;
     let mut last_pid_snapshot = HeaterPidSnapshot {
         duty_percent: 0,
@@ -9134,6 +9673,8 @@ async fn main(_spawner: Spawner) {
         ),
         0,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=heater_sync_start\n");
     let _ = apply_heater_power_output(
         &mut pd_i2c,
         ch224q_address,
@@ -9157,6 +9698,8 @@ async fn main(_spawner: Spawner) {
         0,
     )
     .await;
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=heater_sync_complete\n");
     ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
     apply_fan_output(
         &mut fan_enable,
@@ -9204,12 +9747,11 @@ async fn main(_spawner: Spawner) {
         ..StatusLightInputs::default()
     });
     set_status_light_state(initial_status_light_state);
-    let initial_frontpanel_ui_ready = with_timeout(
-        Duration::from_millis(DISPLAY_BRINGUP_TIMEOUT_MS),
-        flush_ui(&mut display, canvas, &ui_state),
-    )
-    .await
-    .is_ok_and(|result| result.is_ok());
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_start\n");
+    let initial_frontpanel_ui_ready = flush_ui(&mut display, canvas, &ui_state).is_ok();
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_complete\n");
     if !initial_frontpanel_ui_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -9225,26 +9767,31 @@ async fn main(_spawner: Spawner) {
         panic!("failed to draw initial frontpanel UI");
     }
     #[cfg(feature = "web_serial")]
-    usb_write_frame(
-        &mut usb_serial,
-        &log_frame("info", "frontpanel runtime ready"),
-        &mut usb_tx_buf,
-    );
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ready\n");
     log_ui_state(&ui_state);
 
     let runtime_started_ms = Instant::now().as_millis();
     let mut last_control_ms: u64 = 0;
     let mut next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
     let mut heater_control_timing = HeaterControlTiming::default();
+    let mut ui_refresh_pending = false;
+    let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
+    let mut first_runtime_probe = true;
+    // USB automation can open WiFi Info after this loop has already sampled
+    // the keys. Do not let an event from that older sample immediately close
+    // the newly opened pairing window.
+    let mut suppress_pairing_input_until_released = false;
     loop {
-        let elapsed_before_wait_ms = Instant::now()
-            .as_millis()
-            .saturating_sub(runtime_started_ms);
-        EmbassyTimer::after_millis(heater_control_poll_wait_ms(
-            elapsed_before_wait_ms,
-            next_control_deadline_ms,
-        ))
-        .await;
+        // Yield cooperatively while using the monotonic clock for deadlines.
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_before\n");
+        }
+        embassy_futures::yield_now().await;
+        #[cfg(feature = "web_serial")]
+        if first_runtime_probe {
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_after\n");
+        }
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
@@ -9256,14 +9803,13 @@ async fn main(_spawner: Spawner) {
             ui_state.gesture_capabilities(),
         );
         let mut needs_redraw = false;
+        let route_before_usb_control = ui_state.route;
         #[cfg(feature = "web_serial")]
         loop {
             match usb_serial.read_byte() {
                 Ok(b'\n') => {
-                    needs_redraw |= handle_usb_control_line(
+                    let (control_needs_redraw, response) = process_control_line(
                         usb_rx_line.as_str(),
-                        &mut usb_serial,
-                        &mut usb_tx_buf,
                         &mut controller,
                         &mut ui_state,
                         &mut memory_config,
@@ -9300,6 +9846,8 @@ async fn main(_spawner: Spawner) {
                         heater_control_timing,
                     )
                     .await;
+                    needs_redraw |= control_needs_redraw;
+                    usb_write_response_frame(&mut usb_serial, &response, &mut usb_tx_buf);
                     usb_rx_line.clear();
                 }
                 Ok(b'\r') => {}
@@ -9311,6 +9859,140 @@ async fn main(_spawner: Spawner) {
                 Err(nb::Error::WouldBlock) => break,
                 Err(_) => break,
             }
+        }
+        let pairing_opened_by_usb = route_before_usb_control != FrontPanelRoute::WifiInfo
+            && ui_state.route == FrontPanelRoute::WifiInfo;
+        if pairing_opened_by_usb {
+            suppress_pairing_input_until_released = true;
+        }
+
+        #[cfg(feature = "net_http")]
+        while let Some(command) = flux_purr_firmware::net::try_receive_command() {
+            let request_id = command.request_id;
+            let response_slot = command.response_slot;
+            let is_mutation = matches!(
+                command.method,
+                HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
+            );
+            if is_mutation && !flux_purr_firmware::net::command_lease_is_active(&command).await {
+                flux_purr_firmware::net::respond_to_command(
+                    response_slot,
+                    request_id,
+                    409,
+                    lan_error_json(
+                        "lease_expired",
+                        "The LAN lease expired before this command reached the control loop.",
+                    ),
+                    false,
+                );
+                continue;
+            }
+            if is_mutation
+                && flux_purr_firmware::net_http::validate_control_revision(
+                    command.expected_revision,
+                    flux_purr_firmware::net::current_control_revision(),
+                )
+                .is_err()
+            {
+                flux_purr_firmware::net::respond_to_command(
+                    response_slot,
+                    request_id,
+                    409,
+                    lan_error_json(
+                        "stale_write",
+                        "The control state changed after this client last read it.",
+                    ),
+                    false,
+                );
+                continue;
+            }
+            let direct_response = match (command.endpoint, command.method) {
+                (LanEndpoint::Identity, HttpMethod::Get) => Some(lan_json_response(
+                    &flux_purr_firmware::net::lan_identity().await,
+                )),
+                (LanEndpoint::Network, HttpMethod::Get) => Some(lan_json_response(
+                    &flux_purr_firmware::net::lan_network_summary().await,
+                )),
+                _ => None,
+            };
+            if let Some((status, body)) = direct_response {
+                flux_purr_firmware::net::respond_to_command(
+                    response_slot,
+                    request_id,
+                    status,
+                    body,
+                    false,
+                );
+                continue;
+            }
+            let line = match lan_command_to_control_line(&command) {
+                Ok(line) => line,
+                Err(message) => {
+                    flux_purr_firmware::net::respond_to_command(
+                        response_slot,
+                        request_id,
+                        400,
+                        lan_error_json("unsupported_lan_command", message),
+                        false,
+                    );
+                    continue;
+                }
+            };
+            let (control_needs_redraw, response) = process_control_line(
+                line.as_str(),
+                &mut controller,
+                &mut ui_state,
+                &mut memory_config,
+                &mut preview_heater_curve,
+                &mut memory_commit_due_ms,
+                &mut memory_sequence,
+                &mut pd_i2c,
+                &mut flash_storage,
+                &mut calibration_runtime_state,
+                elapsed_ms,
+                last_pd_observation,
+                &mut heater_power_backend,
+                &mut heater_controller,
+                last_pid_snapshot,
+                &mut manual_pps_state,
+                fan_command,
+                current_rtd_fault,
+                &mut overtemp_attention_acknowledged,
+                &mut attention_pending_after_fault_clear,
+                &mut overtemp_forced_fan_active,
+                &mut next_attention_reminder_ms,
+                &mut buzzer,
+                &mut thermal_control_profile_preview,
+                last_raw_state,
+                latest_display_temp_c,
+                latest_temp_c,
+                control_measurement_guarded,
+                latest_rtd_raw_adc_mv,
+                latest_rtd_raw_adc_min_mv,
+                latest_rtd_raw_adc_max_mv,
+                latest_vin_raw_adc_mv,
+                latest_vin_mv,
+                last_heater_duty,
+                heater_control_timing,
+            )
+            .await;
+            needs_redraw |= control_needs_redraw;
+            let (status, body) = lan_frame_response(
+                &response,
+                flux_purr_firmware::net::lan_network_summary().await,
+            );
+            flux_purr_firmware::net::respond_to_command(
+                response_slot,
+                request_id,
+                status,
+                body,
+                is_mutation,
+            );
+        }
+        #[cfg(feature = "net_http")]
+        if let Some(token) = flux_purr_firmware::net::take_persisted_token_change().await {
+            memory_config.lan_pairing_token = token;
+            memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
         }
 
         if sample.raw_state != last_raw_state {
@@ -9361,6 +10043,10 @@ async fn main(_spawner: Spawner) {
         }
 
         for event in sample.events {
+            if suppress_pairing_input_until_released {
+                continue;
+            }
+            let route_before = ui_state.route;
             let heater_enabled_before = ui_state.heater_enabled;
             let active_cooling_enabled_before = ui_state.active_cooling_enabled;
             info!(
@@ -9397,6 +10083,29 @@ async fn main(_spawner: Spawner) {
                 continue;
             }
             let interaction_handled = ui_state.handle_event(event);
+            if route_before != FrontPanelRoute::WifiInfo
+                && ui_state.route == FrontPanelRoute::WifiInfo
+            {
+                #[cfg(feature = "net_http")]
+                {
+                    let code = flux_purr_firmware::net::enter_pairing().await;
+                    ui_state.enter_wifi_pairing(code);
+                    info!("LAN pairing window opened from WiFi Info page");
+                }
+                #[cfg(not(feature = "net_http"))]
+                ui_state.leave_wifi_pairing();
+            } else if route_before == FrontPanelRoute::WifiInfo
+                && ui_state.route != FrontPanelRoute::WifiInfo
+            {
+                #[cfg(feature = "net_http")]
+                {
+                    flux_purr_firmware::net::leave_pairing().await;
+                    ui_state.leave_wifi_pairing();
+                    info!("LAN pairing window closed after leaving WiFi Info page");
+                }
+                #[cfg(not(feature = "net_http"))]
+                ui_state.leave_wifi_pairing();
+            }
             if interaction_handled {
                 needs_redraw = true;
             }
@@ -9483,6 +10192,12 @@ async fn main(_spawner: Spawner) {
                     );
                 }
             }
+        }
+        if suppress_pairing_input_until_released
+            && !pairing_opened_by_usb
+            && sample.raw_state.first_pressed().is_none()
+        {
+            suppress_pairing_input_until_released = false;
         }
         if suppress_attention_ack_input
             && suppress_attention_ack_waits_for_event
@@ -9973,6 +10688,10 @@ async fn main(_spawner: Spawner) {
             needs_redraw = true;
         }
 
+        #[cfg(feature = "net_http")]
+        if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
+            needs_redraw = true;
+        }
         if maybe_play_protection_alarm(
             is_overtemp_fault(current_rtd_fault),
             &mut next_protection_alarm_ms,
@@ -10017,20 +10736,23 @@ async fn main(_spawner: Spawner) {
             fan_enabled: fan_command.enabled,
         });
         set_status_light_state(status_light_state);
-
-        if needs_redraw {
-            flush_ui(&mut display, canvas, &ui_state)
-                .await
-                .expect("failed to refresh frontpanel UI");
-            log_ui_state(&ui_state);
+        ui_refresh_pending |= needs_redraw;
+        if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
+            match flush_ui(&mut display, canvas, &ui_state) {
+                Ok(()) => log_ui_state(&ui_state),
+                Err(_) => warn!("frontpanel UI refresh failed"),
+            }
+            ui_refresh_pending = false;
+            next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
         }
+        first_runtime_probe = false;
     }
 }
 
 #[cfg(not(target_arch = "xtensa"))]
 fn main() {
     println!(
-        "flux-purr now runs the interactive frontpanel runtime; build with --target xtensa-esp32s3-none-elf --features esp32s3,web_serial[,frontpanel-key-test]"
+        "flux-purr now runs the interactive frontpanel runtime; build with --target xtensa-esp32s3-none-elf --features esp32s3,web_serial,net_http"
     );
 }
 
@@ -10123,6 +10845,18 @@ mod tests {
             configured_frequency_hz,
             fast_repeat_tone
         ));
+    }
+
+    #[test]
+    fn synchronous_display_delay_runs_before_the_future_is_polled() {
+        let mut observed_us = 0;
+
+        let unpolled = eager_display_delay(120, |microseconds| {
+            observed_us = microseconds;
+        });
+
+        assert_eq!(observed_us, 120_000);
+        drop(unpolled);
     }
 
     struct FakeUsbTx {
@@ -10320,13 +11054,15 @@ mod tests {
                 assert_eq!(request_id.as_str(), "boot-id");
                 assert!(ok);
                 assert_eq!(identity.protocol_version.as_str(), "flux-purr.usb.v1");
+                assert_eq!(identity.device_id.as_str(), "a0f262f20d6c");
+                assert_eq!(identity.hostname.as_str(), "flux-purr-a0f262f20d6c");
             }
             other => panic!("unexpected early identity response: {other:?}"),
         }
     }
 
     #[test]
-    fn early_usb_control_reports_network_from_available_memory() {
+    fn early_usb_control_defers_network_until_main_loop() {
         let mut config = MemoryConfig::default();
         config.wifi_ssid.push_str("bench-net").unwrap();
         let response = usb_early_response(
@@ -10337,15 +11073,13 @@ mod tests {
         match response {
             UsbFrame::Response {
                 request_id,
-                ok: true,
-                result: Some(UsbResponsePayload::Network(network)),
-                error: None,
+                ok: false,
+                result: None,
+                error: Some(error),
             } => {
                 assert_eq!(request_id.as_str(), "boot-net");
-                assert_eq!(
-                    network.ssid.as_ref().map(|ssid| ssid.as_str()),
-                    Some("bench-net")
-                );
+                assert_eq!(error.code.as_str(), "startup_busy");
+                assert!(error.retryable);
             }
             other => panic!("unexpected early network response: {other:?}"),
         }
@@ -10429,7 +11163,7 @@ mod tests {
                 selected_preset_slot: None,
                 presets_c: None,
                 active_cooling_enabled: Some(false),
-                heater_enabled: Some(true),
+                heater_enabled: Some(false),
                 manual_pps_enabled: None,
                 manual_pps_mv: None,
                 manual_pps_ma: None,
@@ -10460,11 +11194,59 @@ mod tests {
                 assert_eq!(request_id.as_str(), "runtime-1");
                 assert_eq!(status.target_temp_c, 240);
                 assert!(!status.active_cooling_enabled);
-                assert!(status.heater_enabled);
-                assert_eq!(status.heater_lock_reason, None);
+                assert!(!status.heater_enabled);
                 assert_eq!(status.uptime_seconds, 12);
                 assert_eq!(memory_config.target_temp_c, 240);
                 assert!(!memory_config.active_cooling_enabled);
+            }
+            other => panic!("unexpected runtime config response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn runtime_config_response_rejects_heater_arm_when_thermal_model_is_missing() {
+        let mut request_id = heapless::String::new();
+        request_id.push_str("runtime-heater-model-missing").unwrap();
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps = ManualPpsState::default();
+        let mut thermal_profile_preview = None;
+
+        let (response, _) = usb_runtime_config_response(
+            request_id,
+            RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: Some(true),
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                fault_attention_acknowledged: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                thermal_control_profile: None,
+                thermal_plant_model: None,
+            },
+            &mut ui_state,
+            &mut memory_config,
+            &mut manual_pps,
+            &mut thermal_profile_preview,
+            test_usb_runtime_status_context(),
+        );
+
+        match response {
+            UsbFrame::Response {
+                ok: true,
+                result: Some(UsbResponsePayload::Status(status)),
+                error: None,
+                ..
+            } => {
+                assert!(!status.heater_enabled);
+                assert_eq!(status.heater_output_percent, 0);
+                assert_eq!(status.heater_physical_output_percent, 0);
+                assert!(!ui_state.heater_enabled);
             }
             other => panic!("unexpected runtime config response: {other:?}"),
         }
@@ -11505,27 +12287,6 @@ mod tests {
 
         assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
         assert_eq!(snapshot.warmup_soft_start_percent, 0);
-    }
-
-    #[test]
-    fn heater_control_poll_wait_lands_on_the_next_deadline() {
-        assert_eq!(
-            heater_control_poll_wait_ms(0, HEATER_CONTROL_INTERVAL_MS),
-            RUNTIME_INPUT_POLL_MAX_INTERVAL_MS.min(HEATER_CONTROL_INTERVAL_MS)
-        );
-        assert_eq!(
-            heater_control_poll_wait_ms(
-                HEATER_CONTROL_INTERVAL_MS
-                    .saturating_mul(2)
-                    .saturating_sub(17),
-                HEATER_CONTROL_INTERVAL_MS.saturating_mul(2),
-            ),
-            17
-        );
-        assert_eq!(
-            heater_control_poll_wait_ms(HEATER_CONTROL_INTERVAL_MS, HEATER_CONTROL_INTERVAL_MS),
-            1
-        );
     }
 
     #[test]
@@ -14033,8 +14794,23 @@ mod tests {
         );
         assert_eq!(FLASH_MEMORY_REGION_SIZE, 2 * FLASH_MEMORY_ERASE_SECTOR_SIZE);
         assert_eq!(FLASH_MEMORY_PARTITION_LABEL, "flux_cfg");
+        assert_eq!(LEGACY_FLASH_MEMORY_PARTITION_OFFSET, 0x110000);
+        assert_eq!(
+            LEGACY_FLASH_MEMORY_SLOT_A_OFFSET,
+            LEGACY_FLASH_MEMORY_PARTITION_OFFSET
+        );
+        assert_eq!(
+            LEGACY_FLASH_MEMORY_SLOT_B_OFFSET,
+            LEGACY_FLASH_MEMORY_PARTITION_OFFSET + FLASH_MEMORY_ERASE_SECTOR_SIZE
+        );
         let partition_table = include_str!("../../partitions.csv");
-        assert!(partition_table.contains("flux_cfg,  data, 0x06,    0x110000, 0x2000"));
+        assert!(partition_table.contains("flux_cfg,  data, 0x06,    0x210000, 0x2000"));
+
+        let expected = esp_idf_part::PartitionTable::try_from(partition_table.as_bytes().to_vec())
+            .unwrap()
+            .to_bin()
+            .unwrap();
+        assert_eq!(expected.as_slice(), include_bytes!("../../partitions.bin"));
     }
 
     #[test]
@@ -14636,6 +15412,24 @@ mod tests {
         assert_eq!(
             current_limit_fixed_pwm_duty_percent(42, 20.0, 3_250, None, &MemoryConfig::default()),
             42
+        );
+    }
+
+    #[test]
+    fn fixed_pd_runtime_caps_cold_plate_duty_to_the_negotiated_current_budget() {
+        let config = MemoryConfig::default();
+
+        assert_eq!(
+            fixed_pd_pwm_duty_percent(100, 20.0, 12_000, 3_250, 200, None, &config,),
+            80
+        );
+        assert_eq!(
+            fixed_pd_pwm_duty_percent(50, 20.0, 12_000, 3_250, 200, None, &config,),
+            50
+        );
+        assert_eq!(
+            fixed_pd_pwm_duty_percent(100, 20.0, 12_000, 0, 200, None, &config),
+            0
         );
     }
 
@@ -15271,6 +16065,14 @@ mod tests {
         assert!(lower_temp < midpoint_temp);
         assert!(midpoint_temp < upper_temp);
         assert!((midpoint_temp - ((lower_temp + upper_temp) * 0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn rtd_uses_the_documented_3v3_divider_supply() {
+        let temperature_c =
+            pt1000_temperature_c_from_resistance(rtd_resistance_ohms_from_mv(1_030).unwrap());
+
+        assert!((30.0..=36.0).contains(&temperature_c));
     }
 
     #[test]

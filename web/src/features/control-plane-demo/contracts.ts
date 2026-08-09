@@ -10,6 +10,14 @@ export type NetworkState =
   | 'connected'
   | 'error'
   | 'timeout'
+export type NetworkFailureCode =
+  | 'disconnect_timed_out'
+  | 'configuration_failed'
+  | 'association_rejected'
+  | 'association_timed_out'
+  | 'ipv4_timed_out'
+  | 'station_disconnected'
+  | 'lan_startup_failed'
 export type PdState = 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
 export type FanDisplayState = 'OFF' | 'AUTO' | 'RUN'
 export type HeaterLockReason = 'cooling-disabled-overtemp' | 'hard-overtemp'
@@ -28,7 +36,11 @@ export interface Identity {
 
 export interface NetworkSummary {
   state: NetworkState
+  configurationGeneration?: number
+  transitionSequence?: number
+  failureCode?: NetworkFailureCode | null
   ssid?: string | null
+  wifiPasswordLength?: number
   ip?: string | null
   gateway?: string | null
   dns?: string[]
@@ -111,7 +123,7 @@ export interface DevdDeviceRecord {
   id: string
   displayName: string
   portPath?: string | null
-  transport: 'mock' | 'native_serial'
+  transport: 'mock' | 'native_serial' | 'lan'
   connection: 'disconnected' | 'connected' | 'busy' | 'error'
   identity: Identity
   network: NetworkSummary
@@ -169,6 +181,20 @@ export interface DevdDeviceList {
   devices: DevdDeviceRecord[]
 }
 
+export interface DevdLanDeviceSummary {
+  id: string
+  baseUrl: string
+  hostname?: string | null
+  lastIpv4?: string | null
+  paired: boolean
+}
+
+export interface DevdLanDeviceList {
+  devices: DevdLanDeviceSummary[]
+  discovery?: string
+  source?: string
+}
+
 export interface DevdLease {
   leaseId: string
   deviceId: string
@@ -180,7 +206,6 @@ export interface WifiConfigRequest {
   op: 'set' | 'clear'
   ssid?: string
   password?: string
-  autoReconnect?: boolean
   telemetryIntervalMs?: number
 }
 
@@ -361,7 +386,6 @@ export interface UsbWifiConfigFrame {
   op: 'set' | 'clear'
   ssid?: string
   password?: string
-  autoReconnect?: boolean
   telemetryIntervalMs?: number
 }
 

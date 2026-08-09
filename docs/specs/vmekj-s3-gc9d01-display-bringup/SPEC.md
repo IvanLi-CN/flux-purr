@@ -1,4 +1,4 @@
-# Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与启动后界面轮播（#vmekj）
+# Flux Purr S3 GC9D01 显示 bring-up 与启动后界面轮播（#vmekj）
 
 ## 状态
 
@@ -17,14 +17,14 @@
 
 ## 继承 / supersession 说明
 
-- 本 spec 继续保留 `GC9D01 async SPI + panel_160x50 + host preview` 的显示 bring-up 基线。
+- 本 spec 继续保留 `GC9D01 + panel_160x50 + host preview` 的显示 bring-up 基线。当前 `esp-rtos` 运行态使用同步 SPI；GC9D01 规定的面板延时必须在同步调用返回前真实执行。
 - 启动后轮播、五向输入、Key Test 与 mock-only safe-off runtime 行为，现已由 `#fk3u7` 接管。
 - 若本 spec 与 `#fk3u7` 在运行态行为上冲突，以 `#fk3u7` 为准。
 
 ### Goals
 
 - 复用 `esp32s3-fan-cycle` binary 名称与 `mcu-agentd` artifact 路径，改造成 `ESP32-S3` 的 GC9D01 显示 bring-up 入口。
-- 接入 `gc9d01-rs` async driver，使用 `Embassy + esp-hal-embassy + SPI2.into_async()` 完成面板初始化与刷屏。
+- 接入 `gc9d01-rs` driver，使用 `Embassy + esp-rtos + SPI2` 完成面板初始化与刷屏。
 - 新增一套共享显示场景与 host/device 共用渲染基线，支撑后续前面板 runtime 的 host preview 与硬件验证。
 - 新增 host-side preview harness，复用同一套渲染代码导出 `framebuffer.bin` 与 `preview.png`。
 - 保持 host 侧质量门和 Xtensa 构建口径可运行，并通过 `mcu-agentd` 完成烧录/监看流程。
@@ -58,8 +58,9 @@
 
 ### MUST
 
-- 显示驱动固定使用 `gc9d01-rs`，并锁定为 async API。
-- 设备端 SPI 必须通过 `SPI2.into_async()` 进入异步模式。
+- 显示驱动固定使用 `gc9d01-rs` 的 `panel_160x50` profile。
+- 当前 `esp-rtos` 设备端 SPI 使用同步模式，避免 interrupt-driven SPI 在启动阶段阻止整个 runtime 前进。
+- 面板硬复位、Sleep-Out 与 Display-On 的规定延时必须在同步驱动调用返回前执行；不得返回一个无人轮询的 async timer future 来冒充已完成延时。
 - 板级显示引脚固定为：`DC=GPIO10`、`MOSI=GPIO11`、`SCLK=GPIO12`、`BLK=GPIO13`、`RES=GPIO14`、`CS=GPIO15`。
 - 首轮面板 profile 按 `panel_160x50`、`width=160`、`height=50`、`dx=15`、`dy=0`、初始 `Orientation::Landscape` 实现。
 - 静态校准屏必须至少包含：方向/边缘标识、彩色块、灰阶块、面板/分辨率文字。
@@ -82,14 +83,15 @@
 
 ### Core flows
 
-- 设备上电后初始化 Embassy 定时器、异步 SPI、GC9D01 driver 与背光控制。
+- 设备上电后初始化 Embassy 运行时、同步 SPI、GC9D01 driver 与背光控制。
 - bring-up 阶段固件先绘制静态校准屏并显示，再进入前面板显示基线画面，用于确认驱动与方向口径。
 - host preview binary 使用与设备端相同的场景渲染入口生成 framebuffer dump，再转换成 PNG 供主人预审。
 - 硬件调试阶段，主人拍摄静态校准屏和前面板运行画面；Agent 根据实拍判断是否需要微调 orientation / dx / dy / 颜色设置。
 
 ### Edge cases / errors
 
-- 若异步 SPI / Embassy 初始化失败，固件应在日志中暴露初始化阶段与具体环节，而不是静默卡死。
+- 若 SPI / Embassy 初始化失败，固件应在日志中暴露初始化阶段与具体环节，而不是静默卡死。
+- 显示初始化和首次整屏写入失败后必须进入可诊断 recovery 状态；SPI 调用返回成功之前必须已经满足面板规定的时序延时。
 - 若 host preview 生成的 PNG 与设备实拍不一致，优先检查驱动 orientation / address window / offset，而不是在 PNG 转换阶段做掩盖式旋转。
 - 若 `mcu-agentd` 无 selector、无设备、资源忙或 artifact 缺失，必须按 `mcu-agentd` 机器人模式错误口径中止并回报证据。
 

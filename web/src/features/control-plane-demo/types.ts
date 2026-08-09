@@ -4,6 +4,7 @@ import type {
   CalibrationState,
   HeaterCurveState,
   HeaterLockReason,
+  NetworkFailureCode,
 } from './contracts'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
@@ -13,9 +14,13 @@ export const UNAVAILABLE_TEMPERATURE_C = -1
 
 export interface DeviceTarget {
   id: string
+  identityId?: string
   alias: string
   location: string
   transport: TransportKind
+  bridgeTransport?: 'usb' | 'wifi'
+  connectionAvailable?: boolean
+  connectionCandidate?: boolean
   severity: DeviceSeverity
   baseUrl: string
   firmware: string
@@ -47,7 +52,12 @@ export interface DeviceTarget {
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
   fanState: 'OFF' | 'AUTO' | 'RUN'
+  wifiSsid?: string | null
   wifiRssi: number | null
+  wifiPasswordLength?: number
+  configurationGeneration?: number
+  transitionSequence?: number
+  wifiFailureCode?: NetworkFailureCode | null
   capabilities: string[]
   networkState?: 'disabled' | 'idle' | 'saving' | 'connecting' | 'connected' | 'error' | 'timeout'
   leaseState?: 'none' | 'active' | 'conflict' | 'expired'

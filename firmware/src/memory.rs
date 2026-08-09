@@ -16,7 +16,7 @@ pub const PREVIOUS_MEMORY_SLOT_B_OFFSET: u16 = 0x0800;
 pub const LEGACY_MEMORY_SLOT_SIZE: usize = 512;
 pub const LEGACY_MEMORY_SLOT_A_OFFSET: u16 = 0x0000;
 pub const LEGACY_MEMORY_SLOT_B_OFFSET: u16 = 0x0200;
-pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 3;
+pub const MEMORY_RECORD_FORMAT_VERSION: u8 = 5;
 pub const MEMORY_RECORD_HEADER_LEN: usize = 16;
 pub const MEMORY_RECORD_PAYLOAD_MAX: usize = MEMORY_SLOT_SIZE - MEMORY_RECORD_HEADER_LEN;
 pub const MEMORY_WIFI_SSID_MAX_LEN: usize = 32;
@@ -130,6 +130,30 @@ const TLV_THERMAL_PROFILE_MODE: u8 = 0x34;
 const TLV_HEATER_CURVE_RAW_OBSERVATIONS: u8 = 0x35;
 const TLV_THERMAL_PLANT_CANDIDATE: u8 = 0x36;
 const TLV_THERMAL_PLANT_ACTIVE: u8 = 0x37;
+const TLV_LAN_PAIRING_TOKEN: u8 = 0x38;
+const TLV_WIFI_STATIC_IPV4: u8 = 0x39;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WifiStaticIpv4Config {
+    pub address: [u8; 4],
+    pub prefix_len: u8,
+    pub gateway: [u8; 4],
+    pub dns: [u8; 4],
+}
+
+impl WifiStaticIpv4Config {
+    pub fn is_valid(self) -> bool {
+        self.prefix_len <= 32
+            && is_unicast_ipv4(self.address)
+            && is_unicast_ipv4(self.gateway)
+            && is_unicast_ipv4(self.dns)
+    }
+}
+
+fn is_unicast_ipv4(address: [u8; 4]) -> bool {
+    let first = address[0];
+    first != 0 && first != 127 && first < 224
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryConfig {
@@ -140,6 +164,12 @@ pub struct MemoryConfig {
     pub wifi_ssid: String<MEMORY_WIFI_SSID_MAX_LEN>,
     pub wifi_password: String<MEMORY_WIFI_PASSWORD_MAX_LEN>,
     pub wifi_auto_reconnect: bool,
+    /// `None` selects DHCP. A value is explicitly configured through USB/devd
+    /// and is never writable from the LAN HTTP surface.
+    pub wifi_static_ipv4: Option<WifiStaticIpv4Config>,
+    /// Stable LAN bearer token. This is never included in control-plane
+    /// status, logs, traces, or user-facing EEPROM exports.
+    pub lan_pairing_token: Option<[u8; crate::lan::LAN_TOKEN_BYTES]>,
     pub telemetry_interval_ms: u32,
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
@@ -504,6 +534,8 @@ impl Default for MemoryConfig {
             wifi_ssid: String::new(),
             wifi_password: String::new(),
             wifi_auto_reconnect: true,
+            wifi_static_ipv4: None,
+            lan_pairing_token: None,
             telemetry_interval_ms: 500,
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
@@ -520,6 +552,8 @@ impl Default for MemoryConfig {
 impl MemoryConfig {
     pub fn sanitize(&mut self) {
         self.target_temp_c = clamp_temp_c(self.target_temp_c);
+        // Automatic WiFi recovery is a device safety policy, not user configuration.
+        self.wifi_auto_reconnect = true;
         if self.selected_preset_slot >= FRONTPANEL_PRESET_COUNT {
             self.selected_preset_slot = MemoryConfig::default().selected_preset_slot;
         }
@@ -529,6 +563,7 @@ impl MemoryConfig {
         if self.telemetry_interval_ms == 0 {
             self.telemetry_interval_ms = MemoryConfig::default().telemetry_interval_ms;
         }
+        self.wifi_static_ipv4 = self.wifi_static_ipv4.filter(|value| value.is_valid());
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
         sanitize_heater_curve_raw_observations(&mut self.heater_curve_raw_observations);
@@ -1218,7 +1253,7 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     if bytes[0..4] != MEMORY_RECORD_MAGIC {
         return Err(MemoryDecodeError::BadMagic);
     }
-    if !matches!(bytes[4], 1 | 2 | MEMORY_RECORD_FORMAT_VERSION) {
+    if !matches!(bytes[4], 1 | 2 | 3 | 4 | MEMORY_RECORD_FORMAT_VERSION) {
         return Err(MemoryDecodeError::UnsupportedFormat(bytes[4]));
     }
     if bytes[5] as usize != MEMORY_RECORD_HEADER_LEN {
@@ -1243,10 +1278,8 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     }
 
     let sequence = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    let mut config = decode_config_payload(
-        &bytes[MEMORY_RECORD_HEADER_LEN..payload_end],
-        bytes[4] >= MEMORY_RECORD_FORMAT_VERSION,
-    )?;
+    let mut config =
+        decode_config_payload(&bytes[MEMORY_RECORD_HEADER_LEN..payload_end], bytes[4] >= 3)?;
     config.sanitize();
 
     Ok(MemoryRecord { sequence, config })
@@ -1318,6 +1351,17 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
+    if let Some(token) = config.lan_pairing_token {
+        push_tlv(TLV_LAN_PAIRING_TOKEN, &token, out, &mut cursor)?;
+    }
+    if let Some(static_ipv4) = config.wifi_static_ipv4 {
+        let mut bytes = [0u8; 13];
+        bytes[..4].copy_from_slice(&static_ipv4.address);
+        bytes[4] = static_ipv4.prefix_len;
+        bytes[5..9].copy_from_slice(&static_ipv4.gateway);
+        bytes[9..13].copy_from_slice(&static_ipv4.dns);
+        push_tlv(TLV_WIFI_STATIC_IPV4, &bytes, out, &mut cursor)?;
+    }
     push_tlv(
         TLV_TELEMETRY_INTERVAL_MS,
         &config.telemetry_interval_ms.to_le_bytes(),
@@ -1501,6 +1545,25 @@ fn decode_config_payload(
             }
             TLV_WIFI_AUTO_RECONNECT if len == 1 => {
                 config.wifi_auto_reconnect = value[0] != 0;
+            }
+            TLV_LAN_PAIRING_TOKEN if len == crate::lan::LAN_TOKEN_BYTES => {
+                let mut token = [0u8; crate::lan::LAN_TOKEN_BYTES];
+                token.copy_from_slice(value);
+                config.lan_pairing_token = Some(token);
+            }
+            TLV_WIFI_STATIC_IPV4 if len == 13 => {
+                let mut address = [0u8; 4];
+                let mut gateway = [0u8; 4];
+                let mut dns = [0u8; 4];
+                address.copy_from_slice(&value[..4]);
+                gateway.copy_from_slice(&value[5..9]);
+                dns.copy_from_slice(&value[9..13]);
+                config.wifi_static_ipv4 = Some(WifiStaticIpv4Config {
+                    address,
+                    prefix_len: value[4],
+                    gateway,
+                    dns,
+                });
             }
             TLV_TELEMETRY_INTERVAL_MS if len == 4 => {
                 config.telemetry_interval_ms =
@@ -2804,7 +2867,7 @@ mod tests {
             target_temp_c: 222,
             selected_preset_slot: 4,
             active_cooling_enabled: false,
-            wifi_auto_reconnect: false,
+            wifi_auto_reconnect: true,
             telemetry_interval_ms: 1_250,
             ..MemoryConfig::default()
         };
@@ -2929,10 +2992,57 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_forces_wifi_auto_reconnect_policy_on() {
+        let mut config = MemoryConfig {
+            wifi_auto_reconnect: false,
+            ..MemoryConfig::default()
+        };
+
+        config.sanitize();
+
+        assert!(config.wifi_auto_reconnect);
+    }
+
+    #[test]
+    fn static_ipv4_rejects_non_unicast_values() {
+        let valid = WifiStaticIpv4Config {
+            address: [192, 168, 31, 42],
+            prefix_len: 24,
+            gateway: [192, 168, 31, 1],
+            dns: [1, 1, 1, 1],
+        };
+        assert!(valid.is_valid());
+        assert!(
+            !WifiStaticIpv4Config {
+                address: [224, 0, 0, 1],
+                ..valid
+            }
+            .is_valid()
+        );
+        assert!(
+            !WifiStaticIpv4Config {
+                gateway: [127, 0, 0, 1],
+                ..valid
+            }
+            .is_valid()
+        );
+    }
+
+    #[test]
     fn record_roundtrip_preserves_config() {
         let record = MemoryRecord {
             sequence: 42,
-            config: sample_config(),
+            config: {
+                let mut config = sample_config();
+                config.wifi_static_ipv4 = Some(WifiStaticIpv4Config {
+                    address: [192, 168, 31, 42],
+                    prefix_len: 24,
+                    gateway: [192, 168, 31, 1],
+                    dns: [1, 1, 1, 1],
+                });
+                config.lan_pairing_token = Some([0xa5; crate::lan::LAN_TOKEN_BYTES]);
+                config
+            },
         };
         let mut bytes = [0u8; MEMORY_SLOT_SIZE];
         let len = encode_memory_record(&record, &mut bytes).unwrap();

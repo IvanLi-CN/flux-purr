@@ -28,8 +28,14 @@ test.describe('control plane live devd bridge', () => {
   let missingAuthorizedPort = false
   let injectStatusTimeoutEvent = false
   let runtimeStatus = status(network('connected'))
+  let wifiNetwork = network('connected')
   let calibrationState = calibration()
   let heaterCurveState = heaterCurve()
+
+  const setWifiNetwork = (next: NetworkSummary) => {
+    wifiNetwork = next
+    runtimeStatus = withStatusNetwork(runtimeStatus, next)
+  }
 
   test.beforeAll(async () => {
     server = http.createServer(async (request, response) => {
@@ -66,6 +72,7 @@ test.describe('control plane live devd bridge', () => {
                   'status',
                   'network',
                   'wifi_config',
+                  'wifi_state_v2',
                   'monitor',
                   'flash',
                 ]),
@@ -136,11 +143,12 @@ test.describe('control plane live devd bridge', () => {
                 'status',
                 'network',
                 'wifi_config',
+                'wifi_state_v2',
                 'monitor',
                 'flash',
               ]),
-              network: network('idle'),
-              status: withStatusNetwork(runtimeStatus, network('idle')),
+              network: wifiNetwork,
+              status: withStatusNetwork(runtimeStatus, wifiNetwork),
               calibration: cloneCalibrationState(calibrationState),
               heaterCurve: cloneHeaterCurveState(heaterCurveState),
               events: [
@@ -210,7 +218,15 @@ test.describe('control plane live devd bridge', () => {
         sendJson(
           response,
           200,
-          identity(['identity', 'status', 'network', 'usb_jsonl', 'wifi_config', 'monitor'])
+          identity([
+            'identity',
+            'status',
+            'network',
+            'usb_jsonl',
+            'wifi_config',
+            'wifi_state_v2',
+            'monitor',
+          ])
         )
         return
       }
@@ -220,7 +236,7 @@ test.describe('control plane live devd bridge', () => {
           sendMissingAuthorizedPortError(response)
           return
         }
-        sendJson(response, 200, network('connected'))
+        sendJson(response, 200, wifiNetwork)
         return
       }
 
@@ -229,7 +245,7 @@ test.describe('control plane live devd bridge', () => {
           sendMissingAuthorizedPortError(response)
           return
         }
-        sendJson(response, 200, runtimeStatus)
+        sendJson(response, 200, withStatusNetwork(runtimeStatus, wifiNetwork))
         return
       }
 
@@ -300,17 +316,22 @@ test.describe('control plane live devd bridge', () => {
           sendMissingAuthorizedPortError(response)
           return
         }
-        sendJson(response, 200, {
-          network: {
-            state: bodyField(body, 'op') === 'clear' ? 'disabled' : 'connected',
-            ssid: bodyField(body, 'op') === 'clear' ? null : bodyField(body, 'ssid'),
-            ip: bodyField(body, 'op') === 'clear' ? null : '192.0.2.11',
-            gateway: null,
-            dns: [],
-            wifiRssi: bodyField(body, 'op') === 'clear' ? null : -49,
-            lastError: null,
-          },
-        })
+        const isClear = bodyField(body, 'op') === 'clear'
+        const snapshot: NetworkSummary = {
+          state: isClear ? 'disabled' : 'connecting',
+          configurationGeneration: isClear ? 3 : 2,
+          transitionSequence: isClear ? 3 : 2,
+          failureCode: null,
+          ssid: isClear ? null : String(bodyField(body, 'ssid')),
+          wifiPasswordLength: isClear ? 0 : String(bodyField(body, 'password')).length,
+          ip: null,
+          gateway: null,
+          dns: [],
+          wifiRssi: null,
+          lastError: null,
+        }
+        setWifiNetwork(snapshot)
+        sendJson(response, 200, { network: snapshot })
         return
       }
 
@@ -411,6 +432,7 @@ test.describe('control plane live devd bridge', () => {
     missingAuthorizedPort = false
     injectStatusTimeoutEvent = false
     runtimeStatus = status(network('connected'))
+    wifiNetwork = network('connected')
     calibrationState = calibration()
     heaterCurveState = heaterCurve()
   })
@@ -421,7 +443,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto('/?demo=false')
 
     const targetRegion = page.getByRole('region', { name: '当前目标' })
-    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(targetRegion).toContainText('传输')
     await expect(targetRegion).toContainText('DEVD')
     await expect(targetRegion).toContainText('租约')
@@ -474,7 +496,7 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto('/?demo=false')
 
-    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
     await expect(page.getByText('No known devices')).toHaveCount(0)
@@ -483,6 +505,26 @@ test.describe('control plane live devd bridge', () => {
     await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
     await expect(page.getByText('运行时已同步')).toBeVisible()
     await expect(page.getByText('有效')).toBeVisible()
+  })
+
+  test('lists discovered USB bridge candidates with an explicit connect action', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+
+    await page.getByRole('button', { name: '目标设备' }).click()
+    await page.getByRole('button', { name: '添加设备' }).click()
+    await page.getByRole('button', { name: /桥接/ }).click()
+
+    const bridge = page.getByRole('region', { name: 'DEVD 桥接目标' })
+    await expect(bridge.getByRole('button', { name: 'USB' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+    await expect(bridge.getByText('flux-purr-e2e')).toBeVisible()
+    await expect(bridge.getByText('/dev/cu.usbmodem-e2e')).toBeVisible()
+    await expect(bridge.getByRole('button', { name: '连接' })).toBeEnabled()
+    await expect(bridge.getByText('设备 ID ·')).toHaveCount(0)
   })
 
   test('preserves the chosen calibration tab and blocks calibration controls while devd is still reacquiring the lease', async ({
@@ -644,7 +686,7 @@ test.describe('control plane live devd bridge', () => {
   test('sends runtime commands through the active devd lease', async ({ page }) => {
     await page.goto('/?demo=false')
 
-    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(page.getByText('运行时已同步')).toBeVisible()
 
     await page.getByRole('button', { name: /总览/i }).click()
@@ -687,18 +729,57 @@ test.describe('control plane live devd bridge', () => {
     )
   })
 
+  test('writes and clears WiFi settings through the active devd lease', async ({ page }) => {
+    await page.goto('/?demo=false')
+
+    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
+      timeout: 10_000,
+    })
+    await page.getByRole('button', { name: /设置/i }).click()
+
+    const wifiSettings = page.getByLabel('WiFi 设置')
+    await expect(wifiSettings).toBeVisible()
+    await wifiSettings.getByLabel('WiFi 名称').fill('FluxPurr-E2E')
+    await wifiSettings.getByLabel('密码').fill('test-wifi-pass')
+    await wifiSettings.getByRole('button', { name: '保存并连接' }).click()
+
+    await expect(page.getByText('已提交，正在等待设备连接。')).toBeVisible()
+    await expect.poll(() => wifiRequests().length).toBe(1)
+    expect(wifiRequests()[0]?.body).toEqual(
+      expect.objectContaining({
+        leaseId: 'lease-e2e',
+        op: 'set',
+        ssid: 'FluxPurr-E2E',
+        password: 'test-wifi-pass',
+      })
+    )
+    await expect(page.getByText('test-wifi-pass')).toHaveCount(0)
+
+    setWifiNetwork(network('connected', 2, 3))
+    await expect(page.getByText('WiFi 已连接。')).toBeVisible({ timeout: 5_000 })
+
+    await wifiSettings.getByRole('button', { name: '清除 WiFi' }).click()
+    await wifiSettings.getByRole('button', { name: '确认清除' }).click()
+
+    await expect(page.getByText('已清除设备中的 WiFi 设置。')).toBeVisible()
+    await expect.poll(() => wifiRequests().length).toBe(2)
+    expect(wifiRequests()[1]?.body).toEqual(
+      expect.objectContaining({ leaseId: 'lease-e2e', op: 'clear' })
+    )
+  })
+
   test('keeps the live devd workspace visible across repeated reloads', async ({ page }) => {
     await page.goto('/?demo=false')
 
     for (let reloadIndex = 0; reloadIndex < 3; reloadIndex += 1) {
-      await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+      await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
       await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
       await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
       await expect(page.getByText('No known devices')).toHaveCount(0)
       await expect(page.getByText('Failed to fetch')).toHaveCount(0)
 
       await page.reload()
-      await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+      await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
       await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
       await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
       await expect(page.getByText('No known devices')).toHaveCount(0)
@@ -719,7 +800,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto('/?demo=false')
 
     const targetRegion = page.getByRole('region', { name: '当前目标' })
-    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(targetRegion).toContainText('传输')
     await expect(targetRegion).toContainText('DEVD')
     await expect(targetRegion).toContainText('租约')
@@ -741,7 +822,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto('/?demo=false')
 
     const targetRegion = page.getByRole('region', { name: '当前目标' })
-    await expect(page.getByRole('combobox', { name: '目标设备' })).toContainText('/ DEVD')
+    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(targetRegion).toContainText('传输')
     await expect(targetRegion).toContainText('DEVD')
     await expect(targetRegion).toContainText('租约')
@@ -854,10 +935,18 @@ function identity(capabilities: string[]) {
   }
 }
 
-function network(state: 'idle' | 'connected') {
+function network(
+  state: NetworkSummary['state'],
+  configurationGeneration = 1,
+  transitionSequence = 1
+): NetworkSummary {
   return {
     state,
+    configurationGeneration,
+    transitionSequence,
+    failureCode: null,
     ssid: state === 'connected' ? 'FluxPurr-E2E' : null,
+    wifiPasswordLength: state === 'connected' ? 11 : 0,
     ip: state === 'connected' ? '192.0.2.10' : null,
     gateway: null,
     dns: [],

@@ -1,5 +1,7 @@
 use heapless::Vec;
 
+use crate::control_plane::NetworkSummary;
+
 pub mod render;
 
 pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
@@ -492,11 +494,9 @@ pub enum FrontPanelRuntimeMode {
 
 impl FrontPanelRuntimeMode {
     pub const fn compile_time_default() -> Self {
-        if cfg!(feature = "frontpanel-key-test") {
-            Self::KeyTest
-        } else {
-            Self::App
-        }
+        // Key diagnostics remain available to the host preview and tests, but
+        // the production firmware must never boot into a test-only runtime.
+        Self::App
     }
 }
 
@@ -616,6 +616,10 @@ pub struct FrontPanelUiState {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub active_cooling_enabled: bool,
+    pub network: NetworkSummary,
+    /// The four digits are set only while the physical WiFi Info page is
+    /// active. Leaving that page clears the code immediately.
+    pub wifi_pairing_code: Option<[u8; 4]>,
     pub key_test: KeyTestState,
 }
 
@@ -655,8 +659,18 @@ impl FrontPanelUiState {
                 Some(300),
             ],
             active_cooling_enabled: true,
+            network: NetworkSummary::default(),
+            wifi_pairing_code: None,
             key_test: KeyTestState::default(),
         }
+    }
+
+    pub fn apply_network_summary(&mut self, network: NetworkSummary) -> bool {
+        if self.network == network {
+            return false;
+        }
+        self.network = network;
+        true
     }
 
     pub fn set_raw_state(&mut self, raw_state: FrontPanelRawState) {
@@ -743,6 +757,16 @@ impl FrontPanelUiState {
             .unwrap_or(self.selected_preset_slot);
     }
 
+    pub fn enter_wifi_pairing(&mut self, code: Option<[u8; 4]>) {
+        self.route = FrontPanelRoute::WifiInfo;
+        self.wifi_pairing_code =
+            code.filter(|value| value.iter().all(|digit| digit.is_ascii_digit()));
+    }
+
+    pub fn leave_wifi_pairing(&mut self) {
+        self.wifi_pairing_code = None;
+    }
+
     fn apply_app_event(&mut self, event: KeyEvent) -> bool {
         match self.route {
             FrontPanelRoute::KeyTest => {
@@ -825,6 +849,9 @@ impl FrontPanelUiState {
             }
             (FrontPanelKey::Center, KeyGesture::ShortPress) => {
                 self.route = self.selected_menu_item.route();
+                if self.route != FrontPanelRoute::WifiInfo {
+                    self.leave_wifi_pairing();
+                }
                 if self.route == FrontPanelRoute::PresetTemp {
                     self.ensure_selected_preset_slot();
                 }
@@ -874,6 +901,7 @@ impl FrontPanelUiState {
             }
             (FrontPanelKey::Center, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::LongPress) => {
+                self.leave_wifi_pairing();
                 self.route = FrontPanelRoute::Menu;
                 true
             }
@@ -898,6 +926,9 @@ impl FrontPanelUiState {
             (FrontPanelKey::Left, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::ShortPress)
             | (FrontPanelKey::Center, KeyGesture::LongPress) => {
+                if self.route == FrontPanelRoute::WifiInfo {
+                    self.leave_wifi_pairing();
+                }
                 self.route = FrontPanelRoute::Menu;
                 true
             }
@@ -952,6 +983,22 @@ fn clamp_target_temp_c(target_temp_c: i16) -> i16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_summary_updates_only_when_runtime_state_changes() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let connected = NetworkSummary {
+            state: crate::control_plane::NetworkState::Connected,
+            ssid: Some("Ivan".try_into().unwrap()),
+            ip: Some("192.168.31.88".try_into().unwrap()),
+            wifi_rssi: Some(-58),
+            ..NetworkSummary::default()
+        };
+
+        assert!(state.apply_network_summary(connected.clone()));
+        assert_eq!(state.network, connected);
+        assert!(!state.apply_network_summary(connected));
+    }
 
     fn raw_state(keys: &[RawFrontPanelKey]) -> FrontPanelRawState {
         let mut state = FrontPanelRawState::default();
@@ -1738,4 +1785,12 @@ mod tests {
         assert_eq!(state.key_test.last_key, Some(FrontPanelKey::Left));
         assert_eq!(state.key_test.last_gesture, Some(KeyGesture::LongPress));
     }
+}
+
+#[test]
+fn production_runtime_default_is_app() {
+    assert_eq!(
+        FrontPanelRuntimeMode::compile_time_default(),
+        FrontPanelRuntimeMode::App
+    );
 }

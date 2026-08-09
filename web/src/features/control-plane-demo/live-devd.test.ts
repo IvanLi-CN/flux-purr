@@ -3,6 +3,7 @@ import type { DevdDeviceRecord, DevdEvent, DevdLease } from './contracts'
 import {
   createBootstrappingLiveDevdScenario,
   degradeDevicesForRefreshError,
+  devdEventsToLogEntries,
   devdRecordToReconnectingTarget,
   preserveLastLiveDevdTarget,
   prioritizeLiveDevdDevices,
@@ -11,6 +12,8 @@ import {
   releaseDevdLeaseOnPageHide,
   resolveDevdLease,
   selectPreferredLiveDevdDeviceId,
+  selectRetainedLiveDevdDeviceId,
+  shouldHoldDevdLease,
   writeStoredDevdLeaseId,
   writeStoredLiveDevdTarget,
 } from './live-devd'
@@ -19,6 +22,39 @@ import type { ControlPlaneHttpClient } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('live devd selection', () => {
+  it('keeps runtime trace entries in chronological order for tail following', () => {
+    const events: DevdEvent[] = [
+      {
+        id: 'newer',
+        timestamp: '200',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'newer event',
+        payload: {},
+      },
+      {
+        id: 'older',
+        timestamp: '100',
+        deviceId: 'serial-1',
+        kind: 'serial',
+        message: 'older event',
+        payload: {},
+      },
+    ]
+
+    expect(devdEventsToLogEntries(events, []).map((event) => event.message)).toEqual([
+      'older event',
+      'newer event',
+    ])
+  })
+
+  it('does not hold a USB bridge lease while a direct LAN target is selected', () => {
+    expect(shouldHoldDevdLease('lan-a0f262f20d6c')).toBe(false)
+    expect(shouldHoldDevdLease('serial-303a-1001-A0:F2:62:F2:0D:6C', true)).toBe(false)
+    expect(shouldHoldDevdLease('serial-303a-1001-A0:F2:62:F2:0D:6C')).toBe(true)
+    expect(shouldHoldDevdLease(null)).toBe(true)
+  })
+
   it('prefers active devd targets before fixtures', () => {
     const devices: DeviceTarget[] = [
       makeDevice('fixture', 'mock', 'none'),
@@ -104,16 +140,18 @@ describe('live devd selection', () => {
       makeDevice('native-1', 'devd', 'active'),
       makeDevice('fixture', 'mock', 'none'),
     ]
+    devices[0].networkState = 'connected'
 
     const degraded = degradeDevicesForRefreshError(devices, new Error('Failed to fetch'))
 
     expect(degraded).toHaveLength(2)
-    expect(selectPreferredLiveDevdDeviceId(degraded)).toBe('native-1')
+    expect(selectPreferredLiveDevdDeviceId(degraded)).toBe('fixture')
     expect(degraded[0]).toMatchObject({
       id: 'native-1',
       transport: 'devd',
       severity: 'warning',
-      networkState: 'error',
+      connectionAvailable: false,
+      networkState: 'connected',
       transportIssue: 'Failed to fetch',
       leaseState: 'active',
     })
@@ -122,6 +160,7 @@ describe('live devd selection', () => {
       transport: 'mock',
       severity: 'nominal',
     })
+    expect(selectRetainedLiveDevdDeviceId(degraded)).toBe('native-1')
   })
 
   it('creates a devd placeholder when refresh fails before any live target is known', () => {
@@ -136,6 +175,7 @@ describe('live devd selection', () => {
       leaseState: 'none',
       transportIssue: 'Failed to fetch',
     })
+    expect(selectRetainedLiveDevdDeviceId(degraded)).toBe('live-devd-unavailable')
   })
 
   it('keeps the last live devd target when the daemon returns no native targets', () => {
@@ -143,6 +183,7 @@ describe('live devd selection', () => {
       makeDevice('native-1', 'devd', 'active'),
       makeDevice('fixture', 'mock', 'none'),
     ]
+    currentDevices[0].networkState = 'connected'
     const nextDevices = [makeDevice('fixture-2', 'mock', 'none')]
 
     const preserved = preserveLastLiveDevdTarget(nextDevices, currentDevices)
@@ -152,7 +193,8 @@ describe('live devd selection', () => {
       id: 'native-1',
       transport: 'devd',
       severity: 'warning',
-      networkState: 'error',
+      connectionAvailable: false,
+      networkState: 'connected',
       leaseState: 'active',
       transportIssue:
         'Authorized native serial target is temporarily unavailable; keeping the last live target until polling recovers.',
@@ -222,11 +264,7 @@ describe('live devd selection', () => {
       leaseState: 'expired',
       transportIssue: '正在重新接管本机 devd 租约，请稍候。',
     })
-    expect(scenario.events[0]).toMatchObject({
-      source: 'devd',
-      tone: 'warning',
-      message: 'devd reachable; waiting for the first authorized native serial probe',
-    })
+    expect(scenario.events).toEqual(liveControlPlaneScenario.events)
   })
 
   it('keeps a busy native record in reconnecting state without changing its device id', () => {
@@ -234,7 +272,7 @@ describe('live devd selection', () => {
 
     expect(reconnecting).toMatchObject({
       id: 'native-1',
-      alias: 'Authorized USB target',
+      alias: 'native-1',
       location: '/dev/cu.usbmodem-native-1',
       transport: 'devd',
       severity: 'warning',
@@ -242,6 +280,7 @@ describe('live devd selection', () => {
       leaseState: 'expired',
       transportIssue: '正在重新接管本机 devd 租约，请稍候。',
     })
+    expect(reconnecting.alias).not.toBe('Authorized USB target')
     expect(reconnecting.leaseId).toBeUndefined()
   })
 

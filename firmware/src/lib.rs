@@ -1,14 +1,23 @@
 #![no_std]
 
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+extern crate alloc;
+
 pub mod adapters;
 pub mod board;
 pub mod buzzer;
 pub mod control_plane;
 pub mod display;
 pub mod frontpanel;
+pub mod lan;
+pub mod mdns;
 pub mod memory;
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+pub mod net;
+pub mod net_http;
 pub mod status_light;
 pub mod thermal_plant;
+pub mod wifi_state;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 #[cfg(not(target_os = "none"))]

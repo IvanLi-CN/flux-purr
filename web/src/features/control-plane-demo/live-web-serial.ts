@@ -8,20 +8,30 @@ import type {
   HeaterCurvePackage,
   HeaterCurveState,
 } from './contracts'
+import { rememberKnownWebSerialDevice } from './known-web-serial-devices'
+import { ControlPlaneClientError } from './transport-client'
 import type { ControlPlaneScenario, DeviceTarget, EventLogEntry } from './types'
 import {
+  type BrowserSerialPort,
+  formatWebSerialEventTime,
   getBrowserSerial,
   isWebSerialSupported,
+  normalizeBrowserSerialError,
+  selectBrowserSerialPort,
   type WebSerialConnectionState,
   WebSerialControlPlaneClient,
+  type WebSerialDiagnostic,
   webSerialProbeToDeviceTarget,
 } from './web-serial'
 
 const WEB_SERIAL_POLL_MS = 1_000
+const WEB_SERIAL_CONNECT_TIMEOUT_MS = 60_000
 
 export interface LiveWebSerialOptions {
   enabled?: boolean
   clientFactory?: () => WebSerialControlPlaneClient
+  connectTimeoutMs?: number
+  persistKnownDevices?: boolean
 }
 
 export interface LiveWebSerialControls {
@@ -29,7 +39,10 @@ export interface LiveWebSerialControls {
   supported: boolean
   error?: string
   deviceId?: string
-  connect: () => Promise<boolean>
+  connect: (options?: {
+    forcePortSelection?: boolean
+    replaceExisting?: boolean
+  }) => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
   getCalibration: () => Promise<CalibrationState>
@@ -48,10 +61,17 @@ export interface LiveWebSerialControls {
 
 export function useLiveWebSerialScenario(
   scenario: ControlPlaneScenario,
-  { enabled = true, clientFactory }: LiveWebSerialOptions = {}
+  {
+    enabled = true,
+    clientFactory,
+    connectTimeoutMs = WEB_SERIAL_CONNECT_TIMEOUT_MS,
+    persistKnownDevices = false,
+  }: LiveWebSerialOptions = {}
 ): { scenario: ControlPlaneScenario; serial: LiveWebSerialControls } {
-  const supported = enabled && isWebSerialSupported(getBrowserSerial())
+  const browserSerial = getBrowserSerial()
+  const supported = enabled && isWebSerialSupported(browserSerial)
   const clientRef = useRef<WebSerialControlPlaneClient | null>(null)
+  const preauthorizedPortsRef = useRef<BrowserSerialPort[] | undefined>(undefined)
   const [state, setState] = useState<WebSerialConnectionState>(supported ? 'idle' : 'unsupported')
   const [device, setDevice] = useState<DeviceTarget | null>(null)
   const [events, setEvents] = useState<EventLogEntry[]>([])
@@ -73,11 +93,35 @@ export function useLiveWebSerialScenario(
     })
   }, [enabled, supported])
 
+  useEffect(() => {
+    preauthorizedPortsRef.current = undefined
+    if (!enabled || !browserSerial?.getPorts) {
+      return
+    }
+
+    let cancelled = false
+    void browserSerial
+      .getPorts()
+      .then((ports) => {
+        if (!cancelled) {
+          preauthorizedPortsRef.current = ports
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          preauthorizedPortsRef.current = undefined
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [browserSerial, enabled])
+
   const appendEvent = useCallback((message: string, tone: EventLogEntry['tone'] = 'info') => {
     setEvents((current) =>
       [
         {
-          time: 'web',
+          time: formatWebSerialEventTime(new Date()),
           source: 'webserial',
           message,
           tone,
@@ -87,39 +131,107 @@ export function useLiveWebSerialScenario(
     )
   }, [])
 
-  const connect = useCallback(async () => {
-    if (!enabled || !supported) {
-      setError('Web Serial is not available in this browser.')
-      setState('unsupported')
-      return false
-    }
+  const connect = useCallback(
+    async ({ forcePortSelection = false, replaceExisting = false } = {}) => {
+      if (!enabled || !supported) {
+        setError('Web Serial is not available in this browser.')
+        setState('unsupported')
+        return false
+      }
 
-    setState('connecting')
-    setError(undefined)
-    let client: WebSerialControlPlaneClient | null = null
-    try {
-      client = clientFactory?.() ?? new WebSerialControlPlaneClient()
-      const probe = await client.connect()
-      clientRef.current = client
-      const nextDevice = webSerialProbeToDeviceTarget(probe)
-      setDevice(nextDevice)
-      setState('connected')
-      appendEvent(
-        `${nextDevice.alias} USB JSONL probe accepted: get_identity / get_network / get_status`,
-        'success'
-      )
-      appendEvent(`${nextDevice.alias} connected over browser Web Serial`, 'success')
-      return true
-    } catch (error) {
-      await client?.disconnect()
-      clientRef.current = null
-      setDevice(null)
-      setError(error instanceof Error ? error.message : 'Web Serial connection failed.')
-      setState('error')
-      appendEvent('browser Web Serial connection failed', 'warning')
-      return false
-    }
-  }, [appendEvent, clientFactory, enabled, supported])
+      setState('connecting')
+      setError(undefined)
+      let client: WebSerialControlPlaneClient | null = null
+      let connectionEstablished = false
+      const replacingConnectedClient = replaceExisting && clientRef.current != null
+      let previousClientDisconnected = false
+      try {
+        const selectedPortPromise =
+          replaceExisting && !clientFactory && browserSerial
+            ? selectBrowserSerialPort(
+                browserSerial,
+                preauthorizedPortsRef.current,
+                forcePortSelection
+              )
+            : null
+        const selectedPort = selectedPortPromise ? await selectedPortPromise : null
+        if (replaceExisting) {
+          const currentClient = clientRef.current
+          clientRef.current = null
+          await currentClient?.disconnect()
+          previousClientDisconnected = true
+        }
+        client =
+          clientFactory?.() ??
+          new WebSerialControlPlaneClient({
+            serial: browserSerial,
+            preauthorizedPorts: selectedPort ? [selectedPort] : preauthorizedPortsRef.current,
+            onDiagnostic: (diagnostic) => {
+              const message = webSerialDiagnosticMessage(diagnostic)
+              appendEvent(message, 'warning')
+              if (connectionEstablished) {
+                setDevice(null)
+                setError(message)
+                setState('error')
+              }
+            },
+          })
+        const probe = await withTimeout(
+          client.connect(),
+          connectTimeoutMs,
+          new ControlPlaneClientError(
+            'Web Serial 连接超时，请重新选择设备。',
+            'web_serial_timeout',
+            true
+          )
+        )
+        clientRef.current = client
+        connectionEstablished = true
+        const nextDevice = webSerialProbeToDeviceTarget(probe)
+        if (persistKnownDevices) {
+          rememberKnownWebSerialDevice({
+            deviceId: probe.identity.deviceId,
+            hostname: nextDevice.alias,
+            firmwareVersion: probe.identity.firmwareVersion,
+            buildId: probe.identity.buildId,
+          })
+        }
+        setDevice(nextDevice)
+        setState('connected')
+        appendEvent(
+          `${nextDevice.alias} USB JSONL probe accepted: get_identity / get_network / get_status`,
+          'success'
+        )
+        appendEvent(`${nextDevice.alias} connected over browser Web Serial`, 'success')
+        return true
+      } catch (error) {
+        const normalizedError = normalizeBrowserSerialError(error)
+        const message = normalizedError.message
+        if (replacingConnectedClient && !previousClientDisconnected) {
+          setError(message)
+          setState('connected')
+          appendEvent('browser Web Serial device selection cancelled', 'warning')
+          return false
+        }
+        setDevice(null)
+        setError(message)
+        setState('error')
+        appendEvent('browser Web Serial connection failed', 'warning')
+        await client?.disconnect()
+        clientRef.current = null
+        return false
+      }
+    },
+    [
+      appendEvent,
+      browserSerial,
+      clientFactory,
+      connectTimeoutMs,
+      enabled,
+      persistKnownDevices,
+      supported,
+    ]
+  )
 
   const disconnect = useCallback(async () => {
     const client = clientRef.current
@@ -407,4 +519,39 @@ export function useLiveWebSerialScenario(
     scenario: serialScenario,
     serial,
   }
+}
+
+function webSerialDiagnosticMessage(diagnostic: WebSerialDiagnostic) {
+  if (diagnostic.kind === 'panic') {
+    return `固件故障后复位：${diagnostic.reason}`
+  }
+  const reason =
+    diagnostic.reason === 'system_brownout'
+      ? '电源欠压'
+      : diagnostic.reason === 'watchdog'
+        ? '看门狗超时'
+        : diagnostic.reason === 'software'
+          ? '软件请求'
+          : diagnostic.reason
+  return `设备已复位：${reason}`
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, error: Error): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return promise
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const timer = globalThis.setTimeout(() => reject(error), timeoutMs)
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timer)
+        resolve(value)
+      },
+      (reason) => {
+        globalThis.clearTimeout(timer)
+        reject(reason)
+      }
+    )
+  })
 }

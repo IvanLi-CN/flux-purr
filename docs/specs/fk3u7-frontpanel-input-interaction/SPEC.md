@@ -69,7 +69,7 @@
 - `Preset Temp` 页中，当槽位值降到 `0°C` 以下时必须进入 `---` 状态并置灰；再次上调时必须能从 `---` 回到 `0°C`。
 - `Dashboard` 仅在左右切换记忆温度时忽略灰色 / `---` 槽位，不得把无效预设当作可命中的目标值。
 - `Active Cooling` 页在当前正式 runtime 中为只读策略说明页；用户开启这一项时，口径统一称为“开启主动降温”；页面只保留返回/退出导航，不再承载可写 fan mock。
-- `WiFi Info / Device Info` 必须保持只读页，仅处理返回/退出。
+- `WiFi Info` 是只读网络信息页，但进入时必须显示本次新生成的四位 LAN 配对码；离开页面立即撤销该码。`Device Info` 保持只读页；两者只处理返回/退出。
 - 若 runtime 处于“fault 已消失但 attention reminder 仍待确认”状态，则第一次任意输入只负责确认/静音，不执行 heater/fan/menu 原动作；第二次输入才恢复正常语义。
 - 所有已接受的前面板用户操作都必须有声音反馈；Dashboard 的 heater / 主动降温切换继续使用专用 cue，其余已接受交互（菜单导航、进入/退出子页、Preset Temp 编辑等）统一使用通用提示音。
 - 真实 heater / fan 执行链路、保护与运行态真相源以 `#q2aw6` 为准；本 spec 只冻结输入与导航语义。
@@ -135,7 +135,8 @@
   - 只读显示当前安全策略（overtemp-only 风扇包线说明）
   - `Left short / Center short / Center long`：返回 `Menu`
 - `WiFi Info / Device Info`
-  - 只读显示
+  - WiFi Info 显示当前四位配对码但不提供写开关；离页即撤销 pairing window。
+  - Device Info 保持只读显示。
   - `Left short / Center short / Center long`：返回 `Menu`
 
 ### 边界条件
@@ -176,7 +177,7 @@ None
 - Given 一级菜单，When 主人左右移动并中键进入，Then 始终只在四个固定项之间切换。
 - Given 任意子页，When 主人中键短按或长按，Then 都能回到上一级菜单；When 主人按左键，Then 也能返回菜单。
 - Given `Preset Temp`，When 某个槽位已显示为灰色 `---`，Then 仍然可以被选中、进入并通过短按或 hold-repeat 上调重新调回有效温度。
-- Given `WiFi Info / Device Info`，When 主人操作返回手势，Then 页面只发生返回，不产生额外 mock 副作用。
+- Given `WiFi Info`，When 主人进入页面，Then 显示一组新的四位码；When 主人返回，Then 前一组码立即失效。Given `Device Info`，When 主人操作返回手势，Then 页面只发生返回。
 - Given runtime 刚从活动 fault 退出且仍在 attention reminder pending，When 主人第一次进行任意输入，Then 该输入只会确认/静音，不会执行原本对应的 heater/fan/menu 动作。
 - Given Storybook docs/gallery，When 打开故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页和两条交互流故事。
 - Given firmware preview 与 Storybook 截图，When 对比同一路由，Then 颜色、布局和文案口径保持一致。
@@ -252,6 +253,10 @@ None
 ![Front panel Storybook preset temp](./assets/storybook-preset-temp.png)
 
 ### Firmware preview renders
+
+#### WiFi Info pairing
+
+![Front panel WiFi Info pairing code](./assets/wifi-info-pairing.png)
 
 #### Key Test
 

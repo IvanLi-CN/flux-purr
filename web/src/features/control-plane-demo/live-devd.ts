@@ -16,12 +16,7 @@ import {
   devdRecordToDeviceTarget,
   isMeaningfulDevdTransportIssueEvent,
 } from './transport-client'
-import {
-  type ControlPlaneScenario,
-  type DeviceTarget,
-  type EventLogEntry,
-  UNAVAILABLE_TEMPERATURE_C,
-} from './types'
+import { type ControlPlaneScenario, type DeviceTarget, UNAVAILABLE_TEMPERATURE_C } from './types'
 
 const DEVD_POLL_MS = 2_000
 const DEVD_TRACE_LIMIT = 240
@@ -44,6 +39,7 @@ const DEVD_EVENT_KINDS = [
 
 export interface LiveDevdOptions {
   enabled?: boolean
+  leaseEnabled?: boolean
   devdBaseUrl?: string | null
   httpClient?: ControlPlaneHttpClient
   includeMockDevices?: boolean
@@ -63,10 +59,17 @@ export function defaultDevdBaseUrl() {
   return env.VITE_FLUX_PURR_DEVD_URL ?? 'http://127.0.0.1:30080'
 }
 
+/** Discovery remains available for every connection mode; only the bridge
+ * selection is allowed to retain the exclusive USB control lease. */
+export function shouldHoldDevdLease(selectedDeviceId: string | null, addingDirectLan = false) {
+  return !addingDirectLan && !selectedDeviceId?.startsWith('lan-')
+}
+
 export function useLiveDevdScenario(
   scenario: ControlPlaneScenario,
   {
     enabled = true,
+    leaseEnabled = true,
     devdBaseUrl = defaultDevdBaseUrl(),
     httpClient,
     includeMockDevices = true,
@@ -149,7 +152,7 @@ export function useLiveDevdScenario(
         }
         const visibleRecords = includeMockDevices
           ? records
-          : records.filter((record) => record.transport === 'native_serial')
+          : records.filter((record) => record.transport !== 'mock')
         const baseDevices = visibleRecords.map(devdRecordToDeviceTarget)
         const liveRecord = selectLiveDevdRecord(records)
         if (!liveRecord) {
@@ -157,6 +160,16 @@ export function useLiveDevdScenario(
           activeLeaseDeviceIdRef.current = null
           if (!cancelled) {
             setDevices((current) => preserveLastLiveDevdTarget(baseDevices, current))
+            setRefreshState('ready')
+          }
+          refreshInFlightRef.current = false
+          return
+        }
+
+        if (!leaseEnabled) {
+          await releaseActiveLease()
+          if (!cancelled) {
+            setDevices(replaceDevice(baseDevices, devdRecordToDeviceTarget(liveRecord)))
             setRefreshState('ready')
           }
           refreshInFlightRef.current = false
@@ -235,7 +248,7 @@ export function useLiveDevdScenario(
       setStreamEvents([])
       void releaseActiveLease()
     }
-  }, [client, devdBaseUrl, enabled, includeMockDevices])
+  }, [client, devdBaseUrl, enabled, includeMockDevices, leaseEnabled])
 
   useEffect(() => {
     if (!enabled || !devdBaseUrl || !liveDevdDeviceId || typeof EventSource === 'undefined') {
@@ -294,6 +307,20 @@ export function useLiveDevdScenario(
           }
         : device
     )
+    if (!liveDevices.some((device) => device.connectionAvailable !== false)) {
+      return {
+        ...scenario,
+        name: 'Live devd discovery',
+        selectedDeviceId: selectRetainedLiveDevdDeviceId(liveDevices) ?? scenario.selectedDeviceId,
+        devices: [
+          ...scenario.devices,
+          ...liveDevices.filter(
+            (device) => !scenario.devices.some((fixture) => fixture.id === device.id)
+          ),
+        ],
+        artifacts: artifacts.length > 0 ? artifacts : scenario.artifacts,
+      }
+    }
     const selectedDeviceId = selectPreferredLiveDevdDeviceId(liveDevices)
     const fixtureDevices = scenario.devices.filter(
       (device) =>
@@ -304,18 +331,6 @@ export function useLiveDevdScenario(
     const nativeTargets = liveDevices.filter((device) => device.transport === 'devd')
     const nativeCount = nativeTargets.length
     const activeNativeCount = nativeTargets.filter(isReadyLiveDevdTarget).length
-    const devdEvent: EventLogEntry = {
-      time: 'live',
-      source: 'devd',
-      message:
-        activeNativeCount > 0
-          ? `${activeNativeCount} authorized native target${activeNativeCount === 1 ? '' : 's'} discovered`
-          : nativeCount > 0
-            ? 'devd reachable; reconnecting the last authorized native serial target'
-            : 'devd reachable; no authorized native serial target',
-      tone: activeNativeCount > 0 ? 'success' : 'warning',
-    }
-
     return {
       ...scenario,
       name: 'Live devd bridge',
@@ -337,7 +352,7 @@ export function useLiveDevdScenario(
             }
           : metric
       ),
-      events: [devdEvent, ...devdEvents, ...scenario.events],
+      events: [...scenario.events, ...devdEvents],
     }
   }, [artifacts, devdEvents, devices, latestTransportIssueByDevice, refreshState, scenario])
 }
@@ -359,8 +374,8 @@ export function degradeDevicesForRefreshError(devices: DeviceTarget[], error: un
 
     return {
       ...device,
+      connectionAvailable: false,
       severity: 'warning' as const,
-      networkState: 'error' as const,
       transportIssue: message,
     }
   })
@@ -385,8 +400,8 @@ export function preserveLastLiveDevdTarget(
   return [
     {
       ...lastLiveDevdTarget,
+      connectionAvailable: false,
       severity: 'warning' as const,
-      networkState: 'error' as const,
       transportIssue: issue,
     },
     ...baseDevices.filter((device) => device.id !== lastLiveDevdTarget.id),
@@ -394,7 +409,20 @@ export function preserveLastLiveDevdTarget(
 }
 
 export function selectPreferredLiveDevdDeviceId(devices: DeviceTarget[]) {
-  return devices.find((device) => device.transport === 'devd')?.id ?? devices[0]?.id ?? ''
+  return (
+    devices.find((device) => device.transport === 'devd' && device.connectionAvailable !== false)
+      ?.id ??
+    devices.find((device) => device.connectionAvailable !== false)?.id ??
+    ''
+  )
+}
+
+export function selectRetainedLiveDevdDeviceId(devices: DeviceTarget[]) {
+  return (
+    devices.find((device) => device.transport === 'devd')?.id ??
+    devices.find((device) => device.connectionAvailable !== false)?.id ??
+    null
+  )
 }
 
 export function mergeDevdProbeRecord(
@@ -420,8 +448,16 @@ export function mergeDevdProbeRecord(
 function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
   return (
     records.find(
-      (record) => record.transport === 'native_serial' && record.connection !== 'busy'
-    ) ?? records.find((record) => record.transport === 'native_serial')
+      (record) =>
+        (record.transport === 'native_serial' || record.transport === 'lan') &&
+        record.identity.buildId !== 'native-serial-placeholder' &&
+        record.connection !== 'busy'
+    ) ??
+    records.find(
+      (record) =>
+        (record.transport === 'native_serial' || record.transport === 'lan') &&
+        record.identity.buildId !== 'native-serial-placeholder'
+    )
   )
 }
 
@@ -536,13 +572,7 @@ export function createBootstrappingLiveDevdScenario(
     },
     events: [],
   })
-
-  const devdEvent: EventLogEntry = {
-    time: 'live',
-    source: 'devd',
-    message: 'devd reachable; waiting for the first authorized native serial probe',
-    tone: 'warning',
-  }
+  bootstrappingDevice.connectionAvailable = false
 
   return {
     ...scenario,
@@ -559,7 +589,7 @@ export function createBootstrappingLiveDevdScenario(
           }
         : metric
     ),
-    events: [devdEvent, ...scenario.events],
+    events: scenario.events,
   }
 }
 
@@ -569,6 +599,7 @@ function createUnavailableLiveDevdTarget(issue: string): DeviceTarget {
     alias: 'Native devd target unavailable',
     location: 'Waiting for authorized native serial probe',
     transport: 'devd',
+    connectionAvailable: false,
     severity: 'warning',
     baseUrl: 'devd://unavailable',
     firmware: 'unknown',
@@ -640,8 +671,8 @@ function devdRecordsToEvents(records: DevdDeviceRecord[]) {
   return records.flatMap((record) => record.events ?? []).slice(-DEVD_TRACE_LIMIT)
 }
 
-function devdEventsToLogEntries(recordEvents: DevdEvent[], streamEvents: DevdEvent[]) {
-  return mergeDevdEvents(recordEvents, streamEvents).map(devdEventToLogEntry).reverse()
+export function devdEventsToLogEntries(recordEvents: DevdEvent[], streamEvents: DevdEvent[]) {
+  return mergeDevdEvents(recordEvents, streamEvents).map(devdEventToLogEntry)
 }
 
 function latestDevdTransportIssueByDevice(recordEvents: DevdEvent[], streamEvents: DevdEvent[]) {

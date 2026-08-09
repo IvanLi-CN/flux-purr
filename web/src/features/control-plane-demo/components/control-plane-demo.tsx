@@ -1,20 +1,28 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertTriangle,
+  Cable,
   CheckCircle2,
   ChevronDown,
   CircleHelp,
   Download,
   Fan,
   Gauge,
+  LoaderCircle,
   Minus,
   Plus,
   Power,
+  RefreshCw,
+  Router,
+  ScanSearch,
   SlidersHorizontal,
   ToggleRight,
   Trash2,
   Upload,
+  Usb,
+  Wifi,
   Wrench,
+  X,
   Zap,
 } from 'lucide-react'
 import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
@@ -38,7 +46,6 @@ import {
   Select,
   SelectContent,
   SelectItem,
-  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -47,6 +54,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import {
+  bridgeCandidatesForTransport,
+  bridgeProbeToDeviceTarget,
+  validateBridgeDeviceIdentity,
+} from '../bridge-device-connection'
 import { syncCalibrationDraftText } from '../calibration-draft'
 import {
   type CalibrationLeaveRequest,
@@ -72,13 +84,51 @@ import type {
   CalibrationSlotFit,
   CalibrationSlotId,
   CalibrationState,
+  ControlPlaneStatus,
+  DevdLanDeviceSummary,
   HeaterCurveConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
+  NetworkSummary,
   RtdCalibrationSample,
   VinCalibrationSample,
 } from '../contracts'
-import { defaultDevdBaseUrl, type LiveDevdOptions, useLiveDevdScenario } from '../live-devd'
+import {
+  type DeviceChoice,
+  type DeviceConnectionOption,
+  mergeDeviceChoices,
+} from '../device-target-picker'
+import {
+  knownWebSerialDeviceToTarget,
+  listKnownWebSerialDevices,
+  rememberKnownWebSerialDevice,
+} from '../known-web-serial-devices'
+import {
+  authorizedLanRequest,
+  createLanLease,
+  directLanStaleReadPath,
+  isDirectLanDevice,
+  type LanDeviceSession,
+  type LanLease,
+  type LanProbe,
+  lanProbeToDeviceTarget,
+  listSavedLanDeviceSessions,
+  loadLanDeviceSession,
+  probeLanDevice,
+  reconcileStaleLanWrite,
+  releaseLanLease,
+  savedLanSessionToDeviceTarget,
+  startLanLeaseHeartbeat,
+  streamLanEvents,
+  upsertLanDeviceTarget,
+  writeLanRuntime,
+} from '../lan-client'
+import {
+  defaultDevdBaseUrl,
+  type LiveDevdOptions,
+  shouldHoldDevdLease,
+  useLiveDevdScenario,
+} from '../live-devd'
 import {
   type LiveWebSerialControls,
   type LiveWebSerialOptions,
@@ -89,12 +139,23 @@ import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
   HEATER_CONFIRMATION_TIMEOUT_MS,
+  heaterConfirmationNowMs,
   heaterLockReasonText,
+  lanLeaseAcquisitionRequest,
+  lanLeaseHeartbeatFailureDetail,
   type PendingHeaterConfirmation,
   resolvePendingHeaterConfirmation,
   runtimeHeaterState,
+  shouldReacquireLanLeaseOnExplicitSelection,
+  shouldReplacePassiveFeedbackWithHeaterLock,
 } from '../runtime-status'
-import { artifactToManifest, createControlPlaneHttpClient } from '../transport-client'
+import {
+  artifactToManifest,
+  ControlPlaneClientError,
+  type ControlPlaneHttpClient,
+  createControlPlaneHttpClient,
+  devdRecordToDeviceTarget,
+} from '../transport-client'
 import type {
   ControlPlaneScenario,
   DeviceSeverity,
@@ -106,6 +167,26 @@ import type {
 } from '../types'
 import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
+import { LanPairingPanel, type LanPairingPanelProps } from './lan-pairing-panel'
+import {
+  resolveWifiSettingsUnavailableReason,
+  WifiNetworkSettings,
+  type WifiNetworkSettingsDraft,
+} from './wifi-network-settings'
+
+export interface LanRuntimeDependencies {
+  createLease?: typeof createLanLease
+  releaseLease?: typeof releaseLanLease
+  startLeaseHeartbeat?: typeof startLanLeaseHeartbeat
+  streamEvents?: typeof streamLanEvents
+  probeDevice?: typeof probeLanDevice
+  writeRuntime?: typeof writeLanRuntime
+  readStatus?: (session: LanDeviceSession) => Promise<ControlPlaneStatus>
+  readCalibration?: (session: LanDeviceSession) => Promise<CalibrationState>
+  readHeaterCurve?: (session: LanDeviceSession) => Promise<HeaterCurveState>
+}
+
+type LanPairingOverrides = Omit<LanPairingPanelProps, 'onPaired'>
 
 interface ControlPlaneDemoProps {
   scenario?: ControlPlaneScenario
@@ -113,11 +194,15 @@ interface ControlPlaneDemoProps {
   devd?: LiveDevdOptions
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
+  lanPairing?: LanPairingOverrides
+  lanRuntime?: LanRuntimeDependencies
 }
 type CalibrationWorkbenchMode = 'vin_adc' | 'rtd_adc' | 'heater_curve'
 type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 type LogFilter = 'all' | EventLogEntry['tone']
+
+const defaultAddDeviceKind: AddDeviceKind = 'wifi'
 
 interface ActionFeedback {
   title: string
@@ -355,25 +440,87 @@ function isRenderableTemperature(value: number) {
   return Number.isFinite(value) && value >= 0
 }
 
+export function shouldUseWifiReceipt(
+  deviceSnapshot: Pick<DeviceTarget, 'configurationGeneration' | 'transitionSequence'>,
+  receipt: Pick<NetworkSummary, 'configurationGeneration' | 'transitionSequence'>
+) {
+  const deviceGeneration = deviceSnapshot.configurationGeneration ?? 0
+  const deviceSequence = deviceSnapshot.transitionSequence ?? 0
+  const receiptGeneration = receipt.configurationGeneration ?? 0
+  const receiptSequence = receipt.transitionSequence ?? 0
+
+  return (
+    receiptGeneration > deviceGeneration ||
+    (receiptGeneration === deviceGeneration && receiptSequence > deviceSequence) ||
+    // Firmware counters restart from a new transaction after a device reboot.
+    // A direct configuration receipt with both counters lower is therefore
+    // newer than the pre-reboot cached snapshot, not an out-of-order packet.
+    (receiptGeneration < deviceGeneration && receiptSequence < deviceSequence)
+  )
+}
+
 export function ControlPlaneDemo({
   scenario = controlPlaneScenario,
   initialView = 'dashboard',
   devd,
   webSerial: webSerialOptions,
   allowDemoControls = true,
+  lanPairing,
+  lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
-  const liveDevdScenario = useLiveDevdScenario(scenario, devd)
-  const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(
-    liveDevdScenario,
-    webSerialOptions
-  )
+  const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
+  const [activeView, setActiveView] = useState<ConsoleView>(initialView)
+  const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
+    useState<AddDeviceKind>(defaultAddDeviceKind)
+  const liveDevdScenario = useLiveDevdScenario(scenario, {
+    ...devd,
+    leaseEnabled: shouldHoldDevdLease(
+      selectedDeviceId,
+      activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
+    ),
+  })
+  const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario, {
+    ...webSerialOptions,
+    persistKnownDevices: !allowDemoControls && webSerialOptions?.persistKnownDevices !== false,
+  })
   const controlClient = useMemo(
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
     [devd?.httpClient]
   )
   const devdBaseUrl = devd?.devdBaseUrl ?? defaultDevdBaseUrl()
-  const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
-  const [activeView, setActiveView] = useState<ConsoleView>(initialView)
+  const lanRuntime = useMemo(
+    () => ({
+      createLease: lanRuntimeOptions?.createLease ?? createLanLease,
+      releaseLease: lanRuntimeOptions?.releaseLease ?? releaseLanLease,
+      startLeaseHeartbeat: lanRuntimeOptions?.startLeaseHeartbeat ?? startLanLeaseHeartbeat,
+      streamEvents: lanRuntimeOptions?.streamEvents ?? streamLanEvents,
+      probeDevice: lanRuntimeOptions?.probeDevice ?? probeLanDevice,
+      writeRuntime: lanRuntimeOptions?.writeRuntime ?? writeLanRuntime,
+      readStatus:
+        lanRuntimeOptions?.readStatus ??
+        ((session: LanDeviceSession) =>
+          authorizedLanRequest<ControlPlaneStatus>(session, directLanStaleReadPath('runtime'))),
+      readCalibration:
+        lanRuntimeOptions?.readCalibration ??
+        ((session: LanDeviceSession) =>
+          authorizedLanRequest<CalibrationState>(session, directLanStaleReadPath('calibration'))),
+      readHeaterCurve:
+        lanRuntimeOptions?.readHeaterCurve ??
+        ((session: LanDeviceSession) =>
+          authorizedLanRequest<HeaterCurveState>(session, directLanStaleReadPath('heater-curve'))),
+    }),
+    [
+      lanRuntimeOptions?.createLease,
+      lanRuntimeOptions?.releaseLease,
+      lanRuntimeOptions?.startLeaseHeartbeat,
+      lanRuntimeOptions?.streamEvents,
+      lanRuntimeOptions?.probeDevice,
+      lanRuntimeOptions?.writeRuntime,
+      lanRuntimeOptions?.readStatus,
+      lanRuntimeOptions?.readCalibration,
+      lanRuntimeOptions?.readHeaterCurve,
+    ]
+  )
   const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
@@ -404,9 +551,22 @@ export function ControlPlaneDemo({
     Record<string, { rtdTempC: number; vinMv: number }>
   >({})
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
-  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>([])
+  const persistKnownWebSerialDevices =
+    !allowDemoControls && webSerialOptions?.persistKnownDevices !== false
+  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() =>
+    persistKnownWebSerialDevices
+      ? listKnownWebSerialDevices().map(knownWebSerialDeviceToTarget)
+      : []
+  )
+  const [wifiSnapshotsByDevice, setWifiSnapshotsByDevice] = useState<
+    Record<string, NetworkSummary>
+  >({})
+  const [lanLeasesByDevice, setLanLeasesByDevice] = useState<Record<string, LanLease>>({})
   const pendingDeviceModeRef = useRef(allowDemoControls)
-  const [flashRun, setFlashRun] = useState<{ status: FlashRunStatus; progress: number }>({
+  const [flashRun, setFlashRun] = useState<{
+    status: FlashRunStatus
+    progress: number
+  }>({
     status: 'idle',
     progress: 0,
   })
@@ -417,7 +577,7 @@ export function ControlPlaneDemo({
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
   const [pendingHeaterConfirmation, setPendingHeaterConfirmation] =
     useState<PendingHeaterConfirmation | null>(null)
-  const [heaterConfirmationTick, setHeaterConfirmationTick] = useState(0)
+  const [heaterConfirmationNow, setHeaterConfirmationNow] = useState(0)
   const [calibrationLeaveGuard, setCalibrationLeaveGuard] =
     useState<CalibrationLeaveGuardState | null>(null)
   const [feedback, setFeedback] = useState<ActionFeedback>({
@@ -433,7 +593,12 @@ export function ControlPlaneDemo({
     [activeScenario.devices, pendingDevices]
   )
   const preferredSelectedDeviceId = useMemo(() => {
-    if (!deviceOptions.some((device) => device.id === selectedDeviceId)) {
+    const selectedOption = deviceOptions.find((device) => device.id === selectedDeviceId)
+    if (!selectedOption) {
+      return activeScenario.selectedDeviceId
+    }
+
+    if (selectedOption.connectionCandidate && selectedOption.connectionAvailable === false) {
       return activeScenario.selectedDeviceId
     }
 
@@ -454,6 +619,51 @@ export function ControlPlaneDemo({
 
     pendingDeviceModeRef.current = allowDemoControls
     setPendingDevices([])
+  }, [allowDemoControls])
+
+  useEffect(() => {
+    if (!persistKnownWebSerialDevices) return
+    setPendingDevices((current) => {
+      const remembered = listKnownWebSerialDevices().map(knownWebSerialDeviceToTarget)
+      const rememberedIds = new Set(remembered.map((device) => device.id))
+      return [...remembered, ...current.filter((device) => !rememberedIds.has(device.id))]
+    })
+  }, [persistKnownWebSerialDevices])
+
+  useEffect(() => {
+    if (allowDemoControls) {
+      return
+    }
+    let cancelled = false
+    for (const session of listSavedLanDeviceSessions()) {
+      const rememberedTarget = savedLanSessionToDeviceTarget(session)
+      if (rememberedTarget) {
+        setPendingDevices((current) => upsertLanDeviceTarget(current, rememberedTarget))
+      }
+      void probeLanDevice(session)
+        .then((probe) => {
+          if (cancelled) return
+          const target = lanProbeToDeviceTarget(session, probe)
+          setPendingDevices((current) => upsertLanDeviceTarget(current, target))
+        })
+        .catch((error: unknown) => {
+          if (
+            cancelled ||
+            !(error instanceof ControlPlaneClientError) ||
+            error.code !== 'unauthorized'
+          ) {
+            return
+          }
+          setFeedback({
+            title: 'LAN 配对凭据已失效',
+            detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+            tone: 'warning',
+          })
+        })
+    }
+    return () => {
+      cancelled = true
+    }
   }, [allowDemoControls])
 
   useEffect(() => {
@@ -501,8 +711,35 @@ export function ControlPlaneDemo({
       return
     }
 
+    const connectedTarget = activeScenario.devices.find(
+      (device) => device.id === webSerial.deviceId
+    )
+    if (persistKnownWebSerialDevices && connectedTarget) {
+      const deviceId = connectedTarget.identityId ?? connectedTarget.id.replace(/^web-serial-/, '')
+      const remembered = {
+        deviceId,
+        hostname: connectedTarget.alias,
+        firmwareVersion: connectedTarget.firmware,
+        buildId: connectedTarget.buildId,
+      }
+      rememberKnownWebSerialDevice(remembered)
+      const hint = knownWebSerialDeviceToTarget(remembered)
+      setPendingDevices((current) => {
+        const existing = current.find((device) => device.id === hint.id)
+        if (
+          existing?.alias === hint.alias &&
+          existing.firmware === hint.firmware &&
+          existing.buildId === hint.buildId
+        ) {
+          return current
+        }
+        return [hint, ...current.filter((device) => device.id !== hint.id)]
+      })
+    }
+
     const currentSelection = deviceOptions.find((device) => device.id === preferredSelectedDeviceId)
     const shouldAdoptWebSerialTarget =
+      selectedAddDeviceKind === 'web-serial' ||
       !currentSelection ||
       isNoLiveTargetDevice(currentSelection) ||
       isPendingDeviceChoice(currentSelection)
@@ -510,7 +747,35 @@ export function ControlPlaneDemo({
     if (shouldAdoptWebSerialTarget && preferredSelectedDeviceId !== webSerial.deviceId) {
       setSelectedDeviceId(webSerial.deviceId)
     }
-  }, [deviceOptions, preferredSelectedDeviceId, webSerial.deviceId, webSerial.state])
+  }, [
+    deviceOptions,
+    preferredSelectedDeviceId,
+    activeScenario.devices,
+    persistKnownWebSerialDevices,
+    selectedAddDeviceKind,
+    webSerial.deviceId,
+    webSerial.state,
+  ])
+
+  useEffect(() => {
+    if (selectedAddDeviceKind !== 'web-serial' || webSerial.state !== 'error') {
+      return
+    }
+
+    setFeedback({
+      title: 'Web Serial unavailable',
+      detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+      tone: 'warning',
+    })
+  }, [selectedAddDeviceKind, webSerial.error, webSerial.state])
+
+  useEffect(() => {
+    if (webSerial.state !== 'connected') {
+      return
+    }
+
+    setFeedback((current) => clearStaleWebSerialFailure(current))
+  }, [webSerial.state])
 
   useEffect(() => {
     const nextSelectedDevice = activeScenario.devices.find(
@@ -518,6 +783,7 @@ export function ControlPlaneDemo({
     )
     if (
       nextSelectedDevice?.transport === 'devd' &&
+      nextSelectedDevice.connectionAvailable !== false &&
       (feedback.detail === '当前热控状态来自模拟设备契约。' ||
         feedback.detail === '连接浏览器 Web Serial 端口后即可加载真实硬件状态。')
     ) {
@@ -567,7 +833,10 @@ export function ControlPlaneDemo({
           return current
         }
 
-        const next = { ...current, [nextDeviceId]: clone ? clone(value) : value }
+        const next = {
+          ...current,
+          [nextDeviceId]: clone ? clone(value) : value,
+        }
         delete next[sourceId]
         return next
       })
@@ -741,6 +1010,13 @@ export function ControlPlaneDemo({
     const manualPpsMv = manualPpsOverride
       ? manualPpsOverride.mv
       : (selectedDevice.manualPpsMv ?? null)
+    const lanLease = isDirectLanDevice(selectedDevice)
+      ? lanLeasesByDevice[selectedDevice.id]
+      : undefined
+    const networkSnapshot = wifiSnapshotsByDevice[selectedDevice.id]
+    const useNetworkSnapshot =
+      networkSnapshot != null && shouldUseWifiReceipt(selectedDevice, networkSnapshot)
+    const effectiveNetwork = useNetworkSnapshot ? networkSnapshot : undefined
     return {
       ...selectedDevice,
       currentTempC,
@@ -756,8 +1032,20 @@ export function ControlPlaneDemo({
       pdContractMv:
         manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.pdContractMv,
       voltageMv: manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.voltageMv,
-      wifiRssi: selectedDevice.wifiRssi,
-      networkState: selectedDevice.networkState,
+      wifiSsid: effectiveNetwork?.ssid ?? selectedDevice.wifiSsid,
+      wifiRssi: effectiveNetwork?.wifiRssi ?? selectedDevice.wifiRssi,
+      wifiPasswordLength: effectiveNetwork?.wifiPasswordLength ?? selectedDevice.wifiPasswordLength,
+      networkState: effectiveNetwork?.state ?? selectedDevice.networkState,
+      configurationGeneration:
+        effectiveNetwork?.configurationGeneration ?? selectedDevice.configurationGeneration,
+      transitionSequence: effectiveNetwork?.transitionSequence ?? selectedDevice.transitionSequence,
+      wifiFailureCode: effectiveNetwork?.failureCode ?? selectedDevice.wifiFailureCode,
+      leaseId: lanLease?.leaseId ?? selectedDevice.leaseId,
+      leaseState: isDirectLanDevice(selectedDevice)
+        ? lanLease
+          ? 'active'
+          : selectedDevice.leaseState
+        : selectedDevice.leaseState,
     }
   }, [
     activeScenario.devices,
@@ -765,10 +1053,207 @@ export function ControlPlaneDemo({
     fanPolicyByDevice,
     heaterHeldByDevice,
     manualPpsByDevice,
+    lanLeasesByDevice,
     selectedDevice,
     targetTempByDevice,
+    wifiSnapshotsByDevice,
   ])
   const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
+  const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
+  const lanDeviceBaseUrl = isDirectLanDevice(visibleDevice) ? visibleDevice.baseUrl : undefined
+  const lanLease = lanDeviceId ? lanLeasesByDevice[lanDeviceId] : undefined
+  const lanLeaseRequest = useMemo(
+    () =>
+      lanLeaseAcquisitionRequest(
+        {
+          id: visibleDevice.id,
+          alias: visibleDevice.alias,
+          baseUrl: visibleDevice.baseUrl,
+          transport: visibleDevice.transport,
+          leaseState: visibleDevice.leaseState,
+        },
+        Boolean(lanLease)
+      ),
+    [
+      lanLease,
+      visibleDevice.alias,
+      visibleDevice.baseUrl,
+      visibleDevice.id,
+      visibleDevice.leaseState,
+      visibleDevice.transport,
+    ]
+  )
+
+  useEffect(() => {
+    if (!lanLeaseRequest) {
+      return
+    }
+    const { alias, baseUrl, deviceId } = lanLeaseRequest
+    const session = loadLanDeviceSession(baseUrl)
+    if (!session) {
+      setPendingDevices((current) =>
+        current.map((device) =>
+          device.id === deviceId
+            ? {
+                ...device,
+                networkState: 'error',
+                transportIssue: '本机未保存该设备的配对凭据，请重新配对。',
+              }
+            : device
+        )
+      )
+      return
+    }
+    let retired = false
+    void lanRuntime
+      .createLease(session)
+      .then((created) => {
+        if (retired) {
+          void lanRuntime.releaseLease(session, created.leaseId).catch(() => undefined)
+          return
+        }
+        setLanLeasesByDevice((current) => ({
+          ...current,
+          [deviceId]: created,
+        }))
+        setFeedback((current) =>
+          current.title === 'LAN 设备已配对' || current.title === '正在获取 LAN 租约'
+            ? {
+                title: 'LAN 设备已连接',
+                detail: `${alias} 已取得控制 lease。`,
+                tone: 'success',
+              }
+            : current
+        )
+      })
+      .catch((error: unknown) => {
+        if (retired) return
+        setPendingDevices((current) =>
+          current.map((device) =>
+            device.id === deviceId
+              ? {
+                  ...device,
+                  leaseState: 'conflict',
+                  transportIssue: error instanceof Error ? error.message : '无法获取 LAN lease。',
+                }
+              : device
+          )
+        )
+      })
+    return () => {
+      retired = true
+    }
+  }, [lanLeaseRequest, lanRuntime])
+
+  useEffect(() => {
+    if (!lanDeviceId || !lanDeviceBaseUrl || !lanLease) {
+      return
+    }
+    const session = loadLanDeviceSession(lanDeviceBaseUrl)
+    if (!session) {
+      return
+    }
+    let retired = false
+    const stopHeartbeat = lanRuntime.startLeaseHeartbeat(session, lanLease, (error) => {
+      if (retired) return
+      setLanLeasesByDevice((current) => {
+        if (current[lanDeviceId]?.leaseId !== lanLease.leaseId) {
+          return current
+        }
+        const next = { ...current }
+        delete next[lanDeviceId]
+        return next
+      })
+      setPendingDevices((current) =>
+        current.map((device) =>
+          device.id === lanDeviceId
+            ? {
+                ...device,
+                leaseState: 'expired',
+                transportIssue: lanLeaseHeartbeatFailureDetail(error.message),
+              }
+            : device
+        )
+      )
+    })
+    return () => {
+      retired = true
+      stopHeartbeat()
+      void lanRuntime.releaseLease(session, lanLease.leaseId).catch(() => undefined)
+      setLanLeasesByDevice((current) => {
+        if (current[lanDeviceId]?.leaseId !== lanLease.leaseId) {
+          return current
+        }
+        const next = { ...current }
+        delete next[lanDeviceId]
+        return next
+      })
+    }
+  }, [lanDeviceBaseUrl, lanDeviceId, lanLease, lanRuntime])
+
+  useEffect(() => {
+    if (!lanDeviceId || !lanDeviceBaseUrl) {
+      return
+    }
+    const session = loadLanDeviceSession(lanDeviceBaseUrl)
+    if (!session) {
+      return
+    }
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of lanRuntime.streamEvents(session, controller.signal)) {
+          if (controller.signal.aborted || !isControlPlaneStatus(event)) {
+            continue
+          }
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === lanDeviceId ? applyLanStatus(device, event) : device
+            )
+          )
+          setTargetTempByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: event.targetTempC,
+          }))
+          setManualPpsByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: {
+              enabled: event.manualPpsEnabled ?? false,
+              mv: event.manualPpsMv ?? null,
+            },
+          }))
+          setFanPolicyByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: event.fanDisplayState,
+          }))
+          setCalibrationRuntimeByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: event.calibration,
+          }))
+          setHeaterHeldByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: !event.heaterEnabled,
+          }))
+        }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return
+        }
+        setPendingDevices((current) =>
+          current.map((device) =>
+            device.id === lanDeviceId
+              ? {
+                  ...device,
+                  networkState: 'error',
+                  transportIssue: error instanceof Error ? error.message : 'LAN 事件流已断开。',
+                }
+              : device
+          )
+        )
+      }
+    })()
+    return () => controller.abort()
+  }, [lanDeviceBaseUrl, lanDeviceId, lanRuntime])
   const visiblePresetValues =
     visibleDeviceIsLive && visibleDevice.presetsC
       ? normalizePresets(visibleDevice.presetsC)
@@ -829,7 +1314,15 @@ export function ControlPlaneDemo({
   }, [activeView, visibleCalibrationWorkspaceTab, visibleDevice.id, visibleRuntimeCalibration.mode])
 
   useEffect(() => {
-    if (!visibleDeviceIsLive) {
+    if (!shouldShowDeviceControlBlockFeedback(visibleDevice)) {
+      return
+    }
+
+    if (
+      activeView === 'add-device' &&
+      selectedAddDeviceKind === 'web-serial' &&
+      (webSerial.state === 'connecting' || webSerial.state === 'error')
+    ) {
       return
     }
 
@@ -838,7 +1331,12 @@ export function ControlPlaneDemo({
       return
     }
 
-    const conflictTitle = visibleDevice.leaseState === 'conflict' ? '设备租约冲突' : '硬件连接受阻'
+    const conflictTitle =
+      visibleDevice.leaseState === 'conflict'
+        ? '设备租约冲突'
+        : isDirectLanDevice(visibleDevice) && visibleDevice.leaseState === 'none'
+          ? '正在获取 LAN 租约'
+          : '硬件连接受阻'
     setFeedback((current) => {
       if (current.detail === blockedReason && current.title === conflictTitle) {
         return current
@@ -849,7 +1347,7 @@ export function ControlPlaneDemo({
         tone: 'warning',
       }
     })
-  }, [visibleDevice, visibleDeviceIsLive])
+  }, [activeView, selectedAddDeviceKind, visibleDevice, webSerial.state])
 
   useEffect(() => {
     if (!visibleDeviceIsLive || !visibleDevice.heaterLockReason) {
@@ -858,6 +1356,9 @@ export function ControlPlaneDemo({
 
     const detail = heaterLockReasonText(visibleDevice.heaterLockReason)
     setFeedback((current) => {
+      if (!shouldReplacePassiveFeedbackWithHeaterLock(current.title)) {
+        return current
+      }
       if (current.title === '加热安全锁已触发' && current.detail === detail) {
         return current
       }
@@ -879,7 +1380,7 @@ export function ControlPlaneDemo({
       HEATER_CONFIRMATION_TIMEOUT_MS - (Date.now() - pendingHeaterConfirmation.requestedAtMs)
     )
     const timer = window.setTimeout(() => {
-      setHeaterConfirmationTick((current) => current + 1)
+      setHeaterConfirmationNow(Date.now())
     }, remainingMs)
 
     return () => window.clearTimeout(timer)
@@ -901,7 +1402,9 @@ export function ControlPlaneDemo({
       }
       return {
         title: '运行时已同步',
-        detail: '当前热控状态来自 devd 固件状态。',
+        detail: isDirectWebSerialDevice(visibleDevice)
+          ? '当前热控状态来自浏览器 Web Serial。'
+          : '当前热控状态来自 devd 固件状态。',
         tone: 'info',
       }
     })
@@ -934,7 +1437,10 @@ export function ControlPlaneDemo({
     const normalized = normalizeCalibrationState(calibration)
     calibrationVersionByDeviceRef.current[deviceId] =
       (calibrationVersionByDeviceRef.current[deviceId] ?? 0) + 1
-    setCalibrationByDevice((current) => ({ ...current, [deviceId]: normalized }))
+    setCalibrationByDevice((current) => ({
+      ...current,
+      [deviceId]: normalized,
+    }))
   }, [])
 
   useEffect(() => {
@@ -952,6 +1458,21 @@ export function ControlPlaneDemo({
             (calibrationVersionByDeviceRef.current[visibleDeviceId] ?? 0) === requestVersion
           ) {
             commitCalibrationState(visibleDeviceId, calibration)
+          }
+          return
+        }
+        if (lanDeviceBaseUrl) {
+          const session = loadLanDeviceSession(lanDeviceBaseUrl)
+          if (!session) {
+            throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+          }
+          const calibration = await authorizedLanRequest<CalibrationState>(session, 'calibration')
+          if (
+            !cancelled &&
+            (calibrationVersionByDeviceRef.current[visibleDeviceId] ?? 0) === requestVersion
+          ) {
+            commitCalibrationState(visibleDeviceId, calibration)
+            setFeedback((current) => clearCalibrationLoadWarning(current))
           }
           return
         }
@@ -1000,6 +1521,7 @@ export function ControlPlaneDemo({
     visibleDeviceLeaseId,
     visibleDeviceNetworkState,
     visibleDeviceTransport,
+    lanDeviceBaseUrl,
     webSerial,
   ])
   useEffect(() => {
@@ -1013,7 +1535,25 @@ export function ControlPlaneDemo({
         if (visibleDeviceIsDirectWebSerial) {
           const heaterCurve = await webSerial.getHeaterCurve()
           if (!cancelled) {
-            setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+            setHeaterCurveByDevice((current) => ({
+              ...current,
+              [visibleDeviceId]: heaterCurve,
+            }))
+          }
+          return
+        }
+        if (lanDeviceBaseUrl) {
+          const session = loadLanDeviceSession(lanDeviceBaseUrl)
+          if (!session) {
+            throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+          }
+          const heaterCurve = await authorizedLanRequest<HeaterCurveState>(session, 'heater-curve')
+          if (!cancelled) {
+            setHeaterCurveByDevice((current) => ({
+              ...current,
+              [visibleDeviceId]: heaterCurve,
+            }))
+            setFeedback((current) => clearCalibrationLoadWarning(current))
           }
           return
         }
@@ -1032,7 +1572,10 @@ export function ControlPlaneDemo({
           visibleDeviceLeaseId
         )
         if (!cancelled) {
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDeviceId]: heaterCurve,
+          }))
           setFeedback((current) => clearCalibrationLoadWarning(current))
         }
       } catch (error) {
@@ -1058,6 +1601,7 @@ export function ControlPlaneDemo({
     visibleDeviceLeaseId,
     visibleDeviceNetworkState,
     visibleDeviceTransport,
+    lanDeviceBaseUrl,
     webSerial,
   ])
   const scenarioEvents = useMemo(
@@ -1068,7 +1612,7 @@ export function ControlPlaneDemo({
     [activeScenario.events, allowDemoControls, streamTick]
   )
   const visibleEvents = useMemo(
-    () => [...actionEvents, ...scenarioEvents].slice(0, LOG_FEED_SIZE),
+    () => [...scenarioEvents, ...actionEvents].slice(-LOG_FEED_SIZE),
     [actionEvents, scenarioEvents]
   )
 
@@ -1077,17 +1621,58 @@ export function ControlPlaneDemo({
       actionClockRef.current += LOG_FEED_STEP_SECONDS
       setActionEvents((current) =>
         [
+          ...current,
           {
-            time: formatLogTime(actionClockRef.current),
+            time: allowDemoControls
+              ? formatLogTime(actionClockRef.current)
+              : formatRuntimeEventTime(new Date()),
             source,
             message,
             tone,
           },
-          ...current,
-        ].slice(0, 24)
+        ].slice(-24)
       )
     },
-    []
+    [allowDemoControls]
+  )
+
+  const handleLanPaired = useCallback(
+    async (session: LanDeviceSession, probe: LanProbe) => {
+      const target = lanProbeToDeviceTarget(session, probe)
+      setFeedback({
+        title: '正在获取 LAN 租约',
+        detail: `${target.alias} 尚未加入设备列表，等待设备确认控制 lease。`,
+        tone: 'info',
+      })
+      try {
+        const lease = await lanRuntime.createLease(session)
+        const leasedTarget: DeviceTarget = {
+          ...target,
+          leaseId: lease.leaseId,
+          leaseState: 'active',
+        }
+        setLanLeasesByDevice((current) => ({ ...current, [target.id]: lease }))
+        setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
+        setSelectedDeviceId(target.id)
+        setSelectedAddDeviceKind(defaultAddDeviceKind)
+        setActiveView('dashboard')
+        setFeedback({
+          title: 'LAN 设备已连接',
+          detail: `${target.alias} 已取得控制 lease。`,
+          tone: 'success',
+        })
+        emitEvent('lan', `${target.alias} paired and lease acquired`, 'success')
+      } catch (error) {
+        setFeedback({
+          title: 'LAN 租约获取失败',
+          detail: error instanceof Error ? error.message : '无法获取 LAN lease。',
+          tone: 'warning',
+        })
+        emitEvent('lan', `${target.alias} lease acquisition failed`, 'warning')
+        throw error
+      }
+    },
+    [emitEvent, lanRuntime]
   )
 
   useEffect(() => {
@@ -1102,7 +1687,7 @@ export function ControlPlaneDemo({
     const resolution = resolvePendingHeaterConfirmation(
       pendingHeaterConfirmation,
       visibleDevice,
-      pendingHeaterConfirmation.requestedAtMs + heaterConfirmationTick
+      heaterConfirmationNowMs(pendingHeaterConfirmation.requestedAtMs, heaterConfirmationNow)
     )
     if (resolution.outcome === 'pending') {
       return
@@ -1113,7 +1698,7 @@ export function ControlPlaneDemo({
     emitEvent('heater', resolution.eventMessage, resolution.eventTone)
   }, [
     emitEvent,
-    heaterConfirmationTick,
+    heaterConfirmationNow,
     pendingHeaterConfirmation,
     visibleDevice,
     visibleDeviceIsLive,
@@ -1145,6 +1730,22 @@ export function ControlPlaneDemo({
       })
     },
     [visibleDevice.calibration, visibleDevice.id]
+  )
+
+  const reconcileDirectLanStaleWrite = useCallback(
+    async <T,>(
+      error: unknown,
+      refresh: () => Promise<T>,
+      applyRefreshed: (refreshed: T) => void
+    ) => {
+      const refreshed = await reconcileStaleLanWrite(error, refresh)
+      if (refreshed === null) {
+        return false
+      }
+      applyRefreshed(refreshed)
+      return true
+    },
+    []
   )
 
   const configureLiveRuntime = useCallback(
@@ -1186,6 +1787,61 @@ export function ControlPlaneDemo({
         return updated
       }
 
+      if (isDirectLanDevice(visibleDevice)) {
+        const session = loadLanDeviceSession(visibleDevice.baseUrl)
+        if (!session || !visibleDevice.leaseId) {
+          setFeedback({
+            title: 'LAN runtime update blocked',
+            detail: '设备未取得有效 LAN lease，请重新选择或配对。',
+            tone: 'warning',
+          })
+          return false
+        }
+        try {
+          const preflight = await lanRuntime.probeDevice(session, undefined, 'serial')
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === visibleDevice.id ? applyLanStatus(device, preflight.status) : device
+            )
+          )
+          const updatedStatus = await lanRuntime.writeRuntime(session, visibleDevice.leaseId, patch)
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === visibleDevice.id ? applyLanStatus(device, updatedStatus) : device
+            )
+          )
+          return true
+        } catch (error) {
+          const staleWrite =
+            error instanceof ControlPlaneClientError && error.code === 'stale_write'
+          if (staleWrite) {
+            await reconcileDirectLanStaleWrite(
+              error,
+              () => lanRuntime.readStatus(session),
+              (refreshed) => {
+                setPendingDevices((current) =>
+                  current.map((device) =>
+                    device.id === visibleDevice.id ? applyLanStatus(device, refreshed) : device
+                  )
+                )
+              }
+            )
+          }
+          const detail = staleWrite
+            ? '设备控制状态已变化，已读取最新状态；请确认后重新提交。'
+            : error instanceof Error
+              ? error.message
+              : failureMessage
+          setFeedback({
+            title: 'LAN runtime update failed',
+            detail,
+            tone: 'warning',
+          })
+          emitEvent('lan', failureMessage, 'warning')
+          return false
+        }
+      }
+
       if (visibleDevice.transport !== 'devd' || !visibleDevice.leaseId || !devdBaseUrl) {
         applyLocalCalibrationRuntimePatch(patch)
         return false
@@ -1216,10 +1872,80 @@ export function ControlPlaneDemo({
       controlClient,
       devdBaseUrl,
       emitEvent,
+      lanRuntime.probeDevice,
+      lanRuntime.readStatus,
+      lanRuntime.writeRuntime,
+      reconcileDirectLanStaleWrite,
       visibleDevice,
       webSerial,
     ]
   )
+
+  const configureWifi = useCallback(
+    async (op: 'set' | 'clear', draft?: WifiNetworkSettingsDraft) => {
+      const rejectWifiConfiguration = (detail: string): never => {
+        emitEvent('devd', 'wifi configuration blocked by USB lease state', 'warning')
+        throw new Error(detail)
+      }
+
+      if (visibleDevice.transport !== 'devd') {
+        rejectWifiConfiguration('WiFi 设置仅能通过已连接的 USB / devd 目标写入。')
+      }
+      const wifiDevdBaseUrl = devdBaseUrl
+      if (!wifiDevdBaseUrl) {
+        return rejectWifiConfiguration('WiFi 设置仅能通过已连接的 USB / devd 目标写入。')
+      }
+      if (!visibleDevice.capabilities.includes('wifi_config')) {
+        rejectWifiConfiguration('当前设备不支持 WiFi 设置。')
+      }
+      if (!visibleDevice.capabilities.includes('wifi_state_v2')) {
+        rejectWifiConfiguration('当前设备固件需要 WiFi 状态协议更新后才能提交设置。')
+      }
+      const wifiLeaseId = visibleDevice.leaseId
+      if (!wifiLeaseId || visibleDevice.leaseState !== 'active') {
+        return rejectWifiConfiguration('正在获取 USB 租约，请稍候再提交 WiFi 设置。')
+      }
+      if (visibleDevice.severity === 'offline') {
+        rejectWifiConfiguration('目标设备当前离线。')
+      }
+
+      try {
+        const network = await controlClient.configureWifi(wifiDevdBaseUrl, visibleDevice.id, {
+          leaseId: wifiLeaseId,
+          op,
+          ...(draft
+            ? {
+                ssid: draft.ssid,
+                ...(draft.password === undefined ? {} : { password: draft.password }),
+              }
+            : {}),
+        })
+        setWifiSnapshotsByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: network,
+        }))
+        emitEvent(
+          'devd',
+          op === 'set'
+            ? 'wifi configuration submitted through USB bridge'
+            : 'saved wifi cleared through USB bridge',
+          'success'
+        )
+        return network
+      } catch (error) {
+        emitEvent('devd', 'wifi configuration rejected by USB bridge', 'warning')
+        throw error
+      }
+    },
+    [controlClient, devdBaseUrl, emitEvent, visibleDevice]
+  )
+
+  const handleWifiSave = useCallback(
+    (draft: WifiNetworkSettingsDraft) => configureWifi('set', draft),
+    [configureWifi]
+  )
+
+  const handleWifiClear = useCallback(() => configureWifi('clear'), [configureWifi])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -1370,6 +2096,7 @@ export function ControlPlaneDemo({
         },
         () => {
           setActiveView('add-device')
+          setSelectedAddDeviceKind(defaultAddDeviceKind)
           setFlashRun({ status: 'idle', progress: 0 })
           flashCompletionEmittedRef.current = false
           setFeedback({
@@ -1390,6 +2117,35 @@ export function ControlPlaneDemo({
         nextLabel: nextDevice?.alias ?? '切换设备',
       },
       () => {
+        if (
+          nextDevice &&
+          isDirectWebSerialDevice(nextDevice) &&
+          (webSerial.state !== 'connected' || webSerial.deviceId !== nextDevice.id)
+        ) {
+          setSelectedAddDeviceKind('web-serial')
+          setFeedback({
+            title: '正在验证 Web Serial 设备',
+            detail: `正在通过浏览器已授权串口核对 ${nextDevice.alias} 的设备 ID。`,
+            tone: 'info',
+          })
+          emitEvent('webserial', `verifying remembered device ${nextDevice.alias}`, 'info')
+          void handleWebSerialConnect({ replaceExisting: true }).then((connected) => {
+            if (connected) setActiveView('dashboard')
+          })
+          return
+        }
+        if (nextDevice && !isDirectWebSerialDevice(nextDevice)) {
+          setSelectedAddDeviceKind(defaultAddDeviceKind)
+        }
+        if (nextDevice && shouldReacquireLanLeaseOnExplicitSelection(nextDevice)) {
+          setPendingDevices((current) =>
+            current.map((device) =>
+              device.id === nextDevice.id
+                ? { ...device, leaseState: 'none', transportIssue: undefined }
+                : device
+            )
+          )
+        }
         setSelectedDeviceId(deviceId)
         setFlashRun({ status: 'idle', progress: 0 })
         flashCompletionEmittedRef.current = false
@@ -1420,21 +2176,16 @@ export function ControlPlaneDemo({
     flashCompletionEmittedRef.current = false
 
     if (kind === 'web-serial' && !allowDemoControls) {
-      if (webSerial.state === 'connected') {
-        if (webSerial.deviceId) {
-          setSelectedDeviceId(webSerial.deviceId)
-          setActiveView('dashboard')
-        }
-        setFeedback({
-          title: 'Web Serial already connected',
-          detail: 'The browser Web Serial target is already listed in the target selector.',
-          tone: 'info',
-        })
-        emitEvent('webserial', 'browser Web Serial target already connected', 'info')
-        return
-      }
-
-      const connected = await handleWebSerialConnect()
+      setFeedback({
+        title: '正在连接 Web Serial',
+        detail: '正在等待浏览器选择串口；连接超时后会自动结束并允许重试。',
+        tone: 'info',
+      })
+      emitEvent('webserial', 'waiting for browser Web Serial port selection', 'info')
+      const connected = await handleWebSerialConnect({
+        forcePortSelection: true,
+        replaceExisting: true,
+      })
       if (connected) {
         setActiveView('dashboard')
       }
@@ -1456,6 +2207,37 @@ export function ControlPlaneDemo({
     emitEvent('target', `${nextDevice.alias} added from target selector`, 'warning')
   }
 
+  const handleAddDeviceChoice = async (
+    kind: AddDeviceKind,
+    { showPendingDashboard = true }: { showPendingDashboard?: boolean } = {}
+  ) => {
+    setSelectedAddDeviceKind(kind)
+    if (kind === 'wifi') {
+      setFeedback({
+        title: 'WiFi / LAN',
+        detail: '输入设备的私有 HTTP 地址以开始匿名连接。',
+        tone: 'info',
+      })
+      return
+    }
+    if (kind === 'bridge') {
+      setFeedback({
+        title: 'DEVD 桥接',
+        detail: '先选择 USB 或 WiFi / LAN，再明确选择一台 DEVD 已发现的设备。',
+        tone: 'info',
+      })
+      return
+    }
+    await handleAddDevice(kind, { showPendingDashboard })
+  }
+
+  const handleBridgeTargetSelect = (device: DeviceTarget) => {
+    setPendingDevices((current) => upsertLanDeviceTarget(current, device))
+    handleDeviceChange(device.id)
+    setSelectedAddDeviceKind(defaultAddDeviceKind)
+    setActiveView('dashboard')
+  }
+
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {
     await requestCalibrationLeave(
       {
@@ -1465,7 +2247,7 @@ export function ControlPlaneDemo({
       },
       async () => {
         setActiveView('add-device')
-        await handleAddDevice(kind, { showPendingDashboard: false })
+        await handleAddDeviceChoice(kind, { showPendingDashboard: false })
       }
     )
   }
@@ -1522,19 +2304,11 @@ export function ControlPlaneDemo({
     ]
   )
 
-  async function handleWebSerialConnect() {
-    if (webSerial.state === 'connected') {
-      await webSerial.disconnect()
-      setFeedback({
-        title: 'Web Serial disconnected',
-        detail: 'Browser direct USB control is closed.',
-        tone: 'info',
-      })
-      emitEvent('webserial', 'browser direct USB control disconnected', 'info')
-      return false
-    }
-
-    const connected = await webSerial.connect()
+  async function handleWebSerialConnect(options?: {
+    forcePortSelection?: boolean
+    replaceExisting?: boolean
+  }) {
+    const connected = await webSerial.connect(options)
     setFeedback(
       connected
         ? {
@@ -1588,7 +2362,20 @@ export function ControlPlaneDemo({
           { targetTempC: clampedTarget },
           'target temperature update was not accepted by devd'
         )
-        if (liveUpdated || targetTempCommitVersionRef.current[deviceId] !== nextVersion) {
+        if (targetTempCommitVersionRef.current[deviceId] !== nextVersion) {
+          return
+        }
+        if (liveUpdated) {
+          setFeedback({
+            title: 'Target updated',
+            detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
+            tone: 'success',
+          })
+          emitEvent(
+            'thermal',
+            `target temperature updated to ${formatTemp(clampedTarget)}`,
+            'success'
+          )
           return
         }
         setTargetTempByDevice((current) => {
@@ -1599,12 +2386,14 @@ export function ControlPlaneDemo({
       }, 180)
     }
 
-    setFeedback({
-      title: 'Target updated',
-      detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
-      tone: 'success',
-    })
-    emitEvent('thermal', `target temperature updated to ${formatTemp(clampedTarget)}`, 'success')
+    if (!visibleDeviceIsLive) {
+      setFeedback({
+        title: 'Target updated',
+        detail: `${visibleDevice.alias} target is now ${formatTemp(clampedTarget)}.`,
+        tone: 'success',
+      })
+      emitEvent('thermal', `target temperature updated to ${formatTemp(clampedTarget)}`, 'success')
+    }
   }
 
   const handleFanPolicyChange = async (fanState: DeviceTarget['fanState']) => {
@@ -1686,7 +2475,10 @@ export function ControlPlaneDemo({
 
   const handlePresetSlotChange = async (presetIndex: number) => {
     const presetIsEnabled = visiblePresetEnabled[presetIndex] ?? true
-    setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
+    setSelectedPresetByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: presetIndex,
+    }))
     const liveUpdated = await configureLiveRuntime(
       { selectedPresetSlot: presetIndex },
       'preset slot update was not accepted by devd'
@@ -1793,10 +2585,12 @@ export function ControlPlaneDemo({
       return
     }
     if (visibleDeviceIsLive) {
+      const requestedAtMs = Date.now()
+      setHeaterConfirmationNow(requestedAtMs)
       setPendingHeaterConfirmation({
         deviceId: visibleDevice.id,
         requestedEnabled: nextHeaterEnabled,
-        requestedAtMs: Date.now(),
+        requestedAtMs,
       })
       setFeedback(createPendingHeaterFeedback(nextHeaterEnabled))
       return
@@ -1992,7 +2786,10 @@ export function ControlPlaneDemo({
   const handleArtifactChange = (artifactId: string) => {
     const nextArtifact = activeScenario.artifacts.find((artifact) => artifact.id === artifactId)
 
-    setArtifactByDevice((current) => ({ ...current, [visibleDevice.id]: artifactId }))
+    setArtifactByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: artifactId,
+    }))
     setFlashRun({ status: 'idle', progress: 0 })
     flashCompletionEmittedRef.current = false
 
@@ -2026,6 +2823,30 @@ export function ControlPlaneDemo({
     if (isDirectWebSerialDevice(visibleDevice)) {
       const calibration = await webSerial.configureCalibration(request)
       commitCalibrationState(visibleDevice.id, calibration)
+      return
+    }
+    if (isDirectLanDevice(visibleDevice)) {
+      const session = loadLanDeviceSession(visibleDevice.baseUrl)
+      if (!session || !visibleDevice.leaseId) {
+        throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
+      }
+      try {
+        const calibration = await authorizedLanRequest<CalibrationState>(
+          session,
+          'calibration',
+          'PUT',
+          request,
+          visibleDevice.leaseId
+        )
+        commitCalibrationState(visibleDevice.id, calibration)
+      } catch (error) {
+        await reconcileDirectLanStaleWrite(
+          error,
+          () => lanRuntime.readCalibration(session),
+          (refreshed) => commitCalibrationState(visibleDevice.id, refreshed)
+        )
+        throw error
+      }
       return
     }
     if (visibleDeviceIsLive) {
@@ -2074,7 +2895,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', `captured ${channelLabel(channel)} sample`, 'success')
     } catch (error) {
-      setFeedback({ title: '标定失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '标定失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2087,7 +2912,11 @@ export function ControlPlaneDemo({
         tone: 'info',
       })
     } catch (error) {
-      setFeedback({ title: '标定失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '标定失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2100,7 +2929,11 @@ export function ControlPlaneDemo({
         tone: 'success',
       })
     } catch (error) {
-      setFeedback({ title: '标定失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '标定失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2116,7 +2949,11 @@ export function ControlPlaneDemo({
         tone: 'success',
       })
     } catch (error) {
-      setFeedback({ title: '切换槽位失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '切换槽位失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2133,7 +2970,11 @@ export function ControlPlaneDemo({
         tone: 'success',
       })
     } catch (error) {
-      setFeedback({ title: '写入槽位失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '写入槽位失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2142,13 +2983,51 @@ export function ControlPlaneDemo({
       if (isDirectWebSerialDevice(visibleDevice)) {
         if (request.op === 'preview' && request.package) {
           const next = await webSerial.previewHeaterCurve(request.package)
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
           return next
         }
         if (request.op === 'clear_preview') {
           const next = await webSerial.clearHeaterCurvePreview()
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
           return next
+        }
+      }
+      if (isDirectLanDevice(visibleDevice)) {
+        const session = loadLanDeviceSession(visibleDevice.baseUrl)
+        if (!session || !visibleDevice.leaseId) {
+          throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
+        }
+        try {
+          const next = await authorizedLanRequest<HeaterCurveState>(
+            session,
+            'heater-curve',
+            'PUT',
+            request,
+            visibleDevice.leaseId
+          )
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
+          return next
+        } catch (error) {
+          await reconcileDirectLanStaleWrite(
+            error,
+            () => lanRuntime.readHeaterCurve(session),
+            (refreshed) => {
+              setHeaterCurveByDevice((current) => ({
+                ...current,
+                [visibleDevice.id]: refreshed,
+              }))
+            }
+          )
+          throw error
         }
       }
       if (visibleDeviceIsLive) {
@@ -2162,17 +3041,25 @@ export function ControlPlaneDemo({
           ...request,
           leaseId: visibleDevice.leaseId,
         })
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: next,
+        }))
         return next
       }
 
       const next = applyLocalHeaterCurveRequest(visibleHeaterCurve, request)
-      setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+      setHeaterCurveByDevice((current) => ({
+        ...current,
+        [visibleDevice.id]: next,
+      }))
       return next
     },
     [
       controlClient,
       devdBaseUrl,
+      lanRuntime.readHeaterCurve,
+      reconcileDirectLanStaleWrite,
       visibleDevice,
       visibleDeviceIsLive,
       visibleHeaterCurve,
@@ -2191,7 +3078,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', 'updated heater curve preview', 'success')
     } catch (error) {
-      setFeedback({ title: '加热曲线操作失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '加热曲线操作失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2205,7 +3096,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', 'cleared heater curve preview', 'info')
     } catch (error) {
-      setFeedback({ title: '加热曲线操作失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '加热曲线操作失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2213,12 +3108,48 @@ export function ControlPlaneDemo({
     try {
       if (isDirectWebSerialDevice(visibleDevice)) {
         const next = await webSerial.saveHeaterCurve()
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: next,
+        }))
+      } else if (isDirectLanDevice(visibleDevice)) {
+        const session = loadLanDeviceSession(visibleDevice.baseUrl)
+        if (!session || !visibleDevice.leaseId) {
+          throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
+        }
+        try {
+          const next = await authorizedLanRequest<HeaterCurveState>(
+            session,
+            'heater-curve/save',
+            'POST',
+            undefined,
+            visibleDevice.leaseId
+          )
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
+        } catch (error) {
+          await reconcileDirectLanStaleWrite(
+            error,
+            () => lanRuntime.readHeaterCurve(session),
+            (refreshed) => {
+              setHeaterCurveByDevice((current) => ({
+                ...current,
+                [visibleDevice.id]: refreshed,
+              }))
+            }
+          )
+          throw error
+        }
       } else if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
         const next = await controlClient.saveHeaterCurve(devdBaseUrl, visibleDevice.id, {
           leaseId: visibleDevice.leaseId,
         })
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: next,
+        }))
       } else {
         setHeaterCurveByDevice((current) => ({
           ...current,
@@ -2232,7 +3163,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', 'saved heater curve', 'success')
     } catch (error) {
-      setFeedback({ title: '加热曲线操作失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '加热曲线操作失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2246,7 +3181,10 @@ export function ControlPlaneDemo({
 
   const updateCalibrationJob = useCallback(
     async (
-      request: { op: 'start' | 'cancel'; kind?: 'vin_adc_auto' | 'heater_curve_auto' },
+      request: {
+        op: 'start' | 'cancel'
+        kind?: 'vin_adc_auto' | 'heater_curve_auto'
+      },
       failureMessage: string
     ) => {
       const blockedReason = deviceControlBlockReason(visibleDevice)
@@ -2263,6 +3201,35 @@ export function ControlPlaneDemo({
       try {
         if (isDirectWebSerialDevice(visibleDevice)) {
           await webSerial.configureCalibrationJob(request)
+          return true
+        }
+        if (isDirectLanDevice(visibleDevice)) {
+          const session = loadLanDeviceSession(visibleDevice.baseUrl)
+          if (!session || !visibleDevice.leaseId) {
+            throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
+          }
+          try {
+            await authorizedLanRequest(
+              session,
+              'calibration/job',
+              'POST',
+              request,
+              visibleDevice.leaseId
+            )
+          } catch (error) {
+            await reconcileDirectLanStaleWrite(
+              error,
+              () => lanRuntime.readStatus(session),
+              (refreshed) => {
+                setPendingDevices((current) =>
+                  current.map((device) =>
+                    device.id === visibleDevice.id ? applyLanStatus(device, refreshed) : device
+                  )
+                )
+              }
+            )
+            throw error
+          }
           return true
         }
         if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
@@ -2283,7 +3250,15 @@ export function ControlPlaneDemo({
 
       return false
     },
-    [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
+    [
+      controlClient,
+      devdBaseUrl,
+      emitEvent,
+      lanRuntime.readStatus,
+      reconcileDirectLanStaleWrite,
+      visibleDevice,
+      webSerial,
+    ]
   )
 
   const handleCalibrationModeExit = async (): Promise<boolean> => {
@@ -2414,6 +3389,8 @@ export function ControlPlaneDemo({
                 onPresetTempChange={handlePresetTempChange}
                 onPresetEnabledChange={handlePresetEnabledChange}
                 onFanPolicyChange={handleFanPolicyChange}
+                onWifiSave={handleWifiSave}
+                onWifiClear={handleWifiClear}
                 onManualPpsApply={handleManualPpsApply}
                 onManualPpsClear={handleManualPpsClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
@@ -2440,8 +3417,14 @@ export function ControlPlaneDemo({
                 calibrationLeaveGuard={activeView === 'calibration' ? calibrationLeaveGuard : null}
                 onCalibrationLeaveGuardDismiss={dismissCalibrationLeaveGuard}
                 onDeviceSelect={handleDeviceChange}
+                onBridgeTargetSelect={handleBridgeTargetSelect}
+                controlClient={controlClient}
+                devdBaseUrl={devdBaseUrl}
                 onQuickAddDevice={handleQuickAddDevice}
-                onAddDevice={handleAddDevice}
+                onAddDevice={handleAddDeviceChoice}
+                selectedAddDeviceKind={selectedAddDeviceKind}
+                onLanPaired={handleLanPaired}
+                lanPairing={lanPairing}
                 onStartDryRun={handleStartDryRun}
                 onStartFlash={handleStartFlash}
               />
@@ -2482,6 +3465,12 @@ function formatLogTime(totalSeconds: number) {
   const seconds = totalSeconds % 60
 
   return [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':')
+}
+
+export function formatRuntimeEventTime(date: Date) {
+  return [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':')
 }
 
 function createFlashPhases(
@@ -2884,6 +3873,20 @@ function clearCalibrationLoadWarning(current: ActionFeedback): ActionFeedback {
   return current
 }
 
+export function clearStaleWebSerialFailure<T extends ActionFeedback>(
+  current: T
+): T | ActionFeedback {
+  if (current.title !== 'Web Serial unavailable') {
+    return current
+  }
+
+  return {
+    title: 'Web Serial connected',
+    detail: 'Browser direct USB JSONL control is active.',
+    tone: 'success',
+  }
+}
+
 function isTransportBlockedFeedback(current: ActionFeedback) {
   return (
     current.title === '设备租约冲突' ||
@@ -2892,8 +3895,16 @@ function isTransportBlockedFeedback(current: ActionFeedback) {
   )
 }
 
-function isNoLiveTargetDevice(device: DeviceTarget) {
+function isNoLiveTargetDevice(device: Pick<DeviceTarget, 'id' | 'transport'>) {
   return device.id === NO_LIVE_TARGET_ID && device.transport === 'serial'
+}
+
+export function devicePickerTargets<
+  T extends Pick<DeviceTarget, 'id' | 'transport' | 'connectionAvailable'>,
+>(devices: T[]) {
+  return devices.filter(
+    (candidate) => !isNoLiveTargetDevice(candidate) && candidate.connectionAvailable !== false
+  )
 }
 
 function isKnownDeviceChoice(device: DeviceTarget) {
@@ -2905,7 +3916,89 @@ function isPendingDeviceChoice(device: DeviceTarget) {
 }
 
 function isLiveRuntimeDevice(device: Pick<DeviceTarget, 'transport' | 'baseUrl'>) {
-  return device.transport === 'devd' || isDirectWebSerialDevice(device)
+  return device.transport === 'devd' || isDirectWebSerialDevice(device) || isDirectLanDevice(device)
+}
+
+export function shouldShowDeviceControlBlockFeedback(
+  device: Pick<DeviceTarget, 'transport' | 'baseUrl' | 'connectionAvailable'>
+) {
+  return device.connectionAvailable !== false && isLiveRuntimeDevice(device)
+}
+
+function isControlPlaneStatus(value: unknown): value is ControlPlaneStatus {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+  const status = value as Record<string, unknown>
+  return (
+    typeof status.currentTempC === 'number' &&
+    typeof status.targetTempC === 'number' &&
+    typeof status.heaterEnabled === 'boolean' &&
+    typeof status.heaterOutputPercent === 'number' &&
+    typeof status.activeCoolingEnabled === 'boolean' &&
+    typeof status.fanDisplayState === 'string' &&
+    typeof status.voltageMv === 'number' &&
+    typeof status.currentMa === 'number' &&
+    typeof status.boardTempCenti === 'number' &&
+    typeof status.pdRequestMv === 'number' &&
+    typeof status.pdContractMv === 'number' &&
+    typeof status.pdState === 'string' &&
+    typeof status.calibration === 'object' &&
+    status.calibration !== null &&
+    typeof status.network === 'object' &&
+    status.network !== null
+  )
+}
+
+function applyLanStatus(device: DeviceTarget, status: ControlPlaneStatus): DeviceTarget {
+  const networkState = status.network.state
+  return {
+    ...device,
+    severity: networkState === 'error' || networkState === 'timeout' ? 'warning' : 'nominal',
+    uptime: formatDeviceUptime(status.uptimeSeconds),
+    boardTempC: status.boardTempCenti / 100,
+    currentTempC: status.currentTempC,
+    targetTempC: status.targetTempC,
+    selectedPresetIndex: status.selectedPresetSlot,
+    presetsC: status.presetsC,
+    rtdRawAdcMv: status.rtdRawAdcMv,
+    vinRawAdcMv: status.vinRawAdcMv,
+    voltageMv: status.voltageMv,
+    currentMa: status.currentMa,
+    pdRequestMv: status.pdRequestMv,
+    pdContractMv: status.pdContractMv,
+    pdState: status.pdState,
+    manualPpsEnabled: status.manualPpsEnabled ?? false,
+    manualPpsMv: status.manualPpsMv ?? null,
+    manualPpsMa: status.manualPpsMa ?? null,
+    ppsCapabilityMinMv: status.ppsCapabilityMinMv ?? null,
+    ppsCapabilityMaxMv: status.ppsCapabilityMaxMv ?? null,
+    ppsCapabilityMaxMa: status.ppsCapabilityMaxMa ?? null,
+    manualPpsError: status.manualPpsError ?? null,
+    faultAttentionPending: status.faultAttentionPending ?? false,
+    heaterLockReason: status.heaterLockReason ?? null,
+    calibration: status.calibration,
+    heaterEnabled: status.heaterEnabled,
+    heaterOutputPercent: status.heaterOutputPercent,
+    activeCoolingEnabled: status.activeCoolingEnabled,
+    fanState: status.fanDisplayState,
+    wifiSsid: status.network.ssid ?? device.wifiSsid,
+    wifiRssi: status.network.wifiRssi ?? null,
+    wifiPasswordLength: status.network.wifiPasswordLength ?? device.wifiPasswordLength,
+    networkState,
+    configurationGeneration:
+      status.network.configurationGeneration ?? device.configurationGeneration,
+    transitionSequence: status.network.transitionSequence ?? device.transitionSequence,
+    wifiFailureCode: status.network.failureCode ?? null,
+    transportIssue: device.transportIssue,
+  }
+}
+
+function formatDeviceUptime(seconds: number) {
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const rest = seconds % 60
+  return [hours, minutes, rest].map((value) => String(value).padStart(2, '0')).join(':')
 }
 
 function clampPresetIndex(value: number | undefined) {
@@ -3126,28 +4219,7 @@ export function DeviceToolbar({
   return (
     <section className="industrial-status-strip" aria-label="当前目标">
       <div className="industrial-target-picker">
-        <Select value={device.id} onValueChange={onDeviceChange}>
-          <SelectTrigger
-            aria-label="目标设备"
-            className="industrial-device-select industrial-radix-select"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent className="industrial-select-content">
-            {devices.map((item) => (
-              <SelectItem key={item.id} value={item.id} className="industrial-select-item">
-                {item.alias} / {transportLabels[item.transport]}
-              </SelectItem>
-            ))}
-            <SelectSeparator className="industrial-select-separator" />
-            <SelectItem
-              value={ADD_DEVICE_VALUE}
-              className="industrial-select-item industrial-select-item--add"
-            >
-              添加设备
-            </SelectItem>
-          </SelectContent>
-        </Select>
+        <DeviceTargetPicker devices={devices} device={device} onDeviceChange={onDeviceChange} />
       </div>
 
       <StatusDatum label="传输" value={transportLabels[device.transport]} />
@@ -3158,6 +4230,155 @@ export function DeviceToolbar({
       <StatusDatum label="热板" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
     </section>
+  )
+}
+
+export function DeviceTargetPicker({
+  devices,
+  device,
+  onDeviceChange,
+}: {
+  devices: DeviceTarget[]
+  device: DeviceTarget
+  onDeviceChange: (deviceId: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const pickerRef = useRef<HTMLDivElement>(null)
+  const choices = useMemo(() => mergeDeviceChoices(devicePickerTargets(devices)), [devices])
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!pickerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [open])
+
+  const chooseConnection = (targetId: string) => {
+    setOpen(false)
+    onDeviceChange(targetId)
+  }
+
+  return (
+    <div ref={pickerRef} className="industrial-device-picker">
+      <button
+        type="button"
+        className="industrial-device-select industrial-device-picker__trigger"
+        aria-label="目标设备"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="industrial-device-select-value">
+          <strong>{device.alias}</strong>
+          <small>
+            {transportLabels[device.transport]} · {device.location}
+          </small>
+        </span>
+        <ChevronDown aria-hidden="true" className={open ? 'rotate-180' : undefined} />
+      </button>
+      {open ? (
+        <div
+          className="industrial-device-picker__popover"
+          role="dialog"
+          aria-label="设备与连接方式"
+        >
+          {choices.map((choice) => (
+            <DeviceChoiceCard
+              key={choice.identityId}
+              choice={choice}
+              activeTargetId={device.id}
+              onChoose={chooseConnection}
+            />
+          ))}
+          <button
+            type="button"
+            className="industrial-device-picker__add"
+            onClick={() => chooseConnection(ADD_DEVICE_VALUE)}
+          >
+            <Plus aria-hidden="true" />
+            添加设备
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function DeviceChoiceCard({
+  choice,
+  activeTargetId,
+  onChoose,
+}: {
+  choice: DeviceChoice
+  activeTargetId?: string
+  onChoose: (targetId: string) => void
+}) {
+  return (
+    <article className="industrial-device-choice-card" data-device-id={choice.identityId}>
+      <header className="industrial-device-choice-card__header">
+        <span>
+          <strong>{choice.name}</strong>
+          <small>设备 ID · {choice.identityId}</small>
+        </span>
+        <em>{severityLabels[choice.primary.severity]}</em>
+      </header>
+      <fieldset className="industrial-device-choice-card__connections">
+        <legend className="sr-only">{choice.name} 连接方式</legend>
+        {choice.connections.map((connection) => (
+          <DeviceConnectionButton
+            key={connection.key}
+            connection={connection}
+            active={connection.target.id === activeTargetId}
+            onChoose={onChoose}
+          />
+        ))}
+      </fieldset>
+    </article>
+  )
+}
+
+function DeviceConnectionButton({
+  connection,
+  active,
+  onChoose,
+}: {
+  connection: DeviceConnectionOption
+  active: boolean
+  onChoose: (targetId: string) => void
+}) {
+  const ConnectionIcon =
+    connection.kind === 'wifi'
+      ? Wifi
+      : connection.kind === 'web-serial'
+        ? Cable
+        : connection.kind === 'bridge'
+          ? Router
+          : CircleHelp
+
+  return (
+    <button
+      type="button"
+      className={cn('industrial-device-connection-button', active && 'is-active')}
+      onClick={() => onChoose(connection.target.id)}
+      aria-label={`${connection.label} · ${connection.target.alias}`}
+      aria-pressed={active}
+    >
+      <ConnectionIcon aria-hidden="true" className="industrial-device-connection-button__icon" />
+      <span>
+        <strong>{connection.label}</strong>
+        <small>{connection.detail}</small>
+      </span>
+      <ChevronDown aria-hidden="true" className="industrial-device-connection-button__arrow" />
+    </button>
   )
 }
 
@@ -3187,14 +4408,22 @@ function ViewPanel({
   onPresetTempChange,
   onPresetEnabledChange,
   onFanPolicyChange,
+  onWifiSave,
+  onWifiClear,
   onManualPpsApply,
   onManualPpsClear,
   onHeaterHoldToggle,
   onFaultAttentionAcknowledge,
   onArtifactChange,
   onDeviceSelect,
+  onBridgeTargetSelect,
+  controlClient,
+  devdBaseUrl,
   onQuickAddDevice,
   onAddDevice,
+  selectedAddDeviceKind,
+  onLanPaired,
+  lanPairing,
   onStartDryRun,
   onStartFlash,
   onCalibrationReferenceChange,
@@ -3239,14 +4468,22 @@ function ViewPanel({
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
+  onWifiClear: () => Promise<NetworkSummary>
   onManualPpsApply: (millivolts: number) => void | Promise<void>
   onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
   onFaultAttentionAcknowledge: () => void | Promise<void>
   onArtifactChange: (artifactId: string) => void
   onDeviceSelect: (deviceId: string) => void
+  onBridgeTargetSelect: (device: DeviceTarget) => void
+  controlClient: ControlPlaneHttpClient
+  devdBaseUrl: string | null
   onQuickAddDevice: (kind: AddDeviceKind) => void
   onAddDevice: (kind: AddDeviceKind) => void
+  selectedAddDeviceKind: AddDeviceKind
+  onLanPaired: (session: LanDeviceSession, probe: LanProbe) => void | Promise<void>
+  lanPairing?: LanPairingOverrides
   onStartDryRun: () => void
   onStartFlash: () => void
   onCalibrationReferenceChange: (channel: CalibrationChannel, value: number) => void
@@ -3275,7 +4512,10 @@ function ViewPanel({
     failureMessage: string
   ) => void | Promise<void>
   onCalibrationJobChange: (
-    request: { op: 'start' | 'cancel'; kind?: 'vin_adc_auto' | 'heater_curve_auto' },
+    request: {
+      op: 'start' | 'cancel'
+      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+    },
     failureMessage: string
   ) => void | Promise<void>
   onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
@@ -3305,6 +4545,13 @@ function ViewPanel({
         webSerial={webSerial}
         feedback={feedback}
         onAddDevice={onAddDevice}
+        selectedAddDeviceKind={selectedAddDeviceKind}
+        onLanPaired={onLanPaired}
+        lanPairing={lanPairing}
+        knownDevices={knownDevices}
+        onBridgeTargetSelect={onBridgeTargetSelect}
+        controlClient={controlClient}
+        devdBaseUrl={devdBaseUrl}
       />
     )
   }
@@ -3322,6 +4569,8 @@ function ViewPanel({
         onPresetTempChange={onPresetTempChange}
         onPresetEnabledChange={onPresetEnabledChange}
         onFanPolicyChange={onFanPolicyChange}
+        onWifiSave={onWifiSave}
+        onWifiClear={onWifiClear}
       />
     )
   }
@@ -3402,26 +4651,19 @@ function DeviceSelectionView({
   onDeviceSelect: (deviceId: string) => void
   onAddDevice: (kind: AddDeviceKind) => void
 }) {
+  const choices = useMemo(
+    () => mergeDeviceChoices(knownDevices, { allowDemoControls }),
+    [allowDemoControls, knownDevices]
+  )
+
   return (
     <div className="industrial-view-panel industrial-device-select-view">
       <PanelHeader kicker="Device" title="Choose target" />
       <section className="industrial-device-select-section" aria-label="Known devices">
-        {knownDevices.length > 0 ? (
+        {choices.length > 0 ? (
           <div className="industrial-known-device-grid">
-            {knownDevices.map((device) => (
-              <button
-                key={device.id}
-                type="button"
-                className="industrial-known-device-card"
-                onClick={() => onDeviceSelect(device.id)}
-              >
-                <span>
-                  <strong>{device.alias}</strong>
-                  <small>{device.location}</small>
-                </span>
-                <em>{transportLabels[device.transport]}</em>
-                <b>{severityLabels[device.severity]}</b>
-              </button>
+            {choices.map((choice) => (
+              <DeviceChoiceCard key={choice.identityId} choice={choice} onChoose={onDeviceSelect} />
             ))}
           </div>
         ) : (
@@ -3452,11 +4694,25 @@ function AddDeviceView({
   webSerial,
   feedback,
   onAddDevice,
+  selectedAddDeviceKind,
+  onLanPaired,
+  lanPairing,
+  knownDevices,
+  onBridgeTargetSelect,
+  controlClient,
+  devdBaseUrl,
 }: {
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   feedback: ActionFeedback
   onAddDevice: (kind: AddDeviceKind) => void
+  selectedAddDeviceKind: AddDeviceKind
+  onLanPaired: (session: LanDeviceSession, probe: LanProbe) => void | Promise<void>
+  lanPairing?: LanPairingOverrides
+  knownDevices: DeviceTarget[]
+  onBridgeTargetSelect: (device: DeviceTarget) => void
+  controlClient: ControlPlaneHttpClient
+  devdBaseUrl: string | null
 }) {
   return (
     <div className="industrial-view-panel industrial-view-panel--calibration">
@@ -3465,47 +4721,425 @@ function AddDeviceView({
         allowDemoControls={allowDemoControls}
         webSerial={webSerial}
         onAddDevice={onAddDevice}
+        selectedKind={selectedAddDeviceKind}
       />
-      <ActionFeedbackPanel feedback={feedback} />
+      {!allowDemoControls && selectedAddDeviceKind === 'wifi' ? (
+        <LanPairingPanel {...lanPairing} onPaired={onLanPaired} />
+      ) : null}
+      {!allowDemoControls && selectedAddDeviceKind === 'bridge' ? (
+        <BridgeTargetPanel
+          devices={knownDevices}
+          onConnect={onBridgeTargetSelect}
+          client={controlClient}
+          devdBaseUrl={devdBaseUrl}
+        />
+      ) : null}
+      {selectedAddDeviceKind === 'bridge' ? null : <ActionFeedbackPanel feedback={feedback} />}
     </div>
   )
+}
+
+type BridgeTransportChoice = 'usb' | 'wifi'
+type BridgeConnectionState =
+  | { status: 'idle' }
+  | { status: 'identifying'; device: DeviceTarget }
+  | { status: 'connected'; device: DeviceTarget }
+  | { status: 'unknown'; device: DeviceTarget }
+  | { status: 'error'; device: DeviceTarget; detail: string }
+
+function BridgeTargetPanel({
+  devices,
+  onConnect,
+  client,
+  devdBaseUrl,
+}: {
+  devices: DeviceTarget[]
+  onConnect: (device: DeviceTarget) => void
+  client: ControlPlaneHttpClient
+  devdBaseUrl: string | null
+}) {
+  const [transport, setTransport] = useState<BridgeTransportChoice>('usb')
+  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null)
+  const [lanDevices, setLanDevices] = useState<DeviceTarget[]>([])
+  const [discoveryState, setDiscoveryState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [discoveryError, setDiscoveryError] = useState<string | null>(null)
+  const [connectionState, setConnectionState] = useState<BridgeConnectionState>({ status: 'idle' })
+  const [cidr, setCidr] = useState(() =>
+    typeof window === 'undefined'
+      ? ''
+      : (window.localStorage.getItem('flux-purr:devd-lan-scan-cidr') ?? '')
+  )
+  const candidates = bridgeCandidatesForTransport({
+    transport,
+    devices,
+    lanDevices,
+  })
+
+  const mergeLanDevices = useCallback((summaries: DevdLanDeviceSummary[]) => {
+    setLanDevices((current) => {
+      const next = [...current]
+      for (const summary of summaries) {
+        const target = devdLanSummaryToBridgeTarget(summary)
+        const index = next.findIndex((device) => device.id === target.id)
+        if (index >= 0) next[index] = target
+        else next.push(target)
+      }
+      return next
+    })
+  }, [])
+
+  const runDiscovery = async (discover: () => Promise<DevdLanDeviceSummary[]>) => {
+    if (discoveryState === 'loading') return
+    setDiscoveryState('loading')
+    setDiscoveryError(null)
+    try {
+      mergeLanDevices(await discover())
+      setDiscoveryState('idle')
+    } catch (error) {
+      setDiscoveryState('error')
+      setDiscoveryError(error instanceof Error ? error.message : '服务发现失败。')
+    }
+  }
+
+  useEffect(() => {
+    if (transport !== 'wifi' || !devdBaseUrl) return
+    let cancelled = false
+    void client
+      .listDevdLanDevices(devdBaseUrl)
+      .then((summaries) => {
+        if (!cancelled) mergeLanDevices(summaries)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [client, devdBaseUrl, mergeLanDevices, transport])
+
+  const changeTransport = (next: BridgeTransportChoice) => {
+    setTransport(next)
+    setSelectedTargetId(null)
+  }
+
+  const connectUsbCandidate = async (device: DeviceTarget) => {
+    if (!devdBaseUrl || connectionState.status === 'identifying') return
+    setConnectionState({ status: 'identifying', device })
+    let leaseId: string | null = null
+    try {
+      const lease = await client.createDevdLease(devdBaseUrl, device.id)
+      leaseId = lease.leaseId
+      const identity = await client.identifyDevdDevice(devdBaseUrl, device.id, lease.leaseId)
+      if (!validateBridgeDeviceIdentity(identity).ok) {
+        setConnectionState({ status: 'unknown', device })
+        return
+      }
+
+      const probe = await client.probeDevdDevice(devdBaseUrl, device.id, lease.leaseId)
+      const connected = bridgeProbeToDeviceTarget(device, probe)
+      setConnectionState({ status: 'connected', device: connected })
+    } catch (error) {
+      setConnectionState({
+        status: 'error',
+        device,
+        detail: error instanceof Error ? error.message : '无法识别该串口设备。',
+      })
+    } finally {
+      if (leaseId) {
+        await client.releaseDevdLease(devdBaseUrl, leaseId).catch(() => undefined)
+      }
+    }
+  }
+
+  const connectLanCandidate = async (device: DeviceTarget) => {
+    if (!devdBaseUrl || connectionState.status === 'identifying') return
+    setConnectionState({ status: 'identifying', device })
+    try {
+      const record = await client.connectDevdLanDevice(devdBaseUrl, device.id)
+      const registered = devdRecordToDeviceTarget(record)
+      if (!validateBridgeDeviceIdentity(record.identity).ok) {
+        setConnectionState({ status: 'unknown', device: registered })
+        return
+      }
+
+      setConnectionState({
+        status: 'connected',
+        // DEVD's LAN connect endpoint has already read and validated identity,
+        // network, and runtime status. Acquiring another DEVD lease here races
+        // the live reader in this browser and falsely reports a lease conflict.
+        device: bridgeProbeToDeviceTarget(registered, {
+          identity: record.identity,
+          network: record.network,
+          status: record.status,
+        }),
+      })
+    } catch (error) {
+      const detail =
+        error instanceof ControlPlaneClientError && error.code === 'lan_pairing_required'
+          ? '设备拒绝了 DEVD 保存的配对凭据。请在硬件 WiFi Info 页面显示四位码后重新配对。'
+          : error instanceof Error
+            ? error.message
+            : '无法连接该 LAN 设备。'
+      setConnectionState({
+        status: 'error',
+        device,
+        detail,
+      })
+    }
+  }
+
+  return (
+    <section className="industrial-bridge-target-panel" aria-label="DEVD 桥接目标">
+      <div className="industrial-bridge-target-panel__heading">
+        <div>
+          <strong>本机 DEVD 桥接</strong>
+          <small>选择连接路径和具体设备后再建立控制会话</small>
+        </div>
+        <div className="industrial-bridge-target-panel__transport">
+          <Button
+            type="button"
+            variant="outline"
+            aria-pressed={transport === 'usb'}
+            onClick={() => changeTransport('usb')}
+          >
+            <Usb aria-hidden="true" />
+            USB
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            aria-pressed={transport === 'wifi'}
+            onClick={() => changeTransport('wifi')}
+          >
+            <Wifi aria-hidden="true" />
+            WiFi / LAN
+          </Button>
+        </div>
+      </div>
+
+      {candidates.length > 0 ? (
+        <div className="industrial-bridge-target-panel__devices">
+          {candidates.map((device) => {
+            const selected = selectedTargetId === device.id
+            const identifying =
+              connectionState.status === 'identifying' && connectionState.device.id === device.id
+            return (
+              <div key={device.id} className={selected ? 'is-selected' : undefined}>
+                <span>
+                  <strong>{device.alias}</strong>
+                  <small>{device.location}</small>
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={connectionState.status === 'identifying'}
+                  onClick={() => {
+                    setSelectedTargetId(device.id)
+                    if (transport === 'usb') void connectUsbCandidate(device)
+                    else void connectLanCandidate(device)
+                  }}
+                >
+                  {identifying ? (
+                    <LoaderCircle aria-hidden="true" className="animate-spin" />
+                  ) : null}
+                  {identifying ? '识别中' : '连接'}
+                </Button>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <p className="industrial-bridge-target-panel__empty">
+          {transport === 'usb'
+            ? 'DEVD 尚未发现可用的 USB 设备。'
+            : 'DEVD 尚未发现已登记的 WiFi / LAN 设备。'}
+        </p>
+      )}
+
+      {transport === 'wifi' ? (
+        <div className="industrial-bridge-target-panel__discovery">
+          <div className="industrial-bridge-target-panel__discovery-heading">
+            <span>
+              <strong>服务发现</strong>
+              <small>由本机 DEVD 显式执行，不会后台扫描网络</small>
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!devdBaseUrl || discoveryState === 'loading'}
+              onClick={() =>
+                devdBaseUrl && runDiscovery(() => client.refreshDevdLanMdns(devdBaseUrl))
+              }
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={discoveryState === 'loading' ? 'animate-spin' : undefined}
+              />
+              刷新服务
+            </Button>
+          </div>
+          <form
+            className="industrial-bridge-target-panel__cidr"
+            onSubmit={(event) => {
+              event.preventDefault()
+              const value = cidr.trim()
+              if (!devdBaseUrl || !value || discoveryState === 'loading') return
+              window.localStorage.setItem('flux-purr:devd-lan-scan-cidr', value)
+              void runDiscovery(() => client.scanDevdLanCidr(devdBaseUrl, value))
+            }}
+          >
+            <Label htmlFor="devd-lan-cidr">CIDR 网段</Label>
+            <Input
+              id="devd-lan-cidr"
+              value={cidr}
+              placeholder="192.168.31.0/24"
+              disabled={!devdBaseUrl || discoveryState === 'loading'}
+              onChange={(event) => setCidr(event.target.value)}
+            />
+            <Button
+              type="submit"
+              disabled={!devdBaseUrl || !cidr.trim() || discoveryState === 'loading'}
+            >
+              <ScanSearch aria-hidden="true" />
+              扫描网段
+            </Button>
+          </form>
+          {discoveryError ? <p role="alert">{discoveryError}</p> : null}
+        </div>
+      ) : null}
+
+      {connectionState.status !== 'idle' ? (
+        <div className="industrial-bridge-connection-dialog-backdrop">
+          <section
+            className="industrial-bridge-connection-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="bridge-connection-title"
+            aria-describedby="bridge-connection-detail"
+          >
+            <div className="industrial-bridge-connection-dialog__heading">
+              <div>
+                <strong id="bridge-connection-title">
+                  {connectionState.status === 'identifying'
+                    ? '正在识别设备'
+                    : connectionState.status === 'connected'
+                      ? '设备已连接'
+                      : connectionState.status === 'unknown'
+                        ? '未知设备'
+                        : '无法连接设备'}
+                </strong>
+                <small>{connectionState.device.location}</small>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                aria-label="关闭连接状态"
+                disabled={connectionState.status === 'identifying'}
+                onClick={() => setConnectionState({ status: 'idle' })}
+              >
+                <X aria-hidden="true" />
+              </Button>
+            </div>
+            <div
+              className={`industrial-bridge-connection-dialog__status is-${connectionState.status}`}
+              aria-live="polite"
+            >
+              {connectionState.status === 'identifying' ? (
+                <LoaderCircle aria-hidden="true" className="animate-spin" />
+              ) : connectionState.status === 'connected' ? (
+                <CheckCircle2 aria-hidden="true" />
+              ) : (
+                <AlertTriangle aria-hidden="true" />
+              )}
+              <p id="bridge-connection-detail">
+                {connectionState.status === 'identifying'
+                  ? '正在读取固件身份并核对控制协议。'
+                  : connectionState.status === 'connected'
+                    ? `${connectionState.device.alias} 已通过身份验证。`
+                    : connectionState.status === 'unknown'
+                      ? '该串口未返回有效的 Flux Purr 固件身份，已禁止连接。'
+                      : connectionState.detail}
+              </p>
+            </div>
+            {connectionState.status !== 'identifying' ? (
+              <div className="industrial-bridge-connection-dialog__actions">
+                <Button
+                  type="button"
+                  onClick={() => {
+                    if (connectionState.status === 'connected') {
+                      onConnect(connectionState.device)
+                    }
+                    setConnectionState({ status: 'idle' })
+                  }}
+                >
+                  {connectionState.status === 'connected' ? '完成' : '关闭'}
+                </Button>
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+export function devdLanSummaryToBridgeTarget(summary: DevdLanDeviceSummary): DeviceTarget {
+  const pending = createPendingDevice('bridge')
+  return {
+    ...pending,
+    id: summary.id,
+    alias: summary.hostname || summary.id.replace(/^lan-/, ''),
+    location: summary.lastIpv4 || summary.baseUrl,
+    transport: 'devd',
+    bridgeTransport: 'wifi',
+    connectionCandidate: true,
+    baseUrl: summary.baseUrl,
+    severity: summary.paired ? 'nominal' : 'warning',
+    leaseState: 'none',
+    transportIssue: summary.paired
+      ? 'DEVD LAN target is registered and ready to establish a control lease.'
+      : '此设备尚未在 DEVD 中完成配对。',
+  }
 }
 
 function AddDeviceChoices({
   allowDemoControls,
   webSerial,
   onAddDevice,
+  selectedKind,
 }: {
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onAddDevice: (kind: AddDeviceKind) => void
+  selectedKind?: AddDeviceKind
 }) {
   const webSerialDisabled =
-    !allowDemoControls &&
-    (webSerial.state === 'unsupported' ||
-      webSerial.state === 'connecting' ||
-      webSerial.state === 'connected')
+    !allowDemoControls && (webSerial.state === 'unsupported' || webSerial.state === 'connecting')
 
   return (
     <div className="industrial-add-device-grid">
       {addDeviceOptions.map((item) => {
         const disabled = item.kind === 'web-serial' && webSerialDisabled
+        const isSelected = item.kind === selectedKind
         const label =
           item.kind === 'web-serial' && webSerial.state === 'connecting'
             ? 'Web Serial (connecting)'
-            : item.kind === 'web-serial' && webSerial.state === 'connected'
-              ? 'Web Serial connected'
-              : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
-                ? 'Web Serial unavailable'
-                : item.label
+            : item.kind === 'web-serial' && !allowDemoControls && !webSerial.supported
+              ? 'Web Serial unavailable'
+              : item.label
 
         return (
           <button
             key={item.kind}
             type="button"
-            className="industrial-add-device-option"
+            className={`industrial-add-device-option${isSelected ? ' is-selected' : ''}`}
+            aria-pressed={isSelected}
             disabled={disabled}
-            onClick={() => onAddDevice(item.kind)}
+            onClick={(event) => {
+              onAddDevice(item.kind)
+              if (event.detail !== 0) {
+                event.currentTarget.blur()
+              }
+            }}
           >
             <span>{label}</span>
             <small>{item.detail}</small>
@@ -3552,6 +5186,7 @@ function DashboardView({
   }, [advancedOpen, device.id, manualPpsDefaultMv, manualPpsDraftDirty])
   const heaterState = runtimeHeaterState(device)
   const powerCapabilityMa = effectivePpsCurrentCapabilityMa(device) ?? 0
+  const controlsBlocked = deviceControlBlockReason(device) != null
   return (
     <div className="industrial-view-panel">
       <PanelHeader kicker="Dashboard" title="Thermal runtime" />
@@ -3607,13 +5242,13 @@ function DashboardView({
       <div className="industrial-secondary-actions">
         <TargetTempControl
           value={device.targetTempC}
-          disabled={device.severity === 'offline'}
+          disabled={controlsBlocked}
           onChange={onTargetTempChange}
         />
         <button
           type="button"
           className="industrial-button industrial-button--secondary"
-          disabled={device.severity === 'offline'}
+          disabled={controlsBlocked}
           onClick={onHeaterHoldToggle}
         >
           <Power size={16} aria-hidden="true" />
@@ -3623,7 +5258,7 @@ function DashboardView({
           <button
             type="button"
             className="industrial-button industrial-button--secondary"
-            disabled={device.severity === 'offline'}
+            disabled={controlsBlocked}
             onClick={onFaultAttentionAcknowledge}
           >
             消告警
@@ -3656,8 +5291,9 @@ function ManualPpsPanel({
 }) {
   const range = ppsCapabilityRange(device)
   const maxMa = effectivePpsCurrentCapabilityMa(device)
-  const disabled = device.severity === 'offline' || !range || maxMa == null
-  const clearDisabled = device.severity === 'offline' || !device.manualPpsEnabled
+  const controlsBlocked = deviceControlBlockReason(device) != null
+  const disabled = controlsBlocked || !range || maxMa == null
+  const clearDisabled = controlsBlocked || !device.manualPpsEnabled
   const capabilityText = range
     ? `${formatVolts(range.minMv)}-${formatVolts(range.maxMv)} / ${maxMa ? formatAmps(maxMa) : 'current unknown'} source range`
     : 'No PPS APDO reported'
@@ -4047,6 +5683,8 @@ function SettingsView({
   onPresetTempChange,
   onPresetEnabledChange,
   onFanPolicyChange,
+  onWifiSave,
+  onWifiClear,
 }: {
   device: DeviceTarget
   fanPolicyValue: DeviceTarget['fanState']
@@ -4058,7 +5696,13 @@ function SettingsView({
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
+  onWifiClear: () => Promise<NetworkSummary>
 }) {
+  const hasWifiConfiguration =
+    device.transport === 'devd' && device.capabilities.includes('wifi_config')
+  const supportsWifiStateV2 = device.capabilities.includes('wifi_state_v2')
+
   return (
     <div className="industrial-view-panel">
       <PanelHeader kicker="Settings" title="Heat policy" />
@@ -4081,6 +5725,27 @@ function SettingsView({
             </div>
           </div>
         </section>
+
+        {hasWifiConfiguration ? (
+          <WifiNetworkSettings
+            key={device.id}
+            deviceId={device.id}
+            networkState={device.networkState}
+            savedSsid={device.wifiSsid}
+            wifiRssi={device.wifiRssi}
+            savedPasswordLength={device.wifiPasswordLength ?? 0}
+            configurationGeneration={device.configurationGeneration}
+            transitionSequence={device.transitionSequence}
+            failureCode={device.wifiFailureCode}
+            disabled={!supportsWifiStateV2 || !device.leaseId || device.leaseState !== 'active'}
+            unavailableReason={resolveWifiSettingsUnavailableReason({
+              supportsWifiStateV2,
+              transportIssue: device.transportIssue,
+            })}
+            onSave={onWifiSave}
+            onClear={onWifiClear}
+          />
+        ) : null}
 
         <section className="industrial-settings-section industrial-settings-section--presets">
           <h3 className="industrial-section-title">Preset temperatures</h3>
@@ -4171,7 +5836,10 @@ function CalibrationView({
     failureMessage: string
   ) => void | Promise<void>
   onCalibrationJobChange: (
-    request: { op: 'start' | 'cancel'; kind?: 'vin_adc_auto' | 'heater_curve_auto' },
+    request: {
+      op: 'start' | 'cancel'
+      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+    },
     failureMessage: string
   ) => void | Promise<void>
   onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
@@ -4213,7 +5881,9 @@ function CalibrationView({
   const basePpsDraft = calibrationPpsDraft(device, runtimeCalibration)
 
   const exportCalibration = () => {
-    const blob = new Blob([JSON.stringify(calibration, null, 2)], { type: 'application/json' })
+    const blob = new Blob([JSON.stringify(calibration, null, 2)], {
+      type: 'application/json',
+    })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -4543,7 +6213,10 @@ function CalibrationView({
     if (!Number.isFinite(gain) || !Number.isFinite(offsetMv)) {
       return
     }
-    await onCalibrationSetSlotFit(slotEditor.channel, slotEditor.slot, { gain, offsetMv })
+    await onCalibrationSetSlotFit(slotEditor.channel, slotEditor.slot, {
+      gain,
+      offsetMv,
+    })
     closeSlotEditor()
   }, [closeSlotEditor, onCalibrationSetSlotFit, slotEditor])
   const leaveGuardViewModel = calibrationLeaveGuard
@@ -4674,7 +6347,10 @@ function CalibrationView({
                                 onCalibrationJobChange(
                                   jobRunning
                                     ? { op: 'cancel' }
-                                    : { op: 'start', kind: 'heater_curve_auto' },
+                                    : {
+                                        op: 'start',
+                                        kind: 'heater_curve_auto',
+                                      },
                                   jobRunning
                                     ? '加热曲线自动采样取消失败。'
                                     : '加热曲线自动采样启动失败。'
@@ -5158,7 +6834,9 @@ function CalibrationLeaveGuardBubble({
 }) {
   const anchorRef = useRef<HTMLElement | null>(null)
   const bubbleRef = useRef<HTMLDivElement | null>(null)
-  const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({ visibility: 'hidden' })
+  const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({
+    visibility: 'hidden',
+  })
   const [bubbleSide, setBubbleSide] = useState<'bottom' | 'top'>('bottom')
 
   useLayoutEffect(() => {
@@ -5797,7 +7475,7 @@ function CalibrationSlotEditOverlay({
           <div>
             <span className="industrial-slot-editor-card__eyebrow">校准槽位</span>
             <CardTitle className="industrial-slot-editor-card__title" id={titleId}>
-              {channelLabel(slotEditor.channel)}
+              {`${channelLabel(slotEditor.channel)} 槽位 ${slotEditor.slot.toUpperCase()}`}
             </CardTitle>
           </div>
           <span className="industrial-slot-editor-card__slot">{slotEditor.slot.toUpperCase()}</span>
@@ -5879,7 +7557,7 @@ function CalibrationSlotEditorField({
       <div className="industrial-slot-editor-control">
         <Input
           id={id}
-          type="text"
+          type="number"
           inputMode="decimal"
           aria-label={label}
           value={value}
@@ -6037,8 +7715,12 @@ function CalibrationChannelSamples({
     .map((sample, index) =>
       isValidCalibrationSample(sample, channel) ? { ...sample, index } : null
     )
-    .filter((sample): sample is (RtdCalibrationSample | VinCalibrationSample) & { index: number } =>
-      Boolean(sample)
+    .filter(
+      (
+        sample
+      ): sample is (RtdCalibrationSample | VinCalibrationSample) & {
+        index: number
+      } => Boolean(sample)
     )
   const rtdSamplePairs = isRtdChannel
     ? populatedSamples.reduce<Array<Array<RtdCalibrationSample & { index: number }>>>(
@@ -6592,7 +8274,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   })
 
   useLayoutEffect(() => {
-    if (followTail) {
+    if (followTail && filteredEvents.length > 0) {
       rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
     }
   }, [filteredEvents.length, followTail, rowVirtualizer])
@@ -6618,7 +8300,11 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
 
       if (next) {
         window.requestAnimationFrame(() => {
-          rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
+          if (filteredEvents.length > 0) {
+            rowVirtualizer.scrollToIndex(filteredEvents.length - 1, {
+              align: 'end',
+            })
+          }
         })
       }
 
@@ -6627,8 +8313,9 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   }
 
   const virtualItems = rowVirtualizer.getVirtualItems()
-  const latestSourceLabel = filteredEvents[0]?.source
-    ? (eventSourceLabels[filteredEvents[0].source] ?? filteredEvents[0].source.toUpperCase())
+  const latestEvent = filteredEvents.at(-1)
+  const latestSourceLabel = latestEvent?.source
+    ? (eventSourceLabels[latestEvent.source] ?? latestEvent.source.toUpperCase())
     : '追踪'
 
   return (
@@ -6654,9 +8341,9 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
         </fieldset>
       </div>
       <div className="industrial-log-panel__summary">
-        <span>{filteredEvents[0]?.time}</span>
+        <span>{latestEvent?.time}</span>
         <strong>{latestSourceLabel}</strong>
-        <p>{filteredEvents[0]?.message ?? '暂无追踪帧'}</p>
+        <p>{latestEvent?.message ?? '暂无追踪帧'}</p>
       </div>
       <SimpleBar
         autoHide

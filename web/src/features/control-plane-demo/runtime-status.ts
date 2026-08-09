@@ -2,8 +2,58 @@ import type { HeaterLockReason } from './contracts'
 import type { DeviceTarget } from './types'
 
 const BLOCKED_NETWORK_STATES = new Set(['error', 'timeout'])
+const PASSIVE_FEEDBACK_TITLES = new Set(['运行时已同步', '暂无在线目标'])
 
 export const HEATER_CONFIRMATION_TIMEOUT_MS = 2_500
+
+export function heaterConfirmationNowMs(requestedAtMs: number, timerFiredAtMs: number) {
+  return Math.max(requestedAtMs, timerFiredAtMs)
+}
+
+export function shouldReplacePassiveFeedbackWithHeaterLock(title: string) {
+  return PASSIVE_FEEDBACK_TITLES.has(title)
+}
+
+export function lanLeaseHeartbeatFailureDetail(message: string) {
+  const detail = message.trim()
+  return detail ? `LAN lease 心跳失败：${detail}` : 'LAN lease 心跳失败，请重新选择设备。'
+}
+
+export function shouldAcquireLanLease(device: Pick<DeviceTarget, 'leaseState'>) {
+  return device.leaseState !== 'conflict' && device.leaseState !== 'expired'
+}
+
+export function shouldReacquireLanLeaseOnExplicitSelection(
+  device: Pick<DeviceTarget, 'transport' | 'leaseState'>
+) {
+  return device.transport === 'wifi' && device.leaseState === 'expired'
+}
+
+export interface LanLeaseAcquisitionRequest {
+  deviceId: string
+  baseUrl: string
+  alias: string
+}
+
+/**
+ * Extract the only fields that may start or retire a direct-LAN lease. Status
+ * refreshes intentionally do not participate, so a DEVD poll cannot cancel a
+ * browser lease acquisition that is already in flight.
+ */
+export function lanLeaseAcquisitionRequest(
+  device: Pick<DeviceTarget, 'id' | 'alias' | 'baseUrl' | 'transport' | 'leaseState'>,
+  hasLease: boolean
+): LanLeaseAcquisitionRequest | null {
+  if (
+    hasLease ||
+    device.transport !== 'wifi' ||
+    !device.baseUrl.startsWith('http://') ||
+    !shouldAcquireLanLease(device)
+  ) {
+    return null
+  }
+  return { deviceId: device.id, baseUrl: device.baseUrl, alias: device.alias }
+}
 
 export interface RuntimeFeedback {
   title: string
@@ -44,7 +94,8 @@ export function heaterLockReasonText(reason: HeaterLockReason) {
 }
 
 export function deviceControlBlockReason(
-  device: Pick<DeviceTarget, 'severity' | 'leaseState' | 'transportIssue' | 'networkState'>
+  device: Pick<DeviceTarget, 'severity' | 'leaseState' | 'transportIssue' | 'networkState'> &
+    Partial<Pick<DeviceTarget, 'transport' | 'baseUrl'>>
 ) {
   if (device.severity === 'offline') {
     return '目标设备当前离线。'
@@ -56,6 +107,14 @@ export function deviceControlBlockReason(
 
   if (device.leaseState === 'expired') {
     return device.transportIssue ?? '当前设备租约已过期，请等待页面重新接管。'
+  }
+
+  if (
+    device.transport === 'wifi' &&
+    device.baseUrl?.startsWith('http://') &&
+    device.leaseState !== 'active'
+  ) {
+    return device.transportIssue ?? '正在获取 LAN 控制租约，暂时无法下发控制。'
   }
 
   const networkState = device.networkState

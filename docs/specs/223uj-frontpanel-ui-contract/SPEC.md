@@ -138,7 +138,7 @@
   - 第一行固定概括 `PD 20V | <35 OFF >40 50% >60 MAX`；`20V` 为默认 build，`12V / 28V` 变体只替换电压值，不改变布局。
   - 第二行固定概括 `SAFE >100 PLS >350 50% >360 MAX`。
 - `WiFi Info`
-  - 只显示最关键的三行：`SSID`、`RSSI`、`IP`。
+  - 显示 `SSID`、`RSSI` 与四位 `PAIR` 码；配对码只在该页面可见且离页立即失效。
 - `Device Info`
   - 只显示 `Board`、`FW`、`Serial` 三组紧凑信息。
 
@@ -170,7 +170,7 @@ None
 - Given `Preset Temp` 页面，When 观察屏幕，Then 目标温度为单一主任务，不出现第二个竞争主视觉块。
 - Given `Preset Temp` 页面，When 某个槽位显示为灰色 `---`，Then 该槽位仍可被选中与重新调整为有效值。
 - Given `Active Cooling` 页面，When 观察屏幕，Then 开关状态与两行安全策略摘要清晰分层，不依赖外部图例理解。
-- Given `WiFi Info` 页面，When 观察屏幕，Then `SSID/RSSI/IP` 均可读，且没有超过屏宽的断行。
+- Given `WiFi Info` 页面，When 观察屏幕，Then SSID 与连接状态来自 WiFi runtime；连接成功时 IP/RSSI 与 `PAIR` 均可读，四位配对码没有超过屏宽的断行；离开页面后不得继续显示或接受该码。
 - Given `Device Info` 页面，When 观察屏幕，Then `Board/FW/Serial` 结构清楚且信息密度不显拥挤。
 - Given Storybook docs/gallery，When 打开前面板故事集，Then 至少存在 `Key Test`、`Dashboard`、`Menu`、四个子页与 1 个总览画面。
 
@@ -247,6 +247,8 @@ PR: include
 ![Front panel active cooling](./assets/frontpanel-active-cooling.png)
 
 #### WiFi Info
+
+该证据由 host-side `frontpanel_preview` 复用固件 framebuffer renderer 生成，展示 runtime SSID、IPv4、RSSI 与配对码。
 
 ![Front panel WiFi info](./assets/frontpanel-wifi-info.png)
 

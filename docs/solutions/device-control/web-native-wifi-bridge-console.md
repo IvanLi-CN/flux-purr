@@ -65,7 +65,7 @@ Web 侧先定义稳定的数据模型，用来隐藏不同 transport 的差异�
 
 - `DeviceTarget`：`deviceId`、`baseUrl`、alias/location、transport kind（`http`、`serial`、`devd`、`mock`）。
 - `Identity`：固件版本、build ID、git SHA、feature list、设备 hostname、API version 和 capabilities。
-- `NetworkSummary`：WiFi state、IP、gateway、DNS、RSSI 和 last error。
+- `NetworkSummary`：WiFi state、可显示的设备确认 `ssid`、密码长度、`configurationGeneration`、单调 `transitionSequence`、有限 `failureCode`、IP、gateway、DNS、RSSI 和诊断性 last error。状态、SSID 与版本字段是设备事实，不可由 host 或 Web 推断；密码内容永不返回。WiFi Set 省略 `password` 字段时保留设备原密码，显式空字符串才清除密码；Web 的已保存密码以真实输入值承载掩码，未脏时禁止提交，点击全选且删除任意字符即清空整段。
 - `Status`：按用户可理解的硬件域分组，不直接暴露底层 driver 输出。
 - `SerialSession`：连接状态、protocol version、当前 status、logs、trace 和 safe settings。
 
@@ -92,7 +92,7 @@ Daemon 应该是本地 HTTP 服务，而不是 UI 专用私有通道。Mains Aeg
 
 - 健康与兼容：`/health`、`/api/v1/ping`、`/api/v1/identity`、`/api/v1/network`、`/api/v1/status`。
 - 设备生命周期：scan、bind、connect、disconnect、unbind、reset。
-- 固件生命周期：select artifact、verify files、dry-run flash、real flash。
+- 固件生命周期：select artifact、verify files、dry-run flash、real flash 和 `flux_cfg` layout-migration preflight。
 - 串口生命周期：create heartbeat lease、read session、stream events、start/stop monitor。
 - 设置桥接：WiFi config、log level、safe manual preferences。
 - 工具能力：defmt decode，以及可选 host power routes。
@@ -101,9 +101,11 @@ Daemon 应该是本地 HTTP 服务，而不是 UI 专用私有通道。Mains Aeg
 
 daemon endpoint 在更新 registry 后再发布 bounded event 时，必须先释放 registry/state lock。event publisher 往往会再次读取或写入同一个 registry；如果成功路径持锁 emit event，WiFi/runtime 这类 mutating endpoint 会在真实硬件返回成功后卡死，浏览器只看到挂起请求。
 
+不能假设 app 写入不会影响数据区：无论 `flux_cfg` 是否迁移，real flash 都必须先读取设备当前 partition table，确认目标容量与地址安全后，将完整原始 record 写入目标并读回逐字验证；app 写入完成后，再把同一受限临时备份恢复到目标地址并再次逐字验证。预写失败必须在 app 写入前终止；恢复或最终验证失败必须明确报告为保护失败。临时原始记录只在受限临时目录中短暂存在，永不进入 daemon log、trace 或 registry；外置 EEPROM 不在这条 flash 迁移的破坏范围内。
+
 同一个 native serial port 必须有跨进程互斥保护。进程内 mutex 只能保护单个 daemon；开发时残留的旧 daemon、浏览器预览或 smoke 进程可能同时打开同一个 USB Serial/JTAG port，造成 `Broken pipe`、短时断线或看起来像硬件重启的现象。serial RPC 应该在 open/write/read 前获取 port-scoped process lock，并在超时窗口内等待或返回 retryable lock timeout。
 
-对 ESP32-S3 USB Serial/JTAG 这类 host open 可能触发 reset 的设备，daemon 不应在每个 HTTP polling request 中反复 open/close 串口。更稳的模型是 per-port 持久 serial session：process lock 与 fd 同生命周期，正常 identity/network/status/runtime RPC 复用同一个 fd；只有 recoverable I/O error 才丢弃 session 并等待 port 重新出现。
+对 ESP32-S3 USB Serial/JTAG 这类 host open 可能触发 reset 的设备，daemon 不应在每个 HTTP polling request 中反复 open/close 串口。更稳的模型是 per-port 持久 serial session：process lock 与 fd 同生命周期，正常 identity/network/status/runtime RPC 复用同一个 fd；启动日志中的 USB reset marker 只表示保持当前 fd 并等待启动响应，不能主动触发 reopen；只有 recoverable I/O error 才丢弃 session 并等待 port 重新出现。
 
 ### USB Lease 模型
 
@@ -146,15 +148,19 @@ USB serial 采用 newline-delimited JSON frame。建议最小协议能力如下�
 - 通过小型 adapter 把内部 enum 与 sensor data 映射为稳定 API slug。
 - network task 发布最新 snapshot，并提供 `/api/v1/identity`、`/api/v1/network`、`/api/v1/status`，按能力支持 SSE。
 - WiFi credential 通过 USB 写入设备存储，再应用到 runtime network task。
-- daemon/Web 等待 network state 到达 `connected` 或 `disabled`，不能在写入凭据 ack 后就假定成功。
+- WiFi receipt 必须携带设备已发布的 `NetworkSummary`；`devd` 验证后原样持久化和转发，Web 只按 generation/sequence 消费。已确认 `ssid` 必须穿透 transport 映射并在成功后回填配置表单；只清除页面内存中的密码，不能以空字段掩盖实际已连接网络。设备对外只发布 `connecting|connected|error`（无配置时为 `disabled`）；配置事务最多三次尝试、总计 30 秒，配置断连最多 3 秒，单次关联最多 8 秒，IPv4/DHCP 最多 15 秒。可恢复单次失败保持 `connecting`，事务耗尽后只发布一次终态 `error`；失败不会在同一 configuration generation 内自动恢复，必须有新配置才重新进入 `connecting`。`connected` 只接受设备异步快照。Web 不维护 WiFi 超时计时器；transport 故障单独展示，不能伪装为 WiFi 失败。
 
 这样能避免 firmware network code 直接依赖每个硬件 subsystem，也让 API 演进更容易测试。
 
 ### Flux Purr v1 transport boundary
 
-Flux Purr 的当前真实控制面先收敛在两条正规路径：浏览器使用 Web Serial 或 Web -> native `devd` -> USB JSONL；命令行使用 released `flux-purr` CLI -> `flux-purr-devd` -> USB JSONL。固件 release artifact 默认包含 `web_serial`，但不声明 direct firmware HTTP / event stream capability；direct `net_http` 只有在固件 HTTP server 真正实现、验证并进入 identity capabilities 后，才应出现在 artifact catalog、Web target 或 API 文档的当前能力列表里。
+Flux Purr 的当前真实控制面有三条正规路径：浏览器 Web Serial、Web -> native `devd` -> USB JSONL，以及 Chromium HTTPS Web -> firmware `net_http`。命令行既可经 `flux-purr-devd` 走 USB JSONL，也可对已配对 LAN record 直接使用同一 HTTP v1 API。固件默认 artifact 包含 `web_serial` 与 `net_http`；WiFi STA 使用 DHCP hostname 与 `_http._tcp.local` DNS-SD，USB 是唯一的初始 WiFi 配置、静态 IPv4、flash 和 token reset 通道。
 
-这条边界很重要：Web 可以复用同一套 domain parser，但 UI capability gate 必须以当前 transport 暴露的能力为准。对 Flux Purr v1 来说，WiFi provisioning、runtime config、artifact verify、dry-run flash、bounded events 与 monitor trace 都由 `devd` 保护在 lease 后面；HTTP handoff 仍是后续 milestone，而不是当前硬件可用性的证明。
+这条边界很重要：Web 可以复用同一套 domain parser，但 UI capability gate 必须以当前 transport 暴露的能力为准。LAN 读取需要 bearer，固件必须接受多个同时在途的读取连接；HTTP 由单一 TCP acceptor 分配两个静态 socket，identity 与 network 从发布快照直接回答，唯一 mutation-capable workspace 处理 status、SSE 与控制命令。这样浏览器并发 probe 不会复制大 request buffer，也不会用顺序请求掩盖服务端限制。额外请求在 socket 归还前受有界排队，客户端必须将无响应表达为 transport 问题，而不是私网或 WiFi station 失败。对仍只接受单连接的旧固件，浏览器只在传输级失败时执行一次串行读取回退，并继续暴露真实认证或协议错误。写入需要 30 秒 device lease，并携带设备最近公开的单调 control revision。HTTP worker 只负责并发连接、鉴权和入队，主控制循环是唯一 mutation 消费者；同一 revision 的竞争写中只有先执行者成功，后续请求以 `stale_write` 拒绝且不能自动重放。设备重启后已保存 token 的 direct LAN record 仅在 operator 显式重新选择该连接方式时重新取得 lease；heartbeat expiry 与明确 conflict 都保持只读，不允许自动抢占。WiFi Info 页面生成的四位配对码可经持有 USB lease 的 `devd` / CLI 查询，页面离开即失效；该代码不持久化，也不得进入 trace、导出或错误。具备 `wifi_config` 的 native `devd` target 必须让 Web live Settings 保留 WiFi form；若缺少 `wifi_state_v2`，所有 set/clear 控件锁定并说明需要协议更新，不得猜测状态。具备该 capability 后每次 set/clear 都必须走 active USB lease；密码仅在设备确认 `connected` 或 `disabled` 时从页面内存清除，clear 需要二次确认。direct LAN 与 Web Serial 不得获得 WiFi provisioning UI。WiFi provisioning、artifact verify、dry-run flash、USB trace 与 token reset 继续由 `devd` / USB 保护；token 不得写入 URL、trace、导出或错误。
+
+浏览器完成四位码 claim 只代表拿到稳定 bearer token，不能声称设备已连接或解锁控制；它必须继续取得并维持 device lease，只有 active lease 才能启用 LAN runtime 写操作。probe 得到的单调 control revision 必须回写到同一 origin 的 LAN session，避免页面刷新后第一次写入因缺少 revision 被本地拦截。每次 direct-LAN 写入在 PUT 前串行读取设备 snapshot，以该 revision 发送命令；如果仍收到 `stale_write`，只回读一次、恢复设备事实并要求明确重提，不自动重放命令或显示成功。对恢复的单个 LAN record 收到 `401` 时，只移除该 record 的本地 token 并要求重新显示物理配对码，不能影响其它 target。浏览器 LAN 的 E2E 要拥有独立的 HTTP v1 fixture，并明确禁用 `devd`；它可以回放共享的协议 trace，但不得通过另一个程序去模拟或验证 LAN。`devd` 和 CLI 另以各自的 native USB fixture 验证其 transport、registry 与 reset 边界。
+
+LAN 授权不能先于连接。浏览器和 CLI 先用匿名、低频的 `/health` 读取设备 identity 与 pairing policy；这个摘要不包含 runtime telemetry、code 或 bearer。`required` 在连接成功后才显示物理 WiFi Info 页的四位码对话框，`optional` 使用空 claim，`unavailable` 停留在匿名基础只读。三个策略都属于同一个 HTTP v1 interface，调用方必须拒绝未知值，不能把 current default 写成前端必填字段。这样既能保留当前的物理配对安全边界，也不会在将来引入免 code 或只读设备时改变连接流程。
 
 CLI 不应该暴露 lease 细节给普通用户。`flux-purr` 应在每个需要设备控制权的命令中创建、heartbeat 和释放 lease；只有 `devd` HTTP contract 保留 `leaseId` 作为内部能力边界。用户级硬件记忆只记录当前 USB transport，`FLUX_PURR_HOME` 或 OS config 目录保存默认 USB port 与 saved hardware，运行中的 daemon 不因配置文件变化而静默切换端口。
 
@@ -218,6 +224,9 @@ ADC 校准属于控制面设置，不属于 dashboard display offset。RTD 和 V
 - 如果平台支持，添加 mDNS/DNS-SD；否则提供明确 hostname convention。
 - daemon 通过 USB 发送 WiFi config，然后轮询 status，直到 network state 变为 `connected`。
 - Web UI 在 WiFi provisioning 成功后，把设备转换为 direct HTTP target。
+- LAN client 禁止跟随重定向。纯浏览器 direct LAN 可由 operator 主动执行受限私有 IPv4 CIDR scan，只匿名探测公开 `/health`，不得使用 mDNS、不得后台运行、不得调用 `devd`；CIDR 只可作为本地表单偏好恢复，不能触发自动扫描，且扫描输入、操作、进度和结果保持可见。native `devd`/CLI discovery 则独立提供 mDNS 与显式 CIDR scan。两条 discovery surface 都只持久化已验证的私网根地址，且未认证 discovery 不得改写已配对 token 对应的地址。设备地址变化时必须完成一次新的四位码配对后才可更新该 token 的目标。
+- “Bridge” 是 transport family，不是 device identity。Web 选择本机桥接后仍必须先区分 DEVD USB 与 DEVD WiFi/LAN，再从对应 discovery/registry 结果中显式选择具体目标；点击 transport card 不得创建 pending device、自动领取 lease 或改写当前目标。路径切换必须清空旧选择，direct browser LAN records 与 DEVD bridge records 必须保持不同所有权。
+- DEVD Bridge 的 LAN 候选不能来自通用 USB `/api/v1/devices` 轮询。Web 应先读取 daemon 的 LAN registry，再把 mDNS refresh 与有界 CIDR scan 暴露为明确的 operator 动作；页面加载不得自动扫描网络。发现结果按稳定 LAN ID 合并并以 hostname 为主名称，发现错误保留已有候选，direct browser LAN session 与 USB record 不进入该集合。DNS-SD encoder 应独立于硬件任务接受 host 测试：PTR 是 shared record，只有 SRV/TXT/A 等 unique records 设置 cache-flush。发现候选在完成配对、probe 和 lease 前不得进入在线目标列表。
 
 验收标准：
 

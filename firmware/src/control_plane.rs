@@ -1,5 +1,5 @@
 use heapless::{String, Vec};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     DeviceMode, DeviceStatus, PdState,
@@ -11,7 +11,7 @@ use crate::{
         MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig,
         ThermalControlProfileConfig, ThermalControlProfilePointConfig,
         ThermalControlProfileSettingsConfig, ThermalPlantRawAnchor, ThermalPlantRawTransaction,
-        ThermalProfileBank, ThermalProfileMode, adc_calibration_fit,
+        ThermalProfileBank, ThermalProfileMode, WifiStaticIpv4Config, adc_calibration_fit,
         thermal_plant_raw_transaction_is_complete,
     },
 };
@@ -35,20 +35,49 @@ pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkState {
+    /// No WiFi credentials are configured. This is the absence state, not a
+    /// connection attempt result.
     Disabled,
+    /// Legacy/internal state. Firmware WiFi summaries normalize it to
+    /// `connecting` when credentials exist.
     Idle,
+    /// Internal persistence/disconnect stage; never published by firmware
+    /// WiFi summaries.
     Saving,
     Connecting,
     Connected,
     Error,
+    /// Legacy/internal timeout state. Firmware WiFi summaries normalize it to
+    /// `error` so hardware exposes only connecting/connected/error outcomes.
     Timeout,
+}
+
+/// Safe, finite reasons for a terminal WiFi state. Driver text remains
+/// diagnostic-only and must never decide user-facing presentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkFailureCode {
+    DisconnectTimedOut,
+    ConfigurationFailed,
+    AssociationRejected,
+    AssociationTimedOut,
+    Ipv4TimedOut,
+    StationDisconnected,
+    LanStartupFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkSummary {
     pub state: NetworkState,
+    #[serde(default)]
+    pub configuration_generation: u32,
+    #[serde(default)]
+    pub transition_sequence: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<NetworkFailureCode>,
     pub ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
+    pub wifi_password_length: u8,
     pub ip: Option<String<48>>,
     pub gateway: Option<String<48>>,
     pub dns: Vec<String<48>, 2>,
@@ -60,7 +89,11 @@ impl Default for NetworkSummary {
     fn default() -> Self {
         Self {
             state: NetworkState::Disabled,
+            configuration_generation: 0,
+            transition_sequence: 0,
+            failure_code: None,
             ssid: None,
+            wifi_password_length: 0,
             ip: None,
             gateway: None,
             dns: Vec::new(),
@@ -96,6 +129,12 @@ impl Identity {
             push_str(&mut capabilities, "usb_jsonl");
             push_str(&mut capabilities, "wifi_config");
             push_str(&mut capabilities, "monitor");
+            push_str(&mut capabilities, "wifi_state_v2");
+        }
+        #[cfg(feature = "net_http")]
+        {
+            push_str(&mut capabilities, "lan_http");
+            push_str(&mut capabilities, "lan_pairing");
         }
         Self {
             device_id: string("flux-purr-s3-001"),
@@ -108,6 +147,23 @@ impl Identity {
             hostname: string("flux-purr-s3-001"),
             capabilities,
         }
+    }
+
+    pub fn firmware_from_mac(mac: [u8; 6]) -> Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut identity = Self::firmware_default();
+        identity.device_id.clear();
+        identity.hostname.clear();
+        let _ = identity.hostname.push_str("flux-purr-");
+        for byte in mac {
+            let high = HEX[usize::from(byte >> 4)] as char;
+            let low = HEX[usize::from(byte & 0x0f)] as char;
+            let _ = identity.device_id.push(high);
+            let _ = identity.device_id.push(low);
+            let _ = identity.hostname.push(high);
+            let _ = identity.hostname.push(low);
+        }
+        identity
     }
 }
 
@@ -506,9 +562,60 @@ impl From<FrontPanelKey> for FrontPanelKeyWire {
 pub struct WifiConfigCommand {
     pub op: WifiConfigOp,
     pub ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
+    /// `None` preserves the stored password; `Some("")` explicitly clears it.
     pub password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
-    pub auto_reconnect: Option<bool>,
+    /// `None` means the field was absent and therefore preserves the existing
+    /// address. `Some(None)` is an explicit JSON null that clears it.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_static_ipv4_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
     pub telemetry_interval_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiStaticIpv4Wire {
+    pub address: [u8; 4],
+    pub prefix_len: u8,
+    pub gateway: [u8; 4],
+    pub dns: [u8; 4],
+}
+
+/// A missing `staticIpv4` field preserves the saved address, while an explicit
+/// JSON `null` requests DHCP. `serde_json_core` otherwise collapses both into
+/// the same nested `Option` value.
+fn deserialize_static_ipv4_patch<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<WifiStaticIpv4Wire>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<WifiStaticIpv4Wire>::deserialize(deserializer).map(Some)
+}
+
+impl From<WifiStaticIpv4Wire> for WifiStaticIpv4Config {
+    fn from(value: WifiStaticIpv4Wire) -> Self {
+        Self {
+            address: value.address,
+            prefix_len: value.prefix_len,
+            gateway: value.gateway,
+            dns: value.dns,
+        }
+    }
+}
+
+impl From<WifiStaticIpv4Config> for WifiStaticIpv4Wire {
+    fn from(value: WifiStaticIpv4Config) -> Self {
+        Self {
+            address: value.address,
+            prefix_len: value.prefix_len,
+            gateway: value.gateway,
+            dns: value.dns,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,19 +631,19 @@ impl WifiConfigCommand {
             WifiConfigOp::Clear => {
                 config.wifi_ssid.clear();
                 config.wifi_password.clear();
-                config.wifi_auto_reconnect = false;
+                config.wifi_static_ipv4 = None;
             }
             WifiConfigOp::Set => {
                 config.wifi_ssid.clear();
                 if let Some(ssid) = &self.ssid {
                     let _ = config.wifi_ssid.push_str(ssid);
                 }
-                config.wifi_password.clear();
                 if let Some(password) = &self.password {
+                    config.wifi_password.clear();
                     let _ = config.wifi_password.push_str(password);
                 }
-                if let Some(auto_reconnect) = self.auto_reconnect {
-                    config.wifi_auto_reconnect = auto_reconnect;
+                if let Some(static_ipv4) = self.static_ipv4 {
+                    config.wifi_static_ipv4 = static_ipv4.map(Into::into);
                 }
                 if let Some(interval) = self.telemetry_interval_ms {
                     config.telemetry_interval_ms = interval.max(1);
@@ -551,7 +658,7 @@ impl WifiConfigCommand {
             op: self.op,
             ssid: self.ssid.clone(),
             password: self.password.as_ref().map(|_| string("<redacted>")),
-            auto_reconnect: self.auto_reconnect,
+            static_ipv4: self.static_ipv4.flatten(),
             telemetry_interval_ms: self.telemetry_interval_ms,
         }
     }
@@ -563,8 +670,17 @@ pub struct RedactedWifiConfig {
     pub op: WifiConfigOp,
     pub ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     pub password: Option<String<16>>,
-    pub auto_reconnect: Option<bool>,
+    pub static_ipv4: Option<WifiStaticIpv4Wire>,
     pub telemetry_interval_ms: Option<u32>,
+}
+
+/// Receipt returned as soon as firmware accepts a WiFi configuration. The
+/// network snapshot is authoritative: host adapters must not synthesize it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WifiConfigReceipt {
+    pub wifi: RedactedWifiConfig,
+    pub network: NetworkSummary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1398,7 +1514,12 @@ struct UsbFrameWire {
     op: Option<String<24>>,
     ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
     password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
-    auto_reconnect: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_static_ipv4_patch",
+        skip_serializing_if = "Option::is_none"
+    )]
+    static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
     telemetry_interval_ms: Option<u32>,
     target_temp_c: Option<i16>,
     selected_preset_slot: Option<usize>,
@@ -1455,7 +1576,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     op: parse_wifi_config_op(value.op.as_deref())?,
                     ssid: value.ssid,
                     password: value.password,
-                    auto_reconnect: value.auto_reconnect,
+                    static_ipv4: value.static_ipv4,
                     telemetry_interval_ms: value.telemetry_interval_ms,
                 },
             }),
@@ -1544,7 +1665,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             op: None,
             ssid: None,
             password: None,
-            auto_reconnect: None,
+            static_ipv4: None,
             telemetry_interval_ms: None,
             target_temp_c: None,
             selected_preset_slot: None,
@@ -1603,7 +1724,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.op = Some(string(config.op.as_str()));
                 wire.ssid = config.ssid.clone();
                 wire.password = config.password.clone();
-                wire.auto_reconnect = config.auto_reconnect;
+                wire.static_ipv4 = config.static_ipv4;
                 wire.telemetry_interval_ms = config.telemetry_interval_ms;
             }
             UsbFrame::RuntimeConfig { request_id, config } => {
@@ -1694,10 +1815,14 @@ pub enum UsbRequestOp {
     GetIdentity,
     GetNetwork,
     GetStatus,
+    GetLanPairingCode,
+    OpenLanPairingWindow,
+    CloseLanPairingWindow,
     GetCalibration,
     GetCalibrationJob,
     GetHeaterCurve,
     SetLogLevel,
+    ClearLanPairingToken,
 }
 
 impl UsbRequestOp {
@@ -1706,10 +1831,14 @@ impl UsbRequestOp {
             Self::GetIdentity => "get_identity",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
+            Self::GetLanPairingCode => "get_lan_pairing_code",
+            Self::OpenLanPairingWindow => "open_lan_pairing_window",
+            Self::CloseLanPairingWindow => "close_lan_pairing_window",
             Self::GetCalibration => "get_calibration",
             Self::GetCalibrationJob => "get_calibration_job",
             Self::GetHeaterCurve => "get_heater_curve",
             Self::SetLogLevel => "set_log_level",
+            Self::ClearLanPairingToken => "clear_lan_pairing_token",
         }
     }
 }
@@ -1761,11 +1890,22 @@ pub enum UsbResponsePayload {
     Identity(Identity),
     Network(NetworkSummary),
     Status(ControlPlaneStatus),
-    Wifi(RedactedWifiConfig),
+    LanPairingCode(LanPairingCode),
+    Wifi(WifiConfigReceipt),
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
     HeaterCurve(HeaterCurveStateWire),
     Ack,
+}
+
+/// A transient code is intentionally available through the already-authorized
+/// USB control channel so host tooling can complete a physical WiFi Info-page
+/// pairing flow. It never persists and becomes inactive when that page exits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanPairingCode {
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String<4>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1836,11 +1976,12 @@ pub fn network_from_memory(config: &MemoryConfig) -> NetworkSummary {
 
     NetworkSummary {
         state: if ssid.is_some() {
-            NetworkState::Idle
+            NetworkState::Connecting
         } else {
             NetworkState::Disabled
         },
         ssid,
+        wifi_password_length: config.wifi_password.len() as u8,
         ..NetworkSummary::default()
     }
 }
@@ -1860,10 +2001,14 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_identity") => Ok(UsbRequestOp::GetIdentity),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
+        Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
+        Some("open_lan_pairing_window") => Ok(UsbRequestOp::OpenLanPairingWindow),
+        Some("close_lan_pairing_window") => Ok(UsbRequestOp::CloseLanPairingWindow),
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),
         Some("get_calibration_job") => Ok(UsbRequestOp::GetCalibrationJob),
         Some("get_heater_curve") => Ok(UsbRequestOp::GetHeaterCurve),
         Some("set_log_level") => Ok(UsbRequestOp::SetLogLevel),
+        Some("clear_lan_pairing_token") => Ok(UsbRequestOp::ClearLanPairingToken),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -1911,6 +2056,12 @@ mod tests {
     use std::format;
 
     #[test]
+    fn network_failure_states_remain_observable_before_any_reconnect_attempt() {
+        assert_ne!(NetworkState::Error, NetworkState::Connecting);
+        assert_ne!(NetworkState::Timeout, NetworkState::Connecting);
+    }
+
+    #[test]
     fn identity_lists_feature_capabilities() {
         let identity = Identity::firmware_default();
         assert!(
@@ -1935,6 +2086,29 @@ mod tests {
                     .any(|value| value == "wifi_config")
             );
         }
+        #[cfg(feature = "net_http")]
+        {
+            assert!(
+                identity
+                    .capabilities
+                    .iter()
+                    .any(|value| value == "lan_http")
+            );
+            assert!(
+                identity
+                    .capabilities
+                    .iter()
+                    .any(|value| value == "lan_pairing")
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_identity_uses_the_mac_for_every_transport() {
+        let identity = Identity::firmware_from_mac([0xa0, 0xf2, 0x62, 0xf2, 0x0d, 0x6c]);
+
+        assert_eq!(identity.device_id.as_str(), "a0f262f20d6c");
+        assert_eq!(identity.hostname.as_str(), "flux-purr-a0f262f20d6c");
     }
 
     #[test]
@@ -1955,7 +2129,7 @@ mod tests {
         assert_eq!(status.mode, DeviceModeWire::Sampling);
         assert_eq!(status.target_temp_c, 210);
         assert!(!status.active_cooling_enabled);
-        assert_eq!(status.network.state, NetworkState::Idle);
+        assert_eq!(status.network.state, NetworkState::Connecting);
         assert_eq!(status.network.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(status.frontpanel_key, Some(FrontPanelKeyWire::Center));
         assert_eq!(status.heater_lock_reason, None);
@@ -1983,6 +2157,26 @@ mod tests {
         assert!(json.contains(r#""heaterLockReason":null"#));
         assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
         assert!(!json.contains("fallback5v"));
+    }
+
+    #[test]
+    fn network_summary_exposes_password_length_without_password_content() {
+        let mut config = MemoryConfig::default();
+        config.wifi_ssid.push_str("FluxPurr-Lab").unwrap();
+        config.wifi_password.push_str("secret-pass").unwrap();
+        let summary = network_from_memory(&config);
+        assert_eq!(summary.wifi_password_length, 11);
+
+        let frame = UsbFrame::Response {
+            request_id: string("req-network"),
+            ok: true,
+            result: Some(UsbResponsePayload::Network(summary)),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).unwrap();
+        assert!(json.contains(r#""wifiPasswordLength":11"#));
+        assert!(!json.contains("secret-pass"));
     }
 
     #[test]
@@ -2155,17 +2349,146 @@ mod tests {
             op: WifiConfigOp::Set,
             ssid: Some(string("FluxPurr-Lab")),
             password: Some(string("secret-pass")),
-            auto_reconnect: Some(true),
+            static_ipv4: Some(Some(WifiStaticIpv4Wire {
+                address: [192, 168, 31, 42],
+                prefix_len: 24,
+                gateway: [192, 168, 31, 1],
+                dns: [1, 1, 1, 1],
+            })),
             telemetry_interval_ms: Some(750),
         };
         let mut config = MemoryConfig::default();
         command.apply_to(&mut config);
         assert_eq!(config.wifi_ssid.as_str(), "FluxPurr-Lab");
         assert_eq!(config.wifi_password.as_str(), "secret-pass");
+        assert_eq!(config.wifi_static_ipv4.unwrap().address, [192, 168, 31, 42]);
         assert_eq!(
             command.redacted_summary().password.as_deref(),
             Some("<redacted>")
         );
+    }
+
+    #[test]
+    fn wifi_command_preserves_static_ipv4_when_field_is_omitted() {
+        let mut config = MemoryConfig {
+            wifi_static_ipv4: Some(WifiStaticIpv4Config {
+                address: [192, 168, 31, 42],
+                prefix_len: 24,
+                gateway: [192, 168, 31, 1],
+                dns: [1, 1, 1, 1],
+            }),
+            ..MemoryConfig::default()
+        };
+        WifiConfigCommand {
+            op: WifiConfigOp::Set,
+            ssid: Some(string("FluxPurr-Lab")),
+            password: None,
+            static_ipv4: None,
+            telemetry_interval_ms: None,
+        }
+        .apply_to(&mut config);
+
+        assert_eq!(config.wifi_static_ipv4.unwrap().address, [192, 168, 31, 42]);
+    }
+
+    #[test]
+    fn wifi_command_preserves_password_when_field_is_omitted() {
+        let mut config = MemoryConfig::default();
+        config.wifi_password.push_str("secret-pass").unwrap();
+
+        WifiConfigCommand {
+            op: WifiConfigOp::Set,
+            ssid: Some(string("FluxPurr-Lab")),
+            password: None,
+            static_ipv4: None,
+            telemetry_interval_ms: None,
+        }
+        .apply_to(&mut config);
+
+        assert_eq!(config.wifi_password.as_str(), "secret-pass");
+    }
+
+    #[test]
+    fn wifi_command_clears_password_when_empty_password_is_explicit() {
+        let mut config = MemoryConfig::default();
+        config.wifi_password.push_str("secret-pass").unwrap();
+
+        WifiConfigCommand {
+            op: WifiConfigOp::Set,
+            ssid: Some(string("FluxPurr-Lab")),
+            password: Some(string("")),
+            static_ipv4: None,
+            telemetry_interval_ms: None,
+        }
+        .apply_to(&mut config);
+
+        assert!(config.wifi_password.is_empty());
+    }
+
+    #[test]
+    fn wifi_command_clears_static_ipv4_when_field_is_explicit_null() {
+        let mut config = MemoryConfig {
+            wifi_static_ipv4: Some(WifiStaticIpv4Config {
+                address: [192, 168, 31, 42],
+                prefix_len: 24,
+                gateway: [192, 168, 31, 1],
+                dns: [1, 1, 1, 1],
+            }),
+            ..MemoryConfig::default()
+        };
+        let frame = parse_usb_frame(
+            r#"{"type":"wifi_config","requestId":"req-dhcp","op":"set","staticIpv4":null}"#,
+        )
+        .unwrap();
+        let UsbFrame::WifiConfig {
+            config: command, ..
+        } = frame
+        else {
+            panic!("expected WiFi config frame");
+        };
+
+        assert_eq!(command.static_ipv4, Some(None));
+        command.apply_to(&mut config);
+        assert!(config.wifi_static_ipv4.is_none());
+
+        let direct =
+            serde_json_core::from_str::<WifiConfigCommand>(r#"{"op":"set","staticIpv4":null}"#)
+                .unwrap()
+                .0;
+        assert_eq!(direct.static_ipv4, Some(None));
+    }
+
+    #[test]
+    fn usb_wifi_static_ipv4_patch_preserves_absent_and_serializes_dhcp_clear() {
+        let clear = UsbFrame::WifiConfig {
+            request_id: string("wifi-dhcp"),
+            config: WifiConfigCommand {
+                op: WifiConfigOp::Set,
+                ssid: None,
+                password: None,
+                static_ipv4: Some(None),
+                telemetry_interval_ms: None,
+            },
+        };
+        let preserve = UsbFrame::WifiConfig {
+            request_id: string("wifi-preserve"),
+            config: WifiConfigCommand {
+                op: WifiConfigOp::Set,
+                ssid: None,
+                password: None,
+                static_ipv4: None,
+                telemetry_interval_ms: None,
+            },
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+
+        let clear_json = write_usb_frame(&clear, &mut out).unwrap();
+        assert!(clear_json.contains(r#""staticIpv4":null"#));
+        assert_eq!(parse_usb_frame(clear_json).unwrap(), clear);
+
+        let preserve_json = write_usb_frame(&preserve, &mut out).unwrap();
+        assert!(!preserve_json.contains(r#""staticIpv4""#));
+        assert_eq!(parse_usb_frame(preserve_json).unwrap(), preserve);
     }
 
     #[test]
@@ -2434,9 +2757,79 @@ mod tests {
     }
 
     #[test]
+    fn parses_usb_only_lan_pairing_reset_request() {
+        let frame = parse_usb_frame(
+            r#"{"type":"request","requestId":"reset-lan","op":"clear_lan_pairing_token"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            UsbFrame::Request {
+                request_id: string("reset-lan"),
+                op: UsbRequestOp::ClearLanPairingToken,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_usb_only_lan_pairing_window_requests() {
+        let open = parse_usb_frame(
+            r#"{"type":"request","requestId":"pairing-open","op":"open_lan_pairing_window"}"#,
+        )
+        .unwrap();
+        let close = parse_usb_frame(
+            r#"{"type":"request","requestId":"pairing-close","op":"close_lan_pairing_window"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            open,
+            UsbFrame::Request {
+                request_id: string("pairing-open"),
+                op: UsbRequestOp::OpenLanPairingWindow,
+            }
+        );
+        assert_eq!(
+            close,
+            UsbFrame::Request {
+                request_id: string("pairing-close"),
+                op: UsbRequestOp::CloseLanPairingWindow,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_and_writes_usb_lan_pairing_code_response() {
+        let frame = parse_usb_frame(
+            r#"{"type":"request","requestId":"pairing-code","op":"get_lan_pairing_code"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            UsbFrame::Request {
+                request_id: string("pairing-code"),
+                op: UsbRequestOp::GetLanPairingCode,
+            }
+        );
+
+        let response = UsbFrame::Response {
+            request_id: string("pairing-code"),
+            ok: true,
+            result: Some(UsbResponsePayload::LanPairingCode(LanPairingCode {
+                active: true,
+                code: Some(string("4827")),
+            })),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&response, &mut out).unwrap();
+        assert!(json.contains(r#""lan_pairing_code":{"active":true,"code":"4827"}"#));
+    }
+
+    #[test]
     fn parse_wifi_frame_and_write_redacted_response() {
         let frame = parse_usb_frame(
-            r#"{"type":"wifi_config","requestId":"req-002","op":"set","ssid":"FluxPurr-Lab","password":"secret-pass","autoReconnect":true,"telemetryIntervalMs":500}"#,
+            r#"{"type":"wifi_config","requestId":"req-002","op":"set","ssid":"FluxPurr-Lab","password":"secret-pass","autoReconnect":false,"telemetryIntervalMs":500}"#,
         )
         .unwrap();
         let UsbFrame::WifiConfig { request_id, config } = frame else {
@@ -2444,17 +2837,27 @@ mod tests {
         };
         assert_eq!(request_id.as_str(), "req-002");
         assert_eq!(config.password.as_deref(), Some("secret-pass"));
+        let mut memory = MemoryConfig {
+            wifi_auto_reconnect: false,
+            ..MemoryConfig::default()
+        };
+        config.apply_to(&mut memory);
+        assert!(memory.wifi_auto_reconnect);
 
         let response = UsbFrame::Response {
             request_id,
             ok: true,
-            result: Some(UsbResponsePayload::Wifi(config.redacted_summary())),
+            result: Some(UsbResponsePayload::Wifi(WifiConfigReceipt {
+                wifi: config.redacted_summary(),
+                network: NetworkSummary::default(),
+            })),
             error: None,
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.contains(r#""password":"<redacted>""#));
         assert!(!json.contains("secret-pass"));
+        assert!(!json.contains("autoReconnect"));
         assert!(json.ends_with('\n'));
     }
 
@@ -2636,6 +3039,7 @@ mod tests {
 
         assert!(line.len() > 4_096);
         assert!(line.len() <= USB_LINE_MAX_LEN);
+        assert!(line.len() <= crate::net_http::LAN_HTTP_BODY_MAX_LEN);
         let UsbFrame::RuntimeConfig { request_id, config } = parse_usb_frame(&line).unwrap() else {
             panic!("expected runtime config frame");
         };
@@ -2701,5 +3105,37 @@ mod tests {
             parse_usb_frame(r#"{"type":"request","op":"get_status"}"#),
             Err(UsbFrameError::MalformedJson)
         );
+    }
+
+    #[test]
+    fn wifi_config_receipt_carries_a_redacted_versioned_network_snapshot() {
+        let receipt = WifiConfigReceipt {
+            wifi: RedactedWifiConfig {
+                op: WifiConfigOp::Set,
+                ssid: Some(string("FluxPurr-Lab")),
+                password: Some(string("<redacted>")),
+                static_ipv4: None,
+                telemetry_interval_ms: None,
+            },
+            network: NetworkSummary {
+                state: NetworkState::Connecting,
+                configuration_generation: 7,
+                transition_sequence: 19,
+                failure_code: None,
+                ..NetworkSummary::default()
+            },
+        };
+        let response = UsbFrame::Response {
+            request_id: string("wifi-v2"),
+            ok: true,
+            result: Some(UsbResponsePayload::Wifi(receipt)),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&response, &mut out).unwrap();
+
+        assert!(json.contains(r#""configurationGeneration":7"#));
+        assert!(json.contains(r#""transitionSequence":19"#));
+        assert!(!json.contains("secret-pass"));
     }
 }

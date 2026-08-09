@@ -224,7 +224,15 @@ impl PreviewPreset {
             }
             Self::WifiInfo => {
                 let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
-                state.route = FrontPanelRoute::WifiInfo;
+                state.network.state = flux_purr_firmware::control_plane::NetworkState::Connected;
+                state.network.ssid = Some("Ivan".try_into().expect("preview SSID should fit"));
+                state.network.ip = Some(
+                    "192.168.31.88"
+                        .try_into()
+                        .expect("preview IPv4 address should fit"),
+                );
+                state.network.wifi_rssi = Some(-58);
+                state.enter_wifi_pairing(Some(*b"4827"));
                 state
             }
             Self::DeviceInfo => {
