@@ -1142,11 +1142,13 @@ async fn handle_http_connection(
         }
         total += received;
     }
-    let header_end = request_bytes[..total]
-        .windows(4)
-        .position(|value| value == b"\r\n\r\n")
-        .map(|index| index + 4)
-        .unwrap_or(total);
+    let Some(header_end) = complete_http_header(&request_bytes[..total]) else {
+        *response = HttpResponse::new(
+            400,
+            r#"{"error":{"code":"header_incomplete","message":"Request header ended before its terminator."}}"#,
+        );
+        return write_http_response(socket, response).await;
+    };
     let parsed = parse_http_header(&request_bytes[..header_end]);
     let Some(_method) = parsed.method else {
         *response = HttpResponse::new(
@@ -1218,6 +1220,13 @@ async fn handle_http_connection(
         .await;
     }
     write_http_response(socket, response).await
+}
+
+fn complete_http_header(request: &[u8]) -> Option<usize> {
+    request
+        .windows(4)
+        .position(|value| value == b"\r\n\r\n")
+        .map(|index| index + 4)
 }
 
 fn complete_http_body(request: &[u8], header_end: usize, content_length: usize) -> Option<&[u8]> {
@@ -1488,7 +1497,21 @@ fn random_u32() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_http_body, decode_pairing_code, encode_pairing_code};
+    use super::{
+        complete_http_body, complete_http_header, decode_pairing_code, encode_pairing_code,
+    };
+
+    #[test]
+    fn complete_http_header_rejects_a_missing_terminator() {
+        let request = b"DELETE /api/v1/leases HTTP/1.1\r\nAuthorization: Bearer token";
+
+        assert_eq!(complete_http_header(request), None);
+        let complete_request = b"GET /health HTTP/1.1\r\nHost: device\r\n\r\n";
+        assert_eq!(
+            complete_http_header(complete_request),
+            Some(complete_request.len())
+        );
+    }
 
     #[test]
     fn complete_http_body_rejects_a_truncated_content_length() {
