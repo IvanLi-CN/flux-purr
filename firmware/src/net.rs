@@ -1172,8 +1172,15 @@ async fn handle_http_connection(
         total += received;
         body_len = total.saturating_sub(header_end);
     }
-    let body_end = header_end.saturating_add(content_length).min(total);
-    let body = core::str::from_utf8(&request_bytes[header_end..body_end]).unwrap_or("");
+    let Some(body_bytes) = complete_http_body(&request_bytes[..total], header_end, content_length)
+    else {
+        *response = HttpResponse::new(
+            400,
+            r#"{"error":{"code":"body_incomplete","message":"Request body ended before Content-Length."}}"#,
+        );
+        return write_http_response(socket, response).await;
+    };
+    let body = core::str::from_utf8(body_bytes).unwrap_or("");
     let request = parsed
         .request(body)
         .expect("a recognized HTTP method builds a request");
@@ -1211,6 +1218,11 @@ async fn handle_http_connection(
         .await;
     }
     write_http_response(socket, response).await
+}
+
+fn complete_http_body(request: &[u8], header_end: usize, content_length: usize) -> Option<&[u8]> {
+    let body_end = header_end.checked_add(content_length)?;
+    request.get(header_end..body_end)
 }
 
 fn stage_http_gate(
@@ -1476,7 +1488,20 @@ fn random_u32() -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_pairing_code, encode_pairing_code};
+    use super::{complete_http_body, decode_pairing_code, encode_pairing_code};
+
+    #[test]
+    fn complete_http_body_rejects_a_truncated_content_length() {
+        let request = b"POST /api/v1/runtime HTTP/1.1\r\nContent-Length: 4\r\n\r\n{}";
+        let header_end = request
+            .windows(4)
+            .position(|value| value == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+
+        assert_eq!(complete_http_body(request, header_end, 4), None);
+        assert_eq!(complete_http_body(request, header_end, 2), Some(&b"{}"[..]));
+    }
 
     #[test]
     fn pairing_code_mirror_preserves_leading_zeroes() {

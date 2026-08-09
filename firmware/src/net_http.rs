@@ -609,7 +609,7 @@ impl NetHttpState {
         match self.pairing_mode {
             LanPairingMode::Required => {
                 let Some(code) = pairing_claim_code(request.body) else {
-                    return HttpResponse::new(400, r#"{"error":"pairing_code_invalid"}"#);
+                    return access_error_response(LanAccessError::PairingCodeInvalid);
                 };
                 if let Err(error) = self.pairing.claim(code) {
                     return access_error_response(error);
@@ -1141,6 +1141,28 @@ mod tests {
         );
 
         assert_eq!(response.status, 200);
+    }
+
+    #[test]
+    fn malformed_pairing_claim_uses_the_standard_error_envelope() {
+        let mut state = NetHttpState::new(None);
+        let mut mailbox = TestMailbox::default();
+        state.pairing_code_from_random(4827);
+
+        let response = state.handle(
+            0,
+            HttpRequest {
+                body: r#"{"code":false}"#,
+                ..req(HttpMethod::Post, "/api/v1/pairing/claim")
+            },
+            &mut mailbox,
+        );
+
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.body.as_str(),
+            r#"{"error":{"code":"pairing_code_invalid","message":"The pairing code is invalid."}}"#
+        );
     }
 
     #[test]
