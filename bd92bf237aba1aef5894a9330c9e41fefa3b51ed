@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "b7dd3b201af348448e39e5ce7a188e6ce92341e9",
+  "pr_number": 63,
+  "pr_title": "feat: complete WiFi/LAN control plane",
+  "product": {
+    "effective_version": "0.16.0",
+    "tag": "v0.16.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "bd92bf237aba1aef5894a9330c9e41fefa3b51ed",
+  "type_label": "type:minor"
+}
