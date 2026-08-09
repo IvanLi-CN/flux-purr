@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, fireEvent, userEvent, within } from 'storybook/test'
+import { expect, fireEvent, userEvent, waitFor, within } from 'storybook/test'
 import { FrontPanelDesignBoard } from '@/features/frontpanel-preview/components/front-panel-design-board'
 import { FrontPanelDisplay } from '@/features/frontpanel-preview/components/front-panel-display'
 import { FrontPanelGallery } from '@/features/frontpanel-preview/components/front-panel-gallery'
@@ -356,7 +356,7 @@ export const KeyTestInteractions: Story = {
 
     await step('short press keeps success color semantics', async () => {
       await pressShort('up')
-      await expect(debug).toHaveTextContent('keyTest: U / U / SHORT')
+      await waitFor(() => expect(debug).toHaveTextContent('keyTest: U / U / SHORT'))
       await expect(debug).toHaveTextContent('route: key-test')
       await expect(await canvas.findByTestId('frontpanel-gesture-short')).toHaveAttribute(
         'data-active',
