@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   authorizedLanRequest,
   claimLanPairing,
+  directLanStaleReadPath,
   getLanPublicInfo,
   isChromiumPrivateNetworkSupported,
   lanProbeToDeviceTarget,
@@ -11,6 +12,7 @@ import {
   loadLanScanCidr,
   normalizeLanBaseUrl,
   probeLanDevice,
+  reconcileStaleLanWrite,
   rememberLanDeviceIdentity,
   resumeLanDeviceSession,
   savedLanSessionToDeviceTarget,
@@ -22,9 +24,49 @@ import {
   upsertLanDeviceTarget,
   writeLanRuntime,
 } from './lan-client'
+import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('LAN browser client', () => {
+  it('reads the same device resource after a rejected stale write', () => {
+    expect(directLanStaleReadPath('runtime')).toBe('status')
+    expect(directLanStaleReadPath('calibration')).toBe('calibration')
+    expect(directLanStaleReadPath('heater-curve')).toBe('heater-curve')
+  })
+
+  it('reconciles a stale direct-LAN write once without replaying its mutation', async () => {
+    const staleWrite = new ControlPlaneClientError(
+      'The control state changed after this client last read it.',
+      'stale_write',
+      false
+    )
+    const refresh = vi.fn(async () => ({ revision: 17 }))
+
+    await expect(reconcileStaleLanWrite(staleWrite, refresh)).resolves.toEqual({
+      revision: 17,
+    })
+    expect(refresh).toHaveBeenCalledTimes(1)
+
+    await expect(
+      reconcileStaleLanWrite(new Error('transport disconnected'), refresh)
+    ).resolves.toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves the original stale-write result when its factual refresh cannot complete', async () => {
+    const staleWrite = new ControlPlaneClientError(
+      'The control state changed after this client last read it.',
+      'stale_write',
+      false
+    )
+    const refresh = vi.fn(async () => {
+      throw new Error('status read failed')
+    })
+
+    await expect(reconcileStaleLanWrite(staleWrite, refresh)).resolves.toBeNull()
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
   it('retains the last explicit device address and removes it when cleared', () => {
     const records = new Map<string, string>()
     const storage = {
@@ -96,7 +138,11 @@ describe('LAN browser client', () => {
             deviceId: '001122334455',
             hostname: 'flux-purr-001122334455',
             firmwareVersion: '1.0.0',
-            pairing: { mode: 'required', active: false, attemptsRemaining: 5 },
+            pairing: {
+              mode: 'required',
+              active: false,
+              attemptsRemaining: 5,
+            },
           }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         )
@@ -105,7 +151,11 @@ describe('LAN browser client', () => {
     }) as unknown as typeof fetch
 
     await expect(
-      scanLanSubnet('192.168.1.0/24', { fetcher, concurrency: 8, timeoutMs: 50 })
+      scanLanSubnet('192.168.1.0/24', {
+        fetcher,
+        concurrency: 8,
+        timeoutMs: 50,
+      })
     ).resolves.toEqual([
       {
         baseUrl: 'http://192.168.1.42',
@@ -234,7 +284,9 @@ describe('LAN browser client', () => {
   it('uses PNA fetch options and never carries token in URL', async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       expect(String(input)).not.toContain('aaaaaaaa')
-      expect(init?.headers).toMatchObject({ Authorization: `Bearer ${'a'.repeat(64)}` })
+      expect(init?.headers).toMatchObject({
+        Authorization: `Bearer ${'a'.repeat(64)}`,
+      })
       expect((init as RequestInit & { targetAddressSpace?: string }).targetAddressSpace).toBe(
         'private'
       )
@@ -273,7 +325,10 @@ describe('LAN browser client', () => {
       activeRequests -= 1
       return new Response(JSON.stringify({}), {
         status: 200,
-        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': '7',
+        },
       })
     }) as unknown as typeof fetch
     const session: import('./lan-client').LanDeviceSession = {
@@ -308,7 +363,10 @@ describe('LAN browser client', () => {
       activeRequests -= 1
       return new Response(JSON.stringify({}), {
         status: 200,
-        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': '7',
+        },
       })
     }) as unknown as typeof fetch
 
@@ -344,7 +402,10 @@ describe('LAN browser client', () => {
     const fetcher = vi.fn(async () => {
       return new Response(JSON.stringify({}), {
         status: 200,
-        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': '7',
+        },
       })
     }) as unknown as typeof fetch
 
@@ -372,7 +433,10 @@ describe('LAN browser client', () => {
         await new Promise((resolve) => setTimeout(resolve, 1))
         return new Response(JSON.stringify({}), {
           status: 200,
-          headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+          headers: {
+            'content-type': 'application/json',
+            'X-Flux-Purr-Revision': '7',
+          },
         })
       } finally {
         activeRequests -= 1
@@ -394,7 +458,10 @@ describe('LAN browser client', () => {
       if (path === '/api/v1/status') {
         return new Response(JSON.stringify({}), {
           status: 200,
-          headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '11' },
+          headers: {
+            'content-type': 'application/json',
+            'X-Flux-Purr-Revision': '11',
+          },
         })
       }
       expect(init?.headers).toMatchObject({
@@ -403,7 +470,10 @@ describe('LAN browser client', () => {
       })
       return new Response(JSON.stringify({ accepted: true }), {
         status: 200,
-        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '8' },
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': '8',
+        },
       })
     }) as unknown as typeof fetch
     const session = {
@@ -426,7 +496,10 @@ describe('LAN browser client', () => {
       const revision = path === '/api/v1/status' ? '15' : '16'
       return new Response(JSON.stringify({}), {
         status: 200,
-        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': revision },
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': revision,
+        },
       })
     }) as unknown as typeof fetch
     const session = {
@@ -441,7 +514,9 @@ describe('LAN browser client', () => {
       '/api/v1/status',
       '/api/v1/calibration',
     ])
-    expect(requests[1]?.headers).toMatchObject({ 'X-Flux-Purr-Revision': '15' })
+    expect(requests[1]?.headers).toMatchObject({
+      'X-Flux-Purr-Revision': '15',
+    })
     expect(session.controlRevision).toBe(16)
   })
 
@@ -466,7 +541,10 @@ describe('LAN browser client', () => {
         const current = revisions.length === 0 ? '7' : '8'
         return new Response(JSON.stringify({}), {
           status: 200,
-          headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': current },
+          headers: {
+            'content-type': 'application/json',
+            'X-Flux-Purr-Revision': current,
+          },
         })
       }
       const revision = (init?.headers as Record<string, string>)['X-Flux-Purr-Revision']
@@ -598,7 +676,11 @@ describe('LAN browser client', () => {
 
   it('turns a paired probe into a direct WiFi control target without carrying the token', () => {
     const target = lanProbeToDeviceTarget(
-      { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64), hostname: 'flux-purr-test' },
+      {
+        baseUrl: 'http://192.168.1.10',
+        token: 'a'.repeat(64),
+        hostname: 'flux-purr-test',
+      },
       {
         identity: {
           deviceId: '001122334455',
@@ -684,7 +766,10 @@ describe('LAN browser client', () => {
     try {
       storage.setItem(
         'flux-purr:lan-device:http://192.168.1.10',
-        JSON.stringify({ baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) })
+        JSON.stringify({
+          baseUrl: 'http://192.168.1.10',
+          token: 'a'.repeat(64),
+        })
       )
       storage.setItem('flux-purr:lan-device:invalid', '{not json')
 
@@ -745,7 +830,9 @@ describe('LAN browser client', () => {
       ).rejects.toMatchObject({ code: 'unauthorized' })
 
       expect(loadLanDeviceSession('http://192.168.1.10')).toBeNull()
-      expect(loadLanDeviceSession('http://192.168.1.11')).toMatchObject({ token })
+      expect(loadLanDeviceSession('http://192.168.1.11')).toMatchObject({
+        token,
+      })
       expect(listSavedLanDeviceSessions()).toContainEqual(
         expect.objectContaining({
           baseUrl: 'http://192.168.1.10',
@@ -773,7 +860,9 @@ describe('LAN browser client', () => {
       const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         attempts += 1
         expect(String(input)).not.toContain('aaaaaaaa')
-        expect(init?.headers).toMatchObject({ Authorization: `Bearer ${'a'.repeat(64)}` })
+        expect(init?.headers).toMatchObject({
+          Authorization: `Bearer ${'a'.repeat(64)}`,
+        })
         expect((init as RequestInit & { targetAddressSpace?: string }).targetAddressSpace).toBe(
           'private'
         )
@@ -798,7 +887,10 @@ describe('LAN browser client', () => {
       const next = events.next()
 
       await vi.advanceTimersByTimeAsync(1_000)
-      await expect(next).resolves.toMatchObject({ done: false, value: { targetTempC: 145 } })
+      await expect(next).resolves.toMatchObject({
+        done: false,
+        value: { targetTempC: 145 },
+      })
       expect(fetcher).toHaveBeenCalledTimes(2)
 
       controller.abort()

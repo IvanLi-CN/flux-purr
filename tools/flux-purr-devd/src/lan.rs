@@ -138,8 +138,13 @@ pub enum LanClientError {
     InvalidPairingResponse,
     #[error("device did not provide a valid control revision")]
     InvalidControlRevision,
-    #[error("the saved LAN pairing token was rejected by the device")]
-    AuthorizationRejected,
+    #[error("LAN device returned {status} {code}: {message}")]
+    RemoteApi {
+        status: reqwest::StatusCode,
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     #[error("LAN request failed: {0}")]
     Request(#[from] reqwest::Error),
     #[error("LAN discovery failed: {0}")]
@@ -297,10 +302,11 @@ pub async fn authorized_json(
             .bearer_auth(token)
             .send()
             .await?;
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(LanClientError::AuthorizationRejected);
+        if !response.status().is_success() {
+            let status = response.status();
+            let payload = response.json::<Value>().await.ok();
+            return Err(remote_api_error(status, payload.as_ref()));
         }
-        let response = response.error_for_status()?;
         Some(control_revision(response.headers())?)
     } else {
         None
@@ -316,10 +322,40 @@ pub async fn authorized_json(
         request = request.json(&body);
     }
     let response = request.send().await?;
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(LanClientError::AuthorizationRejected);
+    if !response.status().is_success() {
+        let status = response.status();
+        let payload = response.json::<Value>().await.ok();
+        return Err(remote_api_error(status, payload.as_ref()));
     }
-    Ok(response.error_for_status()?.json().await?)
+    Ok(response.json().await?)
+}
+
+fn remote_api_error(status: reqwest::StatusCode, payload: Option<&Value>) -> LanClientError {
+    let error = payload
+        .and_then(|value| value.get("error"))
+        .and_then(Value::as_object);
+    let code = error
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .unwrap_or("lan_request_failed")
+        .to_owned();
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .filter(|message| !message.is_empty())
+        .unwrap_or("LAN device rejected the request.")
+        .to_owned();
+    let retryable = error
+        .and_then(|error| error.get("retryable"))
+        .and_then(Value::as_bool)
+        .unwrap_or(status.is_server_error());
+    LanClientError::RemoteApi {
+        status,
+        code,
+        message,
+        retryable,
+    }
 }
 
 fn control_revision(headers: &reqwest::header::HeaderMap) -> Result<u32, LanClientError> {
@@ -575,6 +611,70 @@ mod tests {
         ));
         headers.insert("X-Flux-Purr-Revision", "42".parse().unwrap());
         assert_eq!(control_revision(&headers).unwrap(), 42);
+    }
+
+    #[test]
+    fn remote_api_conflict_preserves_the_device_error_contract() {
+        let error = remote_api_error(
+            reqwest::StatusCode::CONFLICT,
+            Some(&json!({
+                "error": {
+                    "code": "stale_write",
+                    "message": "The control state changed after this client last read it.",
+                    "retryable": false
+                }
+            })),
+        );
+
+        match error {
+            LanClientError::RemoteApi {
+                status,
+                code,
+                message,
+                retryable,
+            } => {
+                assert_eq!(status, reqwest::StatusCode::CONFLICT);
+                assert_eq!(code, "stale_write");
+                assert_eq!(
+                    message,
+                    "The control state changed after this client last read it."
+                );
+                assert!(!retryable);
+            }
+            other => panic!("expected preserved remote API conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn remote_api_unauthorized_preserves_the_device_error_contract() {
+        let error = remote_api_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            Some(&json!({
+                "error": {
+                    "code": "unauthorized",
+                    "message": "The pairing token is not authorized for this device.",
+                    "retryable": false
+                }
+            })),
+        );
+
+        match error {
+            LanClientError::RemoteApi {
+                status,
+                code,
+                message,
+                retryable,
+            } => {
+                assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+                assert_eq!(code, "unauthorized");
+                assert_eq!(
+                    message,
+                    "The pairing token is not authorized for this device."
+                );
+                assert!(!retryable);
+            }
+            other => panic!("expected preserved remote API unauthorized, got {other:?}"),
+        }
     }
 
     async fn redirect_to_target() -> Redirect {

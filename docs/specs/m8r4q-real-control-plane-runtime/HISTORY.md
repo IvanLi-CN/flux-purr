@@ -2,6 +2,7 @@
 
 ## 2026-08-05
 
+- Direct-LAN 写入曾在 `stale_write` 后只显示失败或只更新 runtime snapshot，导致 calibration 与 heater-curve 工作区保留过时事实；各类写入现在只回读一次对应资源并替换其 state map，拒绝原写入且禁止自动重放。DEVD LAN bridge 曾把设备 HTTP 错误改写为本地 bridge error；adapter 现在保留远端 status 与完整 error envelope，包括 unauthorized。CI 在 Storybook interaction 前准备 Chromium，EdgeOne 只消费成功 push 运行生成的 verified artifact。
 - Add Device 的桥接页曾无条件渲染全局“最近操作”，导致后台 native target 轮询错误与当前桥接配置混在一起。桥接路径现只呈现面板自身的发现、选择和错误状态，LAN 候选确认也在面板内完成。
 - `flux-purr-devd serve` 曾在省略 `--serial-port` 时依次读取环境变量、用户配置和硬编码具体端口，随后又把 `serial_port=None` 错误实现成不发现任何 USB，导致多设备环境只能看到既有 LAN 记录。无参数启动现在保持 `serial_port=None`，枚举全部符合项目 USB 身份规则的未验证 transport 候选，但不自动选择、打开或探测；只有显式 flag 或 operator 选择才确定 USB 目标。
 - Runtime trace 的 live adapter 曾把事件反转为新到旧，而“跟随尾部”仍滚到数组末项，导致按钮实际追随最旧事件。所有来源现统一按旧到新进入 UI，operator actions 追加到末尾，摘要与虚拟滚动尾部共同指向最新事件。

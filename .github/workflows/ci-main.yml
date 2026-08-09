@@ -80,6 +80,9 @@ jobs:
       - name: Install web dependencies
         run: bun install --cwd web --frozen-lockfile
 
+      - name: Install Playwright browsers
+        run: cd web && bunx playwright install --with-deps chromium
+
       - name: Quality gates declaration
         run: python3 .github/scripts/check-quality-gates.py
 
@@ -103,9 +106,6 @@ jobs:
 
       - name: Storybook interaction tests
         run: bun run --cwd web test:storybook
-
-      - name: Install Playwright browsers
-        run: cd web && bunx playwright install --with-deps chromium
 
       - name: E2E tests
         run: bash scripts/check-web-e2e.sh

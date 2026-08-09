@@ -2139,6 +2139,7 @@ const lanHeartbeatExpiryFixture: LanRuntimeDependencies = {
 
 let lanStaleWriteAttempts = 0
 let lanStaleWriteProbeCount = 0
+let lanStaleWriteStatusReadCount = 0
 const lanStaleWriteFixture: LanRuntimeDependencies = {
   ...lanRuntimeFixture,
   probeDevice: async (session) => {
@@ -2153,6 +2154,10 @@ const lanStaleWriteFixture: LanRuntimeDependencies = {
       'stale_write',
       false
     )
+  },
+  readStatus: async () => {
+    lanStaleWriteStatusReadCount += 1
+    return lanStaleWriteProbe.status
   },
 }
 
@@ -2320,6 +2325,7 @@ export const LiveLanStaleWriteRefreshesWithoutReplay: Story = {
   play: async ({ canvasElement, step }) => {
     lanStaleWriteAttempts = 0
     lanStaleWriteProbeCount = 0
+    lanStaleWriteStatusReadCount = 0
     const canvas = within(canvasElement)
 
     await step(
@@ -2341,7 +2347,8 @@ export const LiveLanStaleWriteRefreshesWithoutReplay: Story = {
         ).toBeVisible()
         await expect(await canvas.findByLabelText('Dashboard target temperature')).toHaveValue(150)
         expect(lanStaleWriteAttempts).toBe(1)
-        expect(lanStaleWriteProbeCount).toBe(2)
+        expect(lanStaleWriteProbeCount).toBe(1)
+        expect(lanStaleWriteStatusReadCount).toBe(1)
         expect(canvas.queryByText('Target updated')).not.toBeInTheDocument()
       }
     )

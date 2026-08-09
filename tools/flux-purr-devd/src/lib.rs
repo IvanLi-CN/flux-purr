@@ -2276,10 +2276,16 @@ fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, HttpError> {
 
 fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
     match error {
-        lan::LanClientError::AuthorizationRejected => HttpError::conflict(
-            "lan_pairing_required",
-            "The saved DEVD LAN pairing token was rejected. Open WiFi Info and pair again with its four-digit code.",
-            json!({ "action": "pair" }),
+        lan::LanClientError::RemoteApi {
+            status,
+            code,
+            message,
+            retryable,
+        } => HttpError::new(
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            &code,
+            &message,
+            retryable,
         ),
         error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
     }
@@ -10437,6 +10443,34 @@ mod tests {
         let body = lan_bridge_payload(&payload).unwrap();
         assert_eq!(body["targetTempC"], 120);
         assert!(body.get("leaseId").is_none());
+    }
+
+    #[test]
+    fn lan_bridge_error_preserves_remote_conflict_status_and_code() {
+        let error = lan_bridge_error(lan::LanClientError::RemoteApi {
+            status: StatusCode::CONFLICT,
+            code: "stale_write".to_string(),
+            message: "The control state changed after this client last read it.".to_string(),
+            retryable: false,
+        });
+
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.error.code, "stale_write");
+        assert!(!error.error.retryable);
+    }
+
+    #[test]
+    fn lan_bridge_error_preserves_remote_unauthorized_status_and_code() {
+        let error = lan_bridge_error(lan::LanClientError::RemoteApi {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized".to_string(),
+            message: "The pairing token is not authorized for this device.".to_string(),
+            retryable: false,
+        });
+
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.error.code, "unauthorized");
+        assert!(!error.error.retryable);
     }
 
     #[test]

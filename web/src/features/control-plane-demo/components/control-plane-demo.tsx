@@ -106,6 +106,7 @@ import {
 import {
   authorizedLanRequest,
   createLanLease,
+  directLanStaleReadPath,
   isDirectLanDevice,
   type LanDeviceSession,
   type LanLease,
@@ -114,6 +115,7 @@ import {
   listSavedLanDeviceSessions,
   loadLanDeviceSession,
   probeLanDevice,
+  reconcileStaleLanWrite,
   releaseLanLease,
   savedLanSessionToDeviceTarget,
   startLanLeaseHeartbeat,
@@ -179,6 +181,9 @@ export interface LanRuntimeDependencies {
   streamEvents?: typeof streamLanEvents
   probeDevice?: typeof probeLanDevice
   writeRuntime?: typeof writeLanRuntime
+  readStatus?: (session: LanDeviceSession) => Promise<ControlPlaneStatus>
+  readCalibration?: (session: LanDeviceSession) => Promise<CalibrationState>
+  readHeaterCurve?: (session: LanDeviceSession) => Promise<HeaterCurveState>
 }
 
 type LanPairingOverrides = Omit<LanPairingPanelProps, 'onPaired'>
@@ -491,6 +496,18 @@ export function ControlPlaneDemo({
       streamEvents: lanRuntimeOptions?.streamEvents ?? streamLanEvents,
       probeDevice: lanRuntimeOptions?.probeDevice ?? probeLanDevice,
       writeRuntime: lanRuntimeOptions?.writeRuntime ?? writeLanRuntime,
+      readStatus:
+        lanRuntimeOptions?.readStatus ??
+        ((session: LanDeviceSession) =>
+          authorizedLanRequest<ControlPlaneStatus>(session, directLanStaleReadPath('runtime'))),
+      readCalibration:
+        lanRuntimeOptions?.readCalibration ??
+        ((session: LanDeviceSession) =>
+          authorizedLanRequest<CalibrationState>(session, directLanStaleReadPath('calibration'))),
+      readHeaterCurve:
+        lanRuntimeOptions?.readHeaterCurve ??
+        ((session: LanDeviceSession) =>
+          authorizedLanRequest<HeaterCurveState>(session, directLanStaleReadPath('heater-curve'))),
     }),
     [
       lanRuntimeOptions?.createLease,
@@ -499,6 +516,9 @@ export function ControlPlaneDemo({
       lanRuntimeOptions?.streamEvents,
       lanRuntimeOptions?.probeDevice,
       lanRuntimeOptions?.writeRuntime,
+      lanRuntimeOptions?.readStatus,
+      lanRuntimeOptions?.readCalibration,
+      lanRuntimeOptions?.readHeaterCurve,
     ]
   )
   const [streamTick, setStreamTick] = useState(0)
@@ -543,7 +563,10 @@ export function ControlPlaneDemo({
   >({})
   const [lanLeasesByDevice, setLanLeasesByDevice] = useState<Record<string, LanLease>>({})
   const pendingDeviceModeRef = useRef(allowDemoControls)
-  const [flashRun, setFlashRun] = useState<{ status: FlashRunStatus; progress: number }>({
+  const [flashRun, setFlashRun] = useState<{
+    status: FlashRunStatus
+    progress: number
+  }>({
     status: 'idle',
     progress: 0,
   })
@@ -810,7 +833,10 @@ export function ControlPlaneDemo({
           return current
         }
 
-        const next = { ...current, [nextDeviceId]: clone ? clone(value) : value }
+        const next = {
+          ...current,
+          [nextDeviceId]: clone ? clone(value) : value,
+        }
         delete next[sourceId]
         return next
       })
@@ -1086,7 +1112,10 @@ export function ControlPlaneDemo({
           void lanRuntime.releaseLease(session, created.leaseId).catch(() => undefined)
           return
         }
-        setLanLeasesByDevice((current) => ({ ...current, [deviceId]: created }))
+        setLanLeasesByDevice((current) => ({
+          ...current,
+          [deviceId]: created,
+        }))
         setFeedback((current) =>
           current.title === 'LAN 设备已配对' || current.title === '正在获取 LAN 租约'
             ? {
@@ -1182,7 +1211,10 @@ export function ControlPlaneDemo({
               device.id === lanDeviceId ? applyLanStatus(device, event) : device
             )
           )
-          setTargetTempByDevice((current) => ({ ...current, [lanDeviceId]: event.targetTempC }))
+          setTargetTempByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: event.targetTempC,
+          }))
           setManualPpsByDevice((current) => ({
             ...current,
             [lanDeviceId]: {
@@ -1190,7 +1222,10 @@ export function ControlPlaneDemo({
               mv: event.manualPpsMv ?? null,
             },
           }))
-          setFanPolicyByDevice((current) => ({ ...current, [lanDeviceId]: event.fanDisplayState }))
+          setFanPolicyByDevice((current) => ({
+            ...current,
+            [lanDeviceId]: event.fanDisplayState,
+          }))
           setCalibrationRuntimeByDevice((current) => ({
             ...current,
             [lanDeviceId]: event.calibration,
@@ -1402,7 +1437,10 @@ export function ControlPlaneDemo({
     const normalized = normalizeCalibrationState(calibration)
     calibrationVersionByDeviceRef.current[deviceId] =
       (calibrationVersionByDeviceRef.current[deviceId] ?? 0) + 1
-    setCalibrationByDevice((current) => ({ ...current, [deviceId]: normalized }))
+    setCalibrationByDevice((current) => ({
+      ...current,
+      [deviceId]: normalized,
+    }))
   }, [])
 
   useEffect(() => {
@@ -1497,7 +1535,10 @@ export function ControlPlaneDemo({
         if (visibleDeviceIsDirectWebSerial) {
           const heaterCurve = await webSerial.getHeaterCurve()
           if (!cancelled) {
-            setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+            setHeaterCurveByDevice((current) => ({
+              ...current,
+              [visibleDeviceId]: heaterCurve,
+            }))
           }
           return
         }
@@ -1508,7 +1549,10 @@ export function ControlPlaneDemo({
           }
           const heaterCurve = await authorizedLanRequest<HeaterCurveState>(session, 'heater-curve')
           if (!cancelled) {
-            setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+            setHeaterCurveByDevice((current) => ({
+              ...current,
+              [visibleDeviceId]: heaterCurve,
+            }))
             setFeedback((current) => clearCalibrationLoadWarning(current))
           }
           return
@@ -1528,7 +1572,10 @@ export function ControlPlaneDemo({
           visibleDeviceLeaseId
         )
         if (!cancelled) {
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDeviceId]: heaterCurve }))
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDeviceId]: heaterCurve,
+          }))
           setFeedback((current) => clearCalibrationLoadWarning(current))
         }
       } catch (error) {
@@ -1685,6 +1732,22 @@ export function ControlPlaneDemo({
     [visibleDevice.calibration, visibleDevice.id]
   )
 
+  const reconcileDirectLanStaleWrite = useCallback(
+    async <T,>(
+      error: unknown,
+      refresh: () => Promise<T>,
+      applyRefreshed: (refreshed: T) => void
+    ) => {
+      const refreshed = await reconcileStaleLanWrite(error, refresh)
+      if (refreshed === null) {
+        return false
+      }
+      applyRefreshed(refreshed)
+      return true
+    },
+    []
+  )
+
   const configureLiveRuntime = useCallback(
     async (
       patch: {
@@ -1752,23 +1815,28 @@ export function ControlPlaneDemo({
           const staleWrite =
             error instanceof ControlPlaneClientError && error.code === 'stale_write'
           if (staleWrite) {
-            try {
-              const refreshed = await lanRuntime.probeDevice(session, undefined, 'serial')
-              setPendingDevices((current) =>
-                current.map((device) =>
-                  device.id === visibleDevice.id ? applyLanStatus(device, refreshed.status) : device
+            await reconcileDirectLanStaleWrite(
+              error,
+              () => lanRuntime.readStatus(session),
+              (refreshed) => {
+                setPendingDevices((current) =>
+                  current.map((device) =>
+                    device.id === visibleDevice.id ? applyLanStatus(device, refreshed) : device
+                  )
                 )
-              )
-            } catch {
-              // The original stale-write result remains the actionable failure.
-            }
+              }
+            )
           }
           const detail = staleWrite
             ? '设备控制状态已变化，已读取最新状态；请确认后重新提交。'
             : error instanceof Error
               ? error.message
               : failureMessage
-          setFeedback({ title: 'LAN runtime update failed', detail, tone: 'warning' })
+          setFeedback({
+            title: 'LAN runtime update failed',
+            detail,
+            tone: 'warning',
+          })
           emitEvent('lan', failureMessage, 'warning')
           return false
         }
@@ -1805,7 +1873,9 @@ export function ControlPlaneDemo({
       devdBaseUrl,
       emitEvent,
       lanRuntime.probeDevice,
+      lanRuntime.readStatus,
       lanRuntime.writeRuntime,
+      reconcileDirectLanStaleWrite,
       visibleDevice,
       webSerial,
     ]
@@ -1850,7 +1920,10 @@ export function ControlPlaneDemo({
               }
             : {}),
         })
-        setWifiSnapshotsByDevice((current) => ({ ...current, [visibleDevice.id]: network }))
+        setWifiSnapshotsByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: network,
+        }))
         emitEvent(
           'devd',
           op === 'set'
@@ -2402,7 +2475,10 @@ export function ControlPlaneDemo({
 
   const handlePresetSlotChange = async (presetIndex: number) => {
     const presetIsEnabled = visiblePresetEnabled[presetIndex] ?? true
-    setSelectedPresetByDevice((current) => ({ ...current, [visibleDevice.id]: presetIndex }))
+    setSelectedPresetByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: presetIndex,
+    }))
     const liveUpdated = await configureLiveRuntime(
       { selectedPresetSlot: presetIndex },
       'preset slot update was not accepted by devd'
@@ -2710,7 +2786,10 @@ export function ControlPlaneDemo({
   const handleArtifactChange = (artifactId: string) => {
     const nextArtifact = activeScenario.artifacts.find((artifact) => artifact.id === artifactId)
 
-    setArtifactByDevice((current) => ({ ...current, [visibleDevice.id]: artifactId }))
+    setArtifactByDevice((current) => ({
+      ...current,
+      [visibleDevice.id]: artifactId,
+    }))
     setFlashRun({ status: 'idle', progress: 0 })
     flashCompletionEmittedRef.current = false
 
@@ -2751,14 +2830,23 @@ export function ControlPlaneDemo({
       if (!session || !visibleDevice.leaseId) {
         throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
       }
-      const calibration = await authorizedLanRequest<CalibrationState>(
-        session,
-        'calibration',
-        'PUT',
-        request,
-        visibleDevice.leaseId
-      )
-      commitCalibrationState(visibleDevice.id, calibration)
+      try {
+        const calibration = await authorizedLanRequest<CalibrationState>(
+          session,
+          'calibration',
+          'PUT',
+          request,
+          visibleDevice.leaseId
+        )
+        commitCalibrationState(visibleDevice.id, calibration)
+      } catch (error) {
+        await reconcileDirectLanStaleWrite(
+          error,
+          () => lanRuntime.readCalibration(session),
+          (refreshed) => commitCalibrationState(visibleDevice.id, refreshed)
+        )
+        throw error
+      }
       return
     }
     if (visibleDeviceIsLive) {
@@ -2807,7 +2895,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', `captured ${channelLabel(channel)} sample`, 'success')
     } catch (error) {
-      setFeedback({ title: '标定失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '标定失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2820,7 +2912,11 @@ export function ControlPlaneDemo({
         tone: 'info',
       })
     } catch (error) {
-      setFeedback({ title: '标定失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '标定失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2833,7 +2929,11 @@ export function ControlPlaneDemo({
         tone: 'success',
       })
     } catch (error) {
-      setFeedback({ title: '标定失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '标定失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2849,7 +2949,11 @@ export function ControlPlaneDemo({
         tone: 'success',
       })
     } catch (error) {
-      setFeedback({ title: '切换槽位失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '切换槽位失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2866,7 +2970,11 @@ export function ControlPlaneDemo({
         tone: 'success',
       })
     } catch (error) {
-      setFeedback({ title: '写入槽位失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '写入槽位失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2875,12 +2983,18 @@ export function ControlPlaneDemo({
       if (isDirectWebSerialDevice(visibleDevice)) {
         if (request.op === 'preview' && request.package) {
           const next = await webSerial.previewHeaterCurve(request.package)
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
           return next
         }
         if (request.op === 'clear_preview') {
           const next = await webSerial.clearHeaterCurvePreview()
-          setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
           return next
         }
       }
@@ -2889,15 +3003,32 @@ export function ControlPlaneDemo({
         if (!session || !visibleDevice.leaseId) {
           throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
         }
-        const next = await authorizedLanRequest<HeaterCurveState>(
-          session,
-          'heater-curve',
-          'PUT',
-          request,
-          visibleDevice.leaseId
-        )
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
-        return next
+        try {
+          const next = await authorizedLanRequest<HeaterCurveState>(
+            session,
+            'heater-curve',
+            'PUT',
+            request,
+            visibleDevice.leaseId
+          )
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
+          return next
+        } catch (error) {
+          await reconcileDirectLanStaleWrite(
+            error,
+            () => lanRuntime.readHeaterCurve(session),
+            (refreshed) => {
+              setHeaterCurveByDevice((current) => ({
+                ...current,
+                [visibleDevice.id]: refreshed,
+              }))
+            }
+          )
+          throw error
+        }
       }
       if (visibleDeviceIsLive) {
         const blockedReason = deviceControlBlockReason(visibleDevice)
@@ -2910,17 +3041,25 @@ export function ControlPlaneDemo({
           ...request,
           leaseId: visibleDevice.leaseId,
         })
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: next,
+        }))
         return next
       }
 
       const next = applyLocalHeaterCurveRequest(visibleHeaterCurve, request)
-      setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+      setHeaterCurveByDevice((current) => ({
+        ...current,
+        [visibleDevice.id]: next,
+      }))
       return next
     },
     [
       controlClient,
       devdBaseUrl,
+      lanRuntime.readHeaterCurve,
+      reconcileDirectLanStaleWrite,
       visibleDevice,
       visibleDeviceIsLive,
       visibleHeaterCurve,
@@ -2939,7 +3078,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', 'updated heater curve preview', 'success')
     } catch (error) {
-      setFeedback({ title: '加热曲线操作失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '加热曲线操作失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2953,7 +3096,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', 'cleared heater curve preview', 'info')
     } catch (error) {
-      setFeedback({ title: '加热曲线操作失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '加热曲线操作失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -2961,25 +3108,48 @@ export function ControlPlaneDemo({
     try {
       if (isDirectWebSerialDevice(visibleDevice)) {
         const next = await webSerial.saveHeaterCurve()
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: next,
+        }))
       } else if (isDirectLanDevice(visibleDevice)) {
         const session = loadLanDeviceSession(visibleDevice.baseUrl)
         if (!session || !visibleDevice.leaseId) {
           throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
         }
-        const next = await authorizedLanRequest<HeaterCurveState>(
-          session,
-          'heater-curve/save',
-          'POST',
-          undefined,
-          visibleDevice.leaseId
-        )
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        try {
+          const next = await authorizedLanRequest<HeaterCurveState>(
+            session,
+            'heater-curve/save',
+            'POST',
+            undefined,
+            visibleDevice.leaseId
+          )
+          setHeaterCurveByDevice((current) => ({
+            ...current,
+            [visibleDevice.id]: next,
+          }))
+        } catch (error) {
+          await reconcileDirectLanStaleWrite(
+            error,
+            () => lanRuntime.readHeaterCurve(session),
+            (refreshed) => {
+              setHeaterCurveByDevice((current) => ({
+                ...current,
+                [visibleDevice.id]: refreshed,
+              }))
+            }
+          )
+          throw error
+        }
       } else if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
         const next = await controlClient.saveHeaterCurve(devdBaseUrl, visibleDevice.id, {
           leaseId: visibleDevice.leaseId,
         })
-        setHeaterCurveByDevice((current) => ({ ...current, [visibleDevice.id]: next }))
+        setHeaterCurveByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: next,
+        }))
       } else {
         setHeaterCurveByDevice((current) => ({
           ...current,
@@ -2993,7 +3163,11 @@ export function ControlPlaneDemo({
       })
       emitEvent('calibration', 'saved heater curve', 'success')
     } catch (error) {
-      setFeedback({ title: '加热曲线操作失败', detail: errorMessage(error), tone: 'warning' })
+      setFeedback({
+        title: '加热曲线操作失败',
+        detail: errorMessage(error),
+        tone: 'warning',
+      })
     }
   }
 
@@ -3007,7 +3181,10 @@ export function ControlPlaneDemo({
 
   const updateCalibrationJob = useCallback(
     async (
-      request: { op: 'start' | 'cancel'; kind?: 'vin_adc_auto' | 'heater_curve_auto' },
+      request: {
+        op: 'start' | 'cancel'
+        kind?: 'vin_adc_auto' | 'heater_curve_auto'
+      },
       failureMessage: string
     ) => {
       const blockedReason = deviceControlBlockReason(visibleDevice)
@@ -3031,13 +3208,28 @@ export function ControlPlaneDemo({
           if (!session || !visibleDevice.leaseId) {
             throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
           }
-          await authorizedLanRequest(
-            session,
-            'calibration/job',
-            'POST',
-            request,
-            visibleDevice.leaseId
-          )
+          try {
+            await authorizedLanRequest(
+              session,
+              'calibration/job',
+              'POST',
+              request,
+              visibleDevice.leaseId
+            )
+          } catch (error) {
+            await reconcileDirectLanStaleWrite(
+              error,
+              () => lanRuntime.readStatus(session),
+              (refreshed) => {
+                setPendingDevices((current) =>
+                  current.map((device) =>
+                    device.id === visibleDevice.id ? applyLanStatus(device, refreshed) : device
+                  )
+                )
+              }
+            )
+            throw error
+          }
           return true
         }
         if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
@@ -3058,7 +3250,15 @@ export function ControlPlaneDemo({
 
       return false
     },
-    [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
+    [
+      controlClient,
+      devdBaseUrl,
+      emitEvent,
+      lanRuntime.readStatus,
+      reconcileDirectLanStaleWrite,
+      visibleDevice,
+      webSerial,
+    ]
   )
 
   const handleCalibrationModeExit = async (): Promise<boolean> => {
@@ -4312,7 +4512,10 @@ function ViewPanel({
     failureMessage: string
   ) => void | Promise<void>
   onCalibrationJobChange: (
-    request: { op: 'start' | 'cancel'; kind?: 'vin_adc_auto' | 'heater_curve_auto' },
+    request: {
+      op: 'start' | 'cancel'
+      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+    },
     failureMessage: string
   ) => void | Promise<void>
   onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
@@ -4566,7 +4769,11 @@ function BridgeTargetPanel({
       ? ''
       : (window.localStorage.getItem('flux-purr:devd-lan-scan-cidr') ?? '')
   )
-  const candidates = bridgeCandidatesForTransport({ transport, devices, lanDevices })
+  const candidates = bridgeCandidatesForTransport({
+    transport,
+    devices,
+    lanDevices,
+  })
 
   const mergeLanDevices = useCallback((summaries: DevdLanDeviceSummary[]) => {
     setLanDevices((current) => {
@@ -5629,7 +5836,10 @@ function CalibrationView({
     failureMessage: string
   ) => void | Promise<void>
   onCalibrationJobChange: (
-    request: { op: 'start' | 'cancel'; kind?: 'vin_adc_auto' | 'heater_curve_auto' },
+    request: {
+      op: 'start' | 'cancel'
+      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+    },
     failureMessage: string
   ) => void | Promise<void>
   onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
@@ -5671,7 +5881,9 @@ function CalibrationView({
   const basePpsDraft = calibrationPpsDraft(device, runtimeCalibration)
 
   const exportCalibration = () => {
-    const blob = new Blob([JSON.stringify(calibration, null, 2)], { type: 'application/json' })
+    const blob = new Blob([JSON.stringify(calibration, null, 2)], {
+      type: 'application/json',
+    })
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
@@ -6001,7 +6213,10 @@ function CalibrationView({
     if (!Number.isFinite(gain) || !Number.isFinite(offsetMv)) {
       return
     }
-    await onCalibrationSetSlotFit(slotEditor.channel, slotEditor.slot, { gain, offsetMv })
+    await onCalibrationSetSlotFit(slotEditor.channel, slotEditor.slot, {
+      gain,
+      offsetMv,
+    })
     closeSlotEditor()
   }, [closeSlotEditor, onCalibrationSetSlotFit, slotEditor])
   const leaveGuardViewModel = calibrationLeaveGuard
@@ -6132,7 +6347,10 @@ function CalibrationView({
                                 onCalibrationJobChange(
                                   jobRunning
                                     ? { op: 'cancel' }
-                                    : { op: 'start', kind: 'heater_curve_auto' },
+                                    : {
+                                        op: 'start',
+                                        kind: 'heater_curve_auto',
+                                      },
                                   jobRunning
                                     ? '加热曲线自动采样取消失败。'
                                     : '加热曲线自动采样启动失败。'
@@ -6616,7 +6834,9 @@ function CalibrationLeaveGuardBubble({
 }) {
   const anchorRef = useRef<HTMLElement | null>(null)
   const bubbleRef = useRef<HTMLDivElement | null>(null)
-  const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({ visibility: 'hidden' })
+  const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({
+    visibility: 'hidden',
+  })
   const [bubbleSide, setBubbleSide] = useState<'bottom' | 'top'>('bottom')
 
   useLayoutEffect(() => {
@@ -7495,8 +7715,12 @@ function CalibrationChannelSamples({
     .map((sample, index) =>
       isValidCalibrationSample(sample, channel) ? { ...sample, index } : null
     )
-    .filter((sample): sample is (RtdCalibrationSample | VinCalibrationSample) & { index: number } =>
-      Boolean(sample)
+    .filter(
+      (
+        sample
+      ): sample is (RtdCalibrationSample | VinCalibrationSample) & {
+        index: number
+      } => Boolean(sample)
     )
   const rtdSamplePairs = isRtdChannel
     ? populatedSamples.reduce<Array<Array<RtdCalibrationSample & { index: number }>>>(
@@ -8077,7 +8301,9 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
       if (next) {
         window.requestAnimationFrame(() => {
           if (filteredEvents.length > 0) {
-            rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
+            rowVirtualizer.scrollToIndex(filteredEvents.length - 1, {
+              align: 'end',
+            })
           }
         })
       }

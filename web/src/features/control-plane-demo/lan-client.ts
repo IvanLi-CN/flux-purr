@@ -65,8 +65,41 @@ export interface ResumedLanDeviceSession {
 
 export type LanProbeMode = 'concurrent' | 'serial'
 
+export type DirectLanStaleResource = 'runtime' | 'calibration' | 'heater-curve'
+
 export function isDirectLanDevice(device: Pick<DeviceTarget, 'baseUrl' | 'transport'>) {
   return device.transport === 'wifi' && device.baseUrl.startsWith('http://')
+}
+
+/**
+ * A stale revision means another client changed device state after this
+ * browser's preflight read. Reconcile exactly once, then leave the original
+ * mutation rejected so callers never replay a potentially side-effecting
+ * control request.
+ */
+export async function reconcileStaleLanWrite<T>(
+  error: unknown,
+  refresh: () => Promise<T>
+): Promise<T | null> {
+  if (!(error instanceof ControlPlaneClientError) || error.code !== 'stale_write') {
+    return null
+  }
+  try {
+    return await refresh()
+  } catch {
+    return null
+  }
+}
+
+export function directLanStaleReadPath(resource: DirectLanStaleResource) {
+  switch (resource) {
+    case 'runtime':
+      return 'status'
+    case 'calibration':
+      return 'calibration'
+    case 'heater-curve':
+      return 'heater-curve'
+  }
 }
 
 export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProbe): DeviceTarget {
@@ -432,12 +465,19 @@ export async function claimLanPairing(
     fetcher,
     normalizedBaseUrl,
     '/api/v1/pairing/claim',
-    { method: 'POST', body: JSON.stringify(code === undefined ? {} : { code }) }
+    {
+      method: 'POST',
+      body: JSON.stringify(code === undefined ? {} : { code }),
+    }
   )
   if (!/^[a-f0-9]{64}$/i.test(response.token)) {
     throw new ControlPlaneClientError('设备返回的配对凭据无效。', 'pairing_response_invalid', false)
   }
-  const session = { baseUrl: normalizedBaseUrl, token: response.token, hostname: response.hostname }
+  const session = {
+    baseUrl: normalizedBaseUrl,
+    token: response.token,
+    hostname: response.hostname,
+  }
   storeLanDeviceSession(session)
   return session
 }
