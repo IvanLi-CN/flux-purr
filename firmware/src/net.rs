@@ -33,6 +33,7 @@ use esp_radio::{
     wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent},
 };
 use heapless::{String, Vec};
+use serde::Serialize;
 use static_cell::StaticCell;
 
 use crate::{
@@ -40,21 +41,29 @@ use crate::{
     mdns::build_http_announcement,
     memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
     net_http::{
-        ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod, HttpRequest,
-        HttpResponse, LAN_HTTP_BODY_MAX_LEN, NetHttpState, device_names_from_mac,
-        identity_from_device_names,
+        ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod, HttpReadGate,
+        HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN, LAN_HTTP_LIGHT_BODY_MAX_LEN,
+        LightHttpResponse, NetHttpState, device_names_from_mac, format_http_response_headers,
+        http_socket_slot_count, http_workspace_slot_count, identity_from_device_names,
     },
     wifi_state::{
         SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
     },
 };
 
-// TCP buffering only needs to cover in-flight segments: request parsing reads
-// the body incrementally into its dedicated workspace. Keeping these separate
-// avoids reserving the full request size three times per connection.
-const HTTP_TCP_BUFFER_LEN: usize = 2 * 1024;
+// Three sockets at 1 KiB per direction use less static RAM than the previous
+// two-socket 2 KiB layout while still covering the largest HTTP header and
+// streaming larger bodies through the shared request workspace.
+const HTTP_TCP_BUFFER_LEN: usize = 1024;
 const HTTP_REQUEST_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
-const HTTP_CONNECTION_COUNT: usize = 3;
+const HTTP_LIGHT_REQUEST_BUFFER_LEN: usize = 512;
+// One mutation-capable request plus two independent readers cover the browser
+// event/status path and lease heartbeat without allowing concurrent
+// writes. Identity and network use the published snapshot path and never
+// consume the mutation workspace.
+const HTTP_ACTIVE_REQUEST_BUDGET: usize = 1;
+const HTTP_SOCKET_COUNT: usize = http_socket_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
+const HTTP_WORKSPACE_COUNT: usize = http_workspace_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
@@ -65,12 +74,12 @@ type WifiProvisioningMutex = Mutex<CriticalSectionRawMutex, WifiProvisioningMach
 type RuntimeStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<LanRuntimeState>>;
 
 static CONTROL_STATE: ControlStateMutex = Mutex::new(None);
-// Each HTTP worker has one in-flight command and response. Request IDs prevent
-// a late answer for a timed-out command from being attributed to another
-// connection while the bounded worker pool still permits concurrent reads.
+// Request IDs prevent a late answer for a timed-out command from being
+// attributed to the next request. The control loop remains the sole mutation
+// executor even while the network listener is being recovered.
 static CONTROL_MAILBOX: Channel<CriticalSectionRawMutex, ControlMailboxCommand, 4> = Channel::new();
 static CONTROL_RESPONSES: [Signal<CriticalSectionRawMutex, ControlMailboxResponse>;
-    HTTP_CONNECTION_COUNT] = [const { Signal::new() }; HTTP_CONNECTION_COUNT];
+    HTTP_SOCKET_COUNT] = [const { Signal::new() }; HTTP_SOCKET_COUNT];
 static CONTROL_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static CONTROL_REVISION: AtomicU32 = AtomicU32::new(0);
 // USB/devd reads this mirror without taking the HTTP gate mutex. This keeps
@@ -86,23 +95,20 @@ static NET_RUNNER: StaticCell<embassy_net::Runner<'static, WifiDevice<'static>>>
     StaticCell::new();
 static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new();
 static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
+// The mutation-capable HTTP worker owns its full request workspace outside the
+// executor arena. Lightweight readers are served from published snapshots.
 static HTTP_WORKSPACE_0: StaticCell<HttpWorkspace> = StaticCell::new();
-static HTTP_WORKSPACE_1: StaticCell<HttpWorkspace> = StaticCell::new();
-static HTTP_WORKSPACE_2: StaticCell<HttpWorkspace> = StaticCell::new();
 static HTTP_RX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_SOCKETS: Channel<CriticalSectionRawMutex, HttpSocket, HTTP_CONNECTION_COUNT> =
+static HTTP_SOCKETS: Channel<CriticalSectionRawMutex, HttpSocket, HTTP_SOCKET_COUNT> =
     Channel::new();
-static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_CONNECTION_COUNT> =
+static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_WORKSPACE_COUNT> =
     Channel::new();
 
-// Request and response buffers stay outside the Embassy task frames. Socket
-// buffers are separate so an accepted TcpSocket can move into a worker task
-// and return to the idle pool without self-referential workspace state.
 struct HttpWorkspace {
     request: [u8; HTTP_REQUEST_BUFFER_LEN],
     response: HttpResponse,
@@ -132,11 +138,35 @@ struct HttpWorkspaceSlot {
     response_slot: u8,
 }
 
-/// `TcpSocket` is intentionally `!Send` because embassy-net protects the
-/// stack with a single-core `RefCell`. The socket pool only moves ownership
-/// between non-Send tasks on that same executor; no socket is ever accessed
-/// concurrently. The wrapper makes that ownership transfer explicit to the
-/// static channel without exposing the socket to another executor or core.
+struct ParsedHttpHeader {
+    method: Option<HttpMethod>,
+    path: String<128>,
+    origin: Option<String<128>>,
+    authorization: Option<String<96>>,
+    lease_id: Option<String<32>>,
+    expected_revision: Option<u32>,
+    private_network: bool,
+    content_length: usize,
+}
+
+impl ParsedHttpHeader {
+    fn request<'a>(&'a self, body: &'a str) -> Option<HttpRequest<'a>> {
+        Some(HttpRequest {
+            method: self.method?,
+            path: self.path.as_str(),
+            origin: self.origin.as_ref().map(String::as_str),
+            authorization: self.authorization.as_ref().map(String::as_str),
+            lease_id: self.lease_id.as_ref().map(String::as_str),
+            expected_revision: self.expected_revision,
+            request_private_network: self.private_network,
+            body,
+            entropy: random_entropy(),
+        })
+    }
+}
+
+/// `TcpSocket` remains on the same executor. The wrapper only transfers its
+/// exclusive ownership between the listener and its one worker.
 struct HttpSocket(TcpSocket<'static>);
 
 unsafe impl Send for HttpSocket {}
@@ -412,7 +442,7 @@ where
     report_stage(b"boot_stage=wifi_radio_init_complete\n");
     let radio = RADIO_CONTROLLER.init(radio);
     report_stage(b"boot_stage=wifi_interface_init_start\n");
-    let (controller, interfaces) = wifi::new(radio, wifi_peripheral, Default::default())
+    let (controller, interfaces) = wifi::new(radio, wifi_peripheral, wifi_driver_config())
         .map_err(|_| LanStartupError::WifiInitialization)?;
     report_stage(b"boot_stage=wifi_interface_init_complete\n");
     let station = interfaces.sta;
@@ -443,8 +473,6 @@ where
     let seed = random_u64();
     let (stack, runner) = embassy_net::new(station, net_config(&initial_config), resources, seed);
     report_stage(b"boot_stage=wifi_network_stack_ready\n");
-    // Keep large drivers out of executor task frames so USB recovery and all
-    // LAN tasks fit in the bounded shared arena.
     let runner = NET_RUNNER.init(runner);
     let controller = WIFI_CONTROLLER.init(controller);
 
@@ -472,22 +500,16 @@ where
             HTTP_TX_2.init([0; HTTP_TCP_BUFFER_LEN]),
         ),
     ];
-    let workspaces = [
-        HTTP_WORKSPACE_0.init_with(HttpWorkspace::new),
-        HTTP_WORKSPACE_1.init_with(HttpWorkspace::new),
-        HTTP_WORKSPACE_2.init_with(HttpWorkspace::new),
-    ];
-    for (response_slot, (mut socket, workspace)) in sockets.into_iter().zip(workspaces).enumerate()
-    {
+    for mut socket in sockets {
         socket.set_timeout(Some(Duration::from_secs(5)));
         HTTP_SOCKETS.send(HttpSocket(socket)).await;
-        HTTP_WORKSPACES
-            .send(HttpWorkspaceSlot {
-                workspace,
-                response_slot: response_slot as u8,
-            })
-            .await;
     }
+    HTTP_WORKSPACES
+        .send(HttpWorkspaceSlot {
+            workspace: HTTP_WORKSPACE_0.init_with(HttpWorkspace::new),
+            response_slot: 0,
+        })
+        .await;
     spawner
         .spawn(http_listener_task(stack, *spawner))
         .map_err(|_| LanStartupError::HttpTaskCapacity)?;
@@ -496,6 +518,17 @@ where
         .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
     report_stage(b"boot_stage=wifi_all_tasks_spawned\n");
     Ok(())
+}
+
+/// The LAN control plane has bounded, low-throughput traffic. esp-radio owns
+/// these pools at runtime, so this budget must live next to its constructor
+/// rather than in legacy esp-wifi build environment variables.
+fn wifi_driver_config() -> wifi::Config {
+    wifi::Config::default()
+        .with_static_rx_buf_num(6)
+        .with_dynamic_rx_buf_num(8)
+        .with_dynamic_tx_buf_num(8)
+        .with_rx_ba_win(6)
 }
 
 #[embassy_executor::task]
@@ -585,13 +618,25 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
             continue;
         }
         let _ = publish_wifi_event(&config, ProvisioningEvent::DriverConfigured, None).await;
-        let association = with_timeout(
-            Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
-            controller.connect_async(),
-        )
-        .await;
-        if !matches!(association, Ok(Ok(()))) {
-            let event = if association.is_err() {
+        // `connect_async` clears pending STA events before it waits. The radio
+        // can associate between `start_async` and that clear, leaving the TCP
+        // stack online while this task waits forever for an event it discarded.
+        // Start association once, then observe the stack's current link state;
+        // `wait_link_up` completes immediately when that event already arrived.
+        let association_started =
+            matches!(controller.is_connected(), Ok(true)) || controller.connect().is_ok();
+        let association_timed_out = if association_started {
+            with_timeout(
+                Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
+                stack.wait_link_up(),
+            )
+            .await
+            .is_err()
+        } else {
+            false
+        };
+        if !association_started || association_timed_out {
+            let event = if association_timed_out {
                 ProvisioningEvent::AssociationTimedOut
             } else {
                 ProvisioningEvent::AssociationFailed
@@ -816,46 +861,234 @@ fn net_config(config: &WifiRuntimeConfig) -> NetConfig {
 async fn http_listener_task(stack: Stack<'static>, spawner: Spawner) {
     loop {
         stack.wait_config_up().await;
-        let workspace = HTTP_WORKSPACES.receive().await;
         let HttpSocket(mut socket) = HTTP_SOCKETS.receive().await;
         if socket.accept(HTTP_SERVICE_PORT).await.is_err() {
-            HTTP_WORKSPACES.send(workspace).await;
             HTTP_SOCKETS.send(HttpSocket(socket)).await;
             Timer::after(Duration::from_millis(200)).await;
             continue;
         }
-
-        // The idle socket count and worker pool are identical, so a valid
-        // accepted socket always has a worker slot available.
-        let _ = spawner.spawn(http_connection_task(HttpSocket(socket), workspace));
+        let _ = spawner.spawn(http_connection_task(HttpSocket(socket)));
     }
 }
 
-#[embassy_executor::task(pool_size = HTTP_CONNECTION_COUNT)]
-async fn http_connection_task(socket: HttpSocket, slot: HttpWorkspaceSlot) {
+#[embassy_executor::task(pool_size = 3)]
+async fn http_connection_task(socket: HttpSocket) {
     let mut socket = socket.0;
-    let HttpWorkspaceSlot {
-        workspace,
-        response_slot,
-    } = slot;
-    let _ = handle_http_connection(
-        &mut socket,
-        &mut workspace.request,
-        &mut workspace.response,
-        &mut workspace.command,
-        &mut workspace.control_response,
-        response_slot,
-    )
-    .await;
-    socket.close();
-    let _ = socket.flush().await;
-    HTTP_WORKSPACES
-        .send(HttpWorkspaceSlot {
+    let mut header = [0u8; HTTP_LIGHT_REQUEST_BUFFER_LEN];
+    let header_len = read_http_header(&mut socket, &mut header)
+        .await
+        .unwrap_or(0);
+    let light_handled = if header_len > 0 {
+        handle_light_http_connection(&mut socket, &header[..header_len])
+            .await
+            .unwrap_or(true)
+    } else {
+        true
+    };
+    if !light_handled {
+        let HttpWorkspaceSlot {
             workspace,
             response_slot,
-        })
+        } = HTTP_WORKSPACES.receive().await;
+        let _ = handle_http_connection(
+            &mut socket,
+            &mut workspace.request,
+            &mut workspace.response,
+            &mut workspace.command,
+            &mut workspace.control_response,
+            response_slot,
+            &header[..header_len],
+        )
         .await;
+        HTTP_WORKSPACES
+            .send(HttpWorkspaceSlot {
+                workspace,
+                response_slot,
+            })
+            .await;
+    }
+    socket.close();
+    let _ = socket.flush().await;
     HTTP_SOCKETS.send(HttpSocket(socket)).await;
+}
+
+async fn read_http_header(
+    socket: &mut TcpSocket<'_>,
+    bytes: &mut [u8],
+) -> Result<usize, embassy_net::tcp::Error> {
+    let mut total = 0;
+    while total < bytes.len() {
+        let received = socket.read(&mut bytes[total..]).await?;
+        if received == 0 {
+            break;
+        }
+        total += received;
+        if bytes[..total].windows(4).any(|value| value == b"\r\n\r\n") {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
+    let mut parsed = ParsedHttpHeader {
+        method: None,
+        path: String::new(),
+        origin: None,
+        authorization: None,
+        lease_id: None,
+        expected_revision: None,
+        private_network: false,
+        content_length: 0,
+    };
+    let header = core::str::from_utf8(bytes).unwrap_or("");
+    let mut lines = header.lines();
+    let mut request_line = lines.next().unwrap_or("").split_whitespace();
+    parsed.method = match request_line.next().unwrap_or("") {
+        "GET" => Some(HttpMethod::Get),
+        "POST" => Some(HttpMethod::Post),
+        "PUT" => Some(HttpMethod::Put),
+        "DELETE" => Some(HttpMethod::Delete),
+        "OPTIONS" => Some(HttpMethod::Options),
+        _ => None,
+    };
+    let _ = parsed.path.push_str(
+        request_line
+            .next()
+            .unwrap_or("")
+            .split('?')
+            .next()
+            .unwrap_or(""),
+    );
+    for line in lines {
+        let Some((key, value)) = line.trim_end_matches('\r').split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("Origin") {
+            let mut copied = String::new();
+            let _ = copied.push_str(value);
+            parsed.origin = Some(copied);
+        }
+        if key.eq_ignore_ascii_case("Authorization") {
+            let mut copied = String::new();
+            let _ = copied.push_str(value);
+            parsed.authorization = Some(copied);
+        }
+        if key.eq_ignore_ascii_case("X-Flux-Purr-Lease") {
+            let mut copied = String::new();
+            let _ = copied.push_str(value);
+            parsed.lease_id = Some(copied);
+        }
+        if key.eq_ignore_ascii_case("X-Flux-Purr-Revision") {
+            parsed.expected_revision = value.parse().ok();
+        }
+        if key.eq_ignore_ascii_case("Access-Control-Request-Private-Network") {
+            parsed.private_network = value.eq_ignore_ascii_case("true");
+        }
+        if key.eq_ignore_ascii_case("Content-Length") {
+            parsed.content_length = value.parse().unwrap_or(0);
+        }
+    }
+    parsed
+}
+
+async fn handle_light_http_connection(
+    socket: &mut TcpSocket<'_>,
+    header: &[u8],
+) -> Result<bool, embassy_net::tcp::Error> {
+    if !header.windows(4).any(|value| value == b"\r\n\r\n") {
+        return Ok(false);
+    }
+    let parsed = parse_http_header(header);
+    if parsed.content_length != 0 {
+        return Ok(false);
+    }
+    let Some(request) = parsed.request("") else {
+        return Ok(false);
+    };
+    let mut light_response = LightHttpResponse {
+        status: 500,
+        allow_origin: None,
+        allow_private_network: false,
+        body: String::new(),
+    };
+    let gate = CONTROL_STATE
+        .lock()
+        .await
+        .as_mut()
+        .expect("LAN control state initialized")
+        .gate_light_read(request, &mut light_response);
+    match gate {
+        HttpReadGate::Respond => {
+            write_light_http_response(socket, &light_response).await?;
+            Ok(true)
+        }
+        HttpReadGate::Snapshot {
+            endpoint,
+            allow_origin,
+        } => {
+            let response = match endpoint {
+                crate::lan::LanEndpoint::Identity => {
+                    light_json_response(&lan_identity().await, allow_origin)
+                }
+                crate::lan::LanEndpoint::Network => {
+                    light_json_response(&lan_network_summary().await, allow_origin)
+                }
+                _ => return Ok(false),
+            };
+            write_light_http_response(socket, &response).await?;
+            Ok(true)
+        }
+        HttpReadGate::Defer => Ok(false),
+    }
+}
+
+fn light_json_response<T: Serialize>(
+    value: &T,
+    allow_origin: Option<String<128>>,
+) -> LightHttpResponse {
+    let mut encoded = [0u8; LAN_HTTP_LIGHT_BODY_MAX_LEN];
+    let body = match serde_json_core::to_slice(value, &mut encoded) {
+        Ok(written) => {
+            let mut body = String::new();
+            let _ = body.push_str(core::str::from_utf8(&encoded[..written]).unwrap_or(""));
+            body
+        }
+        Err(_) => {
+            let mut body = String::new();
+            let _ = body.push_str(r#"{"error":{"code":"snapshot_too_large","message":"Read snapshot exceeded the LAN envelope."}}"#);
+            return LightHttpResponse {
+                status: 500,
+                allow_origin,
+                allow_private_network: false,
+                body,
+            };
+        }
+    };
+    LightHttpResponse {
+        status: 200,
+        allow_origin,
+        allow_private_network: false,
+        body,
+    }
+}
+
+async fn write_light_http_response(
+    socket: &mut TcpSocket<'_>,
+    response: &LightHttpResponse,
+) -> Result<(), embassy_net::tcp::Error> {
+    let header = format_http_response_headers(
+        response.status,
+        response.body.len(),
+        response.allow_origin.as_ref().map(String::as_str),
+        response.allow_private_network,
+        None,
+        "application/json",
+    );
+    socket.write_all(header.as_bytes()).await?;
+    socket.write_all(response.body.as_bytes()).await?;
+    socket.flush().await
 }
 
 async fn handle_http_connection(
@@ -865,6 +1098,7 @@ async fn handle_http_connection(
     command_slot: &mut Option<ControlMailboxCommand>,
     control_response_slot: &mut Option<ControlMailboxResponse>,
     worker_slot: u8,
+    prefetched: &[u8],
 ) -> Result<(), embassy_net::tcp::Error> {
     request_bytes.fill(0);
     *command_slot = None;
@@ -872,90 +1106,33 @@ async fn handle_http_connection(
     response.allow_origin = None;
     response.allow_private_network = false;
     response.control_revision = None;
-    let mut total = 0usize;
-    loop {
+    let mut total = prefetched.len().min(request_bytes.len());
+    request_bytes[..total].copy_from_slice(&prefetched[..total]);
+    while total < request_bytes.len()
+        && !request_bytes[..total]
+            .windows(4)
+            .any(|value| value == b"\r\n\r\n")
+    {
         let received = socket.read(&mut request_bytes[total..]).await?;
-        if received == 0 || total.saturating_add(received) >= request_bytes.len() {
+        if received == 0 {
             break;
         }
         total += received;
-        if request_bytes[..total]
-            .windows(4)
-            .any(|value| value == b"\r\n\r\n")
-        {
-            break;
-        }
     }
     let header_end = request_bytes[..total]
         .windows(4)
         .position(|value| value == b"\r\n\r\n")
         .map(|index| index + 4)
         .unwrap_or(total);
-    let mut path = String::<128>::new();
-    let mut origin = None::<String<128>>;
-    let mut authorization = None::<String<96>>;
-    let mut lease_id = None::<String<32>>;
-    let mut expected_revision = None::<u32>;
-    let mut private_network = false;
-    let mut content_length = 0usize;
-    let method = {
-        let header = core::str::from_utf8(&request_bytes[..header_end]).unwrap_or("");
-        let mut lines = header.lines();
-        let mut request_line = lines.next().unwrap_or("").split_whitespace();
-        let method = match request_line.next().unwrap_or("") {
-            "GET" => HttpMethod::Get,
-            "POST" => HttpMethod::Post,
-            "PUT" => HttpMethod::Put,
-            "DELETE" => HttpMethod::Delete,
-            "OPTIONS" => HttpMethod::Options,
-            _ => {
-                *response = HttpResponse::new(
-                    405,
-                    r#"{"error":{"code":"method_not_allowed","message":"Unsupported HTTP method."}}"#,
-                );
-                return write_http_response(socket, response).await;
-            }
-        };
-        let _ = path.push_str(
-            request_line
-                .next()
-                .unwrap_or("")
-                .split('?')
-                .next()
-                .unwrap_or(""),
+    let parsed = parse_http_header(&request_bytes[..header_end]);
+    let Some(_method) = parsed.method else {
+        *response = HttpResponse::new(
+            405,
+            r#"{"error":{"code":"method_not_allowed","message":"Unsupported HTTP method."}}"#,
         );
-        for line in lines {
-            let Some((key, value)) = line.trim_end_matches('\r').split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if key.eq_ignore_ascii_case("Origin") {
-                let mut copied = String::new();
-                let _ = copied.push_str(value);
-                origin = Some(copied);
-            }
-            if key.eq_ignore_ascii_case("Authorization") {
-                let mut copied = String::new();
-                let _ = copied.push_str(value);
-                authorization = Some(copied);
-            }
-            if key.eq_ignore_ascii_case("X-Flux-Purr-Lease") {
-                let mut copied = String::new();
-                let _ = copied.push_str(value);
-                lease_id = Some(copied);
-            }
-            if key.eq_ignore_ascii_case("X-Flux-Purr-Revision") {
-                expected_revision = value.parse().ok();
-            }
-            if key.eq_ignore_ascii_case("Access-Control-Request-Private-Network") {
-                private_network = value.eq_ignore_ascii_case("true");
-            }
-            if key.eq_ignore_ascii_case("Content-Length") {
-                content_length = value.parse().unwrap_or(0);
-            }
-        }
-        method
+        return write_http_response(socket, response).await;
     };
+    let content_length = parsed.content_length;
     if content_length > LAN_HTTP_BODY_MAX_LEN {
         *response = HttpResponse::new(
             400,
@@ -974,17 +1151,9 @@ async fn handle_http_connection(
     }
     let body_end = header_end.saturating_add(content_length).min(total);
     let body = core::str::from_utf8(&request_bytes[header_end..body_end]).unwrap_or("");
-    let request = HttpRequest {
-        method,
-        path: path.as_str(),
-        origin: origin.as_ref().map(String::as_str),
-        authorization: authorization.as_ref().map(String::as_str),
-        lease_id: lease_id.as_ref().map(String::as_str),
-        expected_revision,
-        request_private_network: private_network,
-        body,
-        entropy: random_entropy(),
-    };
+    let request = parsed
+        .request(body)
+        .expect("a recognized HTTP method builds a request");
     let dispatch = {
         let gate = CONTROL_STATE
             .lock()
@@ -1148,43 +1317,14 @@ async fn write_http_response_headers(
     control_revision: Option<u32>,
     content_type: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
-    let status = match response_status {
-        200 => "200 OK",
-        204 => "204 No Content",
-        400 => "400 Bad Request",
-        401 => "401 Unauthorized",
-        403 => "403 Forbidden",
-        404 => "404 Not Found",
-        405 => "405 Method Not Allowed",
-        409 => "409 Conflict",
-        428 => "428 Precondition Required",
-        429 => "429 Too Many Requests",
-        503 => "503 Service Unavailable",
-        504 => "504 Gateway Timeout",
-        _ => "500 Internal Server Error",
-    };
-    let mut header = String::<384>::new();
-    let _ = write!(
-        header,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Flux-Purr-Lease, X-Flux-Purr-Revision\r\nAccess-Control-Expose-Headers: X-Flux-Purr-Revision\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n",
-        body_len
+    let header = format_http_response_headers(
+        response_status,
+        body_len,
+        allow_origin,
+        allow_private_network,
+        control_revision,
+        content_type,
     );
-    if let Some(revision) = control_revision {
-        let _ = write!(header, "X-Flux-Purr-Revision: {revision}\r\n");
-    }
-    if content_type == "text/event-stream" {
-        let _ = header.push_str("Cache-Control: no-cache\r\n");
-    }
-    if let Some(origin) = allow_origin {
-        let _ = write!(
-            header,
-            "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
-        );
-    }
-    if allow_private_network {
-        let _ = header.push_str("Access-Control-Allow-Private-Network: true\r\n");
-    }
-    let _ = header.push_str("\r\n");
     socket.write_all(header.as_bytes()).await
 }
 

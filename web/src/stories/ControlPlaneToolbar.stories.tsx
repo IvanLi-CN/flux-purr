@@ -172,6 +172,15 @@ export const MergedDeviceConnections: Story = {
         bridgeTransport: 'wifi',
         baseUrl: 'devd://bridge-lan-device-1',
       },
+      {
+        ...controlPlaneScenario.devices[0],
+        id: 'web-serial-device-2',
+        identityId: 'device-2',
+        alias: 'flux-purr-device-2',
+        location: 'Browser Web Serial',
+        transport: 'serial',
+        baseUrl: 'webserial://device-2',
+      },
     ],
     device: {
       ...controlPlaneScenario.devices[0],
@@ -202,9 +211,42 @@ export const MergedDeviceConnections: Story = {
     )
     await expect(
       dialog.querySelectorAll('.industrial-device-connection-button__icon')
-    ).toHaveLength(3)
+    ).toHaveLength(4)
     await expect(dialog.querySelectorAll('.industrial-device-picker__add > svg')).toHaveLength(1)
     await expect(dialog).not.toHaveTextContent('桥接 · USB')
     await expect(dialog).not.toHaveTextContent('桥接 · WiFi / LAN')
+
+    const triggerStyle = getComputedStyle(trigger)
+    await expect(triggerStyle.backgroundImage).toBe('none')
+    await expect(triggerStyle.paddingRight).toBe(triggerStyle.paddingLeft)
+    await expect(trigger.querySelectorAll(':scope > svg')).toHaveLength(1)
+
+    const singleConnectionCard = dialog.querySelector('[data-device-id="device-2"]')
+    const connectionGrid = singleConnectionCard?.querySelector(
+      '.industrial-device-choice-card__connections'
+    )
+    const connectionButton = connectionGrid?.querySelector('.industrial-device-connection-button')
+    expect(connectionGrid).not.toBeNull()
+    expect(connectionButton).not.toBeNull()
+    const gridWidth = connectionGrid?.getBoundingClientRect().width ?? 0
+    const buttonWidth = connectionButton?.getBoundingClientRect().width ?? 0
+    expect(buttonWidth / gridWidth).toBeGreaterThan(0.3)
+    expect(buttonWidth / gridWidth).toBeLessThan(0.36)
+
+    for (const button of dialog.querySelectorAll<HTMLElement>(
+      '.industrial-device-connection-button'
+    )) {
+      const icon = button.querySelector<HTMLElement>('.industrial-device-connection-button__icon')
+      const copy = button.querySelector<HTMLElement>(':scope > span')
+      const arrow = button.querySelector<HTMLElement>('.industrial-device-connection-button__arrow')
+      expect(icon).not.toBeNull()
+      expect(copy).not.toBeNull()
+      expect(arrow).not.toBeNull()
+      if (!icon || !copy || !arrow) continue
+
+      const iconGap = copy.getBoundingClientRect().left - icon.getBoundingClientRect().right
+      const arrowGap = arrow.getBoundingClientRect().left - copy.getBoundingClientRect().right
+      expect(Math.abs(iconGap - arrowGap)).toBeLessThanOrEqual(1)
+    }
   },
 }

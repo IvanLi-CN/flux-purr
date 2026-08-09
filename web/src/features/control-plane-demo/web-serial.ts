@@ -23,12 +23,20 @@ import type { DeviceTarget } from './types'
 const WEB_SERIAL_BAUD_RATE = 115_200
 const WEB_SERIAL_RPC_TIMEOUT_MS = 12_000
 const WEB_SERIAL_DEVICE_BASE_URL = 'webserial://selected'
-const WEB_SERIAL_LINE_LIMIT = 2048
+const WEB_SERIAL_LINE_LIMIT = 8 * 1024
+const WEB_SERIAL_INITIALIZATION_RETRY_MS = 500
+const WEB_SERIAL_INITIALIZATION_ATTEMPTS = 50
 
 export type WebSerialConnectionState = 'unsupported' | 'idle' | 'connecting' | 'connected' | 'error'
 
+export interface WebSerialDiagnostic {
+  kind: 'reset' | 'panic'
+  reason: string
+}
+
 export interface BrowserSerial {
   requestPort(options?: unknown): Promise<BrowserSerialPort>
+  getPorts?(): Promise<BrowserSerialPort[]>
 }
 
 export interface BrowserSerialPort {
@@ -36,6 +44,23 @@ export interface BrowserSerialPort {
   writable: WritableStream<Uint8Array> | null
   open(options: { baudRate: number; bufferSize?: number }): Promise<void>
   close(): Promise<void>
+}
+
+/**
+ * `navigator.serial.requestPort()` must begin during the triggering click. The
+ * caller supplies any port list discovered before that click so this function
+ * can either reuse one port or synchronously open the native chooser.
+ */
+export function selectBrowserSerialPort(
+  serial: BrowserSerial,
+  preauthorizedPorts?: readonly BrowserSerialPort[],
+  forcePortSelection = false
+): Promise<BrowserSerialPort> {
+  if (forcePortSelection) {
+    return serial.requestPort()
+  }
+  const preauthorizedPort = preauthorizedPorts?.length === 1 ? preauthorizedPorts[0] : null
+  return preauthorizedPort ? Promise.resolve(preauthorizedPort) : serial.requestPort()
 }
 
 export interface WebSerialProbe {
@@ -131,6 +156,8 @@ export class WebSerialControlPlaneClient {
   private readonly encoder = new TextEncoder()
   private readonly decoder = new TextDecoder()
   private readonly pending = new Map<string, PendingRequest>()
+  private readonly preauthorizedPorts?: readonly BrowserSerialPort[]
+  private readonly onDiagnostic?: (diagnostic: WebSerialDiagnostic) => void
   private port: BrowserSerialPort | null = null
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   private lineBuffer = ''
@@ -141,9 +168,13 @@ export class WebSerialControlPlaneClient {
   constructor({
     serial = getBrowserSerial(),
     baudRate = WEB_SERIAL_BAUD_RATE,
+    preauthorizedPorts,
+    onDiagnostic,
   }: {
     serial?: BrowserSerial | null
     baudRate?: number
+    preauthorizedPorts?: readonly BrowserSerialPort[]
+    onDiagnostic?: (diagnostic: WebSerialDiagnostic) => void
   } = {}) {
     if (!serial) {
       throw new ControlPlaneClientError(
@@ -154,11 +185,18 @@ export class WebSerialControlPlaneClient {
     }
     this.serial = serial
     this.baudRate = baudRate
+    this.preauthorizedPorts = preauthorizedPorts
+    this.onDiagnostic = onDiagnostic
   }
 
   async connect() {
     const attempt = ++this.connectionAttempt
-    const port = await this.serial.requestPort()
+    let port: BrowserSerialPort
+    try {
+      port = await selectBrowserSerialPort(this.serial, this.preauthorizedPorts)
+    } catch (error) {
+      throw normalizeBrowserSerialError(error)
+    }
     if (attempt !== this.connectionAttempt) {
       await port.close().catch(() => undefined)
       throw new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
@@ -170,7 +208,7 @@ export class WebSerialControlPlaneClient {
     }
     this.port = port
     this.readPump = this.readLoop()
-    return this.probe()
+    return this.probeAfterInitialization()
   }
 
   async disconnect() {
@@ -180,8 +218,8 @@ export class WebSerialControlPlaneClient {
     this.rejectAll(
       new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
     )
-    await this.reader?.cancel().catch(() => undefined)
-    await this.readPump?.catch(() => undefined)
+    await withCleanupTimeout(this.reader?.cancel().catch(() => undefined))
+    await withCleanupTimeout(this.readPump?.catch(() => undefined))
     if (port) {
       await port.close().catch(() => undefined)
     }
@@ -201,6 +239,24 @@ export class WebSerialControlPlaneClient {
       createUsbRequestFrame('get_status')
     )
     return { identity, network, status }
+  }
+
+  private async probeAfterInitialization(): Promise<WebSerialProbe> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.probe()
+      } catch (error) {
+        if (
+          attempt >= WEB_SERIAL_INITIALIZATION_ATTEMPTS ||
+          !isFirmwareInitializationPending(error)
+        ) {
+          throw error
+        }
+        await new Promise<void>((resolve) =>
+          globalThis.setTimeout(resolve, WEB_SERIAL_INITIALIZATION_RETRY_MS)
+        )
+      }
+    }
   }
 
   async configureRuntime(request: DirectRuntimeConfigRequest): Promise<ControlPlaneStatus> {
@@ -361,7 +417,7 @@ export class WebSerialControlPlaneClient {
       .then(() => response)
       .catch((error) => {
         const pending = this.pending.get(requestId)
-        const wrappedError = serialError(error)
+        const wrappedError = normalizeBrowserSerialError(error)
         if (pending) {
           globalThis.clearTimeout(pending.timeout)
           this.pending.delete(requestId)
@@ -408,7 +464,7 @@ export class WebSerialControlPlaneClient {
         }
       }
     } catch (error) {
-      this.rejectAll(serialError(error))
+      this.rejectAll(normalizeBrowserSerialError(error))
     } finally {
       if (this.reader === reader) {
         this.reader = null
@@ -441,6 +497,10 @@ export class WebSerialControlPlaneClient {
     try {
       frame = JSON.parse(line) as UsbResponseWire
     } catch {
+      const diagnostic = parseWebSerialDiagnostic(line)
+      if (diagnostic) {
+        this.onDiagnostic?.(diagnostic)
+      }
       return
     }
 
@@ -480,6 +540,32 @@ export class WebSerialControlPlaneClient {
   }
 }
 
+export function parseWebSerialDiagnostic(line: string): WebSerialDiagnostic | null {
+  const resetReason = line.match(/^reset_reason=([a-z0-9_]+)$/)?.[1]
+  if (resetReason) {
+    return { kind: 'reset', reason: resetReason }
+  }
+  const panicReason = line.match(/^panic=([a-z0-9_]+)$/)?.[1]
+  if (panicReason) {
+    return { kind: 'panic', reason: panicReason }
+  }
+  return null
+}
+
+export function formatWebSerialEventTime(date: Date) {
+  return [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':')
+}
+
+async function withCleanupTimeout(operation: Promise<unknown> | undefined) {
+  if (!operation) return
+  await Promise.race([
+    operation,
+    new Promise<void>((resolve) => globalThis.setTimeout(resolve, 500)),
+  ])
+}
+
 function createUsbRequestFrame(op: UsbRequestFrame['op']) {
   return (requestId: string): UsbRequestFrame => ({
     type: 'request',
@@ -493,15 +579,31 @@ function createWebSerialRequestId() {
   return `web-${Date.now()}-${random}`
 }
 
-function serialError(error: unknown) {
+export function normalizeBrowserSerialError(error: unknown) {
   if (error instanceof ControlPlaneClientError) {
     return error
+  }
+
+  if (error instanceof Error && /no port selected by (the )?user/i.test(error.message)) {
+    return new ControlPlaneClientError(
+      '浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。',
+      'web_serial_port_not_selected',
+      true
+    )
   }
 
   return new ControlPlaneClientError(
     error instanceof Error ? error.message : 'Web Serial read failed.',
     'web_serial_read_failed',
     true
+  )
+}
+
+function isFirmwareInitializationPending(error: unknown) {
+  return (
+    (error instanceof ControlPlaneClientError && error.code === 'usb_response_timeout') ||
+    (error instanceof Error &&
+      /not available until memory and WiFi initialization completes/i.test(error.message))
   )
 }
 

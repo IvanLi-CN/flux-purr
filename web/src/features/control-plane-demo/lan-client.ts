@@ -39,7 +39,11 @@ export interface LanSubnetScanOptions {
 export interface LanDeviceSession {
   baseUrl: string
   token: string
+  authorizationState?: 'valid' | 'invalid'
+  deviceId?: string
   hostname?: string
+  firmwareVersion?: string
+  buildId?: string
   controlRevision?: number
 }
 
@@ -53,6 +57,13 @@ export interface LanProbe {
   network: NetworkSummary
   status: ControlPlaneStatus
 }
+
+export interface ResumedLanDeviceSession {
+  session: LanDeviceSession
+  probe: LanProbe
+}
+
+export type LanProbeMode = 'concurrent' | 'serial'
 
 export function isDirectLanDevice(device: Pick<DeviceTarget, 'baseUrl' | 'transport'>) {
   return device.transport === 'wifi' && device.baseUrl.startsWith('http://')
@@ -103,6 +114,74 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     capabilities: Array.from(new Set([...identity.capabilities, 'lan_http', 'lan_lease'])),
     networkState: network.state,
     leaseState: 'none',
+  }
+}
+
+export function rememberLanDeviceIdentity(session: LanDeviceSession, probe: LanProbe) {
+  const remembered: LanDeviceSession = {
+    ...session,
+    deviceId: probe.identity.deviceId,
+    hostname: probe.identity.hostname || session.hostname,
+    firmwareVersion: probe.identity.firmwareVersion,
+    buildId: probe.identity.buildId,
+  }
+  storeLanDeviceSession(remembered)
+  return remembered
+}
+
+export function savedLanSessionToDeviceTarget(session: LanDeviceSession): DeviceTarget | null {
+  const deviceId = session.deviceId ?? session.hostname?.match(/^flux-purr-([a-f0-9]{12})$/i)?.[1]
+  if (!deviceId) return null
+  return {
+    id: `lan-${deviceId}`,
+    identityId: deviceId,
+    alias: session.hostname || deviceId,
+    location: session.baseUrl.replace(/^https?:\/\//, ''),
+    transport: 'wifi',
+    severity: 'offline',
+    baseUrl: session.baseUrl,
+    firmware: session.firmwareVersion ?? 'unknown',
+    buildId: session.buildId ?? 'unknown',
+    uptime: 'N/A',
+    boardTempC: 0,
+    currentTempC: 0,
+    targetTempC: 0,
+    voltageMv: 0,
+    currentMa: 0,
+    pdRequestMv: 0,
+    pdContractMv: 0,
+    pdState: 'fault',
+    calibration: {
+      mode: 'off',
+      ppsEnabled: false,
+      ppsMv: null,
+      ppsMa: null,
+      heaterEnabled: false,
+      targetAdcMv: null,
+      stable: false,
+      stabilityErrorMv: null,
+      error: null,
+      job: {
+        kind: null,
+        status: 'idle',
+        progressPercent: 0,
+        samplesCollected: 0,
+        nextRequestMv: null,
+        message: null,
+      },
+    },
+    heaterEnabled: false,
+    heaterOutputPercent: 0,
+    activeCoolingEnabled: false,
+    fanState: 'OFF',
+    wifiRssi: null,
+    capabilities: ['identity', 'network', 'status', 'lan_http', 'lan_lease'],
+    networkState: 'idle',
+    leaseState: 'none',
+    transportIssue:
+      session.authorizationState === 'invalid'
+        ? '已记住此 LAN 设备，但配对凭据已失效；请重新进行物理配对。'
+        : '已记住此 LAN 通道；选择后将重新验证设备并获取控制租约。',
   }
 }
 
@@ -405,9 +484,49 @@ export function loadLanDeviceSession(baseUrl: string): LanDeviceSession | null {
   if (!raw) return null
   try {
     const session = JSON.parse(raw) as LanDeviceSession
-    return session.baseUrl === normalized && /^[a-f0-9]{64}$/i.test(session.token) ? session : null
+    return session.baseUrl === normalized &&
+      session.authorizationState !== 'invalid' &&
+      /^[a-f0-9]{64}$/i.test(session.token)
+      ? session
+      : null
   } catch {
     return null
+  }
+}
+
+/**
+ * Restores a browser-held bearer only after the public health identity still
+ * matches the device that originally received it. This prevents a DHCP address
+ * reuse from sending the old device's bearer token to different hardware.
+ */
+export async function resumeLanDeviceSession(
+  baseUrl: string,
+  health: Pick<LanPublicInfo, 'deviceId'>,
+  probe: (session: LanDeviceSession) => Promise<LanProbe> = (session) => probeLanDevice(session)
+): Promise<ResumedLanDeviceSession | null> {
+  const session = loadLanDeviceSession(baseUrl)
+  if (!session) return null
+
+  if (session.deviceId && session.deviceId !== health.deviceId) {
+    forgetLanDeviceSession(baseUrl)
+    return null
+  }
+
+  try {
+    const snapshot = await probe(session)
+    if (snapshot.identity.deviceId !== health.deviceId) {
+      forgetLanDeviceSession(baseUrl)
+      return null
+    }
+    return {
+      session: rememberLanDeviceIdentity(session, snapshot),
+      probe: snapshot,
+    }
+  } catch (error) {
+    if (error instanceof ControlPlaneClientError && error.code === 'unauthorized') {
+      invalidateLanDeviceAuthorization(baseUrl)
+    }
+    throw error
   }
 }
 
@@ -435,6 +554,24 @@ export function listSavedLanDeviceSessions(): LanDeviceSession[] {
 
 export function forgetLanDeviceSession(baseUrl: string) {
   getStorage()?.removeItem(`${LAN_STORAGE_PREFIX}${normalizeLanBaseUrl(baseUrl)}`)
+}
+
+export function invalidateLanDeviceAuthorization(baseUrl: string) {
+  const normalized = normalizeLanBaseUrl(baseUrl)
+  const storage = getStorage()
+  const raw = storage?.getItem(`${LAN_STORAGE_PREFIX}${normalized}`)
+  if (!storage || !raw) return
+  try {
+    const session = JSON.parse(raw) as LanDeviceSession
+    if (session.baseUrl === normalized && /^[a-f0-9]{64}$/i.test(session.token)) {
+      storage.setItem(
+        `${LAN_STORAGE_PREFIX}${normalized}`,
+        JSON.stringify({ ...session, authorizationState: 'invalid' })
+      )
+    }
+  } catch {
+    // Malformed records are ignored and remain unavailable to control requests.
+  }
 }
 
 export async function createLanLease(session: LanDeviceSession, fetcher: typeof fetch = fetch) {
@@ -483,18 +620,32 @@ export function startLanLeaseHeartbeat(
 
 export async function probeLanDevice(
   session: LanDeviceSession,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  mode: LanProbeMode = 'concurrent'
 ): Promise<LanProbe> {
   const headers = bearerHeaders(session)
-  const rememberRevision = (revision: number) => {
-    session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
-  }
+  const rememberRevision =
+    mode === 'serial'
+      ? (revision: number) => {
+          // A complete serial probe has one ordered response chain ending in
+          // status, so it is authoritative across a device reboot where the
+          // in-memory control revision restarts at a lower value.
+          session.controlRevision = revision
+        }
+      : (revision: number) => {
+          session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
+        }
   const persistProbe = (probe: LanProbe) => {
     // The control revision is learned from the device response headers. Keep
     // it with the saved session so a later runtime write cannot be rejected
     // merely because it reloaded the same paired device from local storage.
     storeLanDeviceSession(session)
     return probe
+  }
+  if (mode === 'serial') {
+    return persistProbe(
+      await probeLanDeviceRequests(session, fetcher, headers, rememberRevision, false)
+    )
   }
   try {
     return persistProbe(
@@ -527,11 +678,13 @@ async function probeLanDeviceRequests(
   const request = <T>(path: string) =>
     lanRequest<T>(fetcher, session.baseUrl, path, { headers }, rememberRevision)
   if (concurrent) {
-    const [identity, network, status] = await Promise.all([
+    // Firmware exposes two HTTP workers. Start only the two independent reads
+    // together, then free a worker before asking the device for runtime status.
+    const [identity, network] = await Promise.all([
       request<Identity>('/api/v1/identity'),
       request<NetworkSummary>('/api/v1/network'),
-      request<ControlPlaneStatus>('/api/v1/status'),
     ])
+    const status = await request<ControlPlaneStatus>('/api/v1/status')
     return { identity, network, status }
   }
 
@@ -562,7 +715,7 @@ export async function writeLanRuntime(
       body: JSON.stringify(body),
     },
     (next) => {
-      session.controlRevision = next
+      rememberLanControlRevision(session, next)
     }
   )
 }
@@ -593,7 +746,7 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
       ...(body ? { body: JSON.stringify(body) } : {}),
     },
     (next) => {
-      session.controlRevision = next
+      rememberLanControlRevision(session, next)
     }
   )
 }
@@ -694,6 +847,11 @@ function requireLanControlRevision(session: LanDeviceSession) {
   return session.controlRevision as number
 }
 
+function rememberLanControlRevision(session: LanDeviceSession, revision: number) {
+  session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
+  storeLanDeviceSession(session)
+}
+
 function bearerHeaders(session: LanDeviceSession) {
   return { Authorization: `Bearer ${session.token}` }
 }
@@ -702,7 +860,7 @@ async function responseError(response: Response, baseUrl: string) {
   const payload = (await response.json().catch(() => null)) as {
     error?: { code?: string; message?: string; retryable?: boolean }
   } | null
-  if (response.status === 401) forgetLanDeviceSession(baseUrl)
+  if (response.status === 401) invalidateLanDeviceAuthorization(baseUrl)
   return new ControlPlaneClientError(
     payload?.error?.message ?? `设备请求失败 (${response.status})`,
     payload?.error?.code ?? 'lan_request_failed',

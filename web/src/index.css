@@ -1324,6 +1324,7 @@
     align-items: center;
     justify-content: space-between;
     width: 100%;
+    background: var(--industrial-bg);
     cursor: pointer;
     text-align: left;
   }
@@ -1414,7 +1415,7 @@
 
   .industrial-device-choice-card__connections {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.45rem;
     min-width: 0;
     margin: 0;
@@ -1439,6 +1440,12 @@
       background 160ms ease,
       color 160ms ease,
       transform 160ms ease;
+  }
+
+  .industrial-device-connection-button {
+    display: grid;
+    grid-template-columns: 1rem minmax(0, 1fr) 0.9rem;
+    column-gap: 0.5rem;
   }
 
   .industrial-device-connection-button:hover,
@@ -1830,12 +1837,7 @@
     appearance: none;
     border: 1px solid rgba(255, 255, 255, 0.5);
     border-radius: 14px;
-    background:
-      linear-gradient(45deg, transparent 50%, var(--industrial-muted-text) 50%) calc(100% - 18px)
-      50% / 7px 7px no-repeat,
-      linear-gradient(135deg, var(--industrial-muted-text) 50%, transparent 50%) calc(100% - 13px)
-      50% / 7px 7px no-repeat,
-      var(--industrial-bg);
+    background: var(--industrial-bg);
     color: var(--industrial-text);
     box-shadow:
       inset 4px 4px 8px var(--industrial-shadow),
@@ -1844,7 +1846,7 @@
     font-size: 0.88rem;
     font-weight: 800;
     letter-spacing: 0.02em;
-    padding: 0.75rem 2.4rem 0.75rem 0.9rem;
+    padding: 0.75rem 0.9rem;
   }
 
   .industrial-device-select:focus-visible {
@@ -2422,7 +2424,7 @@
     gap: 0.5rem;
   }
 
-  .industrial-bridge-target-panel__devices > button {
+  .industrial-bridge-target-panel__devices > div {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
@@ -2433,10 +2435,9 @@
     background: rgba(250, 253, 253, 0.38);
     padding: 0.65rem 0.75rem;
     color: var(--industrial-text);
-    text-align: left;
   }
 
-  .industrial-bridge-target-panel__devices > button.is-selected {
+  .industrial-bridge-target-panel__devices > div.is-selected {
     border-color: rgba(15, 120, 144, 0.52);
     color: var(--industrial-accent);
     box-shadow: inset 0 0 0 1px rgba(15, 120, 144, 0.16);
@@ -2454,6 +2455,83 @@
     font-size: 0.68rem;
     font-style: normal;
     font-weight: 800;
+  }
+
+  .industrial-bridge-target-panel__devices > div > button {
+    min-width: 6.25rem;
+  }
+
+  .industrial-bridge-connection-dialog-backdrop {
+    position: fixed;
+    z-index: 80;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(18, 31, 43, 0.34);
+    padding: 1rem;
+  }
+
+  .industrial-bridge-connection-dialog {
+    display: grid;
+    width: min(28rem, 100%);
+    gap: 1rem;
+    border: 1px solid rgba(72, 125, 154, 0.42);
+    border-radius: 8px;
+    background: var(--industrial-panel);
+    padding: 1rem;
+    color: var(--industrial-text);
+    box-shadow: 0 18px 44px rgba(22, 41, 54, 0.24);
+  }
+
+  .industrial-bridge-connection-dialog__heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .industrial-bridge-connection-dialog__heading strong,
+  .industrial-bridge-connection-dialog__heading small {
+    display: block;
+  }
+
+  .industrial-bridge-connection-dialog__heading small {
+    margin-top: 0.2rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    overflow-wrap: anywhere;
+  }
+
+  .industrial-bridge-connection-dialog__status {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 4.5rem;
+    border-radius: 7px;
+    background: rgba(232, 240, 242, 0.72);
+    padding: 0.85rem;
+  }
+
+  .industrial-bridge-connection-dialog__status > svg {
+    width: 1.35rem;
+    height: 1.35rem;
+    color: var(--industrial-accent);
+  }
+
+  .industrial-bridge-connection-dialog__status.is-unknown > svg,
+  .industrial-bridge-connection-dialog__status.is-error > svg {
+    color: var(--industrial-danger);
+  }
+
+  .industrial-bridge-connection-dialog__status p {
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .industrial-bridge-connection-dialog__actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .industrial-bridge-target-panel__empty {

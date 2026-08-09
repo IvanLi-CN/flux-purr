@@ -195,6 +195,41 @@ describe('control-plane transport client', () => {
     })
   })
 
+  it('connects a registered DEVD LAN target without exposing its pairing token', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse({
+        id: 'devd-lan-a0f262f20d6c',
+        displayName: 'flux-purr-a0f262f20d6c',
+        portPath: null,
+        transport: 'lan',
+        connection: 'connected',
+        identity: {
+          deviceId: 'a0f262f20d6c',
+          hostname: 'flux-purr-a0f262f20d6c',
+          firmwareVersion: '0.1.0',
+          buildId: 'local-build',
+          gitSha: 'abcdef',
+          board: 'esp32s3_frontpanel',
+          apiVersion: '2026-05-29',
+          protocolVersion: 'flux-purr.usb.v1',
+          capabilities: ['identity', 'network', 'status'],
+        },
+        network: { state: 'connected' },
+        status: {},
+      })
+    )
+    const client = createControlPlaneHttpClient(fetcher)
+
+    const device = await client.connectDevdLanDevice('http://127.0.0.1:30080', 'lan-a0f262f20d6c')
+
+    expect(device.id).toBe('devd-lan-a0f262f20d6c')
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:30080/api/v1/lan/devices/lan-a0f262f20d6c/connect',
+      { method: 'POST' }
+    )
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain('pairingToken')
+  })
+
   it('keeps daemon-local capabilities after a successful native firmware probe', () => {
     const record: DevdDeviceRecord = {
       id: 'serial-1',
@@ -578,6 +613,7 @@ describe('control-plane transport client', () => {
     )
     expect(target.transportIssue).toContain('/dev/cu.usbmodem212101')
     expect(target.transportIssue).not.toContain('native serial RPC failed')
+    expect(target.connectionAvailable).toBe(false)
   })
 
   it('ignores normal reset firmware logs when selecting transport issues', () => {
@@ -687,11 +723,11 @@ describe('control-plane transport client', () => {
     })
 
     expect(entry).toMatchObject({
-      time: '12345',
       source: 'serial',
       tone: 'danger',
       message: 'native serial RPC failed: identity / usb_response_timeout',
     })
+    expect(entry.time).toMatch(/^\d{2}:\d{2}:\d{2}$/)
     expect(JSON.stringify(entry)).not.toContain('Timed out waiting')
 
     const wifiEntry = devdEventToLogEntry({
@@ -1064,6 +1100,36 @@ describe('control-plane transport client', () => {
 
     expect(result.identity.deviceId).toBe('frontpanel-1')
     expect(maxInFlight).toBe(1)
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:30080/api/v1/devices/native%20target/identity?lease_id=lease-1',
+      undefined
+    )
+  })
+
+  it('identifies a devd serial candidate before probing control state', async () => {
+    const fetcher = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        deviceId: 'frontpanel-1',
+        firmwareVersion: '0.1.0',
+        buildId: 'build-1',
+        gitSha: 'abc',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'frontpanel-1',
+        capabilities: ['identity', 'network', 'status'],
+      }),
+    })) as unknown as typeof fetch
+    const client = createControlPlaneHttpClient(fetcher)
+
+    const identity = await client.identifyDevdDevice(
+      'http://127.0.0.1:30080',
+      'native target',
+      'lease-1'
+    )
+
+    expect(identity.deviceId).toBe('frontpanel-1')
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:30080/api/v1/devices/native%20target/identity?lease_id=lease-1',
       undefined

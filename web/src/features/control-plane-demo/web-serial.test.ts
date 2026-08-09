@@ -1,18 +1,29 @@
 import { describe, expect, it } from 'vitest'
 import type { BrowserSerial, BrowserSerialPort } from './web-serial'
 import {
+  formatWebSerialEventTime,
   isDirectWebSerialDevice,
+  normalizeBrowserSerialError,
+  selectBrowserSerialPort,
   WebSerialControlPlaneClient,
   webSerialProbeToDeviceTarget,
 } from './web-serial'
 
 describe('web serial control-plane client', () => {
+  it('formats browser-originated trace events with a local clock time', () => {
+    expect(formatWebSerialEventTime(new Date(2026, 0, 1, 7, 5, 9))).toBe('07:05:09')
+  })
+
   it('probes firmware over USB JSONL and maps the direct device target', async () => {
     const fake = new FakeSerial()
     const client = new WebSerialControlPlaneClient({ serial: fake })
 
     const probe = await client.connect()
     const target = webSerialProbeToDeviceTarget(probe)
+
+    expect(
+      JSON.stringify(responseFor({ type: 'request', op: 'get_status' })).length
+    ).toBeGreaterThan(2_048)
 
     expect(fake.requests.map((request) => request.op)).toEqual([
       'get_identity',
@@ -33,6 +44,60 @@ describe('web serial control-plane client', () => {
     expect(isDirectWebSerialDevice(target)).toBe(true)
 
     await client.disconnect()
+  })
+
+  it('reuses one browser-authorized port before opening the chooser', async () => {
+    const serial = new AuthorizedSerial()
+    const client = new WebSerialControlPlaneClient({
+      serial,
+      preauthorizedPorts: [serial.authorizedPort],
+    })
+
+    await client.connect()
+
+    expect(serial.requestPortCalls).toBe(0)
+    expect(serial.authorizedPortOpened).toBe(true)
+    expect(serial.authorizedPort.signalHistory).toEqual([])
+    await client.disconnect()
+  })
+
+  it('opens the chooser when Add device explicitly requests another port', async () => {
+    const serial = new AuthorizedSerial()
+
+    const selected = await selectBrowserSerialPort(serial, [serial.authorizedPort], true)
+
+    expect(selected).toBe(serial.authorizedPort)
+    expect(serial.requestPortCalls).toBe(1)
+  })
+
+  it('opens the first-time chooser synchronously instead of awaiting authorized-port discovery', async () => {
+    const serial = new FirstAuthorizationSerial()
+    const client = new WebSerialControlPlaneClient({ serial })
+
+    const connection = client.connect()
+
+    expect(serial.requestPortCalls).toBe(1)
+    expect(serial.getPortsCalls).toBe(0)
+    await connection
+    await client.disconnect()
+  })
+
+  it('explains when the browser serial chooser closes without a selected port', async () => {
+    const client = new WebSerialControlPlaneClient({
+      serial: new CancelledChooserSerial(),
+    })
+
+    await expect(client.connect()).rejects.toMatchObject({
+      code: 'web_serial_port_not_selected',
+      message: '浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。',
+    })
+  })
+
+  it('normalizes cancellation from the forced Add device chooser path', () => {
+    expect(normalizeBrowserSerialError(new Error('No port selected by the user.'))).toMatchObject({
+      code: 'web_serial_port_not_selected',
+      message: '浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。',
+    })
   })
 
   it('sends direct runtime_config frames and returns the firmware status payload', async () => {
@@ -65,6 +130,24 @@ describe('web serial control-plane client', () => {
       heaterEnabled: false,
     })
 
+    await client.disconnect()
+  })
+
+  it('reports firmware reset markers without treating arbitrary serial output as device state', async () => {
+    const fake = new FakeSerial()
+    const diagnostics: string[] = []
+    const client = new WebSerialControlPlaneClient({
+      serial: fake,
+      onDiagnostic: (diagnostic) => diagnostics.push(`${diagnostic.kind}:${diagnostic.reason}`),
+    })
+    await client.connect()
+
+    fake.emitLine('boot chatter that is not part of the control-plane contract')
+    fake.emitLine('reset_reason=system_brownout')
+    fake.emitLine('panic=firmware_fault')
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+    expect(diagnostics).toEqual(['reset:system_brownout', 'panic:firmware_fault'])
     await client.disconnect()
   })
 
@@ -142,6 +225,10 @@ class FakeSerial implements BrowserSerial {
   requestPort(): Promise<BrowserSerialPort> {
     return Promise.resolve(this.port)
   }
+
+  emitLine(line: string) {
+    this.port.emitLine(line)
+  }
 }
 
 class DeferredSerial implements BrowserSerial {
@@ -156,6 +243,44 @@ class DeferredSerial implements BrowserSerial {
 
   resolve(port: BrowserSerialPort) {
     this.resolvePort(port)
+  }
+}
+
+class AuthorizedSerial implements BrowserSerial {
+  requestPortCalls = 0
+  authorizedPortOpened = false
+  readonly authorizedPort = new FakeSerialPort([], () => {
+    this.authorizedPortOpened = true
+  })
+
+  getPorts(): Promise<BrowserSerialPort[]> {
+    return Promise.resolve([this.authorizedPort])
+  }
+
+  requestPort(): Promise<BrowserSerialPort> {
+    this.requestPortCalls += 1
+    return Promise.resolve(this.authorizedPort)
+  }
+}
+
+class FirstAuthorizationSerial extends FakeSerial {
+  requestPortCalls = 0
+  getPortsCalls = 0
+
+  getPorts(): Promise<BrowserSerialPort[]> {
+    this.getPortsCalls += 1
+    return Promise.resolve([])
+  }
+
+  requestPort(): Promise<BrowserSerialPort> {
+    this.requestPortCalls += 1
+    return super.requestPort()
+  }
+}
+
+class CancelledChooserSerial implements BrowserSerial {
+  requestPort(): Promise<BrowserSerialPort> {
+    return Promise.reject(new Error('No port selected by the user.'))
   }
 }
 
@@ -181,10 +306,13 @@ class FakeSerialPort implements BrowserSerialPort {
   private readonly decoder = new TextDecoder()
   private readonly encoder = new TextEncoder()
   private readonly requests: Array<Record<string, unknown>>
+  private readonly onOpen?: () => void
   private writeBuffer = ''
+  signalHistory: Array<{ dataTerminalReady?: boolean; requestToSend?: boolean }> = []
 
-  constructor(requests: Array<Record<string, unknown>>) {
+  constructor(requests: Array<Record<string, unknown>>, onOpen?: () => void) {
     this.requests = requests
+    this.onOpen = onOpen
     this.readable = new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.controller = controller
@@ -199,11 +327,21 @@ class FakeSerialPort implements BrowserSerialPort {
   }
 
   open(): Promise<void> {
+    this.onOpen?.()
+    return Promise.resolve()
+  }
+
+  setSignals(signals: { dataTerminalReady?: boolean; requestToSend?: boolean }): Promise<void> {
+    this.signalHistory.push(signals)
     return Promise.resolve()
   }
 
   close(): Promise<void> {
     return Promise.resolve()
+  }
+
+  emitLine(line: string) {
+    this.controller?.enqueue(this.encoder.encode(`${line}\n`))
   }
 
   private flushRequests() {
@@ -379,6 +517,7 @@ const network = {
 }
 
 const baseStatus = {
+  _firmwarePayloadPadding: 'x'.repeat(3_000),
   mode: 'sampling',
   uptimeSeconds: 3661,
   currentTempC: 181.5,

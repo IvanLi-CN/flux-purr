@@ -272,6 +272,24 @@ mod tests {
     }
 
     #[test]
+    fn link_and_ipv4_completion_publish_one_connected_snapshot() {
+        let mut machine = WifiProvisioningMachine::new();
+        machine.apply_at(WifiEvent::ApplyConfig, 0);
+        machine.apply_at(WifiEvent::DisconnectCompleted, 1);
+        machine.apply_at(WifiEvent::DriverConfigured, 2);
+
+        let linked = machine.apply_at(WifiEvent::AssociationSucceeded, 3);
+        assert!(linked.accepted);
+        assert_eq!(linked.state, NetworkState::Connecting);
+
+        let connected = machine.apply_at(WifiEvent::Ipv4Configured, 4);
+        assert!(connected.accepted);
+        assert_eq!(connected.state, NetworkState::Connected);
+        assert_eq!(connected.failure_code, None);
+        assert!(connected.transition_sequence > linked.transition_sequence);
+    }
+
+    #[test]
     fn each_configuration_has_a_monotonic_receipt_identity() {
         let mut machine = WifiProvisioningMachine::new();
         let first = machine.apply(WifiEvent::ApplyConfig);

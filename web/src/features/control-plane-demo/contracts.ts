@@ -123,7 +123,7 @@ export interface DevdDeviceRecord {
   id: string
   displayName: string
   portPath?: string | null
-  transport: 'mock' | 'native_serial'
+  transport: 'mock' | 'native_serial' | 'lan'
   connection: 'disconnected' | 'connected' | 'busy' | 'error'
   identity: Identity
   network: NetworkSummary

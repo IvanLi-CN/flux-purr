@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { deviceIdentityId, mergeDeviceChoices } from './device-target-picker'
+import {
+  deviceIdentityId,
+  isDeviceConnectionAvailable,
+  mergeDeviceChoices,
+} from './device-target-picker'
 import type { DeviceTarget } from './types'
 
 function target(overrides: Partial<DeviceTarget>): DeviceTarget {
@@ -88,6 +92,24 @@ describe('device target picker', () => {
     const choices = mergeDeviceChoices([target({ transport: 'mock', id: 'mock-device-1' })], {
       allowDemoControls: false,
     })
+    expect(choices).toEqual([])
+  })
+
+  it('does not expose a missing authorized serial placeholder as a connection', () => {
+    const missingTarget = target({
+      id: 'serial-_dev_cu.usbmodem21221401',
+      identityId: 'serial-_dev_cu.usbmodem21221401',
+      alias: 'serial-_dev_cu.usbmodem21221401',
+      location: '/dev/cu.usbmodem21221401',
+      severity: 'warning',
+      connectionAvailable: false,
+      leaseState: 'none',
+      buildId: 'native-serial-placeholder',
+      transportIssue: 'Authorized serial port is missing.',
+    })
+    const choices = mergeDeviceChoices([missingTarget])
+
+    expect(isDeviceConnectionAvailable(missingTarget)).toBe(false)
     expect(choices).toEqual([])
   })
 

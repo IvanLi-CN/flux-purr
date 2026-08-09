@@ -23,6 +23,8 @@ test.describe('control plane direct LAN', () => {
   let pairingFailureCode: 'pairing_code_invalid' | 'pairing_locked' | null = null
   let pairingMode: 'required' | 'optional' | 'unavailable' = 'required'
   let pairingActive = true
+  let controlRevision = 7
+  let rejectNextRuntimeAsStale = false
 
   test.beforeEach(async ({ page }) => {
     requests.length = 0
@@ -34,6 +36,8 @@ test.describe('control plane direct LAN', () => {
     pairingFailureCode = null
     pairingMode = 'required'
     pairingActive = true
+    controlRevision = 7
+    rejectNextRuntimeAsStale = false
     await page.route(`${deviceUrl}/**`, async (route) => {
       const request = route.request()
       const url = new URL(request.url())
@@ -126,7 +130,7 @@ test.describe('control plane direct LAN', () => {
       if (url.pathname === '/api/v1/status') {
         await route.fulfill({
           status: 200,
-          headers: jsonHeaders(requestOrigin),
+          headers: jsonHeaders(requestOrigin, controlRevision),
           body: JSON.stringify(status(targetTempC)),
         })
         return
@@ -179,12 +183,29 @@ test.describe('control plane direct LAN', () => {
         return
       }
       if (url.pathname === '/api/v1/runtime' && request.method() === 'PUT') {
+        if (rejectNextRuntimeAsStale) {
+          rejectNextRuntimeAsStale = false
+          controlRevision += 1
+          targetTempC = 150
+          await route.fulfill({
+            status: 409,
+            headers: jsonHeaders(requestOrigin, controlRevision),
+            body: JSON.stringify({
+              error: {
+                code: 'stale_write',
+                message: 'The control state changed after this client last read it.',
+              },
+            }),
+          })
+          return
+        }
         if (typeof body === 'object' && body && 'targetTempC' in body) {
           targetTempC = Number(body.targetTempC)
         }
+        controlRevision += 1
         await route.fulfill({
           status: 200,
-          headers: jsonHeaders(requestOrigin),
+          headers: jsonHeaders(requestOrigin, controlRevision),
           body: JSON.stringify(status(targetTempC)),
         })
         return
@@ -261,10 +282,12 @@ test.describe('control plane direct LAN', () => {
       )
       .toBeGreaterThan(1)
     await page.getByRole('button', { name: '目标设备' }).click()
-    await expect(
-      page.getByRole('button', { name: /WiFi \/ LAN · flux-purr-001122334455/ })
-    ).toBeVisible()
-    await page.getByRole('button', { name: /WiFi \/ LAN · flux-purr-001122334455/ }).click()
+    const targetPicker = page.getByRole('dialog', { name: '设备与连接方式' })
+    const lanConnection = targetPicker.getByRole('button', {
+      name: /WiFi \/ LAN · flux-purr-001122334455/,
+    })
+    await expect(lanConnection).toBeVisible()
+    await lanConnection.click()
     await expect(page.getByRole('button', { name: '目标设备' })).toContainText(
       'flux-purr-001122334455'
     )
@@ -393,7 +416,27 @@ test.describe('control plane direct LAN', () => {
     expect(runtimeRequests()).toHaveLength(0)
   })
 
-  test('purges only the rejected saved LAN session and requires physical pairing again', async ({
+  test('reads the current LAN state after a stale write and does not replay it', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+    await openLanPairing(page)
+    await pairRequiredLanDevice(page)
+    await expect(page.getByText('LAN 设备已连接')).toBeVisible()
+
+    rejectNextRuntimeAsStale = true
+    await page.getByLabel('Dashboard target temperature').fill('155')
+
+    await expect(page.getByText('LAN runtime update failed')).toBeVisible()
+    await expect(
+      page.getByText('设备控制状态已变化，已读取最新状态；请确认后重新提交。')
+    ).toBeVisible()
+    await expect(page.getByLabel('Dashboard target temperature')).toHaveValue('150')
+    expect(runtimeRequests()).toHaveLength(1)
+    await expect(page.getByText('Target updated')).toHaveCount(0)
+  })
+
+  test('keeps the remembered device but invalidates its rejected LAN credential', async ({
     page,
   }) => {
     await page.goto('/?demo=false')
@@ -413,12 +456,26 @@ test.describe('control plane direct LAN', () => {
 
     await expect(page.getByText('LAN 配对凭据已失效')).toBeVisible()
     expect(
-      await page.evaluate(() =>
-        Object.keys(window.localStorage)
-          .filter((key) => key.startsWith('flux-purr:lan-device:'))
-          .sort()
-      )
-    ).toEqual(['flux-purr:lan-device:http://192.168.1.19'])
+      await page.evaluate(() => {
+        const raw = window.localStorage.getItem('flux-purr:lan-device:http://192.168.1.18')
+        return {
+          keys: Object.keys(window.localStorage)
+            .filter((key) => key.startsWith('flux-purr:lan-device:'))
+            .sort(),
+          rejected: raw ? JSON.parse(raw) : null,
+        }
+      })
+    ).toEqual({
+      keys: [
+        'flux-purr:lan-device:http://192.168.1.18',
+        'flux-purr:lan-device:http://192.168.1.19',
+      ],
+      rejected: expect.objectContaining({
+        baseUrl: 'http://192.168.1.18',
+        deviceId,
+        authorizationState: 'invalid',
+      }),
+    })
   })
 
   test('disables writes when a LAN lease heartbeat expires', async ({ page }) => {
@@ -431,7 +488,9 @@ test.describe('control plane direct LAN', () => {
 
     rejectHeartbeat = true
     await expect(page.getByText('硬件连接受阻')).toBeVisible({ timeout: 5_000 })
-    await expect(page.getByText('LAN lease 心跳失败，请重新选择设备。').first()).toBeVisible()
+    await expect(
+      page.getByText('LAN lease 心跳失败：The LAN control lease expired.').first()
+    ).toBeVisible()
     await expect(page.getByLabel('Dashboard target temperature')).toBeDisabled()
     expect(runtimeRequests()).toHaveLength(0)
   })
@@ -467,11 +526,11 @@ function corsHeaders(allowedOrigin: string) {
   }
 }
 
-function jsonHeaders(allowedOrigin: string) {
+function jsonHeaders(allowedOrigin: string, revision = 7) {
   return {
     ...corsHeaders(allowedOrigin),
     'content-type': 'application/json',
-    'X-Flux-Purr-Revision': '7',
+    'X-Flux-Purr-Revision': String(revision),
   }
 }
 

@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { ComponentProps } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import { LanPairingPanel } from '@/features/control-plane-demo/components/lan-pairing-panel'
 import type { LanPublicInfo } from '@/features/control-plane-demo/lan-client'
@@ -89,6 +90,10 @@ const enterScanDevices = fn(
     })
 )
 
+const noSavedLanSession: NonNullable<
+  ComponentProps<typeof LanPairingPanel>['resumeSession']
+> = async () => null
+
 const meta = {
   title: 'App/LanPairingPanel',
   component: LanPairingPanel,
@@ -114,7 +119,11 @@ const meta = {
       </div>
     ),
   ],
-  args: { initialAddress: 'http://192.168.1.18', supported: true },
+  args: {
+    initialAddress: 'http://192.168.1.18',
+    supported: true,
+    resumeSession: noSavedLanSession,
+  },
 } satisfies Meta<typeof LanPairingPanel>
 
 export default meta
@@ -145,6 +154,24 @@ export const RequiredPairing: Story = {
     await expect(pairButton).toBeEnabled()
     await userEvent.click(pairButton)
     await expect(canvas.getByText('已配对 flux-purr-001122334455，正在获取控制租约')).toBeVisible()
+  },
+}
+
+export const RestoresSavedPairing: Story = {
+  args: {
+    connectDevice: async () => requiredActive,
+    resumeSession: async (baseUrl, _health) => mockPairing(baseUrl),
+    onPaired: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '连接设备' }))
+
+    await expect(
+      canvas.getByText('已验证已保存的配对凭据，正在获取 flux-purr-001122334455 控制租约')
+    ).toBeVisible()
+    expect(canvas.queryByRole('dialog', { name: '输入 LAN 配对码' })).toBeNull()
+    await expect(args.onPaired).toHaveBeenCalledTimes(1)
   },
 }
 

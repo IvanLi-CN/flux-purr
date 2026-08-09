@@ -1,9 +1,7 @@
 use std::{env, net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
-use flux_purr_devd::{
-    AppConfig, AppState, DEFAULT_SERIAL_PORT, app, read_default_serial_port_from_user_config,
-};
+use flux_purr_devd::{AppConfig, AppState, app};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
@@ -97,15 +95,7 @@ fn parse_config(args: ServeArgs) -> AppConfig {
         || env::var("FLUX_PURR_DEVD_ALLOW_REAL_FLASH")
             .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-    let serial_port = args
-        .serial_port
-        .or_else(|| {
-            env::var("FLUX_PURR_DEVD_SERIAL_PORT")
-                .ok()
-                .map(PathBuf::from)
-        })
-        .or_else(read_default_serial_port_from_user_config)
-        .or_else(|| Some(PathBuf::from(DEFAULT_SERIAL_PORT)));
+    let serial_port = args.serial_port;
 
     AppConfig {
         bind,
@@ -122,7 +112,12 @@ fn default_dev_cors_for_bind(bind: SocketAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::default_dev_cors_for_bind;
+    use super::{ServeArgs, default_dev_cors_for_bind, parse_config};
+
+    #[test]
+    fn omitted_serial_port_does_not_select_a_device() {
+        assert_eq!(parse_config(ServeArgs::default()).serial_port, None);
+    }
 
     #[test]
     fn default_dev_cors_is_enabled_for_loopback_binds() {

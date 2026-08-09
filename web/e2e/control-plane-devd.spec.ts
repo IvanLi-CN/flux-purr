@@ -507,6 +507,26 @@ test.describe('control plane live devd bridge', () => {
     await expect(page.getByText('有效')).toBeVisible()
   })
 
+  test('lists discovered USB bridge candidates with an explicit connect action', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+
+    await page.getByRole('button', { name: '目标设备' }).click()
+    await page.getByRole('button', { name: '添加设备' }).click()
+    await page.getByRole('button', { name: /桥接/ }).click()
+
+    const bridge = page.getByRole('region', { name: 'DEVD 桥接目标' })
+    await expect(bridge.getByRole('button', { name: 'USB' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+    await expect(bridge.getByText('flux-purr-e2e')).toBeVisible()
+    await expect(bridge.getByText('/dev/cu.usbmodem-e2e')).toBeVisible()
+    await expect(bridge.getByRole('button', { name: '连接' })).toBeEnabled()
+    await expect(bridge.getByText('设备 ID ·')).toHaveCount(0)
+  })
+
   test('preserves the chosen calibration tab and blocks calibration controls while devd is still reacquiring the lease', async ({
     page,
   }) => {

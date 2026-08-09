@@ -19,6 +19,8 @@ export interface DeviceTarget {
   location: string
   transport: TransportKind
   bridgeTransport?: 'usb' | 'wifi'
+  connectionAvailable?: boolean
+  connectionCandidate?: boolean
   severity: DeviceSeverity
   baseUrl: string
   firmware: string

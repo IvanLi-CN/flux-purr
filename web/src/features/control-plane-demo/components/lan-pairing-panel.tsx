@@ -14,6 +14,8 @@ import {
   loadLanScanCidr,
   normalizeLanBaseUrl,
   probeLanDevice,
+  rememberLanDeviceIdentity,
+  resumeLanDeviceSession,
   scanLanSubnet,
   storeLanAddress,
   storeLanScanCidr,
@@ -37,6 +39,7 @@ export interface LanPairingPanelProps {
   connectDevice?: (address: string) => Promise<LanPublicInfo>
   getPairingMetadata?: (address: string) => ReturnType<typeof getLanPairingMetadata>
   pairDevice?: (address: string, code?: string) => Promise<LanPairingResult>
+  resumeSession?: (address: string, health: LanPublicInfo) => Promise<LanPairingResult | null>
   scanDevices?: typeof scanLanSubnet
 }
 
@@ -74,6 +77,7 @@ export function LanPairingPanel({
   connectDevice = getLanPublicInfo,
   getPairingMetadata = getLanPairingMetadata,
   pairDevice = pairLanDevice,
+  resumeSession = resumeLanDeviceSession,
   scanDevices = scanLanSubnet,
 }: LanPairingPanelProps) {
   const [address, setAddress] = useState(() => loadLanAddress(initialAddress))
@@ -149,6 +153,12 @@ export function LanPairingPanel({
       return
     }
 
+    // A successful injected pairing path must establish the same persisted
+    // session boundary as the production claim client before control leasing.
+    result = {
+      ...result,
+      session: rememberLanDeviceIdentity(result.session, result.probe),
+    }
     setState('paired')
     setPairingDialogOpen(false)
     setMessage(
@@ -182,6 +192,28 @@ export function LanPairingPanel({
       setConnectedBaseUrl(baseUrl)
       setConnectedAddress(new URL(baseUrl).hostname)
       setState('connected')
+      try {
+        const resumed = await resumeSession(baseUrl, info)
+        if (resumed) {
+          setState('paired')
+          setMessage(
+            `已验证已保存的配对凭据，正在获取 ${resumed.session.hostname ?? info.hostname} 控制租约`
+          )
+          try {
+            await onPaired?.(resumed.session, resumed.probe)
+          } catch {
+            setState('error')
+            setMessage('已验证配对凭据，但控制租约获取失败。请检查其他客户端后重试。')
+          }
+          return
+        }
+      } catch (error) {
+        if (error instanceof ControlPlaneClientError && error.code === 'unauthorized') {
+          setPairingMessage(lanPairingFailureMessage(error))
+        } else {
+          throw error
+        }
+      }
       if (info.pairing.mode === 'required') {
         setMessage(`已连接 ${info.hostname}。输入四位配对码后才可启用控制。`)
         setPairingDialogOpen(true)
@@ -509,8 +541,11 @@ function defaultScanCidr(address: string) {
 async function pairLanDevice(address: string, code?: string): Promise<LanPairingResult> {
   const session = await claimLanPairing(address, code)
   try {
-    const probe = await probeLanDevice(session)
-    return { session, probe }
+    // The pairing claim owns the firmware's heavy request workspace. Run the
+    // first authenticated probe serially so its TCP connection has fully
+    // returned before ordinary concurrent snapshot reads resume.
+    const probe = await probeLanDevice(session, undefined, 'serial')
+    return { session: rememberLanDeviceIdentity(session, probe), probe }
   } catch (error) {
     if (
       error instanceof ControlPlaneClientError &&

@@ -18,10 +18,89 @@ pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_SERVICE_TYPE: &str = "_http._tcp.local";
 pub const HTTP_SERVICE_PORT: u16 = 80;
 pub const HTTP_SERVICE_TXT: [&str; 3] = ["api=v1", "path=/api/v1", "pairing=frontpanel"];
+/// The TCP listener owns one socket per concurrent in-flight connection.
+/// Snapshot-backed reads do not allocate a mutation workspace. Two reader
+/// slots keep a status/event stream independent from the lease heartbeat while
+/// the single mutation workspace serializes writes.
+pub const fn http_socket_slot_count(active_request_budget: usize) -> usize {
+    active_request_budget.saturating_add(2)
+}
+
+/// Request workspaces carry the bounded request and response bodies. They are
+/// deliberately limited to mutation-capable work; lightweight reads use
+/// published snapshots and do not consume this capacity.
+pub const fn http_workspace_slot_count(active_request_budget: usize) -> usize {
+    active_request_budget
+}
+
 /// The largest supported LAN mutation is the fully materialized nine-point
 /// thermal profile (5,401 bytes). Six KiB preserves protocol headroom while
 /// preventing each HTTP workspace copy from exhausting internal RAM.
 pub const LAN_HTTP_BODY_MAX_LEN: usize = 6 * 1024;
+/// Public and snapshot-backed reads never need the mutation-sized envelope.
+/// Keeping this bounded separately lets the TCP adapter serve concurrent
+/// low-frequency readers without duplicating the six-KiB write workspace.
+pub const LAN_HTTP_LIGHT_BODY_MAX_LEN: usize = 512;
+/// Largest complete HTTP header emitted by the LAN server. It covers a
+/// 128-byte development origin, PNA approval, and an optimistic revision.
+pub const HTTP_RESPONSE_HEADER_MAX_LEN: usize = 640;
+
+#[cfg(any(test, target_arch = "xtensa"))]
+pub(crate) fn format_http_response_headers(
+    response_status: u16,
+    body_len: usize,
+    allow_origin: Option<&str>,
+    allow_private_network: bool,
+    control_revision: Option<u32>,
+    content_type: &str,
+) -> String<HTTP_RESPONSE_HEADER_MAX_LEN> {
+    let status = match response_status {
+        200 => "200 OK",
+        204 => "204 No Content",
+        400 => "400 Bad Request",
+        401 => "401 Unauthorized",
+        403 => "403 Forbidden",
+        404 => "404 Not Found",
+        405 => "405 Method Not Allowed",
+        409 => "409 Conflict",
+        428 => "428 Precondition Required",
+        429 => "429 Too Many Requests",
+        503 => "503 Service Unavailable",
+        504 => "504 Gateway Timeout",
+        _ => "500 Internal Server Error",
+    };
+    let mut header = String::new();
+    write!(
+        header,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {body_len}\r\nConnection: close\r\nAccess-Control-Allow-Headers: Authorization, Content-Type, X-Flux-Purr-Lease, X-Flux-Purr-Revision\r\nAccess-Control-Expose-Headers: X-Flux-Purr-Revision\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n",
+    )
+    .expect("HTTP response base headers fit the fixed buffer");
+    if let Some(revision) = control_revision {
+        write!(header, "X-Flux-Purr-Revision: {revision}\r\n")
+            .expect("HTTP response revision header fits the fixed buffer");
+    }
+    if content_type == "text/event-stream" {
+        header
+            .push_str("Cache-Control: no-cache\r\n")
+            .expect("HTTP response SSE header fits the fixed buffer");
+    }
+    if let Some(origin) = allow_origin {
+        write!(
+            header,
+            "Access-Control-Allow-Origin: {origin}\r\nVary: Origin\r\n"
+        )
+        .expect("HTTP response CORS header fits the fixed buffer");
+    }
+    if allow_private_network {
+        header
+            .push_str("Access-Control-Allow-Private-Network: true\r\n")
+            .expect("HTTP response PNA header fits the fixed buffer");
+    }
+    header
+        .push_str("\r\n")
+        .expect("HTTP response header terminator fits the fixed buffer");
+    header
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -139,6 +218,26 @@ pub struct HttpResponse {
     pub allow_private_network: bool,
     pub control_revision: Option<u32>,
     pub body: String<LAN_HTTP_BODY_MAX_LEN>,
+}
+
+/// A compact response for endpoints that can be answered from immutable LAN
+/// state without entering the main control mailbox.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightHttpResponse {
+    pub status: u16,
+    pub allow_origin: Option<String<128>>,
+    pub allow_private_network: bool,
+    pub body: String<LAN_HTTP_LIGHT_BODY_MAX_LEN>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpReadGate {
+    Respond,
+    Snapshot {
+        endpoint: LanEndpoint,
+        allow_origin: Option<String<128>>,
+    },
+    Defer,
 }
 
 /// The result of protocol-level request handling before a firmware command is
@@ -291,6 +390,52 @@ impl NetHttpState {
         }
     }
 
+    /// Admit only small, read-only routes to the concurrent snapshot path.
+    /// Everything that can mutate state or needs a full control response stays
+    /// on the existing mailbox path.
+    pub fn gate_light_read(
+        &mut self,
+        request: HttpRequest<'_>,
+        response: &mut LightHttpResponse,
+    ) -> HttpReadGate {
+        if request.method == HttpMethod::Options {
+            *response = self.light_preflight(request);
+            return HttpReadGate::Respond;
+        }
+        if request.method != HttpMethod::Get {
+            return HttpReadGate::Defer;
+        }
+        let Some(endpoint) = endpoint_for_path(request.path) else {
+            return HttpReadGate::Defer;
+        };
+        match endpoint {
+            LanEndpoint::Health => {
+                *response = self.light_health_response(request);
+                HttpReadGate::Respond
+            }
+            LanEndpoint::Pairing => {
+                *response = self.light_pairing_response(request);
+                HttpReadGate::Respond
+            }
+            LanEndpoint::Identity | LanEndpoint::Network => {
+                if self.authorized(request.authorization) {
+                    HttpReadGate::Snapshot {
+                        endpoint,
+                        allow_origin: self.cors_origin(request.origin),
+                    }
+                } else {
+                    *response = self.light_error_response(
+                        request.origin,
+                        401,
+                        r#"{"error":{"code":"unauthorized","message":"Bearer token required."}}"#,
+                    );
+                    HttpReadGate::Respond
+                }
+            }
+            _ => HttpReadGate::Defer,
+        }
+    }
+
     /// Apply CORS/PNA, pairing, bearer authentication, and lease policy.
     /// Successful control requests are returned as a normalized mailbox
     /// command so an async transport can enqueue and await main-loop handling.
@@ -334,6 +479,61 @@ impl NetHttpState {
         response.allow_origin = Some(origin);
         response.allow_private_network = policy.allow_private_network;
         response
+    }
+
+    fn light_preflight(&self, request: HttpRequest<'_>) -> LightHttpResponse {
+        let policy = private_network_preflight(request.origin, request.request_private_network);
+        if !policy.allow_origin {
+            return self.light_error_response(
+                request.origin,
+                403,
+                r#"{"error":"origin_not_allowed"}"#,
+            );
+        }
+        LightHttpResponse {
+            status: 204,
+            allow_origin: self.cors_origin(request.origin),
+            allow_private_network: policy.allow_private_network,
+            body: String::new(),
+        }
+    }
+
+    fn light_health_response(&self, request: HttpRequest<'_>) -> LightHttpResponse {
+        let mut body = String::new();
+        self.write_public_health(&mut body);
+        LightHttpResponse {
+            status: 200,
+            allow_origin: self.cors_origin(request.origin),
+            allow_private_network: false,
+            body,
+        }
+    }
+
+    fn light_pairing_response(&self, request: HttpRequest<'_>) -> LightHttpResponse {
+        let mut body = String::new();
+        self.write_pairing_metadata(&mut body);
+        LightHttpResponse {
+            status: 200,
+            allow_origin: self.cors_origin(request.origin),
+            allow_private_network: false,
+            body,
+        }
+    }
+
+    fn light_error_response(
+        &self,
+        origin: Option<&str>,
+        status: u16,
+        message: &str,
+    ) -> LightHttpResponse {
+        let mut body = String::new();
+        let _ = body.push_str(message);
+        LightHttpResponse {
+            status,
+            allow_origin: self.cors_origin(origin),
+            allow_private_network: false,
+            body,
+        }
     }
 
     fn dispatch_gate(&mut self, now_ms: u64, request: HttpRequest<'_>) -> HttpGate {
@@ -438,13 +638,24 @@ impl NetHttpState {
     /// bearer can be obtained, but never exposes operational status, a token,
     /// or the front-panel pairing code.
     fn public_health_response(&self) -> HttpResponse {
+        let mut body = String::new();
+        self.write_public_health(&mut body);
+        HttpResponse::json(200, body)
+    }
+
+    fn pairing_metadata_response(&self) -> HttpResponse {
+        let mut body = String::new();
+        self.write_pairing_metadata(&mut body);
+        HttpResponse::json(200, body)
+    }
+
+    fn write_public_health(&self, body: &mut impl core::fmt::Write) {
         let identity = self
             .device_names
             .as_ref()
             .map(identity_from_device_names)
             .unwrap_or_else(crate::control_plane::Identity::firmware_default);
         let attempts_remaining = 5u8.saturating_sub(self.pairing.failed_attempts());
-        let mut body = String::new();
         let _ = write!(
             body,
             r#"{{"ok":true,"api":"v1","deviceId":"{}","hostname":"{}","firmwareVersion":"{}","pairing":{{"mode":"{}","active":{},"attemptsRemaining":{}}}}}"#,
@@ -455,12 +666,10 @@ impl NetHttpState {
             self.pairing.is_active(),
             attempts_remaining
         );
-        HttpResponse::json(200, body)
     }
 
-    fn pairing_metadata_response(&self) -> HttpResponse {
+    fn write_pairing_metadata(&self, body: &mut impl core::fmt::Write) {
         let attempts_remaining = 5u8.saturating_sub(self.pairing.failed_attempts());
-        let mut body = String::new();
         let _ = write!(
             body,
             r#"{{"mode":"{}","active":{},"attemptsRemaining":{}}}"#,
@@ -468,7 +677,6 @@ impl NetHttpState {
             self.pairing_mode == LanPairingMode::Required && self.pairing.is_active(),
             attempts_remaining
         );
-        HttpResponse::json(200, body)
     }
 
     fn lease_route(&mut self, now_ms: u64, request: HttpRequest<'_>) -> HttpResponse {
@@ -703,6 +911,30 @@ mod tests {
     }
 
     #[test]
+    fn cors_pna_response_headers_are_complete_for_direct_browser_control() {
+        let header = format_http_response_headers(
+            200,
+            2_710,
+            Some("http://127.0.0.1:18091"),
+            true,
+            Some(u32::MAX),
+            "application/json",
+        );
+
+        assert!(header.contains("Content-Length: 2710\r\n"));
+        assert!(header.contains("Access-Control-Allow-Origin: http://127.0.0.1:18091\r\n"));
+        assert!(header.contains("Access-Control-Allow-Private-Network: true\r\n"));
+        assert!(header.ends_with("\r\n\r\n"));
+        assert!(header.len() <= HTTP_RESPONSE_HEADER_MAX_LEN);
+    }
+
+    #[test]
+    fn http_socket_budget_supports_two_reads_with_one_mutation_workspace() {
+        assert_eq!(http_socket_slot_count(1), 3);
+        assert_eq!(http_workspace_slot_count(1), 1);
+    }
+
+    #[test]
     fn lan_identity_uses_the_mac_derived_device_name() {
         let identity = identity_from_device_names(&device_names_from_mac([0, 17, 34, 51, 68, 85]));
 
@@ -773,6 +1005,53 @@ mod tests {
         );
         assert!(health.body.contains(r#""mode":"required""#));
         assert_eq!(mailbox.calls, 0);
+    }
+
+    #[test]
+    fn light_read_gate_keeps_snapshot_reads_out_of_the_control_mailbox() {
+        let mut state = NetHttpState::new(Some([9; crate::lan::LAN_TOKEN_BYTES]));
+        let bearer = "Bearer 0909090909090909090909090909090909090909090909090909090909090909";
+        let mut response = LightHttpResponse {
+            status: 500,
+            allow_origin: None,
+            allow_private_network: false,
+            body: String::new(),
+        };
+
+        let health = state.gate_light_read(req(HttpMethod::Get, "/health"), &mut response);
+        assert!(matches!(health, HttpReadGate::Respond));
+        assert_eq!(response.status, 200);
+
+        let unauthorized =
+            state.gate_light_read(req(HttpMethod::Get, "/api/v1/network"), &mut response);
+        assert!(matches!(unauthorized, HttpReadGate::Respond));
+        assert_eq!(response.status, 401);
+
+        let network = state.gate_light_read(
+            HttpRequest {
+                authorization: Some(bearer),
+                ..req(HttpMethod::Get, "/api/v1/network")
+            },
+            &mut response,
+        );
+        assert!(matches!(
+            network,
+            HttpReadGate::Snapshot {
+                endpoint: LanEndpoint::Network,
+                ..
+            }
+        ));
+
+        assert!(matches!(
+            state.gate_light_read(
+                HttpRequest {
+                    authorization: Some(bearer),
+                    ..req(HttpMethod::Get, "/api/v1/status")
+                },
+                &mut response,
+            ),
+            HttpReadGate::Defer
+        ));
     }
 
     #[test]

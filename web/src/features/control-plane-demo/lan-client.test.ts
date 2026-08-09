@@ -10,8 +10,12 @@ import {
   loadLanScanCidr,
   normalizeLanBaseUrl,
   probeLanDevice,
+  rememberLanDeviceIdentity,
+  resumeLanDeviceSession,
+  savedLanSessionToDeviceTarget,
   scanLanSubnet,
   storeLanAddress,
+  storeLanDeviceSession,
   storeLanScanCidr,
   streamLanEvents,
   upsertLanDeviceTarget,
@@ -173,6 +177,50 @@ describe('LAN browser client', () => {
     expect(fetcher).toHaveBeenCalledTimes(1)
   })
 
+  it('resumes the saved browser session only after health confirms the same device identity', async () => {
+    const records = new Map<string, string>()
+    const storage = {
+      get length() {
+        return records.size
+      },
+      clear: () => records.clear(),
+      getItem: (key: string) => records.get(key) ?? null,
+      key: (index: number) => Array.from(records.keys())[index] ?? null,
+      removeItem: (key: string) => records.delete(key),
+      setItem: (key: string, value: string) => records.set(key, value),
+    } as Storage
+    vi.stubGlobal('window', { localStorage: storage })
+    try {
+      const session = {
+        baseUrl: 'http://192.168.1.10',
+        token: 'a'.repeat(64),
+        deviceId: '001122334455',
+        hostname: 'flux-purr-001122334455',
+      }
+      storeLanDeviceSession(session)
+      const probe = {
+        identity: {
+          deviceId: '001122334455',
+          hostname: 'flux-purr-001122334455',
+          firmwareVersion: '1.0.0',
+          buildId: 'build-1',
+          capabilities: [],
+        },
+      } as unknown as Awaited<ReturnType<typeof probeLanDevice>>
+
+      await expect(
+        resumeLanDeviceSession(session.baseUrl, { deviceId: '001122334455' }, async () => probe)
+      ).resolves.toMatchObject({ session, probe })
+
+      await expect(
+        resumeLanDeviceSession(session.baseUrl, { deviceId: 'aabbccddeeff' }, async () => probe)
+      ).resolves.toBeNull()
+      expect(loadLanDeviceSession(session.baseUrl)).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('accepts Chromium but explicitly excludes Safari direct-LAN mode', () => {
     expect(isChromiumPrivateNetworkSupported('Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36')).toBe(
       true
@@ -198,7 +246,7 @@ describe('LAN browser client', () => {
     expect(fetcher).toHaveBeenCalledTimes(3)
   })
 
-  it('probes identity, network, and status concurrently and remembers the newest revision', async () => {
+  it('limits the initial LAN probe to the two device HTTP workers and remembers the newest revision', async () => {
     let activeRequests = 0
     let maximumActiveRequests = 0
     const requestOrder: string[] = []
@@ -237,7 +285,7 @@ describe('LAN browser client', () => {
       expect(requestOrder).toEqual(
         expect.arrayContaining(['/api/v1/identity', '/api/v1/network', '/api/v1/status'])
       )
-      expect(maximumActiveRequests).toBe(3)
+      expect(maximumActiveRequests).toBe(2)
       expect(session.controlRevision).toBe(7)
       expect(JSON.parse(records.get('flux-purr:lan-device:http://192.168.1.10') ?? '{}')).toEqual(
         expect.objectContaining({ controlRevision: 7 })
@@ -247,7 +295,70 @@ describe('LAN browser client', () => {
     }
   })
 
-  it('falls back to a serial probe when concurrent reads hit a transport limit', async () => {
+  it('keeps the first probe after pairing serial until the claim socket is released', async () => {
+    let activeRequests = 0
+    let maximumActiveRequests = 0
+    const requestOrder: string[] = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      activeRequests += 1
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests)
+      requestOrder.push(new URL(String(input)).pathname)
+      await new Promise((resolve) => setTimeout(resolve, 1))
+      activeRequests -= 1
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+      })
+    }) as unknown as typeof fetch
+
+    await probeLanDevice(
+      { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) },
+      fetcher,
+      'serial'
+    )
+
+    expect(maximumActiveRequests).toBe(1)
+    expect(requestOrder).toEqual(['/api/v1/identity', '/api/v1/network', '/api/v1/status'])
+  })
+
+  it('replaces a persisted revision with the serial preflight revision after a device reboot', async () => {
+    const records = new Map<string, string>()
+    vi.stubGlobal('window', {
+      localStorage: {
+        get length() {
+          return records.size
+        },
+        clear: () => records.clear(),
+        getItem: (key: string) => records.get(key) ?? null,
+        key: (index: number) => Array.from(records.keys())[index] ?? null,
+        removeItem: (key: string) => records.delete(key),
+        setItem: (key: string, value: string) => records.set(key, value),
+      },
+    })
+    const session: import('./lan-client').LanDeviceSession = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 42,
+    }
+    const fetcher = vi.fn(async () => {
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '7' },
+      })
+    }) as unknown as typeof fetch
+
+    try {
+      await probeLanDevice(session, fetcher, 'serial')
+      expect(session.controlRevision).toBe(7)
+      expect(JSON.parse(records.get('flux-purr:lan-device:http://192.168.1.10') ?? '{}')).toEqual(
+        expect.objectContaining({ controlRevision: 7 })
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls back to a serial probe when the two-worker read batch hits a transport limit', async () => {
     let activeRequests = 0
     let concurrentFailure = false
     const fetcher = vi.fn(async (_input: RequestInfo | URL) => {
@@ -271,7 +382,7 @@ describe('LAN browser client', () => {
       probeLanDevice({ baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }, fetcher)
     ).resolves.toBeDefined()
     expect(concurrentFailure).toBe(true)
-    expect(fetcher).toHaveBeenCalledTimes(6)
+    expect(fetcher).toHaveBeenCalledTimes(5)
   })
 
   it('sends the last device revision with a LAN write', async () => {
@@ -294,6 +405,121 @@ describe('LAN browser client', () => {
     await writeLanRuntime(session, 'lease-1', { targetTempC: 120 }, fetcher)
 
     expect(session.controlRevision).toBe(8)
+  })
+
+  it('persists a successful LAN write revision for the next reloaded write', async () => {
+    const records = new Map<string, string>()
+    vi.stubGlobal('window', {
+      localStorage: {
+        get length() {
+          return records.size
+        },
+        clear: () => records.clear(),
+        getItem: (key: string) => records.get(key) ?? null,
+        key: (index: number) => Array.from(records.keys())[index] ?? null,
+        removeItem: (key: string) => records.delete(key),
+        setItem: (key: string, value: string) => records.set(key, value),
+      },
+    })
+    const revisions: string[] = []
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const revision = (init?.headers as Record<string, string>)['X-Flux-Purr-Revision']
+      revisions.push(revision)
+      return new Response(JSON.stringify({ accepted: true }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'X-Flux-Purr-Revision': String(Number(revision) + 1),
+        },
+      })
+    }) as unknown as typeof fetch
+    const initialSession = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 7,
+    }
+
+    try {
+      storeLanDeviceSession(initialSession)
+      await writeLanRuntime(initialSession, 'lease-1', { targetTempC: 120 }, fetcher)
+
+      const reloadedSession = loadLanDeviceSession(initialSession.baseUrl)
+      expect(reloadedSession?.controlRevision).toBe(8)
+      if (!reloadedSession) {
+        throw new Error('expected persisted LAN session')
+      }
+      await writeLanRuntime(reloadedSession, 'lease-1', { targetTempC: 121 }, fetcher)
+
+      expect(revisions).toEqual(['7', '8'])
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('keeps a remembered LAN connection visible while the device is offline', () => {
+    const records = new Map<string, string>()
+    vi.stubGlobal('window', {
+      localStorage: {
+        get length() {
+          return records.size
+        },
+        clear: () => records.clear(),
+        getItem: (key: string) => records.get(key) ?? null,
+        key: (index: number) => Array.from(records.keys())[index] ?? null,
+        removeItem: (key: string) => records.delete(key),
+        setItem: (key: string, value: string) => records.set(key, value),
+      },
+    })
+    const session = { baseUrl: 'http://192.168.31.189', token: 'a'.repeat(64) }
+    const probe = {
+      identity: {
+        deviceId: 'a0f262f20d6c',
+        hostname: 'flux-purr-a0f262f20d6c',
+        firmwareVersion: '0.1.0',
+        buildId: 'build-1',
+        gitSha: 'sha',
+        board: 'esp32s3',
+        apiVersion: 'v1',
+        protocolVersion: 'usb.v1',
+        capabilities: [],
+      },
+      network: { state: 'connected' as const },
+      status: {} as import('./contracts').ControlPlaneStatus,
+    }
+
+    try {
+      const remembered = rememberLanDeviceIdentity(session, probe)
+      const reloaded = listSavedLanDeviceSessions()[0]
+      const target = savedLanSessionToDeviceTarget(reloaded)
+
+      expect(reloaded).toEqual(remembered)
+      expect(target).toMatchObject({
+        id: 'lan-a0f262f20d6c',
+        identityId: 'a0f262f20d6c',
+        alias: 'flux-purr-a0f262f20d6c',
+        transport: 'wifi',
+        severity: 'offline',
+        baseUrl: 'http://192.168.31.189',
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('restores a legacy LAN session from its canonical hostname', () => {
+    expect(
+      savedLanSessionToDeviceTarget({
+        baseUrl: 'http://192.168.31.189',
+        token: 'a'.repeat(64),
+        hostname: 'flux-purr-a0f262f20d6c',
+      })
+    ).toMatchObject({
+      id: 'lan-a0f262f20d6c',
+      identityId: 'a0f262f20d6c',
+      alias: 'flux-purr-a0f262f20d6c',
+      transport: 'wifi',
+      severity: 'offline',
+    })
   })
 
   it('validates manual addresses and pairing codes before issuing a request', async () => {
@@ -424,7 +650,7 @@ describe('LAN browser client', () => {
     }
   })
 
-  it('purges only the rejected LAN session when a bearer request returns 401', async () => {
+  it('invalidates credentials without forgetting the device when a bearer request returns 401', async () => {
     const records = new Map<string, string>()
     const storage = {
       get length() {
@@ -447,7 +673,12 @@ describe('LAN browser client', () => {
       const token = 'a'.repeat(64)
       storage.setItem(
         'flux-purr:lan-device:http://192.168.1.10',
-        JSON.stringify({ baseUrl: 'http://192.168.1.10', token })
+        JSON.stringify({
+          baseUrl: 'http://192.168.1.10',
+          token,
+          deviceId: '001122334455',
+          hostname: 'flux-purr-001122334455',
+        })
       )
       storage.setItem(
         'flux-purr:lan-device:http://192.168.1.11',
@@ -469,6 +700,21 @@ describe('LAN browser client', () => {
 
       expect(loadLanDeviceSession('http://192.168.1.10')).toBeNull()
       expect(loadLanDeviceSession('http://192.168.1.11')).toMatchObject({ token })
+      expect(listSavedLanDeviceSessions()).toContainEqual(
+        expect.objectContaining({
+          baseUrl: 'http://192.168.1.10',
+          deviceId: '001122334455',
+          authorizationState: 'invalid',
+        })
+      )
+      const invalidSession = listSavedLanDeviceSessions().find(
+        (session) => session.baseUrl === 'http://192.168.1.10'
+      )
+      expect(invalidSession).toBeDefined()
+      expect(invalidSession && savedLanSessionToDeviceTarget(invalidSession)).toMatchObject({
+        id: 'lan-001122334455',
+        severity: 'offline',
+      })
     } finally {
       vi.unstubAllGlobals()
     }

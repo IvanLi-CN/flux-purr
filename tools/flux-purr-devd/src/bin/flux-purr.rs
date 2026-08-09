@@ -105,6 +105,14 @@ enum LanCommand {
     )]
     PairingCode(TargetSelector),
     #[command(
+        about = "Open the physical WiFi Info pairing window through a USB/devd lease and return its four-digit code."
+    )]
+    PairingOpen(TargetSelector),
+    #[command(
+        about = "Close the physical WiFi Info pairing window through a USB/devd lease and invalidate its code."
+    )]
+    PairingClose(TargetSelector),
+    #[command(
         about = "Clear a LAN token only through a USB/devd lease; the device must be selected explicitly."
     )]
     Reset(TargetSelector),
@@ -1262,6 +1270,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 )
                 .await?
             }
+            LanCommand::PairingOpen(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::POST,
+                    "/lan-pairing/window",
+                    None,
+                )
+                .await?
+            }
+            LanCommand::PairingClose(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::DELETE,
+                    "/lan-pairing/window",
+                    None,
+                )
+                .await?
+            }
             LanCommand::Status(args) => {
                 let device = resolve_lan_target(&args.id)?;
                 authorized_json(&device, Method::GET, "status", None, None).await?
@@ -1525,11 +1553,11 @@ async fn request_leased(
         suffix
     );
     let mut url = api_url(&resolved.devd, &path)?;
-    match method {
-        Method::GET | Method::POST if body.is_none() => {
-            url.query_pairs_mut().append_pair("lease_id", lease_id);
-        }
-        _ => {}
+    if body.is_none() {
+        // Lease-bearing control endpoints can be GET, POST, or DELETE. A
+        // body-less DELETE still needs the same query lease as a body-less
+        // read, otherwise the daemon correctly rejects the operation.
+        url.query_pairs_mut().append_pair("lease_id", lease_id);
     }
     let mut request = client.request(method, url);
     if let Some(mut body) = body {

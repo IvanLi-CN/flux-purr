@@ -41,7 +41,6 @@ pub const DEVICE_LIST_EVENT_LIMIT: usize = 24;
 pub const DEVICE_EVENT_REPLAY_LIMIT: usize = 120;
 pub const DEFAULT_LEASE_TTL_MS: u64 = 30_000;
 pub const DEFAULT_BAUD_RATE: u32 = 115_200;
-pub const DEFAULT_SERIAL_PORT: &str = "/dev/cu.usbmodem21221401";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30080";
 const DEFAULT_PD_REQUEST_MV: u16 = 20_000;
 const PPS_HARDWARE_MIN_MV: u16 = 5_000;
@@ -199,14 +198,6 @@ pub fn write_user_config(config: &UserConfig) -> io::Result<()> {
     Ok(())
 }
 
-pub fn read_default_serial_port_from_user_config() -> Option<PathBuf> {
-    read_user_config()
-        .ok()
-        .and_then(|config| config.default_serial_port)
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -214,7 +205,7 @@ impl Default for AppConfig {
             artifact_root: None,
             allow_dev_cors: true,
             allow_real_flash: false,
-            serial_port: Some(PathBuf::from(DEFAULT_SERIAL_PORT)),
+            serial_port: None,
         }
     }
 }
@@ -587,14 +578,14 @@ impl DeviceRecord {
             transport: DeviceTransport::NativeSerial,
             connection: ConnectionState::Disconnected,
             identity: Identity {
-                device_id: id.to_string(),
+                device_id: String::new(),
                 firmware_version: "unknown".to_string(),
                 build_id: "native-serial-placeholder".to_string(),
                 git_sha: "unknown".to_string(),
                 board: "unknown".to_string(),
                 api_version: "2026-05-29".to_string(),
                 protocol_version: "flux-purr.usb.v1".to_string(),
-                hostname: id.to_string(),
+                hostname: String::new(),
                 capabilities: vec![
                     "identity".to_string(),
                     "status".to_string(),
@@ -618,6 +609,30 @@ impl DeviceRecord {
             events: VecDeque::new(),
         }
     }
+
+    fn lan_bridge(
+        id: String,
+        identity: Identity,
+        network: NetworkSummary,
+        status: ControlPlaneStatus,
+    ) -> Self {
+        let mut record = Self::mock(&id, DeviceTransport::Lan);
+        record.display_name = if identity.hostname.trim().is_empty() {
+            identity.device_id.clone()
+        } else {
+            identity.hostname.clone()
+        };
+        record.port_path = None;
+        record.connection = ConnectionState::Connected;
+        record.identity = identity;
+        record.network = network;
+        record.status = status;
+        record.status.network = record.network.clone();
+        record.logs.clear();
+        record.trace.clear();
+        record.events.clear();
+        record
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -625,6 +640,7 @@ impl DeviceRecord {
 pub enum DeviceTransport {
     Mock,
     NativeSerial,
+    Lan,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1906,12 +1922,20 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/lan/discovery/scan", post(scan_lan_cidr))
         .route("/api/v1/lan/pair", post(pair_lan_device))
         .route(
+            "/api/v1/lan/devices/{lan_device_id}/connect",
+            post(connect_lan_device),
+        )
+        .route(
             "/api/v1/devices/{device_id}/lan-pairing/reset",
             post(reset_lan_pairing),
         )
         .route(
             "/api/v1/devices/{device_id}/lan-pairing/code",
             get(get_lan_pairing_code),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/lan-pairing/window",
+            post(open_lan_pairing_window).delete(close_lan_pairing_window),
         )
         .route("/api/v1/devices", get(list_devices))
         .route("/api/v1/devices/{device_id}/bind", post(bind_device))
@@ -2105,6 +2129,117 @@ async fn pair_lan_device(
     Ok(Json(summary))
 }
 
+/// Establish a DEVD-owned control route for an already paired LAN device.
+/// The browser receives only the verified public record; the pairing token
+/// remains in DEVD's local registry and is never serialized by this endpoint.
+async fn connect_lan_device(
+    State(state): State<AppState>,
+    AxumPath(lan_device_id): AxumPath<String>,
+) -> Result<Json<Value>, HttpError> {
+    let configured = read_user_config()
+        .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?
+        .lan_devices
+        .into_iter()
+        .find(|device| device.id == lan_device_id)
+        .ok_or_else(|| {
+            HttpError::not_found("lan_device_not_found", "LAN device is not registered.")
+        })?;
+
+    if configured.pairing_token.is_none() {
+        return Err(HttpError::conflict(
+            "lan_pairing_required",
+            "Pair this LAN device before connecting it through DEVD.",
+            json!({ "deviceId": configured.id }),
+        ));
+    }
+
+    let identity = lan_bridge_read::<Identity>(&configured, "identity").await?;
+    validate_lan_bridge_identity(&identity)?;
+    let network = lan_bridge_read::<NetworkSummary>(&configured, "network").await?;
+    let status = lan_bridge_read::<ControlPlaneStatus>(&configured, "status").await?;
+    let bridge_id = bridge_lan_device_id(&configured.id);
+    let record = DeviceRecord::lan_bridge(bridge_id.clone(), identity, network, status);
+
+    {
+        let mut state_lock = state.lock()?;
+        state_lock.devices.insert(bridge_id.clone(), record.clone());
+    }
+    state.emit(event(
+        &bridge_id,
+        "lan",
+        "DEVD LAN bridge identity verified",
+        json!({ "transport": "lan", "lanDeviceId": configured.id }),
+    ));
+    Ok(Json(device_list_payload(record)))
+}
+
+fn bridge_lan_device_id(lan_device_id: &str) -> String {
+    format!("devd-{lan_device_id}")
+}
+
+fn lan_device_id_for_bridge(device_id: &str) -> Result<&str, HttpError> {
+    device_id.strip_prefix("devd-lan-").ok_or_else(|| {
+        HttpError::bad_request(
+            "invalid_lan_bridge_device",
+            "Invalid DEVD LAN bridge device ID.",
+        )
+    })
+}
+
+fn lan_bridge_config(target: &DeviceRecord) -> Result<lan::LanDeviceConfig, HttpError> {
+    let lan_device_id = lan_device_id_for_bridge(&target.id)?;
+    read_user_config()
+        .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?
+        .lan_devices
+        .into_iter()
+        .find(|device| device.id.strip_prefix("lan-") == Some(lan_device_id))
+        .ok_or_else(|| {
+            HttpError::not_found("lan_device_not_found", "LAN device is not registered.")
+        })
+}
+
+async fn lan_bridge_read<T: DeserializeOwned>(
+    device: &lan::LanDeviceConfig,
+    path: &str,
+) -> Result<T, HttpError> {
+    let value = lan::authorized_json(device, Method::GET, path, None, None)
+        .await
+        .map_err(|error| match error {
+            lan::LanClientError::AuthorizationRejected => HttpError::conflict(
+                "lan_pairing_required",
+                "The saved DEVD LAN pairing token was rejected. Open WiFi Info and pair again with its four-digit code.",
+                json!({ "action": "pair" }),
+            ),
+            error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
+        })?;
+    serde_json::from_value(value).map_err(|_| {
+        HttpError::bad_request(
+            "lan_bridge_invalid_response",
+            "LAN device returned an invalid response.",
+        )
+    })
+}
+
+fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
+    let valid = !identity.device_id.trim().is_empty()
+        && identity.api_version == "2026-05-29"
+        && identity.protocol_version == "flux-purr.usb.v1"
+        && ["identity", "network", "status"].iter().all(|capability| {
+            identity
+                .capabilities
+                .iter()
+                .any(|value| value == capability)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(HttpError::bad_request(
+            "unknown_lan_device",
+            "The LAN endpoint did not identify as a compatible Flux Purr device.",
+        ))
+    }
+}
+
 async fn reset_lan_pairing(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -2159,6 +2294,59 @@ async fn get_lan_pairing_code(
         ));
     }
     Ok(Json(serial_lan_pairing_code(&state, &target).await?))
+}
+
+async fn open_lan_pairing_window(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<LanPairingCode>, HttpError> {
+    let target = native_lan_pairing_target(&state, &device_id, query.lease_id.as_deref())?;
+    let code = serial_open_lan_pairing_window(&state, &target).await?;
+    state.emit(event(
+        &device_id,
+        "lan",
+        "LAN pairing window opened through USB lease",
+        json!({ "code": "<redacted>" }),
+    ));
+    Ok(Json(code))
+}
+
+async fn close_lan_pairing_window(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = native_lan_pairing_target(&state, &device_id, query.lease_id.as_deref())?;
+    serial_close_lan_pairing_window(&state, &target).await?;
+    state.emit(event(
+        &device_id,
+        "lan",
+        "LAN pairing window closed through USB lease",
+        json!({ "code": "<redacted>" }),
+    ));
+    Ok(Json(json!({ "closed": true })))
+}
+
+fn native_lan_pairing_target(
+    state: &AppState,
+    device_id: &str,
+    lease_id: Option<&str>,
+) -> Result<DeviceRecord, HttpError> {
+    let mut state_lock = state.lock()?;
+    let target = state_lock
+        .devices
+        .get(device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+        .clone();
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "LAN pairing window is available only through the USB/devd transport.",
+        ));
+    }
+    state_lock.require_lease(device_id, lease_id)?;
+    Ok(target)
 }
 
 async fn bind_device(
@@ -2292,6 +2480,17 @@ async fn device_identity(
         }
         return Ok(Json(identity));
     }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let identity = lan_bridge_read::<Identity>(&configured, "identity").await?;
+        validate_lan_bridge_identity(&identity)?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.identity = identity.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(identity));
+    }
     Ok(Json(target.identity))
 }
 
@@ -2322,6 +2521,17 @@ async fn device_network(
                 return Err(error);
             }
         };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.network = network.clone();
+            device.status.network = network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(network));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let network = lan_bridge_read::<NetworkSummary>(&configured, "network").await?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.network = network.clone();
@@ -2364,6 +2574,17 @@ async fn device_status(
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.status = status.clone();
             device.network = status.network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(status));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let status = lan_bridge_read::<ControlPlaneStatus>(&configured, "status").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.network = status.network.clone();
+            device.status = status.clone();
             device.connection = ConnectionState::Connected;
         }
         return Ok(Json(status));
@@ -4388,6 +4609,44 @@ async fn serial_lan_pairing_code(
     validate_lan_pairing_code(code)
 }
 
+async fn serial_open_lan_pairing_window(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<LanPairingCode, HttpError> {
+    let code = serial_request_payload::<LanPairingCode>(
+        state,
+        target,
+        "open_lan_pairing_window",
+        "lan_pairing_code",
+    )
+    .await?;
+    validate_lan_pairing_code(code)
+}
+
+async fn serial_close_lan_pairing_window(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<(), HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-lan-pairing-close", now_millis());
+    let request = serde_json::to_string(&UsbRequestWire {
+        frame_type: "request",
+        request_id: &request_id,
+        op: "close_lan_pairing_window",
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB LAN pairing-window close request"))?;
+    let _ = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    Ok(())
+}
+
 fn validate_lan_pairing_code(code: LanPairingCode) -> Result<LanPairingCode, HttpError> {
     let valid_code = code
         .code
@@ -4688,8 +4947,7 @@ async fn serial_exchange(
             retry_policy,
         )
     })
-    .await
-    .map_err(|_| HttpError::internal("serial worker failed"))?;
+    .await?;
 
     match &result {
         Ok(payload) => record_transport_event(
@@ -4728,17 +4986,30 @@ async fn serial_exchange(
 async fn spawn_serial_worker<T, F>(
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
     worker: F,
-) -> Result<T, tokio::task::JoinError>
+) -> Result<T, HttpError>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
-    let serial_rpc = serial_rpc.lock_owned().await;
+    spawn_serial_worker_with_timeout(serial_rpc, SERIAL_RPC_TIMEOUT, worker).await
+}
+
+async fn spawn_serial_worker_with_timeout<T, F>(
+    serial_rpc: Arc<tokio::sync::Mutex<()>>,
+    lock_timeout: Duration,
+    worker: F,
+) -> Result<T, HttpError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let serial_rpc = acquire_serial_rpc_with_timeout(serial_rpc, lock_timeout).await?;
     tokio::task::spawn_blocking(move || {
         let _serial_rpc = serial_rpc;
         worker()
     })
     .await
+    .map_err(|_| HttpError::internal("serial worker failed"))
 }
 
 fn native_port_path(target: &DeviceRecord) -> Result<String, HttpError> {
@@ -5057,8 +5328,9 @@ fn serial_lock_path(port_path: &str) -> PathBuf {
 }
 
 fn open_serial_port(port_path: &str) -> Result<Box<dyn serialport::SerialPort>, HttpError> {
-    let mut port = serialport::new(port_path, DEFAULT_BAUD_RATE)
-        .dtr_on_open(false)
+    // USB Serial/JTAG does not use modem-control lines.  Explicit DTR/RTS writes
+    // can reset an attached MCU, so leave those lines entirely to the driver.
+    serialport::new(port_path, DEFAULT_BAUD_RATE)
         .timeout(SERIAL_READ_TIMEOUT)
         .open()
         .map_err(|error| {
@@ -5068,10 +5340,7 @@ fn open_serial_port(port_path: &str) -> Result<Box<dyn serialport::SerialPort>, 
                 &format!("Failed to open serial port: {error}"),
                 true,
             )
-        })?;
-    let _ = port.write_request_to_send(false);
-    let _ = port.write_data_terminal_ready(false);
-    Ok(port)
+        })
 }
 
 fn open_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSession, HttpError> {
@@ -5450,6 +5719,12 @@ async fn flash_device(
                     "Real flash requires a native serial target.",
                 ));
             }
+            DeviceTransport::Lan => {
+                return Err(HttpError::bad_request(
+                    "lan_flash_unsupported",
+                    "Firmware flashing is unavailable through the DEVD LAN bridge.",
+                ));
+            }
         }
     };
 
@@ -5578,19 +5853,38 @@ async fn flash_device(
 }
 
 pub fn scan_serial_devices(serial_port: Option<&Path>) -> Vec<DeviceRecord> {
+    let available_ports = serialport::available_ports().ok().unwrap_or_default();
+    scan_serial_devices_from_available(serial_port, &available_ports)
+}
+
+fn scan_serial_devices_from_available(
+    serial_port: Option<&Path>,
+    available_ports: &[serialport::SerialPortInfo],
+) -> Vec<DeviceRecord> {
     let Some(serial_port) = serial_port else {
-        return Vec::new();
+        return available_ports
+            .iter()
+            .filter(|port| is_flux_purr_usb_candidate(port))
+            .map(|port| serial_device_record(&port.port_name, Some(port)))
+            .collect();
     };
     let port_name = serial_port.to_string_lossy().into_owned();
-    let available_ports = serialport::available_ports().ok().unwrap_or_default();
     if !serial_port.exists() {
-        return vec![missing_serial_device_record(&port_name, &available_ports)];
+        return vec![missing_serial_device_record(&port_name, available_ports)];
     }
 
     let port_info = available_ports
         .iter()
         .find(|port| port.port_name == port_name);
     vec![serial_device_record(&port_name, port_info)]
+}
+
+fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {
+    port.port_name.starts_with("/dev/cu.usbmodem")
+        || matches!(
+            &port.port_type,
+            serialport::SerialPortType::UsbPort(info) if info.vid == 0x303a
+        )
 }
 
 fn refresh_serial_devices(state: &mut DevdState, serial_devices: Vec<DeviceRecord>) {
@@ -6518,7 +6812,12 @@ fn requires_lease(state: &DevdState, device_id: &str) -> bool {
     state
         .devices
         .get(device_id)
-        .map(|device| device.transport == DeviceTransport::NativeSerial)
+        .map(|device| {
+            matches!(
+                device.transport,
+                DeviceTransport::NativeSerial | DeviceTransport::Lan
+            )
+        })
         .unwrap_or(true)
 }
 
@@ -7177,11 +7476,59 @@ mod tests {
     }
 
     #[test]
+    fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
+        let ports = vec![
+            serialport::SerialPortInfo {
+                port_name: "/dev/cu.usbmodem-a".to_string(),
+                port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                    vid: 0x303a,
+                    pid: 0x1001,
+                    serial_number: Some("candidate-a".to_string()),
+                    manufacturer: Some("Espressif".to_string()),
+                    product: Some("USB JTAG/serial debug unit".to_string()),
+                }),
+            },
+            serialport::SerialPortInfo {
+                port_name: "/dev/cu.usbmodem-b".to_string(),
+                port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                    vid: 0x303a,
+                    pid: 0x1001,
+                    serial_number: Some("candidate-b".to_string()),
+                    manufacturer: Some("Espressif".to_string()),
+                    product: Some("USB JTAG/serial debug unit".to_string()),
+                }),
+            },
+            serialport::SerialPortInfo {
+                port_name: "/dev/cu.other".to_string(),
+                port_type: serialport::SerialPortType::Unknown,
+            },
+        ];
+
+        let devices = scan_serial_devices_from_available(None, &ports);
+
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].port_path.as_deref(), Some("/dev/cu.usbmodem-a"));
+        assert_eq!(devices[1].port_path.as_deref(), Some("/dev/cu.usbmodem-b"));
+        assert!(
+            devices
+                .iter()
+                .all(|device| device.identity.device_id.is_empty())
+        );
+        assert!(
+            devices
+                .iter()
+                .all(|device| device.identity.hostname.is_empty())
+        );
+    }
+
+    #[test]
     fn native_serial_devices_advertise_devd_flash_capabilities() {
         let device = serial_device_record("/dev/cu.usbmodem-test", None);
 
         assert_eq!(device.transport, DeviceTransport::NativeSerial);
         assert_eq!(device.connection, ConnectionState::Disconnected);
+        assert_eq!(device.identity.device_id, "");
+        assert_eq!(device.identity.hostname, "");
         assert_eq!(device.identity.build_id, "native-serial-placeholder");
         assert_eq!(device.identity.board, "unknown");
         assert_eq!(device.status.current_temp_c, -1.0);
@@ -8099,7 +8446,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_serial_reads_and_pairing_code_require_an_active_lease() {
+    async fn native_serial_reads_and_pairing_window_operations_require_an_active_lease() {
         let state = AppState::test();
         {
             let mut state_lock = state.lock().unwrap();
@@ -8122,6 +8469,16 @@ mod tests {
         .unwrap_err();
         assert_eq!(pairing_error.status, StatusCode::FORBIDDEN);
         assert_eq!(pairing_error.error.code, "lease_required");
+
+        let pairing_window_error = open_lan_pairing_window(
+            State(state.clone()),
+            AxumPath("native-test".to_string()),
+            Query(LeaseQuery { lease_id: None }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(pairing_window_error.status, StatusCode::FORBIDDEN);
+        assert_eq!(pairing_window_error.error.code, "lease_required");
 
         let status_error = device_status(
             State(state),
@@ -9764,6 +10121,12 @@ mod tests {
         request.abort();
         tokio::task::yield_now().await;
         assert!(serial_rpc.try_lock().is_err());
+
+        let error =
+            spawn_serial_worker_with_timeout(serial_rpc.clone(), Duration::from_millis(25), || ())
+                .await
+                .unwrap_err();
+        assert_eq!(error.error.code, "serial_lock_timeout");
 
         finish_tx.send(()).unwrap();
         let _serial_rpc = tokio::time::timeout(Duration::from_secs(1), serial_rpc.lock())

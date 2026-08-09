@@ -21,10 +21,18 @@ export function deviceIdentityId(device: Pick<DeviceTarget, 'id' | 'identityId'>
   return device.identityId?.trim() || stripTransportId(device.id)
 }
 
+export function isDeviceConnectionAvailable(device: Pick<DeviceTarget, 'connectionAvailable'>) {
+  return device.connectionAvailable !== false
+}
+
 export function deviceConnectionOptions(
   device: DeviceTarget,
   { allowDemoControls = true }: { allowDemoControls?: boolean } = {}
 ) {
+  if (!isDeviceConnectionAvailable(device)) {
+    return []
+  }
+
   const kind = connectionKind(device)
   if (kind === 'mock' && !allowDemoControls) {
     return []

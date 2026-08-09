@@ -7,12 +7,6 @@ rustflags = [
 [env]
 ESP_TARGET = "esp32s3"
 DEFMT_LOG = "info"
-# The LAN control plane is a low-throughput station client. Bound the WiFi
-# driver queues so its default 32-frame TX/RX pools cannot starve the display,
-# USB recovery path, or front-panel control executor on the ESP32-S3.
-ESP_WIFI_CONFIG_STATIC_RX_BUF_NUM = "6"
-ESP_WIFI_CONFIG_DYNAMIC_RX_BUF_NUM = "8"
-ESP_WIFI_CONFIG_DYNAMIC_TX_BUF_NUM = "8"
 
 [unstable]
 build-std = ["core", "alloc"]

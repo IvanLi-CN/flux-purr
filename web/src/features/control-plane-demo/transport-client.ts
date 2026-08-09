@@ -42,6 +42,7 @@ export class ControlPlaneClientError extends Error {
 }
 
 export interface ControlPlaneHttpClient {
+  identifyDevdDevice(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<Identity>
   probeDevice(
     baseUrl: string,
     leaseId?: string
@@ -63,6 +64,7 @@ export interface ControlPlaneHttpClient {
   listDevdLanDevices(devdBaseUrl: string): Promise<DevdLanDeviceSummary[]>
   refreshDevdLanMdns(devdBaseUrl: string): Promise<DevdLanDeviceSummary[]>
   scanDevdLanCidr(devdBaseUrl: string, cidr: string): Promise<DevdLanDeviceSummary[]>
+  connectDevdLanDevice(devdBaseUrl: string, lanDeviceId: string): Promise<DevdDeviceRecord>
   bindDevdDevice(
     devdBaseUrl: string,
     deviceId: string,
@@ -131,6 +133,12 @@ export function createControlPlaneHttpClient(
   fetcher: typeof fetch = fetch
 ): ControlPlaneHttpClient {
   return {
+    identifyDevdDevice(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<Identity>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/identity?lease_id=${encodeURIComponent(leaseId)}`
+      )
+    },
     async probeDevice(baseUrl, leaseId) {
       const suffix = leaseId ? `?lease_id=${encodeURIComponent(leaseId)}` : ''
       const [identity, network, status] = await Promise.all([
@@ -189,6 +197,13 @@ export function createControlPlaneHttpClient(
         }
       )
       return response.devices
+    },
+    connectDevdLanDevice(devdBaseUrl, lanDeviceId) {
+      return requestJson<DevdDeviceRecord>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/lan/devices/${encodeURIComponent(lanDeviceId)}/connect`,
+        { method: 'POST' }
+      )
     },
     bindDevdDevice(devdBaseUrl, deviceId, leaseId, request) {
       return requestJson<DevdDeviceRecord>(
@@ -362,13 +377,28 @@ export function createControlPlaneHttpClient(
 export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget {
   const transportIssue = devdTransportIssue(record)
   const firmwareAlias = record.identity.hostname.trim() || record.identity.deviceId.trim()
+  const identityVerified = record.identity.buildId !== 'native-serial-placeholder'
+  const authorizedPortMissing = record.events?.some(
+    (event) => event.payload?.code === 'authorized_port_missing'
+  )
   return {
     id: record.id,
     identityId: record.identity.deviceId,
-    alias: firmwareAlias || (record.transport === 'native_serial' ? record.id : record.displayName),
-    location: record.portPath ?? 'localhost devd',
-    transport: record.transport === 'native_serial' ? 'devd' : 'mock',
-    bridgeTransport: record.transport === 'native_serial' ? 'usb' : undefined,
+    alias: firmwareAlias || record.displayName,
+    location:
+      record.transport === 'lan'
+        ? (record.network.ip ?? 'DEVD LAN')
+        : (record.portPath ?? 'localhost devd'),
+    transport: record.transport === 'mock' ? 'mock' : 'devd',
+    bridgeTransport:
+      record.transport === 'native_serial'
+        ? 'usb'
+        : record.transport === 'lan'
+          ? 'wifi'
+          : undefined,
+    connectionAvailable: identityVerified,
+    connectionCandidate:
+      record.transport === 'native_serial' && Boolean(record.portPath) && !authorizedPortMissing,
     severity: record.connection === 'connected' ? 'nominal' : 'warning',
     baseUrl: `devd://${record.id}`,
     firmware: record.identity.firmwareVersion,
@@ -409,7 +439,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     wifiFailureCode: record.network.failureCode ?? null,
     capabilities: record.identity.capabilities,
     networkState: record.network.state,
-    leaseState: record.transport === 'native_serial' ? 'none' : undefined,
+    leaseState: record.transport === 'mock' ? undefined : 'none',
     transportIssue,
     heaterCurve: record.heaterCurve,
   }
@@ -498,12 +528,22 @@ export function devdEventToTransportIssue(event: DevdEvent) {
 export function devdEventToLogEntry(event: DevdEvent): EventLogEntry {
   const detail = devdEventDetail(event)
   return {
-    time: event.timestamp,
+    time: formatTraceTimestamp(event.timestamp),
     source: event.kind,
     message: detail ? `${event.message}: ${detail}` : event.message,
     tone: devdEventTone(event),
     detail: devdEventFrameDetail(event),
   }
+}
+
+function formatTraceTimestamp(timestamp: string) {
+  if (/^\d{2}:\d{2}:\d{2}$/.test(timestamp)) return timestamp
+  const numeric = Number(timestamp)
+  const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return '--:--:--'
+  return [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':')
 }
 
 function devdEventDetail(event: DevdEvent) {
