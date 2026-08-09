@@ -236,3 +236,4 @@
 - USB Serial/JTAG 的连接不把 DTR/RTS 变更作为初始化步骤。Browser Web Serial 与 DEVD 都只打开端口并执行有界只读 probe，硬件复位只能由设备明确诊断上报。
 - Browser Web Serial 的成功状态会结算先前的同通道失败反馈；“最近操作”不再能在已连接 target 旁保留过期的 `Web Serial unavailable`，也不会替换其它通道或运行操作的反馈。
 - Web Serial 成功 probe 在 transport 层立即保存最小身份，而不是等待页面的后续 effect；已记忆通道在页面重挂载后仍与同一设备的 LAN/Bridge 通道合并。DEVD bootstrap/unavailable 不是控制目标，不会再向无关页面写入租约重连反馈。
+- DEVD 设备列表刷新失败时，保留的不可用占位曾与旧的模拟 target ID 一起返回，使 live 页面误回退到添加设备页。占位现作为只读诊断当前目标保持 Dashboard 上下文；它持续禁用写入，且不会进入设备卡片或连接方式列表。

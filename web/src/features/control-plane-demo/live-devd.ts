@@ -311,6 +311,7 @@ export function useLiveDevdScenario(
       return {
         ...scenario,
         name: 'Live devd discovery',
+        selectedDeviceId: selectRetainedLiveDevdDeviceId(liveDevices) ?? scenario.selectedDeviceId,
         devices: [
           ...scenario.devices,
           ...liveDevices.filter(
@@ -413,6 +414,14 @@ export function selectPreferredLiveDevdDeviceId(devices: DeviceTarget[]) {
       ?.id ??
     devices.find((device) => device.connectionAvailable !== false)?.id ??
     ''
+  )
+}
+
+export function selectRetainedLiveDevdDeviceId(devices: DeviceTarget[]) {
+  return (
+    devices.find((device) => device.transport === 'devd')?.id ??
+    devices.find((device) => device.connectionAvailable !== false)?.id ??
+    null
   )
 }
 

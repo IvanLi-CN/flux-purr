@@ -12,6 +12,7 @@ import {
   releaseDevdLeaseOnPageHide,
   resolveDevdLease,
   selectPreferredLiveDevdDeviceId,
+  selectRetainedLiveDevdDeviceId,
   shouldHoldDevdLease,
   writeStoredDevdLeaseId,
   writeStoredLiveDevdTarget,
@@ -159,6 +160,7 @@ describe('live devd selection', () => {
       transport: 'mock',
       severity: 'nominal',
     })
+    expect(selectRetainedLiveDevdDeviceId(degraded)).toBe('native-1')
   })
 
   it('creates a devd placeholder when refresh fails before any live target is known', () => {
@@ -173,6 +175,7 @@ describe('live devd selection', () => {
       leaseState: 'none',
       transportIssue: 'Failed to fetch',
     })
+    expect(selectRetainedLiveDevdDeviceId(degraded)).toBe('live-devd-unavailable')
   })
 
   it('keeps the last live devd target when the daemon returns no native targets', () => {
