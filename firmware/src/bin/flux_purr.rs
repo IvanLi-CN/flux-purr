@@ -9035,6 +9035,7 @@ where
     }
 }
 
+#[cfg(target_arch = "xtensa")]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
