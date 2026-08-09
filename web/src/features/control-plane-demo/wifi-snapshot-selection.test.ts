@@ -20,4 +20,13 @@ describe('WiFi receipt selection', () => {
       )
     ).toBe(true)
   })
+
+  it('accepts a new configuration receipt after the device counters reset on reboot', () => {
+    expect(
+      shouldUseWifiReceipt(
+        { configurationGeneration: 9, transitionSequence: 48 },
+        { configurationGeneration: 1, transitionSequence: 2 }
+      )
+    ).toBe(true)
+  })
 })

@@ -41,10 +41,11 @@ use crate::{
     mdns::build_http_announcement,
     memory::{MEMORY_WIFI_PASSWORD_MAX_LEN, MEMORY_WIFI_SSID_MAX_LEN, MemoryConfig},
     net_http::{
-        ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod, HttpReadGate,
-        HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN, LAN_HTTP_LIGHT_BODY_MAX_LEN,
-        LightHttpResponse, NetHttpState, device_names_from_mac, format_http_response_headers,
-        http_socket_slot_count, http_workspace_slot_count, identity_from_device_names,
+        CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
+        HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
+        LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
+        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
+        identity_from_device_names,
     },
     wifi_state::{
         SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
@@ -377,6 +378,25 @@ pub fn current_control_revision() -> u32 {
     CONTROL_REVISION.load(Ordering::Acquire)
 }
 
+/// A LAN write is only executable while the exact lease that authorized its
+/// mailbox entry is still active. USB commands have no LAN lease boundary.
+pub async fn command_lease_is_active(command: &ControlMailboxCommand) -> bool {
+    if command.origin != CommandOrigin::Lan {
+        return true;
+    }
+    let Some(lease_id) = command.lease_id else {
+        return !matches!(
+            command.method,
+            HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
+        );
+    };
+    CONTROL_STATE
+        .lock()
+        .await
+        .as_mut()
+        .is_some_and(|state| state.command_lease_is_active(Instant::now().as_millis(), lease_id))
+}
+
 pub fn respond_to_command(
     response_slot: u8,
     request_id: u32,
@@ -665,9 +685,12 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
             continue;
         }
 
-        let connected = apply_wifi_transition(ProvisioningEvent::Ipv4Configured)
-            .await
-            .expect("IPv4 configuration follows a connecting state");
+        let Some(connected) = apply_wifi_transition(ProvisioningEvent::Ipv4Configured).await else {
+            // A newer configuration may have replaced this association while
+            // DHCP was pending. Its completion belongs to the old transaction
+            // and must never publish state or panic the WiFi task.
+            continue;
+        };
         let mut summary = network_connected(&config, &stack, &controller);
         summary.state = connected.state;
         summary.failure_code = connected.failure_code;

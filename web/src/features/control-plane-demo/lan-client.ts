@@ -700,7 +700,7 @@ export async function writeLanRuntime(
   body: Record<string, unknown>,
   fetcher: typeof fetch = fetch
 ) {
-  const revision = requireLanControlRevision(session)
+  const revision = await refreshLanControlRevision(session, fetcher)
   return lanRequest<ControlPlaneStatus>(
     fetcher,
     session.baseUrl,
@@ -734,7 +734,7 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
     ...(leaseId ? { 'X-Flux-Purr-Lease': leaseId } : {}),
   }
   if (isWrite) {
-    headers['X-Flux-Purr-Revision'] = String(requireLanControlRevision(session))
+    headers['X-Flux-Purr-Revision'] = String(await refreshLanControlRevision(session, fetcher))
   }
   return lanRequest<T>(
     fetcher,
@@ -847,8 +847,24 @@ function requireLanControlRevision(session: LanDeviceSession) {
   return session.controlRevision as number
 }
 
+async function refreshLanControlRevision(session: LanDeviceSession, fetcher: typeof fetch) {
+  await lanRequest<ControlPlaneStatus>(
+    fetcher,
+    session.baseUrl,
+    '/api/v1/status',
+    { headers: bearerHeaders(session) },
+    (revision) => {
+      // This serial read is the optimistic-concurrency preflight. It is the
+      // authoritative revision even after a device reboot resets its counter.
+      session.controlRevision = revision
+      storeLanDeviceSession(session)
+    }
+  )
+  return requireLanControlRevision(session)
+}
+
 function rememberLanControlRevision(session: LanDeviceSession, revision: number) {
-  session.controlRevision = Math.max(session.controlRevision ?? 0, revision)
+  session.controlRevision = revision
   storeLanDeviceSession(session)
 }
 

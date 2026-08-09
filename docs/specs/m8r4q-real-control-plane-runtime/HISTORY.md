@@ -233,6 +233,8 @@
 - 顶部 native target 名称改为固件 identity，而不是 USB product descriptor。选择器 trigger 与 dropdown item 分离渲染，避免 Radix 把双行下拉内容重复投影后造成文字重叠。
 - 物理 WiFi Info 页面仍是四位 LAN pairing code 的唯一可用窗口，但已授权 USB/devd CLI 可以显式打开、读取并关闭该窗口。这样自动化能完成真实浏览器配对，同时不会把 code 或窗口控制暴露给 LAN。
 - DEVD LAN bridge 将一次连接定义为 daemon 内完成的身份、网络和状态验证，而不是让 Web 在 verified response 后再次创建识别 lease。这样 bridge 初始化与后续控制 lease 形成明确边界，不会把同一浏览器的并发动作误报为冲突。
+- LAN HTTP gate 曾只在入队时检查 lease，使排队写可能在 lease 过期后仍进入控制循环。mailbox 现在保留入队时的 lease ID，执行点再次验证 active 状态并以 `lease_expired` 结算过期命令。
+- DEVD LAN bridge 曾把控制写局限于 daemon 本地记录，无法证明设备已写入。bridge 现在为每次远端写创建短期 device lease，以设备 status revision 完成 preflight 后转发真实请求，并在终态释放 lease。CI 随之覆盖 devd/CLI、Web unit、Storybook 和 E2E；EdgeOne 只部署成功 CI Main 的 verified Web artifact。
 - USB Serial/JTAG 的连接不把 DTR/RTS 变更作为初始化步骤。Browser Web Serial 与 DEVD 都只打开端口并执行有界只读 probe，硬件复位只能由设备明确诊断上报。
 - Browser Web Serial 的成功状态会结算先前的同通道失败反馈；“最近操作”不再能在已连接 target 旁保留过期的 `Web Serial unavailable`，也不会替换其它通道或运行操作的反馈。
 - Web Serial 成功 probe 在 transport 层立即保存最小身份，而不是等待页面的后续 effect；已记忆通道在页面重挂载后仍与同一设备的 LAN/Bridge 通道合并。DEVD bootstrap/unavailable 不是控制目标，不会再向无关页面写入租约重连反馈。

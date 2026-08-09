@@ -9874,6 +9874,19 @@ async fn main(_spawner: Spawner) {
                 command.method,
                 HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
             );
+            if is_mutation && !flux_purr_firmware::net::command_lease_is_active(&command).await {
+                flux_purr_firmware::net::respond_to_command(
+                    response_slot,
+                    request_id,
+                    409,
+                    lan_error_json(
+                        "lease_expired",
+                        "The LAN lease expired before this command reached the control loop.",
+                    ),
+                    false,
+                );
+                continue;
+            }
             if is_mutation
                 && flux_purr_firmware::net_http::validate_control_revision(
                     command.expected_revision,

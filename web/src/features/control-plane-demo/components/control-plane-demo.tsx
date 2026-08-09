@@ -446,7 +446,11 @@ export function shouldUseWifiReceipt(
 
   return (
     receiptGeneration > deviceGeneration ||
-    (receiptGeneration === deviceGeneration && receiptSequence > deviceSequence)
+    (receiptGeneration === deviceGeneration && receiptSequence > deviceSequence) ||
+    // Firmware counters restart from a new transaction after a device reboot.
+    // A direct configuration receipt with both counters lower is therefore
+    // newer than the pre-reboot cached snapshot, not an out-of-order packet.
+    (receiptGeneration < deviceGeneration && receiptSequence < deviceSequence)
   )
 }
 

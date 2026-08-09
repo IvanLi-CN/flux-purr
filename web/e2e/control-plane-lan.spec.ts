@@ -520,7 +520,8 @@ function corsHeaders(allowedOrigin: string) {
   return {
     'access-control-allow-origin': allowedOrigin,
     'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'access-control-allow-headers': 'Authorization, Content-Type, X-Flux-Purr-Lease',
+    'access-control-allow-headers':
+      'Authorization, Content-Type, X-Flux-Purr-Lease, X-Flux-Purr-Revision',
     'access-control-expose-headers': 'X-Flux-Purr-Revision',
     'access-control-allow-private-network': 'true',
   }

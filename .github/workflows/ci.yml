@@ -47,6 +47,22 @@ jobs:
       - name: Firmware build
         run: bash scripts/check-firmware-build.sh
 
+  devd:
+    name: DEVD checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.91.0
+
+      - name: DEVD tests
+        run: bash scripts/check-devd.sh
+
   web:
     name: Web checks
     runs-on: ubuntu-latest
@@ -75,18 +91,22 @@ jobs:
       - name: Biome check + typecheck
         run: bash scripts/check-web-check.sh
 
+      - name: Web unit tests
+        run: bun run --cwd web test:unit
+
       - name: Web build
         run: bash scripts/check-web-build.sh
 
       - name: Storybook build
         run: bash scripts/check-storybook-build.sh
 
+      - name: Storybook interaction tests
+        run: bun run --cwd web test:storybook
+
       - name: Install Playwright browsers
         run: cd web && bunx playwright install --with-deps chromium
 
-      - name: Optional E2E
-        env:
-          SKIP_E2E: "1"
+      - name: E2E tests
         run: bash scripts/check-web-e2e.sh
 
   worktree-bootstrap:

@@ -127,6 +127,10 @@ pub struct ControlMailboxCommand {
     pub origin: CommandOrigin,
     pub endpoint: LanEndpoint,
     pub method: HttpMethod,
+    /// LAN write commands retain the lease that authorized enqueueing. The
+    /// front-panel executor validates it again before touching hardware so a
+    /// timed-out request cannot outlive lease ownership.
+    pub lease_id: Option<[u8; LAN_LEASE_ID_BYTES]>,
     /// Optimistic concurrency precondition supplied by the client for writes.
     pub expected_revision: Option<u32>,
     pub body: String<LAN_HTTP_BODY_MAX_LEN>,
@@ -565,12 +569,19 @@ impl NetHttpState {
         if endpoint == LanEndpoint::Lease {
             return HttpGate::Respond(self.lease_route(now_ms, request));
         }
-        if is_write(request.method) && self.require_lease(now_ms, request.lease_id).is_err() {
-            return HttpGate::Respond(HttpResponse::new(
-                409,
-                r#"{"error":{"code":"lease_required","message":"An active LAN lease is required for writes."}}"#,
-            ));
-        }
+        let lease_id = if is_write(request.method) {
+            match self.require_lease(now_ms, request.lease_id) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    return HttpGate::Respond(HttpResponse::new(
+                        409,
+                        r#"{"error":{"code":"lease_required","message":"An active LAN lease is required for writes."}}"#,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
         if is_control_write(request.method, endpoint) && request.expected_revision.is_none() {
             return HttpGate::Respond(HttpResponse::new(
                 428,
@@ -586,6 +597,7 @@ impl NetHttpState {
                 origin: CommandOrigin::Lan,
                 endpoint,
                 method: request.method,
+                lease_id,
                 expected_revision: request.expected_revision,
                 body,
             },
@@ -708,11 +720,24 @@ impl NetHttpState {
             .is_some_and(|(token, bearer)| token.matches_bearer(bearer))
     }
 
-    fn require_lease(&mut self, now_ms: u64, value: Option<&str>) -> Result<(), LanAccessError> {
+    pub fn command_lease_is_active(
+        &mut self,
+        now_ms: u64,
+        lease_id: [u8; LAN_LEASE_ID_BYTES],
+    ) -> bool {
+        self.leases.require(now_ms, lease_id).is_ok()
+    }
+
+    fn require_lease(
+        &mut self,
+        now_ms: u64,
+        value: Option<&str>,
+    ) -> Result<[u8; LAN_LEASE_ID_BYTES], LanAccessError> {
         let id = value
             .and_then(parse_lease_id)
             .ok_or(LanAccessError::LeaseRequired)?;
-        self.leases.require(now_ms, id)
+        self.leases.require(now_ms, id)?;
+        Ok(id)
     }
 }
 
@@ -876,13 +901,15 @@ mod tests {
     #[derive(Default)]
     struct TestMailbox {
         calls: usize,
+        last_command: Option<ControlMailboxCommand>,
     }
     impl ControlMailbox for TestMailbox {
         fn submit(
             &mut self,
-            _: ControlMailboxCommand,
+            command: ControlMailboxCommand,
         ) -> Result<String<LAN_HTTP_BODY_MAX_LEN>, ControlMailboxError> {
             self.calls += 1;
+            self.last_command = Some(command);
             let mut value = String::new();
             value.push_str(r#"{"ok":true}"#).unwrap();
             Ok(value)
@@ -1153,6 +1180,26 @@ mod tests {
         let id = lease.body.split('"').nth(3).unwrap();
         assert_eq!(state.handle(1, HttpRequest { authorization: Some("Bearer 0909090909090909090909090909090909090909090909090909090909090909"), lease_id: Some(id), expected_revision: Some(0), body: r#"{"targetTempC":120}"#, ..req(HttpMethod::Put, "/api/v1/runtime") }, &mut mailbox).status, 200);
         assert_eq!(mailbox.calls, 1);
+        let command = mailbox.last_command.as_ref().expect("write was dispatched");
+        let lease_id = parse_lease_id(id).expect("lease response is canonical hex");
+        assert_eq!(command.lease_id, Some(lease_id));
+        assert!(state.command_lease_is_active(1, lease_id));
+        assert_eq!(
+            state.handle(
+                1,
+                HttpRequest {
+                    authorization: Some(
+                        "Bearer 0909090909090909090909090909090909090909090909090909090909090909",
+                    ),
+                    lease_id: Some(id),
+                    ..req(HttpMethod::Delete, "/api/v1/leases")
+                },
+                &mut mailbox,
+            )
+            .status,
+            200
+        );
+        assert!(!state.command_lease_is_active(1, lease_id));
         let response = state.handle(
             1,
             HttpRequest {

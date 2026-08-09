@@ -715,6 +715,11 @@ impl NetworkSummary {
         self.configuration_generation > current.configuration_generation
             || (self.configuration_generation == current.configuration_generation
                 && self.transition_sequence >= current.transition_sequence)
+            // Both counters falling together is a device reboot. The first
+            // receipt after the reboot is current device fact, not an old
+            // packet from the previous boot.
+            || (self.configuration_generation < current.configuration_generation
+                && self.transition_sequence < current.transition_sequence)
     }
 }
 
@@ -2204,20 +2209,80 @@ async fn lan_bridge_read<T: DeserializeOwned>(
 ) -> Result<T, HttpError> {
     let value = lan::authorized_json(device, Method::GET, path, None, None)
         .await
-        .map_err(|error| match error {
-            lan::LanClientError::AuthorizationRejected => HttpError::conflict(
-                "lan_pairing_required",
-                "The saved DEVD LAN pairing token was rejected. Open WiFi Info and pair again with its four-digit code.",
-                json!({ "action": "pair" }),
-            ),
-            error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
-        })?;
+        .map_err(lan_bridge_error)?;
     serde_json::from_value(value).map_err(|_| {
         HttpError::bad_request(
             "lan_bridge_invalid_response",
             "LAN device returned an invalid response.",
         )
     })
+}
+
+async fn lan_bridge_write<T: DeserializeOwned>(
+    device: &lan::LanDeviceConfig,
+    path: &str,
+    method: Method,
+    body: Option<Value>,
+) -> Result<T, HttpError> {
+    let lease: LanBridgeLease = serde_json::from_value(
+        lan::authorized_json(device, Method::POST, "leases", None, None)
+            .await
+            .map_err(lan_bridge_error)?,
+    )
+    .map_err(|_| {
+        HttpError::bad_request(
+            "lan_bridge_invalid_response",
+            "LAN device returned an invalid lease response.",
+        )
+    })?;
+
+    let result = lan::authorized_json(device, method, path, Some(&lease.lease_id), body).await;
+    // Release the short-lived remote write lease after the write reaches its
+    // terminal HTTP response. A release failure is non-authoritative: the
+    // firmware expires the lease and the write result is still device fact.
+    let _ = lan::authorized_json(
+        device,
+        Method::DELETE,
+        "leases",
+        Some(&lease.lease_id),
+        None,
+    )
+    .await;
+    let value = result.map_err(lan_bridge_error)?;
+    serde_json::from_value(value).map_err(|_| {
+        HttpError::bad_request(
+            "lan_bridge_invalid_response",
+            "LAN device returned an invalid control response.",
+        )
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LanBridgeLease {
+    lease_id: String,
+}
+
+fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, HttpError> {
+    let mut body = serde_json::to_value(payload)
+        .map_err(|_| HttpError::internal("failed to encode LAN control request"))?;
+    if let Value::Object(fields) = &mut body {
+        // The daemon lease authorizes the client-to-DEVD hop. The firmware
+        // lease is created above and must be the only lease forwarded.
+        fields.remove("leaseId");
+    }
+    Ok(body)
+}
+
+fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
+    match error {
+        lan::LanClientError::AuthorizationRejected => HttpError::conflict(
+            "lan_pairing_required",
+            "The saved DEVD LAN pairing token was rejected. Open WiFi Info and pair again with its four-digit code.",
+            json!({ "action": "pair" }),
+        ),
+        error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
+    }
 }
 
 fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
@@ -2625,6 +2690,17 @@ async fn device_calibration(
         return Ok(Json(calibration));
     }
 
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let calibration = lan_bridge_read::<CalibrationState>(&configured, "calibration").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.calibration = calibration.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(calibration));
+    }
+
     Ok(Json(target.calibration))
 }
 
@@ -2651,6 +2727,25 @@ async fn configure_calibration(
                 return Err(error);
             }
         };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.calibration = calibration.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        drop(state_lock);
+        emit_calibration_event(&state, &device_id, &payload.op, &calibration);
+        return Ok(Json(calibration));
+    }
+
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let calibration = lan_bridge_write::<CalibrationState>(
+            &configured,
+            "calibration",
+            Method::PUT,
+            Some(lan_bridge_payload(&payload)?),
+        )
+        .await?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.calibration = calibration.clone();
@@ -2706,6 +2801,17 @@ async fn device_calibration_job(
         return Ok(Json(job));
     }
 
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let job = lan_bridge_read::<CalibrationJobState>(&configured, "calibration/job").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status.calibration.job = job.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(job));
+    }
+
     Ok(Json(target.status.calibration.job))
 }
 
@@ -2732,6 +2838,23 @@ async fn configure_calibration_job(
                 return Err(error);
             }
         };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status.calibration.job = job.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(job));
+    }
+
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let job = lan_bridge_write::<CalibrationJobState>(
+            &configured,
+            "calibration/job",
+            Method::POST,
+            Some(lan_bridge_payload(&payload)?),
+        )
+        .await?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.status.calibration.job = job.clone();
@@ -2809,6 +2932,17 @@ async fn device_heater_curve(
         return Ok(Json(heater_curve));
     }
 
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let heater_curve = lan_bridge_read::<HeaterCurveState>(&configured, "heater-curve").await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.heater_curve = heater_curve.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(heater_curve));
+    }
+
     Ok(Json(target.heater_curve))
 }
 
@@ -2835,6 +2969,23 @@ async fn configure_heater_curve(
                 return Err(error);
             }
         };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.heater_curve = heater_curve.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(heater_curve));
+    }
+
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let heater_curve = lan_bridge_write::<HeaterCurveState>(
+            &configured,
+            "heater-curve",
+            Method::PUT,
+            Some(lan_bridge_payload(&payload)?),
+        )
+        .await?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.heater_curve = heater_curve.clone();
@@ -2889,6 +3040,23 @@ async fn save_heater_curve(
                 return Err(error);
             }
         };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.heater_curve = heater_curve.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(heater_curve));
+    }
+
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let heater_curve = lan_bridge_write::<HeaterCurveState>(
+            &configured,
+            "heater-curve/save",
+            Method::POST,
+            None,
+        )
+        .await?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.heater_curve = heater_curve.clone();
@@ -3049,6 +3217,13 @@ async fn configure_wifi(
         })));
     }
 
+    if target.transport == DeviceTransport::Lan {
+        return Err(HttpError::bad_request(
+            "lan_wifi_config_unsupported",
+            "WiFi configuration is available only through an active USB/devd target.",
+        ));
+    }
+
     let mut state_lock = state.lock()?;
     let device = state_lock
         .devices
@@ -3146,6 +3321,26 @@ async fn configure_runtime(
                 return Err(error);
             }
         };
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.status = status.clone();
+            device.network = status.network.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        drop(state_lock);
+        emit_runtime_config_event(&state, &device_id, &payload, &status);
+        return Ok(Json(status));
+    }
+
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let status = lan_bridge_write::<ControlPlaneStatus>(
+            &configured,
+            "runtime",
+            Method::PUT,
+            Some(lan_bridge_payload(&payload)?),
+        )
+        .await?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.status = status.clone();
@@ -10192,6 +10387,56 @@ mod tests {
         assert_eq!(accepted.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(accepted.wifi_password_length, 11);
         assert_eq!(accepted.last_error, None);
+    }
+
+    #[test]
+    fn network_snapshot_accepts_the_first_receipt_after_a_device_reboot() {
+        let mut current = NetworkSummary {
+            state: NetworkState::Connected,
+            configuration_generation: 9,
+            transition_sequence: 48,
+            failure_code: None,
+            ssid: Some("FluxPurr-Lab".to_string()),
+            wifi_password_length: 8,
+            ip: Some("192.168.1.42".to_string()),
+            gateway: None,
+            dns: Vec::new(),
+            wifi_rssi: Some(-42),
+            last_error: None,
+        };
+        current.configuration_generation = 1;
+        current.transition_sequence = 2;
+
+        let previous = NetworkSummary {
+            configuration_generation: 9,
+            transition_sequence: 48,
+            ..current.clone()
+        };
+        assert!(current.is_not_older_than(&previous));
+    }
+
+    #[test]
+    fn lan_bridge_payload_keeps_the_remote_lease_authoritative() {
+        let payload = RuntimeConfigRequest {
+            lease_id: "local-lease".to_string(),
+            target_temp_c: Some(120),
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: None,
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: None,
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+            thermal_plant_model: None,
+        };
+
+        let body = lan_bridge_payload(&payload).unwrap();
+        assert_eq!(body["targetTempC"], 120);
+        assert!(body.get("leaseId").is_none());
     }
 
     #[test]

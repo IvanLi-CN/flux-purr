@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  authorizedLanRequest,
   claimLanPairing,
   getLanPublicInfo,
   isChromiumPrivateNetworkSupported,
@@ -385,11 +386,20 @@ describe('LAN browser client', () => {
     expect(fetcher).toHaveBeenCalledTimes(5)
   })
 
-  it('sends the last device revision with a LAN write', async () => {
-    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+  it('refreshes the device revision immediately before every LAN write', async () => {
+    const requestPaths: string[] = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      requestPaths.push(path)
+      if (path === '/api/v1/status') {
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': '11' },
+        })
+      }
       expect(init?.headers).toMatchObject({
         'X-Flux-Purr-Lease': 'lease-1',
-        'X-Flux-Purr-Revision': '7',
+        'X-Flux-Purr-Revision': '11',
       })
       return new Response(JSON.stringify({ accepted: true }), {
         status: 200,
@@ -404,7 +414,35 @@ describe('LAN browser client', () => {
 
     await writeLanRuntime(session, 'lease-1', { targetTempC: 120 }, fetcher)
 
+    expect(requestPaths).toEqual(['/api/v1/status', '/api/v1/runtime'])
     expect(session.controlRevision).toBe(8)
+  })
+
+  it('uses the same fresh-revision preflight for non-runtime control writes', async () => {
+    const requests: Array<{ path: string; headers?: HeadersInit }> = []
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      requests.push({ path, headers: init?.headers })
+      const revision = path === '/api/v1/status' ? '15' : '16'
+      return new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': revision },
+      })
+    }) as unknown as typeof fetch
+    const session = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 3,
+    }
+
+    await authorizedLanRequest(session, 'calibration', 'PUT', { op: 'clear' }, 'lease-1', fetcher)
+
+    expect(requests.map((request) => request.path)).toEqual([
+      '/api/v1/status',
+      '/api/v1/calibration',
+    ])
+    expect(requests[1]?.headers).toMatchObject({ 'X-Flux-Purr-Revision': '15' })
+    expect(session.controlRevision).toBe(16)
   })
 
   it('persists a successful LAN write revision for the next reloaded write', async () => {
@@ -422,7 +460,15 @@ describe('LAN browser client', () => {
       },
     })
     const revisions: string[] = []
-    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname
+      if (path === '/api/v1/status') {
+        const current = revisions.length === 0 ? '7' : '8'
+        return new Response(JSON.stringify({}), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'X-Flux-Purr-Revision': current },
+        })
+      }
       const revision = (init?.headers as Record<string, string>)['X-Flux-Purr-Revision']
       revisions.push(revision)
       return new Response(JSON.stringify({ accepted: true }), {
