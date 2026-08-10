@@ -3793,6 +3793,19 @@ fn reconcile_runtime_heater_enabled(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn consume_thermal_plant_completion_disarm(
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    desired_heater_enabled: bool,
+) -> bool {
+    if calibration_runtime_state.thermal_plant_completion_disarm_pending {
+        calibration_runtime_state.thermal_plant_completion_disarm_pending = false;
+        false
+    } else {
+        desired_heater_enabled
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn thermal_model_heater_allowed(
     memory_config: &MemoryConfig,
@@ -10464,10 +10477,10 @@ async fn main(_spawner: Spawner) {
                     manual_pps_state,
                 ),
             );
-            if calibration_runtime_state.thermal_plant_completion_disarm_pending {
-                calibration_runtime_state.thermal_plant_completion_disarm_pending = false;
-                desired_heater_enabled = false;
-            }
+            desired_heater_enabled = consume_thermal_plant_completion_disarm(
+                &mut calibration_runtime_state,
+                desired_heater_enabled,
+            );
             if ui_state.heater_enabled != desired_heater_enabled {
                 ui_state.heater_enabled = desired_heater_enabled;
                 needs_redraw = true;
@@ -17225,10 +17238,8 @@ mod tests {
         };
         let mut desired_heater_enabled =
             reconcile_runtime_heater_enabled(true, calibration, None, false, false, true);
-        if calibration.thermal_plant_completion_disarm_pending {
-            calibration.thermal_plant_completion_disarm_pending = false;
-            desired_heater_enabled = false;
-        }
+        desired_heater_enabled =
+            consume_thermal_plant_completion_disarm(&mut calibration, desired_heater_enabled);
         assert!(!desired_heater_enabled);
         assert!(reconcile_runtime_heater_enabled(
             true,

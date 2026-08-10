@@ -13002,6 +13002,46 @@ mod tests {
     }
 
     #[test]
+    fn thermal_model_cli_keeps_only_direct_calibration() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "model",
+            "calibrate",
+            "--device",
+            "mock-fp-lab-01",
+        ])
+        .expect("parse direct thermal model calibration");
+        assert!(matches!(
+            cli.command,
+            Command::Thermal {
+                command: ThermalCommand::Model {
+                    command: ThermalModelCommand::Calibrate(_),
+                },
+            }
+        ));
+
+        for removed in [
+            "validate-candidate",
+            "save-candidate",
+            "promote-candidate",
+            "clear-candidate",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "flux-purr",
+                    "thermal",
+                    "model",
+                    removed,
+                    "--device",
+                    "mock-fp-lab-01",
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn parses_thermal_self_test_batch_candidate_files() {
         let cli = Cli::try_parse_from([
             "flux-purr",
