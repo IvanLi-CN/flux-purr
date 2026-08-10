@@ -3969,6 +3969,29 @@ mod tests {
     }
 
     #[test]
+    fn invalid_legacy_candidate_tlv_migrates_without_a_valid_projection() {
+        let mut transaction = sample_thermal_plant_transaction();
+        transaction.anchors[1].target_raw_rtd_adc_mv = transaction.anchors[0].target_raw_rtd_adc_mv;
+        let mut transaction_payload = [0u8; 52];
+        encode_thermal_plant_raw_transaction(&transaction, &mut transaction_payload);
+        let mut payload = [0u8; 64];
+        let mut cursor = 0;
+        push_tlv(
+            TLV_THERMAL_PLANT_CANDIDATE,
+            &transaction_payload,
+            &mut payload,
+            &mut cursor,
+        )
+        .expect("legacy candidate payload fits");
+
+        let decoded = decode_config_payload(&payload[..cursor], true)
+            .expect("legacy candidate payload decodes");
+
+        assert_eq!(decoded.thermal_plant_active, Some(transaction));
+        assert!(project_thermal_plant(&transaction, |adc| Some(adc as f32 / 10.0)).is_none());
+    }
+
+    #[test]
     fn rtd_reprojection_changes_only_derived_thermal_model() {
         let raw = sample_thermal_plant_transaction();
         let original = project_thermal_plant(&raw, |adc| Some(adc as f32 / 10.0))
