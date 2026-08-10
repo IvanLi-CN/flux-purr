@@ -189,7 +189,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`state` is `missing`, `active`, or `invalid`. The persistent source of truth is a complete raw two-anchor transaction: ambient/target RTD ADC, V/I, gate-off and hold power, ramp duration, and delivered energy. The displayed coefficients are derived from the current RTD calibration. Recalibrating RTD rebuilds the projection without rewriting or invalidating raw heat-control observations. Automatic `thermal_plant_auto` calibration writes a physically valid projection directly to `active`; it does not require a user validation or promotion step. Production heating requires an active model, a PPS APDO covering `20V`, and at least `3A` together with the calibrated heater curve needed for power limiting.
+`state` is `missing`, `active`, or `invalid`. The persistent source of truth is a complete raw two-anchor transaction: ambient/target RTD ADC, V/I, gate-off and hold power, ramp duration, and delivered energy. The displayed coefficients are derived from the current RTD calibration. Recalibrating RTD rebuilds the projection without rewriting or invalidating raw heat-control observations. Automatic `thermal_plant_auto` calibration writes a physically valid projection directly to `active`, leaves heating disarmed, and does not require a user validation or promotion step. Production heating requires an active model, a PPS APDO covering `20V`, and at least `3A` together with the calibrated heater curve needed for power limiting.
 
 ### `FirmwareArtifact`
 

@@ -52,7 +52,9 @@
 - Runtime status MUST expose the shared thermal plant state (`missing|active|invalid`), active
   transaction identity, projection validity, and heater lock reason. Automatic model calibration
   MUST store a complete physically valid two-anchor transaction directly as `active`; no
-  candidate, promotion, or user acceptance operation exists in the control plane.
+  candidate, promotion, or user acceptance operation exists in the control plane. A successful
+  automatic model calibration MUST leave the heater disarmed; a later explicit heater arm is the
+  user's separate runtime choice.
 - The protected model-calibration job is the only control-plane path allowed to heat while no
   active model exists. It requires a PPS APDO covering `20V` at `>=3A`; cancellation, disconnect,
   unsupported source, sensor fault, or malformed observation MUST immediately remove that

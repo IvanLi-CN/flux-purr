@@ -3715,6 +3715,7 @@ struct CalibrationRuntimeState {
     job: CalibrationJobState,
     job_data: Option<CalibrationJobData>,
     model_target_temp_c: Option<i16>,
+    thermal_plant_completion_disarm_pending: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3733,6 +3734,7 @@ impl Default for CalibrationRuntimeState {
             job: CalibrationJobState::default(),
             job_data: None,
             model_target_temp_c: None,
+            thermal_plant_completion_disarm_pending: false,
         }
     }
 }
@@ -7343,6 +7345,7 @@ fn update_calibration_job_state(
                         manual_pps.clear();
                     }
                     calibration.mode = CalibrationMode::Off;
+                    calibration.thermal_plant_completion_disarm_pending = true;
                     calibration.pps_enabled = false;
                     calibration.pps_mv = None;
                     calibration.pps_ma = None;
@@ -10449,7 +10452,7 @@ async fn main(_spawner: Spawner) {
                     info!("calibration heater re-arm -> cleared latched fault");
                 }
             }
-            let desired_heater_enabled = reconcile_runtime_heater_enabled(
+            let mut desired_heater_enabled = reconcile_runtime_heater_enabled(
                 ui_state.heater_enabled,
                 calibration_runtime_state,
                 current_rtd_fault,
@@ -10461,6 +10464,10 @@ async fn main(_spawner: Spawner) {
                     manual_pps_state,
                 ),
             );
+            if calibration_runtime_state.thermal_plant_completion_disarm_pending {
+                calibration_runtime_state.thermal_plant_completion_disarm_pending = false;
+                desired_heater_enabled = false;
+            }
             if ui_state.heater_enabled != desired_heater_enabled {
                 ui_state.heater_enabled = desired_heater_enabled;
                 needs_redraw = true;
@@ -12175,6 +12182,24 @@ mod tests {
             Err(ManualPpsError::ThermalPlantSourceUnsupported)
         );
         assert_eq!(calibration.job.status, CalibrationJobStatus::Idle);
+
+        let mut below_current_floor =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(20_000),
+                pps_max_ma: Some(2_999),
+                ..Default::default()
+            }));
+        assert_eq!(
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut below_current_floor,
+            ),
+            Err(ManualPpsError::ThermalPlantSourceUnsupported)
+        );
     }
 
     #[test]
@@ -12260,6 +12285,53 @@ mod tests {
             assert_eq!(calibration.mode, CalibrationMode::Off);
             assert!(!manual_pps.enabled);
             assert!(thermal_plant_projection_for_runtime(&memory_config).is_some());
+            let active_before_invalid_projection = memory_config.thermal_plant_active.unwrap();
+
+            calibration.mode = CalibrationMode::ThermalPlant;
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut manual_pps,
+            )
+            .unwrap();
+            calibration.job_data = Some(CalibrationJobData::ThermalPlant(
+                CalibrationThermalPlantAutoJob {
+                    ambient_raw_rtd_adc_mv: active_before_invalid_projection.anchors[1]
+                        .ambient_raw_rtd_adc_mv,
+                    idle_power_sum_mw: 0,
+                    idle_samples: 40,
+                    anchor_index: 1,
+                    ramp_ticks: 200,
+                    ramp_energy_mj: 500_000,
+                    hold_power_sum_mw: 199 * 50_000,
+                    hold_raw_adc_sum_mv: 199
+                        * u64::from(
+                            active_before_invalid_projection.anchors[1].target_raw_rtd_adc_mv,
+                        ),
+                    hold_samples: 199,
+                    anchors: [Some(active_before_invalid_projection.anchors[1]), None],
+                },
+            ));
+            update_calibration_job_state(
+                &mut calibration,
+                &mut memory_config,
+                &mut None,
+                &mut manual_pps,
+                anchor_raw_rtd_adc_mv[1],
+                0,
+                220.0,
+                max_ma,
+                max_mv.into(),
+                50,
+            );
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
+            assert_eq!(
+                memory_config.thermal_plant_active,
+                Some(active_before_invalid_projection)
+            );
+
+            calibration.mode = CalibrationMode::Off;
             memory_config.active_heater_curve.points = [None; HEATER_CURVE_MAX_POINTS];
             memory_config.heater_curve_raw_observations.points = [None; HEATER_CURVE_MAX_POINTS];
             assert!(!thermal_model_heater_allowed(
@@ -17136,6 +17208,29 @@ mod tests {
             ManualPpsState::default(),
         ));
         assert!(!reconcile_runtime_heater_enabled(
+            true,
+            calibration,
+            None,
+            false,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn thermal_plant_completion_disarm_is_consumed_once() {
+        let mut calibration = CalibrationRuntimeState {
+            thermal_plant_completion_disarm_pending: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut desired_heater_enabled =
+            reconcile_runtime_heater_enabled(true, calibration, None, false, false, true);
+        if calibration.thermal_plant_completion_disarm_pending {
+            calibration.thermal_plant_completion_disarm_pending = false;
+            desired_heater_enabled = false;
+        }
+        assert!(!desired_heater_enabled);
+        assert!(reconcile_runtime_heater_enabled(
             true,
             calibration,
             None,
