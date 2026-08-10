@@ -112,11 +112,11 @@
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
   - `0x35`: `heater_curve_raw_observations`
-  - `0x36`: `pps5a_thermal_plant_candidate`
-  - `0x37`: `pps5a_thermal_plant_active`
+  - `0x36`: legacy thermal-plant candidate record (decode-only migration input)
+  - `0x37`: `thermal_plant_active`
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
-- 新记录不再写入 `0x32/0x33/0x34` point-local profile；解码器仅为旧 record 保留跳过/读取兼容，运行时不得使用其值。`0x35` 保存 raw RTD ADC、实测 V/I/R，`0x36/0x37` 保存环境/目标 raw RTD ADC、gate-off/hold power、ramp duration/energy 和 transaction identity。派生温度、曲线与系数不得成为唯一持久化真相源。
+- 新记录不再写入 `0x32/0x33/0x34` point-local profile；解码器仅为旧 record 保留跳过/读取兼容，运行时不得使用其值。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x37` 保存 active thermal-plant 的环境/目标 raw RTD ADC、gate-off/hold power、ramp duration/energy 和 transaction identity。旧 `0x36` 完整记录仅在没有 `0x37` 时迁移为 active；派生温度、曲线与系数不得成为唯一持久化真相源。
 - 新写入的 thermal profile payload 必须以 `TCP2` 布局标识开头，避免 point-local 布局与历史 settings/point 长度组合发生歧义；无标识的历史 payload 继续按旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多 10 个完整 point-local 压紧目标点，并与完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
 
 ## 验收标准（Acceptance Criteria）
@@ -140,8 +140,9 @@
 - Given RTD calibration active slot or fit changes, When memory is read again, Then raw heater and
   thermal observations remain byte-for-byte stable and all derived values are rebuilt from the new
   projection.
-- Given only one thermal-loss anchor is supplied, When candidate save is requested, Then no partial
-  candidate or active transaction is written.
+- Given automatic thermal calibration supplies fewer than two valid thermal-loss anchors, When the
+  physical projection cannot be formed, Then it leaves the existing active transaction unchanged and
+  heating remains locked.
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

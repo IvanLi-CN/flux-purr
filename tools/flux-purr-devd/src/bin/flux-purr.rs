@@ -461,34 +461,8 @@ enum ThermalCommand {
 
 #[derive(Debug, Subcommand)]
 enum ThermalModelCommand {
-    #[command(about = "Start the protected 80C/220C two-anchor calibration job.")]
+    #[command(about = "Start the 80C/220C two-anchor calibration job.")]
     Calibrate(TargetSelector),
-    #[command(about = "Enter protected candidate-validation mode without promoting it.")]
-    ValidateCandidate(TargetSelector),
-    #[command(
-        about = "Atomically persist a complete 80C/220C raw observation transaction as candidate."
-    )]
-    SaveCandidate(ThermalModelFileArgs),
-    #[command(about = "Promote the matching candidate after nine-point HIL acceptance.")]
-    Promote(ThermalModelPromoteArgs),
-    #[command(about = "Clear the pending candidate without changing the active model.")]
-    ClearCandidate(TargetSelector),
-}
-
-#[derive(Debug, Args)]
-struct ThermalModelFileArgs {
-    #[command(flatten)]
-    target: TargetSelector,
-    #[arg(long)]
-    file: PathBuf,
-}
-
-#[derive(Debug, Args)]
-struct ThermalModelPromoteArgs {
-    #[command(flatten)]
-    target: TargetSelector,
-    #[arg(long = "transaction-id")]
-    transaction_id: u32,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2350,8 +2324,6 @@ async fn handle_thermal_command(
                     Some(json!({
                         "calibration": {
                             "mode": "thermal_plant",
-                            "ppsEnabled": true,
-                            "ppsMv": 21000,
                             "heaterEnabled": false
                         }
                     })),
@@ -2365,67 +2337,6 @@ async fn handle_thermal_command(
                     Some(json!({
                         "op": "start",
                         "kind": "thermal_plant_auto"
-                    })),
-                )
-                .await
-            }
-            ThermalModelCommand::ValidateCandidate(target) => {
-                request_with_lease(
-                    client,
-                    resolve_target(target, default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "calibration": {
-                            "mode": "thermal_plant",
-                            "ppsEnabled": false,
-                            "heaterEnabled": false
-                        }
-                    })),
-                )
-                .await
-            }
-            ThermalModelCommand::SaveCandidate(args) => {
-                let transaction: Value = serde_json::from_slice(&fs::read(args.file)?)?;
-                request_with_lease(
-                    client,
-                    resolve_target(args.target, default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "thermalPlantModel": {
-                            "op": "save_candidate",
-                            "transaction": transaction
-                        }
-                    })),
-                )
-                .await
-            }
-            ThermalModelCommand::Promote(args) => {
-                request_with_lease(
-                    client,
-                    resolve_target(args.target, default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "thermalPlantModel": {
-                            "op": "promote_candidate",
-                            "transactionId": args.transaction_id
-                        }
-                    })),
-                )
-                .await
-            }
-            ThermalModelCommand::ClearCandidate(target) => {
-                request_with_lease(
-                    client,
-                    resolve_target(target, default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "thermalPlantModel": {
-                            "op": "clear_candidate"
-                        }
                     })),
                 )
                 .await
@@ -13088,6 +12999,46 @@ mod tests {
         );
         assert_eq!(args.sample_interval_ms, 300);
         assert_eq!(effective_thermal_sample_interval_ms(333), 300);
+    }
+
+    #[test]
+    fn thermal_model_cli_keeps_only_direct_calibration() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "model",
+            "calibrate",
+            "--device",
+            "mock-fp-lab-01",
+        ])
+        .expect("parse direct thermal model calibration");
+        assert!(matches!(
+            cli.command,
+            Command::Thermal {
+                command: ThermalCommand::Model {
+                    command: ThermalModelCommand::Calibrate(_),
+                },
+            }
+        ));
+
+        for removed in [
+            "validate-candidate",
+            "save-candidate",
+            "promote-candidate",
+            "clear-candidate",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "flux-purr",
+                    "thermal",
+                    "model",
+                    removed,
+                    "--device",
+                    "mock-fp-lab-01",
+                ])
+                .is_err()
+            );
+        }
     }
 
     #[test]
