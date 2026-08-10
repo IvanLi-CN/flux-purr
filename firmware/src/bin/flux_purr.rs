@@ -3785,7 +3785,7 @@ fn reconcile_runtime_heater_enabled(
     if calibration_runtime_state.mode == CalibrationMode::ThermalPlant
         && calibration_runtime_state.job.status != CalibrationJobStatus::Running
     {
-        return current_heater_enabled && calibration_heater_allowed;
+        return false;
     }
     calibration_runtime_state.heater_enabled && calibration_heater_allowed
 }
@@ -3797,15 +3797,12 @@ fn thermal_model_heater_allowed(
     calibration: CalibrationRuntimeState,
     manual_pps: ManualPpsState,
 ) -> bool {
+    if calibration.mode == CalibrationMode::ThermalPlant {
+        return calibration.job.status == CalibrationJobStatus::Running;
+    }
     if calibration.mode != CalibrationMode::Off {
         return true;
     }
-    let source_bank = resolve_thermal_profile_bank(
-        ThermalProfileMode::Auto,
-        manual_pps.capability_min_mv,
-        manual_pps.capability_max_mv,
-        manual_pps.capability_max_ma,
-    );
     let plant_is_available = memory_config
         .thermal_plant_active
         .is_some_and(|transaction| {
@@ -3818,27 +3815,16 @@ fn thermal_model_heater_allowed(
         return false;
     }
 
-    match source_bank {
-        // The plant parameters are physical plate properties. A 5 A source
-        // may use the active plant directly, subject to the electrical limit
-        // applied at the actuator below.
-        ThermalProfileBank::Pps5a => true,
-        // 3 A has the same plant, but its available power must come from a
-        // measured R(T) curve rather than the nominal source V * I product.
-        // Do not unlock it from an uncalibrated default resistance estimate.
-        ThermalProfileBank::Pps3a => {
-            manual_pps
-                .capability_min_mv
-                .is_some_and(|value| value <= 20_000)
-                && manual_pps
-                    .capability_max_mv
-                    .is_some_and(|value| value >= 20_000)
-                && manual_pps
-                    .capability_max_ma
-                    .is_some_and(|value| value >= 3_000)
-                && has_calibrated_heater_resistance_curve(memory_config)
-        }
-    }
+    manual_pps
+        .capability_min_mv
+        .is_some_and(|value| value <= 20_000)
+        && manual_pps
+            .capability_max_mv
+            .is_some_and(|value| value >= 20_000)
+        && manual_pps
+            .capability_max_ma
+            .is_some_and(|value| value >= 3_000)
+        && has_calibrated_heater_resistance_curve(memory_config)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6737,6 +6723,9 @@ fn calibration_job_start(
             {
                 return Err(ManualPpsError::HeaterCurveRequired);
             }
+            let min_mv = manual_pps
+                .capability_min_mv
+                .ok_or(ManualPpsError::NoPpsCapability)?;
             let max_mv = manual_pps
                 .capability_max_mv
                 .ok_or(ManualPpsError::NoPpsCapability)?
@@ -6745,7 +6734,7 @@ fn calibration_job_start(
                 .capability_max_ma
                 .filter(|current| *current >= 3_000)
                 .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
-            if max_mv < 20_000 {
+            if min_mv > 20_000 || max_mv < 20_000 {
                 return Err(ManualPpsError::ThermalPlantSourceUnsupported);
             }
             manual_pps.enable(ManualPpsOwner::Calibration, max_mv, Some(max_ma))?;
@@ -7223,6 +7212,8 @@ fn update_calibration_job_state(
         CalibrationJobData::ThermalPlant(mut job) => {
             if manual_pps.error.is_some()
                 || !manual_pps.enabled
+                || manual_pps.owner != ManualPpsOwner::Calibration
+                || manual_pps.capability_min_mv.unwrap_or(u16::MAX) > 20_000
                 || manual_pps.capability_max_mv.unwrap_or(0) < 20_000
                 || manual_pps.capability_max_ma.unwrap_or(0) < 3_000
             {
@@ -12150,6 +12141,201 @@ mod tests {
     }
 
     #[test]
+    fn thermal_plant_auto_job_requires_a_pps_range_that_covers_20v() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        for (index, raw_rtd_adc_mv) in [240, 460].into_iter().enumerate() {
+            memory_config.heater_curve_raw_observations.points[index] =
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv,
+                    heater_voltage_mv: 20_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 4_000,
+                });
+        }
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: false,
+                pps_min_mv: Some(20_100),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_000),
+                ..Default::default()
+            }));
+
+        assert_eq!(
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut manual_pps,
+            ),
+            Err(ManualPpsError::ThermalPlantSourceUnsupported)
+        );
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Idle);
+    }
+
+    #[test]
+    fn thermal_plant_auto_job_persists_an_active_model_for_3a_and_5a_pps() {
+        fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
+            let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
+            (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
+                / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+                .round() as u16
+        }
+
+        let ambient_raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(25.0);
+        let anchor_raw_rtd_adc_mv = [
+            raw_rtd_adc_mv_for_temp(80.0),
+            raw_rtd_adc_mv_for_temp(220.0),
+        ];
+        for (max_mv, max_ma) in [(20_000, 3_000), (21_000, 5_000)] {
+            let mut calibration = CalibrationRuntimeState {
+                mode: CalibrationMode::ThermalPlant,
+                ..CalibrationRuntimeState::default()
+            };
+            let mut memory_config = MemoryConfig::default();
+            for (index, raw_rtd_adc_mv) in anchor_raw_rtd_adc_mv.into_iter().enumerate() {
+                memory_config.heater_curve_raw_observations.points[index] =
+                    Some(HeaterCurveRawObservation {
+                        raw_rtd_adc_mv,
+                        heater_voltage_mv: max_mv,
+                        heater_current_ma: max_ma,
+                        resistance_milliohms: 4_000,
+                    });
+            }
+            let mut manual_pps =
+                ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                    pps_covers_20v: true,
+                    pps_min_mv: Some(5_000),
+                    pps_max_mv: Some(max_mv),
+                    pps_max_ma: Some(max_ma),
+                    ..Default::default()
+                }));
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut manual_pps,
+            )
+            .unwrap();
+
+            for _ in 0..40 {
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut None,
+                    &mut manual_pps,
+                    ambient_raw_rtd_adc_mv,
+                    0,
+                    25.0,
+                    max_ma,
+                    max_mv.into(),
+                    0,
+                );
+            }
+            for (target_temp_c, target_raw_rtd_adc_mv) in [
+                (80.0, anchor_raw_rtd_adc_mv[0]),
+                (220.0, anchor_raw_rtd_adc_mv[1]),
+            ] {
+                for _ in 0..200 {
+                    update_calibration_job_state(
+                        &mut calibration,
+                        &mut memory_config,
+                        &mut None,
+                        &mut manual_pps,
+                        target_raw_rtd_adc_mv,
+                        0,
+                        target_temp_c,
+                        max_ma,
+                        max_mv.into(),
+                        50,
+                    );
+                }
+            }
+
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+            assert_eq!(calibration.mode, CalibrationMode::Off);
+            assert!(!manual_pps.enabled);
+            assert!(thermal_plant_projection_for_runtime(&memory_config).is_some());
+            assert!(!thermal_model_heater_allowed(
+                &memory_config,
+                calibration,
+                manual_pps,
+            ));
+
+            memory_config.active_heater_curve.points[0] = Some(HeaterCurvePoint {
+                temp_centi_c: 2_500,
+                resistance_milliohms: 4_000,
+            });
+            memory_config.active_heater_curve.points[1] = Some(HeaterCurvePoint {
+                temp_centi_c: 22_000,
+                resistance_milliohms: 4_800,
+            });
+            assert!(thermal_model_heater_allowed(
+                &memory_config,
+                calibration,
+                manual_pps,
+            ));
+        }
+    }
+
+    #[test]
+    fn thermal_plant_job_fails_before_sampling_after_a_manual_pps_override() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut memory_config = MemoryConfig::default();
+        for (index, raw_rtd_adc_mv) in [240, 460].into_iter().enumerate() {
+            memory_config.heater_curve_raw_observations.points[index] =
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv,
+                    heater_voltage_mv: 20_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 4_000,
+                });
+        }
+        let mut manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(20_000),
+                pps_max_ma: Some(3_000),
+                ..Default::default()
+            }));
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::ThermalPlant,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
+        manual_pps
+            .enable(ManualPpsOwner::Debug, 20_000, Some(3_000))
+            .unwrap();
+
+        update_calibration_job_state(
+            &mut calibration,
+            &mut memory_config,
+            &mut None,
+            &mut manual_pps,
+            0,
+            0,
+            20.0,
+            0,
+            20_000,
+            0,
+        );
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
+        assert_eq!(calibration.job.samples_collected, 0);
+        assert_eq!(memory_config.thermal_plant_active, None);
+    }
+
+    #[test]
     fn heater_curve_auto_preview_includes_low_temperature_anchors() {
         let mut bins = CalibrationHeaterCurveAutoJob::default().bins;
         bins[0].observe(140.0, 3.911);
@@ -16928,5 +17114,32 @@ mod tests {
         );
 
         assert!(!desired);
+    }
+
+    #[test]
+    fn failed_thermal_plant_calibration_keeps_heating_locked() {
+        let calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Failed,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+
+        assert!(!thermal_model_heater_allowed(
+            &MemoryConfig::default(),
+            calibration,
+            ManualPpsState::default(),
+        ));
+        assert!(!reconcile_runtime_heater_enabled(
+            true,
+            calibration,
+            None,
+            false,
+            false,
+            true,
+        ));
     }
 }

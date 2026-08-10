@@ -2,7 +2,7 @@
 
 ## 状态
 
-> Current thermal-control contract: the `pps5a` thermal plant model defined below supersedes
+> Current thermal-control contract: the shared thermal plant model defined below supersedes
 > the historical point-local `ThermalControlProfile` runtime. Historical profile payloads remain
 > decodable for record compatibility but are never selected as a heater-control fallback.
 
