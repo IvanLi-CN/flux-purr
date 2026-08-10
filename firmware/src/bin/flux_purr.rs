@@ -3501,6 +3501,7 @@ impl Default for CalibrationJobState {
 
 #[cfg(any(target_arch = "xtensa", test))]
 const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
+const HEATER_CURVE_AUTO_MIN_SAMPLES_PER_BIN: u16 = 20;
 #[cfg(any(target_arch = "xtensa", test))]
 const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
 
@@ -3641,7 +3642,6 @@ fn round_to_u32_nonnegative(value: f32) -> u32 {
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CalibrationHeaterCurveAutoJob {
-    stable_ticks: u8,
     started_ticks: u8,
     cold_bin: HeaterCurveAutoBin,
     bins: [HeaterCurveAutoBin; 4],
@@ -3666,7 +3666,6 @@ struct CalibrationThermalPlantAutoJob {
 impl Default for CalibrationHeaterCurveAutoJob {
     fn default() -> Self {
         Self {
-            stable_ticks: 0,
             started_ticks: 0,
             cold_bin: HeaterCurveAutoBin::new(0.0, 120.0),
             bins: [
@@ -6948,6 +6947,15 @@ fn heater_curve_raw_observations_from_auto_bins(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn heater_curve_auto_bins_ready(job: &CalibrationHeaterCurveAutoJob) -> bool {
+    job.cold_bin.samples >= HEATER_CURVE_AUTO_MIN_SAMPLES_PER_BIN
+        && job
+            .bins
+            .iter()
+            .all(|bin| bin.samples >= HEATER_CURVE_AUTO_MIN_SAMPLES_PER_BIN)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn default_heater_curve_point(temp_c: f32) -> HeaterCurvePoint {
     HeaterCurvePoint {
         temp_centi_c: round_to_i16(temp_c * 100.0),
@@ -7147,12 +7155,6 @@ fn update_calibration_job_state(
             if latest_temp_c >= 80.0 {
                 job.started_ticks = job.started_ticks.saturating_add(1);
             }
-            if latest_temp_c >= 120.0 {
-                job.stable_ticks = job.stable_ticks.saturating_add(1);
-            } else {
-                job.stable_ticks = 0;
-            }
-
             if job.started_ticks > 0 && latest_vin_mv > 0 && pd_current_ma > 0 {
                 for bin in &mut job.bins {
                     if (*bin).contains(latest_temp_c) {
@@ -7180,7 +7182,7 @@ fn update_calibration_job_state(
             )
             .min(99) as u8;
 
-            if latest_temp_c >= 250.0 && job.stable_ticks >= 3 {
+            if heater_curve_auto_bins_ready(&job) {
                 let Some(preview) = heater_curve_preview_from_auto_bins(&job.bins) else {
                     calibration_job_fail(
                         calibration,
@@ -12446,6 +12448,22 @@ mod tests {
         );
         assert!(preview.points[5].is_some());
         assert!(preview.points[6].is_none());
+    }
+
+    #[test]
+    fn heater_curve_auto_completes_after_all_temperature_bins_are_observed() {
+        let mut job = CalibrationHeaterCurveAutoJob::default();
+        for _ in 0..HEATER_CURVE_AUTO_MIN_SAMPLES_PER_BIN {
+            job.cold_bin.observe(100.0, 3.8);
+            for bin in &mut job.bins {
+                bin.observe((bin.min_temp_c + bin.max_temp_c) / 2.0, 3.9);
+            }
+        }
+
+        assert!(heater_curve_auto_bins_ready(&job));
+
+        job.bins[3].samples = HEATER_CURVE_AUTO_MIN_SAMPLES_PER_BIN - 1;
+        assert!(!heater_curve_auto_bins_ready(&job));
     }
 
     #[test]
