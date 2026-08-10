@@ -12260,6 +12260,8 @@ mod tests {
             assert_eq!(calibration.mode, CalibrationMode::Off);
             assert!(!manual_pps.enabled);
             assert!(thermal_plant_projection_for_runtime(&memory_config).is_some());
+            memory_config.active_heater_curve.points = [None; HEATER_CURVE_MAX_POINTS];
+            memory_config.heater_curve_raw_observations.points = [None; HEATER_CURVE_MAX_POINTS];
             assert!(!thermal_model_heater_allowed(
                 &memory_config,
                 calibration,
