@@ -67,10 +67,11 @@
 
 ### MUST
 
-- Production heating MUST remain locked until a physically valid `pps5a` thermal plant model is
-  active. A protected model-calibration job MAY heat with the bounded bootstrap controller; no
-  ordinary runtime request may bypass this lock. `pps3a` / 65 W sources remain identifiable but
-  MUST return `thermal_model_missing_for_source_class` when heating is requested.
+- Production heating MUST remain locked until a physically valid thermal plant model is active. A
+  protected model-calibration job MAY heat with the bounded bootstrap controller on a PPS APDO
+  covering `20V` at `>=3A`; no ordinary runtime request may bypass this lock. `pps3a` / 65 W
+  sources use the same active model when their calibrated heater curve provides the required
+  temperature-aware power limit.
 - The sole production controller MUST implement the lumped thermal balance
   `Ctheta*dT/dt = Ph - kc*(T-Ta) - kr*(Tk^4-TaK^4)` and a loss-feedforward predictive PI command
   `sat(Ploss(T) + Kp*(e-tau_d*dT/dt) + Ki*integral(e))`. Saturation MUST use the temperature-aware
@@ -86,9 +87,9 @@
   rebuild these projections without deleting or invalidating the raw observations; a projection
   outside physical bounds locks heating while retaining the raw data.
 - A thermal-loss calibration transaction consists of exactly two complete steady-state anchors at
-  `80C` and `220C`, including gate-off idle power, hold power, and ramp energy. It is written
-  atomically as `candidate`. Only a successful nine-point `60/80/100/120/140/160/180/220/240C`
-  acceptance run may promote that same candidate atomically to `active`.
+  `80C` and `220C`, including gate-off idle power, hold power, and ramp energy. When its physical
+  projection is valid, automatic calibration writes it atomically as `active`; it does not require
+  a source-class comparison, a nine-point run, or user acceptance.
 
 - HIL host 的 warmup 满功率门禁以 `heaterOutputPercent=100%` 的逻辑命令为主，并要求软启动结束后 `heaterPhysicalOutputPercent >= 99%`。PPS 安全上限更新期间允许物理 PWM 在逻辑命令仍为满功率时短暂落在 `95%..99%`，但该瞬态连续时间不得超过 `2s`；低于 `95%`、持续超过 `2s` 或逻辑命令下降必须拒绝进入候选路径。这样既不把受安全限幅的短暂过渡误判为调优失败，也不掩盖真实的持续欠功率。
 

@@ -49,13 +49,14 @@
 
 ### MUST
 
-- Runtime status MUST expose the shared thermal plant state (`missing|candidate|active|invalid`),
-  candidate transaction identity, projection validity, and heater lock reason. Control-plane model
-  writes MUST be explicit `save_candidate` or `promote_candidate` operations; promotion MUST reject
-  a mismatched transaction identity and MUST never accept a partial two-anchor payload.
-- The protected `pps5a` model-calibration job is the only control-plane path allowed to heat while
-  no active model exists. Cancellation, disconnect, source mismatch, sensor fault, or malformed
-  observation MUST immediately remove that authorization and stop heating.
+- Runtime status MUST expose the shared thermal plant state (`missing|active|invalid`), active
+  transaction identity, projection validity, and heater lock reason. Automatic model calibration
+  MUST store a complete physically valid two-anchor transaction directly as `active`; no
+  candidate, promotion, or user acceptance operation exists in the control plane.
+- The protected model-calibration job is the only control-plane path allowed to heat while no
+  active model exists. It requires a PPS APDO covering `20V` at `>=3A`; cancellation, disconnect,
+  unsupported source, sensor fault, or malformed observation MUST immediately remove that
+  authorization and stop heating.
 
 - 所有 transport 暴露同一领域模型：`Identity`、`NetworkSummary`、`Status`、`FirmwareArtifact`、`ApiError`。
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。

@@ -1,5 +1,7 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
+- 热模型校准收口为 source-independent 自动流程：`20V / >=3A` PPS 使用与 5A 相同的双锚点物理模型，投影有效即保存为 active。候选、promotion 与九点验收不再属于热模型校准控制面；历史 candidate 记录保持可读并迁移为 active。
+
 ## 2026-08-05
 
 - Direct-LAN 写入曾在 `stale_write` 后只显示失败或只更新 runtime snapshot，导致 calibration 与 heater-curve 工作区保留过时事实；各类写入现在只回读一次对应资源并替换其 state map，拒绝原写入且禁止自动重放。DEVD LAN bridge 曾把设备 HTTP 错误改写为本地 bridge error；adapter 现在保留远端 status 与完整 error envelope，包括 unauthorized。CI 在 Storybook interaction 前准备 Chromium，EdgeOne 只消费成功 push 运行生成的 verified artifact。

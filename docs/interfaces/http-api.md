@@ -180,7 +180,6 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 ```json
 {
   "state": "active",
-  "candidateTransactionId": 1431374617,
   "activeTransactionId": 1431374617,
   "projectionValid": true,
   "convectionMwPerC": 0.0,
@@ -190,7 +189,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`state` is `missing`, `candidate`, `active`, or `invalid`. The persistent source of truth is a complete raw two-anchor transaction: ambient/target RTD ADC, V/I, gate-off and hold power, ramp duration, and delivered energy. The displayed coefficients are derived from the current RTD calibration. Recalibrating RTD rebuilds the projection without rewriting or invalidating raw heat-control observations. Ordinary heating is locked until a valid `pps5a` model is active; `pps3a` remains heater-locked.
+`state` is `missing`, `active`, or `invalid`. The persistent source of truth is a complete raw two-anchor transaction: ambient/target RTD ADC, V/I, gate-off and hold power, ramp duration, and delivered energy. The displayed coefficients are derived from the current RTD calibration. Recalibrating RTD rebuilds the projection without rewriting or invalidating raw heat-control observations. Automatic `thermal_plant_auto` calibration writes a physically valid projection directly to `active`; it does not require a user validation or promotion step. Production heating requires an active model, a PPS APDO covering `20V`, and at least `3A` together with the calibrated heater curve needed for power limiting.
 
 ### `FirmwareArtifact`
 
@@ -385,7 +384,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. `thermalPlantModel.op=save_candidate` accepts exactly one complete raw `80C/220C` transaction, `promote_candidate` accepts only its matching `transactionId`, and `clear_candidate` accepts neither transaction data nor an ID. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
 
 `PUT /api/v1/devices/:id/calibration` body:
 
@@ -433,7 +432,7 @@ Apply copies draft calibration to active calibration and returns the updated `Ca
 }
 ```
 
-`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|heater_curve_auto|thermal_plant_auto`. `vin_adc_auto` writes samples into `vin_adc draft`; `heater_curve_auto` writes raw electrical observations and a derived curve; `thermal_plant_auto` is the protected 5A `80C/220C` two-anchor job. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|heater_curve_auto|thermal_plant_auto`. `vin_adc_auto` writes samples into `vin_adc draft`; `heater_curve_auto` writes raw electrical observations and a derived curve; `thermal_plant_auto` is the protected `20V / >=3A` `80C/220C` two-anchor job. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
 `PUT /api/v1/devices/:id/heater-curve` body:
 
@@ -541,7 +540,7 @@ Core commands:
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`
-- `flux-purr thermal model calibrate|validate-candidate|save-candidate|promote|clear-candidate --device <id>` or `--hardware <saved-id>`
+- `flux-purr thermal model calibrate --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal self-test --device <id> [--source-kind isolapurr] --source-id <bench-source-id> --source-url <lan-url> [--profile-mode auto|65w|100w] [--source-power-watts <watts>] [--source-mode auto-follow|manual-forced] [--runtime-rearm-attempts <n>]`
 - `flux-purr thermal tune --device <id> --source-id <bench-source-id> --source-url <lan-url> --profile-mode 100w --source-power-watts 100` runs the Rust-owned 5A full-batch preliminary review workflow. The default same-rank tuning target set is `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`; the canonical execution order is the recursive split `60, 240, 140, 100, 80, 120, 180, 160, 220`. The bundle reports physical-order `tuningTargetsC`, actual-order `tuningExecutionOrderC`, and one owner-facing card/tab per physical target.
 - `flux-purr thermal retune --run-dir <dir> [--apply-preview --device <id>|--hardware <saved-id>]`

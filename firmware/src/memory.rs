@@ -174,7 +174,6 @@ pub struct MemoryConfig {
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
     pub heater_curve_raw_observations: HeaterCurveRawObservations,
-    pub thermal_plant_candidate: Option<ThermalPlantRawTransaction>,
     pub thermal_plant_active: Option<ThermalPlantRawTransaction>,
     /// The legacy field is the persisted 3 A / 65 W bank. Keeping its name makes
     /// v1 record migration explicit and avoids a silent behavior change for callers.
@@ -540,7 +539,6 @@ impl Default for MemoryConfig {
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
             heater_curve_raw_observations: HeaterCurveRawObservations::default(),
-            thermal_plant_candidate: None,
             thermal_plant_active: None,
             active_thermal_control_profile: ThermalControlProfileConfig::default(),
             thermal_control_profile_pps5a: ThermalControlProfileConfig::default(),
@@ -567,9 +565,6 @@ impl MemoryConfig {
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
         sanitize_heater_curve_raw_observations(&mut self.heater_curve_raw_observations);
-        self.thermal_plant_candidate = self
-            .thermal_plant_candidate
-            .filter(thermal_plant_raw_transaction_is_complete);
         self.thermal_plant_active = self
             .thermal_plant_active
             .filter(thermal_plant_raw_transaction_is_complete);
@@ -1424,7 +1419,6 @@ fn encode_config_payload(
         .points
         .iter()
         .any(Option::is_some)
-        || config.thermal_plant_candidate.is_some()
         || config.thermal_plant_active.is_some();
     if !has_new_thermal_data {
         let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
@@ -1466,11 +1460,6 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
-    if let Some(candidate) = config.thermal_plant_candidate {
-        let mut payload = [0u8; 52];
-        encode_thermal_plant_raw_transaction(&candidate, &mut payload);
-        push_tlv(TLV_THERMAL_PLANT_CANDIDATE, &payload, out, &mut cursor)?;
-    }
     if let Some(active) = config.thermal_plant_active {
         let mut payload = [0u8; 52];
         encode_thermal_plant_raw_transaction(&active, &mut payload);
@@ -1633,7 +1622,11 @@ fn decode_config_payload(
                 config.heater_curve_raw_observations = decode_heater_curve_raw_observations(value);
             }
             TLV_THERMAL_PLANT_CANDIDATE if len == 52 => {
-                config.thermal_plant_candidate = decode_thermal_plant_raw_transaction(value);
+                // Candidate records came from the removed acceptance flow. A complete
+                // legacy transaction is the same raw physical model as an active one.
+                if config.thermal_plant_active.is_none() {
+                    config.thermal_plant_active = decode_thermal_plant_raw_transaction(value);
+                }
             }
             TLV_THERMAL_PLANT_ACTIVE if len == 52 => {
                 config.thermal_plant_active = decode_thermal_plant_raw_transaction(value);
@@ -3926,7 +3919,7 @@ mod tests {
             heater_current_ma: 3_000,
             resistance_milliohms: 3_333,
         });
-        config.thermal_plant_candidate = Some(sample_thermal_plant_transaction());
+        config.thermal_plant_active = Some(sample_thermal_plant_transaction());
         let record = MemoryRecord {
             sequence: 51,
             config,
@@ -3940,8 +3933,8 @@ mod tests {
             record.config.heater_curve_raw_observations
         );
         assert_eq!(
-            decoded.config.thermal_plant_candidate,
-            record.config.thermal_plant_candidate
+            decoded.config.thermal_plant_active,
+            record.config.thermal_plant_active
         );
         assert!(
             decoded
@@ -3952,6 +3945,27 @@ mod tests {
                 .all(Option::is_none)
         );
         assert!(len <= MEMORY_SLOT_SIZE);
+    }
+
+    #[test]
+    fn legacy_candidate_tlv_migrates_to_active_thermal_model() {
+        let transaction = sample_thermal_plant_transaction();
+        let mut transaction_payload = [0u8; 52];
+        encode_thermal_plant_raw_transaction(&transaction, &mut transaction_payload);
+        let mut payload = [0u8; 64];
+        let mut cursor = 0;
+        push_tlv(
+            TLV_THERMAL_PLANT_CANDIDATE,
+            &transaction_payload,
+            &mut payload,
+            &mut cursor,
+        )
+        .expect("legacy candidate payload fits");
+
+        let decoded = decode_config_payload(&payload[..cursor], true)
+            .expect("legacy candidate payload decodes");
+
+        assert_eq!(decoded.thermal_plant_active, Some(transaction));
     }
 
     #[test]

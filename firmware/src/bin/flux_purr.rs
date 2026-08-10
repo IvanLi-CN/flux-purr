@@ -75,9 +75,9 @@ use flux_purr_firmware::control_plane::{
     CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire, ControlPlaneStatus,
     Identity, RuntimeConfigCommand, ThermalControlProfileOp, ThermalControlProfilePointWire,
     ThermalControlProfileSettingsWire, ThermalControlProfileWire, ThermalControlRuntimeWire,
-    ThermalPlantModelOpWire, ThermalPlantRuntimeWire, UsbFrame, UsbFrameError, UsbRequestOp,
-    UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
-    network_from_memory, parse_usb_frame, write_usb_frame,
+    ThermalPlantRuntimeWire, UsbFrame, UsbFrameError, UsbRequestOp, UsbResponsePayload,
+    calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
+    parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -3300,6 +3300,9 @@ impl HoldPpsGovernor {
 enum ManualPpsError {
     NoPpsCapability,
     InvalidVoltage,
+    HeaterCurveRequired,
+    ThermalPlantSourceUnsupported,
+    ThermalPlantProjectionInvalid,
     PdNotReady,
     WriteFailed,
 }
@@ -3317,6 +3320,9 @@ impl ManualPpsError {
         match self {
             Self::NoPpsCapability => "manual_pps_no_capability",
             Self::InvalidVoltage => "manual_pps_invalid_voltage",
+            Self::HeaterCurveRequired => "heater_curve_required",
+            Self::ThermalPlantSourceUnsupported => "thermal_plant_source_unsupported",
+            Self::ThermalPlantProjectionInvalid => "thermal_plant_projection_invalid",
             Self::PdNotReady => "manual_pps_pd_not_ready",
             Self::WriteFailed => "manual_pps_write_failed",
         }
@@ -3327,6 +3333,15 @@ impl ManualPpsError {
             Self::NoPpsCapability => "PPS capability is unavailable.",
             Self::InvalidVoltage => {
                 "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
+            }
+            Self::HeaterCurveRequired => {
+                "Thermal plant calibration requires a completed heater curve calibration."
+            }
+            Self::ThermalPlantSourceUnsupported => {
+                "Thermal plant calibration requires a PPS APDO covering 20V at 3A or more."
+            }
+            Self::ThermalPlantProjectionInvalid => {
+                "Thermal plant observations did not produce a physical model."
             }
             Self::PdNotReady => "PD contract is not ready for manual PPS.",
             Self::WriteFailed => "Manual PPS write failed.",
@@ -4085,20 +4100,10 @@ fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRunti
             projected_rtd_temperature_c(memory_config, raw)
         })
     });
-    let candidate_projection = memory_config
-        .thermal_plant_candidate
-        .and_then(|transaction| {
-            project_thermal_plant(&transaction, |raw| {
-                projected_rtd_temperature_c(memory_config, raw)
-            })
-        });
-    let visible_projection = active_projection.or(candidate_projection);
     let state = if memory_config.thermal_plant_active.is_some() && active_projection.is_none() {
         "invalid"
     } else if active_projection.is_some() {
         "active"
-    } else if memory_config.thermal_plant_candidate.is_some() {
-        "candidate"
     } else {
         "missing"
     };
@@ -4106,18 +4111,15 @@ fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRunti
     let _ = state_wire.push_str(state);
     ThermalPlantRuntimeWire {
         state: state_wire,
-        candidate_transaction_id: memory_config
-            .thermal_plant_candidate
-            .map(|transaction| transaction.transaction_id),
         active_transaction_id: memory_config
             .thermal_plant_active
             .map(|transaction| transaction.transaction_id),
-        projection_valid: visible_projection.is_some(),
-        convection_mw_per_c: visible_projection.map(|projection| projection.convection_mw_per_c),
-        radiation_mw_per_k4: visible_projection.map(|projection| projection.radiation_mw_per_k4),
-        thermal_capacity_mj_per_c: visible_projection
+        projection_valid: active_projection.is_some(),
+        convection_mw_per_c: active_projection.map(|projection| projection.convection_mw_per_c),
+        radiation_mw_per_k4: active_projection.map(|projection| projection.radiation_mw_per_k4),
+        thermal_capacity_mj_per_c: active_projection
             .map(|projection| projection.thermal_capacity_mj_per_c),
-        transport_delay_ms: visible_projection.map(|projection| projection.transport_delay_ms),
+        transport_delay_ms: active_projection.map(|projection| projection.transport_delay_ms),
     }
 }
 
@@ -4125,15 +4127,8 @@ fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRunti
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn thermal_plant_projection_for_runtime(
     memory_config: &MemoryConfig,
-    calibration: CalibrationRuntimeState,
 ) -> Option<(flux_purr_firmware::memory::ThermalPlantProjection, f32)> {
-    let transaction = if calibration.mode == CalibrationMode::ThermalPlant
-        && calibration.job.status != CalibrationJobStatus::Running
-    {
-        memory_config.thermal_plant_candidate
-    } else {
-        memory_config.thermal_plant_active
-    }?;
+    let transaction = memory_config.thermal_plant_active?;
     let projection = project_thermal_plant(&transaction, |raw| {
         projected_rtd_temperature_c(memory_config, raw)
     })?;
@@ -4978,7 +4973,6 @@ fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> 
         adc_calibration: previous.adc_calibration,
         active_heater_curve: previous.active_heater_curve,
         heater_curve_raw_observations: previous.heater_curve_raw_observations,
-        thermal_plant_candidate: previous.thermal_plant_candidate,
         thermal_plant_active: previous.thermal_plant_active,
         active_thermal_control_profile: previous.active_thermal_control_profile,
         thermal_control_profile_pps5a: previous.thermal_control_profile_pps5a,
@@ -6304,41 +6298,6 @@ fn usb_runtime_config_response(
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
     mut context: UsbRuntimeStatusContext,
 ) -> (UsbFrame, CalibrationRuntimeState) {
-    if let Some(command) = config.thermal_plant_model {
-        let valid = match command.op {
-            ThermalPlantModelOpWire::SaveCandidate => command
-                .transaction
-                .map(Into::into)
-                .and_then(|transaction| {
-                    project_thermal_plant(&transaction, |raw| {
-                        projected_rtd_temperature_c(memory_config, raw)
-                    })
-                })
-                .is_some(),
-            ThermalPlantModelOpWire::PromoteCandidate => memory_config
-                .thermal_plant_candidate
-                .filter(|candidate| Some(candidate.transaction_id) == command.transaction_id)
-                .and_then(|candidate| {
-                    project_thermal_plant(&candidate, |raw| {
-                        projected_rtd_temperature_c(memory_config, raw)
-                    })
-                })
-                .is_some(),
-            ThermalPlantModelOpWire::ClearCandidate => {
-                command.transaction.is_none() && command.transaction_id.is_none()
-            }
-        };
-        if !valid {
-            return (
-                usb_error_response(
-                    request_id,
-                    "invalid_thermal_plant_model",
-                    "Thermal plant transaction is incomplete, unphysical, or does not match the candidate.",
-                ),
-                context.calibration,
-            );
-        }
-    }
     if let Some(command) = config.thermal_control_profile {
         match command.op {
             ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save
@@ -6765,16 +6724,18 @@ fn calibration_job_start(
             Ok(())
         }
         CalibrationJobKind::ThermalPlant => {
-            if calibration.mode != CalibrationMode::ThermalPlant
-                || memory_config
-                    .heater_curve_raw_observations
-                    .points
-                    .iter()
-                    .filter(|point| point.is_some())
-                    .count()
-                    < 2
-            {
+            if calibration.mode != CalibrationMode::ThermalPlant {
                 return Err(ManualPpsError::InvalidVoltage);
+            }
+            if memory_config
+                .heater_curve_raw_observations
+                .points
+                .iter()
+                .filter(|point| point.is_some())
+                .count()
+                < 2
+            {
+                return Err(ManualPpsError::HeaterCurveRequired);
             }
             let max_mv = manual_pps
                 .capability_max_mv
@@ -6782,8 +6743,11 @@ fn calibration_job_start(
                 .min(21_000);
             let max_ma = manual_pps
                 .capability_max_ma
-                .filter(|current| *current >= 5_000)
-                .ok_or(ManualPpsError::NoPpsCapability)?;
+                .filter(|current| *current >= 3_000)
+                .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
+            if max_mv < 20_000 {
+                return Err(ManualPpsError::ThermalPlantSourceUnsupported);
+            }
             manual_pps.enable(ManualPpsOwner::Calibration, max_mv, Some(max_ma))?;
             calibration.pps_enabled = true;
             calibration.pps_mv = Some(max_mv);
@@ -7259,11 +7223,14 @@ fn update_calibration_job_state(
         CalibrationJobData::ThermalPlant(mut job) => {
             if manual_pps.error.is_some()
                 || !manual_pps.enabled
-                || manual_pps.capability_max_ma.unwrap_or(0) < 5_000
+                || manual_pps.capability_max_mv.unwrap_or(0) < 20_000
+                || manual_pps.capability_max_ma.unwrap_or(0) < 3_000
             {
                 calibration_job_fail(
                     calibration,
-                    manual_pps.error.unwrap_or(ManualPpsError::NoPpsCapability),
+                    manual_pps
+                        .error
+                        .unwrap_or(ManualPpsError::ThermalPlantSourceUnsupported),
                     true,
                     manual_pps,
                 );
@@ -7371,19 +7338,23 @@ fn update_calibration_job_state(
                     {
                         calibration_job_fail(
                             calibration,
-                            ManualPpsError::WriteFailed,
+                            ManualPpsError::ThermalPlantProjectionInvalid,
                             true,
                             manual_pps,
                         );
                         return;
                     }
-                    memory_config.thermal_plant_candidate = Some(transaction);
+                    memory_config.thermal_plant_active = Some(transaction);
                     memory_config.sanitize();
                     calibration.heater_enabled = false;
                     calibration.model_target_temp_c = None;
                     if manual_pps.owner == ManualPpsOwner::Calibration {
                         manual_pps.clear();
                     }
+                    calibration.mode = CalibrationMode::Off;
+                    calibration.pps_enabled = false;
+                    calibration.pps_mv = None;
+                    calibration.pps_ma = None;
                     calibration_job_complete(
                         calibration,
                         CalibrationJobKind::ThermalPlant,
@@ -8358,8 +8329,6 @@ async fn process_control_line(
             mut config,
         }) => {
             let previous_memory_config = memory_config.clone();
-            let model_write_requested = config.thermal_plant_model.is_some();
-            let model_write_request_id = request_id.clone();
             let heater_toggle_requested = config.heater_enabled.is_some();
             let heater_rearm_requested = config.heater_enabled == Some(true);
             let overtemp_active = is_overtemp_fault(current_rtd_fault);
@@ -8405,30 +8374,7 @@ async fn process_control_line(
                 controller.clear_pending_short_press(RawFrontPanelKey::CenterBoot);
             }
             if *memory_config != previous_memory_config {
-                if model_write_requested {
-                    if let Err(error) = commit_memory_config_now(
-                        pd_i2c,
-                        flash_storage,
-                        memory_sequence,
-                        memory_config,
-                    )
-                    .await
-                    {
-                        *memory_config = previous_memory_config;
-                        return (
-                            needs_redraw,
-                            usb_error_response(
-                                model_write_request_id,
-                                error.code(),
-                                error.message(),
-                            ),
-                        );
-                    }
-                    *memory_commit_due_ms = None;
-                } else {
-                    *memory_commit_due_ms =
-                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                }
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
             needs_redraw = true;
             response
@@ -10393,8 +10339,7 @@ async fn main(_spawner: Spawner) {
                 last_pd_status_log_key = pd_status_log_key(current_pd_observation);
             }
             last_pd_observation = current_pd_observation;
-            let runtime_plant =
-                thermal_plant_projection_for_runtime(&memory_config, calibration_runtime_state);
+            let runtime_plant = thermal_plant_projection_for_runtime(&memory_config);
             // The controller works in heater watts, not source capability
             // watts. For a current-limited source, the achievable plate power
             // is V^2/R(T), with V capped by the saved resistance curve and
@@ -10408,41 +10353,37 @@ async fn main(_spawner: Spawner) {
                 &memory_config,
                 active_thermal_settings,
             );
-            let candidate_validation = calibration_runtime_state.mode
-                == CalibrationMode::ThermalPlant
-                && calibration_runtime_state.job.status != CalibrationJobStatus::Running;
-            let pid_snapshot =
-                if calibration_runtime_state.mode == CalibrationMode::Off || candidate_validation {
-                    if let Some((model, ambient_temp_c)) = runtime_plant {
-                        heater_controller.update_thermal_plant_at(ThermalPlantRuntimeInput {
-                            target_temp_c: ui_state.target_temp_c,
-                            measured_temp_c: latest_temp_c,
-                            ambient_temp_c,
-                            heater_enabled: ui_state.heater_enabled,
-                            model,
-                            max_power_mw: max_power_mw as f32,
-                            now_ms: elapsed_ms,
-                        })
-                    } else {
-                        heater_controller.update_at(
-                            ui_state.target_temp_c,
-                            latest_temp_c,
-                            false,
-                            None,
-                            elapsed_ms,
-                        )
-                    }
+            let pid_snapshot = if calibration_runtime_state.mode == CalibrationMode::Off {
+                if let Some((model, ambient_temp_c)) = runtime_plant {
+                    heater_controller.update_thermal_plant_at(ThermalPlantRuntimeInput {
+                        target_temp_c: ui_state.target_temp_c,
+                        measured_temp_c: latest_temp_c,
+                        ambient_temp_c,
+                        heater_enabled: ui_state.heater_enabled,
+                        model,
+                        max_power_mw: max_power_mw as f32,
+                        now_ms: elapsed_ms,
+                    })
                 } else {
                     heater_controller.update_at(
-                        calibration_runtime_state
-                            .model_target_temp_c
-                            .unwrap_or(ui_state.target_temp_c),
+                        ui_state.target_temp_c,
                         latest_temp_c,
-                        ui_state.heater_enabled,
+                        false,
                         None,
                         elapsed_ms,
                     )
-                };
+                }
+            } else {
+                heater_controller.update_at(
+                    calibration_runtime_state
+                        .model_target_temp_c
+                        .unwrap_or(ui_state.target_temp_c),
+                    latest_temp_c,
+                    ui_state.heater_enabled,
+                    None,
+                    elapsed_ms,
+                )
+            };
             last_pid_snapshot = pid_snapshot;
             let requested_duty_percent = pid_snapshot.duty_percent;
             if ui_state.heater_output_percent != requested_duty_percent {
@@ -11171,7 +11112,6 @@ mod tests {
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
-                thermal_plant_model: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -11227,7 +11167,6 @@ mod tests {
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
-                thermal_plant_model: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -11306,7 +11245,6 @@ mod tests {
                         points: profile_points,
                     }),
                 }),
-                thermal_plant_model: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -11386,7 +11324,6 @@ mod tests {
                         points: profile_points,
                     }),
                 }),
-                thermal_plant_model: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -11469,7 +11406,6 @@ mod tests {
                         points: profile_points,
                     }),
                 }),
-                thermal_plant_model: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -11805,7 +11741,6 @@ mod tests {
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
-                thermal_plant_model: None,
             },
             &mut ui_state,
             &mut memory_config,
@@ -11868,7 +11803,6 @@ mod tests {
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
-                thermal_plant_model: None,
             },
             &mut manual_pps,
         )
@@ -11889,7 +11823,6 @@ mod tests {
                 calibration: None,
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
-                thermal_plant_model: None,
             },
             &mut manual_pps,
         )
@@ -12160,6 +12093,60 @@ mod tests {
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
         assert_eq!(memory_config.adc_calibration.vin.sample_count(), 8);
+    }
+
+    #[test]
+    fn thermal_plant_auto_job_uses_the_same_entry_contract_for_3a_and_5a_pps() {
+        for (max_mv, max_ma) in [(20_000, 3_000), (21_000, 5_000)] {
+            let mut calibration = CalibrationRuntimeState {
+                mode: CalibrationMode::ThermalPlant,
+                ..CalibrationRuntimeState::default()
+            };
+            let mut memory_config = MemoryConfig::default();
+            for (index, raw_rtd_adc_mv) in [240, 460].into_iter().enumerate() {
+                memory_config.heater_curve_raw_observations.points[index] =
+                    Some(HeaterCurveRawObservation {
+                        raw_rtd_adc_mv,
+                        heater_voltage_mv: 20_000,
+                        heater_current_ma: max_ma,
+                        resistance_milliohms: 4_000,
+                    });
+            }
+            let mut manual_pps =
+                ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                    pps_covers_20v: true,
+                    pps_min_mv: Some(5_000),
+                    pps_max_mv: Some(max_mv),
+                    pps_max_ma: Some(max_ma),
+                    pps_apdos: [
+                        Some(ch224q::PpsApdo {
+                            min_mv: 5_000,
+                            max_mv,
+                            max_ma,
+                        }),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ],
+                    avs_min_mv: None,
+                    avs_max_mv: None,
+                }));
+
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut manual_pps,
+            )
+            .unwrap();
+
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
+            assert_eq!(calibration.pps_mv, Some(max_mv));
+            assert_eq!(calibration.pps_ma, Some(max_ma));
+        }
     }
 
     #[test]
