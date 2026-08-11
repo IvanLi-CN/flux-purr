@@ -243,7 +243,7 @@ None
 
 - `flux-purr` 已完成 RTD 经验标定（当前按约 `3000 mV` 有效分压换算）。
 - 前面板五向输入与现有 Dashboard / Menu 路由已可在真机上稳定使用。
-- 板级 flash / monitor 统一通过 `mcu-agentd` 执行。
+- 板级烧录通过仓库内 `flux-purr` CLI 与 `flux-purr-devd` 执行；`mcu-agentd` 仅用于不写入设备的诊断。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -253,7 +253,7 @@ None
 - `cargo test --manifest-path tools/flux-purr-devd/Cargo.toml`
 - `bun run check:devd`
 - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- --json thermal self-test --device mock-fp-lab-01 --source-kind isolapurr --source-id iso-mock --source-url http://127.0.0.1:1 --dry-run`
-- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3 --bin flux-purr --release`
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-pps-12v.framebuffer.bin --pd-mv 12000`
 - `cargo run --manifest-path firmware/Cargo.toml --features host-preview --bin frontpanel_preview -- dashboard docs/specs/q2aw6-heater-pid-frontpanel-runtime/assets/dashboard-pps-28v.framebuffer.bin --pd-mv 28000`
 - `bun run --cwd web check`

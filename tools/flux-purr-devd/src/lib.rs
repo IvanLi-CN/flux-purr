@@ -6060,14 +6060,6 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
         (
             "local-esp32s3-release",
             "Local ESP32-S3 release",
-            "target/xtensa-esp32s3-none-elf/release/flux-purr",
-            "release + web_serial + net_http",
-            vec!["web_serial".to_string(), "net_http".to_string()],
-            "elf",
-        ),
-        (
-            "local-esp32s3-release-firmware-target",
-            "Local ESP32-S3 release (legacy firmware target)",
             "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
             "release + web_serial + net_http",
             vec!["web_serial".to_string(), "net_http".to_string()],
@@ -7901,11 +7893,17 @@ mod tests {
     }
 
     #[test]
-    fn artifact_catalog_discovers_local_build_outputs() {
+    fn artifact_catalog_uses_only_the_canonical_firmware_target() {
         let dir = tempdir().unwrap();
-        let artifact_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
-        fs::create_dir_all(&artifact_path).unwrap();
-        fs::write(artifact_path.join("flux-purr"), b"firmware-image").unwrap();
+        let canonical_path = dir
+            .path()
+            .join("firmware/target/xtensa-esp32s3-none-elf/release");
+        fs::create_dir_all(&canonical_path).unwrap();
+        fs::write(canonical_path.join("flux-purr"), b"current-firmware-image").unwrap();
+
+        let stale_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
+        fs::create_dir_all(&stale_path).unwrap();
+        fs::write(stale_path.join("flux-purr"), b"stale-firmware-image").unwrap();
 
         let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
 
@@ -7915,27 +7913,13 @@ mod tests {
         assert_eq!(artifacts[0].profile, "release + web_serial + net_http");
         assert_eq!(artifacts[0].features, ["web_serial", "net_http"]);
         assert_eq!(artifacts[0].files[0].kind, "elf");
-        assert_eq!(artifacts[0].files[0].size, 14);
+        assert_eq!(
+            artifacts[0].files[0].path,
+            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr"
+        );
+        assert_eq!(artifacts[0].files[0].size, 22);
         assert_eq!(artifacts[0].files[0].flash_address, None);
         assert!(artifacts[0].files[0].sha256.starts_with("sha256:"));
-    }
-
-    #[test]
-    fn artifact_catalog_labels_legacy_firmware_target_explicitly() {
-        let dir = tempdir().unwrap();
-        let artifact_path = dir
-            .path()
-            .join("firmware/target/xtensa-esp32s3-none-elf/release");
-        fs::create_dir_all(&artifact_path).unwrap();
-        fs::write(artifact_path.join("flux-purr"), b"firmware-image-root").unwrap();
-
-        let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
-
-        assert!(
-            artifacts
-                .iter()
-                .any(|artifact| artifact.artifact_id == "local-esp32s3-release-firmware-target")
-        );
     }
 
     #[test]

@@ -94,7 +94,7 @@ The branch protection contract is declared in [.github/quality-gates.json](.gith
 Current default target direction is ESP32-S3. For Xtensa builds in CI/release:
 
 ```bash
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release
 ```
 
 Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if the MCU selection changes again.
@@ -111,13 +111,13 @@ PD request build variants:
 
 ```bash
 # default runtime image (20 V)
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release
 
 # 12 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release
 
 # 28 V variant
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release
 ```
 
 Current hardware design notes and manufacturing support assets are frozen in:

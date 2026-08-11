@@ -109,7 +109,7 @@
 ## 2026-07-09
 
 - firmware runtime 温度拒跳路径已移除。真机 `220°C` 开发 HIL 中 `rtdRawAdcMv` 继续上升而 `currentTempC` 卡死不动的问题不再通过温度限幅或趋势故障处理；有效样本直接用于控制，保留的硬 RTD 故障仅为开路、短路、ADC 读失败与过温。
-- 同日真实 flash 还确认了一个 host-side artifact 边界：当前 worktree 的新固件在 `target/xtensa-esp32s3-none-elf/release/flux-purr`，对应 `artifactId=local-esp32s3-release-root-target`；旧的 `firmware/target/...` `local-esp32s3-release` 是陈旧产物，不带最新 `heaterControlPhase` status 字段，不能再作为本轮 HIL 的验收镜像。
+- 同日真实 flash 暴露出 host-side artifact 来源不一致的问题。现行构建与烧录合同只使用 `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`；默认 Cargo 输出不属于 `devd` catalog，不能作为 HIL 镜像。
 - 使用正确 artifact 后，聚焦 `220°C` 的真实 HIL 仍未达标。最佳 run `thermal-1783608810927-serial-303a-1001-d0-cf-13-08-a1-48` 与 `thermal-1783609283479-serial-303a-1001-d0-cf-13-08-a1-48` 都得到 `maxOvershootC=1.0`、`holdPeakToPeakC=3.4`；把 `holdPower / holdReheat / holdExit / holdKp` 一起抬高的 run `thermal-1783609087433-serial-303a-1001-d0-cf-13-08-a1-48` 反而恶化到 `maxOvershootC=2.3`、`holdPeakToPeakC=4.7`。
 - 去掉 `220°C` 点位 `approachLeadTicks` 的候选也没有形成可接受改进。run `thermal-1783609472418-serial-303a-1001-d0-cf-13-08-a1-48` 在 `132.3°C` 附近长时间平台，期间 `heaterOutputPercent=98`、`heaterPhysicalOutputPercent=100`、`pdContractMv≈17500`，但温度与 RTD 原始 ADC 都基本不再上升，说明当前高温功率请求映射在某些候选下仍会落入明显的供热平台。
 - 这批 rerun 给出了当前最明确的开发结论：`220°C` 的“温度锁死”问题已经修掉，但当前混合控制器和高温功率映射还没有通过开发期 `220°C` 验收；剩余 blocker 是 `holdPeakToPeakC` 仍稳定高于 `3.0°C`，并且某些 near-target 候选会触发中温平台。

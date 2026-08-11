@@ -15,7 +15,7 @@ import type {
 
 const devdPort = Number(process.env.E2E_DEVD_PORT ?? 30081)
 const devdBaseUrl = `http://127.0.0.1:${devdPort}`
-const artifactPath = 'target/xtensa-esp32s3-none-elf/release/flux-purr'
+const artifactPath = 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr'
 const artifactSha = 'sha256:e2e'
 const deviceId = 'serial-e2e'
 

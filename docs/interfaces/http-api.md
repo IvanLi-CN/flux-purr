@@ -207,7 +207,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
   "files": [
     {
       "kind": "elf",
-      "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452,
       "flashAddress": null
@@ -478,7 +478,7 @@ Save copies the preview curve to active curve and schedules persistent memory co
       "files": [
         {
           "kind": "elf",
-          "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
+          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
           "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
           "size": 741452,
           "flashAddress": null
@@ -499,7 +499,7 @@ Save copies the preview curve to active curve and schedules persistent memory co
     "files": [
       {
         "kind": "elf",
-        "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
+        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
         "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
         "size": 741452,
         "flashAddress": null
@@ -517,7 +517,7 @@ Successful response:
   "artifactId": "local-esp32s3-release",
   "files": [
     {
-      "path": "target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452
     }

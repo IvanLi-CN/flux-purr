@@ -137,12 +137,12 @@
 - Host release build:
   - `cargo build --manifest-path firmware/Cargo.toml --release`
 - Xtensa app runtime build:
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release`
-  - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3,web_serial,net_http --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release`
+  - Equivalent explicit feature form: `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3,web_serial,net_http --bin flux-purr --release`
 - Xtensa app runtime build (`12 V` variant):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-12v --bin flux-purr --release`
 - Xtensa app runtime build (`28 V` variant):
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release`
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --no-default-features --features esp32s3,web_serial,net_http,pd-request-28v --bin flux-purr --release`
 
 ## Host preview workflow
 
@@ -161,11 +161,11 @@
 - Repo-local config: `mcu-agentd.toml`
 - MCU id: `esp32s3_frontpanel`
 - Configured ELF artifact:
-  - `target/xtensa-esp32s3-none-elf/release/flux-purr`
+  - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
 - `mcu-agentd` remains available for selector inspection and diagnostics. It is not the data-preserving firmware installation path because direct `espflash` execution bypasses devd's `flux_cfg` migration preflight.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`
-  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release` (default `20 V` + real control-plane transport)
+  - `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release` (default `20 V` + real control-plane transport)
   - if a different PD cap is needed, rebuild with `--no-default-features --features esp32s3,web_serial,net_http,pd-request-12v` or `--no-default-features --features esp32s3,web_serial,net_http,pd-request-28v`
   - `mcu-agentd --non-interactive config validate`
   - `mcu-agentd --non-interactive selector get esp32s3_frontpanel`
