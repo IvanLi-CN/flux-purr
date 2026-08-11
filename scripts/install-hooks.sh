@@ -190,6 +190,22 @@ pin_hook_binary() {
     printf 'if [ -n "${LEFTHOOK_BIN:-}" ] && [ ! -x "${LEFTHOOK_BIN}" ]; then\n'
     printf '  unset LEFTHOOK_BIN\n'
     printf 'fi\n'
+    printf 'if [ -z "${LEFTHOOK_BIN:-}" ]; then\n'
+    printf '  hook_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"\n'
+    printf '  if [ -n "$hook_root" ]; then\n'
+    printf '    hook_os="$(uname | tr "[:upper:]" "[:lower:]")"\n'
+    printf '    hook_arch="$(uname -m | sed "s/aarch64/arm64/;s/x86_64/x64/")"\n'
+    printf '    hook_candidate="$hook_root/node_modules/lefthook-${hook_os}-${hook_arch}/bin/lefthook"\n'
+    printf '    if [ -x "$hook_candidate" ]; then\n'
+    printf '      LEFTHOOK_BIN="$hook_candidate"\n'
+    printf '    elif [ -x "$hook_root/node_modules/.bin/lefthook" ]; then\n'
+    printf '      LEFTHOOK_BIN="$hook_root/node_modules/.bin/lefthook"\n'
+    printf '    fi\n'
+    printf '    if [ -n "${LEFTHOOK_BIN:-}" ]; then\n'
+    printf '      export LEFTHOOK_BIN\n'
+    printf '    fi\n'
+    printf '  fi\n'
+    printf 'fi\n'
 
     for hook_bin in "$@"; do
       if [[ -z "$hook_bin" ]]; then
