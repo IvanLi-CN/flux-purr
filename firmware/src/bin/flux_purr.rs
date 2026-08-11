@@ -3901,8 +3901,8 @@ fn thermal_plant_transient_trace_reaches_targets(
     };
     let samples = &transaction.samples[..count];
     let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
-    let mut max_temp_c = f32::MIN;
-    let mut peak_index = 0usize;
+    let mut powered_max_temp_c = f32::MIN;
+    let mut powered_peak_index = None;
     for (index, sample) in samples.iter().enumerate() {
         let Some(temperature_c) = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)
         else {
@@ -3911,18 +3911,21 @@ fn thermal_plant_transient_trace_reaches_targets(
         if !temperature_c.is_finite() {
             return false;
         }
-        if temperature_c > max_temp_c {
-            max_temp_c = temperature_c;
-            peak_index = index;
+        if sample.duty_percent > 0 && temperature_c > powered_max_temp_c {
+            powered_max_temp_c = temperature_c;
+            powered_peak_index = Some(index);
         }
         temperatures_c[index] = temperature_c;
     }
 
-    max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
+    let Some(powered_peak_index) = powered_peak_index else {
+        return false;
+    };
+    powered_max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
         && temperatures_c[0] <= ambient_temp_c + 8.0
-        && samples[peak_index + 1..]
+        && samples[powered_peak_index + 1..]
             .iter()
-            .zip(temperatures_c[peak_index + 1..count].iter())
+            .zip(temperatures_c[powered_peak_index + 1..count].iter())
             .any(|(sample, temperature_c)| {
                 sample.duty_percent == 0 && *temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
             })
@@ -6653,6 +6656,17 @@ fn apply_calibration_control_config(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) -> Result<(), ManualPpsError> {
+    let requests_mutation = config.mode.is_some()
+        || config.pps_enabled.is_some()
+        || config.pps_mv.is_some()
+        || config.heater_enabled.is_some()
+        || config.target_adc_mv.is_some();
+    if calibration.mode == CalibrationMode::ThermalPlant
+        && calibration.job.status == CalibrationJobStatus::Running
+        && requests_mutation
+    {
+        return Err(ManualPpsError::CalibrationInProgress);
+    }
     if let Some(mode) = config.mode {
         calibration.mode = mode.into();
         if calibration.mode == CalibrationMode::Off {
@@ -12373,6 +12387,39 @@ mod tests {
     }
 
     #[test]
+    fn thermal_plant_job_rejects_calibration_control_mutation_atomically() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            heater_enabled: true,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+        let before = calibration;
+        let mut manual_pps = ManualPpsState::default();
+
+        let error = apply_calibration_control_config(
+            &CalibrationControlCommand {
+                mode: Some(CalibrationModeWire::HeaterCurve),
+                pps_enabled: Some(false),
+                pps_mv: None,
+                heater_enabled: Some(false),
+                target_adc_mv: Some(1_000),
+            },
+            &mut calibration,
+            &mut manual_pps,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ManualPpsError::CalibrationInProgress);
+        assert_eq!(calibration, before);
+        assert_eq!(manual_pps, ManualPpsState::default());
+    }
+
+    #[test]
     fn manual_pps_failure_clears_requested_current() {
         let mut manual_pps =
             ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
@@ -12878,9 +12925,11 @@ mod tests {
         let mut heating = true;
         let mut last_saved_temp_c = ambient_temp_c;
         for tick in 1..=60_000_u16 {
+            let reached_cutoff = heating && temperature_c >= THERMAL_PLANT_TARGET_TEMP_C;
             let duty_percent = u8::from(heating) * 100;
             if sample_count < 24
                 || (temperature_c - last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C
+                || reached_cutoff
                 || (!heating && temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C)
             {
                 if sample_count >= THERMAL_PLANT_TRANSIENT_MAX_SAMPLES {
@@ -12894,6 +12943,11 @@ mod tests {
                 };
                 sample_count += 1;
                 last_saved_temp_c = temperature_c;
+            }
+            if reached_cutoff {
+                heating = false;
+                last_saved_temp_c = f32::MIN;
+                continue;
             }
             if !heating && temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C {
                 break;
@@ -12910,10 +12964,6 @@ mod tests {
             let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
                 + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
             temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
-            if heating && temperature_c >= THERMAL_PLANT_TARGET_TEMP_C {
-                heating = false;
-                last_saved_temp_c = f32::MIN;
-            }
         }
         assert!(sample_count >= 24);
         let (transaction, residual) = fit_thermal_plant_transient(
@@ -12969,6 +13019,30 @@ mod tests {
             &memory_config
         ));
         memory_config.thermal_plant_transient_active = Some(incomplete_cooldown);
+        assert!(!thermal_model_heater_allowed(
+            &memory_config,
+            CalibrationRuntimeState::default(),
+            manual_pps
+        ));
+
+        let mut below_target = transaction;
+        let mut saw_powered_sample = false;
+        for sample in below_target.samples[..usize::from(below_target.sample_count)].iter_mut() {
+            if sample.duty_percent > 0 {
+                if saw_powered_sample {
+                    sample.raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(215.0);
+                }
+                saw_powered_sample = true;
+            } else {
+                sample.raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(80.0);
+            }
+        }
+        assert!(thermal_plant_projection_from_transient(&below_target).is_some());
+        assert!(!thermal_plant_transient_trace_reaches_targets(
+            &below_target,
+            &memory_config
+        ));
+        memory_config.thermal_plant_transient_active = Some(below_target);
         assert!(!thermal_model_heater_allowed(
             &memory_config,
             CalibrationRuntimeState::default(),

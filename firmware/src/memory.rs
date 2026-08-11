@@ -4202,13 +4202,13 @@ mod tests {
         let mut config = sample_config();
         let mut transaction = sample_transient_thermal_plant_transaction();
         transaction.sample_count = THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8;
-        for (index, sample) in transaction.samples.iter_mut().enumerate().skip(24) {
+        for (index, sample) in transaction.samples.iter_mut().enumerate() {
             *sample = ThermalPlantTransientSample {
                 elapsed_ticks: (index as u16 + 1) * 10,
                 raw_rtd_adc_mv: if index < 64 {
                     250 + index as u16 * 4
                 } else {
-                    500 - (index as u16 - 64) * 2
+                    502 - (index as u16 - 64) * 2
                 },
                 heater_voltage_100mv: if index < 64 { 200 } else { 0 },
                 duty_percent: if index < 64 { 100 } else { 0 },
