@@ -28,6 +28,7 @@ pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
 pub const THERMAL_PLANT_TRANSIENT_MAX_SAMPLES: usize = 128;
 pub const THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES: u8 = 12;
 pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV: u8 = 50;
+pub const THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV: u8 = 210;
 pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
 pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
@@ -313,8 +314,8 @@ pub struct ThermalPlantTransientSample {
     /// 50 ms ticks from the start of the automatic job.
     pub elapsed_ticks: u16,
     pub raw_rtd_adc_mv: u16,
-    /// Measured heater voltage, quantized to 100 mV. The calibration source is
-    /// bounded to 20 V, so this fits in a byte without losing useful precision.
+    /// Measured heater voltage, quantized to 100 mV. The PPS request is capped
+    /// at 21 V, so this fits in a byte without losing useful precision.
     pub heater_voltage_100mv: u8,
     pub duty_percent: u8,
 }
@@ -747,6 +748,7 @@ pub fn thermal_plant_transient_transaction_is_complete(
             }
         } else if sample.duty_percent == 100
             && sample.heater_voltage_100mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV
+            && sample.heater_voltage_100mv <= THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV
             && !cooling_started
         {
             powered_sample_count = powered_sample_count.saturating_add(1);
@@ -4283,6 +4285,13 @@ mod tests {
         transaction = sample_transient_thermal_plant_transaction();
         transaction.samples[1].heater_voltage_100mv =
             THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV - 1;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_100mv =
+            THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV + 1;
         assert!(!thermal_plant_transient_transaction_is_complete(
             &transaction
         ));

@@ -3747,6 +3747,7 @@ struct CalibrationRuntimeState {
     job_data: Option<CalibrationJobData>,
     model_target_temp_c: Option<i16>,
     thermal_plant_completion_disarm_pending: bool,
+    immediate_heater_disarm_pending: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3766,6 +3767,7 @@ impl Default for CalibrationRuntimeState {
             job_data: None,
             model_target_temp_c: None,
             thermal_plant_completion_disarm_pending: false,
+            immediate_heater_disarm_pending: false,
         }
     }
 }
@@ -3854,6 +3856,13 @@ fn consume_thermal_plant_completion_disarm(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn take_immediate_heater_disarm(calibration_runtime_state: &mut CalibrationRuntimeState) -> bool {
+    let pending = calibration_runtime_state.immediate_heater_disarm_pending;
+    calibration_runtime_state.immediate_heater_disarm_pending = false;
+    pending
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn thermal_model_heater_allowed(
     memory_config: &MemoryConfig,
@@ -3919,6 +3928,9 @@ fn thermal_plant_transient_trace_reaches_targets(
         if !temperature_c.is_finite() {
             return false;
         }
+        if temperature_c >= THERMAL_PLANT_MAX_TEMP_C {
+            return false;
+        }
         if sample.duty_percent > 0 && temperature_c > powered_max_temp_c {
             powered_max_temp_c = temperature_c;
             powered_peak_index = Some(index);
@@ -3932,7 +3944,7 @@ fn thermal_plant_transient_trace_reaches_targets(
     let final_sample = samples.last().copied();
     let final_temp_c = temperatures_c[count - 1];
     powered_max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
-        && temperatures_c[0] <= ambient_temp_c + 8.0
+        && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
         && powered_peak_index + 1 < count
         && final_sample.is_some_and(|sample| sample.duty_percent == 0)
         && final_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
@@ -6797,15 +6809,19 @@ fn calibration_job_complete(
     calibration.model_target_temp_c = None;
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn calibration_job_canceled(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) {
+    if calibration.job.status != CalibrationJobStatus::Running {
+        return;
+    }
     calibration.job.status = CalibrationJobStatus::Canceled;
     calibration.job.message = None;
     calibration.job_data = None;
     calibration.heater_enabled = false;
+    calibration.immediate_heater_disarm_pending = true;
     if manual_pps.owner == ManualPpsOwner::Calibration {
         manual_pps.clear();
         calibration.pps_enabled = false;
@@ -7313,6 +7329,9 @@ fn fit_thermal_plant_transient(
         if !temperature_c.is_finite() || !power_mw.is_finite() || power_mw < 0.0 {
             return None;
         }
+        if temperature_c >= THERMAL_PLANT_MAX_TEMP_C {
+            return None;
+        }
         if sample.duty_percent == 100 && temperature_c > powered_max_temp_c {
             powered_max_temp_c = temperature_c;
             powered_peak_index = Some(index);
@@ -7322,7 +7341,7 @@ fn fit_thermal_plant_transient(
     }
     let powered_peak_index = powered_peak_index?;
     if powered_max_temp_c < THERMAL_PLANT_TARGET_TEMP_C
-        || temperatures_c[0] > ambient_temp_c + 8.0
+        || (temperatures_c[0] - ambient_temp_c).abs() > 8.0
         || powered_peak_index + 1 >= count
         || samples.last().is_none_or(|sample| sample.duty_percent != 0)
         || temperatures_c[count - 1] > THERMAL_PLANT_COOL_COMPLETE_TEMP_C
@@ -10455,6 +10474,18 @@ async fn main(_spawner: Spawner) {
             memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
         }
 
+        if take_immediate_heater_disarm(&mut calibration_runtime_state) {
+            // A control-plane cancel must stop the MOS gate before the next
+            // 50 ms control deadline, then return the source to fixed PD.
+            apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
+            let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+            let _ = write_ch224q_payload(&mut pd_i2c, ch224q_address, &fixed_payload).await;
+            hold_pps_governor.reset();
+            ui_state.heater_enabled = false;
+            ui_state.heater_output_percent = 0;
+            needs_redraw = true;
+        }
+
         if sample.raw_state != last_raw_state {
             if should_consume_attention_raw_input(
                 overtemp_attention_requires_ack(
@@ -10885,8 +10916,37 @@ async fn main(_spawner: Spawner) {
                     last_heater_duty,
                 );
             }
+            let thermal_plant_completed = calibration_runtime_state.mode == CalibrationMode::Off
+                && calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
+                && calibration_runtime_state.job.status == CalibrationJobStatus::Completed;
             if memory_config != memory_before_calibration_job {
-                memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                if thermal_plant_completed {
+                    if let Err(error) = commit_memory_config_now(
+                        &mut pd_i2c,
+                        &mut flash_storage,
+                        &mut memory_sequence,
+                        &memory_config,
+                    )
+                    .await
+                    {
+                        memory_config = memory_before_calibration_job;
+                        calibration_job_fail(
+                            &mut calibration_runtime_state,
+                            ManualPpsError::WriteFailed,
+                            false,
+                            &mut manual_pps_state,
+                        );
+                        info!(
+                            "thermal plant activation commit failed reason={=str}",
+                            error.code()
+                        );
+                    } else {
+                        memory_commit_due_ms = None;
+                    }
+                } else {
+                    memory_commit_due_ms =
+                        Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                }
             }
             if calibration_runtime_state.mode != CalibrationMode::Off
                 && calibration_runtime_state.heater_enabled
@@ -13146,6 +13206,43 @@ mod tests {
             CalibrationRuntimeState::default(),
             manual_pps
         ));
+
+        let mut overtemp_trace = transaction;
+        let powered_sample = overtemp_trace.samples[..usize::from(overtemp_trace.sample_count)]
+            .iter_mut()
+            .find(|sample| sample.duty_percent == 100)
+            .expect("transient trace contains a powered sample");
+        powered_sample.raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(THERMAL_PLANT_MAX_TEMP_C);
+        assert!(thermal_plant_projection_from_transient(&overtemp_trace).is_some());
+        assert!(!thermal_plant_transient_trace_reaches_targets(
+            &overtemp_trace,
+            &memory_config
+        ));
+        memory_config.thermal_plant_transient_active = Some(overtemp_trace);
+        assert!(!thermal_model_heater_allowed(
+            &memory_config,
+            CalibrationRuntimeState::default(),
+            manual_pps
+        ));
+
+        let mut cold_baseline = transaction;
+        cold_baseline.samples[0].raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(-50.0);
+        assert!(thermal_plant_projection_from_transient(&cold_baseline).is_some());
+        assert!(!thermal_plant_transient_trace_reaches_targets(
+            &cold_baseline,
+            &memory_config
+        ));
+        assert!(
+            fit_thermal_plant_transient(
+                cold_baseline.transaction_id,
+                cold_baseline.ambient_raw_rtd_adc_mv,
+                &cold_baseline.samples,
+                cold_baseline.sample_count,
+                None,
+                &memory_config,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -18271,5 +18368,42 @@ mod tests {
             false,
             true,
         ));
+    }
+
+    #[test]
+    fn immediate_heater_disarm_is_consumed_once() {
+        let mut calibration = CalibrationRuntimeState {
+            immediate_heater_disarm_pending: true,
+            ..CalibrationRuntimeState::default()
+        };
+
+        assert!(take_immediate_heater_disarm(&mut calibration));
+        assert!(!take_immediate_heater_disarm(&mut calibration));
+    }
+
+    #[test]
+    fn canceling_a_running_job_latches_immediate_disarm_and_preserves_terminal_state() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            heater_enabled: true,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState::default();
+
+        calibration_job_canceled(&mut calibration, &mut manual_pps);
+
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Canceled);
+        assert!(!calibration.heater_enabled);
+        assert!(take_immediate_heater_disarm(&mut calibration));
+
+        calibration.job.status = CalibrationJobStatus::Completed;
+        calibration_job_canceled(&mut calibration, &mut manual_pps);
+        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        assert!(!take_immediate_heater_disarm(&mut calibration));
     }
 }
