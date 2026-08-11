@@ -1748,11 +1748,11 @@ fn decode_config_payload(
                 config.thermal_plant_active = decode_thermal_plant_raw_transaction(value);
             }
             TLV_THERMAL_PLANT_TRANSIENT_ACTIVE
-                if len >= THERMAL_PLANT_TRANSIENT_HEADER_LEN
-                    && len
-                        <= THERMAL_PLANT_TRANSIENT_HEADER_LEN
-                            + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
-                                * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN =>
+                if (THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                    ..=THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                        + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+                            * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN)
+                    .contains(&len) =>
             {
                 config.thermal_plant_transient_active =
                     decode_thermal_plant_transient_transaction(value);

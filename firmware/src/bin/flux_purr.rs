@@ -3507,6 +3507,7 @@ impl Default for CalibrationJobState {
 
 #[cfg(any(target_arch = "xtensa", test))]
 const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
+#[cfg(any(target_arch = "xtensa", test))]
 const THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN: u16 = 20;
 #[cfg(any(target_arch = "xtensa", test))]
 const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
@@ -7126,8 +7127,8 @@ fn solve_transient_normal_equations(
             target.swap(best, pivot);
         }
         let divisor = matrix[pivot][pivot];
-        for column in pivot..count {
-            matrix[pivot][column] /= divisor;
+        for value in matrix[pivot][pivot..count].iter_mut() {
+            *value /= divisor;
         }
         target[pivot] /= divisor;
         for row in 0..count {
@@ -7135,8 +7136,9 @@ fn solve_transient_normal_equations(
                 continue;
             }
             let factor = matrix[row][pivot];
-            for column in pivot..count {
-                matrix[row][column] -= factor * matrix[pivot][column];
+            let pivot_row = matrix[pivot];
+            for (offset, value) in matrix[row][pivot..count].iter_mut().enumerate() {
+                *value -= factor * pivot_row[pivot + offset];
             }
             target[row] -= factor * target[pivot];
         }
@@ -7515,14 +7517,15 @@ fn update_calibration_job_state(
                 job.phase,
                 ThermalPlantAutoPhase::Ambient | ThermalPlantAutoPhase::Heating
             );
-            let source_lost = manual_pps.error.is_some()
-                || (heating_phase
-                    && (!manual_pps.enabled
-                        || manual_pps.owner != ManualPpsOwner::Calibration
-                        || !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma)))
-                || (!heating_phase
-                    && manual_pps.enabled
-                    && manual_pps.owner != ManualPpsOwner::Calibration);
+            let source_lost = if heating_phase {
+                manual_pps.error.is_some()
+                    || !manual_pps.enabled
+                    || manual_pps.owner != ManualPpsOwner::Calibration
+                    || !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma)
+            } else {
+                manual_pps.error.is_some()
+                    || (manual_pps.enabled && manual_pps.owner != ManualPpsOwner::Calibration)
+            };
             if source_lost || latest_temp_c >= THERMAL_PLANT_MAX_TEMP_C {
                 calibration_job_fail(
                     calibration,
@@ -7589,15 +7592,15 @@ fn update_calibration_job_state(
                         );
                         return;
                     };
-                    if manual_pps.target_mv != Some(request_mv) {
-                        if let Err(error) = manual_pps.enable(
+                    if manual_pps.target_mv != Some(request_mv)
+                        && let Err(error) = manual_pps.enable(
                             ManualPpsOwner::Calibration,
                             request_mv,
                             Some(job.source_current_ma),
-                        ) {
-                            calibration_job_fail(calibration, error, true, manual_pps);
-                            return;
-                        }
+                        )
+                    {
+                        calibration_job_fail(calibration, error, true, manual_pps);
+                        return;
                     }
                     calibration.pps_enabled = true;
                     calibration.pps_mv = Some(request_mv);
@@ -17783,32 +17786,34 @@ mod tests {
 
     #[test]
     fn legacy_steady_state_record_never_unlocks_heating() {
-        let mut memory_config = MemoryConfig::default();
-        memory_config.thermal_plant_active = Some(ThermalPlantRawTransaction {
-            transaction_id: 7,
-            anchors: [
-                ThermalPlantRawAnchor {
-                    ambient_raw_rtd_adc_mv: 250,
-                    target_raw_rtd_adc_mv: 700,
-                    heater_voltage_mv: 20_000,
-                    heater_current_ma: 3_000,
-                    gate_off_idle_power_mw: 0,
-                    steady_hold_power_mw: 1_000,
-                    ramp_duration_ms: 1_000,
-                    ramp_energy_mj: 1_000,
-                },
-                ThermalPlantRawAnchor {
-                    ambient_raw_rtd_adc_mv: 250,
-                    target_raw_rtd_adc_mv: 2_000,
-                    heater_voltage_mv: 20_000,
-                    heater_current_ma: 3_000,
-                    gate_off_idle_power_mw: 0,
-                    steady_hold_power_mw: 2_000,
-                    ramp_duration_ms: 2_000,
-                    ramp_energy_mj: 2_000,
-                },
-            ],
-        });
+        let memory_config = MemoryConfig {
+            thermal_plant_active: Some(ThermalPlantRawTransaction {
+                transaction_id: 7,
+                anchors: [
+                    ThermalPlantRawAnchor {
+                        ambient_raw_rtd_adc_mv: 250,
+                        target_raw_rtd_adc_mv: 700,
+                        heater_voltage_mv: 20_000,
+                        heater_current_ma: 3_000,
+                        gate_off_idle_power_mw: 0,
+                        steady_hold_power_mw: 1_000,
+                        ramp_duration_ms: 1_000,
+                        ramp_energy_mj: 1_000,
+                    },
+                    ThermalPlantRawAnchor {
+                        ambient_raw_rtd_adc_mv: 250,
+                        target_raw_rtd_adc_mv: 2_000,
+                        heater_voltage_mv: 20_000,
+                        heater_current_ma: 3_000,
+                        gate_off_idle_power_mw: 0,
+                        steady_hold_power_mw: 2_000,
+                        ramp_duration_ms: 2_000,
+                        ramp_energy_mj: 2_000,
+                    },
+                ],
+            }),
+            ..MemoryConfig::default()
+        };
         let manual_pps =
             ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
                 pps_covers_20v: true,
