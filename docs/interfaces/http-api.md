@@ -149,7 +149,7 @@ Owner-facing calibration modes are fixed as:
 - `vin_adc` => `电压读数标定`
 - `rtd_adc` => `温度标定`
 - `heater_curve` => `加热曲线标定`
-- `thermal_plant` => `双点热模型标定（20V / >=3A PPS）`
+- `thermal_plant` => `瞬态热模型标定（20V / >=3A PPS）`
 
 Calibration live control is PPS-only. Any requested PPS value must stay within the hardware `5V~28V` safety range and the device's real-time PPS capability. The effective request window is therefore `max(5V, ppsCapabilityMinMv)` through `min(28V, ppsCapabilityMaxMv)`.
 
@@ -189,7 +189,7 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`state` is `missing`, `active`, or `invalid`. The persistent source of truth is a complete raw two-anchor transaction: ambient/target RTD ADC, V/I, gate-off and hold power, ramp duration, and delivered energy. The displayed coefficients are derived from the current RTD calibration. Recalibrating RTD rebuilds the projection without rewriting or invalidating raw heat-control observations. Automatic `thermal_plant_auto` calibration writes a physically valid projection directly to `active`, leaves heating disarmed, and does not require a user validation or promotion step. Production heating requires an active model, a PPS APDO covering `20V`, and at least `3A` together with the calibrated heater curve needed for power limiting.
+`state` is `missing`, `active`, or `invalid`. The persistent source of truth is a bounded raw transient trace: ambient RTD ADC, `50ms` timestamps, RTD ADC, measured heater voltage, and duty. `thermal_plant_auto` samples the heater-resistance curve during the same run, heats at `100%` of the current safety-limited power until `220C`, then immediately disarms and records natural cooling to `80C`. `20V / >=3A` is an APDO admission condition, not a fixed calibration voltage: the device uses the selected APDO and current temperature to request the highest safe heater-terminal voltage. The device fits the coefficients locally, writes a physically valid model directly to `active`, and leaves heating disarmed. There is no candidate, promotion, cross-current comparison, or user acceptance operation. Production heating requires an active model, a PPS APDO covering `20V` at at least `3A`, and the curve captured by that same transient run.
 
 ### `FirmwareArtifact`
 
@@ -428,11 +428,11 @@ Apply copies draft calibration to active calibration and returns the updated `Ca
 {
   "leaseId": "lease-001",
   "op": "start",
-  "kind": "heater_curve_auto"
+  "kind": "thermal_plant_auto"
 }
 ```
 
-`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|heater_curve_auto|thermal_plant_auto`. `vin_adc_auto` writes samples into `vin_adc draft`; `heater_curve_auto` writes raw electrical observations and a derived curve; `thermal_plant_auto` is the protected `20V / >=3A` `80C/220C` two-anchor job. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes samples into `vin_adc draft`; `thermal_plant_auto` is the protected `20V / >=3A` single-run transient job. It records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
 `PUT /api/v1/devices/:id/heater-curve` body:
 
@@ -768,7 +768,7 @@ The response returns `CalibrationState`, or `calibration_apply_heater_active` wh
 }
 ```
 
-Supported operations are `start` and `cancel`. `start` accepts `vin_adc_auto`, `heater_curve_auto`, and `thermal_plant_auto`. The response returns `CalibrationJobState`.
+Supported operations are `start` and `cancel`. `start` accepts `vin_adc_auto` and `thermal_plant_auto`. The response returns `CalibrationJobState`.
 
 ### `heater_curve_config`
 

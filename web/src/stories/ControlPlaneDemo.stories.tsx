@@ -298,7 +298,8 @@ export const DemoCalibrationTab: Story = {
             ) as HTMLElement | null
           )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['自动校准'])
+        expect(actionButtons).toEqual([])
+        expect(canvas.queryByRole('button', { name: '自动校准' })).not.toBeInTheDocument()
         await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
         await expect(await canvas.findByRole('slider', { name: '目标 ADC 滑块' })).toBeVisible()

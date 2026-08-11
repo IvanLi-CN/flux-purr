@@ -410,7 +410,6 @@ enum HeaterCurveCalibrationCommand {
     Enter(PpsCalibrationEnterArgs),
     Set(PpsCalibrationSetArgs),
     Heater(HeaterCurveCalibrationHeaterArgs),
-    Auto(TargetSelector),
     Job {
         #[command(subcommand)]
         command: CalibrationJobCommand,
@@ -461,7 +460,9 @@ enum ThermalCommand {
 
 #[derive(Debug, Subcommand)]
 enum ThermalModelCommand {
-    #[command(about = "Start the 80C/220C two-anchor calibration job.")]
+    #[command(
+        about = "Start one 20V transient calibration run to 220C, including heater-curve sampling."
+    )]
     Calibrate(TargetSelector),
 }
 
@@ -2036,19 +2037,6 @@ async fn handle_heater_curve_calibration_command(
                     "calibration": {
                         "heaterEnabled": args.enabled
                     }
-                })),
-            )
-            .await
-        }
-        HeaterCurveCalibrationCommand::Auto(target) => {
-            request_with_lease(
-                client,
-                resolve_target(target, default_devd)?,
-                Method::POST,
-                "/calibration/job",
-                Some(json!({
-                    "op": "start",
-                    "kind": "heater_curve_auto"
                 })),
             )
             .await

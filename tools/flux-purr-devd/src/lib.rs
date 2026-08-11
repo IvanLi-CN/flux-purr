@@ -940,7 +940,6 @@ pub enum CalibrationMode {
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationJobKind {
     VinAdcAuto,
-    HeaterCurveAuto,
     ThermalPlantAuto,
 }
 

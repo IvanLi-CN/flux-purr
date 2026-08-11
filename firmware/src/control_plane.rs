@@ -400,7 +400,6 @@ pub enum CalibrationModeWire {
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationJobKindWire {
     VinAdcAuto,
-    HeaterCurveAuto,
     ThermalPlantAuto,
 }
 
@@ -2973,6 +2972,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_calibration_job_frame_rejects_removed_heater_curve_auto() {
+        assert!(parse_usb_frame(
+            r#"{"type":"calibration_job","requestId":"req-removed","op":"start","kind":"heater_curve_auto"}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn parse_usb_request_accepts_long_calibration_job_op() {
         let frame = parse_usb_frame(
             r#"{"type":"request","requestId":"req-006","op":"get_calibration_job"}"#,
@@ -2994,13 +3001,13 @@ mod tests {
             request_id: string("req-007"),
             command: CalibrationJobCommandWire {
                 op: CalibrationJobOpWire::Start,
-                kind: Some(CalibrationJobKindWire::HeaterCurveAuto),
+                kind: Some(CalibrationJobKindWire::ThermalPlantAuto),
             },
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
         let json = write_usb_frame(&frame, &mut out).unwrap();
         assert!(json.contains(r#""type":"calibration_job""#));
-        assert!(json.contains(r#""kind":"heater_curve_auto""#));
+        assert!(json.contains(r#""kind":"thermal_plant_auto""#));
     }
 
     #[test]

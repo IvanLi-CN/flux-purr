@@ -20,7 +20,7 @@ related_specs:
 
 Thermal control validation is a measured control workflow, not a fixed duty tweak.
 
-Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains raw RTD ADC, electrical, timing, and energy observations; RTD calibration only changes the projection from those observations, never the observations themselves. A complete `80C/220C` two-anchor transaction whose physical projection is valid is written directly as `active`.
+Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage, duty, and `50ms` time points. A single protected run takes an ambient baseline, heats at `100%` safe available power to `220C`, immediately turns heat off, and records passive cooling to `80C`. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples.
 
 The production controller is:
 
@@ -33,8 +33,8 @@ Legacy profile controls remain only for decoding historical records and rerender
 Flux Purr exposes:
 
 - `thermalPlantModel` state and active transaction identity in runtime status
-- protected `thermal_plant_auto` calibration at `80C` and `220C`
-- heater-curve raw observations for reconstructing the resistance projection
+- one protected `thermal_plant_auto` transient calibration, from ambient through `220C` and passive cooling to `80C`
+- heater-curve raw observations captured during that same transient run
 - canonical HTML HIL bundles generated through the Rust report renderer
 
 ## Artifact model

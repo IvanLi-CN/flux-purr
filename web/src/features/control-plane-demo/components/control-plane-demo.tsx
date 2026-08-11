@@ -3183,7 +3183,7 @@ export function ControlPlaneDemo({
     async (
       request: {
         op: 'start' | 'cancel'
-        kind?: 'vin_adc_auto' | 'heater_curve_auto'
+        kind?: 'vin_adc_auto' | 'thermal_plant_auto'
       },
       failureMessage: string
     ) => {
@@ -4514,7 +4514,7 @@ function ViewPanel({
   onCalibrationJobChange: (
     request: {
       op: 'start' | 'cancel'
-      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+      kind?: 'vin_adc_auto' | 'thermal_plant_auto'
     },
     failureMessage: string
   ) => void | Promise<void>
@@ -5838,7 +5838,7 @@ function CalibrationView({
   onCalibrationJobChange: (
     request: {
       op: 'start' | 'cancel'
-      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+      kind?: 'vin_adc_auto' | 'thermal_plant_auto'
     },
     failureMessage: string
   ) => void | Promise<void>
@@ -5985,7 +5985,6 @@ function CalibrationView({
   const heaterPpsMv = parseCalibrationIntegerInput(heaterPpsMvText)
   const heaterPpsError =
     heaterPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, heaterPpsMv)
-  const heaterCanSubmitPps = hasPpsCapability && heaterPpsError == null
   const activePpsMvText =
     calibrationWorkspaceTab === 'heater_curve'
       ? heaterPpsMvText
@@ -6331,41 +6330,6 @@ function CalibrationView({
                       ) : null
                     }
                     actionSlots={[
-                      {
-                        id: 'heater-job-toggle',
-                        node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked ||
-                              pendingCalibrationAction != null ||
-                              (!jobRunning && (!modeArmed || !heaterCanSubmitPps))
-                            }
-                            onClick={() =>
-                              void runCalibrationAction('heater-job-toggle', () =>
-                                onCalibrationJobChange(
-                                  jobRunning
-                                    ? { op: 'cancel' }
-                                    : {
-                                        op: 'start',
-                                        kind: 'heater_curve_auto',
-                                      },
-                                  jobRunning
-                                    ? '加热曲线自动采样取消失败。'
-                                    : '加热曲线自动采样启动失败。'
-                                )
-                              )
-                            }
-                          >
-                            {calibrationActionPending('heater-job-toggle')
-                              ? '处理中...'
-                              : jobRunning
-                                ? '取消校准'
-                                : '自动校准'}
-                          </button>
-                        ),
-                      },
                       {
                         id: 'heater-heater-toggle',
                         node: (

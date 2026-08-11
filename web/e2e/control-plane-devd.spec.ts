@@ -1296,7 +1296,7 @@ function applyCalibrationJobRequest(
     op === 'start'
       ? {
           kind:
-            bodyField(body, 'kind') === 'heater_curve_auto' ||
+            bodyField(body, 'kind') === 'thermal_plant_auto' ||
             bodyField(body, 'kind') === 'vin_adc_auto'
               ? (bodyField(body, 'kind') as CalibrationJobState['kind'])
               : null,

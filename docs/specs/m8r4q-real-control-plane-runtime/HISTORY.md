@@ -1,6 +1,6 @@
 # Flux Purr 真实控制平面运行时历史（#m8r4q）
 
-- 热模型校准收口为 source-independent 自动流程：`20V / >=3A` PPS 使用与 5A 相同的双锚点物理模型，投影有效即保存为 active。候选、promotion 与九点验收不再属于热模型校准控制面；历史 candidate 记录保持可读并迁移为 active。
+- 热模型校准曾采用 source-independent 的双锚点流程。该历史记录保留用于解释 `0x36/0x37`；当前实现改用单次瞬态轨迹，旧记录仅可解码，不迁移为 active，也不解锁加热。
 
 ## 2026-08-05
 

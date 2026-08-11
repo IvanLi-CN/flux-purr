@@ -82,14 +82,20 @@
   apply target-specific temperature offsets or recover the historical point-local profile as a
   hidden compensation path.
 - Model calibration MUST persist raw RTD ADC observations, ambient raw RTD ADC observations,
-  measured voltage/current/power, elapsed time, and delivered energy. Temperature-indexed heater
-  resistance and `kc/kr/Ctheta/tau_d` are derived projections. Changing RTD ADC calibration MUST
-  rebuild these projections without deleting or invalidating the raw observations; a projection
-  outside physical bounds locks heating while retaining the raw data.
-- A thermal-loss calibration transaction consists of exactly two complete steady-state anchors at
-  `80C` and `220C`, including gate-off idle power, hold power, and ramp energy. When its physical
-  projection is valid, automatic calibration writes it atomically as `active`; it does not require
-  a source-class comparison, a nine-point run, or user acceptance.
+  measured heater voltage, duty, and elapsed time. Temperature-indexed heater resistance and
+  `kc/kr/Ctheta/tau_d` are derived projections fitted by the device from that trace. The raw trace
+  is not rewritten by a separate RTD calibration; a missing or physically invalid projection locks
+  heating while retaining the raw data for diagnosis.
+- A thermal-loss calibration transaction consists of one bounded transient trace: ambient
+  baseline, `100%` safety-limited heating to `220C`, immediate heater disarm, and passive cooling
+  to `80C`. It must never enter generic Approach or Hold control. The same trace supplies every
+  heater-curve temperature band. When its local physical fit is valid, automatic calibration writes
+  it atomically as `active`; it does not require a source-class comparison, a nine-point run, or
+  user acceptance.
+- The transient job's `20V / >=3A` requirement selects a usable PPS APDO; it does not pin the
+  heater to `20V`. At each heating sample it requests the highest terminal voltage allowed by that
+  same APDO, the shared board-current reserve, and `R(T)`. The request may change with temperature,
+  but the transient PWM command remains `100%` until the `220C` cut-off.
 
 - HIL host 的 warmup 满功率门禁以 `heaterOutputPercent=100%` 的逻辑命令为主，并要求软启动结束后 `heaterPhysicalOutputPercent >= 99%`。PPS 安全上限更新期间允许物理 PWM 在逻辑命令仍为满功率时短暂落在 `95%..99%`，但该瞬态连续时间不得超过 `2s`；低于 `95%`、持续超过 `2s` 或逻辑命令下降必须拒绝进入候选路径。这样既不把受安全限幅的短暂过渡误判为调优失败，也不掩盖真实的持续欠功率。
 

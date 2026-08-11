@@ -136,7 +136,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 - `GET /api/v1/devices/:id/calibration?lease_id=...` returns `CalibrationState`.
 - `PUT /api/v1/devices/:id/calibration` mutates shared samples or slots. Body includes `leaseId`, `op=capture|delete|clear|import|set_active_slot|set_slot_fit`, optional `channel`, references, explicit ADC values, `sampleIndex`, `state`, `slot`, or `fit`.
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...` returns the current calibration auto-job state.
-- `POST /api/v1/devices/:id/calibration/job` starts or cancels first-class auto jobs. `start` accepts `kind=vin_adc_auto|heater_curve_auto`; `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+- `POST /api/v1/devices/:id/calibration/job` starts or cancels first-class auto jobs. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`; `thermal_plant_auto` owns the combined transient heater-curve and thermal-model capture; `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
 ### USB JSONL
 
