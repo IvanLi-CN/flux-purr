@@ -149,7 +149,11 @@ Owner-facing calibration modes are fixed as:
 - `vin_adc` => `电压读数标定`
 - `rtd_adc` => `温度标定`
 - `heater_curve` => `加热曲线标定`
-- `thermal_plant` => `瞬态热模型标定（20V / >=3A PPS）`
+
+`thermal_plant` is an internal runtime state used only while the protected
+`thermal_plant_auto` job runs from the heater-curve workspace. It is not a
+fourth owner-facing calibration mode and cannot be selected through the
+manual calibration control.
 
 Calibration live control is PPS-only. Any requested PPS value must stay within the hardware `5V~28V` safety range and the device's real-time PPS capability. The effective request window is therefore `max(5V, ppsCapabilityMinMv)` through `min(28V, ppsCapabilityMaxMv)`.
 

@@ -145,6 +145,7 @@ const TLV_THERMAL_PLANT_ACTIVE: u8 = 0x37;
 const TLV_LAN_PAIRING_TOKEN: u8 = 0x38;
 const TLV_WIFI_STATIC_IPV4: u8 = 0x39;
 const TLV_THERMAL_PLANT_TRANSIENT_ACTIVE: u8 = 0x3a;
+const TLV_HEATER_CURVE_TRANSACTION_ID: u8 = 0x3b;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WifiStaticIpv4Config {
@@ -187,6 +188,9 @@ pub struct MemoryConfig {
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
     pub heater_curve_raw_observations: HeaterCurveRawObservations,
+    /// The transient run that captured the persisted raw heater observations.
+    /// A missing identity keeps automatic production heating locked.
+    pub heater_curve_transaction_id: Option<u32>,
     /// Read-only two-platform records from the removed steady-state calibration.
     /// They remain decodable so later configuration writes do not reject a legacy
     /// record, but they never unlock production heating.
@@ -604,6 +608,7 @@ impl Default for MemoryConfig {
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
             heater_curve_raw_observations: HeaterCurveRawObservations::default(),
+            heater_curve_transaction_id: None,
             thermal_plant_active: None,
             thermal_plant_transient_active: None,
             active_thermal_control_profile: ThermalControlProfileConfig::default(),
@@ -631,12 +636,13 @@ impl MemoryConfig {
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
         sanitize_heater_curve_raw_observations(&mut self.heater_curve_raw_observations);
+        self.heater_curve_transaction_id = self.heater_curve_transaction_id.filter(|id| *id != 0);
         self.thermal_plant_active = self
             .thermal_plant_active
             .filter(thermal_plant_raw_transaction_is_complete);
         self.thermal_plant_transient_active = self
             .thermal_plant_transient_active
-            .filter(thermal_plant_transient_transaction_is_complete);
+            .filter(thermal_plant_transient_transaction_has_valid_structure);
         sanitize_thermal_control_profile(&mut self.active_thermal_control_profile);
         sanitize_thermal_control_profile(&mut self.thermal_control_profile_pps5a);
     }
@@ -701,7 +707,7 @@ pub fn thermal_plant_raw_transaction_is_complete(value: &ThermalPlantRawTransact
         })
 }
 
-pub fn thermal_plant_transient_transaction_is_complete(
+pub fn thermal_plant_transient_transaction_has_valid_structure(
     value: &ThermalPlantTransientTransaction,
 ) -> bool {
     if value.transaction_id == 0
@@ -710,23 +716,6 @@ pub fn thermal_plant_transient_transaction_is_complete(
     {
         return false;
     }
-    let projection = value.projection.projection();
-    if !projection.convection_mw_per_c.is_finite()
-        || !projection.radiation_mw_per_k4.is_finite()
-        || !projection.thermal_capacity_mj_per_c.is_finite()
-        || !(0.0..=THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C)
-            .contains(&projection.convection_mw_per_c)
-        || !(0.0..=THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4)
-            .contains(&projection.radiation_mw_per_k4)
-        || !(100.0..=2_000_000.0).contains(&projection.thermal_capacity_mj_per_c)
-        || projection.transport_delay_ms > 10_000
-    {
-        return false;
-    }
-    if projection.convection_mw_per_c == 0.0 && projection.radiation_mw_per_k4 == 0.0 {
-        return false;
-    }
-
     let samples = &value.samples[..usize::from(value.sample_count)];
     if samples
         .first()
@@ -765,6 +754,25 @@ pub fn thermal_plant_transient_transaction_is_complete(
         && cooling_started
         && has_cooling_sample
         && peak_raw_rtd_adc_mv > value.ambient_raw_rtd_adc_mv
+}
+
+pub fn thermal_plant_transient_transaction_is_complete(
+    value: &ThermalPlantTransientTransaction,
+) -> bool {
+    if !thermal_plant_transient_transaction_has_valid_structure(value) {
+        return false;
+    }
+    let projection = value.projection.projection();
+    projection.convection_mw_per_c.is_finite()
+        && projection.radiation_mw_per_k4.is_finite()
+        && projection.thermal_capacity_mj_per_c.is_finite()
+        && (0.0..=THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C)
+            .contains(&projection.convection_mw_per_c)
+        && (0.0..=THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4)
+            .contains(&projection.radiation_mw_per_k4)
+        && (100.0..=2_000_000.0).contains(&projection.thermal_capacity_mj_per_c)
+        && projection.transport_delay_ms <= 10_000
+        && (projection.convection_mw_per_c != 0.0 || projection.radiation_mw_per_k4 != 0.0)
 }
 
 pub fn thermal_plant_projection_from_transient(
@@ -1593,6 +1601,14 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
+    if let Some(transaction_id) = config.heater_curve_transaction_id {
+        push_tlv(
+            TLV_HEATER_CURVE_TRANSACTION_ID,
+            &transaction_id.to_le_bytes(),
+            out,
+            &mut cursor,
+        )?;
+    }
     if let Some(active) = config.thermal_plant_transient_active {
         let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
             + usize::from(active.sample_count) * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN;
@@ -1761,6 +1777,10 @@ fn decode_config_payload(
             }
             TLV_HEATER_CURVE_RAW_OBSERVATIONS if len == HEATER_CURVE_MAX_POINTS * 8 => {
                 config.heater_curve_raw_observations = decode_heater_curve_raw_observations(value);
+            }
+            TLV_HEATER_CURVE_TRANSACTION_ID if len == 4 => {
+                config.heater_curve_transaction_id =
+                    Some(u32::from_le_bytes([value[0], value[1], value[2], value[3]]));
             }
             TLV_THERMAL_PLANT_CANDIDATE if len == 52 => {
                 // Retain historical records for inspection and lossless decoding only.
@@ -1969,7 +1989,7 @@ fn decode_thermal_plant_transient_transaction(
         },
         samples,
     };
-    thermal_plant_transient_transaction_is_complete(&value).then_some(value)
+    thermal_plant_transient_transaction_has_valid_structure(&value).then_some(value)
 }
 
 fn encode_adc_calibration_samples(config: &AdcCalibrationConfig, out: &mut [u8]) {
@@ -2262,9 +2282,6 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         let approach_tail_window = point
             .approach_tail_window_centi_c
             .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX);
-        let approach_tail_steps = (approach_tail_window
-            + THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C / 2)
-            / THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C;
         let values = [
             target,
             brake_distance,
@@ -2272,7 +2289,7 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
             approach_power,
             approach_floor_power,
             approach_damping_exponent,
-            approach_tail_steps,
+            approach_tail_window,
             point.hold_power_permille.min(1_000),
             point.hold_reheat_power_permille.min(1_000),
             point.hold_entry_centi_c.min(5_000),
@@ -2294,7 +2311,7 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
             point.warmup_reenter_centi_c.clamp(50, 5_000),
         ];
         let widths = [
-            9, 13, 10, 10, 10, 12, 4, 10, 10, 13, 13, 13, 13, 13, 14, 14, 8, 8, 8, 13,
+            9, 13, 10, 10, 10, 12, 9, 10, 10, 13, 13, 13, 13, 13, 14, 14, 8, 8, 8, 13,
         ];
         let packed = &mut out[cursor..cursor + THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN];
         packed.fill(0);
@@ -2429,8 +2446,7 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
             let approach_damping_exponent_permille =
                 read_packed_profile_value(packed, &mut bit_cursor, 12);
             let approach_tail_window_centi_c =
-                read_packed_profile_value(packed, &mut bit_cursor, 4)
-                    * THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C;
+                read_packed_profile_value(packed, &mut bit_cursor, 9);
             let hold_power_permille = read_packed_profile_value(packed, &mut bit_cursor, 10);
             let hold_reheat_power_permille = read_packed_profile_value(packed, &mut bit_cursor, 10);
             let hold_entry_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
@@ -3693,7 +3709,7 @@ mod tests {
         config.active_thermal_control_profile.points[0]
             .as_mut()
             .expect("sample profile point")
-            .approach_tail_window_centi_c = 175;
+            .approach_tail_window_centi_c = 176;
 
         let mut current = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
         let current_len =
@@ -3703,7 +3719,7 @@ mod tests {
             decoded_current.points[0]
                 .expect("current point")
                 .approach_tail_window_centi_c,
-            175
+            176
         );
 
         let point = config.active_thermal_control_profile.points[0].expect("sample profile point");
@@ -4385,7 +4401,9 @@ mod tests {
             resistance_milliohms: 3_333,
         });
         config.thermal_plant_active = Some(sample_thermal_plant_transaction());
-        config.thermal_plant_transient_active = Some(sample_transient_thermal_plant_transaction());
+        let transaction = sample_transient_thermal_plant_transaction();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
         let record = MemoryRecord {
             sequence: 51,
             config,
@@ -4403,6 +4421,10 @@ mod tests {
             record.config.thermal_plant_transient_active
         );
         assert_eq!(decoded.config.thermal_plant_active, None);
+        assert_eq!(
+            decoded.config.heater_curve_transaction_id,
+            record.config.heater_curve_transaction_id
+        );
         assert_eq!(
             decoded.config.active_thermal_control_profile,
             record.config.active_thermal_control_profile
@@ -4467,6 +4489,7 @@ mod tests {
                 duty_percent: if (1..64).contains(&index) { 100 } else { 0 },
             };
         }
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
         config.thermal_plant_transient_active = Some(transaction);
         let record = MemoryRecord {
             sequence: 52,
@@ -4493,6 +4516,44 @@ mod tests {
         assert_eq!(decoded.config.wifi_password, config.wifi_password);
         assert_eq!(decoded.config.lan_pairing_token, config.lan_pairing_token);
         assert_eq!(decoded.config.wifi_static_ipv4, config.wifi_static_ipv4);
+        assert_eq!(
+            decoded.config.heater_curve_transaction_id,
+            config.heater_curve_transaction_id
+        );
+    }
+
+    #[test]
+    fn structurally_valid_transient_with_invalid_projection_retains_raw_trace() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.projection = ThermalPlantProjectionRecord {
+            convection_mw_per_c_bits: 0,
+            radiation_mw_per_k4_bits: 0,
+            thermal_capacity_mj_per_c_bits: 0,
+            transport_delay_ms: 0,
+        };
+        assert!(thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        let mut config = sample_config();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
+        let record = MemoryRecord {
+            sequence: 53,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("invalid trace encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("invalid trace decodes");
+
+        assert_eq!(
+            decoded.config.thermal_plant_transient_active,
+            Some(transaction)
+        );
+        assert!(thermal_plant_projection_from_transient(&transaction).is_none());
     }
 
     #[test]

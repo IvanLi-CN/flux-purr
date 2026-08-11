@@ -117,7 +117,8 @@
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
   - `0x3a`: `thermal_plant_transient_active`
-- 新记录持续写入 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x36` 与 `0x37` 只保留为历史稳态双平台记录，绝不迁移或优先于新模型，也不得解锁加热。`0x3a` 保存瞬态 active 模型的 ambient raw RTD ADC、定长 `50ms` 轨迹、实测加热电压、duty、拟合系数和 transaction identity。派生温度、曲线与系数不得成为唯一持久化真相源。
+  - `0x3b`: `heater_curve_transaction_id`
+- 新记录持续写入 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x36` 与 `0x37` 只保留为历史稳态双平台记录，绝不迁移或优先于新模型，也不得解锁加热。`0x3a` 保存瞬态模型的 ambient raw RTD ADC、定长 `50ms` 轨迹、实测加热电压、duty、拟合系数和 transaction identity；`0x3b` 必须等于该模型 transaction identity，证明 `0x35` 的曲线原始观测来自同一次瞬态采集。拟合系数无效时仍保留结构合法的原始 `0x3a` 轨迹以支持诊断，但它只能呈现为 `invalid`，不得解锁加热。派生温度、曲线与系数不得成为唯一持久化真相源。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头；它无损保存完整 point-local 字段，并让两个十点 bank、最长 Wi-Fi 凭据、LAN token、static IPv4、完整 calibration 与最长瞬态轨迹共同装入一个 `2KiB` active record。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
 ## 验收标准（Acceptance Criteria）
