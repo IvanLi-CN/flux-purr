@@ -1551,41 +1551,33 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
-    let has_new_thermal_data = config
-        .heater_curve_raw_observations
-        .points
-        .iter()
-        .any(Option::is_some)
-        || config.thermal_plant_transient_active.is_some();
-    if !has_new_thermal_data {
-        let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
-        let thermal_profile_len = encode_thermal_control_profile(
-            &config.active_thermal_control_profile,
-            &mut thermal_profile_payload,
-        );
-        push_tlv(
-            TLV_THERMAL_CONTROL_PROFILE_PPS3A,
-            &thermal_profile_payload[..thermal_profile_len],
-            out,
-            &mut cursor,
-        )?;
-        let pps5a_profile_len = encode_thermal_control_profile(
-            &config.thermal_control_profile_pps5a,
-            &mut thermal_profile_payload,
-        );
-        push_tlv(
-            TLV_THERMAL_CONTROL_PROFILE_PPS5A,
-            &thermal_profile_payload[..pps5a_profile_len],
-            out,
-            &mut cursor,
-        )?;
-        let mode = match config.thermal_profile_mode {
-            ThermalProfileMode::Auto => 0,
-            ThermalProfileMode::W65 => 1,
-            ThermalProfileMode::W100 => 2,
-        };
-        push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
-    }
+    let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+    let thermal_profile_len = encode_thermal_control_profile(
+        &config.active_thermal_control_profile,
+        &mut thermal_profile_payload,
+    );
+    push_tlv(
+        TLV_THERMAL_CONTROL_PROFILE_PPS3A,
+        &thermal_profile_payload[..thermal_profile_len],
+        out,
+        &mut cursor,
+    )?;
+    let pps5a_profile_len = encode_thermal_control_profile(
+        &config.thermal_control_profile_pps5a,
+        &mut thermal_profile_payload,
+    );
+    push_tlv(
+        TLV_THERMAL_CONTROL_PROFILE_PPS5A,
+        &thermal_profile_payload[..pps5a_profile_len],
+        out,
+        &mut cursor,
+    )?;
+    let mode = match config.thermal_profile_mode {
+        ThermalProfileMode::Auto => 0,
+        ThermalProfileMode::W65 => 1,
+        ThermalProfileMode::W100 => 2,
+    };
+    push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
     let mut raw_curve_payload = [0u8; HEATER_CURVE_MAX_POINTS * 8];
     encode_heater_curve_raw_observations(
         &config.heater_curve_raw_observations,
@@ -4178,7 +4170,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_thermal_data_roundtrips_without_legacy_profiles() {
+    fn transient_thermal_data_roundtrips_with_saved_profiles() {
         let mut config = sample_config();
         config.heater_curve_raw_observations.points[0] = Some(HeaterCurveRawObservation {
             raw_rtd_adc_mv: 250,
@@ -4205,13 +4197,17 @@ mod tests {
             record.config.thermal_plant_transient_active
         );
         assert_eq!(decoded.config.thermal_plant_active, None);
-        assert!(
-            decoded
-                .config
-                .active_thermal_control_profile
-                .points
-                .iter()
-                .all(Option::is_none)
+        assert_eq!(
+            decoded.config.active_thermal_control_profile,
+            record.config.active_thermal_control_profile
+        );
+        assert_eq!(
+            decoded.config.thermal_control_profile_pps5a,
+            record.config.thermal_control_profile_pps5a
+        );
+        assert_eq!(
+            decoded.config.thermal_profile_mode,
+            record.config.thermal_profile_mode
         );
         assert!(len <= MEMORY_SLOT_SIZE);
     }
@@ -4219,6 +4215,18 @@ mod tests {
     #[test]
     fn maximum_transient_trace_roundtrips_within_one_memory_record() {
         let mut config = sample_config();
+        let pps3a_template =
+            config.active_thermal_control_profile.points[1].expect("3A profile template");
+        let pps5a_template =
+            config.thermal_control_profile_pps5a.points[1].expect("5A profile template");
+        for index in 2..THERMAL_CONTROL_PROFILE_MAX_POINTS {
+            let mut pps3a_point = pps3a_template;
+            pps3a_point.target_temp_c = 200 + index as i16 * 10;
+            config.active_thermal_control_profile.points[index] = Some(pps3a_point);
+            let mut pps5a_point = pps5a_template;
+            pps5a_point.target_temp_c = 240 + index as i16 * 10;
+            config.thermal_control_profile_pps5a.points[index] = Some(pps5a_point);
+        }
         let mut transaction = sample_transient_thermal_plant_transaction();
         transaction.sample_count = THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8;
         for (index, sample) in transaction.samples.iter_mut().enumerate() {
@@ -4238,7 +4246,7 @@ mod tests {
         config.thermal_plant_transient_active = Some(transaction);
         let record = MemoryRecord {
             sequence: 52,
-            config,
+            config: config.clone(),
         };
         let mut bytes = [0u8; MEMORY_SLOT_SIZE];
         let len = encode_memory_record(&record, &mut bytes).expect("maximum trace encodes");
@@ -4248,6 +4256,14 @@ mod tests {
         assert_eq!(
             decoded.config.thermal_plant_transient_active,
             Some(transaction)
+        );
+        assert_eq!(
+            decoded.config.active_thermal_control_profile,
+            config.active_thermal_control_profile
+        );
+        assert_eq!(
+            decoded.config.thermal_control_profile_pps5a,
+            config.thermal_control_profile_pps5a
         );
     }
 

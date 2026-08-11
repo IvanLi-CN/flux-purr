@@ -7724,7 +7724,16 @@ fn update_calibration_job_state(
                     calibration.pps_mv = Some(request_mv);
                     calibration.pps_ma = Some(job.source_current_ma);
                     calibration.job.next_request_mv = Some(request_mv);
-                    if heater_duty_percent > 0 && latest_vin_mv > 0 && pd_current_ma > 0 {
+                    if heater_duty_percent > 0 && (latest_vin_mv == 0 || pd_current_ma == 0) {
+                        calibration_job_fail(
+                            calibration,
+                            ManualPpsError::ThermalPlantProjectionInvalid,
+                            true,
+                            manual_pps,
+                        );
+                        return;
+                    }
+                    if heater_duty_percent > 0 {
                         if job.heater_curve.cold_bin.contains(latest_temp_c) {
                             job.heater_curve.cold_bin.observe_electrical(
                                 latest_temp_c,
@@ -13477,6 +13486,64 @@ mod tests {
         assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
         assert_eq!(calibration.job.samples_collected, 0);
         assert_eq!(memory_config.thermal_plant_active, None);
+    }
+
+    #[test]
+    fn thermal_plant_job_disarms_on_missing_powered_electrical_observation() {
+        for (latest_vin_mv, pd_current_ma) in [(0, 3_000), (20_000, 0)] {
+            let mut calibration = CalibrationRuntimeState {
+                mode: CalibrationMode::ThermalPlant,
+                ..CalibrationRuntimeState::default()
+            };
+            let mut memory_config = MemoryConfig::default();
+            let mut manual_pps =
+                ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                    pps_covers_20v: true,
+                    pps_min_mv: Some(5_000),
+                    pps_max_mv: Some(20_000),
+                    pps_max_ma: Some(3_000),
+                    ..Default::default()
+                }));
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut manual_pps,
+            )
+            .unwrap();
+
+            for _ in 0..THERMAL_PLANT_AMBIENT_TICKS {
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut manual_pps,
+                    250,
+                    0,
+                    25.0,
+                    3_000,
+                    20_000,
+                    0,
+                );
+            }
+            assert!(calibration.heater_enabled);
+
+            update_calibration_job_state(
+                &mut calibration,
+                &mut memory_config,
+                &mut manual_pps,
+                260,
+                0,
+                26.0,
+                pd_current_ma,
+                latest_vin_mv,
+                100,
+            );
+
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
+            assert!(!calibration.heater_enabled);
+            assert!(!manual_pps.enabled);
+            assert_eq!(memory_config.thermal_plant_transient_active, None);
+        }
     }
 
     #[test]
