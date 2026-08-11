@@ -3309,6 +3309,7 @@ impl HoldPpsGovernor {
 enum ManualPpsError {
     NoPpsCapability,
     InvalidVoltage,
+    CalibrationInProgress,
     HeaterCurveCoverageInsufficient,
     ThermalPlantSourceUnsupported,
     ThermalPlantProjectionInvalid,
@@ -3329,6 +3330,7 @@ impl ManualPpsError {
         match self {
             Self::NoPpsCapability => "manual_pps_no_capability",
             Self::InvalidVoltage => "manual_pps_invalid_voltage",
+            Self::CalibrationInProgress => "manual_pps_calibration_busy",
             Self::HeaterCurveCoverageInsufficient => "heater_curve_coverage_insufficient",
             Self::ThermalPlantSourceUnsupported => "thermal_plant_source_unsupported",
             Self::ThermalPlantProjectionInvalid => "thermal_plant_projection_invalid",
@@ -3342,6 +3344,9 @@ impl ManualPpsError {
             Self::NoPpsCapability => "PPS capability is unavailable.",
             Self::InvalidVoltage => {
                 "manualPpsMv/manualPpsMa must match PPS capability and APDO steps."
+            }
+            Self::CalibrationInProgress => {
+                "Manual PPS cannot override a running thermal-model calibration."
             }
             Self::HeaterCurveCoverageInsufficient => {
                 "The transient thermal-model run did not collect enough heater-curve samples."
@@ -3856,9 +3861,13 @@ fn thermal_model_heater_allowed(
     if calibration.mode != CalibrationMode::Off {
         return true;
     }
-    let plant_is_available = memory_config
-        .thermal_plant_transient_active
-        .is_some_and(|transaction| thermal_plant_projection_from_transient(&transaction).is_some());
+    let plant_is_available =
+        memory_config
+            .thermal_plant_transient_active
+            .is_some_and(|transaction| {
+                thermal_plant_projection_from_transient(&transaction).is_some()
+                    && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
+            });
     if !plant_is_available {
         return false;
     }
@@ -3873,6 +3882,50 @@ fn thermal_model_heater_allowed(
             .capability_max_ma
             .is_some_and(|value| value >= 3_000)
         && has_calibrated_heater_resistance_curve(memory_config)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_transient_trace_reaches_targets(
+    transaction: &ThermalPlantTransientTransaction,
+    memory_config: &MemoryConfig,
+) -> bool {
+    let count = usize::from(transaction.sample_count);
+    if !(24..=THERMAL_PLANT_TRANSIENT_MAX_SAMPLES).contains(&count) {
+        return false;
+    }
+
+    let Some(ambient_temp_c) =
+        projected_rtd_temperature_c(memory_config, transaction.ambient_raw_rtd_adc_mv)
+    else {
+        return false;
+    };
+    let samples = &transaction.samples[..count];
+    let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut max_temp_c = f32::MIN;
+    let mut peak_index = 0usize;
+    for (index, sample) in samples.iter().enumerate() {
+        let Some(temperature_c) = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)
+        else {
+            return false;
+        };
+        if !temperature_c.is_finite() {
+            return false;
+        }
+        if temperature_c > max_temp_c {
+            max_temp_c = temperature_c;
+            peak_index = index;
+        }
+        temperatures_c[index] = temperature_c;
+    }
+
+    max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
+        && temperatures_c[0] <= ambient_temp_c + 8.0
+        && samples[peak_index + 1..]
+            .iter()
+            .zip(temperatures_c[peak_index + 1..count].iter())
+            .any(|(sample, temperature_c)| {
+                sample.duty_percent == 0 && *temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
+            })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4150,7 +4203,11 @@ fn projected_rtd_temperature_c(memory_config: &MemoryConfig, raw_adc_mv: u16) ->
 fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRuntimeWire {
     let active_projection = memory_config
         .thermal_plant_transient_active
-        .and_then(|transaction| thermal_plant_projection_from_transient(&transaction));
+        .and_then(|transaction| {
+            thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
+                .then(|| thermal_plant_projection_from_transient(&transaction))
+                .flatten()
+        });
     let state =
         if memory_config.thermal_plant_transient_active.is_some() && active_projection.is_none() {
             "invalid"
@@ -4181,6 +4238,9 @@ fn thermal_plant_projection_for_runtime(
     memory_config: &MemoryConfig,
 ) -> Option<(flux_purr_firmware::memory::ThermalPlantProjection, f32)> {
     let transaction = memory_config.thermal_plant_transient_active?;
+    if !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config) {
+        return None;
+    }
     let projection = thermal_plant_projection_from_transient(&transaction)?;
     let ambient_temp_c =
         projected_rtd_temperature_c(memory_config, transaction.ambient_raw_rtd_adc_mv)?;
@@ -5572,12 +5632,14 @@ where
             Some(target_mv) => target_mv,
             None => {
                 manual_pps.fail(ManualPpsError::InvalidVoltage);
+                apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
                 return true;
             }
         };
         let target_ma = manual_pps.target_ma.unwrap_or(0);
         if !pd_observation.is_some_and(|observation| observation.status.pd_active) {
             manual_pps.fail(ManualPpsError::PdNotReady);
+            apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
             let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
             let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
             return true;
@@ -5600,6 +5662,7 @@ where
                 );
             } else {
                 manual_pps.fail(ManualPpsError::WriteFailed);
+                apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
                 let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
                 let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
                 info!(
@@ -6455,7 +6518,7 @@ fn usb_runtime_config_response(
             context.calibration,
         );
     }
-    if let Err(error) = apply_manual_pps_config(&config, manual_pps) {
+    if let Err(error) = apply_manual_pps_config(&config, context.calibration, manual_pps) {
         return (
             UsbFrame::Response {
                 request_id,
@@ -6552,8 +6615,18 @@ fn usb_runtime_config_response(
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn apply_manual_pps_config(
     config: &RuntimeConfigCommand,
+    calibration: CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) -> Result<(), ManualPpsError> {
+    let manual_pps_requested = config.manual_pps_enabled.is_some()
+        || config.manual_pps_mv.is_some()
+        || config.manual_pps_ma.is_some();
+    if calibration.mode == CalibrationMode::ThermalPlant
+        && calibration.job.status == CalibrationJobStatus::Running
+        && manual_pps_requested
+    {
+        return Err(ManualPpsError::CalibrationInProgress);
+    }
     if config.manual_pps_enabled == Some(false) {
         manual_pps.clear();
         return Ok(());
@@ -10770,6 +10843,34 @@ async fn main(_spawner: Spawner) {
             if memory_config != memory_before_calibration_job {
                 memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
             }
+            if calibration_runtime_state.mode != CalibrationMode::Off
+                && calibration_runtime_state.heater_enabled
+                && current_rtd_fault.is_none()
+                && heater_controller.fault_latched().is_some()
+            {
+                heater_controller.clear_fault_latch();
+                info!("calibration heater re-arm -> cleared latched fault");
+            }
+            let mut desired_heater_enabled = reconcile_runtime_heater_enabled(
+                ui_state.heater_enabled,
+                calibration_runtime_state,
+                current_rtd_fault,
+                cooling_disabled_lock_latched,
+                heater_controller.fault_latched().is_some(),
+                thermal_model_heater_allowed(
+                    &memory_config,
+                    calibration_runtime_state,
+                    manual_pps_state,
+                ),
+            );
+            desired_heater_enabled = consume_thermal_plant_completion_disarm(
+                &mut calibration_runtime_state,
+                desired_heater_enabled,
+            );
+            if ui_state.heater_enabled != desired_heater_enabled {
+                ui_state.heater_enabled = desired_heater_enabled;
+                needs_redraw = true;
+            }
             let runtime_plant = thermal_plant_projection_for_runtime(&memory_config);
             // The controller works in heater watts, not source capability
             // watts. For a current-limited source, the achievable plate power
@@ -10866,35 +10967,6 @@ async fn main(_spawner: Spawner) {
                 .min(u64::from(u16::MAX)) as u16;
             if ui_state.manual_pps_enabled != manual_pps_state.enabled {
                 ui_state.manual_pps_enabled = manual_pps_state.enabled;
-                needs_redraw = true;
-            }
-            if calibration_runtime_state.mode != CalibrationMode::Off {
-                if calibration_runtime_state.heater_enabled
-                    && current_rtd_fault.is_none()
-                    && heater_controller.fault_latched().is_some()
-                {
-                    heater_controller.clear_fault_latch();
-                    info!("calibration heater re-arm -> cleared latched fault");
-                }
-            }
-            let mut desired_heater_enabled = reconcile_runtime_heater_enabled(
-                ui_state.heater_enabled,
-                calibration_runtime_state,
-                current_rtd_fault,
-                cooling_disabled_lock_latched,
-                heater_controller.fault_latched().is_some(),
-                thermal_model_heater_allowed(
-                    &memory_config,
-                    calibration_runtime_state,
-                    manual_pps_state,
-                ),
-            );
-            desired_heater_enabled = consume_thermal_plant_completion_disarm(
-                &mut calibration_runtime_state,
-                desired_heater_enabled,
-            );
-            if ui_state.heater_enabled != desired_heater_enabled {
-                ui_state.heater_enabled = desired_heater_enabled;
                 needs_redraw = true;
             }
             let next_pd_contract_mv = manual_pps_state
@@ -12236,6 +12308,7 @@ mod tests {
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
             },
+            CalibrationRuntimeState::default(),
             &mut manual_pps,
         )
         .unwrap_err();
@@ -12256,6 +12329,7 @@ mod tests {
                 thermal_profile_mode: None,
                 thermal_control_profile: None,
             },
+            CalibrationRuntimeState::default(),
             &mut manual_pps,
         )
         .unwrap();
@@ -12263,6 +12337,39 @@ mod tests {
         assert_eq!(manual_pps.target_mv, None);
         assert_eq!(manual_pps.target_ma, None);
         assert!(manual_pps.consume_automatic_restore_pending());
+    }
+
+    #[test]
+    fn manual_pps_config_cannot_take_over_a_running_thermal_plant_job() {
+        let error = apply_manual_pps_config(
+            &RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(false),
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                fault_attention_acknowledged: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                thermal_control_profile: None,
+            },
+            CalibrationRuntimeState {
+                mode: CalibrationMode::ThermalPlant,
+                job: CalibrationJobState {
+                    kind: Some(CalibrationJobKind::ThermalPlant),
+                    status: CalibrationJobStatus::Running,
+                    ..CalibrationJobState::default()
+                },
+                ..CalibrationRuntimeState::default()
+            },
+            &mut ManualPpsState::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ManualPpsError::CalibrationInProgress);
     }
 
     #[test]
@@ -12830,6 +12937,145 @@ mod tests {
                 .iter()
                 .any(|sample| sample.duty_percent == 0)
         );
+        assert!(thermal_plant_transient_trace_reaches_targets(
+            &transaction,
+            &memory_config
+        ));
+        memory_config.thermal_plant_transient_active = Some(transaction);
+        let manual_pps =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(20_000),
+                pps_max_ma: Some(3_000),
+                ..Default::default()
+            }));
+        assert!(thermal_model_heater_allowed(
+            &memory_config,
+            CalibrationRuntimeState::default(),
+            manual_pps
+        ));
+
+        let mut incomplete_cooldown = transaction;
+        for sample in incomplete_cooldown.samples[..usize::from(incomplete_cooldown.sample_count)]
+            .iter_mut()
+            .filter(|sample| sample.duty_percent == 0)
+        {
+            sample.raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(90.0);
+        }
+        assert!(thermal_plant_projection_from_transient(&incomplete_cooldown).is_some());
+        assert!(!thermal_plant_transient_trace_reaches_targets(
+            &incomplete_cooldown,
+            &memory_config
+        ));
+        memory_config.thermal_plant_transient_active = Some(incomplete_cooldown);
+        assert!(!thermal_model_heater_allowed(
+            &memory_config,
+            CalibrationRuntimeState::default(),
+            manual_pps
+        ));
+    }
+
+    #[test]
+    fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
+        fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
+            let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
+            (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
+                / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+                .round() as u16
+        }
+
+        for source_current_ma in [3_000, 5_000] {
+            let mut calibration = CalibrationRuntimeState {
+                mode: CalibrationMode::ThermalPlant,
+                ..CalibrationRuntimeState::default()
+            };
+            let mut memory_config = MemoryConfig::default();
+            let mut manual_pps =
+                ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                    pps_covers_20v: true,
+                    pps_min_mv: Some(5_000),
+                    pps_max_mv: Some(20_000),
+                    pps_max_ma: Some(source_current_ma),
+                    ..Default::default()
+                }));
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut memory_config,
+                &mut manual_pps,
+            )
+            .unwrap();
+
+            let ambient_temp_c = 25.0_f32;
+            let capacity_mj_per_c = 30_000.0_f32;
+            let convection_mw_per_c = 100.0_f32;
+            let radiation_mw_per_k4 = 0.00000005_f32;
+            let mut temperature_c = ambient_temp_c;
+            for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
+                + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
+                + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
+            {
+                let heater_duty_percent = u8::from(calibration.heater_enabled) * 100;
+                match calibration.job_data {
+                    Some(CalibrationJobData::ThermalPlant(CalibrationThermalPlantAutoJob {
+                        phase: ThermalPlantAutoPhase::Heating,
+                        ..
+                    })) => assert_eq!(heater_duty_percent, 100),
+                    Some(CalibrationJobData::ThermalPlant(CalibrationThermalPlantAutoJob {
+                        phase: ThermalPlantAutoPhase::Cooling,
+                        ..
+                    })) => assert_eq!(heater_duty_percent, 0),
+                    _ => {}
+                }
+                let source_mv = manual_pps.target_mv.unwrap_or(0);
+                let resistance_ohms =
+                    estimated_heater_resistance_ohms(temperature_c, None, &memory_config);
+                let pd_current_ma = if heater_duty_percent > 0 {
+                    ((f32::from(source_mv) / resistance_ohms).round() as u16).min(source_current_ma)
+                } else {
+                    0
+                };
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut manual_pps,
+                    raw_rtd_adc_mv_for_temp(temperature_c),
+                    0,
+                    temperature_c,
+                    pd_current_ma,
+                    u32::from(source_mv),
+                    heater_duty_percent,
+                );
+                if calibration.job.status == CalibrationJobStatus::Completed {
+                    break;
+                }
+                if calibration.job.status == CalibrationJobStatus::Failed {
+                    panic!(
+                        "thermal plant job failed: {:?}, temp={temperature_c}, samples={}",
+                        calibration.job.message, calibration.job.samples_collected
+                    );
+                }
+
+                let power_mw = if heater_duty_percent > 0 {
+                    (f32::from(source_mv) / 1_000.0).powi(2) / resistance_ohms * 1_000.0
+                } else {
+                    0.0
+                };
+                let temperature_k = temperature_c + 273.15;
+                let ambient_k = ambient_temp_c + 273.15;
+                let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
+                    + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
+                temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
+            }
+
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+            assert_eq!(calibration.mode, CalibrationMode::Off);
+            assert!(!calibration.heater_enabled);
+            assert!(!manual_pps.enabled);
+            assert!(memory_config.thermal_plant_transient_active.is_some());
+            assert!(has_calibrated_heater_resistance_curve(&memory_config));
+        }
     }
 
     #[test]
@@ -12905,6 +13151,10 @@ mod tests {
         assert_eq!(
             thermal_plant_calibration_snapshot(220.0, false).duty_percent,
             0
+        );
+        assert_eq!(
+            thermal_plant_calibration_snapshot(215.0, true).duty_percent,
+            100
         );
     }
 

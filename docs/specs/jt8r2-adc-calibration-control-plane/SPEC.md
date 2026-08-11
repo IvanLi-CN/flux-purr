@@ -18,7 +18,7 @@
 - RTD 校准必须影响温度显示和闭环控制输入；原始电气开路/短路检查仍基于 raw ADC 行为。
 - VIN 校准必须让 `status.voltageMv` 表达校准后的实测输入电压；`pdContractMv` 继续表达 PD contract / target。
 - Web、CLI、native `devd` HTTP 与 USB JSONL 使用同一校准领域模型。
-- owner-facing 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定` 三种模式；技术术语只作为模式内次级信息出现。
+- owner-facing 手动工作区固定为 `电压读数标定`、`温度标定`、`加热曲线标定` 三种模式；`thermal_plant_auto` 是加热曲线工作区中的受保护自动任务，不是第四个模式或持久化校准对象。
 - 标定样本只负责生成拟合建议值；A/B 槽位才是硬件真正使用并持久化的参数。
 
 ### Non-goals
@@ -80,10 +80,10 @@
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
 - `电压读数标定` 手动模式必须支持直接输入和 `1V` 步进；自动模式必须按 `1V` 步进在实时 PPS capability 内扫点，并以“请求 PPS 电压”作为 reference 写入 `vin_adc samples`。
 - `温度标定` 只能是手动/半自动；firmware 必须按目标 `RTD_ADC` 毫伏值持续控热并暴露稳定状态，最终 capture 继续写 `rtd_adc samples`。
-- 任一校准/标定模式一旦开启，Web 必须立即接管 calibration-owned PPS 供电；不得再要求操作者额外点击 `申请 PPS` 才让滑块与加热控制生效。
-- 校准模式已开启时，`PPS 电压` 滑块与数值输入必须以节流方式直接更新 calibration-owned PPS 目标，不再依赖单独的 apply/submit 按钮。
+- 任一手动校准/标定模式一旦开启，Web 必须立即接管 calibration-owned PPS 供电；不得再要求操作者额外点击 `申请 PPS` 才让滑块与加热控制生效。`thermal_plant_auto` 自行选择安全可用 PPS 请求，期间不接受手动 PPS 覆盖。
+- 手动校准模式已开启时，`PPS 电压` 滑块与数值输入必须以节流方式直接更新 calibration-owned PPS 目标，不再依赖单独的 apply/submit 按钮；`thermal_plant_auto` 期间这些输入不得改变运行请求。
 - `温度标定` 的加热控制仅在 `温度标定` 校准模式已开启时可用；关闭该校准模式时必须同步停止加热。除校准模式本身外，Web 不得再对 `开启加热` 追加额外前置条件。
-- 三个校准模式里的加热控制都必须使用 owner-facing Toggle 开关语义，而不是 `开启加热` / `关闭加热` 按钮文案；该开关只表达“请求是否允许加热”，实际出热仍以后端返回的 `heaterOutputPercent` 为真相源。
+- 三个手动校准模式里的加热控制都必须使用 owner-facing Toggle 开关语义，而不是 `开启加热` / `关闭加热` 按钮文案；该开关只表达“请求是否允许加热”，实际出热仍以后端返回的 `heaterOutputPercent` 为真相源。`thermal_plant_auto` 不暴露手动加热开关。
 - `温度标定` 是否实际出热必须以硬件返回的 `heaterOutputPercent` 为真相源；Web 必须把该反馈显示为 owner-facing 的能量强度图示，而不是根据 `targetAdcMv` 与当前 ADC 的比较自行推断“应当在加热”。
 - `温度标定` 样本表必须只展示两项 owner-facing 数据：硬件目标 ADC 毫伏值与操作者输入的标定温度；不得混入额外技术字段或说明文案。
 - `温度标定` 样本表应优先使用双栏配对布局展示 RTD 样本，并保持数值垂直居中，以减少列表高度同时维持可读性。
@@ -93,7 +93,7 @@
 - 样本变化只允许更新拟合建议值，不得自动覆盖 `A/B` 槽位。
 - `标定温度` 输入必须是纯手动 value；硬件上报温度只能作为 placeholder/辅助提示，不得自动写入 value。
 - 当 RTD/VIN calibration state 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
-- `加热曲线标定` 自动模式必须丢弃启动瞬态，在稳定温区内做分段统计和单调平滑，再生成 `heater_curve preview`；自动生成的每个温阻点不得低于硬件名义 `R20 + TCR` 模型对应阻值，防止把整机输入等效阻抗误写为过低的 heater resistance 并在 5A 高温调优时错误限功率；手动模式继续保留当前最终结果填写形态。
+- `thermal_plant_auto` 必须在同一次 `100%` 安全可用功率的瞬态运行中采集 heater-curve 温区样本和热模型轨迹：测温达到 `220°C` 的同一控制周期断热，风扇关闭并自然冷却到 `80°C` 后在固件内拟合；物理有效时直接写入 active，不产生 preview、candidate、promotion 或用户验收。自动生成的每个温阻点不得低于硬件名义 `R20 + TCR` 模型对应阻值；手动曲线编辑继续保留当前最终结果填写形态。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
 
 ### SHOULD

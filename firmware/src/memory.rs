@@ -712,10 +712,15 @@ pub fn thermal_plant_transient_transaction_is_complete(
     {
         return false;
     }
+    if projection.convection_mw_per_c == 0.0 && projection.radiation_mw_per_k4 == 0.0 {
+        return false;
+    }
 
     let samples = &value.samples[..usize::from(value.sample_count)];
     let mut has_powered_sample = false;
-    let mut has_gate_off_sample = false;
+    let mut has_cooling_sample = false;
+    let mut cooling_started = false;
+    let mut peak_raw_rtd_adc_mv = 0u16;
     for (index, sample) in samples.iter().enumerate() {
         if sample.raw_rtd_adc_mv == 0 || sample.duty_percent > 100 {
             return false;
@@ -724,14 +729,21 @@ pub fn thermal_plant_transient_transaction_is_complete(
             return false;
         }
         if sample.duty_percent == 0 {
-            has_gate_off_sample = true;
-        } else if sample.heater_voltage_100mv > 0 {
+            if has_powered_sample {
+                cooling_started = true;
+                has_cooling_sample |= sample.raw_rtd_adc_mv < peak_raw_rtd_adc_mv;
+            }
+        } else if sample.heater_voltage_100mv > 0 && !cooling_started {
             has_powered_sample = true;
+            peak_raw_rtd_adc_mv = peak_raw_rtd_adc_mv.max(sample.raw_rtd_adc_mv);
         } else {
             return false;
         }
     }
-    has_powered_sample && has_gate_off_sample
+    has_powered_sample
+        && cooling_started
+        && has_cooling_sample
+        && peak_raw_rtd_adc_mv > value.ambient_raw_rtd_adc_mv
 }
 
 pub fn thermal_plant_projection_from_transient(
@@ -4123,7 +4135,11 @@ mod tests {
         for (index, sample) in samples.iter_mut().take(24).enumerate() {
             *sample = ThermalPlantTransientSample {
                 elapsed_ticks: (index as u16 + 1) * 10,
-                raw_rtd_adc_mv: 250 + index as u16 * 4,
+                raw_rtd_adc_mv: if index < 12 {
+                    250 + index as u16 * 8
+                } else {
+                    330 - (index as u16 - 12) * 4
+                },
                 heater_voltage_100mv: if index < 12 { 200 } else { 0 },
                 duty_percent: if index < 12 { 100 } else { 0 },
             };
@@ -4189,7 +4205,11 @@ mod tests {
         for (index, sample) in transaction.samples.iter_mut().enumerate().skip(24) {
             *sample = ThermalPlantTransientSample {
                 elapsed_ticks: (index as u16 + 1) * 10,
-                raw_rtd_adc_mv: 250 + index as u16 * 4,
+                raw_rtd_adc_mv: if index < 64 {
+                    250 + index as u16 * 4
+                } else {
+                    500 - (index as u16 - 64) * 2
+                },
                 heater_voltage_100mv: if index < 64 { 200 } else { 0 },
                 duty_percent: if index < 64 { 100 } else { 0 },
             };
@@ -4208,6 +4228,25 @@ mod tests {
             decoded.config.thermal_plant_transient_active,
             Some(transaction)
         );
+    }
+
+    #[test]
+    fn transient_record_requires_cooling_after_heating() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[13].duty_percent = 100;
+        transaction.samples[13].heater_voltage_100mv = 200;
+
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        for sample in transaction.samples.iter_mut().take(24).skip(12) {
+            sample.raw_rtd_adc_mv = 338;
+        }
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
     }
 
     #[test]

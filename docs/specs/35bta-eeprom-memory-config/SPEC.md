@@ -141,9 +141,9 @@
 - Given RTD calibration active slot or fit changes, When memory is read again, Then raw heater and
   thermal observations remain byte-for-byte stable and all derived values are rebuilt from the new
   projection.
-- Given automatic thermal calibration supplies fewer than two valid thermal-loss anchors, When the
-  physical projection cannot be formed, Then it leaves the existing active transaction unchanged and
-  heating remains locked.
+- Given a transient thermal trace does not contain an ordered powered rise to `220°C` followed by
+  zero-duty cooling to `80°C`, or its physical projection cannot be formed, When calibration ends,
+  Then it leaves the existing active transaction unchanged and heating remains locked.
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
