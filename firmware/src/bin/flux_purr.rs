@@ -125,11 +125,16 @@ use flux_purr_firmware::memory::{
     THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
     THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT,
     THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX,
-    THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, THERMAL_PLANT_TRANSIENT_MAX_SAMPLES,
+    THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C,
+    THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4, THERMAL_PLANT_TRANSIENT_MAX_SAMPLES,
     ThermalControlProfileConfig, ThermalControlProfilePointConfig,
     ThermalControlProfileSettingsConfig, ThermalPlantProjection, ThermalPlantProjectionRecord,
     ThermalPlantTransientSample, ThermalPlantTransientTransaction, ThermalProfileBank,
     ThermalProfileMode, heater_resistance_ohms_from_curve, thermal_plant_projection_from_transient,
+};
+#[cfg(test)]
+use flux_purr_firmware::memory::{
+    MEMORY_SLOT_SIZE, MemoryRecord, decode_memory_record, encode_memory_record,
 };
 #[cfg(test)]
 use flux_purr_firmware::memory::{ThermalPlantRawAnchor, ThermalPlantRawTransaction};
@@ -3889,6 +3894,9 @@ fn thermal_plant_transient_trace_reaches_targets(
     transaction: &ThermalPlantTransientTransaction,
     memory_config: &MemoryConfig,
 ) -> bool {
+    if !flux_purr_firmware::memory::thermal_plant_transient_transaction_is_complete(transaction) {
+        return false;
+    }
     let count = usize::from(transaction.sample_count);
     if !(24..=THERMAL_PLANT_TRANSIENT_MAX_SAMPLES).contains(&count) {
         return false;
@@ -3921,14 +3929,13 @@ fn thermal_plant_transient_trace_reaches_targets(
     let Some(powered_peak_index) = powered_peak_index else {
         return false;
     };
+    let final_sample = samples.last().copied();
+    let final_temp_c = temperatures_c[count - 1];
     powered_max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
         && temperatures_c[0] <= ambient_temp_c + 8.0
-        && samples[powered_peak_index + 1..]
-            .iter()
-            .zip(temperatures_c[powered_peak_index + 1..count].iter())
-            .any(|(sample, temperature_c)| {
-                sample.duty_percent == 0 && *temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
-            })
+        && powered_peak_index + 1 < count
+        && final_sample.is_some_and(|sample| sample.duty_percent == 0)
+        && final_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6661,10 +6668,7 @@ fn apply_calibration_control_config(
         || config.pps_mv.is_some()
         || config.heater_enabled.is_some()
         || config.target_adc_mv.is_some();
-    if calibration.mode == CalibrationMode::ThermalPlant
-        && calibration.job.status == CalibrationJobStatus::Running
-        && requests_mutation
-    {
+    if thermal_plant_calibration_job_running(*calibration) && requests_mutation {
         return Err(ManualPpsError::CalibrationInProgress);
     }
     if let Some(mode) = config.mode {
@@ -6715,6 +6719,12 @@ fn apply_calibration_control_config(
     }
 
     Ok(())
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn thermal_plant_calibration_job_running(calibration: CalibrationRuntimeState) -> bool {
+    calibration.mode == CalibrationMode::ThermalPlant
+        && calibration.job.status == CalibrationJobStatus::Running
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -7294,8 +7304,8 @@ fn fit_thermal_plant_transient(
     let ambient_temp_c = projected_rtd_temperature_c(memory_config, ambient_raw_rtd_adc_mv)?;
     let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut powers_mw = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
-    let mut max_temp_c = f32::MIN;
-    let mut peak_index = 0usize;
+    let mut powered_max_temp_c = f32::MIN;
+    let mut powered_peak_index = None;
     for (index, sample) in samples.iter().enumerate() {
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
         let power_mw =
@@ -7303,21 +7313,19 @@ fn fit_thermal_plant_transient(
         if !temperature_c.is_finite() || !power_mw.is_finite() || power_mw < 0.0 {
             return None;
         }
-        if temperature_c > max_temp_c {
-            max_temp_c = temperature_c;
-            peak_index = index;
+        if sample.duty_percent == 100 && temperature_c > powered_max_temp_c {
+            powered_max_temp_c = temperature_c;
+            powered_peak_index = Some(index);
         }
         temperatures_c[index] = temperature_c;
         powers_mw[index] = power_mw;
     }
-    if max_temp_c < THERMAL_PLANT_TARGET_TEMP_C
+    let powered_peak_index = powered_peak_index?;
+    if powered_max_temp_c < THERMAL_PLANT_TARGET_TEMP_C
         || temperatures_c[0] > ambient_temp_c + 8.0
-        || !samples[peak_index + 1..]
-            .iter()
-            .zip(temperatures_c[peak_index + 1..count].iter())
-            .any(|(sample, temperature_c)| {
-                sample.duty_percent == 0 && *temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
-            })
+        || powered_peak_index + 1 >= count
+        || samples.last().is_none_or(|sample| sample.duty_percent != 0)
+        || temperatures_c[count - 1] > THERMAL_PLANT_COOL_COMPLETE_TEMP_C
     {
         return None;
     }
@@ -7423,6 +7431,10 @@ fn fit_thermal_plant_transient(
                 || !projection.convection_mw_per_c.is_finite()
                 || !projection.radiation_mw_per_k4.is_finite()
                 || !(100.0..=2_000_000.0).contains(&projection.thermal_capacity_mj_per_c)
+                || !(0.0..=THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C)
+                    .contains(&projection.convection_mw_per_c)
+                || !(0.0..=THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4)
+                    .contains(&projection.radiation_mw_per_k4)
                 || residual > 0.20
             {
                 continue;
@@ -8863,33 +8875,46 @@ async fn process_control_line(
             response
         }
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
-            let previous_memory_config = memory_config.clone();
-            let response = usb_calibration_config_response(
-                request_id.clone(),
-                config,
-                memory_config,
-                latest_rtd_raw_adc_mv,
-                latest_vin_raw_adc_mv,
-            );
-            if *memory_config != previous_memory_config {
-                if commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
+            if thermal_plant_calibration_job_running(*calibration_runtime_state) {
+                usb_error_response(
+                    request_id,
+                    ManualPpsError::CalibrationInProgress.code(),
+                    "Automatic thermal-model calibration is running; calibration inputs are locked.",
+                )
+            } else {
+                let previous_memory_config = memory_config.clone();
+                let response = usb_calibration_config_response(
+                    request_id.clone(),
+                    config,
+                    memory_config,
+                    latest_rtd_raw_adc_mv,
+                    latest_vin_raw_adc_mv,
+                );
+                if *memory_config != previous_memory_config {
+                    if commit_memory_config_now(
+                        pd_i2c,
+                        flash_storage,
+                        memory_sequence,
+                        memory_config,
+                    )
                     .await
                     .is_ok()
-                {
-                    *memory_commit_due_ms = None;
-                } else {
-                    *memory_config = previous_memory_config;
-                    return (
-                        needs_redraw,
-                        usb_error_response(
-                            request_id,
-                            "memory_commit_failed",
-                            "Calibration draft could not be persisted.",
-                        ),
-                    );
+                    {
+                        *memory_commit_due_ms = None;
+                    } else {
+                        *memory_config = previous_memory_config;
+                        return (
+                            needs_redraw,
+                            usb_error_response(
+                                request_id,
+                                "memory_commit_failed",
+                                "Calibration draft could not be persisted.",
+                            ),
+                        );
+                    }
                 }
+                response
             }
-            response
         }
         Ok(UsbFrame::CalibrationJob {
             request_id,
@@ -8908,7 +8933,13 @@ async fn process_control_line(
             preview_heater_curve,
         ),
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
-            if let Some(preview) = *preview_heater_curve {
+            if thermal_plant_calibration_job_running(*calibration_runtime_state) {
+                usb_error_response(
+                    request_id,
+                    ManualPpsError::CalibrationInProgress.code(),
+                    "Automatic thermal-model calibration is running; calibration inputs are locked.",
+                )
+            } else if let Some(preview) = *preview_heater_curve {
                 let previous_memory_config = memory_config.clone();
                 memory_config.active_heater_curve = preview.curve;
                 if let Some(raw_observations) = preview.raw_observations {
@@ -12420,6 +12451,29 @@ mod tests {
     }
 
     #[test]
+    fn thermal_plant_job_locks_persistent_calibration_inputs() {
+        let running = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+        assert!(thermal_plant_calibration_job_running(running));
+
+        let completed = CalibrationRuntimeState {
+            job: CalibrationJobState {
+                status: CalibrationJobStatus::Completed,
+                ..running.job
+            },
+            ..running
+        };
+        assert!(!thermal_plant_calibration_job_running(completed));
+    }
+
+    #[test]
     fn manual_pps_failure_clears_requested_current() {
         let mut manual_pps =
             ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
@@ -12920,11 +12974,17 @@ mod tests {
             heater_voltage_100mv: 0,
             duty_percent: 0,
         }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
-        let mut sample_count = 0usize;
+        samples[0] = ThermalPlantTransientSample {
+            elapsed_ticks: 1,
+            raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(ambient_temp_c),
+            heater_voltage_100mv: 0,
+            duty_percent: 0,
+        };
+        let mut sample_count = 1usize;
         let mut temperature_c = ambient_temp_c;
         let mut heating = true;
         let mut last_saved_temp_c = ambient_temp_c;
-        for tick in 1..=60_000_u16 {
+        for tick in 2..=60_000_u16 {
             let reached_cutoff = heating && temperature_c >= THERMAL_PLANT_TARGET_TEMP_C;
             let duty_percent = u8::from(heating) * 100;
             if sample_count < 24
@@ -12981,7 +13041,8 @@ mod tests {
         assert!((projection.thermal_capacity_mj_per_c - capacity_mj_per_c).abs() < 40_000.0);
         assert!((projection.convection_mw_per_c - convection_mw_per_c).abs() < 80.0);
         assert!(projection.radiation_mw_per_k4 >= 0.0);
-        assert_eq!(transaction.samples[0].duty_percent, 100);
+        assert_eq!(transaction.samples[0].duty_percent, 0);
+        assert_eq!(transaction.samples[1].duty_percent, 100);
         assert!(
             transaction.samples[..usize::from(transaction.sample_count)]
                 .iter()
@@ -13004,6 +13065,43 @@ mod tests {
             &memory_config,
             CalibrationRuntimeState::default(),
             manual_pps
+        ));
+
+        let persisted_record = MemoryRecord {
+            sequence: 1,
+            config: memory_config.clone(),
+        };
+        let mut persisted_bytes = [0_u8; MEMORY_SLOT_SIZE];
+        let persisted_len = encode_memory_record(&persisted_record, &mut persisted_bytes)
+            .expect("transient record encodes");
+        let persisted_transaction = decode_memory_record(&persisted_bytes[..persisted_len])
+            .expect("transient record decodes")
+            .config
+            .thermal_plant_transient_active
+            .expect("transient model persists");
+        let persisted_last =
+            persisted_transaction.samples[usize::from(persisted_transaction.sample_count) - 1];
+        assert_eq!(persisted_last.duty_percent, 0);
+        assert!(
+            projected_rtd_temperature_c(&memory_config, persisted_last.raw_rtd_adc_mv)
+                .is_some_and(|temperature_c| temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C)
+        );
+
+        let mut nonterminal_cooldown = transaction;
+        let append_index = usize::from(nonterminal_cooldown.sample_count);
+        assert!(append_index < THERMAL_PLANT_TRANSIENT_MAX_SAMPLES);
+        let previous = nonterminal_cooldown.samples[append_index - 1];
+        nonterminal_cooldown.samples[append_index] = ThermalPlantTransientSample {
+            elapsed_ticks: previous.elapsed_ticks.saturating_add(1),
+            raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(100.0),
+            heater_voltage_100mv: 0,
+            duty_percent: 0,
+        };
+        nonterminal_cooldown.sample_count = nonterminal_cooldown.sample_count.saturating_add(1);
+        assert!(thermal_plant_projection_from_transient(&nonterminal_cooldown).is_some());
+        assert!(!thermal_plant_transient_trace_reaches_targets(
+            &nonterminal_cooldown,
+            &memory_config
         ));
 
         let mut incomplete_cooldown = transaction;

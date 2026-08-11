@@ -26,6 +26,10 @@ pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
 pub const THERMAL_PLANT_TRANSIENT_MAX_SAMPLES: usize = 128;
+pub const THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES: u8 = 12;
+pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV: u8 = 50;
+pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
+pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
 pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
@@ -705,8 +709,10 @@ pub fn thermal_plant_transient_transaction_is_complete(
     if !projection.convection_mw_per_c.is_finite()
         || !projection.radiation_mw_per_k4.is_finite()
         || !projection.thermal_capacity_mj_per_c.is_finite()
-        || projection.convection_mw_per_c < 0.0
-        || projection.radiation_mw_per_k4 < 0.0
+        || !(0.0..=THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C)
+            .contains(&projection.convection_mw_per_c)
+        || !(0.0..=THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4)
+            .contains(&projection.radiation_mw_per_k4)
         || !(100.0..=2_000_000.0).contains(&projection.thermal_capacity_mj_per_c)
         || projection.transport_delay_ms > 10_000
     {
@@ -717,7 +723,13 @@ pub fn thermal_plant_transient_transaction_is_complete(
     }
 
     let samples = &value.samples[..usize::from(value.sample_count)];
-    let mut has_powered_sample = false;
+    if samples
+        .first()
+        .is_none_or(|sample| sample.duty_percent != 0)
+    {
+        return false;
+    }
+    let mut powered_sample_count = 0_u8;
     let mut has_cooling_sample = false;
     let mut cooling_started = false;
     let mut peak_raw_rtd_adc_mv = 0u16;
@@ -729,18 +741,21 @@ pub fn thermal_plant_transient_transaction_is_complete(
             return false;
         }
         if sample.duty_percent == 0 {
-            if has_powered_sample {
+            if powered_sample_count > 0 {
                 cooling_started = true;
                 has_cooling_sample |= sample.raw_rtd_adc_mv < peak_raw_rtd_adc_mv;
             }
-        } else if sample.heater_voltage_100mv > 0 && !cooling_started {
-            has_powered_sample = true;
+        } else if sample.duty_percent == 100
+            && sample.heater_voltage_100mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV
+            && !cooling_started
+        {
+            powered_sample_count = powered_sample_count.saturating_add(1);
             peak_raw_rtd_adc_mv = peak_raw_rtd_adc_mv.max(sample.raw_rtd_adc_mv);
         } else {
             return false;
         }
     }
-    has_powered_sample
+    powered_sample_count >= THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES
         && cooling_started
         && has_cooling_sample
         && peak_raw_rtd_adc_mv > value.ambient_raw_rtd_adc_mv
@@ -4135,13 +4150,15 @@ mod tests {
         for (index, sample) in samples.iter_mut().take(24).enumerate() {
             *sample = ThermalPlantTransientSample {
                 elapsed_ticks: (index as u16 + 1) * 10,
-                raw_rtd_adc_mv: if index < 12 {
+                raw_rtd_adc_mv: if index == 0 {
+                    250
+                } else if index <= 12 {
                     250 + index as u16 * 8
                 } else {
-                    330 - (index as u16 - 12) * 4
+                    346 - (index as u16 - 12) * 8
                 },
-                heater_voltage_100mv: if index < 12 { 200 } else { 0 },
-                duty_percent: if index < 12 { 100 } else { 0 },
+                heater_voltage_100mv: if (1..=12).contains(&index) { 200 } else { 0 },
+                duty_percent: if (1..=12).contains(&index) { 100 } else { 0 },
             };
         }
         ThermalPlantTransientTransaction {
@@ -4205,13 +4222,15 @@ mod tests {
         for (index, sample) in transaction.samples.iter_mut().enumerate() {
             *sample = ThermalPlantTransientSample {
                 elapsed_ticks: (index as u16 + 1) * 10,
-                raw_rtd_adc_mv: if index < 64 {
+                raw_rtd_adc_mv: if index == 0 {
+                    250
+                } else if index < 64 {
                     250 + index as u16 * 4
                 } else {
                     502 - (index as u16 - 64) * 2
                 },
-                heater_voltage_100mv: if index < 64 { 200 } else { 0 },
-                duty_percent: if index < 64 { 100 } else { 0 },
+                heater_voltage_100mv: if (1..64).contains(&index) { 200 } else { 0 },
+                duty_percent: if (1..64).contains(&index) { 100 } else { 0 },
             };
         }
         config.thermal_plant_transient_active = Some(transaction);
@@ -4233,8 +4252,8 @@ mod tests {
     #[test]
     fn transient_record_requires_cooling_after_heating() {
         let mut transaction = sample_transient_thermal_plant_transaction();
-        transaction.samples[13].duty_percent = 100;
-        transaction.samples[13].heater_voltage_100mv = 200;
+        transaction.samples[14].duty_percent = 100;
+        transaction.samples[14].heater_voltage_100mv = 200;
 
         assert!(!thermal_plant_transient_transaction_is_complete(
             &transaction
@@ -4244,6 +4263,38 @@ mod tests {
         for sample in transaction.samples.iter_mut().take(24).skip(12) {
             sample.raw_rtd_adc_mv = 338;
         }
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].duty_percent = 1;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[0].duty_percent = 100;
+        transaction.samples[0].heater_voltage_100mv = 200;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_100mv =
+            THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV - 1;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.projection =
+            ThermalPlantProjectionRecord::from_projection(ThermalPlantProjection {
+                convection_mw_per_c: THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C + 1.0,
+                radiation_mw_per_k4: 0.0000002,
+                thermal_capacity_mj_per_c: 42_000.0,
+                transport_delay_ms: 500,
+            });
         assert!(!thermal_plant_transient_transaction_is_complete(
             &transaction
         ));
