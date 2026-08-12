@@ -1200,11 +1200,25 @@ impl CalibrationChannelState {
         self.fitted_fit = fit_calibration_channel(&self.samples, channel);
     }
 
+    fn sanitize_slot_fits(&mut self) {
+        sanitize_calibration_slot_fit(&mut self.slots.a);
+        sanitize_calibration_slot_fit(&mut self.slots.b);
+    }
+
     fn slot_fit_mut(&mut self, slot: CalibrationSlotId) -> &mut CalibrationSlotFit {
         match slot {
             CalibrationSlotId::A => &mut self.slots.a,
             CalibrationSlotId::B => &mut self.slots.b,
         }
+    }
+}
+
+fn sanitize_calibration_slot_fit(fit: &mut CalibrationSlotFit) {
+    if !fit.gain.is_finite() || fit.gain == 0.0 {
+        fit.gain = 1.0;
+    }
+    if !fit.offset_mv.is_finite() {
+        fit.offset_mv = 0.0;
     }
 }
 
@@ -4405,6 +4419,8 @@ fn apply_mock_calibration_config(
             *calibration.channel_mut(channel).slot_fit_mut(slot) = fit;
         }
     }
+    calibration.rtd_adc.sanitize_slot_fits();
+    calibration.vin_adc.sanitize_slot_fits();
     calibration.refresh_fits();
     Ok(())
 }
@@ -9834,6 +9850,37 @@ mod tests {
             mock_thermal_plant_safe_request_mv(&device, source),
             Some(16_800)
         );
+    }
+
+    #[test]
+    fn calibration_slot_fit_normalizes_before_raw_curve_projection() {
+        let mut device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
+        device.calibration.rtd_adc.slots.a = CalibrationSlotFit {
+            gain: 0.0,
+            offset_mv: f32::NAN,
+        };
+        device.heater_curve.active.raw_observations = Some(HeaterCurveRawObservations {
+            points: vec![
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 300,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_300,
+                }),
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 500,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_500,
+                }),
+            ],
+        });
+
+        device.calibration.rtd_adc.sanitize_slot_fits();
+
+        assert_eq!(device.calibration.rtd_adc.slots.a.gain, 1.0);
+        assert_eq!(device.calibration.rtd_adc.slots.a.offset_mv, 0.0);
+        assert_eq!(mock_heater_resistance_at_r20_ohms(&device), 3.2);
     }
 
     #[test]
