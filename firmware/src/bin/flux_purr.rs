@@ -6557,6 +6557,28 @@ fn usb_runtime_config_response(
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
     mut context: UsbRuntimeStatusContext,
 ) -> (UsbFrame, CalibrationRuntimeState) {
+    let manual_pps_requested = config.manual_pps_enabled.is_some()
+        || config.manual_pps_mv.is_some()
+        || config.manual_pps_ma.is_some();
+    if thermal_plant_calibration_job_running(context.calibration)
+        && (manual_pps_requested
+            || config.calibration.is_some()
+            || config.heater_enabled == Some(true))
+    {
+        return (
+            UsbFrame::Response {
+                request_id,
+                ok: false,
+                result: None,
+                error: Some(ApiError::new(
+                    ManualPpsError::CalibrationInProgress.code(),
+                    "Manual PPS and heater controls cannot override a running thermal-model calibration.",
+                    false,
+                )),
+            },
+            context.calibration,
+        );
+    }
     if let Some(command) = config.thermal_control_profile {
         match command.op {
             ThermalControlProfileOp::Preview | ThermalControlProfileOp::Save
@@ -12038,6 +12060,63 @@ mod tests {
             }
             other => panic!("unexpected runtime config response: {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_config_cannot_override_a_running_thermal_plant_job() {
+        let mut request_id = heapless::String::new();
+        request_id.push_str("runtime-thermal-job-busy").unwrap();
+        let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps = ManualPpsState::default();
+        let mut thermal_profile_preview = None;
+        let mut context = test_usb_runtime_status_context();
+        context.calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+
+        let (response, returned_calibration) = usb_runtime_config_response(
+            request_id,
+            RuntimeConfigCommand {
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: Some(true),
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                fault_attention_acknowledged: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                thermal_control_profile: None,
+            },
+            &mut ui_state,
+            &mut memory_config,
+            &mut manual_pps,
+            &mut thermal_profile_preview,
+            context,
+        );
+
+        match response {
+            UsbFrame::Response {
+                ok: false,
+                error: Some(error),
+                ..
+            } => assert_eq!(error.code.as_str(), "manual_pps_calibration_busy"),
+            other => panic!("unexpected runtime response: {other:?}"),
+        }
+        assert_eq!(
+            returned_calibration.job.status,
+            CalibrationJobStatus::Running
+        );
+        assert!(!ui_state.heater_enabled);
     }
 
     #[test]

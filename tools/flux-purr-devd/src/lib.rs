@@ -366,6 +366,8 @@ pub struct DeviceRecord {
     pub network: NetworkSummary,
     pub status: ControlPlaneStatus,
     #[serde(default, skip_serializing, skip_deserializing)]
+    mock_pps_apdos: Vec<MockPpsApdo>,
+    #[serde(default, skip_serializing, skip_deserializing)]
     pub preview_thermal_control_profile: Option<ThermalControlProfilePackage>,
     #[serde(default, skip_serializing, skip_deserializing)]
     pub saved_thermal_control_profile: Option<ThermalControlProfilePackage>,
@@ -377,6 +379,13 @@ pub struct DeviceRecord {
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
     pub events: VecDeque<DevdEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MockPpsApdo {
+    min_mv: u16,
+    max_mv: u16,
+    max_ma: u16,
 }
 
 impl DeviceRecord {
@@ -490,6 +499,11 @@ impl DeviceRecord {
             identity,
             network,
             status,
+            mock_pps_apdos: vec![MockPpsApdo {
+                min_mv: 5_000,
+                max_mv: 21_000,
+                max_ma: 3_000,
+            }],
             preview_thermal_control_profile: None,
             saved_thermal_control_profile: None,
             saved_thermal_control_profile_pps5a: None,
@@ -598,6 +612,7 @@ impl DeviceRecord {
             },
             network,
             status,
+            mock_pps_apdos: Vec::new(),
             preview_thermal_control_profile: None,
             saved_thermal_control_profile: None,
             saved_thermal_control_profile_pps5a: None,
@@ -2834,16 +2849,22 @@ async fn configure_calibration_job(
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
     match payload.op {
         CalibrationJobOp::Cancel => {
+            if device.status.calibration.job.status != CalibrationJobStatus::Running {
+                return Ok(Json(device.status.calibration.job.clone()));
+            }
             device.status.calibration.job = CalibrationJobState {
                 status: CalibrationJobStatus::Canceled,
                 ..CalibrationJobState::default()
             };
-            device.status.calibration.heater_enabled = false;
-            device.status.calibration.pps_enabled = false;
-            device.status.calibration.pps_mv = None;
-            device.status.calibration.pps_ma = None;
+            disarm_mock_thermal_plant(&mut device.status);
         }
         CalibrationJobOp::Start => {
+            if device.status.calibration.job.status == CalibrationJobStatus::Running {
+                return Err(HttpError::bad_request(
+                    "heater_disarm_pending",
+                    "The previous heater session is still being physically disarmed.",
+                ));
+            }
             let kind = payload.kind.ok_or_else(|| {
                 HttpError::bad_request(
                     "calibration_job_kind_required",
@@ -2851,12 +2872,9 @@ async fn configure_calibration_job(
                 )
             })?;
             if kind == CalibrationJobKind::ThermalPlantAuto {
-                validate_thermal_plant_source_against_status(&device.status)?;
+                validate_thermal_plant_source_against_device(device)?;
                 device.status.calibration.mode = CalibrationMode::ThermalPlant;
-                device.status.calibration.heater_enabled = false;
-                device.status.calibration.pps_enabled = false;
-                device.status.calibration.pps_mv = None;
-                device.status.calibration.pps_ma = None;
+                disarm_mock_thermal_plant(&mut device.status);
             }
             device.status.calibration.job = CalibrationJobState {
                 kind: Some(kind),
@@ -2869,6 +2887,23 @@ async fn configure_calibration_job(
         }
     }
     Ok(Json(device.status.calibration.job.clone()))
+}
+
+fn disarm_mock_thermal_plant(status: &mut ControlPlaneStatus) {
+    status.heater_enabled = false;
+    status.heater_output_percent = 0;
+    status.heater_physical_output_percent = 0;
+    status.manual_pps_enabled = false;
+    status.manual_pps_mv = None;
+    status.manual_pps_ma = None;
+    status.pd_request_mv = DEFAULT_PD_REQUEST_MV;
+    status.pd_contract_mv = DEFAULT_PD_REQUEST_MV;
+    status.voltage_mv = u32::from(DEFAULT_PD_REQUEST_MV);
+    status.manual_pps_error = None;
+    status.calibration.heater_enabled = false;
+    status.calibration.pps_enabled = false;
+    status.calibration.pps_mv = None;
+    status.calibration.pps_ma = None;
 }
 
 async fn device_heater_curve(
@@ -3338,6 +3373,20 @@ async fn configure_runtime(
         .devices
         .get_mut(&device_id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    if mock_thermal_plant_job_running(&device.status) {
+        let manual_pps_requested = payload.manual_pps_enabled.is_some()
+            || payload.manual_pps_mv.is_some()
+            || payload.manual_pps_ma.is_some();
+        if manual_pps_requested
+            || payload.calibration.is_some()
+            || payload.heater_enabled == Some(true)
+        {
+            return Err(HttpError::bad_request(
+                "manual_pps_calibration_busy",
+                "Manual PPS and heater controls cannot override a running thermal-model calibration.",
+            ));
+        }
+    }
     if let Some(target_temp_c) = payload.target_temp_c {
         device.status.target_temp_c = target_temp_c;
     }
@@ -4544,18 +4593,28 @@ fn validate_calibration_request_against_status(
     Ok(())
 }
 
-fn validate_thermal_plant_source_against_status(
-    status: &ControlPlaneStatus,
-) -> Result<(), HttpError> {
-    let supported = matches!(
-        (
-            status.pps_capability_min_mv,
-            status.pps_capability_max_mv,
-            status.pps_capability_max_ma,
-        ),
-        (Some(min_mv), Some(max_mv), Some(max_ma))
-            if min_mv <= 20_000 && max_mv >= 20_000 && max_ma >= 3_000
-    );
+fn mock_thermal_plant_job_running(status: &ControlPlaneStatus) -> bool {
+    status.calibration.mode == CalibrationMode::ThermalPlant
+        && status.calibration.job.status == CalibrationJobStatus::Running
+}
+
+fn validate_thermal_plant_source_against_device(device: &DeviceRecord) -> Result<(), HttpError> {
+    let supported = if device.mock_pps_apdos.is_empty() {
+        matches!(
+            (
+                device.status.pps_capability_min_mv,
+                device.status.pps_capability_max_mv,
+                device.status.pps_capability_max_ma,
+            ),
+            (Some(min_mv), Some(max_mv), Some(max_ma))
+                if min_mv <= 20_000 && max_mv >= 20_000 && max_ma >= 3_000
+        )
+    } else {
+        device
+            .mock_pps_apdos
+            .iter()
+            .any(|apdo| apdo.min_mv <= 20_000 && apdo.max_mv >= 20_000 && apdo.max_ma >= 3_000)
+    };
     if supported {
         Ok(())
     } else {
@@ -9282,6 +9341,25 @@ mod tests {
             CalibrationMode::ThermalPlant
         );
 
+        let state_lock = state.lock().unwrap();
+        let status = &state_lock.devices.get("mock-fp-lab-01").unwrap().status;
+        assert!(!status.heater_enabled);
+        assert_eq!(status.heater_output_percent, 0);
+        assert_eq!(status.heater_physical_output_percent, 0);
+        drop(state_lock);
+
+        let _ = configure_calibration_job(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id.clone(),
+                op: CalibrationJobOp::Cancel,
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap();
+
         {
             let mut state_lock = state.lock().unwrap();
             state_lock
@@ -9290,7 +9368,157 @@ mod tests {
                 .unwrap()
                 .status
                 .pps_capability_max_ma = Some(2_999);
+            state_lock
+                .devices
+                .get_mut("mock-fp-lab-01")
+                .unwrap()
+                .mock_pps_apdos[0]
+                .max_ma = 2_999;
         }
+        let error = configure_calibration_job(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id,
+                op: CalibrationJobOp::Start,
+                kind: Some(CalibrationJobKind::ThermalPlantAuto),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "thermal_plant_source_unsupported");
+    }
+
+    #[tokio::test]
+    async fn thermal_plant_mock_job_locks_runtime_overrides_and_state_transitions() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+
+        let _ = configure_calibration_job(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id.clone(),
+                op: CalibrationJobOp::Start,
+                kind: Some(CalibrationJobKind::ThermalPlantAuto),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let repeated_start = configure_calibration_job(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id.clone(),
+                op: CalibrationJobOp::Start,
+                kind: Some(CalibrationJobKind::ThermalPlantAuto),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(repeated_start.error.code, "heater_disarm_pending");
+
+        let manual_override = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: None,
+                manual_pps_enabled: Some(true),
+                manual_pps_mv: Some(20_000),
+                manual_pps_ma: Some(3_000),
+                calibration: None,
+                thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
+                thermal_control_profile: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(manual_override.error.code, "manual_pps_calibration_busy");
+
+        let heater_override = configure_runtime(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(RuntimeConfigRequest {
+                lease_id: lease.lease_id.clone(),
+                target_temp_c: None,
+                selected_preset_slot: None,
+                presets_c: None,
+                active_cooling_enabled: None,
+                heater_enabled: Some(true),
+                manual_pps_enabled: None,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                calibration: None,
+                thermal_profile_mode: None,
+                fault_attention_acknowledged: None,
+                thermal_control_profile: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(heater_override.error.code, "manual_pps_calibration_busy");
+
+        let canceled = configure_calibration_job(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id.clone(),
+                op: CalibrationJobOp::Cancel,
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(canceled.status, CalibrationJobStatus::Canceled);
+
+        let idle_cancel = configure_calibration_job(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id,
+                op: CalibrationJobOp::Cancel,
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(idle_cancel.status, CalibrationJobStatus::Canceled);
+    }
+
+    #[tokio::test]
+    async fn thermal_plant_mock_job_requires_one_matching_apdo() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        {
+            let mut state_lock = state.lock().unwrap();
+            let device = state_lock.devices.get_mut("mock-fp-lab-01").unwrap();
+            device.status.pps_capability_min_mv = Some(5_000);
+            device.status.pps_capability_max_mv = Some(21_000);
+            device.status.pps_capability_max_ma = Some(5_000);
+            device.mock_pps_apdos = vec![
+                MockPpsApdo {
+                    min_mv: 5_000,
+                    max_mv: 11_000,
+                    max_ma: 5_000,
+                },
+                MockPpsApdo {
+                    min_mv: 20_000,
+                    max_mv: 21_000,
+                    max_ma: 1_000,
+                },
+            ];
+        }
+
         let error = configure_calibration_job(
             State(state),
             AxumPath("mock-fp-lab-01".to_string()),
