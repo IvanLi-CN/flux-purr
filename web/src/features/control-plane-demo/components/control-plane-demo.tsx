@@ -6356,14 +6356,6 @@ function CalibrationView({
                                   )
                                   return
                                 }
-                                await onCalibrationRuntimeChange(
-                                  {
-                                    mode: 'thermal_plant',
-                                    ppsEnabled: false,
-                                    heaterEnabled: false,
-                                  },
-                                  '瞬态热模型标定模式启动失败。'
-                                )
                                 await onCalibrationJobChange(
                                   { op: 'start', kind: 'thermal_plant_auto' },
                                   '自动热模型标定启动失败。'

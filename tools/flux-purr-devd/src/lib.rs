@@ -2850,6 +2850,14 @@ async fn configure_calibration_job(
                     "Calibration auto job requires a job kind.",
                 )
             })?;
+            if kind == CalibrationJobKind::ThermalPlantAuto {
+                validate_thermal_plant_source_against_status(&device.status)?;
+                device.status.calibration.mode = CalibrationMode::ThermalPlant;
+                device.status.calibration.heater_enabled = false;
+                device.status.calibration.pps_enabled = false;
+                device.status.calibration.pps_mv = None;
+                device.status.calibration.pps_ma = None;
+            }
             device.status.calibration.job = CalibrationJobState {
                 kind: Some(kind),
                 status: CalibrationJobStatus::Running,
@@ -4500,6 +4508,12 @@ fn validate_calibration_request_against_status(
     status: &ControlPlaneStatus,
     current: &CalibrationRuntimeState,
 ) -> Result<(), HttpError> {
+    if calibration.mode == Some(CalibrationMode::ThermalPlant) {
+        return Err(HttpError::bad_request(
+            "thermal_plant_managed_by_job",
+            "Automatic thermal-model calibration is managed by thermal_plant_auto.",
+        ));
+    }
     let current_ma = effective_pps_current_capability_ma(status);
     if calibration.pps_enabled != Some(true) && calibration.pps_mv.is_none() {
         return Ok(());
@@ -4528,6 +4542,28 @@ fn validate_calibration_request_against_status(
         }
     })?;
     Ok(())
+}
+
+fn validate_thermal_plant_source_against_status(
+    status: &ControlPlaneStatus,
+) -> Result<(), HttpError> {
+    let supported = matches!(
+        (
+            status.pps_capability_min_mv,
+            status.pps_capability_max_mv,
+            status.pps_capability_max_ma,
+        ),
+        (Some(min_mv), Some(max_mv), Some(max_ma))
+            if min_mv <= 20_000 && max_mv >= 20_000 && max_ma >= 3_000
+    );
+    if supported {
+        Ok(())
+    } else {
+        Err(HttpError::bad_request(
+            "thermal_plant_source_unsupported",
+            "Thermal-plant calibration requires a PPS capability covering 20V at 3A or more.",
+        ))
+    }
 }
 
 fn validate_manual_pps_against_status(
@@ -9212,6 +9248,81 @@ mod tests {
         assert!(status.calibration.pps_enabled);
         assert_eq!(status.calibration.pps_ma, Some(3_000));
         assert_eq!(status.manual_pps_ma, Some(3_000));
+    }
+
+    #[tokio::test]
+    async fn thermal_plant_mock_job_requires_20v_three_amp_capability() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let started = configure_calibration_job(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id.clone(),
+                op: CalibrationJobOp::Start,
+                kind: Some(CalibrationJobKind::ThermalPlantAuto),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(started.status, CalibrationJobStatus::Running);
+        assert_eq!(started.kind, Some(CalibrationJobKind::ThermalPlantAuto));
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .devices
+                .get("mock-fp-lab-01")
+                .unwrap()
+                .status
+                .calibration
+                .mode,
+            CalibrationMode::ThermalPlant
+        );
+
+        {
+            let mut state_lock = state.lock().unwrap();
+            state_lock
+                .devices
+                .get_mut("mock-fp-lab-01")
+                .unwrap()
+                .status
+                .pps_capability_max_ma = Some(2_999);
+        }
+        let error = configure_calibration_job(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id,
+                op: CalibrationJobOp::Start,
+                kind: Some(CalibrationJobKind::ThermalPlantAuto),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "thermal_plant_source_unsupported");
+    }
+
+    #[test]
+    fn manual_calibration_cannot_select_the_thermal_plant_runtime_state() {
+        let status = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock).status;
+        let error = validate_calibration_request_against_status(
+            &CalibrationControlRequest {
+                mode: Some(CalibrationMode::ThermalPlant),
+                pps_enabled: None,
+                pps_mv: None,
+                heater_enabled: None,
+                target_adc_mv: None,
+            },
+            &status,
+            &status.calibration,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "thermal_plant_managed_by_job");
     }
 
     #[tokio::test]

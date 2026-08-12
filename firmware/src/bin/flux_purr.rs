@@ -1037,18 +1037,11 @@ impl ThermalControlProfile {
 fn active_thermal_control_profile(
     memory_config: &MemoryConfig,
     preview: Option<ThermalControlProfile>,
-    pps_capability_min_mv: Option<u16>,
-    pps_capability_max_mv: Option<u16>,
-    pps_capability_max_ma: Option<u16>,
+    manual_pps: &ManualPpsState,
 ) -> Option<ThermalControlProfile> {
     preview.or_else(|| {
         ThermalControlProfile::from_saved_config(memory_config.thermal_profile(
-            resolve_thermal_profile_bank(
-                memory_config.thermal_profile_mode,
-                pps_capability_min_mv,
-                pps_capability_max_mv,
-                pps_capability_max_ma,
-            ),
+            resolve_thermal_profile_bank(memory_config.thermal_profile_mode, manual_pps),
         ))
     })
 }
@@ -1056,15 +1049,9 @@ fn active_thermal_control_profile(
 #[cfg(any(target_arch = "xtensa", test))]
 fn resolve_thermal_profile_bank(
     mode: ThermalProfileMode,
-    pps_capability_min_mv: Option<u16>,
-    pps_capability_max_mv: Option<u16>,
-    pps_capability_max_ma: Option<u16>,
+    manual_pps: &ManualPpsState,
 ) -> ThermalProfileBank {
-    if mode == ThermalProfileMode::Auto
-        && pps_capability_min_mv.is_some_and(|value| value <= 20_000)
-        && pps_capability_max_mv.is_some_and(|value| value >= 20_000)
-        && pps_capability_max_ma.is_some_and(|value| value >= 5_000)
-    {
+    if mode == ThermalProfileMode::Auto && manual_pps.has_matching_pps_apdo(20_000, 5_000) {
         ThermalProfileBank::Pps5a
     } else {
         mode.default_bank()
@@ -3318,6 +3305,7 @@ enum ManualPpsError {
     NoPpsCapability,
     InvalidVoltage,
     CalibrationInProgress,
+    TerminalDisarmPending,
     ThermalPlantManagedByJob,
     HeaterCurveCoverageInsufficient,
     ThermalPlantSourceUnsupported,
@@ -3340,6 +3328,7 @@ impl ManualPpsError {
             Self::NoPpsCapability => "manual_pps_no_capability",
             Self::InvalidVoltage => "manual_pps_invalid_voltage",
             Self::CalibrationInProgress => "manual_pps_calibration_busy",
+            Self::TerminalDisarmPending => "heater_disarm_pending",
             Self::ThermalPlantManagedByJob => "thermal_plant_managed_by_job",
             Self::HeaterCurveCoverageInsufficient => "heater_curve_coverage_insufficient",
             Self::ThermalPlantSourceUnsupported => "thermal_plant_source_unsupported",
@@ -3357,6 +3346,9 @@ impl ManualPpsError {
             }
             Self::CalibrationInProgress => {
                 "Manual PPS cannot override a running thermal-model calibration."
+            }
+            Self::TerminalDisarmPending => {
+                "The previous heater session is still being physically disarmed."
             }
             Self::ThermalPlantManagedByJob => {
                 "Automatic thermal-model calibration is managed by thermal_plant_auto."
@@ -3889,7 +3881,7 @@ fn thermal_model_heater_allowed(
             .is_some_and(|transaction| {
                 thermal_plant_projection_from_transient(&transaction).is_some()
                     && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
-                    && memory_config.heater_curve_transaction_id == Some(transaction.transaction_id)
+                    && thermal_plant_curve_is_bound(memory_config, transaction)
             });
     if !plant_is_available {
         return false;
@@ -3897,6 +3889,14 @@ fn thermal_model_heater_allowed(
 
     manual_pps.has_matching_pps_apdo(20_000, 3_000)
         && has_persisted_heater_resistance_curve(memory_config)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_curve_is_bound(
+    memory_config: &MemoryConfig,
+    transaction: ThermalPlantTransientTransaction,
+) -> bool {
+    memory_config.heater_curve_transaction_id == Some(transaction.transaction_id)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4229,9 +4229,10 @@ fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRunti
     let active_projection = memory_config
         .thermal_plant_transient_active
         .and_then(|transaction| {
-            thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
-                .then(|| thermal_plant_projection_from_transient(&transaction))
-                .flatten()
+            (thermal_plant_curve_is_bound(memory_config, transaction)
+                && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config))
+            .then(|| thermal_plant_projection_from_transient(&transaction))
+            .flatten()
         });
     let state =
         if memory_config.thermal_plant_transient_active.is_some() && active_projection.is_none() {
@@ -4263,7 +4264,9 @@ fn thermal_plant_projection_for_runtime(
     memory_config: &MemoryConfig,
 ) -> Option<(flux_purr_firmware::memory::ThermalPlantProjection, f32)> {
     let transaction = memory_config.thermal_plant_transient_active?;
-    if !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config) {
+    if !thermal_plant_curve_is_bound(memory_config, transaction)
+        || !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
+    {
         return None;
     }
     let projection = thermal_plant_projection_from_transient(&transaction)?;
@@ -5700,6 +5703,36 @@ async fn apply_heater_power_output<PWM>(
 where
     PWM: SetDutyCycle,
 {
+    if let HeaterPowerBackend::PpsMos {
+        terminal_fixed_pd_disarmed,
+        current_mode,
+        current_request_mv,
+        settle_until_ms,
+        next_request_at_ms,
+        current_limit_fixed_pwm_active,
+        current_limit_fixed_request_confirmed,
+        idle_request_mv,
+        ..
+    } = backend
+        && *terminal_fixed_pd_disarmed
+    {
+        if !heater_enabled || duty_percent == 0 {
+            apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+            return false;
+        }
+
+        // A subsequent explicit arm may re-enter PPS only after the terminal
+        // fixed-PD disarm completed. Calibration invalidation clears its arm
+        // request before setting this latch.
+        *terminal_fixed_pd_disarmed = false;
+        *current_mode = None;
+        *current_request_mv = *idle_request_mv;
+        *settle_until_ms = None;
+        *next_request_at_ms = 0;
+        *current_limit_fixed_pwm_active = false;
+        *current_limit_fixed_request_confirmed = false;
+    }
+
     let manual_pps_active = manual_pps.enabled;
     let mut manual_pps_request_changed = false;
     if manual_pps_active {
@@ -5764,36 +5797,6 @@ where
             last_physical_duty_percent,
         );
         return manual_pps_request_changed || *last_physical_duty_percent != previous_duty_percent;
-    }
-
-    if let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        current_mode,
-        current_request_mv,
-        settle_until_ms,
-        next_request_at_ms,
-        current_limit_fixed_pwm_active,
-        current_limit_fixed_request_confirmed,
-        idle_request_mv,
-        ..
-    } = backend
-        && *terminal_fixed_pd_disarmed
-    {
-        if !heater_enabled || duty_percent == 0 {
-            apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-            return false;
-        }
-
-        // A genuine later enable is allowed to re-enter PPS from a known
-        // state; terminal calibration transitions themselves always arrive
-        // here with the heater disabled.
-        *terminal_fixed_pd_disarmed = false;
-        *current_mode = None;
-        *current_request_mv = *idle_request_mv;
-        *settle_until_ms = None;
-        *next_request_at_ms = 0;
-        *current_limit_fixed_pwm_active = false;
-        *current_limit_fixed_request_confirmed = false;
     }
 
     if manual_pps.consume_automatic_restore_pending() {
@@ -6523,12 +6526,8 @@ fn usb_runtime_status(
     status.heater_control_cycle_ms = context.heater_control_timing.cycle_ms;
     status.calibration = calibration_runtime_state_to_wire(context.calibration);
     status.thermal_control_profile_preview = context.thermal_control_profile_preview;
-    let resolved_bank = resolve_thermal_profile_bank(
-        memory_config.thermal_profile_mode,
-        context.manual_pps.capability_min_mv,
-        context.manual_pps.capability_max_mv,
-        context.manual_pps.capability_max_ma,
-    );
+    let resolved_bank =
+        resolve_thermal_profile_bank(memory_config.thermal_profile_mode, &context.manual_pps);
     let mut thermal_profile_mode = heapless::String::new();
     let _ = thermal_profile_mode.push_str(memory_config.thermal_profile_mode.as_str());
     status.thermal_profile_mode = thermal_profile_mode;
@@ -6709,13 +6708,8 @@ fn usb_runtime_config_response(
     ui_state.manual_pps_enabled = manual_pps.enabled;
     context.manual_pps = *manual_pps;
     context.thermal_control_profile_preview = thermal_control_profile_preview.is_some();
-    context.active_thermal_control_profile = active_thermal_control_profile(
-        memory_config,
-        *thermal_control_profile_preview,
-        manual_pps.capability_min_mv,
-        manual_pps.capability_max_mv,
-        manual_pps.capability_max_ma,
-    );
+    context.active_thermal_control_profile =
+        active_thermal_control_profile(memory_config, *thermal_control_profile_preview, manual_pps);
 
     (
         usb_response(
@@ -6735,6 +6729,12 @@ fn apply_manual_pps_config(
     let manual_pps_requested = config.manual_pps_enabled.is_some()
         || config.manual_pps_mv.is_some()
         || config.manual_pps_ma.is_some();
+    if calibration.immediate_heater_disarm_pending
+        && manual_pps_requested
+        && config.manual_pps_enabled != Some(false)
+    {
+        return Err(ManualPpsError::TerminalDisarmPending);
+    }
     if calibration.mode == CalibrationMode::ThermalPlant
         && calibration.job.status == CalibrationJobStatus::Running
         && manual_pps_requested
@@ -6774,6 +6774,9 @@ fn apply_calibration_control_config(
         || config.target_adc_mv.is_some();
     if thermal_plant_calibration_job_running(*calibration) && requests_mutation {
         return Err(ManualPpsError::CalibrationInProgress);
+    }
+    if calibration.immediate_heater_disarm_pending && requests_mutation {
+        return Err(ManualPpsError::TerminalDisarmPending);
     }
     if config.mode == Some(CalibrationModeWire::ThermalPlant) {
         return Err(ManualPpsError::ThermalPlantManagedByJob);
@@ -6934,14 +6937,31 @@ fn calibration_job_canceled(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn disarm_calibration_after_transient_input_change(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+) {
+    calibration.heater_enabled = false;
+    calibration.pps_enabled = false;
+    calibration.pps_mv = None;
+    calibration.pps_ma = None;
+    if manual_pps.owner == ManualPpsOwner::Calibration {
+        manual_pps.clear();
+    }
+    calibration.immediate_heater_disarm_pending = true;
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn calibration_job_start(
     calibration: &mut CalibrationRuntimeState,
     kind: CalibrationJobKind,
     memory_config: &mut MemoryConfig,
     manual_pps: &mut ManualPpsState,
 ) -> Result<(), ManualPpsError> {
-    if calibration.job.status == CalibrationJobStatus::Running {
-        return Err(ManualPpsError::WriteFailed);
+    if calibration.job.status == CalibrationJobStatus::Running
+        || calibration.immediate_heater_disarm_pending
+    {
+        return Err(ManualPpsError::TerminalDisarmPending);
     }
     match kind {
         CalibrationJobKind::VinAdc => {
@@ -6994,9 +7014,6 @@ fn calibration_job_start(
             Ok(())
         }
         CalibrationJobKind::ThermalPlant => {
-            if calibration.mode != CalibrationMode::ThermalPlant {
-                return Err(ManualPpsError::InvalidVoltage);
-            }
             let (source_min_mv, source_max_mv, source_current_ma) = manual_pps
                 .thermal_plant_source_limits()
                 .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
@@ -7013,6 +7030,7 @@ fn calibration_job_start(
                 request_mv,
                 Some(source_current_ma),
             )?;
+            calibration.mode = CalibrationMode::ThermalPlant;
             calibration.pps_enabled = true;
             calibration.pps_mv = manual_pps.target_mv;
             calibration.pps_ma = manual_pps.target_ma;
@@ -8828,13 +8846,8 @@ async fn process_control_line(
     heater_control_timing: HeaterControlTiming,
 ) -> (bool, UsbFrame) {
     let mut needs_redraw = false;
-    let active_thermal_control_profile = active_thermal_control_profile(
-        memory_config,
-        *thermal_control_profile_preview,
-        manual_pps.capability_min_mv,
-        manual_pps.capability_max_mv,
-        manual_pps.capability_max_ma,
-    );
+    let active_thermal_control_profile =
+        active_thermal_control_profile(memory_config, *thermal_control_profile_preview, manual_pps);
     let runtime_context =
         |heater_fault_latched: Option<HeaterFaultReason>,
          attention_pending_after_fault_clear_value: bool| UsbRuntimeStatusContext {
@@ -9081,7 +9094,10 @@ async fn process_control_line(
                     .is_some()
                     && previous_memory_config.adc_calibration != memory_config.adc_calibration
                 {
-                    calibration_runtime_state.immediate_heater_disarm_pending = true;
+                    disarm_calibration_after_transient_input_change(
+                        calibration_runtime_state,
+                        manual_pps,
+                    );
                 }
                 if *memory_config != previous_memory_config {
                     if commit_memory_config_now(
@@ -9148,7 +9164,10 @@ async fn process_control_line(
                 {
                     memory_config.heater_curve_transaction_id = None;
                     invalidate_transient_thermal_plant(memory_config);
-                    calibration_runtime_state.immediate_heater_disarm_pending = true;
+                    disarm_calibration_after_transient_input_change(
+                        calibration_runtime_state,
+                        manual_pps,
+                    );
                 }
                 if let Err(error) =
                     commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
@@ -10934,9 +10953,7 @@ async fn main(_spawner: Spawner) {
             let active_thermal_control_profile = active_thermal_control_profile(
                 &memory_config,
                 thermal_control_profile_preview,
-                manual_pps_state.capability_min_mv,
-                manual_pps_state.capability_max_mv,
-                manual_pps_state.capability_max_ma,
+                &manual_pps_state,
             );
             let active_thermal_settings = active_thermal_control_profile
                 .filter(|_| calibration_runtime_state.mode != CalibrationMode::Off)
@@ -12799,6 +12816,69 @@ mod tests {
     }
 
     #[test]
+    fn transient_input_change_disarms_calibration_before_fixed_pd_restore() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::HeaterCurve,
+            pps_enabled: true,
+            pps_mv: Some(20_000),
+            pps_ma: Some(3_000),
+            heater_enabled: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            owner: ManualPpsOwner::Calibration,
+            target_mv: Some(20_000),
+            target_ma: Some(3_000),
+            applied_mv: Some(20_000),
+            ..ManualPpsState::default()
+        };
+
+        disarm_calibration_after_transient_input_change(&mut calibration, &mut manual_pps);
+
+        assert!(!calibration.heater_enabled);
+        assert!(!calibration.pps_enabled);
+        assert_eq!(calibration.pps_mv, None);
+        assert_eq!(calibration.pps_ma, None);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert!(!manual_pps.enabled);
+        assert_eq!(manual_pps.target_mv, None);
+        assert_eq!(manual_pps.applied_mv, None);
+    }
+
+    #[test]
+    fn thermal_plant_job_waits_for_a_pending_terminal_disarm() {
+        let mut calibration = CalibrationRuntimeState {
+            immediate_heater_disarm_pending: true,
+            ..CalibrationRuntimeState::default()
+        };
+
+        assert_eq!(
+            calibration_job_start(
+                &mut calibration,
+                CalibrationJobKind::ThermalPlant,
+                &mut MemoryConfig::default(),
+                &mut ManualPpsState::default(),
+            ),
+            Err(ManualPpsError::TerminalDisarmPending)
+        );
+        assert_eq!(
+            apply_calibration_control_config(
+                &CalibrationControlCommand {
+                    mode: Some(CalibrationModeWire::HeaterCurve),
+                    pps_enabled: Some(true),
+                    pps_mv: Some(20_000),
+                    heater_enabled: Some(true),
+                    target_adc_mv: None,
+                },
+                &mut calibration,
+                &mut ManualPpsState::default(),
+            ),
+            Err(ManualPpsError::TerminalDisarmPending)
+        );
+    }
+
+    #[test]
     fn thermal_plant_job_locks_persistent_calibration_inputs() {
         let running = CalibrationRuntimeState {
             mode: CalibrationMode::ThermalPlant,
@@ -13083,10 +13163,7 @@ mod tests {
         for (max_mv, max_ma, expected_request_mv) in
             [(20_000, 3_000, 8_900), (21_000, 5_000, 15_300)]
         {
-            let mut calibration = CalibrationRuntimeState {
-                mode: CalibrationMode::ThermalPlant,
-                ..CalibrationRuntimeState::default()
-            };
+            let mut calibration = CalibrationRuntimeState::default();
             let mut memory_config = MemoryConfig::default();
             for (index, raw_rtd_adc_mv) in [240, 460].into_iter().enumerate() {
                 memory_config.heater_curve_raw_observations.points[index] =
@@ -13129,6 +13206,7 @@ mod tests {
             .unwrap();
 
             assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
+            assert_eq!(calibration.mode, CalibrationMode::ThermalPlant);
             assert_eq!(calibration.pps_mv, Some(expected_request_mv));
             assert_eq!(calibration.pps_ma, Some(max_ma));
         }
@@ -13468,6 +13546,10 @@ mod tests {
             CalibrationRuntimeState::default(),
             manual_pps
         ));
+        let unrelated_wire = thermal_plant_runtime_wire(&unrelated_curve);
+        assert_eq!(unrelated_wire.state.as_str(), "invalid");
+        assert!(!unrelated_wire.projection_valid);
+        assert!(thermal_plant_projection_for_runtime(&unrelated_curve).is_none());
         let mut missing_raw_curve = memory_config.clone();
         missing_raw_curve.heater_curve_raw_observations = HeaterCurveRawObservations::default();
         assert!(!thermal_model_heater_allowed(
@@ -16828,26 +16910,90 @@ mod tests {
 
     #[test]
     fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
+        let five_amp =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(5_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 5_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
         assert_eq!(
-            resolve_thermal_profile_bank(
-                ThermalProfileMode::Auto,
-                Some(5_000),
-                Some(21_000),
-                Some(5_000),
-            ),
+            resolve_thermal_profile_bank(ThermalProfileMode::Auto, &five_amp),
             ThermalProfileBank::Pps5a
         );
+        let three_amp =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(3_250),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 21_000,
+                        max_ma: 3_250,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
         assert_eq!(
-            resolve_thermal_profile_bank(
-                ThermalProfileMode::Auto,
-                Some(5_000),
-                Some(21_000),
-                Some(3_250),
-            ),
+            resolve_thermal_profile_bank(ThermalProfileMode::Auto, &three_amp),
+            ThermalProfileBank::Pps3a
+        );
+        let split_apdos =
+            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(5_000),
+                pps_apdos: [
+                    Some(ch224q::PpsApdo {
+                        min_mv: 5_000,
+                        max_mv: 11_000,
+                        max_ma: 5_000,
+                    }),
+                    Some(ch224q::PpsApdo {
+                        min_mv: 20_000,
+                        max_mv: 21_000,
+                        max_ma: 3_000,
+                    }),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                avs_min_mv: None,
+                avs_max_mv: None,
+            }));
+        assert_eq!(
+            resolve_thermal_profile_bank(ThermalProfileMode::Auto, &split_apdos),
             ThermalProfileBank::Pps3a
         );
         assert_eq!(
-            resolve_thermal_profile_bank(ThermalProfileMode::W100, None, None, Some(3_250)),
+            resolve_thermal_profile_bank(ThermalProfileMode::W100, &ManualPpsState::default()),
             ThermalProfileBank::Pps5a
         );
     }

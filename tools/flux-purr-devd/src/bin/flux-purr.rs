@@ -2306,19 +2306,6 @@ async fn handle_thermal_command(
             ThermalModelCommand::Calibrate(target) => {
                 request_with_lease(
                     client,
-                    resolve_target(target.clone(), default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "calibration": {
-                            "mode": "thermal_plant",
-                            "heaterEnabled": false
-                        }
-                    })),
-                )
-                .await?;
-                request_with_lease(
-                    client,
                     resolve_target(target, default_devd)?,
                     Method::POST,
                     "/calibration/job",

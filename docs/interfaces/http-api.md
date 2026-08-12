@@ -100,26 +100,22 @@ During firmware boot, before EEPROM/flash restoration and WiFi task startup comp
 
 ```json
 {
-  "active": {
-    "rtdAdc": [null, null, null, null, null, null, null, null],
-    "vinAdc": [null, null, null, null, null, null, null, null]
+  "rtdAdc": {
+    "samples": [{ "observedMv": 1120, "expectedMv": 1118, "referenceTempC": 25.0, "targetAdcMv": 1118 }, null, null, null, null, null, null, null],
+    "fittedFit": { "gain": 1.0, "offsetMv": -2.0, "sampleCount": 1 },
+    "slots": { "a": { "gain": 1.0, "offsetMv": 0.0 }, "b": { "gain": 0.9982, "offsetMv": 5.4 } },
+    "activeSlot": "a"
   },
-  "draft": {
-    "rtdAdc": [{ "observedMv": 1120, "expectedMv": 1118, "referenceTempC": 25.0 }, null, null, null, null, null, null, null],
-    "vinAdc": [{ "observedMv": 1670, "expectedMv": 1820, "referenceVinMv": 20000 }, null, null, null, null, null, null, null]
-  },
-  "activeFit": {
-    "rtdAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 0, "defaultSampleCount": 2 },
-    "vinAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 0, "defaultSampleCount": 2 }
-  },
-  "draftFit": {
-    "rtdAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 1, "defaultSampleCount": 2 },
-    "vinAdc": { "gain": 1.0, "offsetMv": 0.0, "customSampleCount": 1, "defaultSampleCount": 2 }
+  "vinAdc": {
+    "samples": [{ "observedMv": 1670, "expectedMv": 1820, "referenceVinMv": 20000 }, null, null, null, null, null, null, null],
+    "fittedFit": { "gain": 1.0, "offsetMv": 150.0, "sampleCount": 1 },
+    "slots": { "a": { "gain": 1.0, "offsetMv": 0.0 }, "b": { "gain": 1.0, "offsetMv": 150.0 } },
+    "activeSlot": "b"
   }
 }
 ```
 
-Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples and also preserves the owner-entered physical reference (`referenceTempC` for RTD, `referenceVinMv` for VIN) whenever one was provided. Capture commands accept those physical references and convert them into expected ADC millivolts using the RTD/PT1000 or VIN divider model. Import replaces the full draft package.
+Calibration channels are `rtd_adc` and `vin_adc`. Each channel stores up to eight ADC-domain samples, a derived `fittedFit`, persistent A/B slots, and its `activeSlot`. Capture preserves the owner-entered physical reference (`referenceTempC` for RTD, `referenceVinMv` for VIN). Import replaces the complete state; sample, slot, and active-slot operations persist immediately. There is no draft, apply, or promotion stage.
 
 ### `CalibrationRuntimeState`
 
@@ -286,7 +282,7 @@ Supported direct operations:
 
 - `request` with `op=get_identity|get_network|get_status|get_calibration|get_calibration_job|get_heater_curve`
 - `runtime_config` for `targetTempC`, `selectedPresetSlot`, `presetsC`, `activeCoolingEnabled`, `heaterEnabled`, and `calibration`
-- `calibration_config`, `calibration_apply`, `calibration_job`, `heater_curve_config`, and `heater_curve_save`
+- `calibration_config`, `calibration_job`, `heater_curve_config`, and `heater_curve_save`
 
 Unsupported direct operations:
 
@@ -321,7 +317,6 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `PUT /api/v1/devices/:id/wifi`: WiFi provisioning is USB/devd-only. The live Web Settings form remains visible for a selected native `devd` device with `wifi_config`; without `wifi_state_v2` it locks every configuration control and reports that a protocol update is required. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. Its response is a redacted WiFi receipt with the device-published `NetworkSummary`; `devd` must reject an unversioned or malformed receipt. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. It never sends credentials over direct LAN or Web Serial.
 - `PUT /api/v1/devices/:id/runtime`
 - `PUT /api/v1/devices/:id/calibration`
-- `POST /api/v1/devices/:id/calibration/apply`
 - `POST /api/v1/devices/:id/calibration/job`
 - `GET /api/v1/devices/:id/heater-curve?lease_id=...`
 - `PUT /api/v1/devices/:id/heater-curve`
@@ -401,17 +396,7 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 }
 ```
 
-`op` is `capture | delete | clear | import`. `capture` requires `channel` and either a physical reference (`referenceTempC` for `rtd_adc`, `referenceVinMv` for `vin_adc`) or explicit `expectedMv`; `observedMv` is optional and otherwise comes from the latest device ADC reading. `delete` requires `sampleIndex`. `clear` requires `channel`. `import` requires a complete `package` with `rtdAdc` and `vinAdc` arrays.
-
-`POST /api/v1/devices/:id/calibration/apply` body:
-
-```json
-{
-  "leaseId": "lease-001"
-}
-```
-
-Apply copies draft calibration to active calibration and returns the updated `CalibrationState`. It is rejected with `calibration_apply_heater_active` when the heater is enabled or output is nonzero.
+`op` is `capture | delete | clear | import | set_active_slot | set_slot_fit`. `capture` requires `channel` and either a physical reference (`referenceTempC` for `rtd_adc`, `referenceVinMv` for `vin_adc`) or explicit `expectedMv`; `observedMv` is optional and otherwise comes from the latest device ADC reading. `delete` requires `sampleIndex`. `clear` requires `channel`. `import` requires complete `state`. `set_active_slot` requires `channel` and `slot`; `set_slot_fit` also requires `fit`.
 
 `GET /api/v1/devices/:id/calibration/job?lease_id=...` returns the current auto-job state:
 
@@ -436,7 +421,7 @@ Apply copies draft calibration to active calibration and returns the updated `Ca
 }
 ```
 
-`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes samples into `vin_adc draft`; `thermal_plant_auto` is the protected `20V / >=3A` single-run transient job. It records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
 `PUT /api/v1/devices/:id/heater-curve` body:
 
@@ -748,18 +733,7 @@ The response returns the updated status:
 }
 ```
 
-Supported operations are `capture`, `delete`, `clear`, and `import`. The response returns `CalibrationState`.
-
-### `calibration_apply`
-
-```json
-{
-  "type": "calibration_apply",
-  "requestId": "req-005"
-}
-```
-
-The response returns `CalibrationState`, or `calibration_apply_heater_active` when applying would change active calibration while heater output is active.
+Supported operations are `capture`, `delete`, `clear`, `import`, `set_active_slot`, and `set_slot_fit`. The response returns `CalibrationState`.
 
 ### `calibration_job`
 
