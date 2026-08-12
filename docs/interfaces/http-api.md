@@ -535,7 +535,7 @@ Core commands:
 - `flux-purr thermal retune --run-dir <dir> [--apply-preview --device <id>|--hardware <saved-id>]`
 - `flux-purr thermal report rerender-legacy --legacy-bundle-dir <dir> [--output-dir <dir>]`
 - Batch profile comparison repeats `--candidate-profile-file <path>` for one `--targets-c` value; candidates share one source/lease session, use `max(40C, target-30C)` as the restart threshold, produce separate reports, and never write EEPROM.
-- `flux-purr calibration get|capture|delete|clear|import|export|apply|collect --device <id>` or `--hardware <saved-id>`
+- `flux-purr calibration get|capture|delete|clear|set-slot-fit|set-active-slot|import|export|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode voltage|temperature|heater-curve ...`
 - `flux-purr wifi set|clear --device <id> ...`

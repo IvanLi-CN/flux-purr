@@ -1,10 +1,12 @@
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     env,
     fs::{self, File},
-    io::{self, Read},
+    io::{self, Read, Write},
     net::SocketAddr,
     path::{Component, Path, PathBuf},
     process::Output,
@@ -84,7 +86,9 @@ const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 // Opening an ESP32-S3 USB Serial/JTAG port can reset the device. Read-only
 // requests are idempotent and must remain alive through USB enumeration,
 // front-panel startup, and PD bring-up so the first native CLI query is usable.
-const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
+// Opening USB Serial/JTAG can reset the MCU. Allow a full cold boot plus
+// hardware discovery before declaring a read-only request unavailable.
+const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -93,6 +97,11 @@ const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
 // The 500ms cadence accommodates a full startup window without flooding it.
 const SERIAL_SILENT_RETRY_DELAY: Duration = Duration::from_millis(500);
 const SERIAL_LINE_LIMIT: usize = 8 * 1024;
+// `serialport` configures termios and flushes both queues on macOS. USB
+// Serial/JTAG can interpret that control traffic as a host reset, so the
+// ESP32-S3 path uses an unconfigured raw descriptor instead.
+#[cfg(target_os = "macos")]
+const MACOS_O_NONBLOCK: i32 = 0x0004;
 #[cfg(unix)]
 const LOCK_EX: i32 = 2;
 #[cfg(unix)]
@@ -5481,7 +5490,15 @@ fn serial_exchange_blocking(
                     }
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    std::thread::sleep(SERIAL_READ_TIMEOUT);
+                }
                 maybe_retry_silent_serial_request(
                     &mut *session.port,
                     request,
@@ -5582,7 +5599,58 @@ type SerialSessionMap = HashMap<String, SerialSession>;
 
 struct SerialSession {
     _serial_lock: SerialPortProcessLock,
-    port: Box<dyn serialport::SerialPort>,
+    port: Box<dyn SerialSessionPort>,
+}
+
+trait SerialSessionPort: Read + Write + Send {
+    fn begin_write(&mut self) -> Result<(), HttpError>;
+    fn finish_write(&mut self) -> Result<(), HttpError>;
+}
+
+impl SerialSessionPort for Box<dyn serialport::SerialPort> {
+    fn begin_write(&mut self) -> Result<(), HttpError> {
+        self.set_timeout(SERIAL_WRITE_TIMEOUT)
+            .map_err(serial_timeout_config_http_error)
+    }
+
+    fn finish_write(&mut self) -> Result<(), HttpError> {
+        self.set_timeout(SERIAL_READ_TIMEOUT)
+            .map_err(serial_timeout_config_http_error)
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct RawUsbSerialJtagPort {
+    file: File,
+}
+
+#[cfg(target_os = "macos")]
+impl Read for RawUsbSerialJtagPort {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Write for RawUsbSerialJtagPort {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl SerialSessionPort for RawUsbSerialJtagPort {
+    fn begin_write(&mut self) -> Result<(), HttpError> {
+        Ok(())
+    }
+
+    fn finish_write(&mut self) -> Result<(), HttpError> {
+        Ok(())
+    }
 }
 
 fn lock_serial_sessions(
@@ -5690,12 +5758,35 @@ fn serial_lock_path(port_path: &str) -> PathBuf {
     std::env::temp_dir().join(name)
 }
 
-fn open_serial_port(port_path: &str) -> Result<Box<dyn serialport::SerialPort>, HttpError> {
+fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
+    port_path.starts_with("/dev/cu.usbmodem")
+}
+
+fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpError> {
+    #[cfg(target_os = "macos")]
+    if is_esp_usb_serial_jtag_port(port_path) {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .custom_flags(MACOS_O_NONBLOCK)
+            .open(port_path)
+            .map_err(|error| {
+                HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "serial_open_failed",
+                    &format!("Failed to open serial port: {error}"),
+                    true,
+                )
+            })?;
+        return Ok(Box::new(RawUsbSerialJtagPort { file }));
+    }
+
     // USB Serial/JTAG does not use modem-control lines.  Explicit DTR/RTS writes
     // can reset an attached MCU, so leave those lines entirely to the driver.
     serialport::new(port_path, DEFAULT_BAUD_RATE)
         .timeout(SERIAL_READ_TIMEOUT)
         .open()
+        .map(|port| Box::new(port) as Box<dyn SerialSessionPort>)
         .map_err(|error| {
             HttpError::new(
                 StatusCode::BAD_GATEWAY,
@@ -5735,20 +5826,16 @@ fn reopen_serial_session(port_path: &str, deadline: Instant) -> Result<SerialSes
     ))
 }
 
-fn write_serial_request(
-    port: &mut dyn serialport::SerialPort,
-    request: &str,
-) -> Result<(), HttpError> {
+fn write_serial_request(port: &mut dyn SerialSessionPort, request: &str) -> Result<(), HttpError> {
     validate_serial_request_len(request)?;
-    port.set_timeout(SERIAL_WRITE_TIMEOUT)
-        .map_err(serial_timeout_config_http_error)?;
+    port.begin_write()?;
     let write_result = port
         .write_all(request.as_bytes())
         .and_then(|_| port.write_all(b"\n"))
         .and_then(|_| port.flush());
-    let restore_result = port.set_timeout(SERIAL_READ_TIMEOUT);
+    let restore_result = port.finish_write();
     write_result.map_err(serial_io_http_error)?;
-    restore_result.map_err(serial_timeout_config_http_error)
+    restore_result
 }
 
 fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
@@ -5789,7 +5876,7 @@ fn write_serial_request_with_reopen(
 }
 
 fn maybe_retry_silent_serial_request(
-    port: &mut dyn serialport::SerialPort,
+    port: &mut dyn SerialSessionPort,
     request: &str,
     retry_policy: SerialRetryPolicy,
     next_retry_at: &mut Instant,
