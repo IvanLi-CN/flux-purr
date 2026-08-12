@@ -5333,6 +5333,27 @@ fn thermal_plant_calibration_request_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_calibration_temperature_c(
+    calibration: &CalibrationRuntimeState,
+    live_rtd_temp_c: Option<f32>,
+    control_temp_c: f32,
+) -> f32 {
+    // The general PID intentionally holds its control temperature across a
+    // PPS step while the RTD settles. A transient calibration changes PPS on
+    // nearly every heating tick, so using that held value here would calculate
+    // the next current-safe voltage from an increasingly stale resistance.
+    // The live sample has already passed the RTD fault checks; use it only for
+    // the protected auto job and leave production PID filtering unchanged.
+    if calibration.mode == CalibrationMode::ThermalPlant
+        && calibration.job.status == CalibrationJobStatus::Running
+    {
+        live_rtd_temp_c.unwrap_or(control_temp_c)
+    } else {
+        control_temp_c
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn heater_available_power_mw_for_temp(
     current_temp_c: f32,
     capability_max_mv: Option<u16>,
@@ -11315,7 +11336,7 @@ async fn main(_spawner: Spawner) {
                 &mut control_measurement_guarded,
             );
 
-            match rtd_sample {
+            let calibration_live_rtd_temp_c = match rtd_sample {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
@@ -11339,6 +11360,7 @@ async fn main(_spawner: Spawner) {
                         measurement.temp_c,
                     );
                     current_rtd_fault = overtemp_fault_from_control_temperature(measurement.temp_c);
+                    Some(measurement.temp_c)
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
@@ -11359,8 +11381,9 @@ async fn main(_spawner: Spawner) {
                         reason.label(),
                         ui_state.heater_enabled,
                     );
+                    None
                 }
-            }
+            };
             last_rtd_sample_request_mv = current_request_mv;
 
             if let Some(reason) = current_rtd_fault
@@ -11430,6 +11453,11 @@ async fn main(_spawner: Spawner) {
                     &mut manual_pps_state,
                 );
             } else {
+                let calibration_temp_c = thermal_plant_calibration_temperature_c(
+                    &calibration_runtime_state,
+                    calibration_live_rtd_temp_c,
+                    latest_temp_c,
+                );
                 update_calibration_job_state(
                     &mut calibration_runtime_state,
                     &mut memory_config,
@@ -11437,7 +11465,7 @@ async fn main(_spawner: Spawner) {
                     thermal_plant_workspace,
                     latest_rtd_raw_adc_mv,
                     latest_vin_raw_adc_mv,
-                    latest_temp_c,
+                    calibration_temp_c,
                     current_pd_observation
                         .map(|observation| observation.current_ma)
                         .unwrap_or(0),
@@ -13611,6 +13639,47 @@ mod tests {
                 &MemoryConfig::default(),
             ),
             Some(8_900)
+        );
+    }
+
+    #[test]
+    fn thermal_plant_uses_live_rtd_temperature_during_a_pps_transition() {
+        let calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+        let memory_config = MemoryConfig::default();
+
+        // The regular PID can deliberately retain 143C while a PPS request is
+        // settling. The transient job must track the physical RTD sample so
+        // its current-safe voltage ceiling follows rising heater resistance.
+        let calibration_temp_c =
+            thermal_plant_calibration_temperature_c(&calibration, Some(181.5), 143.0);
+        assert_eq!(calibration_temp_c, 181.5);
+        assert_eq!(
+            thermal_plant_calibration_request_mv(
+                5_000,
+                21_000,
+                3_000,
+                calibration_temp_c,
+                &memory_config,
+            ),
+            Some(14_600)
+        );
+        assert_eq!(
+            thermal_plant_calibration_request_mv(5_000, 21_000, 3_000, 143.0, &memory_config,),
+            Some(13_200)
+        );
+
+        let idle = CalibrationRuntimeState::default();
+        assert_eq!(
+            thermal_plant_calibration_temperature_c(&idle, Some(181.5), 143.0),
+            143.0
         );
     }
 
