@@ -5241,7 +5241,8 @@ fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveCon
         }
         let resistance_milliohms = observation
             .resistance_milliohms
-            .max(last_resistance_milliohms);
+            .max(last_resistance_milliohms)
+            .max(heater_curve_model_floor_milliohms(temp_c));
         last_resistance_milliohms = resistance_milliohms;
         curve.points[count] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
             temp_centi_c: round_to_i16(temp_c * 100.0),
@@ -5259,7 +5260,7 @@ fn estimated_heater_resistance_ohms(
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
 ) -> f32 {
-    preview_heater_curve
+    let estimated = preview_heater_curve
         .and_then(|curve| heater_resistance_ohms_from_curve(curve, current_temp_c))
         .or_else(|| {
             projected_heater_curve(memory_config)
@@ -5268,7 +5269,8 @@ fn estimated_heater_resistance_ohms(
         .or_else(|| {
             heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
         })
-        .unwrap_or_else(|| default_estimated_heater_resistance_ohms(current_temp_c))
+        .unwrap_or_else(|| default_estimated_heater_resistance_ohms(current_temp_c));
+    estimated.max(default_estimated_heater_resistance_ohms(current_temp_c))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -7353,10 +7355,15 @@ fn enforce_heater_curve_model_floor(
 ) {
     for point in points {
         let temp_c = f32::from(point.temp_centi_c) / 100.0;
-        let model_floor_milliohms =
-            round_to_u16_nonnegative(default_estimated_heater_resistance_ohms(temp_c) * 1000.0);
-        point.resistance_milliohms = point.resistance_milliohms.max(model_floor_milliohms);
+        point.resistance_milliohms = point
+            .resistance_milliohms
+            .max(heater_curve_model_floor_milliohms(temp_c));
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn heater_curve_model_floor_milliohms(temp_c: f32) -> u16 {
+    round_to_u16_nonnegative(default_estimated_heater_resistance_ohms(temp_c) * 1000.0)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -17605,7 +17612,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_heater_observations_reproject_after_temperature_calibration() {
+    fn raw_heater_observations_reproject_without_underestimating_the_model_floor() {
         let mut config = MemoryConfig::default();
         config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
             temp_centi_c: 0,
@@ -17631,10 +17638,10 @@ mod tests {
             });
 
         let resistance = estimated_heater_resistance_ohms(216.7, None, &config);
-        assert!(resistance < 5.674);
+        assert!(resistance >= default_estimated_heater_resistance_ohms(216.7));
         assert_eq!(
             heater_safe_max_mv_for_temp(216.7, 4_700, 21_000, None, &config),
-            18_400
+            21_000
         );
     }
 
