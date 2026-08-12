@@ -53,6 +53,8 @@ const THERMAL_PROFILE_ANCHOR_TARGETS_C: [i16; 6] = [60, 100, 140, 180, 220, 250]
 const THERMAL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX: u16 = 4_000;
 const THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
 const THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
+const THERMAL_PLANT_CALIBRATION_CURRENT_RESERVE_MA: u16 = 200;
+const DEFAULT_HEATER_R20_MILLIOHMS: u16 = 3_200;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
@@ -2871,17 +2873,28 @@ async fn configure_calibration_job(
                     "Calibration auto job requires a job kind.",
                 )
             })?;
+            let mut next_request_mv = device.status.calibration.pps_mv;
             if kind == CalibrationJobKind::ThermalPlantAuto {
-                validate_thermal_plant_source_against_device(device)?;
+                let (source, request_mv) = thermal_plant_start_request_for_device(device)?;
                 device.status.calibration.mode = CalibrationMode::ThermalPlant;
                 disarm_mock_thermal_plant(&mut device.status);
+                device.status.manual_pps_enabled = true;
+                device.status.manual_pps_mv = Some(request_mv);
+                device.status.manual_pps_ma = Some(source.max_ma);
+                device.status.pd_request_mv = request_mv;
+                device.status.pd_contract_mv = request_mv;
+                device.status.voltage_mv = u32::from(request_mv);
+                device.status.calibration.pps_enabled = true;
+                device.status.calibration.pps_mv = Some(request_mv);
+                device.status.calibration.pps_ma = Some(source.max_ma);
+                next_request_mv = Some(request_mv);
             }
             device.status.calibration.job = CalibrationJobState {
                 kind: Some(kind),
                 status: CalibrationJobStatus::Running,
                 progress_percent: 0,
                 samples_collected: 0,
-                next_request_mv: device.status.calibration.pps_mv,
+                next_request_mv,
                 message: None,
             };
         }
@@ -4598,31 +4611,102 @@ fn mock_thermal_plant_job_running(status: &ControlPlaneStatus) -> bool {
         && status.calibration.job.status == CalibrationJobStatus::Running
 }
 
-fn validate_thermal_plant_source_against_device(device: &DeviceRecord) -> Result<(), HttpError> {
-    let supported = if device.mock_pps_apdos.is_empty() {
-        matches!(
-            (
-                device.status.pps_capability_min_mv,
-                device.status.pps_capability_max_mv,
-                device.status.pps_capability_max_ma,
-            ),
-            (Some(min_mv), Some(max_mv), Some(max_ma))
-                if min_mv <= 20_000 && max_mv >= 20_000 && max_ma >= 3_000
-        )
-    } else {
-        device
-            .mock_pps_apdos
-            .iter()
-            .any(|apdo| apdo.min_mv <= 20_000 && apdo.max_mv >= 20_000 && apdo.max_ma >= 3_000)
-    };
-    if supported {
-        Ok(())
-    } else {
-        Err(HttpError::bad_request(
+fn thermal_plant_start_request_for_device(
+    device: &DeviceRecord,
+) -> Result<(MockPpsApdo, u16), HttpError> {
+    let source = mock_thermal_plant_source_limits(device).ok_or_else(|| {
+        HttpError::bad_request(
             "thermal_plant_source_unsupported",
             "Thermal-plant calibration requires a PPS capability covering 20V at 3A or more.",
-        ))
+        )
+    })?;
+    let request_mv = mock_thermal_plant_safe_request_mv(device, source).ok_or_else(|| {
+        HttpError::bad_request(
+            "thermal_plant_source_unsupported",
+            "Thermal-plant calibration cannot safely request power from the selected PPS capability.",
+        )
+    })?;
+    Ok((source, request_mv))
+}
+
+fn mock_thermal_plant_source_limits(device: &DeviceRecord) -> Option<MockPpsApdo> {
+    let mut selected = None;
+    let mut consider = |candidate: MockPpsApdo| {
+        if candidate.min_mv > 20_000 || candidate.max_mv < 20_000 || candidate.max_ma < 3_000 {
+            return;
+        }
+        if selected.is_none_or(|current: MockPpsApdo| {
+            candidate.max_ma > current.max_ma
+                || (candidate.max_ma == current.max_ma
+                    && (candidate.max_mv > current.max_mv
+                        || (candidate.max_mv == current.max_mv
+                            && candidate.min_mv < current.min_mv)))
+        }) {
+            selected = Some(candidate);
+        }
+    };
+    if device.mock_pps_apdos.is_empty() {
+        if let (Some(min_mv), Some(max_mv), Some(max_ma)) = (
+            device.status.pps_capability_min_mv,
+            device.status.pps_capability_max_mv,
+            device.status.pps_capability_max_ma,
+        ) {
+            consider(MockPpsApdo {
+                min_mv,
+                max_mv,
+                max_ma,
+            });
+        }
+    } else {
+        for apdo in device.mock_pps_apdos.iter().copied() {
+            consider(apdo);
+        }
     }
+    selected
+}
+
+fn mock_thermal_plant_safe_request_mv(device: &DeviceRecord, source: MockPpsApdo) -> Option<u16> {
+    let resistance_ohms = mock_heater_resistance_at_r20_ohms(device);
+    let available_current_ma = source
+        .max_ma
+        .saturating_sub(THERMAL_PLANT_CALIBRATION_CURRENT_RESERVE_MA);
+    let safe_mv =
+        (resistance_ohms * f32::from(available_current_ma)).clamp(0.0, f32::from(u16::MAX)) as u16;
+    let safe_mv = (safe_mv / 100).saturating_mul(100).min(source.max_mv);
+    (safe_mv >= source.min_mv).then_some(safe_mv)
+}
+
+fn mock_heater_resistance_at_r20_ohms(device: &DeviceRecord) -> f32 {
+    let mut points = device
+        .heater_curve
+        .active
+        .points
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    points.sort_unstable_by_key(|point| point.temp_centi_c);
+    let Some(first) = points.first().copied() else {
+        return f32::from(DEFAULT_HEATER_R20_MILLIOHMS) / 1_000.0;
+    };
+    if points.len() == 1 || 2_000 <= first.temp_centi_c {
+        return f32::from(first.resistance_milliohms) / 1_000.0;
+    }
+    for pair in points.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if 2_000 <= right.temp_centi_c {
+            let span = f32::from(right.temp_centi_c - left.temp_centi_c);
+            if span <= 0.0 {
+                return f32::from(left.resistance_milliohms) / 1_000.0;
+            }
+            let ratio = f32::from(2_000 - left.temp_centi_c) / span;
+            let left_ohms = f32::from(left.resistance_milliohms) / 1_000.0;
+            let right_ohms = f32::from(right.resistance_milliohms) / 1_000.0;
+            return left_ohms + ((right_ohms - left_ohms) * ratio);
+        }
+    }
+    f32::from(points.last().unwrap().resistance_milliohms) / 1_000.0
 }
 
 fn validate_manual_pps_against_status(
@@ -9517,6 +9601,38 @@ mod tests {
                     max_ma: 1_000,
                 },
             ];
+        }
+
+        let error = configure_calibration_job(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Json(CalibrationJobRequest {
+                lease_id: lease.lease_id,
+                op: CalibrationJobOp::Start,
+                kind: Some(CalibrationJobKind::ThermalPlantAuto),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "thermal_plant_source_unsupported");
+    }
+
+    #[tokio::test]
+    async fn thermal_plant_mock_job_rejects_an_apdo_above_the_safe_start_request() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        {
+            let mut state_lock = state.lock().unwrap();
+            let device = state_lock.devices.get_mut("mock-fp-lab-01").unwrap();
+            device.status.pps_capability_min_mv = Some(20_000);
+            device.status.pps_capability_max_mv = Some(21_000);
+            device.status.pps_capability_max_ma = Some(3_000);
+            device.mock_pps_apdos = vec![MockPpsApdo {
+                min_mv: 20_000,
+                max_mv: 21_000,
+                max_ma: 3_000,
+            }];
         }
 
         let error = configure_calibration_job(
