@@ -55,6 +55,16 @@ const THERMAL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX: u16 = 375;
 const THERMAL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX: u16 = 1_000;
 const THERMAL_PLANT_CALIBRATION_CURRENT_RESERVE_MA: u16 = 200;
 const DEFAULT_HEATER_R20_MILLIOHMS: u16 = 3_200;
+const PT1000_R0_OHMS: f32 = 1_000.0;
+const PT1000_A: f32 = 3.9083e-3;
+const PT1000_B: f32 = -5.775e-7;
+const PT1000_C: f32 = -4.183e-12;
+const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
+const RTD_DIVIDER_SUPPLY_MV: f32 = 3_300.0;
+const RTD_SHORT_FAULT_MAX_MV: f32 = 150.0;
+const RTD_OPEN_FAULT_MIN_MV: f32 = 2_800.0;
+const RTD_TEMP_MIN_C: f32 = -50.0;
+const RTD_TEMP_MAX_C: f32 = 500.0;
 const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 const HEATER_CURVE_MAX_POINTS: usize = 8;
 const VIN_DIVIDER_R_HIGH_OHMS: u32 = 56_000;
@@ -4682,7 +4692,14 @@ fn mock_heater_resistance_at_r20_ohms(device: &DeviceRecord) -> f32 {
         .active
         .raw_observations
         .as_ref()
-        .is_some_and(|observations| observations.points.iter().flatten().count() >= 2)
+        .is_some_and(|observations| {
+            let mut points = observations.points.iter().flatten();
+            points.clone().count() >= 2
+                && points.all(|observation| {
+                    mock_projected_rtd_temperature_c(device, observation.raw_rtd_adc_mv)
+                        .is_some_and(|temperature_c| (-50.0..=450.0).contains(&temperature_c))
+                })
+        })
     {
         // Firmware projects raw observations onto its fixed 0C/20C anchors
         // before using the display curve as a fallback.
@@ -4718,6 +4735,50 @@ fn mock_heater_resistance_at_r20_ohms(device: &DeviceRecord) -> f32 {
         }
     }
     f32::from(points.last().unwrap().resistance_milliohms) / 1_000.0
+}
+
+fn mock_projected_rtd_temperature_c(device: &DeviceRecord, raw_adc_mv: u16) -> Option<f32> {
+    let rtd_calibration = &device.calibration.rtd_adc;
+    let fit = match rtd_calibration.active_slot {
+        CalibrationSlotId::A => rtd_calibration.slots.a,
+        CalibrationSlotId::B => rtd_calibration.slots.b,
+    };
+    let corrected_mv = (fit.gain * f32::from(raw_adc_mv)) + fit.offset_mv;
+    if !corrected_mv.is_finite() {
+        return None;
+    }
+    let corrected_mv = if corrected_mv >= 0.0 {
+        corrected_mv + 0.5
+    } else {
+        corrected_mv - 0.5
+    }
+    .clamp(0.0, f32::from(u16::MAX)) as u16;
+    let corrected_mv = f32::from(corrected_mv);
+    if !(RTD_SHORT_FAULT_MAX_MV < corrected_mv
+        && corrected_mv < RTD_OPEN_FAULT_MIN_MV
+        && corrected_mv < RTD_DIVIDER_SUPPLY_MV)
+    {
+        return None;
+    }
+    let resistance_ohms =
+        RTD_REFERENCE_RESISTOR_OHMS * corrected_mv / (RTD_DIVIDER_SUPPLY_MV - corrected_mv);
+    let mut low = RTD_TEMP_MIN_C;
+    let mut high = RTD_TEMP_MAX_C;
+    for _ in 0..32 {
+        let mid = (low + high) * 0.5;
+        let polynomial = 1.0 + PT1000_A * mid + PT1000_B * mid * mid;
+        let resistance_at_mid = if mid >= 0.0 {
+            PT1000_R0_OHMS * polynomial
+        } else {
+            PT1000_R0_OHMS * (polynomial + PT1000_C * (mid - 100.0) * mid * mid * mid)
+        };
+        if resistance_at_mid < resistance_ohms {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    Some((low + high) * 0.5)
 }
 
 fn validate_manual_pps_against_status(
@@ -9690,6 +9751,38 @@ mod tests {
         assert_eq!(
             mock_thermal_plant_safe_request_mv(&device, source),
             Some(8_900)
+        );
+    }
+
+    #[test]
+    fn thermal_plant_mock_request_ignores_invalid_raw_curve_observations() {
+        let mut device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
+        device.heater_curve.active.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 2_000,
+            resistance_milliohms: 6_000,
+        });
+        device.heater_curve.active.raw_observations = Some(HeaterCurveRawObservations {
+            points: vec![
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 0,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_300,
+                }),
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 500,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_500,
+                }),
+            ],
+        });
+
+        let source = mock_thermal_plant_source_limits(&device).unwrap();
+        assert_eq!(mock_heater_resistance_at_r20_ohms(&device), 6.0);
+        assert_eq!(
+            mock_thermal_plant_safe_request_mv(&device, source),
+            Some(16_800)
         );
     }
 
