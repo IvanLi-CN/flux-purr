@@ -4692,14 +4692,7 @@ fn mock_heater_resistance_at_r20_ohms(device: &DeviceRecord) -> f32 {
         .active
         .raw_observations
         .as_ref()
-        .is_some_and(|observations| {
-            let mut points = observations.points.iter().flatten();
-            points.clone().count() >= 2
-                && points.all(|observation| {
-                    mock_projected_rtd_temperature_c(device, observation.raw_rtd_adc_mv)
-                        .is_some_and(|temperature_c| (-50.0..=450.0).contains(&temperature_c))
-                })
-        })
+        .is_some_and(|observations| mock_raw_heater_curve_is_projectable(device, observations))
     {
         // Firmware projects raw observations onto its fixed 0C/20C anchors
         // before using the display curve as a fallback.
@@ -4735,6 +4728,31 @@ fn mock_heater_resistance_at_r20_ohms(device: &DeviceRecord) -> f32 {
         }
     }
     f32::from(points.last().unwrap().resistance_milliohms) / 1_000.0
+}
+
+fn mock_raw_heater_curve_is_projectable(
+    device: &DeviceRecord,
+    observations: &HeaterCurveRawObservations,
+) -> bool {
+    let mut count = 0;
+    for observation in observations.points.iter().flatten() {
+        // This mirrors firmware sanitization before it projects the persisted
+        // observations into a heater curve.
+        if observation.raw_rtd_adc_mv == 0
+            || observation.heater_voltage_mv == 0
+            || observation.heater_current_ma == 0
+            || observation.resistance_milliohms == 0
+        {
+            continue;
+        }
+        if !mock_projected_rtd_temperature_c(device, observation.raw_rtd_adc_mv)
+            .is_some_and(|temperature_c| (-50.0..=450.0).contains(&temperature_c))
+        {
+            return false;
+        }
+        count += 1;
+    }
+    count >= 2
 }
 
 fn mock_projected_rtd_temperature_c(device: &DeviceRecord, raw_adc_mv: u16) -> Option<f32> {
@@ -9766,6 +9784,38 @@ mod tests {
                 Some(HeaterCurveRawObservation {
                     raw_rtd_adc_mv: 0,
                     heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_300,
+                }),
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 500,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_500,
+                }),
+            ],
+        });
+
+        let source = mock_thermal_plant_source_limits(&device).unwrap();
+        assert_eq!(mock_heater_resistance_at_r20_ohms(&device), 6.0);
+        assert_eq!(
+            mock_thermal_plant_safe_request_mv(&device, source),
+            Some(16_800)
+        );
+    }
+
+    #[test]
+    fn thermal_plant_mock_request_ignores_zero_electrical_raw_curve_observations() {
+        let mut device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
+        device.heater_curve.active.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 2_000,
+            resistance_milliohms: 6_000,
+        });
+        device.heater_curve.active.raw_observations = Some(HeaterCurveRawObservations {
+            points: vec![
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 300,
+                    heater_voltage_mv: 0,
                     heater_current_ma: 3_000,
                     resistance_milliohms: 3_300,
                 }),
