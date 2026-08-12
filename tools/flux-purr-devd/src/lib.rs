@@ -4677,6 +4677,17 @@ fn mock_thermal_plant_safe_request_mv(device: &DeviceRecord, source: MockPpsApdo
 }
 
 fn mock_heater_resistance_at_r20_ohms(device: &DeviceRecord) -> f32 {
+    if device
+        .heater_curve
+        .active
+        .raw_observations
+        .as_ref()
+        .is_some_and(|observations| observations.points.iter().flatten().count() >= 2)
+    {
+        // Firmware projects raw observations onto its fixed 0C/20C anchors
+        // before using the display curve as a fallback.
+        return f32::from(DEFAULT_HEATER_R20_MILLIOHMS) / 1_000.0;
+    }
     let mut points = device
         .heater_curve
         .active
@@ -9648,6 +9659,38 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.error.code, "thermal_plant_source_unsupported");
+    }
+
+    #[test]
+    fn thermal_plant_mock_request_prefers_persisted_raw_curve_observations() {
+        let mut device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
+        device.heater_curve.active.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 2_000,
+            resistance_milliohms: 6_000,
+        });
+        device.heater_curve.active.raw_observations = Some(HeaterCurveRawObservations {
+            points: vec![
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 300,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_300,
+                }),
+                Some(HeaterCurveRawObservation {
+                    raw_rtd_adc_mv: 500,
+                    heater_voltage_mv: 12_000,
+                    heater_current_ma: 3_000,
+                    resistance_milliohms: 3_500,
+                }),
+            ],
+        });
+
+        let source = mock_thermal_plant_source_limits(&device).unwrap();
+        assert_eq!(mock_heater_resistance_at_r20_ohms(&device), 3.2);
+        assert_eq!(
+            mock_thermal_plant_safe_request_mv(&device, source),
+            Some(8_900)
+        );
     }
 
     #[test]
