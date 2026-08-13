@@ -5769,6 +5769,7 @@ async fn disarm_pending_thermal_plant_output<PWM>(
     ui_state: &mut FrontPanelUiState,
     last_heater_duty: &mut u8,
     measured_vin_mv: u32,
+    now_ms: u64,
 ) -> bool
 where
     PWM: SetDutyCycle,
@@ -5782,27 +5783,45 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
+    if terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
+        calibration_runtime_state.immediate_heater_disarm_pending = false;
+        let _ = manual_pps.consume_automatic_restore_pending();
+        return true;
+    }
+
+    if !terminal_fixed_pd_retry_due(backend, now_ms) {
+        return true;
+    }
     let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
-    if !write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
-        // Keep both the disarm latch and the PPS backend lock so the next
-        // control period retries fixed PD without re-applying a PPS request.
-        return true;
-    }
-
-    if !terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
-        // The CH224Q accepts the register write before the source has actually
-        // left PPS. Keep the terminal lock active until VIN proves fixed PD.
-        return true;
-    }
-
-    calibration_runtime_state.immediate_heater_disarm_pending = false;
-    let _ = manual_pps.consume_automatic_restore_pending();
+    let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
+    schedule_terminal_fixed_pd_retry(backend, now_ms);
     true
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
     measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_fixed_pd_retry_due(backend: &HeaterPowerBackend, now_ms: u64) -> bool {
+    matches!(
+        backend,
+        HeaterPowerBackend::PpsMos {
+            next_request_at_ms,
+            ..
+        } if now_ms >= *next_request_at_ms
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn schedule_terminal_fixed_pd_retry(backend: &mut HeaterPowerBackend, now_ms: u64) {
+    if let HeaterPowerBackend::PpsMos {
+        next_request_at_ms, ..
+    } = backend
+    {
+        *next_request_at_ms = now_ms.saturating_add(500);
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5815,9 +5834,13 @@ fn latch_terminal_fixed_pd_disarm(
     }
     if let HeaterPowerBackend::PpsMos {
         terminal_fixed_pd_disarmed,
+        next_request_at_ms,
         ..
     } = backend
     {
+        if !*terminal_fixed_pd_disarmed {
+            *next_request_at_ms = 0;
+        }
         *terminal_fixed_pd_disarmed = true;
     }
     true
@@ -8084,6 +8107,12 @@ fn update_calibration_job_state_with_workspace(
                 );
                 return;
             };
+            if job.phase == ThermalPlantAutoPhase::Cooling
+                && calibration.immediate_heater_disarm_pending
+            {
+                calibration.heater_enabled = false;
+                return;
+            }
             let heating_phase = matches!(
                 job.phase,
                 ThermalPlantAutoPhase::Ambient | ThermalPlantAutoPhase::Heating
@@ -10848,6 +10877,7 @@ async fn main(_spawner: Spawner) {
                         &mut ui_state,
                         &mut last_heater_duty,
                         latest_vin_mv,
+                        elapsed_ms,
                     )
                     .await;
                     usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
@@ -10992,6 +11022,7 @@ async fn main(_spawner: Spawner) {
                 &mut ui_state,
                 &mut last_heater_duty,
                 latest_vin_mv,
+                elapsed_ms,
             )
             .await;
             let (status, body) = lan_frame_response(
@@ -11023,6 +11054,7 @@ async fn main(_spawner: Spawner) {
             &mut ui_state,
             &mut last_heater_duty,
             latest_vin_mv,
+            elapsed_ms,
         )
         .await;
 
@@ -11519,6 +11551,7 @@ async fn main(_spawner: Spawner) {
                 &mut ui_state,
                 &mut last_heater_duty,
                 latest_vin_mv,
+                elapsed_ms,
             )
             .await;
             if calibration_runtime_state.mode != CalibrationMode::Off
@@ -14221,6 +14254,10 @@ mod tests {
                     measured_heater_mv,
                     heater_duty_percent,
                 );
+                if calibration.immediate_heater_disarm_pending {
+                    calibration.immediate_heater_disarm_pending = false;
+                    let _ = manual_pps.consume_automatic_restore_pending();
+                }
                 if calibration.job.status == CalibrationJobStatus::Completed {
                     break;
                 }
@@ -14327,6 +14364,65 @@ mod tests {
             100
         );
         assert!(thermal_plant_output_must_be_off(calibration, true, 220.0));
+    }
+
+    #[test]
+    fn thermal_plant_cooling_waits_for_measured_terminal_disarm() {
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            immediate_heater_disarm_pending: true,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                progress_percent: 60,
+                samples_collected: 69,
+                ..CalibrationJobState::default()
+            },
+            job_data: Some(CalibrationJobData::ThermalPlant),
+            ..CalibrationRuntimeState::default()
+        };
+        test_install_thermal_plant_job(CalibrationThermalPlantAutoJob {
+            phase: ThermalPlantAutoPhase::Cooling,
+            source_max_mv: 21_000,
+            source_current_ma: 3_000,
+            ambient_raw_rtd_adc_mv: 1_032,
+            idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+            heater_curve: ThermalPlantCurveSampler::default(),
+            elapsed_ticks: 200,
+            phase_started_tick: 180,
+            sample_count: 69,
+            last_saved_temp_c: 220.0,
+            last_saved_tick: 180,
+            samples: [ThermalPlantTransientSample {
+                elapsed_ticks: 0,
+                raw_rtd_adc_mv: 0,
+                heater_voltage_100mv: 0,
+                duty_percent: 0,
+            }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+        });
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps = ManualPpsState::default();
+
+        update_calibration_job_state(
+            &mut calibration,
+            &mut memory_config,
+            &mut manual_pps,
+            1_380,
+            0,
+            215.0,
+            3_000,
+            21_277,
+            0,
+        );
+
+        assert!(!calibration.heater_enabled);
+        assert_eq!(calibration.job.progress_percent, 60);
+        assert_eq!(calibration.job.samples_collected, 69);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert_eq!(
+            test_thermal_plant_phase(),
+            Some(ThermalPlantAutoPhase::Cooling)
+        );
     }
 
     #[test]
@@ -19523,6 +19619,34 @@ mod tests {
         assert!(terminal_fixed_pd_voltage_confirmed(
             fixed_mv.saturating_add(450)
         ));
+    }
+
+    #[test]
+    fn terminal_fixed_pd_retry_is_rate_limited() {
+        let mut backend = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_000,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 21_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: false,
+        };
+        let calibration = CalibrationRuntimeState {
+            immediate_heater_disarm_pending: true,
+            ..CalibrationRuntimeState::default()
+        };
+
+        assert!(latch_terminal_fixed_pd_disarm(&calibration, &mut backend));
+        assert!(terminal_fixed_pd_retry_due(&backend, 1_000));
+        schedule_terminal_fixed_pd_retry(&mut backend, 1_000);
+        assert!(!terminal_fixed_pd_retry_due(&backend, 1_499));
+        assert!(terminal_fixed_pd_retry_due(&backend, 1_500));
     }
 
     #[test]

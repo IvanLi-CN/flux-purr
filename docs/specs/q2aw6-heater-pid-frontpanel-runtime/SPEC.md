@@ -95,7 +95,8 @@
 - Terminal disarm is complete only after measured heater VIN confirms the configured fixed-PD
   voltage. A successful CH224Q register write or a logical `pdRequestMv` update alone is not proof
   that the source has left PPS; until confirmation the firmware must keep PWM at zero, retain the
-  terminal lock, retry the fixed-PD request, and exclude those samples from passive-cooling fit data.
+  terminal lock, retry the fixed-PD request no more often than every `500ms`, and exclude those
+  samples from passive-cooling fit data.
 - Transient fitting must derive temperature rate across at least `500ms` while retaining the dense
   early samples for transport-delay and measured-power alignment. Adjacent `50ms` RTD samples must
   not be differentiated directly because ADC millivolt quantization can dominate the physical rate.
