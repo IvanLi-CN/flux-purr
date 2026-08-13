@@ -461,7 +461,7 @@ enum ThermalCommand {
 #[derive(Debug, Subcommand)]
 enum ThermalModelCommand {
     #[command(
-        about = "Start one 20V transient calibration run to 220C, including heater-curve sampling."
+        about = "Start one selected-APDO full-voltage transient calibration run to 220C, including heater-curve sampling."
     )]
     Calibrate(TargetSelector),
 }

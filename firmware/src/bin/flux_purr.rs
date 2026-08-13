@@ -131,7 +131,6 @@ use flux_purr_firmware::memory::{
     THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX,
     THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MAX,
     THERMAL_CONTROL_PROFILE_AUTO_ADJUSTABLE_WORKING_FLOOR_MV_MIN,
-    THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT,
     THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_MAX,
     THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS, THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C,
     THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4, THERMAL_PLANT_TRANSIENT_MAX_SAMPLES,
@@ -418,11 +417,6 @@ const HEATER_CURVE_COLD_ANCHOR_TEMP_C: f32 = 0.0;
 const HEATER_CURVE_R20_ANCHOR_TEMP_C: f32 = 20.0;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_PROFILE_TEMP_COEFFICIENT_PER_C: f32 = 0.00393;
-// The transient run uses the same electrical safety reserve at every source
-// capability. It is not a 3 A / 5 A profile selector.
-#[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_CALIBRATION_CURRENT_RESERVE_MA: u16 =
-    THERMAL_CONTROL_PROFILE_HEATER_CURRENT_RESERVE_MA_DEFAULT;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_CURRENT_LIMIT_FALLBACK_REQUEST: ch224q::VoltageRequest = ch224q::VoltageRequest::V9;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3731,7 +3725,6 @@ enum ThermalPlantAutoPhase {
 #[derive(Debug)]
 struct CalibrationThermalPlantAutoJob {
     phase: ThermalPlantAutoPhase,
-    source_min_mv: u16,
     source_max_mv: u16,
     source_current_ma: u16,
     ambient_raw_rtd_adc_mv: u16,
@@ -5313,46 +5306,15 @@ fn heater_safe_max_mv_for_temp(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_calibration_request_mv(
-    source_min_mv: u16,
-    source_max_mv: u16,
-    source_current_ma: u16,
-    current_temp_c: f32,
-    memory_config: &MemoryConfig,
-) -> Option<u16> {
-    let available_current_ma = heater_available_current_ma(
-        source_current_ma,
-        THERMAL_PLANT_CALIBRATION_CURRENT_RESERVE_MA,
-    );
-    let safe_max_mv = heater_safe_max_mv_for_temp(
-        current_temp_c,
-        available_current_ma,
-        source_max_mv,
-        None,
-        memory_config,
-    );
-    (safe_max_mv >= source_min_mv).then_some(safe_max_mv)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-fn thermal_plant_calibration_temperature_c(
-    calibration: &CalibrationRuntimeState,
-    live_rtd_temp_c: Option<f32>,
-    control_temp_c: f32,
-) -> f32 {
-    // The general PID intentionally holds its control temperature across a
-    // PPS step while the RTD settles. A transient calibration changes PPS on
-    // nearly every heating tick, so using that held value here would calculate
-    // the next current-safe voltage from an increasingly stale resistance.
-    // The live sample has already passed the RTD fault checks; use it only for
-    // the protected auto job and leave production PID filtering unchanged.
-    if calibration.mode == CalibrationMode::ThermalPlant
-        && calibration.job.status == CalibrationJobStatus::Running
-    {
-        live_rtd_temp_c.unwrap_or(control_temp_c)
-    } else {
-        control_temp_c
-    }
+fn production_pps_request_ceiling_mv(
+    _current_temp_c: f32,
+    _source_current_limit_ma: u16,
+    _reserve_ma: u16,
+    source_voltage_max_mv: u16,
+    _preview_heater_curve: Option<&HeaterCurveConfig>,
+    _memory_config: &MemoryConfig,
+) -> u16 {
+    source_voltage_max_mv
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5362,13 +5324,9 @@ fn heater_available_power_mw_for_temp(
     capability_max_ma: Option<u16>,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
-    active_thermal_settings: ThermalControlProfileSettings,
 ) -> u32 {
     let source_voltage_max_mv = capability_max_mv.unwrap_or(0).min(HEATER_ADJUSTABLE_MAX_MV);
-    let available_current_ma = heater_available_current_ma(
-        capability_max_ma.unwrap_or(0),
-        active_thermal_settings.heater_current_reserve_ma,
-    );
+    let available_current_ma = capability_max_ma.unwrap_or(0);
     if source_voltage_max_mv == 0 || available_current_ma == 0 {
         return 0;
     }
@@ -5378,14 +5336,14 @@ fn heater_available_power_mw_for_temp(
     if !resistance_ohms.is_finite() || resistance_ohms <= 0.0 {
         return 0;
     }
-    let safe_max_mv = heater_safe_max_mv_for_temp(
-        current_temp_c,
-        available_current_ma,
-        source_voltage_max_mv,
-        preview_heater_curve,
-        memory_config,
-    );
-    ((f32::from(safe_max_mv) * f32::from(safe_max_mv) / resistance_ohms) / 1_000.0)
+    let resistance_limited_power_mw = f32::from(source_voltage_max_mv)
+        * f32::from(source_voltage_max_mv)
+        / resistance_ohms
+        / 1_000.0;
+    let contract_power_mw =
+        f32::from(source_voltage_max_mv) * f32::from(available_current_ma) / 1_000.0;
+    resistance_limited_power_mw
+        .min(contract_power_mw)
         .max(0.0)
         .min(u32::MAX as f32) as u32
 }
@@ -5903,7 +5861,8 @@ where
 
     if manual_pps.enabled && manual_pps.owner == ManualPpsOwner::Calibration {
         // Calibration owns a source voltage already limited by the same
-        // V=max(min(APDO), min(V_APDO, I_available * R(T))) rule as runtime.
+        // Fixed-PD fallback cannot change source voltage, so PWM remains the
+        // only way to stay within the negotiated current contract.
         // Do not route it through the generic profile governor or PWM-based
         // current fallback: the transient needs a measured, full-duty step.
         let previous_duty_percent = *last_physical_duty_percent;
@@ -6014,13 +5973,11 @@ where
         } => {
             let source_current_limit_ma =
                 effective_pps_current_limit_ma(capability_max_ma, pd_observation);
-            let effective_current_limit_ma = heater_available_current_ma(
-                source_current_limit_ma,
-                active_thermal_settings.heater_current_reserve_ma,
-            );
-            let persisted_safe_max_mv = heater_safe_max_mv_for_temp(
+            let effective_current_limit_ma = source_current_limit_ma;
+            let persisted_safe_max_mv = production_pps_request_ceiling_mv(
                 current_temp_c,
                 effective_current_limit_ma,
+                active_thermal_settings.heater_current_reserve_ma,
                 adjustable_max_mv,
                 preview_heater_curve,
                 memory_config,
@@ -7206,17 +7163,10 @@ fn calibration_job_start_with_workspace(
             Ok(())
         }
         CalibrationJobKind::ThermalPlant => {
-            let (source_min_mv, source_max_mv, source_current_ma) = manual_pps
+            let (_, source_max_mv, source_current_ma) = manual_pps
                 .thermal_plant_source_limits()
                 .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
-            let request_mv = thermal_plant_calibration_request_mv(
-                source_min_mv,
-                source_max_mv,
-                source_current_ma,
-                HEATER_CURVE_R20_ANCHOR_TEMP_C,
-                memory_config,
-            )
-            .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
+            let request_mv = source_max_mv;
             manual_pps.enable(
                 ManualPpsOwner::Calibration,
                 request_mv,
@@ -7238,7 +7188,6 @@ fn calibration_job_start_with_workspace(
             };
             thermal_plant_workspace.job = Some(CalibrationThermalPlantAutoJob {
                 phase: ThermalPlantAutoPhase::Ambient,
-                source_min_mv,
                 source_max_mv,
                 source_current_ma,
                 ambient_raw_rtd_adc_mv: 0,
@@ -8124,21 +8073,7 @@ fn update_calibration_job_state_with_workspace(
                     }
                 }
                 ThermalPlantAutoPhase::Heating => {
-                    let Some(request_mv) = thermal_plant_calibration_request_mv(
-                        job.source_min_mv,
-                        job.source_max_mv,
-                        job.source_current_ma,
-                        latest_temp_c,
-                        memory_config,
-                    ) else {
-                        calibration_job_fail(
-                            calibration,
-                            ManualPpsError::ThermalPlantSourceUnsupported,
-                            true,
-                            manual_pps,
-                        );
-                        return;
-                    };
+                    let request_mv = job.source_max_mv;
                     if manual_pps.target_mv != Some(request_mv)
                         && let Err(error) = manual_pps.enable(
                             ManualPpsOwner::Calibration,
@@ -11343,7 +11278,7 @@ async fn main(_spawner: Spawner) {
                 &mut control_measurement_guarded,
             );
 
-            let calibration_live_rtd_temp_c = match rtd_sample {
+            match rtd_sample {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
@@ -11367,7 +11302,6 @@ async fn main(_spawner: Spawner) {
                         measurement.temp_c,
                     );
                     current_rtd_fault = overtemp_fault_from_control_temperature(measurement.temp_c);
-                    Some(measurement.temp_c)
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
@@ -11388,9 +11322,8 @@ async fn main(_spawner: Spawner) {
                         reason.label(),
                         ui_state.heater_enabled,
                     );
-                    None
                 }
-            };
+            }
             last_rtd_sample_request_mv = current_request_mv;
 
             if let Some(reason) = current_rtd_fault
@@ -11460,11 +11393,6 @@ async fn main(_spawner: Spawner) {
                     &mut manual_pps_state,
                 );
             } else {
-                let calibration_temp_c = thermal_plant_calibration_temperature_c(
-                    &calibration_runtime_state,
-                    calibration_live_rtd_temp_c,
-                    latest_temp_c,
-                );
                 update_calibration_job_state(
                     &mut calibration_runtime_state,
                     &mut memory_config,
@@ -11472,7 +11400,7 @@ async fn main(_spawner: Spawner) {
                     thermal_plant_workspace,
                     latest_rtd_raw_adc_mv,
                     latest_vin_raw_adc_mv,
-                    calibration_temp_c,
+                    latest_temp_c,
                     current_pd_observation
                         .map(|observation| observation.current_ma)
                         .unwrap_or(0),
@@ -11554,10 +11482,9 @@ async fn main(_spawner: Spawner) {
             }
             let runtime_plant = thermal_plant_projection_for_runtime(&memory_config);
             // The controller works in heater watts, not source capability
-            // watts. For a current-limited source, the achievable plate power
-            // is V^2/R(T), with V capped by the saved resistance curve and
-            // board-current reserve. This keeps the 3 A path on the same
-            // physical model as 5 A without another thermal calibration.
+            // watts. Bound achievable plate power by both V^2/R(T) and the
+            // selected APDO's V*I contract without turning R(T) into a voltage
+            // ceiling. The source contract owns its current boundary.
             let runtime_source_limits = manual_pps_state.thermal_plant_source_limits();
             let max_power_mw = heater_available_power_mw_for_temp(
                 latest_temp_c,
@@ -11565,7 +11492,6 @@ async fn main(_spawner: Spawner) {
                 runtime_source_limits.map(|(_, _, max_ma)| max_ma),
                 preview_heater_curve_config(preview_heater_curve.as_ref()),
                 &memory_config,
-                active_thermal_settings,
             );
             let thermal_plant_calibration_running = calibration_runtime_state.mode
                 == CalibrationMode::ThermalPlant
@@ -13553,10 +13479,8 @@ mod tests {
     }
 
     #[test]
-    fn thermal_plant_auto_job_uses_the_same_entry_contract_for_3a_and_5a_pps() {
-        for (max_mv, max_ma, expected_request_mv) in
-            [(20_000, 3_000, 8_900), (21_000, 5_000, 15_300)]
-        {
+    fn thermal_plant_auto_job_requests_the_selected_apdo_ceiling_for_3a_and_5a() {
+        for (max_mv, max_ma) in [(20_000, 3_000), (21_000, 3_000), (21_000, 5_000)] {
             let mut calibration = CalibrationRuntimeState::default();
             let mut memory_config = MemoryConfig::default();
             for (index, raw_rtd_adc_mv) in [240, 460].into_iter().enumerate() {
@@ -13601,14 +13525,17 @@ mod tests {
 
             assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
             assert_eq!(calibration.mode, CalibrationMode::ThermalPlant);
-            assert_eq!(calibration.pps_mv, Some(expected_request_mv));
+            assert_eq!(calibration.pps_mv, Some(max_mv));
+            assert_eq!(calibration.job.next_request_mv, Some(max_mv));
             assert_eq!(calibration.pps_ma, Some(max_ma));
         }
     }
 
     #[test]
-    fn thermal_plant_safe_request_uses_the_20v_apdo_current_not_another_range() {
-        let manual_pps =
+    fn thermal_plant_auto_job_uses_the_apdo_that_covers_20v_not_another_range() {
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut memory_config = MemoryConfig::default();
+        let mut manual_pps =
             ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
                 pps_covers_20v: true,
                 pps_min_mv: Some(5_000),
@@ -13635,59 +13562,17 @@ mod tests {
                 avs_max_mv: None,
             }));
 
-        let (min_mv, max_mv, max_ma) = manual_pps.thermal_plant_source_limits().unwrap();
-        assert_eq!((min_mv, max_mv, max_ma), (5_000, 21_000, 3_000));
-        assert_eq!(
-            thermal_plant_calibration_request_mv(
-                min_mv,
-                max_mv,
-                max_ma,
-                HEATER_CURVE_R20_ANCHOR_TEMP_C,
-                &MemoryConfig::default(),
-            ),
-            Some(8_900)
-        );
-    }
+        calibration_job_start(
+            &mut calibration,
+            CalibrationJobKind::ThermalPlant,
+            &mut memory_config,
+            &mut manual_pps,
+        )
+        .unwrap();
 
-    #[test]
-    fn thermal_plant_uses_live_rtd_temperature_during_a_pps_transition() {
-        let calibration = CalibrationRuntimeState {
-            mode: CalibrationMode::ThermalPlant,
-            job: CalibrationJobState {
-                kind: Some(CalibrationJobKind::ThermalPlant),
-                status: CalibrationJobStatus::Running,
-                ..CalibrationJobState::default()
-            },
-            ..CalibrationRuntimeState::default()
-        };
-        let memory_config = MemoryConfig::default();
-
-        // The regular PID can deliberately retain 143C while a PPS request is
-        // settling. The transient job must track the physical RTD sample so
-        // its current-safe voltage ceiling follows rising heater resistance.
-        let calibration_temp_c =
-            thermal_plant_calibration_temperature_c(&calibration, Some(181.5), 143.0);
-        assert_eq!(calibration_temp_c, 181.5);
-        assert_eq!(
-            thermal_plant_calibration_request_mv(
-                5_000,
-                21_000,
-                3_000,
-                calibration_temp_c,
-                &memory_config,
-            ),
-            Some(14_600)
-        );
-        assert_eq!(
-            thermal_plant_calibration_request_mv(5_000, 21_000, 3_000, 143.0, &memory_config,),
-            Some(13_200)
-        );
-
-        let idle = CalibrationRuntimeState::default();
-        assert_eq!(
-            thermal_plant_calibration_temperature_c(&idle, Some(181.5), 143.0),
-            143.0
-        );
+        assert_eq!(calibration.pps_mv, Some(21_000));
+        assert_eq!(calibration.pps_ma, Some(3_000));
+        assert_eq!(calibration.job.next_request_mv, Some(21_000));
     }
 
     #[test]
@@ -13834,6 +13719,32 @@ mod tests {
                 test_thermal_plant_phase(),
                 Some(ThermalPlantAutoPhase::Heating)
             );
+            for (raw_rtd_adc_mv, temp_c) in [(400, 60.0), (700, 140.0), (1_100, 215.0)] {
+                update_calibration_job_state(
+                    &mut calibration,
+                    &mut memory_config,
+                    &mut manual_pps,
+                    raw_rtd_adc_mv,
+                    0,
+                    temp_c,
+                    max_ma,
+                    max_mv.into(),
+                    100,
+                );
+
+                assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
+                assert_eq!(calibration.job.next_request_mv, Some(max_mv));
+                assert_eq!(calibration.pps_mv, Some(max_mv));
+                assert_eq!(
+                    thermal_plant_calibration_snapshot(temp_c, calibration.heater_enabled)
+                        .duty_percent,
+                    100
+                );
+                assert_eq!(
+                    test_thermal_plant_phase(),
+                    Some(ThermalPlantAutoPhase::Heating)
+                );
+            }
         }
     }
 
@@ -13853,10 +13764,10 @@ mod tests {
         });
         memory_config.active_heater_curve.points[1] = Some(HeaterCurvePoint {
             temp_centi_c: 22_000,
-            resistance_milliohms: 5_000,
+            resistance_milliohms: 6_000,
         });
         for (index, (temp_c, resistance_milliohms)) in
-            [(100.0, 4_400), (200.0, 4_800)].into_iter().enumerate()
+            [(100.0, 4_800), (200.0, 5_800)].into_iter().enumerate()
         {
             memory_config.heater_curve_raw_observations.points[index] =
                 Some(HeaterCurveRawObservation {
@@ -13870,7 +13781,7 @@ mod tests {
         let ambient_temp_c = 25.0_f32;
         let capacity_mj_per_c = 100_000.0_f32;
         let convection_mw_per_c = 100.0_f32;
-        let radiation_mw_per_k4 = 0.000001_f32;
+        let radiation_mw_per_k4 = 0.0000005_f32;
         let mut samples = [ThermalPlantTransientSample {
             elapsed_ticks: 0,
             raw_rtd_adc_mv: 0,
@@ -14269,7 +14180,6 @@ mod tests {
         };
         test_install_thermal_plant_job(CalibrationThermalPlantAutoJob {
             phase: ThermalPlantAutoPhase::Heating,
-            source_min_mv: 5_000,
             source_max_mv: 20_000,
             source_current_ma: 3_000,
             ambient_raw_rtd_adc_mv: 250,
@@ -17550,32 +17460,35 @@ mod tests {
             temp_centi_c: 22_000,
             resistance_milliohms: 5_674,
         });
-        let settings = ThermalControlProfileSettings::default();
-
         assert!(has_calibrated_heater_resistance_curve(&config));
-        let pps3a_power_mw = heater_available_power_mw_for_temp(
-            160.0,
-            Some(20_000),
-            Some(3_250),
-            None,
-            &config,
-            settings,
-        );
-        let pps5a_power_mw = heater_available_power_mw_for_temp(
-            160.0,
-            Some(21_000),
-            Some(5_000),
-            None,
-            &config,
-            settings,
-        );
+        let pps3a_power_mw =
+            heater_available_power_mw_for_temp(160.0, Some(20_000), Some(3_250), None, &config);
+        let pps5a_power_mw =
+            heater_available_power_mw_for_temp(160.0, Some(21_000), Some(5_000), None, &config);
 
-        // 3.25 A less the 200 mA board reserve is roughly a 48 W plate at
-        // this resistance, with no separate source-local thermal fit.
-        // 5 A remains materially higher and therefore needs no separate
-        // plant-loss or RTD calibration to distinguish the source classes.
-        assert!((46_000..=50_000).contains(&pps3a_power_mw));
+        // The 20 V / 3.25 A APDO contributes its complete 65 W contract;
+        // R(T) remains part of the heater-watt estimate but does not lower the
+        // production voltage request or invent a board-current reserve.
+        assert!((64_000..=65_000).contains(&pps3a_power_mw));
         assert!(pps5a_power_mw > 70_000);
+    }
+
+    #[test]
+    fn production_pps_ceiling_is_the_selected_apdo_maximum_not_r_times_i() {
+        let mut config = MemoryConfig::default();
+        config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
+            temp_centi_c: 2_000,
+            resistance_milliohms: 3_200,
+        });
+        config.active_heater_curve.points[1] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
+            temp_centi_c: 21_500,
+            resistance_milliohms: 6_680,
+        });
+
+        assert_eq!(
+            production_pps_request_ceiling_mv(215.0, 3_000, 200, 21_000, None, &config),
+            21_000
+        );
     }
 
     #[test]

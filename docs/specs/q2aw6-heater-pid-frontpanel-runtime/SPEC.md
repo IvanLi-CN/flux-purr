@@ -87,15 +87,14 @@
   is not rewritten by a separate RTD calibration; a missing or physically invalid projection locks
   heating while retaining the raw data for diagnosis.
 - A thermal-loss calibration transaction consists of one bounded transient trace: ambient
-  baseline, `100%` safety-limited heating to `220C`, immediate heater disarm, and passive cooling
+  baseline, selected-APDO `max_mv` with `100%` PWM to `220C`, immediate heater disarm, and passive cooling
   to `80C`. It must never enter generic Approach or Hold control. The same trace supplies every
   heater-curve temperature band. When its local physical fit is valid, automatic calibration writes
   it atomically as `active`; it does not require a source-class comparison, a nine-point run, or
   user acceptance.
-- The transient job's `20V / >=3A` requirement selects a usable PPS APDO; it does not pin the
-  heater to `20V`. At each heating sample it requests the highest terminal voltage allowed by that
-  same APDO, the shared board-current reserve, and `R(T)`. The request may change with temperature,
-  but the transient PWM command remains `100%` until the `220C` cut-off.
+- The transient job's `20V / >=3A` requirement selects one usable PPS APDO. The powered trace uses
+  that APDO's `max_mv` unchanged with `100%` PWM until the `220C` cut-off; heater-curve data, nominal
+  `R20/TCR`, and production-profile current reserve settings do not participate in this request.
 
 - HIL host 的 warmup 满功率门禁以 `heaterOutputPercent=100%` 的逻辑命令为主，并要求软启动结束后 `heaterPhysicalOutputPercent >= 99%`。PPS 安全上限更新期间允许物理 PWM 在逻辑命令仍为满功率时短暂落在 `95%..99%`，但该瞬态连续时间不得超过 `2s`；低于 `95%`、持续超过 `2s` 或逻辑命令下降必须拒绝进入候选路径。这样既不把受安全限幅的短暂过渡误判为调优失败，也不掩盖真实的持续欠功率。
 

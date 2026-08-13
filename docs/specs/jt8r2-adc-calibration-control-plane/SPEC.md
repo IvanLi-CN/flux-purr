@@ -93,7 +93,7 @@
 - 样本变化只允许更新拟合建议值，不得自动覆盖 `A/B` 槽位。
 - `标定温度` 输入必须是纯手动 value；硬件上报温度只能作为 placeholder/辅助提示，不得自动写入 value。
 - 当 RTD/VIN calibration state 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
-- `thermal_plant_auto` 必须在同一次 `100%` 安全可用功率的瞬态运行中采集 heater-curve 温区样本和热模型轨迹：测温达到 `220°C` 的同一控制周期断热，风扇关闭并自然冷却到 `80°C` 后在固件内拟合；物理有效时直接写入 active，不产生 preview、candidate、promotion 或用户验收。自动生成的每个温阻点不得低于硬件名义 `R20 + TCR` 模型对应阻值；手动曲线编辑继续保留当前最终结果填写形态。
+- `thermal_plant_auto` 必须在同一次选中 APDO `max_mv`、`100%` PWM 的瞬态运行中采集 heater-curve 温区样本和热模型轨迹：测温达到 `220°C` 的同一控制周期断热，风扇关闭并自然冷却到 `80°C` 后在固件内拟合；物理有效时直接写入 active，不产生 preview、candidate、promotion 或用户验收。自动生成的每个温阻点不得低于硬件名义 `R20 + TCR` 模型对应阻值；手动曲线编辑继续保留当前最终结果填写形态。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
 
 ### SHOULD

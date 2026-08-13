@@ -59,8 +59,9 @@
   active model exists. It requires a PPS APDO covering `20V` at `>=3A`; cancellation, disconnect,
   unsupported source, sensor fault, or malformed observation MUST immediately remove that
   authorization and stop heating. `20V` is an APDO admission condition, not a fixed job voltage:
-  the job must request the highest terminal voltage allowed by that same APDO, the shared current
-  reserve, and the current `R(T)` estimate.
+  the job must request the selected APDO's `max_mv` for the complete powered trace. Heater-curve
+  data, nominal `R20/TCR`, and production-profile current reserve settings must not reduce or vary
+  that request.
 
 - 所有 transport 暴露同一领域模型：`Identity`、`NetworkSummary`、`Status`、`FirmwareArtifact`、`ApiError`。
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。

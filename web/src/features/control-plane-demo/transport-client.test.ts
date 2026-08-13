@@ -1229,7 +1229,7 @@ describe('control-plane transport client', () => {
             status: 'running',
             progressPercent: 0,
             samplesCollected: 0,
-            nextRequestMv: 15300,
+            nextRequestMv: 21000,
             message: null,
           }),
         }
@@ -1257,7 +1257,7 @@ describe('control-plane transport client', () => {
     expect(started).toMatchObject({
       kind: 'thermal_plant_auto',
       status: 'running',
-      nextRequestMv: 15300,
+      nextRequestMv: 21000,
     })
   })
 

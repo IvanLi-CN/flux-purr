@@ -20,7 +20,7 @@ related_specs:
 
 Thermal control validation is a measured control workflow, not a fixed duty tweak.
 
-Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage, duty, and `50ms` time points. A single protected run takes an ambient baseline, heats at `100%` safe available power to `220C`, immediately turns heat off, and records passive cooling to `80C`. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples.
+Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage, duty, and `50ms` time points. A single protected run takes an ambient baseline, requests the selected APDO's maximum voltage with `100%` PWM to `220C`, immediately turns heat off, and records passive cooling to `80C`. Heater-curve data and production-profile current reserve settings do not reduce or vary the calibration request. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples.
 
 The production controller is:
 
