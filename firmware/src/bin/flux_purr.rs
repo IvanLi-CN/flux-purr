@@ -496,9 +496,6 @@ const CH224Q_PD_SETTLE_MS: u64 = 150;
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
-#[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_TERMINAL_PD_REQUEST: flux_purr_firmware::adapters::ch224q::VoltageRequest =
-    flux_purr_firmware::adapters::ch224q::VoltageRequest::V5;
 #[cfg(target_arch = "xtensa")]
 const STATUS_LIGHT_BOOT_REFRESH_MS: u64 = 50;
 #[cfg(target_arch = "xtensa")]
@@ -5787,15 +5784,37 @@ where
     ui_state.heater_output_percent = 0;
 
     if terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
+        if !terminal_fixed_pd_settle_complete(backend, now_ms) {
+            return true;
+        }
         calibration_runtime_state.immediate_heater_disarm_pending = false;
         let _ = manual_pps.consume_automatic_restore_pending();
         return true;
     }
+    clear_terminal_fixed_pd_settle(backend);
 
     if !terminal_fixed_pd_retry_due(backend, now_ms) {
         return true;
     }
-    let fixed_payload = ch224q::voltage_request_payload(THERMAL_PLANT_TERMINAL_PD_REQUEST);
+    if terminal_pps_floor_transition_required(backend, measured_vin_mv) {
+        let Some((floor_mv, mode_changed)) = terminal_pps_floor_request(backend) else {
+            return true;
+        };
+        if request_ch224q_adjustable_voltage(
+            i2c,
+            ch224q_address,
+            floor_mv,
+            ch224q::AdjustableVoltageMode::Pps,
+            mode_changed,
+        )
+        .await
+        {
+            mark_terminal_pps_floor_requested(backend, floor_mv);
+        }
+        schedule_terminal_fixed_pd_retry(backend, now_ms);
+        return true;
+    }
+    let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
     let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
     schedule_terminal_fixed_pd_retry(backend, now_ms);
     true
@@ -5803,7 +5822,69 @@ where
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
-    measured_vin_mv.abs_diff(u32::from(THERMAL_PLANT_TERMINAL_PD_REQUEST.millivolts())) <= 1_000
+    measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 2_000
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_pps_floor_transition_required(
+    backend: &HeaterPowerBackend,
+    measured_vin_mv: u32,
+) -> bool {
+    matches!(backend, HeaterPowerBackend::PpsMos { pps_min_mv, current_mode: Some(ch224q::AdjustableVoltageMode::Pps), .. }
+        if measured_vin_mv.abs_diff(u32::from(*pps_min_mv)) > 2_000)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_pps_floor_request(backend: &HeaterPowerBackend) -> Option<(u16, bool)> {
+    match backend {
+        HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            current_mode,
+            ..
+        } => Some((
+            *pps_min_mv,
+            *current_mode != Some(ch224q::AdjustableVoltageMode::Pps),
+        )),
+        HeaterPowerBackend::FixedPdPwmFallback { .. } => None,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn mark_terminal_pps_floor_requested(backend: &mut HeaterPowerBackend, floor_mv: u16) {
+    if let HeaterPowerBackend::PpsMos {
+        current_mode,
+        current_request_mv,
+        ..
+    } = backend
+    {
+        *current_mode = Some(ch224q::AdjustableVoltageMode::Pps);
+        *current_request_mv = floor_mv;
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_fixed_pd_settle_complete(backend: &mut HeaterPowerBackend, now_ms: u64) -> bool {
+    if let HeaterPowerBackend::PpsMos {
+        settle_until_ms,
+        current_mode,
+        ..
+    } = backend
+    {
+        *current_mode = None;
+        let deadline = settle_until_ms.get_or_insert(now_ms.saturating_add(300));
+        return now_ms >= *deadline;
+    }
+    true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn clear_terminal_fixed_pd_settle(backend: &mut HeaterPowerBackend) {
+    if let HeaterPowerBackend::PpsMos {
+        settle_until_ms, ..
+    } = backend
+    {
+        *settle_until_ms = None;
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -19612,7 +19693,7 @@ mod tests {
 
     #[test]
     fn terminal_disarm_waits_for_measured_fixed_pd_voltage() {
-        let fixed_mv = u32::from(THERMAL_PLANT_TERMINAL_PD_REQUEST.millivolts());
+        let fixed_mv = u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts());
         assert!(!terminal_fixed_pd_voltage_confirmed(
             fixed_mv.saturating_add(9_000)
         ));
@@ -19650,6 +19731,34 @@ mod tests {
         schedule_terminal_fixed_pd_retry(&mut backend, 1_000);
         assert!(!terminal_fixed_pd_retry_due(&backend, 1_499));
         assert!(terminal_fixed_pd_retry_due(&backend, 1_500));
+    }
+
+    #[test]
+    fn terminal_disarm_transitions_through_pps_floor_before_fixed_pd_settle() {
+        let mut backend = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_000,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 3_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 21_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: true,
+        };
+
+        assert!(terminal_pps_floor_transition_required(&backend, 21_000));
+        assert_eq!(terminal_pps_floor_request(&backend), Some((5_000, false)));
+        mark_terminal_pps_floor_requested(&mut backend, 5_000);
+        assert!(!terminal_pps_floor_transition_required(&backend, 5_500));
+        assert!(!terminal_fixed_pd_settle_complete(&mut backend, 1_000));
+        assert!(!terminal_fixed_pd_settle_complete(&mut backend, 1_299));
+        assert!(terminal_fixed_pd_settle_complete(&mut backend, 1_300));
+        clear_terminal_fixed_pd_settle(&mut backend);
+        assert!(!terminal_fixed_pd_settle_complete(&mut backend, 2_000));
     }
 
     #[test]
