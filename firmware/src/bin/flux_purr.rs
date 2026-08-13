@@ -504,6 +504,10 @@ const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
 #[cfg(target_arch = "xtensa")]
 const EEPROM_READ_CHUNK_MAX_BYTES: usize = 256;
+#[cfg(target_arch = "xtensa")]
+const EEPROM_UNUSED_GAP_OFFSET: u16 = 0x0c00;
+#[cfg(any(target_arch = "xtensa", test))]
+const EEPROM_UNUSED_GAP_LEN: usize = 0x0400;
 #[cfg(any(target_arch = "xtensa", test))]
 const FLASH_MEMORY_ERASE_SECTOR_SIZE: u32 = 4_096;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4654,6 +4658,11 @@ where
     Ok(())
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
+    bytes.iter().any(|byte| *byte != 0xff)
+}
+
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 async fn write_eeprom_bytes_verified(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
@@ -4664,12 +4673,17 @@ async fn write_eeprom_bytes_verified(
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
     let mut eeprom = M24c64::with_address(&mut *i2c, address);
-    for (index, chunk) in bytes.chunks(EEPROM_WRITE_CHUNK_MAX_BYTES).enumerate() {
-        let chunk_offset = offset.saturating_add((index * EEPROM_WRITE_CHUNK_MAX_BYTES) as u16);
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let absolute_offset = usize::from(offset) + written;
+        let chunk_len = eeprom_maintenance_write_chunk_len(absolute_offset, bytes.len() - written);
+        let chunk_offset =
+            u16::try_from(absolute_offset).map_err(|_| MemoryCommitError::WriteFailed)?;
         eeprom
-            .write_page(chunk_offset, chunk)
+            .write_page(chunk_offset, &bytes[written..written + chunk_len])
             .map_err(memory_commit_error_from_eeprom)?;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
+        written += chunk_len;
     }
     let mut verify = [0u8; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
     read_eeprom_bytes_chunked(&mut eeprom, offset, &mut verify[..bytes.len()])
@@ -4678,6 +4692,18 @@ async fn write_eeprom_bytes_verified(
         return Err(MemoryCommitError::VerifyMismatch);
     }
     Ok(())
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
+    let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
+    let page_room = page_size - (absolute_offset % page_size);
+    remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn eeprom_data_is_incompatible(has_valid_record: bool, contains_data: bool) -> bool {
+    !has_valid_record && contains_data
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -4939,7 +4965,7 @@ fn load_eeprom_memory_record(
     let mut selected =
         read_eeprom_bytes_chunked(&mut eeprom, MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
             .map(|_| {
-                contains_data |= scratch.record_bytes.iter().any(|byte| *byte != 0xff);
+                contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes);
                 decode_memory_record(&scratch.record_bytes)
             })
             .ok()
@@ -4947,7 +4973,7 @@ fn load_eeprom_memory_record(
     let slot_b =
         read_eeprom_bytes_chunked(&mut eeprom, MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
             .map(|_| {
-                contains_data |= scratch.record_bytes.iter().any(|byte| *byte != 0xff);
+                contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes);
                 decode_memory_record(&scratch.record_bytes)
             })
             .ok()
@@ -4960,9 +4986,8 @@ fn load_eeprom_memory_record(
         &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
     )
     .map(|_| {
-        contains_data |= scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]
-            .iter()
-            .any(|byte| *byte != 0xff);
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]);
         decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE])
     })
     .ok()
@@ -4975,14 +5000,22 @@ fn load_eeprom_memory_record(
         &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
     )
     .map(|_| {
-        contains_data |= scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]
-            .iter()
-            .any(|byte| *byte != 0xff);
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]);
         decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE])
     })
     .ok()
     .and_then(Result::ok);
     selected = select_latest_optional_memory_record(selected, previous_slot_b);
+
+    let unused_gap = read_eeprom_bytes_chunked(
+        &mut eeprom,
+        EEPROM_UNUSED_GAP_OFFSET,
+        &mut scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN],
+    );
+    if unused_gap.is_ok() {
+        contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN]);
+    }
 
     let legacy_slot_a = read_eeprom_bytes_chunked(
         &mut eeprom,
@@ -4990,9 +5023,8 @@ fn load_eeprom_memory_record(
         &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
     )
     .map(|_| {
-        contains_data |= scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]
-            .iter()
-            .any(|byte| *byte != 0xff);
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]);
         decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE])
     })
     .ok()
@@ -5005,9 +5037,8 @@ fn load_eeprom_memory_record(
         &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
     )
     .map(|_| {
-        contains_data |= scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]
-            .iter()
-            .any(|byte| *byte != 0xff);
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]);
         decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE])
     })
     .ok()
@@ -5028,7 +5059,7 @@ fn load_eeprom_memory_record(
         info!("memory restore unavailable -> using defaults");
     }
 
-    let incompatible = selected.is_none() && contains_data;
+    let incompatible = eeprom_data_is_incompatible(selected.is_some(), contains_data);
     (selected, incompatible)
 }
 
@@ -5100,9 +5131,7 @@ impl MemoryCommitError {
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
-    let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
-    let page_room = page_size - (absolute_offset % page_size);
-    remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+    eeprom_maintenance_write_chunk_len(absolute_offset, remaining)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -14554,6 +14583,33 @@ mod tests {
         assert_eq!(memory_record_write_chunk_len(0x0418, 128), 8);
         assert_eq!(memory_record_write_chunk_len(0x041f, 128), 1);
         assert_eq!(memory_record_write_chunk_len(0x0420, 7), 7);
+    }
+
+    #[test]
+    fn raw_eeprom_writes_split_at_page_boundaries_from_any_offset() {
+        assert_eq!(eeprom_maintenance_write_chunk_len(0x001f, 2), 1);
+        assert_eq!(eeprom_maintenance_write_chunk_len(0x0020, 17), 16);
+        assert_eq!(eeprom_maintenance_write_chunk_len(0x003f, 16), 1);
+    }
+
+    #[test]
+    fn non_blank_eeprom_without_a_valid_record_is_incompatible() {
+        let blank = [0xff; EEPROM_UNUSED_GAP_LEN];
+        let mut incompatible_gap = blank;
+        incompatible_gap[0] = 0x7e;
+
+        assert!(!eeprom_data_is_incompatible(
+            false,
+            eeprom_bytes_contain_data(&blank)
+        ));
+        assert!(eeprom_data_is_incompatible(
+            false,
+            eeprom_bytes_contain_data(&incompatible_gap)
+        ));
+        assert!(!eeprom_data_is_incompatible(
+            true,
+            eeprom_bytes_contain_data(&incompatible_gap)
+        ));
     }
 
     #[test]

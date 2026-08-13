@@ -425,6 +425,19 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 
 `op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
+`POST /api/v1/devices/:id/eeprom` is the USB/devd-only advanced raw EEPROM maintenance endpoint. It requires an active lease and native USB serial transport; it is not exposed through the device LAN API or Web console. Physical heater output must already be `0%`.
+
+```json
+{
+  "leaseId": "lease-001",
+  "op": "write",
+  "offset": 31,
+  "bytes": [0, 255, 17, 34]
+}
+```
+
+`op` is `read | write | erase`. `read` requires `offset` and `length`; `write` requires `offset` and `bytes`; each transport chunk is `1..32` bytes and must stay within the `8 KiB` EEPROM. `erase` accepts no range or content, writes the full EEPROM as `0xFF`, and the devd CLI verifies the full readback. The endpoint returns `bytes` only for `read`; it acknowledges `write` and `erase`. Export/import clients compose raw `8 KiB` images from those chunks without device identity checks, parsing, filtering, migration, or changes to unknown bytes.
+
 `PUT /api/v1/devices/:id/heater-curve` body:
 
 ```json
