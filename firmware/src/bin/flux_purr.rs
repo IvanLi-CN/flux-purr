@@ -496,6 +496,9 @@ const CH224Q_PD_SETTLE_MS: u64 = 150;
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_DELAY_MS: u64 = 100;
+#[cfg(any(target_arch = "xtensa", test))]
+const THERMAL_PLANT_TERMINAL_PD_REQUEST: flux_purr_firmware::adapters::ch224q::VoltageRequest =
+    flux_purr_firmware::adapters::ch224q::VoltageRequest::V5;
 #[cfg(target_arch = "xtensa")]
 const STATUS_LIGHT_BOOT_REFRESH_MS: u64 = 50;
 #[cfg(target_arch = "xtensa")]
@@ -5792,7 +5795,7 @@ where
     if !terminal_fixed_pd_retry_due(backend, now_ms) {
         return true;
     }
-    let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+    let fixed_payload = ch224q::voltage_request_payload(THERMAL_PLANT_TERMINAL_PD_REQUEST);
     let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
     schedule_terminal_fixed_pd_retry(backend, now_ms);
     true
@@ -5800,7 +5803,7 @@ where
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
-    measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
+    measured_vin_mv.abs_diff(u32::from(THERMAL_PLANT_TERMINAL_PD_REQUEST.millivolts())) <= 1_000
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -19609,7 +19612,7 @@ mod tests {
 
     #[test]
     fn terminal_disarm_waits_for_measured_fixed_pd_voltage() {
-        let fixed_mv = u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts());
+        let fixed_mv = u32::from(THERMAL_PLANT_TERMINAL_PD_REQUEST.millivolts());
         assert!(!terminal_fixed_pd_voltage_confirmed(
             fixed_mv.saturating_add(9_000)
         ));

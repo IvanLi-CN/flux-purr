@@ -92,8 +92,8 @@
   heater-curve temperature band. When its local physical fit is valid, automatic calibration writes
   it atomically as `active`; it does not require a source-class comparison, a nine-point run, or
   user acceptance.
-- Terminal disarm is complete only after measured heater VIN confirms the configured fixed-PD
-  voltage. A successful CH224Q register write or a logical `pdRequestMv` update alone is not proof
+- Terminal disarm uses the mandatory fixed `5V` PDO and is complete only after measured heater VIN
+  confirms that voltage. A successful CH224Q register write or a logical `pdRequestMv` update alone is not proof
   that the source has left PPS; until confirmation the firmware must keep PWM at zero, retain the
   terminal lock, retry the fixed-PD request no more often than every `500ms`, and exclude those
   samples from passive-cooling fit data.
