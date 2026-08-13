@@ -5768,6 +5768,7 @@ async fn disarm_pending_thermal_plant_output<PWM>(
     hold_pps_governor: &mut HoldPpsGovernor,
     ui_state: &mut FrontPanelUiState,
     last_heater_duty: &mut u8,
+    measured_vin_mv: u32,
 ) -> bool
 where
     PWM: SetDutyCycle,
@@ -5788,9 +5789,20 @@ where
         return true;
     }
 
+    if !terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
+        // The CH224Q accepts the register write before the source has actually
+        // left PPS. Keep the terminal lock active until VIN proves fixed PD.
+        return true;
+    }
+
     calibration_runtime_state.immediate_heater_disarm_pending = false;
     let _ = manual_pps.consume_automatic_restore_pending();
     true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
+    measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -7661,22 +7673,26 @@ fn transient_fit_row(
     delay_ticks: u16,
     ambient_temp_c: f32,
 ) -> Option<([f32; 3], f32)> {
+    const MIN_DERIVATIVE_WINDOW_TICKS: u16 = 10;
+    let previous_index = (0..index).rev().find(|candidate| {
+        samples[index]
+            .elapsed_ticks
+            .saturating_sub(samples[*candidate].elapsed_ticks)
+            >= MIN_DERIVATIVE_WINDOW_TICKS
+    })?;
     let dt_ticks = samples[index]
         .elapsed_ticks
-        .saturating_sub(samples[index - 1].elapsed_ticks);
-    if dt_ticks == 0 {
-        return None;
-    }
+        .saturating_sub(samples[previous_index].elapsed_ticks);
     let delayed_tick = samples[index].elapsed_ticks.saturating_sub(delay_ticks);
     let delayed_index = (0..index)
         .rev()
         .find(|candidate| samples[*candidate].elapsed_ticks <= delayed_tick)?;
-    let mid_temp_c = (temperatures_c[index] + temperatures_c[index - 1]) * 0.5;
+    let mid_temp_c = (temperatures_c[index] + temperatures_c[previous_index]) * 0.5;
     let ambient_kelvin = ambient_temp_c + 273.15;
     let kelvin = mid_temp_c + 273.15;
     Some((
         [
-            (temperatures_c[index] - temperatures_c[index - 1])
+            (temperatures_c[index] - temperatures_c[previous_index])
                 / (f32::from(dt_ticks) * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0),
             (mid_temp_c - ambient_temp_c).max(0.0),
             kelvin.powi(4) - ambient_kelvin.powi(4),
@@ -10831,6 +10847,7 @@ async fn main(_spawner: Spawner) {
                         &mut hold_pps_governor,
                         &mut ui_state,
                         &mut last_heater_duty,
+                        latest_vin_mv,
                     )
                     .await;
                     usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
@@ -10974,6 +10991,7 @@ async fn main(_spawner: Spawner) {
                 &mut hold_pps_governor,
                 &mut ui_state,
                 &mut last_heater_duty,
+                latest_vin_mv,
             )
             .await;
             let (status, body) = lan_frame_response(
@@ -11004,6 +11022,7 @@ async fn main(_spawner: Spawner) {
             &mut hold_pps_governor,
             &mut ui_state,
             &mut last_heater_duty,
+            latest_vin_mv,
         )
         .await;
 
@@ -11499,6 +11518,7 @@ async fn main(_spawner: Spawner) {
                 &mut hold_pps_governor,
                 &mut ui_state,
                 &mut last_heater_duty,
+                latest_vin_mv,
             )
             .await;
             if calibration_runtime_state.mode != CalibrationMode::Off
@@ -14184,6 +14204,12 @@ mod tests {
                 } else {
                     0
                 };
+                let measured_heater_mv = if heater_duty_percent > 0 {
+                    u32::from(source_mv)
+                        .min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
+                } else {
+                    0
+                };
                 update_calibration_job_state(
                     &mut calibration,
                     &mut memory_config,
@@ -14192,7 +14218,7 @@ mod tests {
                     0,
                     temperature_c,
                     pd_current_ma,
-                    u32::from(source_mv),
+                    measured_heater_mv,
                     heater_duty_percent,
                 );
                 if calibration.job.status == CalibrationJobStatus::Completed {
@@ -19482,6 +19508,20 @@ mod tests {
                 terminal_fixed_pd_disarmed: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn terminal_disarm_waits_for_measured_fixed_pd_voltage() {
+        let fixed_mv = u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts());
+        assert!(!terminal_fixed_pd_voltage_confirmed(
+            fixed_mv.saturating_add(9_000)
+        ));
+        assert!(!terminal_fixed_pd_voltage_confirmed(
+            fixed_mv.saturating_add(3_000)
+        ));
+        assert!(terminal_fixed_pd_voltage_confirmed(
+            fixed_mv.saturating_add(450)
         ));
     }
 

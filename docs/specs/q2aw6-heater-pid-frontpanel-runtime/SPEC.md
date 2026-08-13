@@ -92,6 +92,13 @@
   heater-curve temperature band. When its local physical fit is valid, automatic calibration writes
   it atomically as `active`; it does not require a source-class comparison, a nine-point run, or
   user acceptance.
+- Terminal disarm is complete only after measured heater VIN confirms the configured fixed-PD
+  voltage. A successful CH224Q register write or a logical `pdRequestMv` update alone is not proof
+  that the source has left PPS; until confirmation the firmware must keep PWM at zero, retain the
+  terminal lock, retry the fixed-PD request, and exclude those samples from passive-cooling fit data.
+- Transient fitting must derive temperature rate across at least `500ms` while retaining the dense
+  early samples for transport-delay and measured-power alignment. Adjacent `50ms` RTD samples must
+  not be differentiated directly because ADC millivolt quantization can dominate the physical rate.
 - The transient job's `20V / >=3A` requirement selects one usable PPS APDO. The powered trace uses
   that APDO's `max_mv` unchanged with `100%` PWM until the `220C` cut-off; heater-curve data, nominal
   `R20/TCR`, and production-profile current reserve settings do not participate in this request.
