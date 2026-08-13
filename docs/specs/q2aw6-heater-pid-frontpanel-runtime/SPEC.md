@@ -92,12 +92,10 @@
   heater-curve temperature band. When its local physical fit is valid, automatic calibration writes
   it atomically as `active`; it does not require a source-class comparison, a nine-point run, or
   user acceptance.
-- Terminal disarm first lowers the active PPS request to that APDO's floor, then selects the configured
-  fixed-PD idle voltage. It is complete only after measured heater VIN confirms the fixed voltage and
-  remains inside its tolerance for `300ms`. A successful CH224Q register write or a logical `pdRequestMv` update alone is not proof
-  that the source has left PPS; until confirmation the firmware must keep PWM at zero, retain the
-  terminal lock, retry the fixed-PD request no more often than every `500ms`, and exclude those
-  samples from passive-cooling fit data.
+- At the `220C` cut-off the MOS PWM is the authoritative heater-power disconnect. The selected PPS
+  contract remains unchanged through passive cooling so a PD renegotiation cannot disturb RTD
+  observations; every cooling sample must record zero duty. The calibration-owned PPS request is
+  cleared only after the model transaction is complete, canceled, or failed.
 - Transient fitting must derive temperature rate across at least `500ms` while retaining the dense
   early samples for transport-delay and measured-power alignment. Adjacent `50ms` RTD samples must
   not be differentiated directly because ADC millivolt quantization can dominate the physical rate.
