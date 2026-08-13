@@ -33,6 +33,7 @@ use embedded_storage::{ReadStorage, Storage};
 #[cfg(target_arch = "xtensa")]
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 #[cfg(target_arch = "xtensa")]
+use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     Blocking,
@@ -230,6 +231,31 @@ fn initialize_usb_control_response_buffer() -> &'static mut [u8; USB_CONTROL_TX_
     unsafe {
         (&mut *core::ptr::addr_of_mut!(USB_CONTROL_RESPONSE_BUFFER))
             .write([0; USB_CONTROL_TX_BUFFER_LEN])
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn reset_reason_log_line(reason: Option<SocResetReason>) -> &'static str {
+    match reason {
+        Some(SocResetReason::ChipPowerOn) => "reset_reason=chip_power_on\n",
+        Some(SocResetReason::CoreSw) => "reset_reason=core_software\n",
+        Some(SocResetReason::CoreDeepSleep) => "reset_reason=core_deep_sleep\n",
+        Some(SocResetReason::CoreMwdt0) => "reset_reason=core_mwdt0\n",
+        Some(SocResetReason::CoreMwdt1) => "reset_reason=core_mwdt1\n",
+        Some(SocResetReason::CoreRtcWdt) => "reset_reason=core_rtc_wdt\n",
+        Some(SocResetReason::CpuMwdt0) => "reset_reason=cpu_mwdt0\n",
+        Some(SocResetReason::CpuSw) => "reset_reason=cpu_software\n",
+        Some(SocResetReason::CpuRtcWdt) => "reset_reason=cpu_rtc_wdt\n",
+        Some(SocResetReason::SysBrownOut) => "reset_reason=system_brownout\n",
+        Some(SocResetReason::SysRtcWdt) => "reset_reason=system_rtc_wdt\n",
+        Some(SocResetReason::CpuMwdt1) => "reset_reason=cpu_mwdt1\n",
+        Some(SocResetReason::SysSuperWdt) => "reset_reason=system_super_wdt\n",
+        Some(SocResetReason::SysClkGlitch) => "reset_reason=system_clock_glitch\n",
+        Some(SocResetReason::CoreEfuseCrc) => "reset_reason=core_efuse_crc\n",
+        Some(SocResetReason::CoreUsbUart) => "reset_reason=core_usb_uart\n",
+        Some(SocResetReason::CoreUsbJtag) => "reset_reason=core_usb_jtag\n",
+        Some(SocResetReason::CorePwrGlitch) => "reset_reason=core_power_glitch\n",
+        None => "reset_reason=unknown\n",
     }
 }
 
@@ -10122,6 +10148,7 @@ where
 #[cfg(target_arch = "xtensa")]
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) {
+    let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     init_runtime_heap();
@@ -10154,6 +10181,8 @@ async fn main(_spawner: Spawner) {
         &hello_frame(hardware_identity()),
         usb_tx_buf,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
     #[cfg(feature = "web_serial")]
     poll_usb_early_control(
         &mut usb_serial,
