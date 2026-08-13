@@ -191,6 +191,8 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 
 `state` is `missing`, `active`, or `invalid`. The persistent source of truth is a bounded raw transient trace: ambient RTD ADC, `50ms` timestamps, RTD ADC, measured heater voltage, and duty. `thermal_plant_auto` samples the heater-resistance curve during the same run, requests the selected APDO's maximum voltage with `100%` PWM until `220C`, then immediately disarms and records natural cooling to `80C`. The APDO must cover `20V` at `>=3A`; a `5V..21V / 3A` APDO therefore runs at `21V`, while a `5V..20V / 3A` APDO runs at `20V`. Heater-curve data and production-profile current reserve settings do not reduce the calibration request. The device fits the coefficients locally, writes a physically valid model directly to `active`, and leaves heating disarmed. There is no candidate, promotion, cross-current comparison, or user acceptance operation. Production heating requires an active model, a PPS APDO covering `20V` at at least `3A`, and the curve captured by that same transient run.
 
+The calibration state machine uses the current valid RTD measurement directly for transient sampling, the `220C` cutoff, and the passive-cooling endpoint. Guarded control temperature remains a production PID input only. There is no separate `225C` calibration failure threshold; once the live measurement first reaches `220C`, logical duty, physical PWM, and calibration-owned PPS are cleared in that control cycle. General sensor and absolute-overtemperature protections remain authoritative.
+
 ### `FirmwareArtifact`
 
 ```json

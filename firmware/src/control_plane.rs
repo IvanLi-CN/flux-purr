@@ -30,6 +30,7 @@ pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
 pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
+pub const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1395,6 +1396,10 @@ pub enum UsbFrame {
     HeaterCurveSave {
         request_id: String<REQUEST_ID_MAX_LEN>,
     },
+    EepromMaintenance {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        command: EepromMaintenanceCommand,
+    },
     Response {
         request_id: String<REQUEST_ID_MAX_LEN>,
         ok: bool,
@@ -1461,6 +1466,9 @@ struct UsbFrameWire {
     slot: Option<CalibrationSlotIdWire>,
     fit: Option<CalibrationSlotFitWire>,
     heater_curve: Option<HeaterCurvePackageWire>,
+    offset: Option<u16>,
+    length: Option<u8>,
+    bytes: Option<Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>>,
     ok: Option<bool>,
     result: Option<UsbResponsePayload>,
     error: Option<ApiError>,
@@ -1564,6 +1572,32 @@ struct UsbHeaterCurveConfigInboundWire {
 #[serde(rename_all = "camelCase")]
 struct UsbRequestIdInboundWire {
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EepromMaintenanceOp {
+    Read,
+    Write,
+    Erase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EepromMaintenanceCommand {
+    pub op: EepromMaintenanceOp,
+    pub offset: Option<u16>,
+    pub length: Option<u8>,
+    pub bytes: Option<Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbEepromMaintenanceInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<EepromMaintenanceOp>,
+    offset: Option<u16>,
+    length: Option<u8>,
+    bytes: Option<Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>>,
 }
 
 #[derive(Deserialize)]
@@ -1728,6 +1762,9 @@ impl From<&UsbFrame> for UsbFrameWire {
             slot: None,
             fit: None,
             heater_curve: None,
+            offset: None,
+            length: None,
+            bytes: None,
             ok: None,
             result: None,
             error: None,
@@ -1811,6 +1848,21 @@ impl From<&UsbFrame> for UsbFrameWire {
             UsbFrame::HeaterCurveSave { request_id } => {
                 wire.frame_type = string("heater_curve_save");
                 wire.request_id = Some(request_id.clone());
+            }
+            UsbFrame::EepromMaintenance {
+                request_id,
+                command,
+            } => {
+                wire.frame_type = string("eeprom_maintenance");
+                wire.request_id = Some(request_id.clone());
+                wire.op = Some(string(match command.op {
+                    EepromMaintenanceOp::Read => "read",
+                    EepromMaintenanceOp::Write => "write",
+                    EepromMaintenanceOp::Erase => "erase",
+                }));
+                wire.offset = command.offset;
+                wire.length = command.length;
+                wire.bytes = command.bytes.clone();
             }
             UsbFrame::Response {
                 request_id,
@@ -1930,6 +1982,7 @@ pub enum UsbResponsePayload {
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
     HeaterCurve(HeaterCurveStateWire),
+    EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
     Ack,
 }
 
@@ -2078,6 +2131,18 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
             let frame = parse_usb_wire::<UsbRequestIdInboundWire>(trimmed)?;
             Ok(UsbFrame::HeaterCurveSave {
                 request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+            })
+        }
+        "eeprom_maintenance" => {
+            let frame = parse_usb_wire::<UsbEepromMaintenanceInboundWire>(trimmed)?;
+            Ok(UsbFrame::EepromMaintenance {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: EepromMaintenanceCommand {
+                    op: frame.op.ok_or(UsbFrameError::MalformedJson)?,
+                    offset: frame.offset,
+                    length: frame.length,
+                    bytes: frame.bytes,
+                },
             })
         }
         "response" => {
@@ -3264,6 +3329,38 @@ mod tests {
         let json = write_usb_frame(&frame, &mut out).unwrap();
         assert!(json.contains(r#""type":"calibration_job""#));
         assert!(json.contains(r#""kind":"thermal_plant_auto""#));
+    }
+
+    #[test]
+    fn eeprom_maintenance_frames_preserve_raw_chunk_bytes() {
+        let frame = parse_usb_frame(
+            r#"{"type":"eeprom_maintenance","requestId":"raw-1","op":"write","offset":8160,"bytes":[0,255,17,34]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            UsbFrame::EepromMaintenance {
+                request_id: string("raw-1"),
+                command: EepromMaintenanceCommand {
+                    op: EepromMaintenanceOp::Write,
+                    offset: Some(8160),
+                    length: None,
+                    bytes: Some(heapless::Vec::from_slice(&[0, 255, 17, 34]).unwrap()),
+                },
+            }
+        );
+
+        let response = UsbFrame::Response {
+            request_id: string("raw-1"),
+            ok: true,
+            result: Some(UsbResponsePayload::EepromBytes(
+                heapless::Vec::from_slice(&[0, 255, 17, 34]).unwrap(),
+            )),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&response, &mut out).unwrap();
+        assert!(json.contains(r#""eeprom_bytes":[0,255,17,34]"#));
     }
 
     #[test]

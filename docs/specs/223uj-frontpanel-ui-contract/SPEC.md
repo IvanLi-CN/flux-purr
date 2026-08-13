@@ -179,6 +179,7 @@ None
 - 前面板硬件基线已明确为 `160×50` / RGB565 级别小彩屏。
 - 本轮只冻结视觉契约，不做真实固件画屏。
 - on-device 文案默认使用英文短词和缩写。
+- EEPROM 含有不可解析、CRC/结构无效或高于当前固件格式版本的数据时，前面板不进入 Dashboard 或菜单，而是使用固件同一 renderer 固定显示三行 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。该场景不提供恢复菜单；heater、PPS 与 calibration 保持锁定，详细错误仅由 USB/devd 提供。全 `0xFF` EEPROM 不显示该场景。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -228,6 +229,12 @@ None
 #### Dashboard
 
 ![Front panel home](./assets/frontpanel-home.png)
+
+#### EEPROM incompatible
+
+该画面由固件 `frontpanel_preview` 直接复用设备 renderer、字体与 `DisplayCanvas` 生成；同目录同时保存 `160×50 RGB565LE` logical framebuffer 与 GC9D01 Landscape panel framebuffer。
+
+![EEPROM incompatible fault screen](./assets/eeprom-data-incompatible/eeprom-data-incompatible.png)
 
 #### Dashboard Manual PPS
 

@@ -25,4 +25,5 @@
 ## Remaining Work
 
 - HTTP Wi-Fi 配置服务端尚未实现；持久化模型已预留字段。
-- EEPROM 地址脚硬件基线是 `0x50`；固件以 `0x50` 为首选并探测 `0x50..0x57`。若 EEPROM 当前不响应，flash fallback 仍提供重启后恢复能力。
+- EEPROM 地址脚硬件基线固定为 `0x50`；固件只访问该地址，不扫描共享 I2C 总线。启动读取复用静态 scratch 并采用有界分块，避免把完整 record buffer 放入启动栈。若 EEPROM 当前不响应，flash fallback 仍提供重启后恢复能力。
+- EEPROM 含有非空但不可解析、CRC/结构无效或未来格式数据时，固件保持 heater/PPS/calibration 锁定，并由前面板显示统一的不兼容故障场景。仓库 devd CLI 通过 USB lease 提供完整 8KiB 原始导出、原样导入与全片 `0xFF` 擦除回读；该高级兜底不进入 Web/LAN，也不解析或过滤内容。

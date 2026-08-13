@@ -1573,6 +1573,30 @@ pub struct CalibrationJobRequest {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum EepromMaintenanceOp {
+    Read,
+    Write,
+    Erase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EepromMaintenanceRequest {
+    pub lease_id: String,
+    pub op: EepromMaintenanceOp,
+    pub offset: Option<u16>,
+    pub length: Option<u8>,
+    pub bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EepromMaintenanceResponse {
+    pub bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum CalibrationConfigOp {
     Capture,
     Delete,
@@ -1741,6 +1765,21 @@ struct UsbCalibrationJobWire<'a> {
     op: CalibrationJobOp,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<CalibrationJobKind>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbEepromMaintenanceWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: EepromMaintenanceOp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    offset: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    length: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<&'a Vec<u8>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1964,6 +2003,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/calibration/job",
             get(device_calibration_job).post(configure_calibration_job),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/eeprom",
+            post(configure_eeprom_maintenance),
         )
         .route(
             "/api/v1/devices/{device_id}/heater-curve",
@@ -5089,6 +5132,125 @@ async fn serial_calibration_job_config(
     extract_usb_payload(result, "calibration_job")
 }
 
+const EEPROM_CAPACITY_BYTES: usize = 8 * 1024;
+const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
+
+fn validate_eeprom_maintenance_request(
+    payload: &EepromMaintenanceRequest,
+) -> Result<(), HttpError> {
+    match payload.op {
+        EepromMaintenanceOp::Read => {
+            let (Some(offset), Some(length)) = (payload.offset, payload.length) else {
+                return Err(HttpError::bad_request(
+                    "eeprom_range_required",
+                    "EEPROM read requires offset and length.",
+                ));
+            };
+            if length == 0
+                || usize::from(length) > EEPROM_MAINTENANCE_CHUNK_MAX
+                || usize::from(offset) + usize::from(length) > EEPROM_CAPACITY_BYTES
+                || payload.bytes.is_some()
+            {
+                return Err(HttpError::bad_request(
+                    "eeprom_range_invalid",
+                    "EEPROM read range is invalid.",
+                ));
+            }
+        }
+        EepromMaintenanceOp::Write => {
+            let (Some(offset), Some(bytes)) = (payload.offset, payload.bytes.as_ref()) else {
+                return Err(HttpError::bad_request(
+                    "eeprom_write_required",
+                    "EEPROM write requires offset and bytes.",
+                ));
+            };
+            if bytes.is_empty()
+                || bytes.len() > EEPROM_MAINTENANCE_CHUNK_MAX
+                || usize::from(offset) + bytes.len() > EEPROM_CAPACITY_BYTES
+                || payload.length.is_some()
+            {
+                return Err(HttpError::bad_request(
+                    "eeprom_range_invalid",
+                    "EEPROM write range is invalid.",
+                ));
+            }
+        }
+        EepromMaintenanceOp::Erase => {
+            if payload.offset.is_some() || payload.length.is_some() || payload.bytes.is_some() {
+                return Err(HttpError::bad_request(
+                    "eeprom_erase_payload_invalid",
+                    "EEPROM erase does not accept a range or content.",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn serial_eeprom_maintenance(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &EepromMaintenanceRequest,
+) -> Result<EepromMaintenanceResponse, HttpError> {
+    validate_eeprom_maintenance_request(payload)?;
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-eeprom", now_millis());
+    let request = serde_json::to_string(&UsbEepromMaintenanceWire {
+        frame_type: "eeprom_maintenance",
+        request_id: &request_id,
+        op: payload.op,
+        offset: payload.offset,
+        length: payload.length,
+        bytes: payload.bytes.as_ref(),
+    })
+    .map_err(|_| HttpError::internal("failed to encode EEPROM maintenance request"))?;
+    let result = serial_exchange_sensitive(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        match payload.op {
+            EepromMaintenanceOp::Read => SerialRetryPolicy::ReadOnly,
+            EepromMaintenanceOp::Write | EepromMaintenanceOp::Erase => {
+                SerialRetryPolicy::SingleShot
+            }
+        },
+    )
+    .await?;
+    let bytes = if payload.op == EepromMaintenanceOp::Read {
+        Some(extract_usb_payload(result, "eeprom_bytes")?)
+    } else {
+        None
+    };
+    Ok(EepromMaintenanceResponse { bytes })
+}
+
+async fn configure_eeprom_maintenance(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<EepromMaintenanceRequest>,
+) -> Result<Json<EepromMaintenanceResponse>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "EEPROM maintenance requires native USB serial transport.",
+        ));
+    }
+    serial_eeprom_maintenance(&state, &target, &payload)
+        .await
+        .map(Json)
+}
+
 async fn serial_heater_curve_get(
     state: &AppState,
     target: &DeviceRecord,
@@ -5160,7 +5322,51 @@ async fn serial_exchange(
     request: String,
     retry_policy: SerialRetryPolicy,
 ) -> Result<Value, HttpError> {
-    record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
+    serial_exchange_with_visibility(
+        state,
+        device_id,
+        port_path,
+        request_id,
+        request,
+        retry_policy,
+        true,
+    )
+    .await
+}
+
+async fn serial_exchange_sensitive(
+    state: &AppState,
+    device_id: &str,
+    port_path: String,
+    request_id: String,
+    request: String,
+    retry_policy: SerialRetryPolicy,
+) -> Result<Value, HttpError> {
+    serial_exchange_with_visibility(
+        state,
+        device_id,
+        port_path,
+        request_id,
+        request,
+        retry_policy,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serial_exchange_with_visibility(
+    state: &AppState,
+    device_id: &str,
+    port_path: String,
+    request_id: String,
+    request: String,
+    retry_policy: SerialRetryPolicy,
+    record_payload: bool,
+) -> Result<Value, HttpError> {
+    if record_payload {
+        record_transport_event(state, device_id, "tx", "usb_jsonl", &request_id, &request);
+    }
     let serial_sessions = state.serial_sessions.clone();
     let worker_request_id = request_id.clone();
     let worker_device_id = device_id.to_string();
@@ -5179,6 +5385,10 @@ async fn serial_exchange(
         )
     })
     .await?;
+
+    if !record_payload {
+        return result;
+    }
 
     match &result {
         Ok(payload) => record_transport_event(
@@ -10821,6 +11031,46 @@ mod tests {
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
         assert_eq!(error.error.code, "unauthorized");
         assert!(!error.error.retryable);
+    }
+
+    #[test]
+    fn eeprom_maintenance_validation_keeps_raw_chunks_bounded_only_by_transport() {
+        let raw = EepromMaintenanceRequest {
+            lease_id: "lease-1".to_string(),
+            op: EepromMaintenanceOp::Write,
+            offset: Some(8_160),
+            length: None,
+            bytes: Some(vec![0, 255, 17, 34]),
+        };
+        assert!(validate_eeprom_maintenance_request(&raw).is_ok());
+
+        let out_of_range = EepromMaintenanceRequest {
+            offset: Some(8_191),
+            bytes: Some(vec![1, 2]),
+            ..raw.clone()
+        };
+        assert_eq!(
+            validate_eeprom_maintenance_request(&out_of_range)
+                .unwrap_err()
+                .error
+                .code,
+            "eeprom_range_invalid"
+        );
+
+        let erase_with_content = EepromMaintenanceRequest {
+            op: EepromMaintenanceOp::Erase,
+            offset: None,
+            length: None,
+            bytes: Some(vec![0xff]),
+            ..raw
+        };
+        assert_eq!(
+            validate_eeprom_maintenance_request(&erase_with_content)
+                .unwrap_err()
+                .error
+                .code,
+            "eeprom_erase_payload_invalid"
+        );
     }
 
     #[test]

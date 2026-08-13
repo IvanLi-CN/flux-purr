@@ -28,7 +28,6 @@ pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
 pub const THERMAL_PLANT_TRANSIENT_MAX_SAMPLES: usize = 128;
 pub const THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES: u8 = 12;
 pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV: u8 = 50;
-pub const THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV: u8 = 210;
 pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
 pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
@@ -741,7 +740,6 @@ pub fn thermal_plant_transient_transaction_has_valid_structure(
             }
         } else if sample.duty_percent == 100
             && sample.heater_voltage_100mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV
-            && sample.heater_voltage_100mv <= THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV
             && !cooling_started
         {
             powered_sample_count = powered_sample_count.saturating_add(1);
@@ -4595,13 +4593,6 @@ mod tests {
         ));
 
         transaction = sample_transient_thermal_plant_transaction();
-        transaction.samples[1].heater_voltage_100mv =
-            THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV + 1;
-        assert!(!thermal_plant_transient_transaction_is_complete(
-            &transaction
-        ));
-
-        transaction = sample_transient_thermal_plant_transaction();
         transaction.projection =
             ThermalPlantProjectionRecord::from_projection(ThermalPlantProjection {
                 convection_mw_per_c: THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C + 1.0,
@@ -4610,6 +4601,16 @@ mod tests {
                 transport_delay_ms: 500,
             });
         assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+    }
+
+    #[test]
+    fn transient_record_accepts_measured_voltage_above_nominal_apdo_request() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_100mv = 217;
+
+        assert!(thermal_plant_transient_transaction_is_complete(
             &transaction
         ));
     }
