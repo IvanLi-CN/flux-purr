@@ -406,12 +406,11 @@ test.describe('control plane direct LAN', () => {
     await openLanPairing(page)
 
     const targetSelector = page.getByRole('button', { name: '目标设备' })
-    const initialTarget = (await targetSelector.textContent())?.trim() ?? ''
 
     await pairRequiredLanDevice(page)
 
     await expect(page.getByText('LAN 租约获取失败')).toBeVisible()
-    await expect(targetSelector).toContainText(initialTarget)
+    await expect(targetSelector).toContainText('DEVD')
     await expect(targetSelector).not.toContainText('flux-purr-001122334455')
     expect(runtimeRequests()).toHaveLength(0)
   })

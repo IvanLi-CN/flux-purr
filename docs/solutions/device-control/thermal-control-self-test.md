@@ -20,21 +20,21 @@ related_specs:
 
 Thermal control validation is a measured control workflow, not a fixed duty tweak.
 
-Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains raw RTD ADC, electrical, timing, and energy observations; RTD calibration only changes the projection from those observations, never the observations themselves. A complete `80C/220C` two-anchor transaction whose physical projection is valid is written directly as `active`.
+Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage, duty, and `50ms` time points. A single protected run takes an ambient baseline, requests the selected APDO's maximum voltage with `100%` PWM to `220C`, immediately turns heat off, and records passive cooling to `80C`. Heater-curve data and production-profile current reserve settings do not reduce or vary the calibration request. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples.
 
 The production controller is:
 
 `Ctheta * dT/dt = Ph - kc * (T - Ta) - kr * (Tk^4 - TaK^4)`
 
-with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = Vmax(T)^2 / R(T)`, where `Vmax(T) = min(Vsource, Iavailable * R(T))` and `Iavailable` reserves board current. `Vmax` is a heater-terminal constraint: the PPS request adds bounded live `Vpps - Vheater` path-drop compensation, then clamps at `Vsource`, so wiring loss cannot silently strand source power. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
+with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = min(Vsource^2 / R(T), Vsource * Isource)`. The production PPS request ceiling is the selected APDO maximum voltage; neither `R(T)` nor a profile current reserve lowers it. The APDO contract owns the current boundary, while fixed-PD fallback continues to enforce its negotiated current through PWM. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
 
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
 Flux Purr exposes:
 
 - `thermalPlantModel` state and active transaction identity in runtime status
-- protected `thermal_plant_auto` calibration at `80C` and `220C`
-- heater-curve raw observations for reconstructing the resistance projection
+- one protected `thermal_plant_auto` transient calibration, from ambient through `220C` and passive cooling to `80C`
+- heater-curve raw observations captured during that same transient run
 - canonical HTML HIL bundles generated through the Rust report renderer
 
 ## Artifact model

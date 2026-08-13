@@ -53,7 +53,7 @@
 - ESP32-S3 release 构建基线：
 
 ```bash
-cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --release
+cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --release
 ```
 
 - 非硬件验证先于任何真机/HIL 操作完成。

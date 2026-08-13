@@ -21,7 +21,7 @@
 - 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
 - 使用双槽 record、TLV payload 和 CRC，保证坏数据自动回退默认值、未知字段可跳过。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
-- 保存校准无关的 5A heater raw observations 与双点 thermal plant model transaction。
+- 保存与电流档无关的 heater raw observations 和瞬态 thermal plant model transaction。
 
 ### Non-goals
 
@@ -112,12 +112,14 @@
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
   - `0x35`: `heater_curve_raw_observations`
-  - `0x36`: legacy thermal-plant candidate record (decode-only migration input)
-  - `0x37`: `thermal_plant_active`
+  - `0x36`: legacy steady-state thermal-plant candidate record (decode-only)
+  - `0x37`: legacy steady-state thermal-plant active record (decode-only)
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
-- 新记录不再写入 `0x32/0x33/0x34` point-local profile；解码器仅为旧 record 保留跳过/读取兼容，运行时不得使用其值。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x37` 保存 active thermal-plant 的环境/目标 raw RTD ADC、gate-off/hold power、ramp duration/energy 和 transaction identity。旧 `0x36` 完整记录仅在没有 `0x37` 时迁移为 active；派生温度、曲线与系数不得成为唯一持久化真相源。
-- 新写入的 thermal profile payload 必须以 `TCP2` 布局标识开头，避免 point-local 布局与历史 settings/point 长度组合发生歧义；无标识的历史 payload 继续按旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。两个 bank 各自保存最多 10 个完整 point-local 压紧目标点，并与完整 calibration、最长 Wi-Fi 凭据共同 round-trip。
+  - `0x3a`: `thermal_plant_transient_active`
+  - `0x3b`: `heater_curve_transaction_id`
+- 新记录持续写入 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x36` 与 `0x37` 只保留为历史稳态双平台记录，绝不迁移或优先于新模型，也不得解锁加热。`0x3a` 保存瞬态模型的 ambient raw RTD ADC、定长 `50ms` 轨迹、实测加热电压、duty、拟合系数和 transaction identity；`0x3b` 必须等于该模型 transaction identity，证明 `0x35` 的曲线原始观测来自同一次瞬态采集。拟合系数无效时仍保留结构合法的原始 `0x3a` 轨迹以支持诊断，但它只能呈现为 `invalid`，不得解锁加热。派生温度、曲线与系数不得成为唯一持久化真相源。
+- 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头；它无损保存完整 point-local 字段，并让两个十点 bank、最长 Wi-Fi 凭据、LAN token、static IPv4、完整 calibration 与最长瞬态轨迹共同装入一个 `2KiB` active record。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -140,9 +142,9 @@
 - Given RTD calibration active slot or fit changes, When memory is read again, Then raw heater and
   thermal observations remain byte-for-byte stable and all derived values are rebuilt from the new
   projection.
-- Given automatic thermal calibration supplies fewer than two valid thermal-loss anchors, When the
-  physical projection cannot be formed, Then it leaves the existing active transaction unchanged and
-  heating remains locked.
+- Given a transient thermal trace does not contain an ordered powered rise to `220°C` followed by
+  zero-duty cooling to `80°C`, or its physical projection cannot be formed, When calibration ends,
+  Then it leaves the existing active transaction unchanged and heating remains locked.
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

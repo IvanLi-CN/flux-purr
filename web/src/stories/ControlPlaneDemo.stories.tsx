@@ -142,7 +142,9 @@ export const DemoLogFollowTail: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    const followButton = await canvas.findByRole('button', { name: '跟随尾部' })
+    const followButton = await canvas.findByRole('button', {
+      name: '跟随尾部',
+    })
     const scrollElement = canvasElement.querySelector(
       '.industrial-log-panel__rows .simplebar-content-wrapper'
     ) as HTMLElement | null
@@ -204,7 +206,12 @@ export const DemoCalibrationIdle: Story = {
       ...controlPlaneScenario,
       devices: controlPlaneScenario.devices.map((device) =>
         device.id === controlPlaneScenario.selectedDeviceId
-          ? { ...device, currentTempC: 183.6, targetTempC: 183.6, heaterOutputPercent: 0 }
+          ? {
+              ...device,
+              currentTempC: 183.6,
+              targetTempC: 183.6,
+              heaterOutputPercent: 0,
+            }
           : { ...device, heaterOutputPercent: 0 }
       ),
     },
@@ -251,7 +258,9 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByText(/\d+ \/ \d+ 帧/)).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '导入预览' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
-      const heaterCurveTable = await canvas.findByRole('table', { name: '加热曲线点表' })
+      const heaterCurveTable = await canvas.findByRole('table', {
+        name: '加热曲线点表',
+      })
       expect(heaterCurveTable.scrollWidth).toBeLessThanOrEqual(heaterCurveTable.clientWidth + 1)
     })
 
@@ -284,10 +293,14 @@ export const DemoCalibrationTab: Story = {
       'temperature and voltage modes keep technical details as secondary panels',
       async () => {
         await expect(
-          await canvas.findByRole('slider', { name: '加热曲线标定目标温度滑块' })
+          await canvas.findByRole('slider', {
+            name: '加热曲线标定目标温度滑块',
+          })
         ).toBeVisible()
         await expect(
-          await canvas.findByRole('spinbutton', { name: '加热曲线标定目标温度输入' })
+          await canvas.findByRole('spinbutton', {
+            name: '加热曲线标定目标温度输入',
+          })
         ).toBeVisible()
         await expect(await canvas.findByRole('heading', { name: '校准控制' })).toBeVisible()
         expect(canvas.queryByText('PPS 电流能力')).not.toBeInTheDocument()
@@ -298,7 +311,8 @@ export const DemoCalibrationTab: Story = {
             ) as HTMLElement | null
           )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['自动校准'])
+        expect(actionButtons).toEqual(['自动热模型'])
+        await expect(await canvas.findByRole('button', { name: '自动热模型' })).toBeVisible()
         await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
         await expect(await canvas.findByRole('slider', { name: '目标 ADC 滑块' })).toBeVisible()
@@ -313,8 +327,12 @@ export const DemoCalibrationTab: Story = {
         expect(actionButtons).toEqual([])
         await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await expect(await canvas.findByRole('heading', { name: '温度 ADC' })).toBeVisible()
-        const targetAdcInput = await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })
-        const referenceTempInput = await canvas.findByRole('spinbutton', { name: '标定温度' })
+        const targetAdcInput = await canvas.findByRole('spinbutton', {
+          name: '目标 ADC 输入',
+        })
+        const referenceTempInput = await canvas.findByRole('spinbutton', {
+          name: '标定温度',
+        })
         await userEvent.clear(targetAdcInput)
         await userEvent.type(targetAdcInput, '970')
         await userEvent.clear(referenceTempInput)
@@ -326,7 +344,9 @@ export const DemoCalibrationTab: Story = {
           )
         })
         await expect(await canvas.findByText(/1\/8 个样本/i)).toBeVisible()
-        const rtdSampleTable = await canvas.findByRole('table', { name: '温度 ADC 样本' })
+        const rtdSampleTable = await canvas.findByRole('table', {
+          name: '温度 ADC 样本',
+        })
         expect(within(rtdSampleTable).getAllByText('ADC 电压').length).toBeGreaterThanOrEqual(1)
         expect(within(rtdSampleTable).getAllByText('温度').length).toBeGreaterThanOrEqual(1)
         await expect(within(rtdSampleTable).getByText('21.6℃')).toBeVisible()
@@ -365,7 +385,9 @@ export const DemoCalibrationTab: Story = {
         await expect(await canvas.findByLabelText('当前 ADC 标定状态摘要')).toBeVisible()
         await expect(await canvas.findByLabelText('电压 ADC 拟合建议 拟合建议')).toBeVisible()
         await expect(await canvas.findByRole('spinbutton', { name: '参考电压' })).toBeVisible()
-        const vinSampleTable = await canvas.findByRole('table', { name: '电压 ADC 样本' })
+        const vinSampleTable = await canvas.findByRole('table', {
+          name: '电压 ADC 样本',
+        })
         expect(within(vinSampleTable).getAllByText('ADC 电压').length).toBeGreaterThanOrEqual(1)
         expect(within(vinSampleTable).getAllByText('参考电压').length).toBeGreaterThanOrEqual(1)
         expect(canvas.queryByRole('button', { name: '+1V' })).not.toBeInTheDocument()
@@ -382,7 +404,9 @@ export const DemoCalibrationTab: Story = {
     })
 
     await step('voltage mode switch toggles on in demo runtime', async () => {
-      const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+      const modeToggle = await canvas.findByRole('switch', {
+        name: '标定模式',
+      })
       await expect(modeToggle).toHaveAttribute('aria-checked', 'false')
       await userEvent.click(modeToggle)
       await waitFor(() => {
@@ -396,7 +420,9 @@ export const DemoCalibrationTab: Story = {
     await step(
       'arming calibration mode auto-enables PPS runtime without a separate button',
       async () => {
-        const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+        const modeToggle = await canvas.findByRole('switch', {
+          name: '标定模式',
+        })
         await waitFor(() => {
           expect(modeToggle).toHaveAttribute('aria-checked', 'true')
         })
@@ -426,7 +452,9 @@ export const DemoCalibrationTab: Story = {
         throw new Error('Expected calibration mode toggle to exist')
       }
       await userEvent.click(modeToggle)
-      const startAutoButton = await canvas.findByRole('button', { name: '自动扫点' })
+      const startAutoButton = await canvas.findByRole('button', {
+        name: '自动扫点',
+      })
       await userEvent.click(startAutoButton)
       await waitFor(() => {
         expect(startAutoButton).toBeDisabled()
@@ -436,7 +464,9 @@ export const DemoCalibrationTab: Story = {
     await step(
       'armed calibration mode blocks page-internal tab switching until closed',
       async () => {
-        const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+        const modeToggle = await canvas.findByRole('switch', {
+          name: '标定模式',
+        })
         const portalCanvas = within(canvasElement.ownerDocument.body)
         if (modeToggle.getAttribute('aria-checked') !== 'true') {
           await userEvent.click(modeToggle)
@@ -695,10 +725,14 @@ export const DemoTemperatureCalibrationHeatingFeedback: Story = {
         await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
         await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
 
-        const modeToggle = await canvas.findByRole('switch', { name: '标定模式' })
+        const modeToggle = await canvas.findByRole('switch', {
+          name: '标定模式',
+        })
         await expect(modeToggle).toHaveAttribute('aria-checked', 'true')
 
-        const heaterToggle = await canvas.findByRole('switch', { name: '加热开关' })
+        const heaterToggle = await canvas.findByRole('switch', {
+          name: '加热开关',
+        })
         await expect(heaterToggle).toBeEnabled()
         await expect(await canvas.findByRole('meter', { name: '加热强度' })).toHaveAttribute(
           'value',
@@ -749,8 +783,12 @@ export const DemoCalibrationManualFit: Story = {
 
       let statusSummary = await canvas.findByLabelText('当前 ADC 标定状态摘要')
       await userEvent.click(within(statusSummary).getAllByRole('button', { name: '编辑' })[0])
-      let gainInput = await portalCanvas.findByRole('spinbutton', { name: '增益' })
-      let offsetInput = await portalCanvas.findByRole('spinbutton', { name: '偏移' })
+      let gainInput = await portalCanvas.findByRole('spinbutton', {
+        name: '增益',
+      })
+      let offsetInput = await portalCanvas.findByRole('spinbutton', {
+        name: '偏移',
+      })
 
       await userEvent.clear(gainInput)
       await userEvent.type(gainInput, '1.01234')
@@ -761,8 +799,12 @@ export const DemoCalibrationManualFit: Story = {
       await userEvent.click(await canvas.findByRole('tab', { name: '电压读数标定' }))
       statusSummary = await canvas.findByLabelText('当前 ADC 标定状态摘要')
       await userEvent.click(within(statusSummary).getAllByRole('button', { name: '编辑' })[1])
-      gainInput = await portalCanvas.findByRole('spinbutton', { name: '增益' })
-      offsetInput = await portalCanvas.findByRole('spinbutton', { name: '偏移' })
+      gainInput = await portalCanvas.findByRole('spinbutton', {
+        name: '增益',
+      })
+      offsetInput = await portalCanvas.findByRole('spinbutton', {
+        name: '偏移',
+      })
 
       await userEvent.clear(gainInput)
       await userEvent.type(gainInput, '0.98047')
@@ -802,7 +844,9 @@ export const DemoCalibrationDenseLists: Story = {
         expect(canvas.getByText('8/8 个样本')).toBeVisible()
       })
 
-      const rtdList = await canvas.findByRole('region', { name: '温度 ADC 样本列表' })
+      const rtdList = await canvas.findByRole('region', {
+        name: '温度 ADC 样本列表',
+      })
       rtdList.scrollTop = rtdList.scrollHeight
       fireEvent.scroll(rtdList)
 
@@ -816,7 +860,9 @@ export const DemoCalibrationDenseLists: Story = {
       await waitFor(() => {
         expect(canvas.getByText('8/8 个样本')).toBeVisible()
       })
-      const vinList = await canvas.findByRole('region', { name: '电压 ADC 样本列表' })
+      const vinList = await canvas.findByRole('region', {
+        name: '电压 ADC 样本列表',
+      })
       vinList.scrollTop = vinList.scrollHeight
       fireEvent.scroll(vinList)
       await expect(
@@ -847,7 +893,9 @@ export const DemoCalibrationIncompleteRtdSingleSample: Story = {
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
 
-      const rtdList = await canvas.findByRole('region', { name: '温度 ADC 样本列表' })
+      const rtdList = await canvas.findByRole('region', {
+        name: '温度 ADC 样本列表',
+      })
       await expect(within(rtdList).getByText('0/8 个样本')).toBeVisible()
       expect(within(rtdList).queryByRole('button', { name: /删除 温度 ADC 样本/ })).toBeNull()
       expect(within(rtdList).queryByText('1/8 个样本')).toBeNull()
@@ -903,14 +951,18 @@ export const LiveWebSerialAddDevice: Story = {
     )
 
     await step('Dashboard target stepper advances immediately across rapid clicks', async () => {
-      const increase = await canvas.findByRole('button', { name: 'Increase target temperature' })
+      const increase = await canvas.findByRole('button', {
+        name: 'Increase target temperature',
+      })
       await userEvent.click(increase)
       await userEvent.click(increase)
       await userEvent.click(increase)
 
       await waitFor(() => {
         expect(
-          canvas.getByRole('spinbutton', { name: 'Dashboard target temperature' })
+          canvas.getByRole('spinbutton', {
+            name: 'Dashboard target temperature',
+          })
         ).toHaveValue(45)
       })
       await waitFor(() => {
@@ -923,7 +975,9 @@ export const LiveWebSerialAddDevice: Story = {
 
     await step('Dashboard advanced PPS override writes through Web Serial', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: /Advanced PPS/ }))
-      const slider = await canvas.findByRole('slider', { name: 'Manual PPS voltage' })
+      const slider = await canvas.findByRole('slider', {
+        name: 'Manual PPS voltage',
+      })
       fireEvent.input(slider, { target: { value: '10400' } })
       await userEvent.click(await canvas.findByRole('button', { name: 'Apply PPS' }))
 
@@ -991,7 +1045,9 @@ export const LiveWebSerialAddDevice: Story = {
       await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
       await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
 
-      const webSerialButton = await canvas.findByRole('button', { name: /Web Serial/ })
+      const webSerialButton = await canvas.findByRole('button', {
+        name: /Web Serial/,
+      })
       await expect(webSerialButton).toBeEnabled()
       await userEvent.click(webSerialButton)
 
@@ -1060,7 +1116,9 @@ export const LiveKnownWebSerialReconnect: Story = {
 
     await step('an explicit LAN choice remains selected after Web Serial connected', async () => {
       await userEvent.click(
-        await documentRoot.findByRole('button', { name: 'WiFi / LAN · flux-purr-s3-001' })
+        await documentRoot.findByRole('button', {
+          name: 'WiFi / LAN · flux-purr-s3-001',
+        })
       )
 
       await waitFor(() => {
@@ -1509,7 +1567,9 @@ export const LiveBridgeUsbTargetSelection: Story = {
         'Authorized USB target'
       )
       await expect(
-        canvas.getByText('DEVD', { selector: '.industrial-status-datum strong' })
+        canvas.getByText('DEVD', {
+          selector: '.industrial-status-datum strong',
+        })
       ).toBeVisible()
     })
   },
@@ -1606,7 +1666,9 @@ export const LiveBridgeKeyboardFocus: Story = {
     const canvas = within(canvasElement)
 
     await step('keyboard activation preserves the visible focus indicator', async () => {
-      const bridgeOption = await canvas.findByRole('button', { name: /桥接/ })
+      const bridgeOption = await canvas.findByRole('button', {
+        name: /桥接/,
+      })
       bridgeOption.focus()
       await userEvent.keyboard('{Enter}')
 
@@ -1662,7 +1724,9 @@ export const LiveWebSerialTemperatureCalibrationTargetHolds: Story = {
     })
 
     await step('keeps the drafted target ADC across live polling', async () => {
-      const targetAdcInput = await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })
+      const targetAdcInput = await canvas.findByRole('spinbutton', {
+        name: '目标 ADC 输入',
+      })
       await expect(targetAdcInput).toHaveValue(913)
 
       await userEvent.clear(targetAdcInput)
@@ -2183,12 +2247,16 @@ export const LiveLanScanSelection: Story = {
       await userEvent.click(await canvas.findByRole('button', { name: '开始扫描' }))
       await expect(await canvas.findByText(lanIdentity.hostname)).toBeVisible()
       await userEvent.click(
-        await canvas.findByRole('button', { name: `连接 ${lanIdentity.hostname}` })
+        await canvas.findByRole('button', {
+          name: `连接 ${lanIdentity.hostname}`,
+        })
       )
       await expect(await canvas.findByLabelText('设备地址')).toHaveValue(lanSession.baseUrl)
       await expect(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' })).toBeVisible()
       await expect(
-        await canvas.findByRole('button', { name: `连接 ${lanIdentity.hostname}` })
+        await canvas.findByRole('button', {
+          name: `连接 ${lanIdentity.hostname}`,
+        })
       ).toHaveAttribute('aria-pressed', 'true')
       const results = canvas.getByRole('list', { name: '发现的设备' })
       expect(getComputedStyle(results).gap).not.toBe('0px')
@@ -2212,7 +2280,9 @@ export const LiveLanScanSelectionThenConnect: Story = {
     await step('selecting a candidate and completing connection selects the hostname', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: '开始扫描' }))
       await userEvent.click(
-        await canvas.findByRole('button', { name: `连接 ${lanIdentity.hostname}` })
+        await canvas.findByRole('button', {
+          name: `连接 ${lanIdentity.hostname}`,
+        })
       )
       const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
       await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
@@ -2307,7 +2377,9 @@ export const LiveLanHeartbeatExpiryRequiresExplicitReselection: Story = {
       await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
       const picker = within(await canvas.findByRole('dialog', { name: '设备与连接方式' }))
       await userEvent.click(
-        await picker.findByRole('button', { name: `WiFi / LAN · ${lanIdentity.hostname}` })
+        await picker.findByRole('button', {
+          name: `WiFi / LAN · ${lanIdentity.hostname}`,
+        })
       )
       await expect(await canvas.findByText('LAN 设备已连接')).toBeVisible()
       await expect(await canvas.findByLabelText('Dashboard target temperature')).toBeEnabled()

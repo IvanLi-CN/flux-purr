@@ -15,7 +15,7 @@ import type {
 
 const devdPort = Number(process.env.E2E_DEVD_PORT ?? 30081)
 const devdBaseUrl = `http://127.0.0.1:${devdPort}`
-const artifactPath = 'target/xtensa-esp32s3-none-elf/release/flux-purr'
+const artifactPath = 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr'
 const artifactSha = 'sha256:e2e'
 const deviceId = 'serial-e2e'
 
@@ -1296,7 +1296,7 @@ function applyCalibrationJobRequest(
     op === 'start'
       ? {
           kind:
-            bodyField(body, 'kind') === 'heater_curve_auto' ||
+            bodyField(body, 'kind') === 'thermal_plant_auto' ||
             bodyField(body, 'kind') === 'vin_adc_auto'
               ? (bodyField(body, 'kind') as CalibrationJobState['kind'])
               : null,

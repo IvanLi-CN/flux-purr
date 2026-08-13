@@ -400,7 +400,6 @@ pub enum CalibrationModeWire {
 #[serde(rename_all = "snake_case")]
 pub enum CalibrationJobKindWire {
     VinAdcAuto,
-    HeaterCurveAuto,
     ThermalPlantAuto,
 }
 
@@ -1470,6 +1469,130 @@ struct UsbFrameWire {
     message: Option<String<ERROR_MESSAGE_MAX_LEN>>,
 }
 
+// Inbound frames deliberately use a narrow, type-specific parser.  Keeping
+// every optional field in `UsbFrameWire` is convenient for serialization, but
+// makes the first status request materialize every control-plane shape on the
+// ProCPU stack.  The front-panel task has a finite hardware stack, so parse the
+// discriminator first and construct only the requested frame variant.
+#[derive(Deserialize)]
+struct UsbFrameTypeWire {
+    #[serde(rename = "type")]
+    frame_type: String<24>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbHelloInboundWire {
+    protocol_version: Option<String<24>>,
+    framing: Option<String<8>>,
+    identity: Option<Identity>,
+    capabilities: Option<Vec<String<CAPABILITY_MAX_LEN>, CAPABILITY_COUNT_MAX>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbRequestInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<String<24>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbWifiConfigInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<String<24>>,
+    ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
+    password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
+    #[serde(default, deserialize_with = "deserialize_static_ipv4_patch")]
+    static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
+    telemetry_interval_ms: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbRuntimeConfigInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    target_temp_c: Option<i16>,
+    selected_preset_slot: Option<usize>,
+    presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
+    active_cooling_enabled: Option<bool>,
+    heater_enabled: Option<bool>,
+    manual_pps_enabled: Option<bool>,
+    manual_pps_mv: Option<u16>,
+    manual_pps_ma: Option<u16>,
+    fault_attention_acknowledged: Option<bool>,
+    calibration: Option<CalibrationControlCommand>,
+    thermal_profile_mode: Option<ThermalProfileModeWire>,
+    thermal_control_profile: Option<ThermalControlProfileCommand>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbCalibrationConfigInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<String<24>>,
+    channel: Option<CalibrationChannelWire>,
+    reference_temp_c: Option<f32>,
+    reference_vin_mv: Option<u32>,
+    target_adc_mv: Option<u16>,
+    observed_mv: Option<u16>,
+    expected_mv: Option<u16>,
+    sample_index: Option<usize>,
+    state: Option<CalibrationStateWire>,
+    slot: Option<CalibrationSlotIdWire>,
+    fit: Option<CalibrationSlotFitWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbCalibrationJobInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<String<24>>,
+    #[serde(rename = "kind", alias = "jobKind")]
+    kind: Option<CalibrationJobKindWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbHeaterCurveConfigInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    op: Option<String<24>>,
+    heater_curve: Option<HeaterCurvePackageWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbRequestIdInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbResponseInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    ok: Option<bool>,
+    result: Option<UsbResponsePayload>,
+    error: Option<ApiError>,
+}
+
+#[derive(Deserialize)]
+struct UsbStatusInboundWire {
+    status: Option<ControlPlaneStatus>,
+}
+
+#[derive(Deserialize)]
+struct UsbLogInboundWire {
+    level: Option<String<8>>,
+    message: Option<String<ERROR_MESSAGE_MAX_LEN>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbErrorInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    error: Option<ApiError>,
+}
+
 impl TryFrom<UsbFrameWire> for UsbFrame {
     type Error = UsbFrameError;
 
@@ -1861,10 +1984,142 @@ pub fn log_frame(level: &str, message: &str) -> UsbFrame {
 
 pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
     let trimmed = line.trim_end_matches(['\r', '\n']);
-    serde_json_core::from_str::<UsbFrameWire>(trimmed)
+    let frame_type = parse_usb_wire::<UsbFrameTypeWire>(trimmed)?.frame_type;
+    match frame_type.as_str() {
+        "hello" => {
+            let frame = parse_usb_wire::<UsbHelloInboundWire>(trimmed)?;
+            Ok(UsbFrame::Hello {
+                protocol_version: frame.protocol_version.ok_or(UsbFrameError::MalformedJson)?,
+                framing: frame.framing.ok_or(UsbFrameError::MalformedJson)?,
+                identity: frame.identity.ok_or(UsbFrameError::MalformedJson)?,
+                capabilities: frame.capabilities.ok_or(UsbFrameError::MalformedJson)?,
+            })
+        }
+        "request" => {
+            let frame = parse_usb_wire::<UsbRequestInboundWire>(trimmed)?;
+            Ok(UsbFrame::Request {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                op: parse_usb_request_op(frame.op.as_deref())?,
+            })
+        }
+        "wifi_config" => {
+            let frame = parse_usb_wire::<UsbWifiConfigInboundWire>(trimmed)?;
+            Ok(UsbFrame::WifiConfig {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: WifiConfigCommand {
+                    op: parse_wifi_config_op(frame.op.as_deref())?,
+                    ssid: frame.ssid,
+                    password: frame.password,
+                    static_ipv4: frame.static_ipv4,
+                    telemetry_interval_ms: frame.telemetry_interval_ms,
+                },
+            })
+        }
+        "runtime_config" => {
+            let frame = parse_usb_wire::<UsbRuntimeConfigInboundWire>(trimmed)?;
+            Ok(UsbFrame::RuntimeConfig {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: RuntimeConfigCommand {
+                    target_temp_c: frame.target_temp_c,
+                    selected_preset_slot: frame.selected_preset_slot,
+                    presets_c: frame.presets_c,
+                    active_cooling_enabled: frame.active_cooling_enabled,
+                    heater_enabled: frame.heater_enabled,
+                    manual_pps_enabled: frame.manual_pps_enabled,
+                    manual_pps_mv: frame.manual_pps_mv,
+                    manual_pps_ma: frame.manual_pps_ma,
+                    fault_attention_acknowledged: frame.fault_attention_acknowledged,
+                    calibration: frame.calibration,
+                    thermal_profile_mode: frame.thermal_profile_mode,
+                    thermal_control_profile: frame.thermal_control_profile,
+                },
+            })
+        }
+        "calibration_config" => {
+            let frame = parse_usb_wire::<UsbCalibrationConfigInboundWire>(trimmed)?;
+            Ok(UsbFrame::CalibrationConfig {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: CalibrationConfigCommand {
+                    op: parse_calibration_config_op(frame.op.as_deref())?,
+                    channel: frame.channel,
+                    reference_temp_c: frame.reference_temp_c,
+                    reference_vin_mv: frame.reference_vin_mv,
+                    target_adc_mv: frame.target_adc_mv,
+                    observed_mv: frame.observed_mv,
+                    expected_mv: frame.expected_mv,
+                    sample_index: frame.sample_index,
+                    state: frame.state,
+                    slot: frame.slot,
+                    fit: frame.fit,
+                },
+            })
+        }
+        "calibration_job" => {
+            let frame = parse_usb_wire::<UsbCalibrationJobInboundWire>(trimmed)?;
+            Ok(UsbFrame::CalibrationJob {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                command: CalibrationJobCommandWire {
+                    op: parse_calibration_job_op(frame.op.as_deref())?,
+                    kind: frame.kind,
+                },
+            })
+        }
+        "heater_curve_config" => {
+            let frame = parse_usb_wire::<UsbHeaterCurveConfigInboundWire>(trimmed)?;
+            Ok(UsbFrame::HeaterCurveConfig {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                config: HeaterCurveConfigCommand {
+                    op: parse_heater_curve_config_op(frame.op.as_deref())?,
+                    package: frame.heater_curve,
+                },
+            })
+        }
+        "heater_curve_save" => {
+            let frame = parse_usb_wire::<UsbRequestIdInboundWire>(trimmed)?;
+            Ok(UsbFrame::HeaterCurveSave {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+            })
+        }
+        "response" => {
+            let frame = parse_usb_wire::<UsbResponseInboundWire>(trimmed)?;
+            Ok(UsbFrame::Response {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                ok: frame.ok.ok_or(UsbFrameError::MalformedJson)?,
+                result: frame.result,
+                error: frame.error,
+            })
+        }
+        "status" => {
+            let frame = parse_usb_wire::<UsbStatusInboundWire>(trimmed)?;
+            Ok(UsbFrame::Status {
+                status: frame.status.ok_or(UsbFrameError::MalformedJson)?,
+            })
+        }
+        "log" => {
+            let frame = parse_usb_wire::<UsbLogInboundWire>(trimmed)?;
+            Ok(UsbFrame::Log {
+                level: frame.level.ok_or(UsbFrameError::MalformedJson)?,
+                message: frame.message.ok_or(UsbFrameError::MalformedJson)?,
+            })
+        }
+        "error" => {
+            let frame = parse_usb_wire::<UsbErrorInboundWire>(trimmed)?;
+            Ok(UsbFrame::Error {
+                request_id: frame.request_id,
+                error: frame.error.ok_or(UsbFrameError::MalformedJson)?,
+            })
+        }
+        _ => Err(UsbFrameError::MalformedJson),
+    }
+}
+
+#[inline(never)]
+fn parse_usb_wire<T>(line: &str) -> Result<T, UsbFrameError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json_core::from_str(line)
         .map(|(frame, _)| frame)
-        .map_err(|_| UsbFrameError::MalformedJson)?
-        .try_into()
         .map_err(|_| UsbFrameError::MalformedJson)
 }
 
@@ -2973,6 +3228,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_calibration_job_frame_rejects_removed_heater_curve_auto() {
+        assert!(parse_usb_frame(
+            r#"{"type":"calibration_job","requestId":"req-removed","op":"start","kind":"heater_curve_auto"}"#,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn parse_usb_request_accepts_long_calibration_job_op() {
         let frame = parse_usb_frame(
             r#"{"type":"request","requestId":"req-006","op":"get_calibration_job"}"#,
@@ -2994,13 +3257,13 @@ mod tests {
             request_id: string("req-007"),
             command: CalibrationJobCommandWire {
                 op: CalibrationJobOpWire::Start,
-                kind: Some(CalibrationJobKindWire::HeaterCurveAuto),
+                kind: Some(CalibrationJobKindWire::ThermalPlantAuto),
             },
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
         let json = write_usb_frame(&frame, &mut out).unwrap();
         assert!(json.contains(r#""type":"calibration_job""#));
-        assert!(json.contains(r#""kind":"heater_curve_auto""#));
+        assert!(json.contains(r#""kind":"thermal_plant_auto""#));
     }
 
     #[test]

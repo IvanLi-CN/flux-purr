@@ -18,6 +18,9 @@ export interface CalibrationLeaveRequest {
 }
 
 export function asCalibrationWorkbenchMode(mode: CalibrationMode): CalibrationWorkspaceTab | null {
+  if (mode === 'thermal_plant') {
+    return 'heater_curve'
+  }
   if (mode === 'vin_adc' || mode === 'rtd_adc' || mode === 'heater_curve') {
     return mode
   }

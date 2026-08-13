@@ -410,7 +410,6 @@ enum HeaterCurveCalibrationCommand {
     Enter(PpsCalibrationEnterArgs),
     Set(PpsCalibrationSetArgs),
     Heater(HeaterCurveCalibrationHeaterArgs),
-    Auto(TargetSelector),
     Job {
         #[command(subcommand)]
         command: CalibrationJobCommand,
@@ -461,7 +460,9 @@ enum ThermalCommand {
 
 #[derive(Debug, Subcommand)]
 enum ThermalModelCommand {
-    #[command(about = "Start the 80C/220C two-anchor calibration job.")]
+    #[command(
+        about = "Start one selected-APDO full-voltage transient calibration run to 220C, including heater-curve sampling."
+    )]
     Calibrate(TargetSelector),
 }
 
@@ -2040,19 +2041,6 @@ async fn handle_heater_curve_calibration_command(
             )
             .await
         }
-        HeaterCurveCalibrationCommand::Auto(target) => {
-            request_with_lease(
-                client,
-                resolve_target(target, default_devd)?,
-                Method::POST,
-                "/calibration/job",
-                Some(json!({
-                    "op": "start",
-                    "kind": "heater_curve_auto"
-                })),
-            )
-            .await
-        }
         HeaterCurveCalibrationCommand::Job { command } => {
             handle_calibration_job_command(client, default_devd, command).await
         }
@@ -2316,19 +2304,6 @@ async fn handle_thermal_command(
     match command {
         ThermalCommand::Model { command } => match command {
             ThermalModelCommand::Calibrate(target) => {
-                request_with_lease(
-                    client,
-                    resolve_target(target.clone(), default_devd)?,
-                    Method::PUT,
-                    "/runtime",
-                    Some(json!({
-                        "calibration": {
-                            "mode": "thermal_plant",
-                            "heaterEnabled": false
-                        }
-                    })),
-                )
-                .await?;
                 request_with_lease(
                     client,
                     resolve_target(target, default_devd)?,

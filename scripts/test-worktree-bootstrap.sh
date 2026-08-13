@@ -101,7 +101,7 @@ HOOK
 run)
   hook_name="${1:-}"
   shift || true
-  printf '%s\t%s %s\n' "$(pwd)" "$hook_name" "$*" >> "${LEFTHOOK_LOG:?}"
+  printf '%s\t%s\t%s %s\n' "$(pwd)" "$0" "$hook_name" "$*" >> "${LEFTHOOK_LOG:?}"
   if [[ "$hook_name" == "post-checkout" && -f scripts/post-checkout-bootstrap.sh ]]; then
     bash scripts/post-checkout-bootstrap.sh "$@"
   fi
@@ -210,11 +210,14 @@ printf '\n# fixture comment\n' >> "$worktree_dir/web/bun.lock"
 PATH="$fake_bin:$PATH" run_git_fixture -C "$worktree_dir" checkout --detach HEAD >/dev/null
 assert_contains "$bun_log" "$worktree_dir"$'\t''install --cwd web --frozen-lockfile'
 
+hook_os="$(uname | tr '[:upper:]' '[:lower:]')"
+hook_arch="$(uname -m | sed 's/aarch64/arm64/;s/x86_64/x64/')"
+
 (
   cd "$worktree_dir"
   "$hooks_dir/commit-msg" .git/COMMIT_EDITMSG >/dev/null 2>&1 || true
 )
-assert_contains "$LEFTHOOK_LOG" "$worktree_dir"$'\t''commit-msg'
+assert_contains "$LEFTHOOK_LOG" "$worktree_dir"$'\t'"$worktree_dir/node_modules/lefthook-${hook_os}-${hook_arch}/bin/lefthook"$'\t''commit-msg'
 
 copy_repo "$repo_root" "$custom_repo"
 init_repo "$custom_repo"

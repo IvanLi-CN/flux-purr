@@ -83,8 +83,8 @@ export interface ControlPlaneStatus {
   network: NetworkSummary
 }
 
-export type CalibrationMode = 'off' | 'vin_adc' | 'rtd_adc' | 'heater_curve'
-export type CalibrationJobKind = 'vin_adc_auto' | 'heater_curve_auto'
+export type CalibrationMode = 'off' | 'vin_adc' | 'rtd_adc' | 'heater_curve' | 'thermal_plant'
+export type CalibrationJobKind = 'vin_adc_auto' | 'thermal_plant_auto'
 export type CalibrationJobStatus = 'idle' | 'running' | 'completed' | 'failed' | 'canceled'
 export type CalibrationJobOp = 'start' | 'cancel'
 

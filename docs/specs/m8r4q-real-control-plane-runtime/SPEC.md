@@ -51,14 +51,17 @@
 
 - Runtime status MUST expose the shared thermal plant state (`missing|active|invalid`), active
   transaction identity, projection validity, and heater lock reason. Automatic model calibration
-  MUST store a complete physically valid two-anchor transaction directly as `active`; no
-  candidate, promotion, or user acceptance operation exists in the control plane. A successful
-  automatic model calibration MUST leave the heater disarmed; a later explicit heater arm is the
-  user's separate runtime choice.
+  MUST store a complete physically valid transient transaction directly as `active`; no candidate,
+  promotion, or user acceptance operation exists in the control plane. A successful automatic
+  model calibration MUST leave the heater disarmed; a later explicit heater arm is the user's
+  separate runtime choice.
 - The protected model-calibration job is the only control-plane path allowed to heat while no
   active model exists. It requires a PPS APDO covering `20V` at `>=3A`; cancellation, disconnect,
   unsupported source, sensor fault, or malformed observation MUST immediately remove that
-  authorization and stop heating.
+  authorization and stop heating. `20V` is an APDO admission condition, not a fixed job voltage:
+  the job must request the selected APDO's `max_mv` for the complete powered trace. Heater-curve
+  data, nominal `R20/TCR`, and production-profile current reserve settings must not reduce or vary
+  that request.
 
 - 所有 transport 暴露同一领域模型：`Identity`、`NetworkSummary`、`Status`、`FirmwareArtifact`、`ApiError`。
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
@@ -112,7 +115,7 @@
 - Calibration mode control 必须只支持 PPS；Web 的 mode 入口固定为 `电压读数标定`、`温度标定`、`加热曲线标定`，owner-facing 术语不得回退到旧命名。
 - Calibration mode live control 请求必须同时满足硬件 `5V~28V` 与实时 PPS capability。任何 transport 都不得实际发出不在该交集内的电压请求。
 - `runtime_config` 必须支持 `calibration` 子对象，表达 mode、mode-owned PPS 请求、heater on/off、温度模式 ADC-hold 目标与稳定状态；旧 `manualPps*` 调试字段继续保留，但不承载新模式产品语义。`thermalProfileMode` 固定为 `auto|65w|100w`；`thermalControlProfile` 的 preview 继续是单一 RAM overlay，save/clear_saved 必须可携带 `bank=pps3a|pps5a` 写入指定 EEPROM bank。
-- first-class calibration auto jobs 必须支持 `vin_adc_auto` 与 `heater_curve_auto` 两种 `kind`，并通过 `calibration_job` frame / `/calibration/job` endpoint 暴露 `idle|running|completed|failed|canceled` 状态、进度、样本数、下一目标电压与错误信息。
+- first-class calibration auto jobs 必须支持 `vin_adc_auto` 与 `thermal_plant_auto` 两种 `kind`。`thermal_plant_auto` 是加热曲线工作区内的自动命令，不是第四个手动校准模式；它负责同一次瞬态运行中的 heater-curve 与热模型采集，并通过 `calibration_job` frame / `/calibration/job` endpoint 暴露 `idle|running|completed|failed|canceled` 状态、进度、样本数、下一目标电压与错误信息。
 - Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
 - `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
 - `demo=false` 必须使用独立 live scenario，不得混入 demo fixture、degraded demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。
@@ -161,7 +164,7 @@
 - 任何 thermal tune/self-test runtime arm 或 shutdown 写入都必须把 `PUT /runtime` 视为异步请求：同一 lease 下必须轮询 `/status` 直到目标温度与 `heaterEnabled` 状态一致；关热时还必须确认 `activeCoolingEnabled=true`。写入响应中的旧 status 不得直接作为 readback 结论。
 - 一般 runtime 写入也必须以设备确认的 response snapshot 作为本次操作的事实结果：若固件因 thermal model 缺失或安全锁拒绝 `heater_enabled=true`，同一 response 必须返回 `heaterEnabled=false` 与锁定原因，客户端必须立即结算为拒绝，不得显示无限等待或先报成功再回滚。仅在 response 未能反映请求时，Web 才进入有界的 2.5 秒状态确认窗口；窗口到期必须显示一次明确失败。
 - `flux-purr thermal report rerender-legacy`：从旧的 `preliminary-review-*` legacy bundle 或已存在的 `thermal_self_test_preliminary_bundle` 输入目录，重新写出 canonical owner-facing `index.html + run.bundle.json + samples.ndjson + thermal-profile.accepted.json`。该命令是 compliant preliminary review 报告的正式 host 入口；legacy 目录不得再直接充当最终交付页。
-- `flux-purr calibration-mode ...`：提供 owner-facing 三模式入口；现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
+- `flux-purr calibration-mode ...`：提供 owner-facing 三个手动模式入口；`thermal_plant_auto` 只通过 calibration job start/cancel 触发。现有低层 `calibration ...` 与 `heater-curve ...` 原始命令继续保留。
 - `flux-purr wifi set|clear`：通过 leased WiFi endpoint 写入或清除 WiFi 配置，输出必须 redaction password。
 - `flux-purr flash`：默认 dry-run；真实烧录必须显式 `--no-dry-run --confirm FLASH` 且 daemon 启用 real flash。授权的 ESP32-S3 Native USB Serial/JTAG `cu.usbmodem*` 路径必须通过 `espflash --before usb-reset` 自动进入烧录流程，不得要求人工切换下载模式；其他串口保留 `default-reset`。需要保留设备持久化数据的正式烧录仅支持此 `flux-purr -> devd` 路径；直接 `mcu-agentd flash`、直接 `espflash` 或 erase-chip 不属于该保证。
 - `flux-purr monitor`：读取 bounded event backlog，不拥有长期未释放 lease。
@@ -182,7 +185,7 @@
 - `wifi_config` response 的 `wifi` payload 是 `{ wifi: RedactedWifiConfig, network: NetworkSummary }` receipt。`network` 是固件在接受配置时刚发布的 snapshot，`devd` 只能原样验证、持久化和转发，不能合成 `saving`。
 - `runtime_config`：`request_id` + runtime fields；支持 `thermalProfileMode`、`thermalControlProfile.bank` 与 `faultAttentionAcknowledged`。`thermalProfileMode` 只允许 `auto|65w|100w`，`thermalControlProfile.bank` 只允许 `pps3a|pps5a`，HTTP mock 与 native serial 必须在 dispatch 前使用相同校验。status 返回 `thermalProfileMode`、`thermalProfileResolvedBank` 与 `faultAttentionPending`；`auto` 的 resolved bank 只由 advertised PPS capability class 计算，不使用 live current。该 capability class 必须来自同一 selected PPS APDO：先要求覆盖 `20V`，再优先最大电流、最大电压和最小电压。CH224Q 安全限压和 reserve 仍使用 live current。持久化到非 active bank 不得改变 `thermalProfileResolvedBank`；`faultAttentionAcknowledged=true` 的超时回读只有在 `faultAttentionPending=false` 时才可判为成功。
 - `calibration_config`：`request_id` + calibration fields；response 返回 calibration state。校准领域契约见 `#jt8r2`。
-- `calibration_job`：`request_id` + `op=start|cancel` + optional `kind=vin_adc_auto|heater_curve_auto`；response 返回 calibration auto-job 状态。
+- `calibration_job`：`request_id` + `op=start|cancel` + optional `kind=vin_adc_auto|thermal_plant_auto`；response 返回 calibration auto-job 状态。
 - `response`：回显 `request_id`，返回 result 或 error。
 - `status` / `log` / `error`：device-origin async frame。
 - USB JSONL 单帧上限为 `8 KiB`（包含换行）。firmware、native `devd` 与 Browser Web Serial 必须使用同一上限；该容量必须容纳完整 9 点、point-local 的 thermal profile preview/save 请求，超限请求必须在 transport 边界明确拒绝。`save` 必须保留所提供的每一个 `1..=10` point，不得按 profile bank 投影、插值重建或静默丢弃温度点。
@@ -195,7 +198,7 @@
 - 设备选择器中的连接方式按钮表示明确的 operator intent。用户选择 WiFi/LAN、Web Serial 或桥接后，当前 target 必须保持为该连接方式；其它已连接 transport 的 probe、轮询、恢复或迟到状态不得覆盖这次选择。自动采用 Web Serial 只允许发生在 Web Serial 连接事务自身，事务完成后必须释放该自动选择意图。
 - 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
 - Direct Web Serial 控制项只包括 runtime control、manual PPS debug override 与 status polling；status polling 必须回读 target、preset、cooling、heater、`faultAttentionPending`、manual PPS/capability/error 与 power/network summary，并允许通过 `faultAttentionAcknowledged=true` 确认热失控告警，供 Web 与前面板设置界面双向回显。firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
-- Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration draft/apply 和 heater curve preview/save，以保证 calibration workbench 的 transport parity。
+- Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration samples/A-B slots/active-slot 与 heater curve preview/save，以保证 calibration workbench 的 transport parity。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -235,8 +238,8 @@
 - Given CLI 执行真实 thermal self-test，When target ladder 在 preview 模式下全部通过验收，Then 单候选模式结束时的 `thermalControlProfile.op=save` response 必须回显 `thermalControlProfilePreview=false`，`run.json.profilePersistence` 必须为 `saved_tuned_candidate`；每个 stage 必须满足离开 full-speed warmup 后 `<=10s` 进入 hold、最大过冲 `<=3.0°C`、以及进入 hold 后连续 `60s` 峰峰值 `<=3.0°C`。同时，该 stage 的报告必须证明 Approach 参考曲线首选时长是 `5s`、硬上限是 `10s`，并给出该曲线相对实测温度的上下偏差。批测模式不得保存任一候选；任一 stage 或基础设施失败时不得声称 profile 已保存。
 - Given Web 或 CLI 打开 calibration workbench / mode commands，When operator 进入 `电压读数标定`、`温度标定` 或 `加热曲线标定`，Then runtime status、USB JSONL、devd HTTP、CLI 与 Web Serial 都表达相同的 mode live state。
 - Given calibration live control 请求超出硬件 `5V~28V` 或实时 PPS capability，When operator 通过 Web、CLI、devd HTTP 或 Web Serial 提交，Then Web 以受限控件和 inline error 阻止、CLI 报错退出、firmware/devd 拒绝请求，且不会发出非法电压请求。
-- Given `电压读数标定` auto job 启动，When runtime capability 允许，Then job 以 `1V` 步进扫点并把样本写入 `vin_adc draft`。
-- Given `加热曲线标定` auto job 启动，When稳定温区完成采样，Then runtime 先生成平滑后的 `heater_curve preview`，只有用户显式 `Save` 才写入 `active`。
+- Given `电压读数标定` auto job 启动，When runtime capability 允许，Then job 以 `1V` 步进扫点并把样本写入 shared `vin_adc` samples，拟合建议和 A/B persistent slots 保持分离。
+- Given `thermal_plant_auto` starts from `加热曲线标定`, When the single protected transient run completes its `220C` cut-off and `80C` passive cooldown, Then runtime atomically writes the same-run heater curve and thermal model to active; it does not expose an independent heater-curve auto job, preview-to-save gate, candidate, or acceptance step.
 - Given 用户保存默认 USB port，When 重启 `flux-purr-devd serve` 且未显式传入 serial port，Then daemon 只扫描该用户配置 port。
 - Given product release 发布，When 查看 release assets，Then Web、firmware、host-tools 与 release manifest 同挂一个 `vX.Y.Z` Release；manifest 可区分 unchanged component。
 - Given PR 收敛，When checks 完成，Then firmware、devd/CLI、release policy、Web build/test、Web app browser smoke 与授权端口硬件 smoke 均通过；WiFi provisioning 真机写入只通过 devd/USB smoke 覆盖临时 SSID set、clear、redacted event 和最终 disabled readback。

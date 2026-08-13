@@ -10,6 +10,7 @@ describe('calibration leave guard', () => {
   it('maps live calibration modes back to workbench tabs', () => {
     expect(asCalibrationWorkbenchMode('off')).toBeNull()
     expect(asCalibrationWorkbenchMode('heater_curve')).toBe('heater_curve')
+    expect(asCalibrationWorkbenchMode('thermal_plant')).toBe('heater_curve')
     expect(asCalibrationWorkbenchMode('rtd_adc')).toBe('rtd_adc')
     expect(asCalibrationWorkbenchMode('vin_adc')).toBe('vin_adc')
   })

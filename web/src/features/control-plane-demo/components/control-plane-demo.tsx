@@ -3183,7 +3183,7 @@ export function ControlPlaneDemo({
     async (
       request: {
         op: 'start' | 'cancel'
-        kind?: 'vin_adc_auto' | 'heater_curve_auto'
+        kind?: 'vin_adc_auto' | 'thermal_plant_auto'
       },
       failureMessage: string
     ) => {
@@ -4111,6 +4111,9 @@ function consoleViewLabel(view: ConsoleView) {
 }
 
 function asWorkbenchMode(mode: CalibrationMode): CalibrationWorkbenchMode | null {
+  if (mode === 'thermal_plant') {
+    return 'heater_curve'
+  }
   if (mode === 'vin_adc' || mode === 'rtd_adc' || mode === 'heater_curve') {
     return mode
   }
@@ -4514,7 +4517,7 @@ function ViewPanel({
   onCalibrationJobChange: (
     request: {
       op: 'start' | 'cancel'
-      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+      kind?: 'vin_adc_auto' | 'thermal_plant_auto'
     },
     failureMessage: string
   ) => void | Promise<void>
@@ -5838,7 +5841,7 @@ function CalibrationView({
   onCalibrationJobChange: (
     request: {
       op: 'start' | 'cancel'
-      kind?: 'vin_adc_auto' | 'heater_curve_auto'
+      kind?: 'vin_adc_auto' | 'thermal_plant_auto'
     },
     failureMessage: string
   ) => void | Promise<void>
@@ -5985,7 +5988,6 @@ function CalibrationView({
   const heaterPpsMv = parseCalibrationIntegerInput(heaterPpsMvText)
   const heaterPpsError =
     heaterPpsMv == null ? '请输入整数 PPS 电压。' : validateCalibrationPpsInput(device, heaterPpsMv)
-  const heaterCanSubmitPps = hasPpsCapability && heaterPpsError == null
   const activePpsMvText =
     calibrationWorkspaceTab === 'heater_curve'
       ? heaterPpsMvText
@@ -6070,6 +6072,7 @@ function CalibrationView({
       controlsBlocked ||
       pendingCalibrationAction != null ||
       !modeArmed ||
+      runtimeCalibration.mode === 'thermal_plant' ||
       runtimeCalibration.mode === 'off' ||
       runtimeCalibration.ppsEnabled ||
       activePpsMv == null ||
@@ -6109,6 +6112,7 @@ function CalibrationView({
       controlsBlocked ||
       pendingCalibrationAction != null ||
       !modeArmed ||
+      runtimeCalibration.mode === 'thermal_plant' ||
       runtimeCalibration.mode === 'off' ||
       !runtimeCalibration.ppsEnabled ||
       activePpsMv == null ||
@@ -6307,7 +6311,7 @@ function CalibrationView({
                     modeToggle={
                       <CalibrationModeToggle
                         active={modeArmed}
-                        disabled={controlsBlocked}
+                        disabled={controlsBlocked || jobRunning}
                         onEnable={() =>
                           void onModeEnter('heater_curve', {
                             mode: 'heater_curve',
@@ -6332,7 +6336,7 @@ function CalibrationView({
                     }
                     actionSlots={[
                       {
-                        id: 'heater-job-toggle',
+                        id: 'thermal-plant-job-toggle',
                         node: (
                           <button
                             type="button"
@@ -6340,29 +6344,30 @@ function CalibrationView({
                             disabled={
                               controlsBlocked ||
                               pendingCalibrationAction != null ||
-                              (!jobRunning && (!modeArmed || !heaterCanSubmitPps))
+                              (!jobRunning && !hasPpsCapability) ||
+                              (jobRunning && currentJob.kind !== 'thermal_plant_auto')
                             }
                             onClick={() =>
-                              void runCalibrationAction('heater-job-toggle', () =>
-                                onCalibrationJobChange(
-                                  jobRunning
-                                    ? { op: 'cancel' }
-                                    : {
-                                        op: 'start',
-                                        kind: 'heater_curve_auto',
-                                      },
-                                  jobRunning
-                                    ? '加热曲线自动采样取消失败。'
-                                    : '加热曲线自动采样启动失败。'
+                              void runCalibrationAction('thermal-plant-job-toggle', async () => {
+                                if (jobRunning) {
+                                  await onCalibrationJobChange(
+                                    { op: 'cancel' },
+                                    '自动热模型标定停止失败。'
+                                  )
+                                  return
+                                }
+                                await onCalibrationJobChange(
+                                  { op: 'start', kind: 'thermal_plant_auto' },
+                                  '自动热模型标定启动失败。'
                                 )
-                              )
+                              })
                             }
                           >
-                            {calibrationActionPending('heater-job-toggle')
+                            {calibrationActionPending('thermal-plant-job-toggle')
                               ? '处理中...'
                               : jobRunning
-                                ? '取消校准'
-                                : '自动校准'}
+                                ? '停止自动热模型'
+                                : '自动热模型'}
                           </button>
                         ),
                       },
@@ -6373,7 +6378,10 @@ function CalibrationView({
                             label="加热"
                             active={runtimeCalibration.heaterEnabled}
                             disabled={
-                              controlsBlocked || !modeArmed || pendingCalibrationAction != null
+                              controlsBlocked ||
+                              jobRunning ||
+                              !modeArmed ||
+                              pendingCalibrationAction != null
                             }
                             onCheckedChange={() =>
                               void runCalibrationAction('heater-heater-toggle', () =>
@@ -6400,7 +6408,12 @@ function CalibrationView({
                       min={TARGET_TEMP_MIN}
                       max={TARGET_TEMP_MAX}
                       step={TARGET_TEMP_STEP}
-                      disabled={controlsBlocked || !modeArmed || pendingCalibrationAction != null}
+                      disabled={
+                        controlsBlocked ||
+                        jobRunning ||
+                        !modeArmed ||
+                        pendingCalibrationAction != null
+                      }
                       inputAriaLabel="加热曲线标定目标温度输入"
                       sliderAriaLabel="加热曲线标定目标温度滑块"
                       onChange={(value) => {

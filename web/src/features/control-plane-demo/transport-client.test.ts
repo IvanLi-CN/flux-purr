@@ -1157,7 +1157,7 @@ describe('control-plane transport client', () => {
                 files: [
                   {
                     kind: 'elf',
-                    path: 'target/xtensa-esp32s3-none-elf/release/flux-purr',
+                    path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr',
                     sha256: 'sha256:abc',
                     size: 42,
                     flashAddress: null,
@@ -1220,16 +1220,16 @@ describe('control-plane transport client', () => {
         expect(JSON.parse(String(init?.body))).toMatchObject({
           leaseId: 'lease-1',
           op: 'start',
-          kind: 'heater_curve_auto',
+          kind: 'thermal_plant_auto',
         })
         return {
           ok: true,
           json: async () => ({
-            kind: 'heater_curve_auto',
+            kind: 'thermal_plant_auto',
             status: 'running',
             progressPercent: 0,
             samplesCollected: 0,
-            nextRequestMv: 20000,
+            nextRequestMv: 21000,
             message: null,
           }),
         }
@@ -1246,7 +1246,7 @@ describe('control-plane transport client', () => {
     const started = await client.configureCalibrationJob('http://127.0.0.1:30080', 'bench target', {
       leaseId: 'lease-1',
       op: 'start',
-      kind: 'heater_curve_auto',
+      kind: 'thermal_plant_auto',
     })
 
     expect(current).toMatchObject({
@@ -1255,9 +1255,9 @@ describe('control-plane transport client', () => {
       progressPercent: 25,
     })
     expect(started).toMatchObject({
-      kind: 'heater_curve_auto',
+      kind: 'thermal_plant_auto',
       status: 'running',
-      nextRequestMv: 20000,
+      nextRequestMv: 21000,
     })
   })
 
@@ -1349,7 +1349,7 @@ describe('control-plane transport client', () => {
       files: [
         {
           kind: 'elf',
-          path: 'target/xtensa-esp32s3-none-elf/release/flux-purr',
+          path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr',
           sha256: 'sha256:abc',
           size: 42,
           flashAddress: null,

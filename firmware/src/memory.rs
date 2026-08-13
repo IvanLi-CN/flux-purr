@@ -25,6 +25,12 @@ pub const MEMORY_WRITE_DEBOUNCE_MS: u64 = 2_000;
 pub const ADC_CALIBRATION_MAX_SAMPLES: usize = 8;
 pub const HEATER_CURVE_MAX_POINTS: usize = 8;
 pub const THERMAL_PLANT_ANCHOR_COUNT: usize = 2;
+pub const THERMAL_PLANT_TRANSIENT_MAX_SAMPLES: usize = 128;
+pub const THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES: u8 = 12;
+pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV: u8 = 50;
+pub const THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV: u8 = 210;
+pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
+pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
 pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
@@ -79,6 +85,10 @@ const THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER: usize
 const THERMAL_CONTROL_PROFILE_LAYOUT_MARKER: [u8; 4] = *b"TCP2";
 const THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN: usize =
     THERMAL_CONTROL_PROFILE_LAYOUT_MARKER.len();
+const THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER: [u8; 4] = *b"TCP3";
+const THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN: usize =
+    THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER.len();
+const THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN: usize = 28;
 const THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_VALUE_MASK: u16 = 0x0fff;
 const THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_STEP_CENTI_C: u16 = 25;
 const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_LEGACY: usize =
@@ -100,6 +110,8 @@ const THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER: usiz
 const THERMAL_CONTROL_PROFILE_PAYLOAD_LEN: usize = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
     + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
     + THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_POINT_WARMUP_REENTER;
+const THERMAL_PLANT_TRANSIENT_HEADER_LEN: usize = 24;
+const THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN: usize = 6;
 
 const MEMORY_RECORD_MAGIC: [u8; 4] = *b"FPM1";
 const PRESET_NONE_WIRE_VALUE: i16 = i16::MIN;
@@ -132,6 +144,8 @@ const TLV_THERMAL_PLANT_CANDIDATE: u8 = 0x36;
 const TLV_THERMAL_PLANT_ACTIVE: u8 = 0x37;
 const TLV_LAN_PAIRING_TOKEN: u8 = 0x38;
 const TLV_WIFI_STATIC_IPV4: u8 = 0x39;
+const TLV_THERMAL_PLANT_TRANSIENT_ACTIVE: u8 = 0x3a;
+const TLV_HEATER_CURVE_TRANSACTION_ID: u8 = 0x3b;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WifiStaticIpv4Config {
@@ -174,7 +188,14 @@ pub struct MemoryConfig {
     pub adc_calibration: AdcCalibrationConfig,
     pub active_heater_curve: HeaterCurveConfig,
     pub heater_curve_raw_observations: HeaterCurveRawObservations,
+    /// The transient run that captured the persisted raw heater observations.
+    /// A missing identity keeps automatic production heating locked.
+    pub heater_curve_transaction_id: Option<u32>,
+    /// Read-only two-platform records from the removed steady-state calibration.
+    /// They remain decodable so later configuration writes do not reject a legacy
+    /// record, but they never unlock production heating.
     pub thermal_plant_active: Option<ThermalPlantRawTransaction>,
+    pub thermal_plant_transient_active: Option<ThermalPlantTransientTransaction>,
     /// The legacy field is the persisted 3 A / 65 W bank. Keeping its name makes
     /// v1 record migration explicit and avoids a silent behavior change for callers.
     pub active_thermal_control_profile: ThermalControlProfileConfig,
@@ -294,6 +315,54 @@ pub struct ThermalPlantRawAnchor {
 pub struct ThermalPlantRawTransaction {
     pub transaction_id: u32,
     pub anchors: [ThermalPlantRawAnchor; THERMAL_PLANT_ANCHOR_COUNT],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPlantTransientSample {
+    /// 50 ms ticks from the start of the automatic job.
+    pub elapsed_ticks: u16,
+    pub raw_rtd_adc_mv: u16,
+    /// Measured heater voltage, quantized to 100 mV. The PPS request is capped
+    /// at 21 V, so this fits in a byte without losing useful precision.
+    pub heater_voltage_100mv: u8,
+    pub duty_percent: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPlantProjectionRecord {
+    pub convection_mw_per_c_bits: u32,
+    pub radiation_mw_per_k4_bits: u32,
+    pub thermal_capacity_mj_per_c_bits: u32,
+    pub transport_delay_ms: u32,
+}
+
+impl ThermalPlantProjectionRecord {
+    pub fn from_projection(value: ThermalPlantProjection) -> Self {
+        Self {
+            convection_mw_per_c_bits: value.convection_mw_per_c.to_bits(),
+            radiation_mw_per_k4_bits: value.radiation_mw_per_k4.to_bits(),
+            thermal_capacity_mj_per_c_bits: value.thermal_capacity_mj_per_c.to_bits(),
+            transport_delay_ms: value.transport_delay_ms,
+        }
+    }
+
+    pub fn projection(self) -> ThermalPlantProjection {
+        ThermalPlantProjection {
+            convection_mw_per_c: f32::from_bits(self.convection_mw_per_c_bits),
+            radiation_mw_per_k4: f32::from_bits(self.radiation_mw_per_k4_bits),
+            thermal_capacity_mj_per_c: f32::from_bits(self.thermal_capacity_mj_per_c_bits),
+            transport_delay_ms: self.transport_delay_ms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalPlantTransientTransaction {
+    pub transaction_id: u32,
+    pub ambient_raw_rtd_adc_mv: u16,
+    pub sample_count: u8,
+    pub projection: ThermalPlantProjectionRecord,
+    pub samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -539,7 +608,9 @@ impl Default for MemoryConfig {
             adc_calibration: AdcCalibrationConfig::default(),
             active_heater_curve: HeaterCurveConfig::default(),
             heater_curve_raw_observations: HeaterCurveRawObservations::default(),
+            heater_curve_transaction_id: None,
             thermal_plant_active: None,
+            thermal_plant_transient_active: None,
             active_thermal_control_profile: ThermalControlProfileConfig::default(),
             thermal_control_profile_pps5a: ThermalControlProfileConfig::default(),
             thermal_profile_mode: ThermalProfileMode::W65,
@@ -565,9 +636,13 @@ impl MemoryConfig {
         sanitize_adc_calibration(&mut self.adc_calibration);
         sanitize_heater_curve(&mut self.active_heater_curve);
         sanitize_heater_curve_raw_observations(&mut self.heater_curve_raw_observations);
+        self.heater_curve_transaction_id = self.heater_curve_transaction_id.filter(|id| *id != 0);
         self.thermal_plant_active = self
             .thermal_plant_active
             .filter(thermal_plant_raw_transaction_is_complete);
+        self.thermal_plant_transient_active = self
+            .thermal_plant_transient_active
+            .filter(thermal_plant_transient_transaction_has_valid_structure);
         sanitize_thermal_control_profile(&mut self.active_thermal_control_profile);
         sanitize_thermal_control_profile(&mut self.thermal_control_profile_pps5a);
     }
@@ -630,6 +705,80 @@ pub fn thermal_plant_raw_transaction_is_complete(value: &ThermalPlantRawTransact
                 && anchor.ramp_duration_ms > 0
                 && anchor.ramp_energy_mj > 0
         })
+}
+
+pub fn thermal_plant_transient_transaction_has_valid_structure(
+    value: &ThermalPlantTransientTransaction,
+) -> bool {
+    if value.transaction_id == 0
+        || value.ambient_raw_rtd_adc_mv == 0
+        || !(24..=THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8).contains(&value.sample_count)
+    {
+        return false;
+    }
+    let samples = &value.samples[..usize::from(value.sample_count)];
+    if samples
+        .first()
+        .is_none_or(|sample| sample.duty_percent != 0)
+    {
+        return false;
+    }
+    let mut powered_sample_count = 0_u8;
+    let mut has_cooling_sample = false;
+    let mut cooling_started = false;
+    let mut peak_raw_rtd_adc_mv = 0u16;
+    for (index, sample) in samples.iter().enumerate() {
+        if sample.raw_rtd_adc_mv == 0 || sample.duty_percent > 100 {
+            return false;
+        }
+        if index > 0 && sample.elapsed_ticks <= samples[index - 1].elapsed_ticks {
+            return false;
+        }
+        if sample.duty_percent == 0 {
+            if powered_sample_count > 0 {
+                cooling_started = true;
+                has_cooling_sample |= sample.raw_rtd_adc_mv < peak_raw_rtd_adc_mv;
+            }
+        } else if sample.duty_percent == 100
+            && sample.heater_voltage_100mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV
+            && sample.heater_voltage_100mv <= THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV
+            && !cooling_started
+        {
+            powered_sample_count = powered_sample_count.saturating_add(1);
+            peak_raw_rtd_adc_mv = peak_raw_rtd_adc_mv.max(sample.raw_rtd_adc_mv);
+        } else {
+            return false;
+        }
+    }
+    powered_sample_count >= THERMAL_PLANT_TRANSIENT_MIN_POWERED_SAMPLES
+        && cooling_started
+        && has_cooling_sample
+        && peak_raw_rtd_adc_mv > value.ambient_raw_rtd_adc_mv
+}
+
+pub fn thermal_plant_transient_transaction_is_complete(
+    value: &ThermalPlantTransientTransaction,
+) -> bool {
+    if !thermal_plant_transient_transaction_has_valid_structure(value) {
+        return false;
+    }
+    let projection = value.projection.projection();
+    projection.convection_mw_per_c.is_finite()
+        && projection.radiation_mw_per_k4.is_finite()
+        && projection.thermal_capacity_mj_per_c.is_finite()
+        && (0.0..=THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C)
+            .contains(&projection.convection_mw_per_c)
+        && (0.0..=THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4)
+            .contains(&projection.radiation_mw_per_k4)
+        && (100.0..=2_000_000.0).contains(&projection.thermal_capacity_mj_per_c)
+        && projection.transport_delay_ms <= 10_000
+        && (projection.convection_mw_per_c != 0.0 || projection.radiation_mw_per_k4 != 0.0)
+}
+
+pub fn thermal_plant_projection_from_transient(
+    value: &ThermalPlantTransientTransaction,
+) -> Option<ThermalPlantProjection> {
+    thermal_plant_transient_transaction_is_complete(value).then(|| value.projection.projection())
 }
 
 pub fn project_thermal_plant(
@@ -1414,41 +1563,33 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
-    let has_new_thermal_data = config
-        .heater_curve_raw_observations
-        .points
-        .iter()
-        .any(Option::is_some)
-        || config.thermal_plant_active.is_some();
-    if !has_new_thermal_data {
-        let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
-        let thermal_profile_len = encode_thermal_control_profile(
-            &config.active_thermal_control_profile,
-            &mut thermal_profile_payload,
-        );
-        push_tlv(
-            TLV_THERMAL_CONTROL_PROFILE_PPS3A,
-            &thermal_profile_payload[..thermal_profile_len],
-            out,
-            &mut cursor,
-        )?;
-        let pps5a_profile_len = encode_thermal_control_profile(
-            &config.thermal_control_profile_pps5a,
-            &mut thermal_profile_payload,
-        );
-        push_tlv(
-            TLV_THERMAL_CONTROL_PROFILE_PPS5A,
-            &thermal_profile_payload[..pps5a_profile_len],
-            out,
-            &mut cursor,
-        )?;
-        let mode = match config.thermal_profile_mode {
-            ThermalProfileMode::Auto => 0,
-            ThermalProfileMode::W65 => 1,
-            ThermalProfileMode::W100 => 2,
-        };
-        push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
-    }
+    let mut thermal_profile_payload = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+    let thermal_profile_len = encode_thermal_control_profile(
+        &config.active_thermal_control_profile,
+        &mut thermal_profile_payload,
+    );
+    push_tlv(
+        TLV_THERMAL_CONTROL_PROFILE_PPS3A,
+        &thermal_profile_payload[..thermal_profile_len],
+        out,
+        &mut cursor,
+    )?;
+    let pps5a_profile_len = encode_thermal_control_profile(
+        &config.thermal_control_profile_pps5a,
+        &mut thermal_profile_payload,
+    );
+    push_tlv(
+        TLV_THERMAL_CONTROL_PROFILE_PPS5A,
+        &thermal_profile_payload[..pps5a_profile_len],
+        out,
+        &mut cursor,
+    )?;
+    let mode = match config.thermal_profile_mode {
+        ThermalProfileMode::Auto => 0,
+        ThermalProfileMode::W65 => 1,
+        ThermalProfileMode::W100 => 2,
+    };
+    push_tlv(TLV_THERMAL_PROFILE_MODE, &[mode], out, &mut cursor)?;
     let mut raw_curve_payload = [0u8; HEATER_CURVE_MAX_POINTS * 8];
     encode_heater_curve_raw_observations(
         &config.heater_curve_raw_observations,
@@ -1460,10 +1601,26 @@ fn encode_config_payload(
         out,
         &mut cursor,
     )?;
-    if let Some(active) = config.thermal_plant_active {
-        let mut payload = [0u8; 52];
-        encode_thermal_plant_raw_transaction(&active, &mut payload);
-        push_tlv(TLV_THERMAL_PLANT_ACTIVE, &payload, out, &mut cursor)?;
+    if let Some(transaction_id) = config.heater_curve_transaction_id {
+        push_tlv(
+            TLV_HEATER_CURVE_TRANSACTION_ID,
+            &transaction_id.to_le_bytes(),
+            out,
+            &mut cursor,
+        )?;
+    }
+    if let Some(active) = config.thermal_plant_transient_active {
+        let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(active.sample_count) * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN;
+        let mut payload = [0u8; THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN];
+        encode_thermal_plant_transient_transaction(&active, &mut payload[..payload_len]);
+        push_tlv(
+            TLV_THERMAL_PLANT_TRANSIENT_ACTIVE,
+            &payload[..payload_len],
+            out,
+            &mut cursor,
+        )?;
     }
     Ok(cursor)
 }
@@ -1621,15 +1778,29 @@ fn decode_config_payload(
             TLV_HEATER_CURVE_RAW_OBSERVATIONS if len == HEATER_CURVE_MAX_POINTS * 8 => {
                 config.heater_curve_raw_observations = decode_heater_curve_raw_observations(value);
             }
+            TLV_HEATER_CURVE_TRANSACTION_ID if len == 4 => {
+                config.heater_curve_transaction_id =
+                    Some(u32::from_le_bytes([value[0], value[1], value[2], value[3]]));
+            }
             TLV_THERMAL_PLANT_CANDIDATE if len == 52 => {
-                // Candidate records came from the removed acceptance flow. A complete
-                // legacy transaction is the same raw physical model as an active one.
+                // Retain historical records for inspection and lossless decoding only.
+                // They are never promoted to the transient active model.
                 if config.thermal_plant_active.is_none() {
                     config.thermal_plant_active = decode_thermal_plant_raw_transaction(value);
                 }
             }
             TLV_THERMAL_PLANT_ACTIVE if len == 52 => {
                 config.thermal_plant_active = decode_thermal_plant_raw_transaction(value);
+            }
+            TLV_THERMAL_PLANT_TRANSIENT_ACTIVE
+                if (THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                    ..=THERMAL_PLANT_TRANSIENT_HEADER_LEN
+                        + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+                            * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN)
+                    .contains(&len) =>
+            {
+                config.thermal_plant_transient_active =
+                    decode_thermal_plant_transient_transaction(value);
             }
             _ => {}
         }
@@ -1685,6 +1856,7 @@ fn decode_heater_curve_raw_observations(bytes: &[u8]) -> HeaterCurveRawObservati
     config
 }
 
+#[cfg(test)]
 fn encode_thermal_plant_raw_transaction(value: &ThermalPlantRawTransaction, out: &mut [u8]) {
     out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
     let mut cursor = 4;
@@ -1742,6 +1914,82 @@ fn decode_thermal_plant_raw_transaction(bytes: &[u8]) -> Option<ThermalPlantRawT
         anchors,
     };
     thermal_plant_raw_transaction_is_complete(&value).then_some(value)
+}
+
+fn encode_thermal_plant_transient_transaction(
+    value: &ThermalPlantTransientTransaction,
+    out: &mut [u8],
+) {
+    debug_assert_eq!(
+        out.len(),
+        THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(value.sample_count) * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN
+    );
+    out[..4].copy_from_slice(&value.transaction_id.to_le_bytes());
+    out[4..6].copy_from_slice(&value.ambient_raw_rtd_adc_mv.to_le_bytes());
+    out[6] = value.sample_count;
+    out[7] = 0;
+    let projection = value.projection;
+    out[8..12].copy_from_slice(&projection.convection_mw_per_c_bits.to_le_bytes());
+    out[12..16].copy_from_slice(&projection.radiation_mw_per_k4_bits.to_le_bytes());
+    out[16..20].copy_from_slice(&projection.thermal_capacity_mj_per_c_bits.to_le_bytes());
+    out[20..24].copy_from_slice(&projection.transport_delay_ms.to_le_bytes());
+    for (index, sample) in value.samples[..usize::from(value.sample_count)]
+        .iter()
+        .enumerate()
+    {
+        let offset =
+            THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN;
+        out[offset..offset + 2].copy_from_slice(&sample.elapsed_ticks.to_le_bytes());
+        out[offset + 2..offset + 4].copy_from_slice(&sample.raw_rtd_adc_mv.to_le_bytes());
+        out[offset + 4] = sample.heater_voltage_100mv;
+        out[offset + 5] = sample.duty_percent;
+    }
+}
+
+fn decode_thermal_plant_transient_transaction(
+    bytes: &[u8],
+) -> Option<ThermalPlantTransientTransaction> {
+    if bytes.len() < THERMAL_PLANT_TRANSIENT_HEADER_LEN {
+        return None;
+    }
+    let sample_count = bytes[6];
+    let expected_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+        + usize::from(sample_count) * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN;
+    if bytes.len() != expected_len
+        || usize::from(sample_count) > THERMAL_PLANT_TRANSIENT_MAX_SAMPLES
+    {
+        return None;
+    }
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_100mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, sample) in samples[..usize::from(sample_count)].iter_mut().enumerate() {
+        let offset =
+            THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_TRANSIENT_SAMPLE_PAYLOAD_LEN;
+        *sample = ThermalPlantTransientSample {
+            elapsed_ticks: u16::from_le_bytes([bytes[offset], bytes[offset + 1]]),
+            raw_rtd_adc_mv: u16::from_le_bytes([bytes[offset + 2], bytes[offset + 3]]),
+            heater_voltage_100mv: bytes[offset + 4],
+            duty_percent: bytes[offset + 5],
+        };
+    }
+    let value = ThermalPlantTransientTransaction {
+        transaction_id: u32::from_le_bytes(bytes[..4].try_into().ok()?),
+        ambient_raw_rtd_adc_mv: u16::from_le_bytes([bytes[4], bytes[5]]),
+        sample_count,
+        projection: ThermalPlantProjectionRecord {
+            convection_mw_per_c_bits: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            radiation_mw_per_k4_bits: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+            thermal_capacity_mj_per_c_bits: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            transport_delay_ms: u32::from_le_bytes(bytes[20..24].try_into().ok()?),
+        },
+        samples,
+    };
+    thermal_plant_transient_transaction_has_valid_structure(&value).then_some(value)
 }
 
 fn encode_adc_calibration_samples(config: &AdcCalibrationConfig, out: &mut [u8]) {
@@ -1983,7 +2231,104 @@ fn decode_heater_curve(bytes: &[u8]) -> HeaterCurveConfig {
     config
 }
 
+fn write_packed_profile_value(out: &mut [u8], bit_cursor: &mut usize, value: u16, width: usize) {
+    for bit in 0..width {
+        if u32::from(value) & (1_u32 << bit) != 0 {
+            let index = *bit_cursor + bit;
+            out[index / 8] |= 1 << (index % 8);
+        }
+    }
+    *bit_cursor += width;
+}
+
+fn read_packed_profile_value(bytes: &[u8], bit_cursor: &mut usize, width: usize) -> u16 {
+    let mut value = 0_u16;
+    for bit in 0..width {
+        let index = *bit_cursor + bit;
+        if bytes[index / 8] & (1 << (index % 8)) != 0 {
+            value |= 1 << bit;
+        }
+    }
+    *bit_cursor += width;
+    value
+}
+
 fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mut [u8]) -> usize {
+    out[..THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN]
+        .copy_from_slice(&THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER);
+    let settings_start = THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN;
+    let settings_end =
+        settings_start + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
+    encode_thermal_control_profile_settings(
+        &config.settings,
+        &mut out[settings_start..settings_end],
+    );
+    let mut cursor = settings_end;
+    for point in config
+        .points
+        .into_iter()
+        .flatten()
+        .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
+    {
+        let target = clamp_temp_c(point.target_temp_c) as u16;
+        let brake_distance = point.brake_distance_centi_c.clamp(100, 5_000);
+        let warmup_power = point.warmup_power_permille.min(1_000);
+        let approach_power = point.approach_power_permille.min(1_000);
+        let approach_floor_power = point.approach_floor_power_permille.min(1_000);
+        let approach_damping_exponent = point.approach_damping_exponent_permille.clamp(
+            100,
+            THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_MAX,
+        );
+        let approach_tail_window = point
+            .approach_tail_window_centi_c
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_TAIL_WINDOW_CENTI_C_MAX);
+        let values = [
+            target,
+            brake_distance,
+            warmup_power,
+            approach_power,
+            approach_floor_power,
+            approach_damping_exponent,
+            approach_tail_window,
+            point.hold_power_permille.min(1_000),
+            point.hold_reheat_power_permille.min(1_000),
+            point.hold_entry_centi_c.min(5_000),
+            point.hold_exit_centi_c.min(5_000),
+            point.hold_on_centi_c.min(5_000),
+            point.hold_off_centi_c.min(5_000),
+            point.overshoot_cutoff_centi_c.min(5_000),
+            point.hold_kp_permille_per_c.min(10_000),
+            point.hold_ki_permille_per_c_tick.min(10_000),
+            point
+                .hold_blend_ticks
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+            point
+                .approach_lead_ticks
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+            point
+                .hold_lead_ticks
+                .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+            point.warmup_reenter_centi_c.clamp(50, 5_000),
+        ];
+        let widths = [
+            9, 13, 10, 10, 10, 12, 9, 10, 10, 13, 13, 13, 13, 13, 14, 14, 8, 8, 8, 13,
+        ];
+        let packed = &mut out[cursor..cursor + THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN];
+        packed.fill(0);
+        let mut bit_cursor = 0;
+        for (value, width) in values.into_iter().zip(widths) {
+            write_packed_profile_value(packed, &mut bit_cursor, value, width);
+        }
+        cursor += THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN;
+    }
+    cursor
+}
+
+#[cfg(test)]
+fn encode_thermal_control_profile_tcp2(
+    config: &ThermalControlProfileConfig,
+    out: &mut [u8],
+) -> usize {
     out[..THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN]
         .copy_from_slice(&THERMAL_CONTROL_PROFILE_LAYOUT_MARKER);
     let settings_start = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN;
@@ -2064,6 +2409,83 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
 #[allow(clippy::manual_is_multiple_of)]
 fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
     let mut config = ThermalControlProfileConfig::default();
+    if bytes.starts_with(&THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER)
+        && bytes.len()
+            >= THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
+                + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+        && (bytes.len()
+            - THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            % THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN
+            == 0
+        && (bytes.len()
+            - THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            / THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS
+    {
+        let settings_start = THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN;
+        let settings_end =
+            settings_start + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY;
+        config.settings =
+            decode_thermal_control_profile_settings(&bytes[settings_start..settings_end]);
+        let point_count =
+            (bytes.len() - settings_end) / THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN;
+        for (slot, packed) in config.points.iter_mut().zip(
+            bytes[settings_end..]
+                .chunks_exact(THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN)
+                .take(point_count),
+        ) {
+            let mut bit_cursor = 0;
+            let target_temp_c = read_packed_profile_value(packed, &mut bit_cursor, 9) as i16;
+            let brake_distance_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            let warmup_power_permille = read_packed_profile_value(packed, &mut bit_cursor, 10);
+            let approach_power_permille = read_packed_profile_value(packed, &mut bit_cursor, 10);
+            let approach_floor_power_permille =
+                read_packed_profile_value(packed, &mut bit_cursor, 10);
+            let approach_damping_exponent_permille =
+                read_packed_profile_value(packed, &mut bit_cursor, 12);
+            let approach_tail_window_centi_c =
+                read_packed_profile_value(packed, &mut bit_cursor, 9);
+            let hold_power_permille = read_packed_profile_value(packed, &mut bit_cursor, 10);
+            let hold_reheat_power_permille = read_packed_profile_value(packed, &mut bit_cursor, 10);
+            let hold_entry_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            let hold_exit_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            let hold_on_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            let hold_off_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            let overshoot_cutoff_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            let hold_kp_permille_per_c = read_packed_profile_value(packed, &mut bit_cursor, 14);
+            let hold_ki_permille_per_c_tick =
+                read_packed_profile_value(packed, &mut bit_cursor, 14);
+            let hold_blend_ticks = read_packed_profile_value(packed, &mut bit_cursor, 8);
+            let approach_lead_ticks = read_packed_profile_value(packed, &mut bit_cursor, 8);
+            let hold_lead_ticks = read_packed_profile_value(packed, &mut bit_cursor, 8);
+            let warmup_reenter_centi_c = read_packed_profile_value(packed, &mut bit_cursor, 13);
+            *slot = Some(ThermalControlProfilePointConfig {
+                target_temp_c,
+                brake_distance_centi_c,
+                warmup_power_permille,
+                warmup_reenter_centi_c,
+                approach_power_permille,
+                approach_floor_power_permille,
+                approach_damping_exponent_permille,
+                approach_tail_window_centi_c,
+                hold_power_permille,
+                hold_reheat_power_permille,
+                hold_entry_centi_c,
+                hold_exit_centi_c,
+                hold_on_centi_c,
+                hold_off_centi_c,
+                overshoot_cutoff_centi_c,
+                hold_kp_permille_per_c,
+                hold_ki_permille_per_c_tick,
+                hold_blend_ticks,
+                approach_lead_ticks,
+                hold_lead_ticks,
+            });
+        }
+        return config;
+    }
     let mut cursor = 0;
     // Preserve the preceding on-device profile layout so an upgrade does not shift the
     // working-voltage floor or current reserve into the wrong fields.
@@ -2504,6 +2926,20 @@ fn decode_thermal_control_profile(bytes: &[u8]) -> ThermalControlProfileConfig {
 #[allow(clippy::manual_is_multiple_of)]
 fn is_supported_thermal_control_profile(bytes: &[u8]) -> bool {
     let len = bytes.len();
+    let marked_packed = bytes.starts_with(&THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER)
+        && len
+            >= THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
+                + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
+        && (len
+            - THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            % THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN
+            == 0
+        && (len
+            - THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
+            - THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY)
+            / THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN
+            <= THERMAL_CONTROL_PROFILE_MAX_POINTS;
     let marked_current = bytes.starts_with(&THERMAL_CONTROL_PROFILE_LAYOUT_MARKER)
         && len
             >= THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
@@ -2620,7 +3056,8 @@ fn is_supported_thermal_control_profile(bytes: &[u8]) -> bool {
     let current_legacy_points_only = len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN;
     let current_previous_points_only =
         len == THERMAL_CONTROL_PROFILE_POINTS_PAYLOAD_LEN_WITH_WARMUP;
-    marked_current
+    marked_packed
+        || marked_current
         || current_with_point_warmup_reenter
         || previous_settings_with_current_points
         || current_with_settings
@@ -3272,7 +3709,7 @@ mod tests {
         config.active_thermal_control_profile.points[0]
             .as_mut()
             .expect("sample profile point")
-            .approach_tail_window_centi_c = 175;
+            .approach_tail_window_centi_c = 176;
 
         let mut current = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
         let current_len =
@@ -3282,7 +3719,7 @@ mod tests {
             decoded_current.points[0]
                 .expect("current point")
                 .approach_tail_window_centi_c,
-            175
+            176
         );
 
         let point = config.active_thermal_control_profile.points[0].expect("sample profile point");
@@ -3372,14 +3809,14 @@ mod tests {
         let encoded_len = encode_thermal_control_profile(&decoded, &mut encoded);
         assert_eq!(
             encoded_len,
-            THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN
+            THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN
                 + THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_WITH_GLOBALS_ONLY
         );
         assert_eq!(
-            &encoded[..THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN],
-            &THERMAL_CONTROL_PROFILE_LAYOUT_MARKER
+            &encoded[..THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN],
+            &THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER
         );
-        let settings_start = THERMAL_CONTROL_PROFILE_LAYOUT_MARKER_LEN;
+        let settings_start = THERMAL_CONTROL_PROFILE_PACKED_LAYOUT_MARKER_LEN;
         assert_eq!(
             u16::from_le_bytes([
                 encoded[settings_start + 3 * 2],
@@ -3394,6 +3831,15 @@ mod tests {
             ]),
             350
         );
+    }
+
+    #[test]
+    fn tcp2_profile_payload_remains_decodable() {
+        let profile = sample_config().active_thermal_control_profile;
+        let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+        let len = encode_thermal_control_profile_tcp2(&profile, &mut bytes);
+
+        assert_eq!(decode_thermal_control_profile(&bytes[..len]), profile);
     }
 
     #[test]
@@ -3910,8 +4356,43 @@ mod tests {
         }
     }
 
+    fn sample_transient_thermal_plant_transaction() -> ThermalPlantTransientTransaction {
+        let mut samples = [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_100mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+        for (index, sample) in samples.iter_mut().take(24).enumerate() {
+            *sample = ThermalPlantTransientSample {
+                elapsed_ticks: (index as u16 + 1) * 10,
+                raw_rtd_adc_mv: if index == 0 {
+                    250
+                } else if index <= 12 {
+                    250 + index as u16 * 8
+                } else {
+                    346 - (index as u16 - 12) * 8
+                },
+                heater_voltage_100mv: if (1..=12).contains(&index) { 200 } else { 0 },
+                duty_percent: if (1..=12).contains(&index) { 100 } else { 0 },
+            };
+        }
+        ThermalPlantTransientTransaction {
+            transaction_id: 0x5452_4e53,
+            ambient_raw_rtd_adc_mv: 250,
+            sample_count: 24,
+            projection: ThermalPlantProjectionRecord::from_projection(ThermalPlantProjection {
+                convection_mw_per_c: 120.0,
+                radiation_mw_per_k4: 0.0000002,
+                thermal_capacity_mj_per_c: 42_000.0,
+                transport_delay_ms: 500,
+            }),
+            samples,
+        }
+    }
+
     #[test]
-    fn raw_thermal_data_roundtrips_without_legacy_profiles() {
+    fn transient_thermal_data_roundtrips_with_saved_profiles() {
         let mut config = sample_config();
         config.heater_curve_raw_observations.points[0] = Some(HeaterCurveRawObservation {
             raw_rtd_adc_mv: 250,
@@ -3920,6 +4401,9 @@ mod tests {
             resistance_milliohms: 3_333,
         });
         config.thermal_plant_active = Some(sample_thermal_plant_transaction());
+        let transaction = sample_transient_thermal_plant_transaction();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
         let record = MemoryRecord {
             sequence: 51,
             config,
@@ -3933,22 +4417,205 @@ mod tests {
             record.config.heater_curve_raw_observations
         );
         assert_eq!(
-            decoded.config.thermal_plant_active,
-            record.config.thermal_plant_active
+            decoded.config.thermal_plant_transient_active,
+            record.config.thermal_plant_transient_active
         );
-        assert!(
-            decoded
-                .config
-                .active_thermal_control_profile
-                .points
-                .iter()
-                .all(Option::is_none)
+        assert_eq!(decoded.config.thermal_plant_active, None);
+        assert_eq!(
+            decoded.config.heater_curve_transaction_id,
+            record.config.heater_curve_transaction_id
+        );
+        assert_eq!(
+            decoded.config.active_thermal_control_profile,
+            record.config.active_thermal_control_profile
+        );
+        assert_eq!(
+            decoded.config.thermal_control_profile_pps5a,
+            record.config.thermal_control_profile_pps5a
+        );
+        assert_eq!(
+            decoded.config.thermal_profile_mode,
+            record.config.thermal_profile_mode
         );
         assert!(len <= MEMORY_SLOT_SIZE);
     }
 
     #[test]
-    fn legacy_candidate_tlv_migrates_to_active_thermal_model() {
+    fn maximum_transient_trace_roundtrips_within_one_memory_record() {
+        let mut config = sample_config();
+        config.wifi_ssid.clear();
+        config.wifi_password.clear();
+        for _ in 0..MEMORY_WIFI_SSID_MAX_LEN {
+            config.wifi_ssid.push('s').expect("maximum SSID fits");
+        }
+        for _ in 0..MEMORY_WIFI_PASSWORD_MAX_LEN {
+            config
+                .wifi_password
+                .push('p')
+                .expect("maximum password fits");
+        }
+        config.lan_pairing_token = Some([0xa5; crate::lan::LAN_TOKEN_BYTES]);
+        config.wifi_static_ipv4 = Some(WifiStaticIpv4Config {
+            address: [192, 168, 31, 10],
+            prefix_len: 24,
+            gateway: [192, 168, 31, 1],
+            dns: [1, 1, 1, 1],
+        });
+        let pps3a_template =
+            config.active_thermal_control_profile.points[1].expect("3A profile template");
+        let pps5a_template =
+            config.thermal_control_profile_pps5a.points[1].expect("5A profile template");
+        for index in 2..THERMAL_CONTROL_PROFILE_MAX_POINTS {
+            let mut pps3a_point = pps3a_template;
+            pps3a_point.target_temp_c = 200 + index as i16 * 10;
+            config.active_thermal_control_profile.points[index] = Some(pps3a_point);
+            let mut pps5a_point = pps5a_template;
+            pps5a_point.target_temp_c = 240 + index as i16 * 10;
+            config.thermal_control_profile_pps5a.points[index] = Some(pps5a_point);
+        }
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.sample_count = THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8;
+        for (index, sample) in transaction.samples.iter_mut().enumerate() {
+            *sample = ThermalPlantTransientSample {
+                elapsed_ticks: (index as u16 + 1) * 10,
+                raw_rtd_adc_mv: if index == 0 {
+                    250
+                } else if index < 64 {
+                    250 + index as u16 * 4
+                } else {
+                    502 - (index as u16 - 64) * 2
+                },
+                heater_voltage_100mv: if (1..64).contains(&index) { 200 } else { 0 },
+                duty_percent: if (1..64).contains(&index) { 100 } else { 0 },
+            };
+        }
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
+        let record = MemoryRecord {
+            sequence: 52,
+            config: config.clone(),
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("maximum trace encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("maximum trace decodes");
+
+        assert!(len <= MEMORY_SLOT_SIZE);
+        assert_eq!(
+            decoded.config.thermal_plant_transient_active,
+            Some(transaction)
+        );
+        assert_eq!(
+            decoded.config.active_thermal_control_profile,
+            config.active_thermal_control_profile
+        );
+        assert_eq!(
+            decoded.config.thermal_control_profile_pps5a,
+            config.thermal_control_profile_pps5a
+        );
+        assert_eq!(decoded.config.wifi_ssid, config.wifi_ssid);
+        assert_eq!(decoded.config.wifi_password, config.wifi_password);
+        assert_eq!(decoded.config.lan_pairing_token, config.lan_pairing_token);
+        assert_eq!(decoded.config.wifi_static_ipv4, config.wifi_static_ipv4);
+        assert_eq!(
+            decoded.config.heater_curve_transaction_id,
+            config.heater_curve_transaction_id
+        );
+    }
+
+    #[test]
+    fn structurally_valid_transient_with_invalid_projection_retains_raw_trace() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.projection = ThermalPlantProjectionRecord {
+            convection_mw_per_c_bits: 0,
+            radiation_mw_per_k4_bits: 0,
+            thermal_capacity_mj_per_c_bits: 0,
+            transport_delay_ms: 0,
+        };
+        assert!(thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        let mut config = sample_config();
+        config.heater_curve_transaction_id = Some(transaction.transaction_id);
+        config.thermal_plant_transient_active = Some(transaction);
+        let record = MemoryRecord {
+            sequence: 53,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).expect("invalid trace encodes");
+        let decoded = decode_memory_record(&bytes[..len]).expect("invalid trace decodes");
+
+        assert_eq!(
+            decoded.config.thermal_plant_transient_active,
+            Some(transaction)
+        );
+        assert!(thermal_plant_projection_from_transient(&transaction).is_none());
+    }
+
+    #[test]
+    fn transient_record_requires_cooling_after_heating() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[14].duty_percent = 100;
+        transaction.samples[14].heater_voltage_100mv = 200;
+
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        for sample in transaction.samples.iter_mut().take(24).skip(12) {
+            sample.raw_rtd_adc_mv = 338;
+        }
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].duty_percent = 1;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[0].duty_percent = 100;
+        transaction.samples[0].heater_voltage_100mv = 200;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_100mv =
+            THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_100MV - 1;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[1].heater_voltage_100mv =
+            THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_100MV + 1;
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+
+        transaction = sample_transient_thermal_plant_transaction();
+        transaction.projection =
+            ThermalPlantProjectionRecord::from_projection(ThermalPlantProjection {
+                convection_mw_per_c: THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C + 1.0,
+                radiation_mw_per_k4: 0.0000002,
+                thermal_capacity_mj_per_c: 42_000.0,
+                transport_delay_ms: 500,
+            });
+        assert!(!thermal_plant_transient_transaction_is_complete(
+            &transaction
+        ));
+    }
+
+    #[test]
+    fn legacy_candidate_tlv_remains_decode_only() {
         let transaction = sample_thermal_plant_transaction();
         let mut transaction_payload = [0u8; 52];
         encode_thermal_plant_raw_transaction(&transaction, &mut transaction_payload);
@@ -3966,10 +4633,11 @@ mod tests {
             .expect("legacy candidate payload decodes");
 
         assert_eq!(decoded.thermal_plant_active, Some(transaction));
+        assert_eq!(decoded.thermal_plant_transient_active, None);
     }
 
     #[test]
-    fn invalid_legacy_candidate_tlv_migrates_without_a_valid_projection() {
+    fn invalid_legacy_candidate_tlv_remains_decode_only() {
         let mut transaction = sample_thermal_plant_transaction();
         transaction.anchors[1].target_raw_rtd_adc_mv = transaction.anchors[0].target_raw_rtd_adc_mv;
         let mut transaction_payload = [0u8; 52];
