@@ -2880,6 +2880,7 @@ async fn configure_calibration_job(
                 ..CalibrationJobState::default()
             };
             disarm_mock_thermal_plant(&mut device.status);
+            device.status.calibration.mode = CalibrationMode::Off;
         }
         CalibrationJobOp::Start => {
             if device.status.calibration.job.status == CalibrationJobStatus::Running {
@@ -9617,6 +9618,18 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(canceled.status, CalibrationJobStatus::Canceled);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .devices
+                .get("mock-fp-lab-01")
+                .unwrap()
+                .status
+                .calibration
+                .mode,
+            CalibrationMode::Off
+        );
 
         let idle_cancel = configure_calibration_job(
             State(state),

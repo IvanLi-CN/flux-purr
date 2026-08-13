@@ -7036,6 +7036,7 @@ fn calibration_job_fail(
     calibration.model_target_temp_c = None;
     calibration.heater_enabled = false;
     if thermal_plant_job {
+        calibration.mode = CalibrationMode::Off;
         calibration.immediate_heater_disarm_pending = true;
     }
     if clear_manual_pps && manual_pps.owner == ManualPpsOwner::Calibration {
@@ -7075,6 +7076,7 @@ fn calibration_job_canceled(
     calibration.job.message = None;
     calibration.job_data = None;
     calibration.heater_enabled = false;
+    calibration.mode = CalibrationMode::Off;
     calibration.immediate_heater_disarm_pending = true;
     if manual_pps.owner == ManualPpsOwner::Calibration {
         manual_pps.clear();
@@ -19420,6 +19422,7 @@ mod tests {
         calibration_job_canceled(&mut calibration, &mut manual_pps);
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Canceled);
+        assert_eq!(calibration.mode, CalibrationMode::Off);
         assert!(!calibration.heater_enabled);
         assert!(take_immediate_heater_disarm(&mut calibration));
 
