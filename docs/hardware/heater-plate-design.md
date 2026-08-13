@@ -43,13 +43,16 @@ The `70 mm x 70 mm` heater stack also uses separate non-heater companion boards 
 
 ## 4) Common Electrical Model
 
-Each heater plate must be measured during bring-up and the measured cold resistance must be used by firmware power limiting.
+Each heater plate must be measured during bring-up. Its measured resistance curve is used to estimate heater power and thermal-plant input.
 
-The firmware voltage request limit is:
+For a selected PPS APDO, the firmware power estimate is:
 
 ```text
-V_cmd <= min(V_source_max, I_source_max * R_estimated(T))
+Pmax(T) = min(V_source_max^2 / R_estimated(T), V_source_max * I_source_max)
+V_cmd <= V_source_max
 ```
+
+The APDO contract owns the current boundary. `R_estimated(T)` and profile current reserve do not lower the PPS/AVS request ceiling; fixed-PD fallback uses PWM to enforce its negotiated current.
 
 Copper temperature coefficient used for first-order estimation:
 
