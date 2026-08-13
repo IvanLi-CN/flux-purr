@@ -10393,10 +10393,7 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "net_http")]
     {
         if let Err(error) =
-            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
-                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
-            })
-            .await
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config).await
         {
             warn!("LAN control plane startup failed: {=str}", error.message());
             flux_purr_firmware::net::report_startup_failure(error).await;
