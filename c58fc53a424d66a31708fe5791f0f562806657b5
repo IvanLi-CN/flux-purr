@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "20422ac5261f6d287bc822cce2a9c85b3f0bbfcf",
+  "pr_number": 65,
+  "pr_title": "fix(thermal): calibrate plant at full APDO voltage",
+  "product": {
+    "effective_version": "0.16.2",
+    "tag": "v0.16.2"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "c58fc53a424d66a31708fe5791f0f562806657b5",
+  "type_label": "type:patch"
+}
