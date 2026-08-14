@@ -4744,14 +4744,12 @@ fn apply_successful_eeprom_maintenance_operation(
     op: EepromMaintenanceOp,
     ui_state: &mut FrontPanelUiState,
     memory_config: &mut MemoryConfig,
-    memory_sequence: &mut u32,
     memory_commit_due_ms: &mut Option<u64>,
 ) {
     if raw_eeprom_write_requires_restart_lock(op) {
         ui_state.eeprom_data_incompatible = true;
     } else if matches!(op, EepromMaintenanceOp::Erase) {
         *memory_config = MemoryConfig::default();
-        *memory_sequence = 0;
         *memory_commit_due_ms = None;
         apply_memory_config_to_ui(ui_state, memory_config);
     }
@@ -9677,7 +9675,6 @@ async fn process_control_line(
                     op,
                     ui_state,
                     memory_config,
-                    memory_sequence,
                     memory_commit_due_ms,
                 );
                 if matches!(op, EepromMaintenanceOp::Erase) {
@@ -14721,14 +14718,13 @@ mod tests {
             target_temp_c: 180,
             ..MemoryConfig::default()
         };
-        let mut sequence = 9;
+        let sequence = 9;
         let mut commit_due_ms = Some(20);
 
         apply_successful_eeprom_maintenance_operation(
             EepromMaintenanceOp::Write,
             &mut state,
             &mut config,
-            &mut sequence,
             &mut commit_due_ms,
         );
         assert!(state.eeprom_data_incompatible);
@@ -14739,11 +14735,10 @@ mod tests {
             EepromMaintenanceOp::Erase,
             &mut state,
             &mut config,
-            &mut sequence,
             &mut commit_due_ms,
         );
         assert_eq!(config, MemoryConfig::default());
-        assert_eq!(sequence, 0);
+        assert_eq!(sequence, 9);
         assert_eq!(commit_due_ms, None);
         assert_eq!(state.target_temp_c, MemoryConfig::default().target_temp_c);
         assert!(!state.eeprom_data_incompatible);
