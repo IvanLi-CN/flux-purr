@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "4a4068053d6f3f04bc16fff50ca93f2c13a7f7b4",
+  "pr_number": 66,
+  "pr_title": "fix(firmware): harden thermal calibration and EEPROM recovery",
+  "product": {
+    "effective_version": "0.16.3",
+    "tag": "v0.16.3"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "e9754917ee23481dd30571fb7a78cb2c486b82a3",
+  "type_label": "type:patch"
+}
