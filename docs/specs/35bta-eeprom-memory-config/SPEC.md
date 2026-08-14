@@ -63,7 +63,7 @@
 - EEPROM 读写失败不得阻断 heater/fan 保护逻辑；fallback flash 不可用时保存失败必须可见，但不得屏蔽安全保护。
 - 日志不得输出 Wi-Fi 密码明文。
 - EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
-- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
+- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、请求 fixed PD，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
 
 ### SHOULD
 

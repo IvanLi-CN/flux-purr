@@ -4735,8 +4735,35 @@ fn eeprom_data_is_incompatible(has_valid_record: bool, contains_data: bool) -> b
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const fn raw_eeprom_write_requires_restart_lock(op: EepromMaintenanceOp) -> bool {
-    matches!(op, EepromMaintenanceOp::Write)
+const fn raw_eeprom_operation_mutates(op: EepromMaintenanceOp) -> bool {
+    matches!(op, EepromMaintenanceOp::Write | EepromMaintenanceOp::Erase)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn begin_mutating_eeprom_maintenance(
+    ui_state: &mut FrontPanelUiState,
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    // The EEPROM may already be partially changed when the first I2C failure
+    // is reported. Lock power and suppress normal record writes before sending
+    // the first raw byte.
+    ui_state.heater_enabled = false;
+    ui_state.heater_output_percent = 0;
+    ui_state.eeprom_data_incompatible = true;
+    calibration_job_canceled(calibration, manual_pps);
+    calibration.mode = CalibrationMode::Off;
+    calibration.pps_enabled = false;
+    calibration.pps_mv = None;
+    calibration.pps_ma = None;
+    calibration.heater_enabled = false;
+    calibration.job_data = None;
+    calibration.model_target_temp_c = None;
+    calibration.thermal_plant_completion_disarm_pending = false;
+    calibration.immediate_heater_disarm_pending = true;
+    manual_pps.clear();
+    *memory_commit_due_ms = None;
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4746,12 +4773,20 @@ fn apply_successful_eeprom_maintenance_operation(
     memory_config: &mut MemoryConfig,
     memory_commit_due_ms: &mut Option<u64>,
 ) {
-    if raw_eeprom_write_requires_restart_lock(op) {
-        ui_state.eeprom_data_incompatible = true;
-    } else if matches!(op, EepromMaintenanceOp::Erase) {
+    if matches!(op, EepromMaintenanceOp::Erase) {
         *memory_config = MemoryConfig::default();
         *memory_commit_due_ms = None;
         apply_memory_config_to_ui(ui_state, memory_config);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn discard_deferred_memory_commit_for_incompatible_eeprom(
+    eeprom_data_incompatible: bool,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    if eeprom_data_incompatible {
+        *memory_commit_due_ms = None;
     }
 }
 
@@ -9223,6 +9258,7 @@ async fn process_control_line(
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
+    ch224q_address: Address,
     flash_storage: &mut FlashStorage,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     thermal_plant_workspace: &mut CalibrationThermalPlantWorkspace,
@@ -9665,10 +9701,30 @@ async fn process_control_line(
                     ),
                 );
             }
-            ui_state.heater_enabled = false;
-            calibration_job_canceled(calibration_runtime_state, manual_pps);
-            needs_redraw = true;
             let op = command.op;
+            if raw_eeprom_operation_mutates(op) {
+                begin_mutating_eeprom_maintenance(
+                    ui_state,
+                    calibration_runtime_state,
+                    manual_pps,
+                    memory_commit_due_ms,
+                );
+                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+                if !write_ch224q_payload(pd_i2c, ch224q_address, &fixed_payload).await {
+                    return (
+                        needs_redraw,
+                        usb_error_response(
+                            request_id,
+                            "eeprom_power_disarm_failed",
+                            "EEPROM maintenance could not restore fixed PD.",
+                        ),
+                    );
+                }
+            } else {
+                ui_state.heater_enabled = false;
+                calibration_job_canceled(calibration_runtime_state, manual_pps);
+            }
+            needs_redraw = true;
             let response = usb_eeprom_maintenance_response(request_id, command, pd_i2c).await;
             if matches!(&response, UsbFrame::Response { ok: true, .. }) {
                 apply_successful_eeprom_maintenance_operation(
@@ -10925,6 +10981,7 @@ async fn main(_spawner: Spawner) {
                         &mut memory_commit_due_ms,
                         &mut memory_sequence,
                         &mut pd_i2c,
+                        ch224q_address,
                         &mut flash_storage,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
@@ -11069,6 +11126,7 @@ async fn main(_spawner: Spawner) {
                 &mut memory_commit_due_ms,
                 &mut memory_sequence,
                 &mut pd_i2c,
+                ch224q_address,
                 &mut flash_storage,
                 &mut calibration_runtime_state,
                 thermal_plant_workspace,
@@ -11804,6 +11862,10 @@ async fn main(_spawner: Spawner) {
             );
         }
 
+        discard_deferred_memory_commit_for_incompatible_eeprom(
+            ui_state.eeprom_data_incompatible,
+            &mut memory_commit_due_ms,
+        );
         if memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms) {
             memory_commit_due_ms = None;
             if commit_memory_config_now(
@@ -14718,8 +14780,41 @@ mod tests {
             target_temp_c: 180,
             ..MemoryConfig::default()
         };
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::HeaterCurve,
+            pps_enabled: true,
+            pps_mv: Some(20_000),
+            pps_ma: Some(3_000),
+            heater_enabled: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            owner: ManualPpsOwner::Debug,
+            target_mv: Some(20_000),
+            target_ma: Some(3_000),
+            applied_mv: Some(20_000),
+            ..ManualPpsState::default()
+        };
         let sequence = 9;
         let mut commit_due_ms = Some(20);
+
+        begin_mutating_eeprom_maintenance(
+            &mut state,
+            &mut calibration,
+            &mut manual_pps,
+            &mut commit_due_ms,
+        );
+        assert!(raw_eeprom_operation_mutates(EepromMaintenanceOp::Write));
+        assert!(raw_eeprom_operation_mutates(EepromMaintenanceOp::Erase));
+        assert!(!raw_eeprom_operation_mutates(EepromMaintenanceOp::Read));
+        assert!(state.eeprom_data_incompatible);
+        assert!(!manual_pps.enabled);
+        assert!(manual_pps.automatic_restore_pending);
+        assert_eq!(calibration.mode, CalibrationMode::Off);
+        assert!(!calibration.heater_enabled);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert_eq!(commit_due_ms, None);
 
         apply_successful_eeprom_maintenance_operation(
             EepromMaintenanceOp::Write,
@@ -14742,6 +14837,10 @@ mod tests {
         assert_eq!(commit_due_ms, None);
         assert_eq!(state.target_temp_c, MemoryConfig::default().target_temp_c);
         assert!(!state.eeprom_data_incompatible);
+
+        commit_due_ms = Some(42);
+        discard_deferred_memory_commit_for_incompatible_eeprom(true, &mut commit_due_ms);
+        assert_eq!(commit_due_ms, None);
     }
 
     #[test]
