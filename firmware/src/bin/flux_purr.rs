@@ -69,6 +69,8 @@ use flux_purr_firmware::board::s3_frontpanel;
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
+#[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
+use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 use flux_purr_firmware::control_plane::LanPairingCode;
 #[cfg(test)]
@@ -93,7 +95,7 @@ use flux_purr_firmware::control_plane::{
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
-    CalibrationJobCommandWire, CalibrationJobOpWire, EepromMaintenanceCommand, EepromMaintenanceOp,
+    CalibrationJobCommandWire, CalibrationJobOpWire, EepromMaintenanceCommand,
     HeaterCurveConfigCommand, HeaterCurveConfigOp,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -4730,6 +4732,29 @@ fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) 
 #[cfg(any(target_arch = "xtensa", test))]
 fn eeprom_data_is_incompatible(has_valid_record: bool, contains_data: bool) -> bool {
     !has_valid_record && contains_data
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn raw_eeprom_write_requires_restart_lock(op: EepromMaintenanceOp) -> bool {
+    matches!(op, EepromMaintenanceOp::Write)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn apply_successful_eeprom_maintenance_operation(
+    op: EepromMaintenanceOp,
+    ui_state: &mut FrontPanelUiState,
+    memory_config: &mut MemoryConfig,
+    memory_sequence: &mut u32,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    if raw_eeprom_write_requires_restart_lock(op) {
+        ui_state.eeprom_data_incompatible = true;
+    } else if matches!(op, EepromMaintenanceOp::Erase) {
+        *memory_config = MemoryConfig::default();
+        *memory_sequence = 0;
+        *memory_commit_due_ms = None;
+        apply_memory_config_to_ui(ui_state, memory_config);
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -9645,7 +9670,22 @@ async fn process_control_line(
             ui_state.heater_enabled = false;
             calibration_job_canceled(calibration_runtime_state, manual_pps);
             needs_redraw = true;
-            usb_eeprom_maintenance_response(request_id, command, pd_i2c).await
+            let op = command.op;
+            let response = usb_eeprom_maintenance_response(request_id, command, pd_i2c).await;
+            if matches!(&response, UsbFrame::Response { ok: true, .. }) {
+                apply_successful_eeprom_maintenance_operation(
+                    op,
+                    ui_state,
+                    memory_config,
+                    memory_sequence,
+                    memory_commit_due_ms,
+                );
+                if matches!(op, EepromMaintenanceOp::Erase) {
+                    *preview_heater_curve = None;
+                    *thermal_control_profile_preview = None;
+                }
+            }
+            response
         }
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
@@ -14672,6 +14712,41 @@ mod tests {
             true,
             eeprom_bytes_contain_data(&incompatible_gap)
         ));
+    }
+
+    #[test]
+    fn raw_eeprom_maintenance_locks_writes_and_clears_erased_runtime_state() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut config = MemoryConfig {
+            target_temp_c: 180,
+            ..MemoryConfig::default()
+        };
+        let mut sequence = 9;
+        let mut commit_due_ms = Some(20);
+
+        apply_successful_eeprom_maintenance_operation(
+            EepromMaintenanceOp::Write,
+            &mut state,
+            &mut config,
+            &mut sequence,
+            &mut commit_due_ms,
+        );
+        assert!(state.eeprom_data_incompatible);
+        assert_eq!(config.target_temp_c, 180);
+
+        state.eeprom_data_incompatible = false;
+        apply_successful_eeprom_maintenance_operation(
+            EepromMaintenanceOp::Erase,
+            &mut state,
+            &mut config,
+            &mut sequence,
+            &mut commit_due_ms,
+        );
+        assert_eq!(config, MemoryConfig::default());
+        assert_eq!(sequence, 0);
+        assert_eq!(commit_due_ms, None);
+        assert_eq!(state.target_temp_c, MemoryConfig::default().target_temp_c);
+        assert!(!state.eeprom_data_incompatible);
     }
 
     #[test]
