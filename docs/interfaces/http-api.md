@@ -191,6 +191,8 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 
 `state` is `missing`, `active`, or `invalid`. The persistent source of truth is a bounded raw transient trace: ambient RTD ADC, `50ms` timestamps, RTD ADC, measured heater voltage, and duty. `thermal_plant_auto` samples the heater-resistance curve during the same run, requests the selected APDO's maximum voltage with `100%` PWM until `220C`, then immediately disarms and records natural cooling to `80C`. The APDO must cover `20V` at `>=3A`; a `5V..21V / 3A` APDO therefore runs at `21V`, while a `5V..20V / 3A` APDO runs at `20V`. Heater-curve data and production-profile current reserve settings do not reduce the calibration request. The device fits the coefficients locally, writes a physically valid model directly to `active`, and leaves heating disarmed. There is no candidate, promotion, cross-current comparison, or user acceptance operation. Production heating requires an active model, a PPS APDO covering `20V` at at least `3A`, and the curve captured by that same transient run.
 
+The calibration state machine uses the current valid RTD measurement directly for transient sampling, the `220C` cutoff, and the passive-cooling endpoint. Guarded control temperature remains a production PID input only. There is no separate `225C` calibration failure threshold; once the live measurement first reaches `220C`, logical duty and physical PWM are cleared in that control cycle. The selected calibration-owned PPS contract remains unchanged through passive cooling so PD renegotiation cannot disturb the RTD trace, and is cleared only after the model transaction completes, is canceled, or fails. General sensor and absolute-overtemperature protections remain authoritative.
+
 ### `FirmwareArtifact`
 
 ```json
@@ -422,6 +424,19 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 ```
 
 `op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+
+`POST /api/v1/devices/:id/eeprom` is the USB/devd-only advanced raw EEPROM maintenance endpoint. It requires an active lease and native USB serial transport; it is not exposed through the device LAN API or Web console. Physical heater output must already be `0%`.
+
+```json
+{
+  "leaseId": "lease-001",
+  "op": "write",
+  "offset": 31,
+  "bytes": [0, 255, 17, 34]
+}
+```
+
+`op` is `read | write | erase`. `read` requires `offset` and `length`; `write` requires `offset` and `bytes`; each transport chunk is `1..32` bytes and must stay within the `8 KiB` EEPROM. `erase` accepts no range or content, writes the full EEPROM as `0xFF`, and the devd CLI verifies the full readback. The endpoint returns `bytes` only for `read`; it acknowledges `write` and `erase`. Before the first raw write or erase byte, firmware clears debug/calibration PPS, latches fixed-PD disarm, and discards pending ordinary record commits. A raw transport failure remains locked for restart because preceding bytes may have changed EEPROM. A successful raw write keeps heating and calibration locked until restart so the firmware can re-evaluate the complete image; erase clears the in-memory model and curve without writing a default record. Export/import clients compose raw `8 KiB` images from those chunks without device identity checks, parsing, filtering, migration, or changes to unknown bytes.
 
 `PUT /api/v1/devices/:id/heater-curve` body:
 

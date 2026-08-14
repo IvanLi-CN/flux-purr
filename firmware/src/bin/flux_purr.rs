@@ -69,6 +69,8 @@ use flux_purr_firmware::board::s3_frontpanel;
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{BuzzerController, BuzzerCueId};
+#[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
+use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 use flux_purr_firmware::control_plane::LanPairingCode;
 #[cfg(test)]
@@ -93,7 +95,8 @@ use flux_purr_firmware::control_plane::{
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
-    CalibrationJobCommandWire, CalibrationJobOpWire, HeaterCurveConfigCommand, HeaterCurveConfigOp,
+    CalibrationJobCommandWire, CalibrationJobOpWire, EepromMaintenanceCommand,
+    HeaterCurveConfigCommand, HeaterCurveConfigOp,
 };
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
@@ -118,8 +121,8 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    M24C64_I2C_ADDRESS, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE,
-    MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
+    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET,
+    MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
     PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
     encode_memory_record, select_latest_optional_memory_record,
 };
@@ -214,8 +217,8 @@ fn try_allocate_memory_io_scratch() -> Option<Box<MemoryIoScratch>> {
         return None;
     }
     // SAFETY: `write_bytes` initializes every byte of the allocation before it
-    // is exposed as `MemoryIoScratch`. This keeps the 5 KiB workspace out of
-    // the ProCPU task stack and out of permanent application BSS.
+    // is exposed as `MemoryIoScratch`. This keeps the workspace out of the
+    // ProCPU task stack and out of permanent application BSS.
     unsafe {
         allocation.write_bytes(0, layout.size());
         Some(Box::from_raw(allocation.cast::<MemoryIoScratch>()))
@@ -527,6 +530,12 @@ const STATUS_LIGHT_BOOT_REFRESH_MS: u64 = 50;
 const EEPROM_WRITE_CYCLE_DELAY_MS: u64 = 5;
 #[cfg(any(target_arch = "xtensa", test))]
 const EEPROM_WRITE_CHUNK_MAX_BYTES: usize = 16;
+#[cfg(target_arch = "xtensa")]
+const EEPROM_READ_CHUNK_MAX_BYTES: usize = 256;
+#[cfg(target_arch = "xtensa")]
+const EEPROM_UNUSED_GAP_OFFSET: u16 = 0x0c00;
+#[cfg(any(target_arch = "xtensa", test))]
+const EEPROM_UNUSED_GAP_LEN: usize = 0x0400;
 #[cfg(any(target_arch = "xtensa", test))]
 const FLASH_MEMORY_ERASE_SECTOR_SIZE: u32 = 4_096;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3576,8 +3585,6 @@ const THERMAL_PLANT_TARGET_TEMP_C: f32 = 220.0;
 #[cfg(any(target_arch = "xtensa", test))]
 const THERMAL_PLANT_COOL_COMPLETE_TEMP_C: f32 = 80.0;
 #[cfg(any(target_arch = "xtensa", test))]
-const THERMAL_PLANT_MAX_TEMP_C: f32 = 225.0;
-#[cfg(any(target_arch = "xtensa", test))]
 const THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C: f32 = 4.0;
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3896,6 +3903,32 @@ fn thermal_plant_calibration_snapshot(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_calibration_temperature_c(
+    calibration: CalibrationRuntimeState,
+    live_rtd_temp_c: Option<f32>,
+    control_temp_c: f32,
+) -> f32 {
+    if thermal_plant_calibration_job_running(calibration) {
+        live_rtd_temp_c.unwrap_or(control_temp_c)
+    } else {
+        control_temp_c
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_output_must_be_off(
+    calibration: CalibrationRuntimeState,
+    was_running: bool,
+    measured_temp_c: f32,
+) -> bool {
+    if !was_running || calibration.job.kind != Some(CalibrationJobKind::ThermalPlant) {
+        return false;
+    }
+    measured_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
+        || calibration.job.status != CalibrationJobStatus::Running
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn consume_thermal_plant_completion_disarm(
     calibration_runtime_state: &mut CalibrationRuntimeState,
     desired_heater_enabled: bool,
@@ -3981,9 +4014,6 @@ fn thermal_plant_transient_trace_reaches_targets(
             return false;
         };
         if !temperature_c.is_finite() {
-            return false;
-        }
-        if temperature_c >= THERMAL_PLANT_MAX_TEMP_C {
             return false;
         }
         if sample.duty_percent > 0 && temperature_c > powered_max_temp_c {
@@ -4601,10 +4631,6 @@ fn read_ch224q_status(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn eeprom_address_candidates() -> core::ops::RangeInclusive<u8> {
-    M24C64_I2C_ADDRESS..=M24C64_I2C_ADDRESS.saturating_add(7)
-}
-
 #[cfg(target_arch = "xtensa")]
 fn memory_commit_error_from_eeprom<I2cError>(error: EepromError<I2cError>) -> MemoryCommitError
 where
@@ -4630,83 +4656,215 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EepromProbe {
-    address: Option<u8>,
-    current_read_present: bool,
-    random_read_present: bool,
-    bus_current_read_addresses: [Option<u8>; 16],
-    last_error: MemoryCommitError,
+fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
+    let mut eeprom = M24c64::with_address(i2c, M24C64_I2C_ADDRESS);
+    let mut byte = [0u8; 1];
+    eeprom
+        .read_bytes(0, &mut byte)
+        .ok()
+        .map(|()| M24C64_I2C_ADDRESS)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn read_eeprom_bytes_chunked<I2C>(
+    eeprom: &mut M24c64<I2C>,
+    offset: u16,
+    bytes: &mut [u8],
+) -> Result<(), EepromError<I2C::Error>>
+where
+    I2C: embedded_hal::i2c::I2c,
+{
+    let mut read = 0usize;
+    while read < bytes.len() {
+        let chunk_len = (bytes.len() - read).min(EEPROM_READ_CHUNK_MAX_BYTES);
+        let chunk_offset = offset
+            .checked_add(read as u16)
+            .ok_or(EepromError::OutOfRange)?;
+        eeprom.read_bytes(chunk_offset, &mut bytes[read..read + chunk_len])?;
+        read += chunk_len;
+    }
+    Ok(())
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn push_i2c_scan_address(addresses: &mut [Option<u8>; 16], address: u8) {
-    if let Some(slot) = addresses.iter_mut().find(|slot| slot.is_none()) {
-        *slot = Some(address);
-    }
+fn eeprom_bytes_contain_data(bytes: &[u8]) -> bool {
+    bytes.iter().any(|byte| *byte != 0xff)
 }
 
-#[cfg(target_arch = "xtensa")]
-fn scan_i2c_current_read_addresses(i2c: &mut I2c<'_, esp_hal::Blocking>) -> [Option<u8>; 16] {
-    let mut addresses = [None; 16];
-    for address in [0x22, 0x23, 0x50, 0x51, 0x52, 0x53, 0x54, 0x55, 0x56, 0x57] {
-        let mut byte = [0u8; 1];
-        if embedded_hal::i2c::I2c::read(i2c, address, &mut byte).is_ok() {
-            push_i2c_scan_address(&mut addresses, address);
-        }
-    }
-    addresses
-}
-
-#[cfg(target_arch = "xtensa")]
-fn probe_eeprom_with_scan(
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn write_eeprom_bytes_verified(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-    bus_current_read_addresses: [Option<u8>; 16],
-) -> EepromProbe {
-    let mut last_error = MemoryCommitError::WriteAddressNoAck;
-    for address in eeprom_address_candidates() {
-        let mut eeprom = M24c64::with_address(&mut *i2c, address);
-        let mut scratch = [0u8; 1];
-        match eeprom.read_bytes(0, &mut scratch) {
-            Ok(()) => {
-                let current_read_present = eeprom.read_current_byte().is_ok();
-                info!(
-                    "eeprom probe ok addr=0x{=u8:02x} current_read={=bool}",
-                    address, current_read_present,
+    offset: u16,
+    bytes: &[u8],
+) -> Result<(), MemoryCommitError> {
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return Err(MemoryCommitError::WriteAddressNoAck);
+    };
+    let mut eeprom = M24c64::with_address(&mut *i2c, address);
+    let mut written = 0usize;
+    while written < bytes.len() {
+        let absolute_offset = usize::from(offset) + written;
+        let chunk_len = eeprom_maintenance_write_chunk_len(absolute_offset, bytes.len() - written);
+        let chunk_offset =
+            u16::try_from(absolute_offset).map_err(|_| MemoryCommitError::WriteFailed)?;
+        eeprom
+            .write_page(chunk_offset, &bytes[written..written + chunk_len])
+            .map_err(memory_commit_error_from_eeprom)?;
+        EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
+        written += chunk_len;
+    }
+    let mut verify = [0u8; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
+    read_eeprom_bytes_chunked(&mut eeprom, offset, &mut verify[..bytes.len()])
+        .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
+    if verify[..bytes.len()] != *bytes {
+        return Err(MemoryCommitError::VerifyMismatch);
+    }
+    Ok(())
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn eeprom_maintenance_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
+    let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
+    let page_room = page_size - (absolute_offset % page_size);
+    remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn eeprom_data_is_incompatible(has_valid_record: bool, contains_data: bool) -> bool {
+    !has_valid_record && contains_data
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn raw_eeprom_operation_mutates(op: EepromMaintenanceOp) -> bool {
+    matches!(op, EepromMaintenanceOp::Write | EepromMaintenanceOp::Erase)
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn begin_mutating_eeprom_maintenance(
+    ui_state: &mut FrontPanelUiState,
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    // The EEPROM may already be partially changed when the first I2C failure
+    // is reported. Lock power and suppress normal record writes before sending
+    // the first raw byte.
+    ui_state.heater_enabled = false;
+    ui_state.heater_output_percent = 0;
+    ui_state.eeprom_data_incompatible = true;
+    calibration_job_canceled(calibration, manual_pps);
+    calibration.mode = CalibrationMode::Off;
+    calibration.pps_enabled = false;
+    calibration.pps_mv = None;
+    calibration.pps_ma = None;
+    calibration.heater_enabled = false;
+    calibration.job_data = None;
+    calibration.model_target_temp_c = None;
+    calibration.thermal_plant_completion_disarm_pending = false;
+    calibration.immediate_heater_disarm_pending = true;
+    manual_pps.clear();
+    *memory_commit_due_ms = None;
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn apply_successful_eeprom_maintenance_operation(
+    op: EepromMaintenanceOp,
+    ui_state: &mut FrontPanelUiState,
+    memory_config: &mut MemoryConfig,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    if matches!(op, EepromMaintenanceOp::Erase) {
+        *memory_config = MemoryConfig::default();
+        *memory_commit_due_ms = None;
+        apply_memory_config_to_ui(ui_state, memory_config);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn discard_deferred_memory_commit_for_incompatible_eeprom(
+    eeprom_data_incompatible: bool,
+    memory_commit_due_ms: &mut Option<u64>,
+) {
+    if eeprom_data_incompatible {
+        *memory_commit_due_ms = None;
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+async fn usb_eeprom_maintenance_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    command: EepromMaintenanceCommand,
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+) -> UsbFrame {
+    match command.op {
+        EepromMaintenanceOp::Read => {
+            let (Some(offset), Some(length)) = (command.offset, command.length) else {
+                return usb_error_response(
+                    request_id,
+                    "eeprom_range_required",
+                    "EEPROM read requires offset and length.",
                 );
-                return EepromProbe {
-                    address: Some(address),
-                    current_read_present,
-                    random_read_present: true,
-                    bus_current_read_addresses,
-                    last_error,
-                };
+            };
+            let length = usize::from(length);
+            if length == 0
+                || length > flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX
+                || usize::from(offset) + length > usize::from(M24C64_CAPACITY_BYTES)
+            {
+                return usb_error_response(
+                    request_id,
+                    "eeprom_range_invalid",
+                    "EEPROM read range is invalid.",
+                );
             }
-            Err(error) => {
-                last_error = memory_commit_error_from_eeprom(error);
-                info!("eeprom probe miss addr=0x{=u8:02x}", address);
+            let Some(address) = probe_eeprom_address(i2c) else {
+                return usb_error_response(
+                    request_id,
+                    "eeprom_unavailable",
+                    "EEPROM is unavailable.",
+                );
+            };
+            let mut bytes = heapless::Vec::new();
+            let _ = bytes.resize_default(length);
+            let mut eeprom = M24c64::with_address(i2c, address);
+            if read_eeprom_bytes_chunked(&mut eeprom, offset, bytes.as_mut_slice()).is_err() {
+                return usb_error_response(request_id, "eeprom_read_failed", "EEPROM read failed.");
+            }
+            usb_response(request_id, UsbResponsePayload::EepromBytes(bytes))
+        }
+        EepromMaintenanceOp::Write => {
+            let (Some(offset), Some(bytes)) = (command.offset, command.bytes) else {
+                return usb_error_response(
+                    request_id,
+                    "eeprom_write_required",
+                    "EEPROM write requires offset and bytes.",
+                );
+            };
+            if bytes.is_empty()
+                || usize::from(offset) + bytes.len() > usize::from(M24C64_CAPACITY_BYTES)
+            {
+                return usb_error_response(
+                    request_id,
+                    "eeprom_range_invalid",
+                    "EEPROM write range is invalid.",
+                );
+            }
+            match write_eeprom_bytes_verified(i2c, offset, bytes.as_slice()).await {
+                Ok(()) => usb_response(request_id, UsbResponsePayload::Ack),
+                Err(error) => usb_error_response(request_id, error.code(), error.message()),
             }
         }
+        EepromMaintenanceOp::Erase => {
+            let erased = [0xff; flux_purr_firmware::control_plane::EEPROM_MAINTENANCE_CHUNK_MAX];
+            let mut offset = 0u16;
+            while offset < M24C64_CAPACITY_BYTES {
+                if let Err(error) = write_eeprom_bytes_verified(i2c, offset, &erased).await {
+                    return usb_error_response(request_id, error.code(), error.message());
+                }
+                offset = offset.saturating_add(erased.len() as u16);
+            }
+            usb_response(request_id, UsbResponsePayload::Ack)
+        }
     }
-    info!("eeprom probe failed reason={=str}", last_error.code());
-    EepromProbe {
-        address: None,
-        current_read_present: false,
-        random_read_present: false,
-        bus_current_read_addresses,
-        last_error,
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
-fn probe_eeprom(i2c: &mut I2c<'_, esp_hal::Blocking>) -> EepromProbe {
-    let bus_current_read_addresses = scan_i2c_current_read_addresses(i2c);
-    probe_eeprom_with_scan(i2c, bus_current_read_addresses)
-}
-
-#[cfg(target_arch = "xtensa")]
-fn probe_eeprom_address(i2c: &mut I2c<'_, esp_hal::Blocking>) -> Option<u8> {
-    probe_eeprom(i2c).address
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4880,63 +5038,95 @@ fn write_flash_memory_record(
 fn load_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
+) -> (Option<MemoryRecord>, bool) {
     let Some(address) = probe_eeprom_address(i2c) else {
         info!("memory restore skipped: eeprom unavailable");
-        return None;
+        return (None, false);
     };
 
     let mut eeprom = M24c64::with_address(i2c, address);
-    let mut selected = eeprom
-        .read_bytes(MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
-        .map(|_| decode_memory_record(&scratch.record_bytes))
-        .ok()
-        .and_then(Result::ok);
-    let slot_b = eeprom
-        .read_bytes(MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
-        .map(|_| decode_memory_record(&scratch.record_bytes))
-        .ok()
-        .and_then(Result::ok);
+    let mut contains_data = false;
+    let mut selected =
+        read_eeprom_bytes_chunked(&mut eeprom, MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
+            .map(|_| {
+                contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes);
+                decode_memory_record(&scratch.record_bytes)
+            })
+            .ok()
+            .and_then(Result::ok);
+    let slot_b =
+        read_eeprom_bytes_chunked(&mut eeprom, MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
+            .map(|_| {
+                contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes);
+                decode_memory_record(&scratch.record_bytes)
+            })
+            .ok()
+            .and_then(Result::ok);
     selected = select_latest_optional_memory_record(selected, slot_b);
 
-    let previous_slot_a = eeprom
-        .read_bytes(
-            PREVIOUS_MEMORY_SLOT_A_OFFSET,
-            &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
-        )
-        .map(|_| decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]))
-        .ok()
-        .and_then(Result::ok);
+    let previous_slot_a = read_eeprom_bytes_chunked(
+        &mut eeprom,
+        PREVIOUS_MEMORY_SLOT_A_OFFSET,
+        &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
+    )
+    .map(|_| {
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]);
+        decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE])
+    })
+    .ok()
+    .and_then(Result::ok);
     selected = select_latest_optional_memory_record(selected, previous_slot_a);
 
-    let previous_slot_b = eeprom
-        .read_bytes(
-            PREVIOUS_MEMORY_SLOT_B_OFFSET,
-            &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
-        )
-        .map(|_| decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]))
-        .ok()
-        .and_then(Result::ok);
+    let previous_slot_b = read_eeprom_bytes_chunked(
+        &mut eeprom,
+        PREVIOUS_MEMORY_SLOT_B_OFFSET,
+        &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
+    )
+    .map(|_| {
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]);
+        decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE])
+    })
+    .ok()
+    .and_then(Result::ok);
     selected = select_latest_optional_memory_record(selected, previous_slot_b);
 
-    let legacy_slot_a = eeprom
-        .read_bytes(
-            LEGACY_MEMORY_SLOT_A_OFFSET,
-            &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
-        )
-        .map(|_| decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]))
-        .ok()
-        .and_then(Result::ok);
+    let unused_gap = read_eeprom_bytes_chunked(
+        &mut eeprom,
+        EEPROM_UNUSED_GAP_OFFSET,
+        &mut scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN],
+    );
+    if unused_gap.is_ok() {
+        contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN]);
+    }
+
+    let legacy_slot_a = read_eeprom_bytes_chunked(
+        &mut eeprom,
+        LEGACY_MEMORY_SLOT_A_OFFSET,
+        &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
+    )
+    .map(|_| {
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]);
+        decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE])
+    })
+    .ok()
+    .and_then(Result::ok);
     selected = select_latest_optional_memory_record(selected, legacy_slot_a);
 
-    let legacy_slot_b = eeprom
-        .read_bytes(
-            LEGACY_MEMORY_SLOT_B_OFFSET,
-            &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
-        )
-        .map(|_| decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]))
-        .ok()
-        .and_then(Result::ok);
+    let legacy_slot_b = read_eeprom_bytes_chunked(
+        &mut eeprom,
+        LEGACY_MEMORY_SLOT_B_OFFSET,
+        &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
+    )
+    .map(|_| {
+        contains_data |=
+            eeprom_bytes_contain_data(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]);
+        decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE])
+    })
+    .ok()
+    .and_then(Result::ok);
     selected = select_latest_optional_memory_record(selected, legacy_slot_b);
 
     if let Some(record) = &selected {
@@ -4953,7 +5143,8 @@ fn load_eeprom_memory_record(
         info!("memory restore unavailable -> using defaults");
     }
 
-    selected
+    let incompatible = eeprom_data_is_incompatible(selected.is_some(), contains_data);
+    (selected, incompatible)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -4963,7 +5154,7 @@ fn load_memory_record(
     flash: &mut FlashStorage,
     scratch: &mut MemoryIoScratch,
 ) -> Option<MemoryRecord> {
-    let eeprom = load_eeprom_memory_record(i2c, scratch);
+    let (eeprom, _) = load_eeprom_memory_record(i2c, scratch);
     let flash = load_flash_memory_record_with_legacy_migration(flash, scratch);
     select_latest_optional_memory_record(eeprom, flash)
 }
@@ -5024,9 +5215,7 @@ impl MemoryCommitError {
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> usize {
-    let page_size = flux_purr_firmware::memory::M24C64_PAGE_SIZE;
-    let page_room = page_size - (absolute_offset % page_size);
-    remaining.min(page_room).min(EEPROM_WRITE_CHUNK_MAX_BYTES)
+    eeprom_maintenance_write_chunk_len(absolute_offset, remaining)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -5085,7 +5274,7 @@ async fn write_memory_record(
             if let Err(error) = write_flash_memory_record(flash, record, scratch) {
                 info!(
                     "memory commit flash mirror unavailable reason={=str}",
-                    error.code(),
+                    error.code()
                 );
             }
             Ok(())
@@ -5095,14 +5284,7 @@ async fn write_memory_record(
                 "memory commit falling back to flash reason={=str}",
                 eeprom_error.code()
             );
-            write_flash_memory_record(flash, record, scratch).map_err(|flash_error| {
-                info!(
-                    "memory commit flash fallback failed eeprom_reason={=str} flash_reason={=str}",
-                    eeprom_error.code(),
-                    flash_error.code(),
-                );
-                flash_error
-            })
+            write_flash_memory_record(flash, record, scratch).map_err(|_| eeprom_error)
         }
     }
 }
@@ -5116,8 +5298,7 @@ async fn commit_memory_config_now(
     memory_config: &MemoryConfig,
 ) -> Result<(), MemoryCommitError> {
     let Some(mut scratch) = try_allocate_memory_io_scratch() else {
-        info!("memory commit skipped: I/O workspace unavailable");
-        return Err(MemoryCommitError::WriteFailed);
+        return Err(MemoryCommitError::EncodeFailed);
     };
     let mut expected_config = memory_config.clone();
     expected_config.sanitize();
@@ -5708,6 +5889,7 @@ async fn disarm_pending_thermal_plant_output<PWM>(
     hold_pps_governor: &mut HoldPpsGovernor,
     ui_state: &mut FrontPanelUiState,
     last_heater_duty: &mut u8,
+    measured_vin_mv: u32,
 ) -> bool
 where
     PWM: SetDutyCycle,
@@ -5728,9 +5910,20 @@ where
         return true;
     }
 
+    if !terminal_fixed_pd_voltage_confirmed(measured_vin_mv) {
+        // The CH224Q accepts the register write before the source has actually
+        // left PPS. Keep the terminal lock active until VIN proves fixed PD.
+        return true;
+    }
+
     calibration_runtime_state.immediate_heater_disarm_pending = false;
     let _ = manual_pps.consume_automatic_restore_pending();
     true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn terminal_fixed_pd_voltage_confirmed(measured_vin_mv: u32) -> bool {
+    measured_vin_mv.abs_diff(u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts())) <= 1_000
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -7601,22 +7794,26 @@ fn transient_fit_row(
     delay_ticks: u16,
     ambient_temp_c: f32,
 ) -> Option<([f32; 3], f32)> {
+    const MIN_DERIVATIVE_WINDOW_TICKS: u16 = 10;
+    let previous_index = (0..index).rev().find(|candidate| {
+        samples[index]
+            .elapsed_ticks
+            .saturating_sub(samples[*candidate].elapsed_ticks)
+            >= MIN_DERIVATIVE_WINDOW_TICKS
+    })?;
     let dt_ticks = samples[index]
         .elapsed_ticks
-        .saturating_sub(samples[index - 1].elapsed_ticks);
-    if dt_ticks == 0 {
-        return None;
-    }
+        .saturating_sub(samples[previous_index].elapsed_ticks);
     let delayed_tick = samples[index].elapsed_ticks.saturating_sub(delay_ticks);
     let delayed_index = (0..index)
         .rev()
         .find(|candidate| samples[*candidate].elapsed_ticks <= delayed_tick)?;
-    let mid_temp_c = (temperatures_c[index] + temperatures_c[index - 1]) * 0.5;
+    let mid_temp_c = (temperatures_c[index] + temperatures_c[previous_index]) * 0.5;
     let ambient_kelvin = ambient_temp_c + 273.15;
     let kelvin = mid_temp_c + 273.15;
     Some((
         [
-            (temperatures_c[index] - temperatures_c[index - 1])
+            (temperatures_c[index] - temperatures_c[previous_index])
                 / (f32::from(dt_ticks) * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0),
             (mid_temp_c - ambient_temp_c).max(0.0),
             kelvin.powi(4) - ambient_kelvin.powi(4),
@@ -7649,9 +7846,6 @@ fn fit_thermal_plant_transient(
         let power_mw =
             transient_sample_power_mw(*sample, temperature_c, preview_heater_curve, memory_config)?;
         if !temperature_c.is_finite() || !power_mw.is_finite() || power_mw < 0.0 {
-            return None;
-        }
-        if temperature_c >= THERMAL_PLANT_MAX_TEMP_C {
             return None;
         }
         if sample.duty_percent == 100 && temperature_c > powered_max_temp_c {
@@ -8011,29 +8205,16 @@ fn update_calibration_job_state_with_workspace(
                 );
                 return;
             };
-            let heating_phase = matches!(
-                job.phase,
-                ThermalPlantAutoPhase::Ambient | ThermalPlantAutoPhase::Heating
-            );
-            let source_lost = if heating_phase {
-                manual_pps.error.is_some()
-                    || !manual_pps.enabled
-                    || manual_pps.owner != ManualPpsOwner::Calibration
-                    || !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma)
-            } else {
-                manual_pps.error.is_some()
-                    || (manual_pps.enabled && manual_pps.owner != ManualPpsOwner::Calibration)
-            };
-            if source_lost || latest_temp_c >= THERMAL_PLANT_MAX_TEMP_C {
+            let source_lost = manual_pps.error.is_some()
+                || !manual_pps.enabled
+                || manual_pps.owner != ManualPpsOwner::Calibration
+                || !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma);
+            if source_lost {
                 calibration_job_fail(
                     calibration,
-                    if latest_temp_c >= THERMAL_PLANT_MAX_TEMP_C {
-                        ManualPpsError::ThermalPlantProjectionInvalid
-                    } else {
-                        manual_pps
-                            .error
-                            .unwrap_or(ManualPpsError::ThermalPlantSourceUnsupported)
-                    },
+                    manual_pps
+                        .error
+                        .unwrap_or(ManualPpsError::ThermalPlantSourceUnsupported),
                     true,
                     manual_pps,
                 );
@@ -8143,11 +8324,6 @@ fn update_calibration_job_state_with_workspace(
                         as u8;
                     if latest_temp_c >= THERMAL_PLANT_TARGET_TEMP_C {
                         calibration.heater_enabled = false;
-                        calibration.immediate_heater_disarm_pending = true;
-                        manual_pps.clear();
-                        calibration.pps_enabled = false;
-                        calibration.pps_mv = None;
-                        calibration.pps_ma = None;
                         job.phase = ThermalPlantAutoPhase::Cooling;
                         job.phase_started_tick = job.elapsed_ticks;
                         calibration.job.progress_percent = 60;
@@ -8219,14 +8395,15 @@ fn update_calibration_job_state_with_workspace(
                             ^ u32::from(latest_rtd_raw_adc_mv)
                             ^ job.elapsed_ticks
                             ^ 0x5452_4e53;
-                        let Some((transaction, _residual)) = fit_thermal_plant_transient(
+                        let fit_result = fit_thermal_plant_transient(
                             transaction_id,
                             job.ambient_raw_rtd_adc_mv,
                             &job.samples,
                             job.sample_count,
                             Some(&curve),
                             memory_config,
-                        ) else {
+                        );
+                        let Some((transaction, _residual)) = fit_result else {
                             calibration_job_fail(
                                 calibration,
                                 ManualPpsError::ThermalPlantProjectionInvalid,
@@ -8242,6 +8419,11 @@ fn update_calibration_job_state_with_workspace(
                         memory_config.thermal_plant_transient_active = Some(transaction);
                         memory_config.thermal_plant_active = None;
                         memory_config.sanitize();
+                        manual_pps.clear();
+                        calibration.pps_enabled = false;
+                        calibration.pps_mv = None;
+                        calibration.pps_ma = None;
+                        calibration.immediate_heater_disarm_pending = true;
                         calibration.mode = CalibrationMode::Off;
                         calibration.thermal_plant_completion_disarm_pending = true;
                         calibration.job.samples_collected = job.sample_count;
@@ -9076,6 +9258,7 @@ async fn process_control_line(
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
+    ch224q_address: Address,
     flash_storage: &mut FlashStorage,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     thermal_plant_workspace: &mut CalibrationThermalPlantWorkspace,
@@ -9282,6 +9465,20 @@ async fn process_control_line(
             request_id,
             mut config,
         }) => {
+            if ui_state.eeprom_data_incompatible
+                && (config.heater_enabled == Some(true)
+                    || config.manual_pps_enabled == Some(true)
+                    || config.calibration.is_some())
+            {
+                return (
+                    needs_redraw,
+                    usb_error_response(
+                        request_id,
+                        "eeprom_data_incompatible",
+                        "EEPROM data is incompatible; heating and calibration are locked.",
+                    ),
+                );
+            }
             let previous_memory_config = memory_config.clone();
             let heater_toggle_requested = config.heater_enabled.is_some();
             let heater_rearm_requested = config.heater_enabled == Some(true);
@@ -9334,7 +9531,13 @@ async fn process_control_line(
             response
         }
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
-            if thermal_plant_calibration_job_running(*calibration_runtime_state) {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
                 usb_error_response(
                     request_id,
                     ManualPpsError::CalibrationInProgress.code(),
@@ -9388,22 +9591,48 @@ async fn process_control_line(
         Ok(UsbFrame::CalibrationJob {
             request_id,
             command,
-        }) => usb_calibration_job_response(
-            request_id,
-            command,
-            calibration_runtime_state,
-            memory_config,
-            manual_pps,
-            thermal_plant_workspace,
-        ),
-        Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => usb_heater_curve_config_response(
-            request_id,
-            config,
-            memory_config,
-            preview_heater_curve,
-        ),
+        }) => {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else {
+                usb_calibration_job_response(
+                    request_id,
+                    command,
+                    calibration_runtime_state,
+                    memory_config,
+                    manual_pps,
+                    thermal_plant_workspace,
+                )
+            }
+        }
+        Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else {
+                usb_heater_curve_config_response(
+                    request_id,
+                    config,
+                    memory_config,
+                    preview_heater_curve,
+                )
+            }
+        }
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
-            if thermal_plant_calibration_job_running(*calibration_runtime_state) {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
                 usb_error_response(
                     request_id,
                     ManualPpsError::CalibrationInProgress.code(),
@@ -9457,6 +9686,59 @@ async fn process_control_line(
                     "Heater curve save requires an active preview package.",
                 )
             }
+        }
+        Ok(UsbFrame::EepromMaintenance {
+            request_id,
+            command,
+        }) => {
+            if last_heater_duty != 0 {
+                return (
+                    false,
+                    usb_error_response(
+                        request_id,
+                        "heater_output_active",
+                        "EEPROM maintenance requires physical heater output to be off.",
+                    ),
+                );
+            }
+            let op = command.op;
+            if raw_eeprom_operation_mutates(op) {
+                begin_mutating_eeprom_maintenance(
+                    ui_state,
+                    calibration_runtime_state,
+                    manual_pps,
+                    memory_commit_due_ms,
+                );
+                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
+                if !write_ch224q_payload(pd_i2c, ch224q_address, &fixed_payload).await {
+                    return (
+                        needs_redraw,
+                        usb_error_response(
+                            request_id,
+                            "eeprom_power_disarm_failed",
+                            "EEPROM maintenance could not restore fixed PD.",
+                        ),
+                    );
+                }
+            } else {
+                ui_state.heater_enabled = false;
+                calibration_job_canceled(calibration_runtime_state, manual_pps);
+            }
+            needs_redraw = true;
+            let response = usb_eeprom_maintenance_response(request_id, command, pd_i2c).await;
+            if matches!(&response, UsbFrame::Response { ok: true, .. }) {
+                apply_successful_eeprom_maintenance_operation(
+                    op,
+                    ui_state,
+                    memory_config,
+                    memory_commit_due_ms,
+                );
+                if matches!(op, EepromMaintenanceOp::Erase) {
+                    *preview_heater_curve = None;
+                    *thermal_control_profile_preview = None;
+                }
+            }
+            response
         }
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
@@ -9605,6 +9887,13 @@ fn lan_frame_response(
             UsbResponsePayload::Calibration(value) => lan_json_response(value),
             UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),
             UsbResponsePayload::HeaterCurve(value) => lan_json_response(value),
+            UsbResponsePayload::EepromBytes(_) => (
+                404,
+                lan_error_json(
+                    "unsupported_operation",
+                    "EEPROM maintenance is available only through USB/devd.",
+                ),
+            ),
             UsbResponsePayload::Ack => {
                 let mut body = heapless::String::new();
                 let _ = body.push_str(r#"{"accepted":true}"#);
@@ -10024,11 +10313,6 @@ async fn main(_spawner: Spawner) {
         usb_tx_buf,
         &usb_boot_memory_config,
     );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_heap_ready\n");
-
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=frontpanel_inputs_start\n");
     info!(
         "boot display_dc={=u8} mosi={=u8} sclk={=u8} blk={=u8} res={=u8} cs={=u8}",
         s3_frontpanel::PIN_LCD_DC,
@@ -10065,8 +10349,6 @@ async fn main(_spawner: Spawner) {
         left: Input::new(peripherals.GPIO18, input_cfg),
         up: Input::new(peripherals.GPIO21, input_cfg),
     };
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=frontpanel_inputs_ready\n");
 
     let spi = Spi::new(
         peripherals.SPI2,
@@ -10077,8 +10359,6 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create SPI2")
     .with_sck(peripherals.GPIO12)
     .with_mosi(peripherals.GPIO11);
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_spi_ready\n");
 
     let cs = Output::new(peripherals.GPIO15, Level::High, OutputConfig::default());
     let dc = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
@@ -10107,8 +10387,6 @@ async fn main(_spawner: Spawner) {
         rst,
         driver_framebuffer,
     );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_start\n");
 
     info!(
         "init panel width={=u16} height={=u16} dx={=u16} dy={=u16}",
@@ -10118,8 +10396,6 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.dy,
     );
     let display_ready = display.init().is_ok();
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_complete\n");
     if !display_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -10134,9 +10410,6 @@ async fn main(_spawner: Spawner) {
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to initialize GC9D01 display");
     }
-
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_render_start\n");
     render_scene(SceneId::StartupCalibration, canvas);
     display.write_area(
         0,
@@ -10145,11 +10418,17 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.height,
         canvas.pixels(),
     );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_flush_start\n");
-    let startup_flush_ready = display.flush().is_ok();
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_flush_complete\n");
+    let startup_flush_ready = match display.flush() {
+        Ok(()) => true,
+        Err(gc9d01::Error::Bus(_)) => {
+            warn!("startup display flush failed: spi bus");
+            false
+        }
+        Err(gc9d01::Error::Pin(_)) => {
+            warn!("startup display flush failed: display pin");
+            false
+        }
+    };
     if !startup_flush_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -10176,8 +10455,6 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(20).await;
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=startup_dwell_complete\n");
     info!(
         "frontpanel runtime mode={=str}",
         runtime_mode_label(runtime_mode)
@@ -10195,8 +10472,6 @@ async fn main(_spawner: Spawner) {
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
         run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await;
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_i2c_init_start\n");
     let mut pd_i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default().with_frequency(Rate::from_hz(CH224Q_I2C_FREQUENCY_HZ)),
@@ -10204,13 +10479,7 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create I2C0")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_i2c_init_complete\n");
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_request_start\n");
     let ch224q_address = request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await;
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_request_complete\n");
     let mut flash_storage = FlashStorage::new();
     info!(
         "pd request locked addr=0x{=u8:02x} target_mv={=u16} settle_ms={=u64}",
@@ -10229,44 +10498,35 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(10).await;
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_settle_complete\n");
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=memory_load_start\n");
-    let restored_memory_record = if let Some(mut scratch) = try_allocate_memory_io_scratch() {
-        load_memory_record(&mut pd_i2c, &mut flash_storage, &mut scratch)
-    } else {
-        info!("memory restore skipped: I/O workspace unavailable");
-        None
-    };
+    let (eeprom_memory_record, eeprom_data_incompatible, flash_memory_record) =
+        if let Some(mut scratch) = try_allocate_memory_io_scratch() {
+            let (eeprom_memory_record, eeprom_data_incompatible) =
+                load_eeprom_memory_record(&mut pd_i2c, &mut scratch);
+            let flash_memory_record =
+                load_flash_memory_record_with_legacy_migration(&mut flash_storage, &mut scratch);
+            (
+                eeprom_memory_record,
+                eeprom_data_incompatible,
+                flash_memory_record,
+            )
+        } else {
+            (None, false, None)
+        };
+    let restored_memory_record =
+        select_latest_optional_memory_record(eeprom_memory_record, flash_memory_record);
     let (mut memory_config, mut memory_sequence) = restored_memory_record
         .map(|record| (record.config, record.sequence))
         .unwrap_or_default();
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=memory_load_complete\n");
-    #[cfg(feature = "net_http")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_start\n");
     #[cfg(feature = "net_http")]
     flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
     #[cfg(feature = "net_http")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_complete\n");
-    #[cfg(feature = "net_http")]
     {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_init_start\n");
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_spawn_start\n");
         if let Err(error) =
-            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
-                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
-            })
-            .await
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config).await
         {
             warn!("LAN control plane startup failed: {=str}", error.message());
             flux_purr_firmware::net::report_startup_failure(error).await;
         }
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=wifi_init_complete\n");
     }
     let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_commit_due_ms: Option<u64> = None;
@@ -10283,24 +10543,16 @@ async fn main(_spawner: Spawner) {
         usb_tx_buf,
         &memory_config,
     );
-
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_start\n");
     let mut adc1_config = AdcConfig::new();
     let mut vin_adc_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO1, RTD_SAMPLE_ATTENUATION);
     let mut rtd_adc_pin = adc1_config
         .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO2, RTD_SAMPLE_ATTENUATION);
     let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_complete\n");
     info!(
         "adc monitor active: vin_gpio1 rtd_gpio2 atten={=str} samples={=u8} interval_ms={=u64}",
         "6dB", RTD_SAMPLE_COUNT as u8, RTD_LOG_INTERVAL_MS,
     );
-
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
     let pwm_clock_cfg =
         PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
@@ -10365,14 +10617,10 @@ async fn main(_spawner: Spawner) {
         .expect("failed to derive buzzer PWM timer clock");
     mcpwm.timer2.start(buzzer_timer_cfg);
     let _ = buzzer_pwm.set_duty_cycle_percent(0);
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_complete\n");
     info!(
         "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
         BUZZER_PWM_PERIOD_TICKS,
     );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_status_wait_start\n");
     let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
         await_ch224q_pd_ready(&mut pd_i2c, ch224q_address, || {
             set_status_light_state(StatusLightState::Booting);
@@ -10406,8 +10654,6 @@ async fn main(_spawner: Spawner) {
         );
         read_ch224q_status(&mut pd_i2c, ch224q_address)
     };
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_status_wait_complete\n");
     let mut last_pd_status_log_key = pd_status_log_key(last_pd_observation);
     let active_thermal_settings =
         ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
@@ -10423,12 +10669,8 @@ async fn main(_spawner: Spawner) {
         active_thermal_settings.auto_adjustable_working_floor_mv,
         active_thermal_settings.heater_current_reserve_ma,
     );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_power_data_start\n");
     let power_data_capabilities = read_ch224q_power_data(&mut pd_i2c, ch224q_address)
         .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes));
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_power_data_complete\n");
     match power_data_capabilities {
         Some(capabilities) => info!(
             "ch224q power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16} pps_max_ma={=u16}",
@@ -10478,17 +10720,13 @@ async fn main(_spawner: Spawner) {
             fixed_request.millivolts(),
         ),
     }
-
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_start\n");
     let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_complete\n");
     let mut controller = FrontPanelInputController::new(
         FrontPanelKeyMap::default(),
         FrontPanelInputTimings::default(),
     );
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
+    ui_state.eeprom_data_incompatible = eeprom_data_incompatible;
     ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
     apply_memory_config_to_ui(&mut ui_state, &memory_config);
     let mut heater_controller = HeaterController::new();
@@ -10553,8 +10791,6 @@ async fn main(_spawner: Spawner) {
             );
         }
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_start\n");
     if let Some((raw_adc_mv, corrected_adc_mv, vin_mv)) =
         read_calibrated_vin_mv(&mut adc1, &mut vin_adc_pin, &memory_config)
     {
@@ -10565,8 +10801,6 @@ async fn main(_spawner: Spawner) {
             raw_adc_mv, corrected_adc_mv, vin_mv,
         );
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_complete\n");
     let mut last_heater_duty = 0_u8;
     let mut last_pid_snapshot = HeaterPidSnapshot {
         duty_percent: 0,
@@ -10620,8 +10854,6 @@ async fn main(_spawner: Spawner) {
         ),
         0,
     );
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=heater_sync_start\n");
     let _ = apply_heater_power_output(
         &mut pd_i2c,
         ch224q_address,
@@ -10645,8 +10877,6 @@ async fn main(_spawner: Spawner) {
         0,
     )
     .await;
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=heater_sync_complete\n");
     ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
     apply_fan_output(
         &mut fan_enable,
@@ -10694,11 +10924,7 @@ async fn main(_spawner: Spawner) {
         ..StatusLightInputs::default()
     });
     set_status_light_state(initial_status_light_state);
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_start\n");
     let initial_frontpanel_ui_ready = flush_ui(&mut display, canvas, &ui_state).is_ok();
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ui_flush_complete\n");
     if !initial_frontpanel_ui_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -10713,8 +10939,6 @@ async fn main(_spawner: Spawner) {
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to draw initial frontpanel UI");
     }
-    #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_ready\n");
     log_ui_state(&ui_state);
 
     let runtime_started_ms = Instant::now().as_millis();
@@ -10723,7 +10947,6 @@ async fn main(_spawner: Spawner) {
     let mut heater_control_timing = HeaterControlTiming::default();
     let mut ui_refresh_pending = false;
     let mut next_ui_refresh_ms = DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS;
-    let mut first_runtime_probe = true;
     // USB automation can open WiFi Info after this loop has already sampled
     // the keys. Do not let an event from that older sample immediately close
     // the newly opened pairing window.
@@ -10731,14 +10954,8 @@ async fn main(_spawner: Spawner) {
     loop {
         // Yield cooperatively while using the monotonic clock for deadlines.
         #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_before\n");
-        }
         embassy_futures::yield_now().await;
         #[cfg(feature = "web_serial")]
-        if first_runtime_probe {
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=runtime_yield_after\n");
-        }
         let elapsed_ms = Instant::now()
             .as_millis()
             .saturating_sub(runtime_started_ms);
@@ -10764,6 +10981,7 @@ async fn main(_spawner: Spawner) {
                         &mut memory_commit_due_ms,
                         &mut memory_sequence,
                         &mut pd_i2c,
+                        ch224q_address,
                         &mut flash_storage,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
@@ -10805,6 +11023,7 @@ async fn main(_spawner: Spawner) {
                         &mut hold_pps_governor,
                         &mut ui_state,
                         &mut last_heater_duty,
+                        latest_vin_mv,
                     )
                     .await;
                     usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
@@ -10907,6 +11126,7 @@ async fn main(_spawner: Spawner) {
                 &mut memory_commit_due_ms,
                 &mut memory_sequence,
                 &mut pd_i2c,
+                ch224q_address,
                 &mut flash_storage,
                 &mut calibration_runtime_state,
                 thermal_plant_workspace,
@@ -10948,6 +11168,7 @@ async fn main(_spawner: Spawner) {
                 &mut hold_pps_governor,
                 &mut ui_state,
                 &mut last_heater_duty,
+                latest_vin_mv,
             )
             .await;
             let (status, body) = lan_frame_response(
@@ -10978,6 +11199,7 @@ async fn main(_spawner: Spawner) {
             &mut hold_pps_governor,
             &mut ui_state,
             &mut last_heater_duty,
+            latest_vin_mv,
         )
         .await;
 
@@ -11280,7 +11502,7 @@ async fn main(_spawner: Spawner) {
                 &mut control_measurement_guarded,
             );
 
-            match rtd_sample {
+            let calibration_live_rtd_temp_c = match rtd_sample {
                 RtdSample::Valid(measurement) => {
                     latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                     latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
@@ -11304,6 +11526,7 @@ async fn main(_spawner: Spawner) {
                         measurement.temp_c,
                     );
                     current_rtd_fault = overtemp_fault_from_control_temperature(measurement.temp_c);
+                    Some(measurement.temp_c)
                 }
                 RtdSample::Fault { adc_mv, reason } => {
                     latest_rtd_raw_adc_mv = adc_mv.unwrap_or(0);
@@ -11324,8 +11547,9 @@ async fn main(_spawner: Spawner) {
                         reason.label(),
                         ui_state.heater_enabled,
                     );
+                    None
                 }
-            }
+            };
             last_rtd_sample_request_mv = current_request_mv;
 
             if let Some(reason) = current_rtd_fault
@@ -11384,6 +11608,10 @@ async fn main(_spawner: Spawner) {
                 latest_vin_raw_adc_mv,
             );
             let memory_before_calibration_job = memory_config.clone();
+            let thermal_plant_was_running = calibration_runtime_state.mode
+                == CalibrationMode::ThermalPlant
+                && calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
+                && calibration_runtime_state.job.status == CalibrationJobStatus::Running;
             if current_rtd_fault.is_some()
                 && calibration_runtime_state.mode == CalibrationMode::ThermalPlant
                 && calibration_runtime_state.job.status == CalibrationJobStatus::Running
@@ -11395,6 +11623,11 @@ async fn main(_spawner: Spawner) {
                     &mut manual_pps_state,
                 );
             } else {
+                let calibration_temp_c = thermal_plant_calibration_temperature_c(
+                    calibration_runtime_state,
+                    calibration_live_rtd_temp_c,
+                    latest_temp_c,
+                );
                 update_calibration_job_state(
                     &mut calibration_runtime_state,
                     &mut memory_config,
@@ -11402,7 +11635,7 @@ async fn main(_spawner: Spawner) {
                     thermal_plant_workspace,
                     latest_rtd_raw_adc_mv,
                     latest_vin_raw_adc_mv,
-                    latest_temp_c,
+                    calibration_temp_c,
                     current_pd_observation
                         .map(|observation| observation.current_ma)
                         .unwrap_or(0),
@@ -11442,6 +11675,16 @@ async fn main(_spawner: Spawner) {
                         Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
                 }
             }
+            let calibration_output_temp_c = thermal_plant_calibration_temperature_c(
+                calibration_runtime_state,
+                calibration_live_rtd_temp_c,
+                latest_temp_c,
+            );
+            let force_thermal_plant_output_off = thermal_plant_output_must_be_off(
+                calibration_runtime_state,
+                thermal_plant_was_running,
+                calibration_output_temp_c,
+            );
             needs_redraw |= disarm_pending_thermal_plant_output(
                 &mut calibration_runtime_state,
                 &mut heater_power_backend,
@@ -11452,6 +11695,7 @@ async fn main(_spawner: Spawner) {
                 &mut hold_pps_governor,
                 &mut ui_state,
                 &mut last_heater_duty,
+                latest_vin_mv,
             )
             .await;
             if calibration_runtime_state.mode != CalibrationMode::Off
@@ -11481,6 +11725,9 @@ async fn main(_spawner: Spawner) {
             if ui_state.heater_enabled != desired_heater_enabled {
                 ui_state.heater_enabled = desired_heater_enabled;
                 needs_redraw = true;
+            }
+            if force_thermal_plant_output_off {
+                ui_state.heater_enabled = false;
             }
             let runtime_plant = thermal_plant_projection_for_runtime(&memory_config);
             // The controller works in heater watts, not source capability
@@ -11535,7 +11782,11 @@ async fn main(_spawner: Spawner) {
                 )
             };
             last_pid_snapshot = pid_snapshot;
-            let requested_duty_percent = pid_snapshot.duty_percent;
+            let requested_duty_percent = if force_thermal_plant_output_off {
+                0
+            } else {
+                pid_snapshot.duty_percent
+            };
             if ui_state.heater_output_percent != requested_duty_percent {
                 ui_state.heater_output_percent = requested_duty_percent;
                 needs_redraw = true;
@@ -11551,7 +11802,9 @@ async fn main(_spawner: Spawner) {
                 latest_vin_mv,
                 latest_temp_c,
                 requested_duty_percent,
-                if thermal_plant_calibration_running {
+                if force_thermal_plant_output_off {
+                    false
+                } else if thermal_plant_calibration_running {
                     calibration_runtime_state.heater_enabled
                 } else {
                     ui_state.heater_enabled
@@ -11609,6 +11862,10 @@ async fn main(_spawner: Spawner) {
             );
         }
 
+        discard_deferred_memory_commit_for_incompatible_eeprom(
+            ui_state.eeprom_data_incompatible,
+            &mut memory_commit_due_ms,
+        );
         if memory_commit_due_ms.is_some_and(|due_ms| elapsed_ms >= due_ms) {
             memory_commit_due_ms = None;
             if commit_memory_config_now(
@@ -11800,7 +12057,6 @@ async fn main(_spawner: Spawner) {
             ui_refresh_pending = false;
             next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
         }
-        first_runtime_probe = false;
     }
 }
 
@@ -13868,6 +14124,28 @@ mod tests {
             &transaction,
             &memory_config
         ));
+
+        let mut quantized_trace = samples;
+        for (index, sample) in quantized_trace[..sample_count].iter_mut().enumerate() {
+            if index > 0 && index + 1 < sample_count {
+                sample.raw_rtd_adc_mv = if index % 2 == 0 {
+                    sample.raw_rtd_adc_mv.saturating_add(1)
+                } else {
+                    sample.raw_rtd_adc_mv.saturating_sub(1)
+                };
+            }
+        }
+        let (_, quantized_residual) = fit_thermal_plant_transient(
+            0x5155_414e,
+            raw_rtd_adc_mv_for_temp(ambient_temp_c),
+            &quantized_trace,
+            sample_count as u8,
+            None,
+            &memory_config,
+        )
+        .expect("bounded ADC quantization must still fit");
+        assert!(quantized_residual <= 0.20);
+
         memory_config.thermal_plant_transient_active = Some(transaction);
         memory_config.heater_curve_transaction_id = Some(transaction.transaction_id);
         let manual_pps =
@@ -14033,24 +14311,6 @@ mod tests {
             manual_pps
         ));
 
-        let mut overtemp_trace = transaction;
-        let powered_sample = overtemp_trace.samples[..usize::from(overtemp_trace.sample_count)]
-            .iter_mut()
-            .find(|sample| sample.duty_percent == 100)
-            .expect("transient trace contains a powered sample");
-        powered_sample.raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(THERMAL_PLANT_MAX_TEMP_C);
-        assert!(thermal_plant_projection_from_transient(&overtemp_trace).is_some());
-        assert!(!thermal_plant_transient_trace_reaches_targets(
-            &overtemp_trace,
-            &memory_config
-        ));
-        memory_config.thermal_plant_transient_active = Some(overtemp_trace);
-        assert!(!thermal_model_heater_allowed(
-            &memory_config,
-            CalibrationRuntimeState::default(),
-            manual_pps
-        ));
-
         let mut cold_baseline = transaction;
         cold_baseline.samples[0].raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(-50.0);
         assert!(thermal_plant_projection_from_transient(&cold_baseline).is_some());
@@ -14125,6 +14385,12 @@ mod tests {
                 } else {
                     0
                 };
+                let measured_heater_mv = if heater_duty_percent > 0 {
+                    u32::from(source_mv)
+                        .min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
+                } else {
+                    0
+                };
                 update_calibration_job_state(
                     &mut calibration,
                     &mut memory_config,
@@ -14133,7 +14399,7 @@ mod tests {
                     0,
                     temperature_c,
                     pd_current_ma,
-                    u32::from(source_mv),
+                    measured_heater_mv,
                     heater_duty_percent,
                 );
                 if calibration.job.status == CalibrationJobStatus::Completed {
@@ -14147,7 +14413,8 @@ mod tests {
                 }
 
                 let power_mw = if heater_duty_percent > 0 {
-                    (f32::from(source_mv) / 1_000.0).powi(2) / resistance_ohms * 1_000.0
+                    ((f32::from(source_mv) / 1_000.0).powi(2) / resistance_ohms * 1_000.0)
+                        .min(f32::from(source_mv) * f32::from(source_current_ma) / 1_000.0)
                 } else {
                     0.0
                 };
@@ -14225,8 +14492,9 @@ mod tests {
         );
 
         assert!(!calibration.heater_enabled);
-        assert!(!manual_pps.enabled);
-        assert!(take_immediate_heater_disarm(&mut calibration));
+        assert!(manual_pps.enabled);
+        assert_eq!(manual_pps.target_mv, Some(20_000));
+        assert!(!take_immediate_heater_disarm(&mut calibration));
         assert_eq!(calibration.job_data, Some(CalibrationJobData::ThermalPlant));
         assert_eq!(
             test_thermal_plant_phase(),
@@ -14239,6 +14507,38 @@ mod tests {
         assert_eq!(
             thermal_plant_calibration_snapshot(215.0, true).duty_percent,
             100
+        );
+        assert!(thermal_plant_output_must_be_off(calibration, true, 220.0));
+    }
+
+    #[test]
+    fn thermal_plant_live_rtd_cutoff_ignores_a_lagging_guarded_temperature() {
+        let calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::ThermalPlant,
+            heater_enabled: true,
+            job: CalibrationJobState {
+                kind: Some(CalibrationJobKind::ThermalPlant),
+                status: CalibrationJobStatus::Running,
+                ..CalibrationJobState::default()
+            },
+            ..CalibrationRuntimeState::default()
+        };
+
+        let calibration_temp =
+            thermal_plant_calibration_temperature_c(calibration, Some(229.5), 158.4);
+        assert_eq!(calibration_temp, 229.5);
+        assert!(thermal_plant_output_must_be_off(
+            calibration,
+            true,
+            calibration_temp
+        ));
+        assert_eq!(
+            thermal_plant_calibration_temperature_c(
+                CalibrationRuntimeState::default(),
+                Some(229.5),
+                158.4
+            ),
+            158.4
         );
     }
 
@@ -14444,6 +14744,103 @@ mod tests {
         assert_eq!(memory_record_write_chunk_len(0x0418, 128), 8);
         assert_eq!(memory_record_write_chunk_len(0x041f, 128), 1);
         assert_eq!(memory_record_write_chunk_len(0x0420, 7), 7);
+    }
+
+    #[test]
+    fn raw_eeprom_writes_split_at_page_boundaries_from_any_offset() {
+        assert_eq!(eeprom_maintenance_write_chunk_len(0x001f, 2), 1);
+        assert_eq!(eeprom_maintenance_write_chunk_len(0x0020, 17), 16);
+        assert_eq!(eeprom_maintenance_write_chunk_len(0x003f, 16), 1);
+    }
+
+    #[test]
+    fn non_blank_eeprom_without_a_valid_record_is_incompatible() {
+        let blank = [0xff; EEPROM_UNUSED_GAP_LEN];
+        let mut incompatible_gap = blank;
+        incompatible_gap[0] = 0x7e;
+
+        assert!(!eeprom_data_is_incompatible(
+            false,
+            eeprom_bytes_contain_data(&blank)
+        ));
+        assert!(eeprom_data_is_incompatible(
+            false,
+            eeprom_bytes_contain_data(&incompatible_gap)
+        ));
+        assert!(!eeprom_data_is_incompatible(
+            true,
+            eeprom_bytes_contain_data(&incompatible_gap)
+        ));
+    }
+
+    #[test]
+    fn raw_eeprom_maintenance_locks_writes_and_clears_erased_runtime_state() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let mut config = MemoryConfig {
+            target_temp_c: 180,
+            ..MemoryConfig::default()
+        };
+        let mut calibration = CalibrationRuntimeState {
+            mode: CalibrationMode::HeaterCurve,
+            pps_enabled: true,
+            pps_mv: Some(20_000),
+            pps_ma: Some(3_000),
+            heater_enabled: true,
+            ..CalibrationRuntimeState::default()
+        };
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            owner: ManualPpsOwner::Debug,
+            target_mv: Some(20_000),
+            target_ma: Some(3_000),
+            applied_mv: Some(20_000),
+            ..ManualPpsState::default()
+        };
+        let sequence = 9;
+        let mut commit_due_ms = Some(20);
+
+        begin_mutating_eeprom_maintenance(
+            &mut state,
+            &mut calibration,
+            &mut manual_pps,
+            &mut commit_due_ms,
+        );
+        assert!(raw_eeprom_operation_mutates(EepromMaintenanceOp::Write));
+        assert!(raw_eeprom_operation_mutates(EepromMaintenanceOp::Erase));
+        assert!(!raw_eeprom_operation_mutates(EepromMaintenanceOp::Read));
+        assert!(state.eeprom_data_incompatible);
+        assert!(!manual_pps.enabled);
+        assert!(manual_pps.automatic_restore_pending);
+        assert_eq!(calibration.mode, CalibrationMode::Off);
+        assert!(!calibration.heater_enabled);
+        assert!(calibration.immediate_heater_disarm_pending);
+        assert_eq!(commit_due_ms, None);
+
+        apply_successful_eeprom_maintenance_operation(
+            EepromMaintenanceOp::Write,
+            &mut state,
+            &mut config,
+            &mut commit_due_ms,
+        );
+        assert!(state.eeprom_data_incompatible);
+        assert_eq!(config.target_temp_c, 180);
+
+        state.eeprom_data_incompatible = false;
+        apply_successful_eeprom_maintenance_operation(
+            EepromMaintenanceOp::Erase,
+            &mut state,
+            &mut config,
+            &mut commit_due_ms,
+        );
+        assert_eq!(config, MemoryConfig::default());
+        assert_eq!(sequence, 9);
+        assert_eq!(commit_due_ms, None);
+        assert_eq!(state.target_temp_c, MemoryConfig::default().target_temp_c);
+        assert!(!state.eeprom_data_incompatible);
+
+        commit_due_ms = Some(42);
+        discard_deferred_memory_commit_for_incompatible_eeprom(true, &mut commit_due_ms);
+        assert_eq!(commit_due_ms, None);
     }
 
     #[test]
@@ -19229,18 +19626,6 @@ mod tests {
     }
 
     #[test]
-    fn i2c_scan_address_list_keeps_first_sixteen_hits() {
-        let mut addresses = [None; 16];
-        for address in 0x08..=0x19 {
-            push_i2c_scan_address(&mut addresses, address);
-        }
-
-        assert_eq!(addresses[0], Some(0x08));
-        assert_eq!(addresses[15], Some(0x17));
-        assert!(!addresses.contains(&Some(0x18)));
-    }
-
-    #[test]
     fn runtime_heater_reconcile_preserves_dashboard_heater_when_calibration_is_off() {
         let desired = reconcile_runtime_heater_enabled(
             true,
@@ -19402,6 +19787,20 @@ mod tests {
                 terminal_fixed_pd_disarmed: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn terminal_disarm_waits_for_measured_fixed_pd_voltage() {
+        let fixed_mv = u32::from(DEFAULT_PD_VOLTAGE_REQUEST.millivolts());
+        assert!(!terminal_fixed_pd_voltage_confirmed(
+            fixed_mv.saturating_add(9_000)
+        ));
+        assert!(!terminal_fixed_pd_voltage_confirmed(
+            fixed_mv.saturating_add(3_000)
+        ));
+        assert!(terminal_fixed_pd_voltage_confirmed(
+            fixed_mv.saturating_add(450)
         ));
     }
 

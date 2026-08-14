@@ -199,6 +199,11 @@ pub fn render_frontpanel_ui_with_palette(
 ) {
     canvas.clear(COLOR_BG).ok();
 
+    if state.eeprom_data_incompatible {
+        draw_eeprom_data_incompatible(canvas);
+        return;
+    }
+
     match state.route {
         FrontPanelRoute::KeyTest => draw_key_test(canvas, state),
         FrontPanelRoute::Dashboard => draw_dashboard(canvas, state, palette),
@@ -208,6 +213,12 @@ pub fn render_frontpanel_ui_with_palette(
         FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state),
         FrontPanelRoute::DeviceInfo => draw_device_info(canvas),
     }
+}
+
+fn draw_eeprom_data_incompatible(canvas: &mut DisplayCanvas) {
+    draw_text_mid_center(canvas, "EEPROM DATA", 80, 5, COLOR_WARNING);
+    draw_text_mid_center(canvas, "INCOMPATIBLE", 80, 19, COLOR_TEXT);
+    draw_text_mid_center(canvas, "HEATER LOCKED", 80, 33, COLOR_WARNING);
 }
 
 fn fill_rect(canvas: &mut DisplayCanvas, x: i32, y: i32, width: u32, height: u32, color: Rgb565) {
@@ -961,6 +972,19 @@ fn draw_device_info(canvas: &mut DisplayCanvas) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frontpanel::FrontPanelRuntimeMode;
+
+    #[test]
+    fn incompatible_eeprom_renders_a_dedicated_locked_screen() {
+        let mut canvas = DisplayCanvas::new();
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.eeprom_data_incompatible = true;
+
+        render_frontpanel_ui(&mut canvas, &state);
+
+        assert!(canvas.pixels().contains(&COLOR_WARNING));
+        assert!(canvas.pixels().contains(&COLOR_TEXT));
+    }
 
     #[test]
     fn temperature_color_follows_threshold_bands() {

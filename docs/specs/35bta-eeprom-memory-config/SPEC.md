@@ -46,13 +46,13 @@
 
 - Web 控制台页面变更
 - HTTP Wi-Fi 服务端实现
-- EEPROM 工厂擦除/迁移命令
+- 面向普通用户的 EEPROM 恢复流程、迁移包或 Web/LAN 维护入口
 
 ## 需求（Requirements）
 
 ### MUST
 
-- EEPROM 设备默认为 `M24C64`，7-bit I2C 首选地址 `0x50`，固件在 `0x50..0x57` 范围内探测以兼容实板地址脚差异；容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。
+- EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用静态复用 scratch 和有界分块访问，不得把完整 record buffer 放入启动栈。
 - `MemoryRecord` 当前格式版本为 `v5`：header 的 byte `4` 保存 format version，byte `5` 保存 header length，bytes `6..8` 保存 payload length，bytes `8..12` 保存 `sequence`，bytes `12..16` 保存 CRC。v1-v5 均可解码；v1/v2 使用窄 TLV 长度，v3-v5 使用 `u16` TLV 长度。active 双槽位于 `0x1000` / `0x1800`，每槽 `2048 bytes`；previous 双槽为 `1024 bytes`（`0x0400` / `0x0800`），legacy 双槽为 `512 bytes`（`0x0000` / `0x0200`）。启动时选择 CRC 合法且 `sequence` 最大的 record。旧 EEPROM 槽只作为兼容读取源，选择出的旧配置先在 RAM 中完成字段迁移；后续成功提交配置时才以当前 v5 编码写入 active 槽，不在启动阶段强制重写 EEPROM。
 - 外置 EEPROM 是主持久化后端；若 EEPROM 当前不可达或写入失败，固件必须使用 ESP flash 中标签为 `flux_cfg` 的专用 8KiB data partition 保存同一 `MemoryRecord`，不得直接占用或写入 NVS 管理范围。flash slot A/B 必须各自独占一个 4KiB erase sector，写入任一 slot 不得擦除另一份有效 record。启动时同时读取可用后端，选择 CRC 合法且 `sequence` 最大的 record；所有后端都无效时使用默认配置。升级前曾使用旧 factory-app 边界后 `0x110000` / `0x111000` raw 双槽的设备，若该区域仍含 CRC 合法 record，启动时必须将其迁移复制到当前 `flux_cfg`；新写入不得回到旧 raw 区域。
 - `devd` 的 real-flash 路径在写入任何应用镜像前，必须读取设备当前 `0x8000` partition table 并解析实际 `flux_cfg`。若目标 [`firmware/partitions.csv`](../../../firmware/partitions.csv) 改变该分区地址，`devd` 必须将当前完整 `flux_cfg`（或未分区 legacy raw 双槽）预写到目标 `flux_cfg` 地址，再原样读回验证；只有验证成功才可写入新 partition table 和 app。目标地址被当前 layout 占用、目标容量较小、读取/解析失败或逐字验证不一致时，必须拒绝应用烧录。临时副本不得进入日志、trace 或用户配置目录。EEPROM 不受该 flash layout 迁移影响。
@@ -62,6 +62,8 @@
 - 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
 - EEPROM 读写失败不得阻断 heater/fan 保护逻辑；fallback flash 不可用时保存失败必须可见，但不得屏蔽安全保护。
 - 日志不得输出 Wi-Fi 密码明文。
+- EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
+- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、请求 fixed PD，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
 
 ### SHOULD
 
@@ -87,6 +89,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
+- EEPROM 原始维护仅通过 USB/devd lease 暴露，不进入设备 LAN API 或 Web 控制台；它是避免 EEPROM 数据丢失的高级兜底工具，不属于普通用户工作流。物理 heater 输出非零时固件必须拒绝维护操作。
 - Flash fallback 复用同一当前 v5 `MemoryRecord` 编码与 sequence 选择规则，存放在 ESP-IDF partition table 中标签为 `flux_cfg` 的专用 8KiB data partition；两个逻辑 slot 分别位于该分区的 `0x0000` 与 `0x1000`，只在 EEPROM 不可达或写入失败时使用。为兼容此前位于 `0x110000` / `0x111000` 的 raw fallback 双槽，当前 runtime 只读探测其 CRC 合法 record，并在发现时立即以 v5 编码复制到 `flux_cfg`；此兼容读取不写旧区域。当前 `flux_cfg` 中的旧格式 record 仍按版本解码，后续成功提交时物化为 v5。仓库根 `espflash.toml` 必须让 ELF 烧录同步写入 [`firmware/partitions.csv`](../../../firmware/partitions.csv)。支持 raw app artifact 时，devd 必须先写入由该 CSV 生成并受版本控制的 [`firmware/partitions.bin`](../../../firmware/partitions.bin) 到 `0x8000`，再写入 app 并显式 reset；两条安装路径都必须保证该分区属于正式 flash 合同。写入前 `devd` 以当前设备的 partition table 规划 `flux_cfg` 迁移；地址变化时先 read/verify 目标位置的完整 record，随后才允许安装目标 layout 和应用镜像。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
@@ -118,7 +121,7 @@
   - `0x39`: static IPv4 configuration
   - `0x3a`: `thermal_plant_transient_active`
   - `0x3b`: `heater_curve_transaction_id`
-- 新记录持续写入 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x36` 与 `0x37` 只保留为历史稳态双平台记录，绝不迁移或优先于新模型，也不得解锁加热。`0x3a` 保存瞬态模型的 ambient raw RTD ADC、定长 `50ms` 轨迹、实测加热电压、duty、拟合系数和 transaction identity；`0x3b` 必须等于该模型 transaction identity，证明 `0x35` 的曲线原始观测来自同一次瞬态采集。拟合系数无效时仍保留结构合法的原始 `0x3a` 轨迹以支持诊断，但它只能呈现为 `invalid`，不得解锁加热。派生温度、曲线与系数不得成为唯一持久化真相源。
+- 新记录持续写入 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode。`0x35` 保存 raw RTD ADC、实测 V/I/R；`0x36` 与 `0x37` 只保留为历史稳态双平台记录，绝不迁移或优先于新模型，也不得解锁加热。`0x3a` 保存成功瞬态模型的 ambient raw RTD ADC、定长 `50ms` 轨迹、实测加热电压、duty、拟合系数和 transaction identity；`0x3b` 必须等于该模型 transaction identity，证明 `0x35` 的曲线原始观测来自同一次瞬态采集。轨迹电压是 ADC 实测值，允许因测量误差高于所选 APDO 的名义最高请求；APDO 覆盖能力和运行安全由 calibration admission 与运行门禁负责，持久化结构不得用名义电压上限过滤实测值。拟合失败不写 `0x3a`，也不得覆盖既有 active。派生温度、曲线与系数不得成为唯一持久化真相源。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头；它无损保存完整 point-local 字段，并让两个十点 bank、最长 Wi-Fi 凭据、LAN token、static IPv4、完整 calibration 与最长瞬态轨迹共同装入一个 `2KiB` active record。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
 ## 验收标准（Acceptance Criteria）
@@ -173,7 +176,7 @@
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 假设：M24C64 地址脚按硬件基线配置为 7-bit 地址 `0x50`；固件仍会探测 `0x50..0x57`。当实机 EEPROM 不响应时，flash fallback 必须维持保存/重启恢复能力，避免调优和校准流程被单一外设阻断。
+- 假设：M24C64 地址脚按硬件基线固定为 7-bit 地址 `0x50`；固件只访问该硬件地址。当实机 EEPROM 不响应时，flash fallback 必须维持保存/重启恢复能力，避免调优和校准流程被单一外设阻断。
 - 风险：当前实现未加密 Wi-Fi 密码；若后续威胁模型要求物理攻击防护，需要另开安全存储规格。
 - 风险：若后续新增更多高频配置项，需要重新评估 EEPROM 写入寿命与合并写策略。
 

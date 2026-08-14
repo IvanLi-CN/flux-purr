@@ -611,6 +611,7 @@ pub struct FrontPanelUiState {
     pub fan_display_state: FanDisplayState,
     pub heater_lock_reason: Option<HeaterLockReason>,
     pub dashboard_warning_visible: bool,
+    pub eeprom_data_incompatible: bool,
     pub manual_pps_enabled: bool,
     pub selected_menu_item: FrontPanelMenuItem,
     pub selected_preset_slot: usize,
@@ -643,6 +644,7 @@ impl FrontPanelUiState {
             fan_display_state: FanDisplayState::Auto,
             heater_lock_reason: None,
             dashboard_warning_visible: false,
+            eeprom_data_incompatible: false,
             manual_pps_enabled: false,
             selected_menu_item: FrontPanelMenuItem::ActiveCooling,
             selected_preset_slot: 1,
@@ -681,6 +683,9 @@ impl FrontPanelUiState {
     }
 
     pub fn handle_event(&mut self, event: KeyEvent) -> bool {
+        if self.eeprom_data_incompatible {
+            return false;
+        }
         self.key_test.last_raw_key = Some(event.raw_key);
         self.key_test.last_key = Some(event.key);
         self.key_test.last_gesture = Some(event.gesture);

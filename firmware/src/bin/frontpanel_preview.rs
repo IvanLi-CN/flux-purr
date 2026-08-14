@@ -37,6 +37,7 @@ enum PreviewPreset {
     ActiveCooling,
     WifiInfo,
     DeviceInfo,
+    EepromDataIncompatible,
 }
 
 fn build_key_test_state(raw_key: RawFrontPanelKey, gesture: KeyGesture) -> FrontPanelUiState {
@@ -103,6 +104,7 @@ impl PreviewPreset {
             Self::ActiveCooling => "active-cooling",
             Self::WifiInfo => "wifi-info",
             Self::DeviceInfo => "device-info",
+            Self::EepromDataIncompatible => "eeprom-data-incompatible",
         }
     }
 
@@ -125,6 +127,7 @@ impl PreviewPreset {
             "active-cooling" => Some(Self::ActiveCooling),
             "wifi-info" => Some(Self::WifiInfo),
             "device-info" => Some(Self::DeviceInfo),
+            "eeprom-data-incompatible" => Some(Self::EepromDataIncompatible),
             _ => None,
         }
     }
@@ -240,6 +243,11 @@ impl PreviewPreset {
                 state.route = FrontPanelRoute::DeviceInfo;
                 state
             }
+            Self::EepromDataIncompatible => {
+                let mut state = base_dashboard_state();
+                state.eeprom_data_incompatible = true;
+                state
+            }
         }
     }
 }
@@ -276,7 +284,7 @@ where
     let preset_slug = args.next().unwrap_or_else(|| String::from("dashboard"));
     let Some(preset) = PreviewPreset::from_slug(&preset_slug) else {
         return Err(format!(
-            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info)",
+            "unknown frontpanel preset '{}' (known: key-test-idle, key-test-short, key-test-double, key-test-long, dashboard, dashboard-manual, dashboard-fan-off, dashboard-fan-auto, dashboard-fan-run, dashboard-overtemp-a, dashboard-overtemp-b, dashboard-temp, menu, preset-temp, active-cooling, wifi-info, device-info, eeprom-data-incompatible)",
             preset_slug
         ));
     };
