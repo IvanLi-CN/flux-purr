@@ -1477,37 +1477,44 @@ async fn handle_eeprom_command(
             let resolved = resolve_target(args.target, devd)?;
             let lease = create_lease(client, &resolved).await?;
             let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
-            for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
-                let length = (EEPROM_CAPACITY_BYTES - offset).min(EEPROM_CHUNK_BYTES);
-                let value = request_leased(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    Method::POST,
-                    "/eeprom",
-                    Some(json!({
-                        "op": "read",
-                        "offset": offset,
-                        "length": length,
-                    })),
-                )
-                .await?;
-                let bytes: Vec<u8> =
-                    serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
-                if bytes.len() != length {
-                    return Err(format!(
-                        "EEPROM read returned {} bytes, expected {length}",
-                        bytes.len()
+            let result = async {
+                let mut image = Vec::with_capacity(EEPROM_CAPACITY_BYTES);
+                for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
+                    let length = (EEPROM_CAPACITY_BYTES - offset).min(EEPROM_CHUNK_BYTES);
+                    let value = request_leased(
+                        client,
+                        &resolved,
+                        &lease.lease_id,
+                        Method::POST,
+                        "/eeprom",
+                        Some(json!({
+                            "op": "read",
+                            "offset": offset,
+                            "length": length,
+                        })),
                     )
-                    .into());
+                    .await?;
+                    let bytes: Vec<u8> =
+                        serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
+                    if bytes.len() != length {
+                        return Err(format!(
+                            "EEPROM read returned {} bytes, expected {length}",
+                            bytes.len()
+                        )
+                        .into());
+                    }
+                    image.extend_from_slice(&bytes);
                 }
-                image.extend_from_slice(&bytes);
+                fs::write(&args.output, &image)?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
+                    "path": args.output,
+                    "bytes": image.len(),
+                }))
             }
+            .await;
             let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
             heartbeat.abort();
-            fs::write(&args.output, &image)?;
-            Ok(json!({ "path": args.output, "bytes": image.len() }))
+            result
         }
         EepromCommand::Import(args) => {
             let image = fs::read(&args.input)?;
@@ -1519,24 +1526,31 @@ async fn handle_eeprom_command(
             let resolved = resolve_target(args.target, devd)?;
             let lease = create_lease(client, &resolved).await?;
             let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            for (offset, chunk) in image.chunks(EEPROM_CHUNK_BYTES).enumerate() {
-                request_leased(
-                    client,
-                    &resolved,
-                    &lease.lease_id,
-                    Method::POST,
-                    "/eeprom",
-                    Some(json!({
-                        "op": "write",
-                        "offset": offset * EEPROM_CHUNK_BYTES,
-                        "bytes": chunk,
-                    })),
-                )
-                .await?;
+            let result = async {
+                for (offset, chunk) in image.chunks(EEPROM_CHUNK_BYTES).enumerate() {
+                    request_leased(
+                        client,
+                        &resolved,
+                        &lease.lease_id,
+                        Method::POST,
+                        "/eeprom",
+                        Some(json!({
+                            "op": "write",
+                            "offset": offset * EEPROM_CHUNK_BYTES,
+                            "bytes": chunk,
+                        })),
+                    )
+                    .await?;
+                }
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
+                    "bytes": image.len(),
+                    "rebootRequired": true,
+                }))
             }
+            .await;
             let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
             heartbeat.abort();
-            Ok(json!({ "bytes": image.len(), "rebootRequired": true }))
+            result
         }
         EepromCommand::Erase(args) => {
             if args.confirm != "ERASE EEPROM" {
@@ -1545,40 +1559,48 @@ async fn handle_eeprom_command(
             let resolved = resolve_target(args.target, devd)?;
             let lease = create_lease(client, &resolved).await?;
             let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            request_leased(
-                client,
-                &resolved,
-                &lease.lease_id,
-                Method::POST,
-                "/eeprom",
-                Some(json!({ "op": "erase" })),
-            )
-            .await?;
-            for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
-                let value = request_leased(
+            let result = async {
+                request_leased(
                     client,
                     &resolved,
                     &lease.lease_id,
                     Method::POST,
                     "/eeprom",
-                    Some(json!({
-                        "op": "read",
-                        "offset": offset,
-                        "length": EEPROM_CHUNK_BYTES,
-                    })),
+                    Some(json!({ "op": "erase" })),
                 )
                 .await?;
-                let bytes: Vec<u8> =
-                    serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
-                if bytes.len() != EEPROM_CHUNK_BYTES || bytes.iter().any(|byte| *byte != 0xff) {
-                    return Err(
-                        format!("EEPROM erase verification failed at offset {offset}").into(),
-                    );
+                for offset in (0..EEPROM_CAPACITY_BYTES).step_by(EEPROM_CHUNK_BYTES) {
+                    let value = request_leased(
+                        client,
+                        &resolved,
+                        &lease.lease_id,
+                        Method::POST,
+                        "/eeprom",
+                        Some(json!({
+                            "op": "read",
+                            "offset": offset,
+                            "length": EEPROM_CHUNK_BYTES,
+                        })),
+                    )
+                    .await?;
+                    let bytes: Vec<u8> =
+                        serde_json::from_value(value.get("bytes").cloned().unwrap_or(Value::Null))?;
+                    if bytes.len() != EEPROM_CHUNK_BYTES || bytes.iter().any(|byte| *byte != 0xff) {
+                        return Err(
+                            format!("EEPROM erase verification failed at offset {offset}").into(),
+                        );
+                    }
                 }
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(json!({
+                    "erased": true,
+                    "bytes": EEPROM_CAPACITY_BYTES,
+                    "rebootRequired": true,
+                }))
             }
+            .await;
             let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
             heartbeat.abort();
-            Ok(json!({ "erased": true, "bytes": EEPROM_CAPACITY_BYTES, "rebootRequired": true }))
+            result
         }
     }
 }

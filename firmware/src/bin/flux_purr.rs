@@ -5212,7 +5212,15 @@ async fn write_memory_record(
     scratch: &mut MemoryIoScratch,
 ) -> Result<(), MemoryCommitError> {
     match write_eeprom_memory_record(i2c, record, scratch).await {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Err(error) = write_flash_memory_record(flash, record, scratch) {
+                info!(
+                    "memory commit flash mirror unavailable reason={=str}",
+                    error.code()
+                );
+            }
+            Ok(())
+        }
         Err(eeprom_error) => {
             info!(
                 "memory commit falling back to flash reason={=str}",
@@ -9464,7 +9472,13 @@ async fn process_control_line(
             response
         }
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
-            if thermal_plant_calibration_job_running(*calibration_runtime_state) {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
                 usb_error_response(
                     request_id,
                     ManualPpsError::CalibrationInProgress.code(),
@@ -9536,14 +9550,30 @@ async fn process_control_line(
                 )
             }
         }
-        Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => usb_heater_curve_config_response(
-            request_id,
-            config,
-            memory_config,
-            preview_heater_curve,
-        ),
+        Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else {
+                usb_heater_curve_config_response(
+                    request_id,
+                    config,
+                    memory_config,
+                    preview_heater_curve,
+                )
+            }
+        }
         Ok(UsbFrame::HeaterCurveSave { request_id }) => {
-            if thermal_plant_calibration_job_running(*calibration_runtime_state) {
+            if ui_state.eeprom_data_incompatible {
+                usb_error_response(
+                    request_id,
+                    "eeprom_data_incompatible",
+                    "EEPROM data is incompatible; heating and calibration are locked.",
+                )
+            } else if thermal_plant_calibration_job_running(*calibration_runtime_state) {
                 usb_error_response(
                     request_id,
                     ManualPpsError::CalibrationInProgress.code(),
@@ -10375,14 +10405,20 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(10).await;
     }
-    let mut scratch = try_allocate_memory_io_scratch();
-    let (eeprom_memory_record, eeprom_data_incompatible) = scratch
-        .as_mut()
-        .map(|scratch| load_eeprom_memory_record(&mut pd_i2c, scratch))
-        .unwrap_or((None, false));
-    let flash_memory_record = scratch.as_mut().and_then(|scratch| {
-        load_flash_memory_record_with_legacy_migration(&mut flash_storage, scratch)
-    });
+    let (eeprom_memory_record, eeprom_data_incompatible, flash_memory_record) =
+        if let Some(mut scratch) = try_allocate_memory_io_scratch() {
+            let (eeprom_memory_record, eeprom_data_incompatible) =
+                load_eeprom_memory_record(&mut pd_i2c, &mut scratch);
+            let flash_memory_record =
+                load_flash_memory_record_with_legacy_migration(&mut flash_storage, &mut scratch);
+            (
+                eeprom_memory_record,
+                eeprom_data_incompatible,
+                flash_memory_record,
+            )
+        } else {
+            (None, false, None)
+        };
     let restored_memory_record =
         select_latest_optional_memory_record(eeprom_memory_record, flash_memory_record);
     let (mut memory_config, mut memory_sequence) = restored_memory_record

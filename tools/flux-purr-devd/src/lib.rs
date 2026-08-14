@@ -1592,6 +1592,7 @@ pub struct EepromMaintenanceRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EepromMaintenanceResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bytes: Option<Vec<u8>>,
 }
 
@@ -11071,6 +11072,14 @@ mod tests {
                 .code,
             "eeprom_erase_payload_invalid"
         );
+    }
+
+    #[test]
+    fn eeprom_maintenance_write_ack_omits_read_bytes() {
+        let response = EepromMaintenanceResponse { bytes: None };
+        let value = serde_json::to_value(response).unwrap();
+
+        assert!(value.get("bytes").is_none());
     }
 
     #[test]
