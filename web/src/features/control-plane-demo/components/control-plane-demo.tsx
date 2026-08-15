@@ -115,6 +115,7 @@ import {
   authorizedLanRequest,
   createLanLease,
   directLanStaleReadPath,
+  getLanPublicInfo,
   isDirectLanDevice,
   type LanDeviceSession,
   type LanLease,
@@ -125,6 +126,7 @@ import {
   probeLanDevice,
   reconcileStaleLanWrite,
   releaseLanLease,
+  resumeLanDeviceSession,
   savedLanSessionToDeviceTarget,
   startLanLeaseHeartbeat,
   streamLanEvents,
@@ -188,6 +190,7 @@ export interface LanRuntimeDependencies {
   startLeaseHeartbeat?: typeof startLanLeaseHeartbeat
   streamEvents?: typeof streamLanEvents
   probeDevice?: typeof probeLanDevice
+  getPublicInfo?: typeof getLanPublicInfo
   writeRuntime?: typeof writeLanRuntime
   readStatus?: (session: LanDeviceSession) => Promise<ControlPlaneStatus>
   readCalibration?: (session: LanDeviceSession) => Promise<CalibrationState>
@@ -657,6 +660,7 @@ export function ControlPlaneDemo({
       startLeaseHeartbeat: lanRuntimeOptions?.startLeaseHeartbeat ?? startLanLeaseHeartbeat,
       streamEvents: lanRuntimeOptions?.streamEvents ?? streamLanEvents,
       probeDevice: lanRuntimeOptions?.probeDevice ?? probeLanDevice,
+      getPublicInfo: lanRuntimeOptions?.getPublicInfo ?? getLanPublicInfo,
       writeRuntime: lanRuntimeOptions?.writeRuntime ?? writeLanRuntime,
       readStatus:
         lanRuntimeOptions?.readStatus ??
@@ -677,6 +681,7 @@ export function ControlPlaneDemo({
       lanRuntimeOptions?.startLeaseHeartbeat,
       lanRuntimeOptions?.streamEvents,
       lanRuntimeOptions?.probeDevice,
+      lanRuntimeOptions?.getPublicInfo,
       lanRuntimeOptions?.writeRuntime,
       lanRuntimeOptions?.readStatus,
       lanRuntimeOptions?.readCalibration,
@@ -766,8 +771,8 @@ export function ControlPlaneDemo({
   const preferredRouteDeviceConnection = routeDeviceChoice
     ? preferredDeviceConnection(
         routeDeviceChoice,
-        routeFallbackKind ??
-          requestedConnectionByIdentityRef.current[routeDeviceChoice.identityId] ??
+        requestedConnectionByIdentityRef.current[routeDeviceChoice.identityId] ??
+          routeFallbackKind ??
           routePreferences.transportByIdentity[routeDeviceChoice.identityId]
       )
     : undefined
@@ -839,12 +844,23 @@ export function ControlPlaneDemo({
       const rememberedTarget = savedLanSessionToDeviceTarget(session)
       const rememberedIdentityId = rememberedTarget ? deviceIdentityId(rememberedTarget) : null
       if (rememberedTarget) {
-        setPendingDevices((current) => upsertLanDeviceTarget(current, rememberedTarget))
+        setPendingDevices((current) =>
+          upsertLanDeviceTarget(current, { ...rememberedTarget, connectionAvailable: false })
+        )
       }
-      void probeLanDevice(session)
-        .then((probe) => {
+      if (!rememberedTarget || !rememberedIdentityId) continue
+      void lanRuntime
+        .getPublicInfo(session.baseUrl)
+        .then((health) => resumeLanDeviceSession(session.baseUrl, health, lanRuntime.probeDevice))
+        .then((resumed) => {
           if (cancelled) return
-          const target = lanProbeToDeviceTarget(session, probe)
+          if (!resumed) {
+            setPendingDevices((current) =>
+              current.filter((device) => device.id !== rememberedTarget.id)
+            )
+            return
+          }
+          const target = lanProbeToDeviceTarget(resumed.session, resumed.probe)
           setPendingDevices((current) => upsertLanDeviceTarget(current, target))
         })
         .catch((error: unknown) => {
@@ -868,7 +884,7 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [allowDemoControls])
+  }, [allowDemoControls, lanRuntime])
 
   useEffect(() => {
     if (!allowDemoControls || activeScenario.events.length < 2) {
@@ -1569,23 +1585,24 @@ export function ControlPlaneDemo({
     [navigation, visibleDevice.id]
   )
 
+  const onCalibrationGuardChange = navigation?.onCalibrationGuardChange
+  const navigationDeviceId = navigation?.state.kind === 'device' ? navigation.state.deviceId : null
+
   useEffect(() => {
-    if (!navigation) return
+    if (!onCalibrationGuardChange) return
     const guard =
       activeView === 'calibration' && visibleRuntimeCalibration.mode !== 'off'
         ? {
-            deviceId:
-              navigation.state.kind === 'device'
-                ? navigation.state.deviceId
-                : deviceIdentityId(visibleDevice),
+            deviceId: navigationDeviceId ?? deviceIdentityId(visibleDevice),
             workspaceTab: visibleCalibrationWorkspaceTab,
           }
         : null
-    navigation.onCalibrationGuardChange(guard)
-    return () => navigation.onCalibrationGuardChange(null)
+    onCalibrationGuardChange(guard)
+    return () => onCalibrationGuardChange(null)
   }, [
     activeView,
-    navigation,
+    navigationDeviceId,
+    onCalibrationGuardChange,
     visibleCalibrationWorkspaceTab,
     visibleDevice,
     visibleRuntimeCalibration.mode,
@@ -1631,8 +1648,13 @@ export function ControlPlaneDemo({
   const routeConnectionKind = routeDeviceConnection?.kind
   const routeConnectionTargetId = routeDeviceConnection?.target.id
   const routeConnectionTargetAlias = routeDeviceConnection?.target.alias
+  const routeConnectionUnavailable = routeDeviceConnection
+    ? routeDeviceConnection.target.connectionAvailable === false ||
+      routeDeviceConnection.target.severity === 'offline'
+    : true
   const routeFallbackConnection = routeDeviceChoice?.connections
     .filter((connection) => connection.kind !== 'web-serial')
+    .filter(isHealthyRouteConnection)
     .sort((left, right) => resumeConnectionPriority(left) - resumeConnectionPriority(right))[0]
   const routeFallbackConnectionKind = routeFallbackConnection?.kind
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
@@ -1652,7 +1674,7 @@ export function ControlPlaneDemo({
       return
     }
     if (routeConnectionKind !== 'web-serial') {
-      setRouteResumeFailed(false)
+      setRouteResumeFailed(routeConnectionUnavailable)
       return
     }
     if (webSerial.deviceIdentityId === routeRecoveryIdentityId) {
@@ -1704,6 +1726,7 @@ export function ControlPlaneDemo({
     connectPreauthorizedWebSerial,
     allowDemoControls,
     routeConnectionKind,
+    routeConnectionUnavailable,
     routeConnectionTargetAlias,
     routeConnectionTargetId,
     routeFallbackConnectionKind,
@@ -2559,7 +2582,10 @@ export function ControlPlaneDemo({
       const connection = routeDeviceChoices
         .find((choice) => choice.identityId === identityId)
         ?.connections.find((candidate) => candidate.target.id === nextDevice.id)
-      if (connection) requestedConnectionByIdentityRef.current[identityId] = connection.kind
+      if (connection) {
+        requestedConnectionByIdentityRef.current[identityId] = connection.kind
+        setRouteFallbackKind(undefined)
+      }
       const currentState = navigation.state
       void navigation.navigate(
         currentState.kind === 'device'
@@ -3820,6 +3846,7 @@ export function ControlPlaneDemo({
           routeNavigation.navigate({ ...unavailableRouteState, deviceId: identityId })
         }
         addDevice={() => routeNavigation.navigate({ kind: 'add-device' })}
+        feedback={feedback}
       />
     )
   }
@@ -3988,12 +4015,14 @@ function RouteDeviceRecovery({
   retry,
   chooseDevice,
   addDevice,
+  feedback,
 }: {
   identityId: string
   choices: DeviceChoice[]
   retry: () => void
   chooseDevice: (identityId: string) => void | Promise<void>
   addDevice: () => void | Promise<void>
+  feedback: ActionFeedback
 }) {
   return (
     <main className="industrial-shell industrial-shell--fixed text-[var(--industrial-text)]">
@@ -4028,6 +4057,7 @@ function RouteDeviceRecovery({
             添加连接
           </Button>
         </div>
+        {feedback.tone === 'warning' ? <ActionFeedbackPanel feedback={feedback} /> : null}
       </section>
     </main>
   )

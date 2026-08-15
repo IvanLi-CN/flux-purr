@@ -1,5 +1,5 @@
 import { useBlocker, useNavigate, useRouterState } from '@tanstack/react-router'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { persistAppVariant } from '@/app-mode'
 import {
   type CalibrationRouteGuard,
@@ -20,6 +20,12 @@ function App() {
   const location = useRouterState({ select: (state) => state.location })
   const routeState = useMemo(() => parseConsoleRoute(location.pathname), [location.pathname])
   const [calibrationGuard, setCalibrationGuard] = useState<CalibrationRouteGuard | null>(null)
+  const [blockedNavigation, setBlockedNavigation] =
+    useState<ConsoleNavigationAdapter['blockedNavigation']>(null)
+  const pendingBlockRef = useRef<{
+    id: symbol
+    resolve: (shouldBlock: boolean) => void
+  } | null>(null)
 
   useEffect(() => persistAppVariant(variant), [variant])
 
@@ -36,8 +42,32 @@ function App() {
     })
   }, [location.pathname, location.searchStr, navigate, search])
 
-  const blocker = useBlocker({
-    shouldBlockFn: ({ current, next }) => {
+  const settlePendingBlock = useCallback((id: symbol, shouldBlock: boolean) => {
+    const pending = pendingBlockRef.current
+    if (!pending || pending.id !== id) return
+    pendingBlockRef.current = null
+    setBlockedNavigation(null)
+    pending.resolve(shouldBlock)
+  }, [])
+
+  useEffect(
+    () => () => {
+      pendingBlockRef.current?.resolve(true)
+      pendingBlockRef.current = null
+    },
+    []
+  )
+
+  useEffect(() => {
+    if (calibrationGuard || !pendingBlockRef.current) return
+    const pending = pendingBlockRef.current
+    pendingBlockRef.current = null
+    setBlockedNavigation(null)
+    pending.resolve(false)
+  }, [calibrationGuard])
+
+  useBlocker({
+    shouldBlockFn: async ({ current, next }) => {
       if (!calibrationGuard) return false
       const sameSearch =
         current.search.demo === next.search.demo && current.search.uiDemo === next.search.uiDemo
@@ -55,11 +85,22 @@ function App() {
       ) {
         return false
       }
-      return true
+      pendingBlockRef.current?.resolve(true)
+      const id = Symbol('blocked-navigation')
+      return new Promise<boolean>((resolve) => {
+        pendingBlockRef.current = { id, resolve }
+        const nextRoute = parseConsoleRoute(next.pathname)
+        setBlockedNavigation({
+          next: nextRoute,
+          nextLabel: routeLabel(nextRoute),
+          proceed: () => settlePendingBlock(id, false),
+          reset: () => settlePendingBlock(id, true),
+        })
+      })
     },
     enableBeforeUnload: Boolean(calibrationGuard),
-    disabled: !calibrationGuard,
-    withResolver: true,
+    disabled: false,
+    withResolver: false,
   })
 
   const navigateConsole = useCallback<ConsoleNavigationAdapter['navigate']>(
@@ -152,18 +193,10 @@ function App() {
       variant,
       search,
       navigate: navigateConsole,
-      blockedNavigation:
-        blocker.status === 'blocked'
-          ? {
-              next: parseConsoleRoute(blocker.next.pathname),
-              nextLabel: routeLabel(parseConsoleRoute(blocker.next.pathname)),
-              proceed: blocker.proceed,
-              reset: blocker.reset,
-            }
-          : null,
+      blockedNavigation,
       onCalibrationGuardChange,
     }
-  }, [blocker, navigateConsole, onCalibrationGuardChange, routeState, search, variant])
+  }, [blockedNavigation, navigateConsole, onCalibrationGuardChange, routeState, search, variant])
 
   if (search.uiDemo) return <UiDemo />
   if (!routeState || !navigation) return null

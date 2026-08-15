@@ -193,14 +193,20 @@ export function useLiveWebSerialScenario(
               )
             : null
         const selectedPort = selectedPortPromise ? await selectedPortPromise : null
-        if (signal?.aborted || !isCurrentAttempt()) return false
+        if (signal?.aborted || !isCurrentAttempt()) {
+          if (isCurrentAttempt()) setState(clientRef.current ? 'connected' : 'idle')
+          return false
+        }
         if (replaceExisting) {
           const currentClient = clientRef.current
           clientRef.current = null
           await currentClient?.disconnect()
           previousClientDisconnected = true
         }
-        if (signal?.aborted || !isCurrentAttempt()) return false
+        if (signal?.aborted || !isCurrentAttempt()) {
+          if (isCurrentAttempt()) setState('idle')
+          return false
+        }
         client =
           clientFactory?.() ??
           new WebSerialControlPlaneClient({
