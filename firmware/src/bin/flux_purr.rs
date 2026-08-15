@@ -452,6 +452,8 @@ const BUZZER_PROTECTION_ALARM_INTERVAL_MS: u64 = 1_000;
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
 const STATUS_LIGHT_BOOT_DURATION_MS: u64 = 1_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const RUNTIME_READY_BOOT_STAGE_LINE: &[u8] = b"boot_stage=runtime_ready\n";
 #[cfg(target_arch = "xtensa")]
 const RTD_SAMPLE_ATTENUATION: Attenuation = Attenuation::_6dB;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -11103,6 +11105,8 @@ async fn main(_spawner: Spawner) {
         panic!("failed to draw initial frontpanel UI");
     }
     log_ui_state(&ui_state);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, RUNTIME_READY_BOOT_STAGE_LINE);
 
     let runtime_started_ms = Instant::now().as_millis();
     let mut last_control_ms: u64 = 0;
@@ -14512,6 +14516,11 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn runtime_ready_boot_stage_matches_post_flash_contract() {
+        assert_eq!(RUNTIME_READY_BOOT_STAGE_LINE, b"boot_stage=runtime_ready\n");
     }
 
     #[test]

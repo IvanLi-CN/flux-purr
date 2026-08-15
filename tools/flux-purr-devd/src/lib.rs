@@ -78,6 +78,7 @@ const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 // hardware discovery before declaring a read-only request unavailable.
 const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const POST_FLASH_BOOT_TIMEOUT: Duration = Duration::from_secs(90);
+const RUNTIME_READY_BOOT_STAGE: &str = "boot_stage=runtime_ready";
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -1909,7 +1910,7 @@ impl BootObservation {
         }
         if line.starts_with("boot_stage=") {
             self.last_stage = Some(line.to_string());
-            return Ok(line == "boot_stage=runtime_ready");
+            return Ok(line == RUNTIME_READY_BOOT_STAGE);
         }
         let lowercase = line.to_ascii_lowercase();
         if lowercase.contains("guru meditation")
@@ -10473,15 +10474,11 @@ mod tests {
                 .observe_line("boot_stage=adc_init_complete")
                 .unwrap()
         );
-        assert!(
-            observation
-                .observe_line("boot_stage=runtime_ready")
-                .unwrap()
-        );
+        assert!(observation.observe_line(RUNTIME_READY_BOOT_STAGE).unwrap());
         assert_eq!(observation.reset_count, 1);
         assert_eq!(
             observation.last_stage.as_deref(),
-            Some("boot_stage=runtime_ready")
+            Some(RUNTIME_READY_BOOT_STAGE)
         );
     }
 
