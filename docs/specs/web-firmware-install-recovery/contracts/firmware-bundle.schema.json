@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flux-purr.ivanli.cc/schemas/firmware-bundle-v1.json",
+  "title": "Flux Purr firmware bundle manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mediaType", "identity", "target", "layout", "segments", "migrations"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "mediaType": { "const": "application/vnd.flux-purr.firmware-bundle+zip" },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "sourceSha", "buildId", "channel"],
+      "properties": {
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", "maxLength": 64 },
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "buildId": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
+        "channel": { "enum": ["stable", "rc", "local"] }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chip", "package", "flashSize", "psramSize", "flashMode", "flashFrequency"],
+      "properties": {
+        "chip": { "const": "esp32s3" },
+        "package": { "const": "ESP32-S3FH4R2" },
+        "flashSize": { "const": 4194304 },
+        "psramSize": { "const": 2097152 },
+        "flashMode": { "const": "dio" },
+        "flashFrequency": { "const": "40m" }
+      }
+    },
+    "layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "partitionTableSha256"],
+      "properties": {
+        "id": { "const": "flux-purr.esp32s3fh4r2.factory" },
+        "version": { "const": 1 },
+        "partitionTableSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "segments": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/bootloader" },
+        { "$ref": "#/$defs/partitionTable" },
+        { "$ref": "#/$defs/factoryApp" }
+      ],
+      "items": false
+    },
+    "migrations": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$" },
+      "maxItems": 8
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "md5": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "segmentBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "address", "length", "sha256", "md5"],
+      "properties": {
+        "kind": { "type": "string" },
+        "path": { "type": "string" },
+        "address": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "md5": { "$ref": "#/$defs/md5" }
+      }
+    },
+    "bootloader": {
+      "allOf": [
+        { "$ref": "#/$defs/segmentBase" },
+        { "type": "object", "properties": { "kind": { "type": "string", "const": "bootloader" }, "path": { "type": "string", "const": "images/bootloader.bin" }, "address": { "type": "integer", "const": 0 }, "length": { "type": "integer", "maximum": 32768 } } }
+      ]
+    },
+    "partitionTable": {
+      "allOf": [
+        { "$ref": "#/$defs/segmentBase" },
+        { "type": "object", "properties": { "kind": { "type": "string", "const": "partition-table" }, "path": { "type": "string", "const": "images/partition-table.bin" }, "address": { "type": "integer", "const": 32768 }, "length": { "type": "integer", "const": 4096 } } }
+      ]
+    },
+    "factoryApp": {
+      "allOf": [
+        { "$ref": "#/$defs/segmentBase" },
+        { "type": "object", "properties": { "kind": { "type": "string", "const": "factory-app" }, "path": { "type": "string", "const": "images/factory-app.bin" }, "address": { "type": "integer", "const": 65536 }, "length": { "type": "integer", "maximum": 2097152 } } }
+      ]
+    }
+  }
+}
