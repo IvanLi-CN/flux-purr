@@ -50,7 +50,7 @@ describe('device target picker', () => {
     )
   })
 
-  it('renders one device card with at most the three public connection methods', () => {
+  it('renders one device card while preserving distinct bridge sources', () => {
     const choices = mergeDeviceChoices([
       target({ id: 'native-device-1', transport: 'devd', bridgeTransport: 'usb' }),
       target({
@@ -79,14 +79,20 @@ describe('device target picker', () => {
       'wifi',
       'web-serial',
       'bridge',
+      'bridge',
     ])
-    expect(choices[0].connections).toHaveLength(3)
+    expect(choices[0].connections).toHaveLength(4)
     expect(choices[0].connections.map((connection) => connection.label)).toEqual([
       'WiFi / LAN',
       'Web Serial',
       '桥接',
+      '桥接',
     ])
     expect(choices[0].connections[2].detail).toContain('USB')
+    expect(choices[0].connections[3].detail).toContain('WiFi / LAN')
+    expect(preferredDeviceConnection(choices[0], 'bridge', 'bridge-lan-device-1')?.target.id).toBe(
+      'bridge-lan-device-1'
+    )
   })
 
   it('does not expose mock connections in live mode', () => {

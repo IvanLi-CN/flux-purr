@@ -52,9 +52,14 @@ export function deviceConnectionOptions(
         : 'USB'
       : undefined
 
+  const connectionKey =
+    kind === 'bridge'
+      ? `${deviceIdentityId(device)}:${kind}:${device.bridgeTransport ?? 'usb'}`
+      : `${deviceIdentityId(device)}:${kind}`
+
   return [
     {
-      key: `${deviceIdentityId(device)}:${kind}`,
+      key: connectionKey,
       kind,
       label: labels[kind],
       detail: bridgeSource ? `${bridgeSource} · ${device.location}` : device.location,
@@ -87,7 +92,7 @@ export function mergeDeviceChoices(
 
     for (const connection of connections) {
       const existingIndex = current.connections.findIndex(
-        (candidate) => candidate.kind === connection.kind
+        (candidate) => candidate.key === connection.key
       )
       if (existingIndex < 0) {
         current.connections.push(connection)
@@ -117,8 +122,14 @@ export function mergeDeviceChoices(
 
 export function preferredDeviceConnection(
   choice: DeviceChoice,
-  preferredKind?: DeviceConnectionKind
+  preferredKind?: DeviceConnectionKind,
+  preferredTargetId?: string
 ) {
+  const preferredTarget = preferredTargetId
+    ? choice.connections.find((connection) => connection.target.id === preferredTargetId)
+    : undefined
+  if (preferredTarget) return preferredTarget
+
   const preferred = preferredKind
     ? choice.connections.find((connection) => connection.kind === preferredKind)
     : undefined

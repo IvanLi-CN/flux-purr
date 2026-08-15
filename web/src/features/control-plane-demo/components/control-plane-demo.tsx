@@ -102,6 +102,7 @@ import {
   type DeviceChoice,
   type DeviceConnectionKind,
   type DeviceConnectionOption,
+  deviceConnectionOptions,
   deviceIdentityId,
   mergeDeviceChoices,
   preferredDeviceConnection,
@@ -633,7 +634,9 @@ export function ControlPlaneDemo({
   const automaticResumeKeyRef = useRef<string | null>(null)
   const successfulRouteKeyRef = useRef<string | null>(null)
   const previousRouteDeviceIdRef = useRef<string | null>(null)
-  const requestedConnectionByIdentityRef = useRef<Record<string, DeviceConnectionKind>>({})
+  const [requestedConnectionByIdentity, setRequestedConnectionByIdentity] = useState<
+    Record<string, { kind: DeviceConnectionKind; targetId: string }>
+  >({})
   const invalidLanCredentialIdentityIdsRef = useRef(new Set<string>())
   const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
     useState<AddDeviceKind>(defaultAddDeviceKind)
@@ -771,9 +774,10 @@ export function ControlPlaneDemo({
   const preferredRouteDeviceConnection = routeDeviceChoice
     ? preferredDeviceConnection(
         routeDeviceChoice,
-        requestedConnectionByIdentityRef.current[routeDeviceChoice.identityId] ??
+        requestedConnectionByIdentity[routeDeviceChoice.identityId]?.kind ??
           routeFallbackKind ??
-          routePreferences.transportByIdentity[routeDeviceChoice.identityId]
+          routePreferences.transportByIdentity[routeDeviceChoice.identityId],
+        requestedConnectionByIdentity[routeDeviceChoice.identityId]?.targetId
       )
     : undefined
   const healthyRouteFallback = routeDeviceChoice?.connections
@@ -1705,6 +1709,11 @@ export function ControlPlaneDemo({
           return
         }
         if (routeFallbackConnectionKind && routeFallbackConnectionLabel) {
+          setRequestedConnectionByIdentity((current) => {
+            const next = { ...current }
+            delete next[routeRecoveryIdentityId]
+            return next
+          })
           setRouteFallbackKind(routeFallbackConnectionKind)
           setFeedback({
             title: '已切换备用连接',
@@ -1750,7 +1759,12 @@ export function ControlPlaneDemo({
     if (successfulRouteKeyRef.current === successKey) return
     successfulRouteKeyRef.current = successKey
     rememberSuccessfulRoute(navigation.variant, identityId, routeDeviceConnection.kind)
-    delete requestedConnectionByIdentityRef.current[identityId]
+    setRequestedConnectionByIdentity((current) => {
+      if (!(identityId in current)) return current
+      const next = { ...current }
+      delete next[identityId]
+      return next
+    })
     setRoutePreferences(readRoutePreferences())
   }, [navigation, routeDeviceConnection, visibleDevice])
 
@@ -2586,9 +2600,11 @@ export function ControlPlaneDemo({
       const nextDevice = deviceOverride ?? deviceOptions.find((device) => device.id === deviceId)
       if (!nextDevice) return
       const identityId = deviceIdentityId(nextDevice)
-      const connection = routeDeviceChoices
-        .find((choice) => choice.identityId === identityId)
-        ?.connections.find((candidate) => candidate.target.id === nextDevice.id)
+      const connection =
+        routeDeviceChoices
+          .find((choice) => choice.identityId === identityId)
+          ?.connections.find((candidate) => candidate.target.id === nextDevice.id) ??
+        deviceConnectionOptions(nextDevice, { allowDemoControls })[0]
       void requestCalibrationLeave(
         {
           reason: 'device-change',
@@ -2596,7 +2612,10 @@ export function ControlPlaneDemo({
         },
         () => {
           if (connection) {
-            requestedConnectionByIdentityRef.current[identityId] = connection.kind
+            setRequestedConnectionByIdentity((current) => ({
+              ...current,
+              [identityId]: { kind: connection.kind, targetId: connection.target.id },
+            }))
             setRouteFallbackKind(undefined)
           }
           const currentState = navigation.state
