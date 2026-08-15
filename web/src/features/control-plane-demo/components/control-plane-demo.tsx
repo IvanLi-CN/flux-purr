@@ -281,6 +281,14 @@ function resumeConnectionPriority(connection: DeviceConnectionOption) {
   if (connection.kind === 'bridge') return 3
   return 4
 }
+
+function isHealthyRouteConnection(connection: DeviceConnectionOption) {
+  return (
+    connection.target.connectionAvailable !== false &&
+    connection.target.severity === 'nominal' &&
+    (connection.kind === 'mock' || connection.target.leaseState === 'active')
+  )
+}
 const PPS_STEP_MV = 100
 const PPS_HARDWARE_MIN_MV = 5_000
 const PPS_HARDWARE_MAX_MV = 28_000
@@ -457,6 +465,17 @@ function CalibrationRouteTab({
         params={{ deviceId: navigation.state.deviceId }}
         search={navigation.search}
         aria-current={navigation.state.calibrationTab === tab ? 'page' : undefined}
+        onPointerDownCapture={(event) => {
+          if (
+            event.button !== 0 ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.shiftKey
+          ) {
+            event.stopPropagation()
+          }
+        }}
         onClick={(event) => {
           if (
             event.button === 0 &&
@@ -744,7 +763,7 @@ export function ControlPlaneDemo({
     routedConsoleState?.kind === 'device'
       ? routeDeviceChoices.find((choice) => choice.identityId === routedConsoleState.deviceId)
       : undefined
-  const routeDeviceConnection = routeDeviceChoice
+  const preferredRouteDeviceConnection = routeDeviceChoice
     ? preferredDeviceConnection(
         routeDeviceChoice,
         routeFallbackKind ??
@@ -752,6 +771,17 @@ export function ControlPlaneDemo({
           routePreferences.transportByIdentity[routeDeviceChoice.identityId]
       )
     : undefined
+  const healthyRouteFallback = routeDeviceChoice?.connections
+    .filter((connection) => connection !== preferredRouteDeviceConnection)
+    .filter(isHealthyRouteConnection)
+    .sort((left, right) => resumeConnectionPriority(left) - resumeConnectionPriority(right))[0]
+  const routeDeviceConnection =
+    preferredRouteDeviceConnection &&
+    preferredRouteDeviceConnection.kind !== 'web-serial' &&
+    !isHealthyRouteConnection(preferredRouteDeviceConnection) &&
+    healthyRouteFallback
+      ? healthyRouteFallback
+      : preferredRouteDeviceConnection
   const preferredSelectedDeviceId = useMemo(() => {
     if (navigation?.state.kind === 'device' && routeDeviceConnection) {
       return routeDeviceConnection.target.id
@@ -1563,25 +1593,35 @@ export function ControlPlaneDemo({
 
   useEffect(() => {
     const blocked = navigation?.blockedNavigation
-    if (!blocked || calibrationLeaveGuard) return
-    setCalibrationLeaveGuard({
-      reason: 'view-change',
-      nextLabel: blocked.nextLabel,
-      nextView: blocked.next?.kind === 'device' ? blocked.next.view : 'add-device',
-      nextWorkspaceTab: blocked.next?.kind === 'device' ? blocked.next.calibrationTab : undefined,
-      continueAction: blocked.proceed,
-      cancelAction: blocked.reset,
+    if (!blocked) return
+    setCalibrationLeaveGuard((current) => {
+      if (current?.continueAction === blocked.proceed && current.cancelAction === blocked.reset) {
+        return current
+      }
+      return {
+        reason: 'view-change',
+        nextLabel: blocked.nextLabel,
+        nextView: blocked.next?.kind === 'device' ? blocked.next.view : 'add-device',
+        nextWorkspaceTab: blocked.next?.kind === 'device' ? blocked.next.calibrationTab : undefined,
+        continueAction: blocked.proceed,
+        cancelAction: blocked.reset,
+      }
     })
     setFeedback({
       title: '请先关闭校准控制',
       detail: `${calibrationModeLabel(visibleCalibrationWorkspaceTab)}仍在运行，离开前请先关闭开关。`,
       tone: 'warning',
     })
-  }, [calibrationLeaveGuard, navigation?.blockedNavigation, visibleCalibrationWorkspaceTab])
+  }, [navigation?.blockedNavigation, visibleCalibrationWorkspaceTab])
 
   const connectPreauthorizedWebSerial = useCallback(
-    (signal: AbortSignal) =>
-      webSerial.connect({ replaceExisting: true, preauthorizedOnly: true, signal }),
+    (signal: AbortSignal, expectedIdentityId: string) =>
+      webSerial.connect({
+        replaceExisting: true,
+        preauthorizedOnly: true,
+        signal,
+        expectedIdentityId,
+      }),
     [webSerial.connect]
   )
 
@@ -1607,15 +1647,15 @@ export function ControlPlaneDemo({
     ) {
       return
     }
+    if (allowDemoControls) {
+      setRouteResumeFailed(false)
+      return
+    }
     if (routeConnectionKind !== 'web-serial') {
       setRouteResumeFailed(false)
       return
     }
-    if (
-      webSerial.deviceId &&
-      deviceIdentityId({ id: webSerial.deviceId, identityId: routeRecoveryIdentityId }) ===
-        routeRecoveryIdentityId
-    ) {
+    if (webSerial.deviceIdentityId === routeRecoveryIdentityId) {
       setRouteResumeFailed(false)
       return
     }
@@ -1630,36 +1670,39 @@ export function ControlPlaneDemo({
       tone: 'info',
     })
     const controller = new AbortController()
-    void connectPreauthorizedWebSerial(controller.signal).then((connected) => {
-      if (controller.signal.aborted) return
-      if (connected) {
+    void connectPreauthorizedWebSerial(controller.signal, routeRecoveryIdentityId).then(
+      (connected) => {
+        if (controller.signal.aborted) return
+        if (connected) {
+          setFeedback({
+            title: 'Web Serial connected',
+            detail: 'Browser direct USB JSONL control is active.',
+            tone: 'success',
+          })
+          setRouteResumeFailed(false)
+          return
+        }
+        if (routeFallbackConnectionKind && routeFallbackConnectionLabel) {
+          setRouteFallbackKind(routeFallbackConnectionKind)
+          setFeedback({
+            title: '已切换备用连接',
+            detail: `${routeConnectionTargetAlias} 的预授权串口不可用，正在尝试 ${routeFallbackConnectionLabel}。`,
+            tone: 'warning',
+          })
+          return
+        }
         setFeedback({
-          title: 'Web Serial connected',
-          detail: 'Browser direct USB JSONL control is active.',
-          tone: 'success',
-        })
-        setRouteResumeFailed(false)
-        return
-      }
-      if (routeFallbackConnectionKind && routeFallbackConnectionLabel) {
-        setRouteFallbackKind(routeFallbackConnectionKind)
-        setFeedback({
-          title: '已切换备用连接',
-          detail: `${routeConnectionTargetAlias} 的预授权串口不可用，正在尝试 ${routeFallbackConnectionLabel}。`,
+          title: 'Web Serial unavailable',
+          detail: 'Browser direct USB control could not be opened.',
           tone: 'warning',
         })
-        return
+        setRouteResumeFailed(true)
       }
-      setFeedback({
-        title: 'Web Serial unavailable',
-        detail: 'Browser direct USB control could not be opened.',
-        tone: 'warning',
-      })
-      setRouteResumeFailed(true)
-    })
+    )
     return () => controller.abort()
   }, [
     connectPreauthorizedWebSerial,
+    allowDemoControls,
     routeConnectionKind,
     routeConnectionTargetAlias,
     routeConnectionTargetId,
@@ -1667,7 +1710,7 @@ export function ControlPlaneDemo({
     routeFallbackConnectionLabel,
     routeRecoveryIdentityId,
     routeRecoveryVariant,
-    webSerial.deviceId,
+    webSerial.deviceIdentityId,
     webSerial.preauthorizedPortsReady,
   ])
 
@@ -7409,10 +7452,20 @@ function CalibrationLeaveGuardBubble({
 }) {
   const anchorRef = useRef<HTMLElement | null>(null)
   const bubbleRef = useRef<HTMLDivElement | null>(null)
+  const continueButtonRef = useRef<HTMLButtonElement | null>(null)
+  const titleId = useId()
+  const descriptionId = useId()
   const [bubbleStyle, setBubbleStyle] = useState<CSSProperties>({
     visibility: 'hidden',
   })
   const [bubbleSide, setBubbleSide] = useState<'bottom' | 'top'>('bottom')
+
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    continueButtonRef.current?.focus()
+    return () => previouslyFocused?.focus()
+  }, [])
 
   useLayoutEffect(() => {
     const anchor = (anchorId ? document.getElementById(anchorId) : null) ?? anchorRef.current
@@ -7500,17 +7553,20 @@ function CalibrationLeaveGuardBubble({
             data-side={bubbleSide}
             role="dialog"
             aria-modal="false"
+            aria-labelledby={titleId}
+            aria-describedby={descriptionId}
             style={bubbleStyle}
           >
             <div className="industrial-calibration-leave-guard__header">
               <div className="industrial-calibration-leave-guard__badge">
                 <AlertTriangle size={12} strokeWidth={2.3} aria-hidden="true" />
-                <span>校准未关闭</span>
+                <span id={titleId}>校准未关闭</span>
               </div>
             </div>
-            <p>校准控制仍开着，先关闭后再切到“{nextLabel}”。</p>
+            <p id={descriptionId}>校准控制仍开着，先关闭后再切到“{nextLabel}”。</p>
             <div className="industrial-calibration-leave-guard__actions">
               <button
+                ref={continueButtonRef}
                 type="button"
                 className="industrial-button industrial-button--secondary"
                 onClick={onContinue}

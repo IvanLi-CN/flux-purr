@@ -40,11 +40,13 @@ export interface LiveWebSerialControls {
   preauthorizedPortsReady: boolean
   error?: string
   deviceId?: string
+  deviceIdentityId?: string
   connect: (options?: {
     forcePortSelection?: boolean
     replaceExisting?: boolean
     preauthorizedOnly?: boolean
     signal?: AbortSignal
+    expectedIdentityId?: string
   }) => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
@@ -86,6 +88,10 @@ export function useLiveWebSerialScenario(
 
   useEffect(() => {
     if (!enabled) {
+      connectAttemptRef.current += 1
+      const client = clientRef.current
+      clientRef.current = null
+      void client?.disconnect()
       setState('unsupported')
       setDevice(null)
       setError(undefined)
@@ -148,11 +154,13 @@ export function useLiveWebSerialScenario(
       replaceExisting = false,
       preauthorizedOnly = false,
       signal,
+      expectedIdentityId,
     }: {
       forcePortSelection?: boolean
       replaceExisting?: boolean
       preauthorizedOnly?: boolean
       signal?: AbortSignal
+      expectedIdentityId?: string
     } = {}) => {
       if (signal?.aborted) return false
       const attemptId = ++connectAttemptRef.current
@@ -227,6 +235,17 @@ export function useLiveWebSerialScenario(
         clientRef.current = client
         connectionEstablished = true
         const nextDevice = webSerialProbeToDeviceTarget(probe)
+        if (expectedIdentityId && probe.identity.deviceId !== expectedIdentityId) {
+          clientRef.current = null
+          connectionEstablished = false
+          await client.disconnect()
+          if (!isCurrentAttempt()) return false
+          setDevice(null)
+          setError('已授权 Web Serial 端口与当前设备身份不匹配。')
+          setState('idle')
+          appendEvent('browser Web Serial identity did not match the routed device', 'warning')
+          return false
+        }
         if (persistKnownDevices) {
           rememberKnownWebSerialDevice({
             deviceId: probe.identity.deviceId,
@@ -296,10 +315,12 @@ export function useLiveWebSerialScenario(
 
     try {
       const probe = await client.probe()
+      if (clientRef.current !== client) return
       setDevice(webSerialProbeToDeviceTarget(probe))
       setState('connected')
       setError(undefined)
     } catch (error) {
+      if (clientRef.current !== client) return
       setError(error instanceof Error ? error.message : 'Web Serial probe failed.')
       setState('error')
       appendEvent('browser Web Serial probe failed', 'warning')
@@ -316,6 +337,7 @@ export function useLiveWebSerialScenario(
 
       try {
         const status = await client.configureRuntime(request)
+        if (clientRef.current !== client) return false
         setDevice((current) =>
           current
             ? webSerialProbeToDeviceTarget({
@@ -348,6 +370,7 @@ export function useLiveWebSerialScenario(
         )
         return true
       } catch (error) {
+        if (clientRef.current !== client) return false
         setError(error instanceof Error ? error.message : 'Web Serial runtime update failed.')
         setState('error')
         appendEvent('browser Web Serial runtime update failed', 'warning')
@@ -367,68 +390,89 @@ export function useLiveWebSerialScenario(
     return client
   }, [])
 
+  const requireCurrentClient = useCallback((client: WebSerialControlPlaneClient) => {
+    if (clientRef.current !== client) {
+      throw new Error('Web Serial connection changed while the request was in flight.')
+    }
+  }, [])
+
   const getCalibration = useCallback(async () => {
+    const client = requireClient()
     try {
-      const calibration = await requireClient().getCalibration()
+      const calibration = await client.getCalibration()
+      requireCurrentClient(client)
       appendEvent('adc calibration read over browser Web Serial', 'success')
       return calibration
     } catch (error) {
+      if (clientRef.current !== client) throw error
       setError(error instanceof Error ? error.message : 'Web Serial calibration read failed.')
       setState('error')
       appendEvent('browser Web Serial calibration read failed', 'warning')
       throw error
     }
-  }, [appendEvent, requireClient])
+  }, [appendEvent, requireClient, requireCurrentClient])
 
   const configureCalibration = useCallback(
     async (request: Omit<CalibrationConfigRequest, 'leaseId'>) => {
+      const client = requireClient()
       try {
-        const calibration = await requireClient().configureCalibration(request)
+        const calibration = await client.configureCalibration(request)
+        requireCurrentClient(client)
         appendEvent('adc calibration state updated over browser Web Serial', 'success')
         return calibration
       } catch (error) {
+        if (clientRef.current !== client) throw error
         setError(error instanceof Error ? error.message : 'Web Serial calibration update failed.')
         setState('error')
         appendEvent('browser Web Serial calibration update failed', 'warning')
         throw error
       }
     },
-    [appendEvent, requireClient]
+    [appendEvent, requireClient, requireCurrentClient]
   )
 
   const getHeaterCurve = useCallback(async () => {
+    const client = requireClient()
     try {
-      const heaterCurve = await requireClient().getHeaterCurve()
+      const heaterCurve = await client.getHeaterCurve()
+      requireCurrentClient(client)
       appendEvent('heater curve read over browser Web Serial', 'success')
       return heaterCurve
     } catch (error) {
+      if (clientRef.current !== client) throw error
       setError(error instanceof Error ? error.message : 'Web Serial heater curve read failed.')
       setState('error')
       appendEvent('browser Web Serial heater curve read failed', 'warning')
       throw error
     }
-  }, [appendEvent, requireClient])
+  }, [appendEvent, requireClient, requireCurrentClient])
 
   const getCalibrationJob = useCallback(async () => {
+    const client = requireClient()
     try {
-      const job = await requireClient().getCalibrationJob()
+      const job = await client.getCalibrationJob()
+      requireCurrentClient(client)
       appendEvent('calibration auto job read over browser Web Serial', 'success')
       return job
     } catch (error) {
+      if (clientRef.current !== client) throw error
       setError(error instanceof Error ? error.message : 'Web Serial calibration job read failed.')
       setState('error')
       appendEvent('browser Web Serial calibration job read failed', 'warning')
       throw error
     }
-  }, [appendEvent, requireClient])
+  }, [appendEvent, requireClient, requireCurrentClient])
 
   const configureCalibrationJob = useCallback(
     async (request: Omit<CalibrationJobRequest, 'leaseId'>) => {
+      const client = requireClient()
       try {
-        const job = await requireClient().configureCalibrationJob(request)
+        const job = await client.configureCalibrationJob(request)
+        requireCurrentClient(client)
         appendEvent('calibration auto job command accepted over browser Web Serial', 'success')
         return job
       } catch (error) {
+        if (clientRef.current !== client) throw error
         setError(
           error instanceof Error ? error.message : 'Web Serial calibration job update failed.'
         )
@@ -437,50 +481,59 @@ export function useLiveWebSerialScenario(
         throw error
       }
     },
-    [appendEvent, requireClient]
+    [appendEvent, requireClient, requireCurrentClient]
   )
 
   const previewHeaterCurve = useCallback(
     async (heaterCurve: HeaterCurvePackage) => {
+      const client = requireClient()
       try {
-        const next = await requireClient().previewHeaterCurve(heaterCurve)
+        const next = await client.previewHeaterCurve(heaterCurve)
+        requireCurrentClient(client)
         appendEvent('heater curve preview accepted over browser Web Serial', 'success')
         return next
       } catch (error) {
+        if (clientRef.current !== client) throw error
         setError(error instanceof Error ? error.message : 'Web Serial heater curve preview failed.')
         setState('error')
         appendEvent('browser Web Serial heater curve preview failed', 'warning')
         throw error
       }
     },
-    [appendEvent, requireClient]
+    [appendEvent, requireClient, requireCurrentClient]
   )
 
   const clearHeaterCurvePreview = useCallback(async () => {
+    const client = requireClient()
     try {
-      const next = await requireClient().clearHeaterCurvePreview()
+      const next = await client.clearHeaterCurvePreview()
+      requireCurrentClient(client)
       appendEvent('heater curve preview cleared over browser Web Serial', 'info')
       return next
     } catch (error) {
+      if (clientRef.current !== client) throw error
       setError(error instanceof Error ? error.message : 'Web Serial heater curve clear failed.')
       setState('error')
       appendEvent('browser Web Serial heater curve clear failed', 'warning')
       throw error
     }
-  }, [appendEvent, requireClient])
+  }, [appendEvent, requireClient, requireCurrentClient])
 
   const saveHeaterCurve = useCallback(async () => {
+    const client = requireClient()
     try {
-      const next = await requireClient().saveHeaterCurve()
+      const next = await client.saveHeaterCurve()
+      requireCurrentClient(client)
       appendEvent('heater curve saved over browser Web Serial', 'success')
       return next
     } catch (error) {
+      if (clientRef.current !== client) throw error
       setError(error instanceof Error ? error.message : 'Web Serial heater curve save failed.')
       setState('error')
       appendEvent('browser Web Serial heater curve save failed', 'warning')
       throw error
     }
-  }, [appendEvent, requireClient])
+  }, [appendEvent, requireClient, requireCurrentClient])
 
   useEffect(() => {
     if (state !== 'connected') {
@@ -493,7 +546,10 @@ export function useLiveWebSerialScenario(
 
   useEffect(
     () => () => {
-      void clientRef.current?.disconnect()
+      connectAttemptRef.current += 1
+      const client = clientRef.current
+      clientRef.current = null
+      void client?.disconnect()
     },
     []
   )
@@ -530,6 +586,7 @@ export function useLiveWebSerialScenario(
       preauthorizedPortsReady,
       error,
       deviceId: device?.id,
+      deviceIdentityId: device?.identityId,
       connect,
       disconnect,
       configureRuntime,
@@ -549,6 +606,7 @@ export function useLiveWebSerialScenario(
       configureRuntime,
       connect,
       device?.id,
+      device?.identityId,
       disconnect,
       error,
       getCalibration,

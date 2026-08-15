@@ -30,7 +30,12 @@ export function parseConsoleRoute(pathname: string): ConsoleRouteState | null {
   if (pathname === '/devices/new') return { kind: 'add-device' }
   const segments = pathname.split('/').filter(Boolean)
   if (segments[0] !== 'devices' || segments.length < 3) return null
-  const deviceId = decodeURIComponent(segments[1] ?? '')
+  let deviceId: string
+  try {
+    deviceId = decodeURIComponent(segments[1] ?? '')
+  } catch {
+    return null
+  }
   if (!deviceId) return null
   const view = segments[2]
   if ((view === 'overview' || view === 'settings' || view === 'update') && segments.length === 3) {
