@@ -139,9 +139,9 @@ impl Identity {
         }
         Self {
             device_id: string("flux-purr-s3-001"),
-            firmware_version: string(env!("CARGO_PKG_VERSION")),
-            build_id: string(option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or("host-build")),
-            git_sha: string(option_env!("GIT_SHA").unwrap_or("unknown")),
+            firmware_version: string(env!("FLUX_PURR_FW_VERSION")),
+            build_id: string(env!("FLUX_PURR_BUILD_ID")),
+            git_sha: string(env!("FLUX_PURR_SOURCE_SHA")),
             board: string("esp32-s3"),
             api_version: string(CONTROL_PLANE_API_VERSION),
             protocol_version: string(USB_PROTOCOL_VERSION),

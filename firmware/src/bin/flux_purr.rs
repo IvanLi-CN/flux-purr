@@ -4059,6 +4059,9 @@ fn thermal_model_heater_allowed(
     if calibration.mode != CalibrationMode::Off {
         return true;
     }
+    if memory_config.commissioning_required {
+        return false;
+    }
     let plant_is_available =
         memory_config
             .thermal_plant_transient_active
@@ -5507,6 +5510,7 @@ fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfi
 #[cfg(any(target_arch = "xtensa", test))]
 fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> MemoryConfig {
     MemoryConfig {
+        commissioning_required: previous.commissioning_required,
         target_temp_c: state.target_temp_c,
         selected_preset_slot: state.selected_preset_slot,
         presets_c: state.presets_c,
