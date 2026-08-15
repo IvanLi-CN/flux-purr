@@ -276,15 +276,20 @@ unsafe impl defmt::Logger for UsbControlNoopLogger {
 }
 
 #[cfg(target_arch = "xtensa")]
-#[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
+fn rom_log_line(line: &[u8]) {
     unsafe extern "C" {
         fn esp_rom_output_tx_one_char(value: u8) -> i32;
     }
-    for byte in b"panic=firmware_fault\n" {
+    for byte in line {
         // SAFETY: this ROM routine is available on ESP32-S3 and accepts one byte.
         unsafe { esp_rom_output_tx_one_char(*byte) };
     }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[panic_handler]
+fn panic(_info: &PanicInfo<'_>) -> ! {
+    rom_log_line(b"panic=firmware_fault\n");
     esp_hal::rom::ets_delay_us(250_000);
     esp_hal::system::software_reset()
 }

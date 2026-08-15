@@ -77,6 +77,7 @@ const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 // Opening USB Serial/JTAG can reset the MCU. Allow a full cold boot plus
 // hardware discovery before declaring a read-only request unavailable.
 const SERIAL_READ_ONLY_RPC_TIMEOUT: Duration = Duration::from_secs(30);
+const POST_FLASH_BOOT_TIMEOUT: Duration = Duration::from_secs(90);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const SERIAL_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -1884,6 +1885,46 @@ pub struct FlashResult {
     pub dry_run: bool,
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BootObservation {
+    reset_count: u8,
+    last_stage: Option<String>,
+}
+
+impl BootObservation {
+    fn observe_line(&mut self, line: &str) -> Result<bool, HttpError> {
+        let line = line.trim();
+        if line.starts_with("reset_reason=") {
+            self.reset_count = self.reset_count.saturating_add(1);
+            if self.reset_count > 1 {
+                return Err(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "firmware_reboot_loop",
+                    "Firmware reset more than once before reaching runtime_ready.",
+                    false,
+                ));
+            }
+        }
+        if line.starts_with("boot_stage=") {
+            self.last_stage = Some(line.to_string());
+            return Ok(line == "boot_stage=runtime_ready");
+        }
+        let lowercase = line.to_ascii_lowercase();
+        if lowercase.contains("guru meditation")
+            || lowercase.contains("watchdog")
+            || lowercase.contains("panic")
+        {
+            return Err(HttpError::new(
+                StatusCode::BAD_GATEWAY,
+                "firmware_boot_failed",
+                &format!("Firmware failed during boot: {line}"),
+                false,
+            ));
+        }
+        Ok(false)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5621,6 +5662,97 @@ fn serial_exchange_blocking(
     ))
 }
 
+fn observe_post_flash_boot_blocking(
+    state: &Arc<Mutex<DevdState>>,
+    events: &broadcast::Sender<DevdEvent>,
+    device_id: &str,
+    serial_sessions: &Arc<Mutex<SerialSessionMap>>,
+    port_path: &str,
+) -> Result<BootObservation, HttpError> {
+    let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
+    let deadline = Instant::now() + POST_FLASH_BOOT_TIMEOUT;
+    let mut session = reopen_serial_session(port_path, deadline)?;
+    let mut observation = BootObservation::default();
+    let mut read_buf = [0_u8; 256];
+    let mut line = Vec::new();
+    let mut discarding_overlong_line = false;
+
+    while Instant::now() < deadline {
+        match session.port.read(&mut read_buf) {
+            Ok(0) => {}
+            Ok(read) => {
+                for byte in &read_buf[..read] {
+                    if !serial_line_finished(&mut line, &mut discarding_overlong_line, *byte) {
+                        continue;
+                    }
+                    emit_serial_log_line(state, events, device_id, &line);
+                    if let Ok(text) = std::str::from_utf8(&line) {
+                        if observation.observe_line(text)? {
+                            store_serial_session(&mut serial_sessions, port_path, session);
+                            return Ok(observation);
+                        }
+                    }
+                    line.clear();
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if error.kind() == io::ErrorKind::WouldBlock {
+                    std::thread::sleep(SERIAL_READ_TIMEOUT);
+                }
+            }
+            Err(error) if is_recoverable_serial_io_error(&error) => {
+                drop(session);
+                session = reopen_serial_session(port_path, deadline)?;
+                line.clear();
+                discarding_overlong_line = false;
+            }
+            Err(error) => return Err(serial_io_http_error(error)),
+        }
+    }
+
+    Err(HttpError::new(
+        StatusCode::GATEWAY_TIMEOUT,
+        "firmware_boot_timeout",
+        &format!(
+            "Firmware did not reach runtime_ready within {} seconds; last stage: {}.",
+            POST_FLASH_BOOT_TIMEOUT.as_secs(),
+            observation.last_stage.as_deref().unwrap_or("none")
+        ),
+        false,
+    ))
+}
+
+async fn observe_post_flash_boot(
+    state: &AppState,
+    device_id: &str,
+    port_path: &str,
+) -> Result<BootObservation, HttpError> {
+    let state_lock = state.inner.clone();
+    let events = state.events.clone();
+    let device_id = device_id.to_string();
+    let serial_sessions = state.serial_sessions.clone();
+    let port_path = port_path.to_string();
+    spawn_serial_worker_with_timeout(
+        state.serial_rpc.clone(),
+        POST_FLASH_BOOT_TIMEOUT + SERIAL_RPC_TIMEOUT,
+        move || {
+            observe_post_flash_boot_blocking(
+                &state_lock,
+                &events,
+                &device_id,
+                &serial_sessions,
+                &port_path,
+            )
+        },
+    )
+    .await?
+}
+
 fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
     match retry_policy {
         SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
@@ -6345,6 +6477,28 @@ async fn flash_device(
         ));
         return Err(error);
     }
+    state.emit(event(
+        &device_id,
+        "flash",
+        "firmware boot observation started",
+        json!({ "artifactId": artifact_id }),
+    ));
+    let boot = match observe_post_flash_boot(&state, &device_id, &port_path).await {
+        Ok(boot) => boot,
+        Err(error) => {
+            state.emit(event(
+                &device_id,
+                "flash",
+                "firmware boot verification failed",
+                json!({
+                    "artifactId": artifact_id,
+                    "code": error.error.code,
+                    "message": error.error.message,
+                }),
+            ));
+            return Err(error);
+        }
+    };
     {
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
@@ -6354,14 +6508,19 @@ async fn flash_device(
     state.emit(event(
         &device_id,
         "flash",
-        "real flash completed",
-        json!({ "artifactId": artifact_id, "dryRun": false }),
+        "real flash completed and firmware reached runtime_ready",
+        json!({
+            "artifactId": artifact_id,
+            "dryRun": false,
+            "resetCount": boot.reset_count,
+            "lastStage": boot.last_stage,
+        }),
     ));
     Ok(Json(FlashResult {
         artifact_id,
         dry_run: false,
         status: "completed".to_string(),
-        message: "espflash command completed.".to_string(),
+        message: "espflash completed and firmware reached runtime_ready.".to_string(),
     }))
 }
 
@@ -10298,6 +10457,47 @@ mod tests {
         assert!(!serial_line_is_usb_reset_marker(
             br#"{\"type\":\"response\",\"requestId\":\"req-1\",\"ok\":true}"#
         ));
+    }
+
+    #[test]
+    fn post_flash_boot_requires_runtime_ready() {
+        let mut observation = BootObservation::default();
+
+        assert!(
+            !observation
+                .observe_line("reset_reason=core_software")
+                .unwrap()
+        );
+        assert!(
+            !observation
+                .observe_line("boot_stage=adc_init_complete")
+                .unwrap()
+        );
+        assert!(
+            observation
+                .observe_line("boot_stage=runtime_ready")
+                .unwrap()
+        );
+        assert_eq!(observation.reset_count, 1);
+        assert_eq!(
+            observation.last_stage.as_deref(),
+            Some("boot_stage=runtime_ready")
+        );
+    }
+
+    #[test]
+    fn post_flash_boot_rejects_reboot_loops_and_panics() {
+        let mut reboot = BootObservation::default();
+        reboot.observe_line("reset_reason=core_software").unwrap();
+        let error = reboot
+            .observe_line("reset_reason=core_software")
+            .unwrap_err();
+        assert_eq!(error.error.code, "firmware_reboot_loop");
+
+        let error = BootObservation::default()
+            .observe_line("Guru Meditation Error: Core 0 panic'ed")
+            .unwrap_err();
+        assert_eq!(error.error.code, "firmware_boot_failed");
     }
 
     #[test]
