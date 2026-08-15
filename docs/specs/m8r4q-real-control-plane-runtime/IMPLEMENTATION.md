@@ -57,6 +57,7 @@
 - heater 控制环当前为 `20Hz`；每个 control cycle 聚合 `64` 次 RTD ADC conversion，并丢弃前置 settle 样本后保留分数毫伏均值贯穿 calibration 与 PT1000 转换。默认 `tempFilterAlphaPermille=750`，仍可通过 thermal profile API / EEPROM 覆盖。冻结的 `pps3a` accepted bundle 仍记录 `700`，因此历史 3A bundle 与当前固件默认值应分开理解。
 - PT1000 换算使用生产板 `TPS62933` 反馈网络确定的 `3328mV` 名义分压电源与 `2.49 kOhm` 参考电阻。RTD ADC calibration 保持独立的 gain/offset 层；未校准设备使用 identity fit，既不以旧样机的有效电压替代 3V3 电路拓扑，也不把该名义值描述为组装板实测电压。
 - 默认产品启动在显示、PD/I2C、持久化配置、LAN/WiFi tasks、MCPWM 输出、CH224Q capability 读取和 heater safe-off 电源同步全部完成后，才创建 ADC1/GPIO1/GPIO2 和 eFuse curve。ADC 后只做首次测量与依赖测量的安全/UI/output 投影，不再创建硬件外设。固定 ADC 初始化延迟未达到一致稳定标准，因此产品不启用固定延迟。
+- ADC 冷启动实验只支持“存在未被单项软件变量消除的 common-mode conversion/input movement”，不支持固定 warm-up 时间、经验 offset 或 Dashboard request isolation。产品保持确定性最后初始化顺序，但不把该顺序描述为绝对精度校准；诊断方法与不可辨识边界见 [`ESP32-S3 ADC absolute-accuracy diagnosis`](../../solutions/device-control/esp32-s3-adc-accuracy-diagnosis.md)。
 - 当前温度链路已经收口为三条可审计职责：owner-facing `currentTempC` / `boardTempCenti` / front panel 直接反映当前有效 RTD 样本；`heaterControlTempC` 反映实际送入控制器的最后可信样本；controller EMA 与 slope 继续单独暴露。PPS transition guard 与控制侧物理斜率门只能作用于 controller 内部状态，不得冻结或改写 owner-facing 温度。
 - 控制环前不使用多样本窗口、中位数或输出钳位。控制侧仅以实际 `20Hz` 周期检查单样本是否超过 `35°C/s` 的物理斜率上限；被拒样本保留在 raw/report，并以 `heaterControlMeasurementGuarded=true` 审计，后续可信样本仍直接进入配置的 EMA。
 - warmup handoff 现在要求实际温度步进确认，避免单个 RTD 批次跳变在滤波温度仍落后时提前退出 warmup。low-temp `Approach -> Hold` 零输出 seam 也已修正：只有当实际误差已进入 hold 释放带时才允许 predictive coast 维持零输出。
