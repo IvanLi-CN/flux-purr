@@ -631,6 +631,20 @@ export function ControlPlaneDemo({
   const [routePreferences, setRoutePreferences] = useState(readRoutePreferences)
   const [routeResumeFailed, setRouteResumeFailed] = useState(false)
   const [routeFallbackKind, setRouteFallbackKind] = useState<DeviceConnectionKind | undefined>()
+  const [pendingLanResumeIdentityIds, setPendingLanResumeIdentityIds] = useState<Set<string>>(
+    () =>
+      new Set(
+        allowDemoControls
+          ? []
+          : listSavedLanDeviceSessions().flatMap((session) => {
+              const target = savedLanSessionToDeviceTarget(session)
+              return target ? [deviceIdentityId(target)] : []
+            })
+      )
+  )
+  const [serialRecoveryExhaustedIdentityIds, setSerialRecoveryExhaustedIdentityIds] = useState<
+    Set<string>
+  >(new Set())
   const automaticResumeKeyRef = useRef<string | null>(null)
   const successfulRouteKeyRef = useRef<string | null>(null)
   const previousRouteDeviceIdRef = useRef<string | null>(null)
@@ -640,12 +654,20 @@ export function ControlPlaneDemo({
   const invalidLanCredentialIdentityIdsRef = useRef(new Set<string>())
   const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
     useState<AddDeviceKind>(defaultAddDeviceKind)
+  const routedRecoveryIdentityId =
+    navigation?.state.kind === 'device' ? navigation.state.deviceId : null
+  const devdLeaseAllowedForRoute =
+    !routedRecoveryIdentityId ||
+    allowDemoControls ||
+    routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
+    serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
   const liveDevdScenario = useLiveDevdScenario(scenario, {
     ...devd,
-    leaseEnabled: shouldHoldDevdLease(
-      selectedDeviceId,
-      activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
-    ),
+    leaseEnabled:
+      shouldHoldDevdLease(
+        selectedDeviceId,
+        activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
+      ) && devdLeaseAllowedForRoute,
   })
   const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario, {
     ...webSerialOptions,
@@ -844,30 +866,50 @@ export function ControlPlaneDemo({
       return
     }
     let cancelled = false
-    for (const session of listSavedLanDeviceSessions()) {
-      const rememberedTarget = savedLanSessionToDeviceTarget(session)
-      const rememberedIdentityId = rememberedTarget ? deviceIdentityId(rememberedTarget) : null
-      if (rememberedTarget) {
-        setPendingDevices((current) =>
-          upsertLanDeviceTarget(current, { ...rememberedTarget, connectionAvailable: false })
-        )
-      }
-      if (!rememberedTarget || !rememberedIdentityId) continue
-      void lanRuntime
-        .getPublicInfo(session.baseUrl)
-        .then((health) => resumeLanDeviceSession(session.baseUrl, health, lanRuntime.probeDevice))
-        .then((resumed) => {
+    const sessions = Array.from(
+      new Map(
+        listSavedLanDeviceSessions().map((session) => {
+          const target = savedLanSessionToDeviceTarget(session)
+          return [`${target ? deviceIdentityId(target) : 'unknown'}:${session.baseUrl}`, session]
+        })
+      ).values()
+    )
+    const pendingIdentities = new Set(
+      sessions.flatMap((session) => {
+        const target = savedLanSessionToDeviceTarget(session)
+        return target ? [deviceIdentityId(target)] : []
+      })
+    )
+    setPendingLanResumeIdentityIds(pendingIdentities)
+
+    const resumeSavedSessions = async () => {
+      for (const session of sessions) {
+        if (cancelled) return
+        const rememberedTarget = savedLanSessionToDeviceTarget(session)
+        const rememberedIdentityId = rememberedTarget ? deviceIdentityId(rememberedTarget) : null
+        if (rememberedTarget) {
+          setPendingDevices((current) =>
+            upsertLanDeviceTarget(current, { ...rememberedTarget, connectionAvailable: false })
+          )
+        }
+        if (!rememberedTarget || !rememberedIdentityId) continue
+        try {
+          const health = await lanRuntime.getPublicInfo(session.baseUrl)
+          const resumed = await resumeLanDeviceSession(
+            session.baseUrl,
+            health,
+            lanRuntime.probeDevice
+          )
           if (cancelled) return
           if (!resumed) {
             setPendingDevices((current) =>
               current.filter((device) => device.id !== rememberedTarget.id)
             )
-            return
+            continue
           }
           const target = lanProbeToDeviceTarget(resumed.session, resumed.probe)
           setPendingDevices((current) => upsertLanDeviceTarget(current, target))
-        })
-        .catch((error: unknown) => {
+        } catch (error: unknown) {
           if (
             cancelled ||
             !(error instanceof ControlPlaneClientError) ||
@@ -883,8 +925,16 @@ export function ControlPlaneDemo({
             detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
             tone: 'warning',
           })
-        })
+        } finally {
+          setPendingLanResumeIdentityIds((current) => {
+            const next = new Set(current)
+            next.delete(rememberedIdentityId)
+            return next
+          })
+        }
+      }
     }
+    void resumeSavedSessions()
     return () => {
       cancelled = true
     }
@@ -925,6 +975,7 @@ export function ControlPlaneDemo({
     setRouteFallbackKind(undefined)
     automaticResumeKeyRef.current = null
     successfulRouteKeyRef.current = null
+    setSerialRecoveryExhaustedIdentityIds(new Set())
   }, [routeDeviceId])
 
   useEffect(() => {
@@ -1650,12 +1701,12 @@ export function ControlPlaneDemo({
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const routeRecoveryVariant = navigation?.variant
   const routeConnectionKind = routeDeviceConnection?.kind
-  const routeConnectionTargetId = routeDeviceConnection?.target.id
-  const routeConnectionTargetAlias = routeDeviceConnection?.target.alias
   const routeConnectionUnavailable = routeDeviceConnection
-    ? routeDeviceConnection.target.connectionAvailable === false ||
-      routeDeviceConnection.target.severity === 'offline'
+    ? !isHealthyRouteConnection(routeDeviceConnection)
     : true
+  const routeHasRecoverableTransportCandidate = routeDeviceChoice?.connections.some(
+    (connection) => !allowDemoControls && connection.kind !== 'web-serial'
+  )
   const routeFallbackConnection = routeDeviceChoice?.connections
     .filter((connection) => connection.kind !== 'web-serial')
     .filter(isHealthyRouteConnection)
@@ -1664,21 +1715,28 @@ export function ControlPlaneDemo({
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
 
   useEffect(() => {
-    if (
-      !routeRecoveryIdentityId ||
-      !routeRecoveryVariant ||
-      !routeConnectionKind ||
-      !routeConnectionTargetId ||
-      !routeConnectionTargetAlias
-    ) {
+    if (routeHasRecoverableTransportCandidate && routeResumeFailed) {
+      setRouteResumeFailed(false)
+    }
+  }, [routeHasRecoverableTransportCandidate, routeResumeFailed])
+
+  useEffect(() => {
+    if (!routeRecoveryIdentityId || !routeRecoveryVariant) {
       return
     }
     if (allowDemoControls) {
       setRouteResumeFailed(routeConnectionUnavailable)
       return
     }
-    if (routeConnectionKind !== 'web-serial') {
-      setRouteResumeFailed(routeConnectionUnavailable)
+    if (pendingLanResumeIdentityIds.has(routeRecoveryIdentityId)) {
+      return
+    }
+    if (
+      routeConnectionKind &&
+      routeConnectionKind !== 'web-serial' &&
+      !routeConnectionUnavailable
+    ) {
+      setRouteResumeFailed(false)
       return
     }
     if (webSerial.deviceIdentityId === routeRecoveryIdentityId) {
@@ -1687,12 +1745,12 @@ export function ControlPlaneDemo({
     }
     if (!webSerial.preauthorizedPortsReady) return
 
-    const attemptKey = `${routeRecoveryVariant}:${routeRecoveryIdentityId}:${routeConnectionTargetId}`
+    const attemptKey = `${routeRecoveryVariant}:${routeRecoveryIdentityId}:web-serial`
     if (automaticResumeKeyRef.current === attemptKey) return
     automaticResumeKeyRef.current = attemptKey
     setFeedback({
       title: '正在恢复 Web Serial',
-      detail: `正在使用已授权端口验证 ${routeConnectionTargetAlias}，不会打开系统设备选择器。`,
+      detail: `正在使用已授权端口验证 ${routeDeviceChoice?.name ?? routeRecoveryIdentityId}，不会打开系统设备选择器。`,
       tone: 'info',
     })
     const controller = new AbortController()
@@ -1708,7 +1766,14 @@ export function ControlPlaneDemo({
           setRouteResumeFailed(false)
           return
         }
-        if (routeFallbackConnectionKind && routeFallbackConnectionLabel) {
+        if (
+          routeConnectionKind === 'web-serial' &&
+          routeFallbackConnectionKind &&
+          routeFallbackConnectionLabel
+        ) {
+          setSerialRecoveryExhaustedIdentityIds((current) =>
+            new Set(current).add(routeRecoveryIdentityId)
+          )
           setRequestedConnectionByIdentity((current) => {
             const next = { ...current }
             delete next[routeRecoveryIdentityId]
@@ -1717,17 +1782,22 @@ export function ControlPlaneDemo({
           setRouteFallbackKind(routeFallbackConnectionKind)
           setFeedback({
             title: '已切换备用连接',
-            detail: `${routeConnectionTargetAlias} 的预授权串口不可用，正在尝试 ${routeFallbackConnectionLabel}。`,
+            detail: `${routeDeviceChoice?.name ?? routeRecoveryIdentityId} 的预授权串口不可用，正在尝试 ${routeFallbackConnectionLabel}。`,
             tone: 'warning',
           })
           return
         }
-        setFeedback({
-          title: 'Web Serial unavailable',
-          detail: 'Browser direct USB control could not be opened.',
-          tone: 'warning',
-        })
-        setRouteResumeFailed(true)
+        if (!invalidLanCredentialIdentityIdsRef.current.has(routeRecoveryIdentityId)) {
+          setFeedback({
+            title: 'Web Serial unavailable',
+            detail: 'Browser direct USB control could not be opened.',
+            tone: 'warning',
+          })
+        }
+        setSerialRecoveryExhaustedIdentityIds((current) =>
+          new Set(current).add(routeRecoveryIdentityId)
+        )
+        setRouteResumeFailed(!routeHasRecoverableTransportCandidate)
       }
     )
     return () => controller.abort()
@@ -1736,12 +1806,13 @@ export function ControlPlaneDemo({
     allowDemoControls,
     routeConnectionKind,
     routeConnectionUnavailable,
-    routeConnectionTargetAlias,
-    routeConnectionTargetId,
+    routeDeviceChoice?.name,
     routeFallbackConnectionKind,
     routeFallbackConnectionLabel,
+    routeHasRecoverableTransportCandidate,
     routeRecoveryIdentityId,
     routeRecoveryVariant,
+    pendingLanResumeIdentityIds,
     webSerial.deviceIdentityId,
     webSerial.preauthorizedPortsReady,
   ])
@@ -1759,6 +1830,18 @@ export function ControlPlaneDemo({
     if (successfulRouteKeyRef.current === successKey) return
     successfulRouteKeyRef.current = successKey
     rememberSuccessfulRoute(navigation.variant, identityId, routeDeviceConnection.kind)
+    setFeedback({
+      title: routeDeviceConnection.kind === 'web-serial' ? 'Web Serial connected' : '运行时已同步',
+      detail:
+        routeDeviceConnection.kind === 'web-serial'
+          ? 'Browser direct USB JSONL control is active.'
+          : routeDeviceConnection.kind === 'wifi'
+            ? '当前热控状态来自直连 LAN 设备。'
+            : routeDeviceConnection.kind === 'mock'
+              ? '当前热控状态来自模拟设备契约。'
+              : '当前热控状态来自 devd 固件状态。',
+      tone: routeDeviceConnection.kind === 'web-serial' ? 'success' : 'info',
+    })
     setRequestedConnectionByIdentity((current) => {
       if (!(identityId in current)) return current
       const next = { ...current }

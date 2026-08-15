@@ -121,4 +121,11 @@ test.describe('device-scoped routing', () => {
     await expect(page.getByLabel('LAN pairing demo')).toBeVisible()
     await expect(page.getByLabel('设备地址')).toHaveValue('http://192.168.1.18')
   })
+
+  test('normalizes UI demo search before rendering an invalid-path 404', async ({ page }) => {
+    await page.goto('/invalid/path?uiDemo=true&demo=true')
+
+    await expect(page).toHaveURL(/\/\?(?=.*demo=true)(?=.*uiDemo=true)/)
+    await expect(page.getByLabel('LAN pairing demo')).toBeVisible()
+  })
 })

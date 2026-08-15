@@ -1,9 +1,14 @@
-import { createRootRoute, Link, Outlet, retainSearchParams } from '@tanstack/react-router'
+import { createRootRoute, Link, Outlet, redirect, retainSearchParams } from '@tanstack/react-router'
 import { AlertTriangle, Home } from 'lucide-react'
 import { validateAppSearch } from '@/routing/search'
 
 export const Route = createRootRoute({
   validateSearch: validateAppSearch,
+  beforeLoad: ({ location, search }) => {
+    if (search.uiDemo && location.pathname !== '/') {
+      throw redirect({ to: '/', search, replace: true })
+    }
+  },
   search: {
     middlewares: [retainSearchParams(['demo', 'uiDemo'])],
   },
