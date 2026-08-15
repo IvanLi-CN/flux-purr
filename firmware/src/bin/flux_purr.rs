@@ -500,9 +500,10 @@ const PT1000_C: f32 = -4.183e-12;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
 #[cfg(any(target_arch = "xtensa", test))]
-// The production divider is driven directly from 3V3. Board-specific ADC error
-// belongs in the persisted RTD ADC calibration, not in the divider topology.
-const RTD_DIVIDER_SUPPLY_MV: u16 = 3_300;
+// R17 = 31.6 kOhm and R16 = 10 kOhm set the TPS62933 3V3 rail to
+// 0.8 V * (1 + 31.6 / 10) = 3.328 V nominal. This is the divider's circuit
+// model, not a measured rail value or an ADC calibration parameter.
+const RTD_DIVIDER_SUPPLY_MV: u16 = 3_328;
 #[cfg(any(target_arch = "xtensa", test))]
 const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -14586,7 +14587,7 @@ mod tests {
                 }
                 if calibration.job.status == CalibrationJobStatus::Failed {
                     panic!(
-                        "thermal plant job failed: {:?}, temp={temperature_c}, samples={}",
+                        "thermal plant job failed: {:?}, physical_temp={temperature_c}, reported_temp={reported_temp_c}, samples={}",
                         calibration.job.message, calibration.job.samples_collected
                     );
                 }
@@ -18973,11 +18974,18 @@ mod tests {
     }
 
     #[test]
-    fn rtd_uses_the_documented_3v3_divider_supply() {
-        let temperature_c =
-            pt1000_temperature_c_from_resistance(rtd_resistance_ohms_from_mv(1_030).unwrap());
+    fn rtd_uses_nominal_regulator_feedback_divider_supply() {
+        let expected_temperature_c = 31.0;
+        let resistance_ohms = pt1000_resistance_ohms_at(expected_temperature_c);
+        let sense_mv = 3_328.0 * resistance_ohms / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms);
+        let reported_temperature_c = pt1000_temperature_c_from_resistance(
+            rtd_resistance_ohms_from_fractional_mv(sense_mv).unwrap(),
+        );
 
-        assert!((30.0..=36.0).contains(&temperature_c));
+        assert!(
+            (reported_temperature_c - expected_temperature_c).abs() < 0.05,
+            "expected {expected_temperature_c:.2}C, got {reported_temperature_c:.2}C"
+        );
     }
 
     #[test]

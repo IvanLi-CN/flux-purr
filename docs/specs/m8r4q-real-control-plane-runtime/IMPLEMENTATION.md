@@ -55,7 +55,8 @@
 - thermal tune 默认同等级目标集为 `60 / 80 / 100 / 120 / 140 / 160 / 180 / 220 / 240°C`；支持的完整 self-test ladder 另含 `200 / 250°C` 显式诊断目标。`300°C` 不属于首版验收。默认 host sampling interval 为 `300ms`，持续采样下限为 `3Hz`；accepted comparison bundle 可以使用更高采样率。
 - 当前固件与 host 工具链已统一 warmup 语义：只要 heater state machine 仍在 `warmup`，输出就保持 `100%`，host readback / candidate import / replay / report 都必须把 `warmupPowerPermille=1000` 视为唯一有效运行值。
 - heater 控制环当前为 `20Hz`；每个 control cycle 聚合 `64` 次 RTD ADC conversion，并丢弃前置 settle 样本后保留分数毫伏均值贯穿 calibration 与 PT1000 转换。默认 `tempFilterAlphaPermille=750`，仍可通过 thermal profile API / EEPROM 覆盖。冻结的 `pps3a` accepted bundle 仍记录 `700`，因此历史 3A bundle 与当前固件默认值应分开理解。
-- PT1000 换算使用生产板 `3300mV` 分压电源与 `2.49 kOhm` 参考电阻。RTD ADC calibration 保持独立的 gain/offset 层；未校准设备使用 identity fit，不再以旧样机的有效电压替代 3V3 电路拓扑。
+- PT1000 换算使用生产板 `TPS62933` 反馈网络确定的 `3328mV` 名义分压电源与 `2.49 kOhm` 参考电阻。RTD ADC calibration 保持独立的 gain/offset 层；未校准设备使用 identity fit，既不以旧样机的有效电压替代 3V3 电路拓扑，也不把该名义值描述为组装板实测电压。
+- 默认产品启动在显示、PD/I2C、持久化配置、LAN/WiFi tasks、MCPWM 输出、CH224Q capability 读取和 heater safe-off 电源同步全部完成后，才创建 ADC1/GPIO1/GPIO2 和 eFuse curve。ADC 后只做首次测量与依赖测量的安全/UI/output 投影，不再创建硬件外设。固定 ADC 初始化延迟未达到一致稳定标准，因此产品不启用固定延迟。
 - 当前温度链路已经收口为三条可审计职责：owner-facing `currentTempC` / `boardTempCenti` / front panel 直接反映当前有效 RTD 样本；`heaterControlTempC` 反映实际送入控制器的最后可信样本；controller EMA 与 slope 继续单独暴露。PPS transition guard 与控制侧物理斜率门只能作用于 controller 内部状态，不得冻结或改写 owner-facing 温度。
 - 控制环前不使用多样本窗口、中位数或输出钳位。控制侧仅以实际 `20Hz` 周期检查单样本是否超过 `35°C/s` 的物理斜率上限；被拒样本保留在 raw/report，并以 `heaterControlMeasurementGuarded=true` 审计，后续可信样本仍直接进入配置的 EMA。
 - warmup handoff 现在要求实际温度步进确认，避免单个 RTD 批次跳变在滤波温度仍落后时提前退出 warmup。low-temp `Approach -> Hold` 零输出 seam 也已修正：只有当实际误差已进入 hold 释放带时才允许 predictive coast 维持零输出。

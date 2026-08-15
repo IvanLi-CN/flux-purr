@@ -109,6 +109,9 @@ This gives the normal `TPS62933` output relation:
 
 `VOUT ~= 0.8 * (1 + RFBT / RFBB)`
 
+With the populated values, the design nominal is `0.8 * (1 + 31.6 / 10) = 3.328 V`.
+This is a feedback-network nominal, not an independent measurement of an assembled board rail.
+
 The `3.3 V` rail should not depend on firmware-generated enables; it must be available early enough for the MCU to boot.
 
 Implemented UVLO network:

@@ -75,7 +75,7 @@
 - WiFi 连接事务计时固定为：断开旧连接最多 3 秒；每次关联最多 8 秒；每次 IPv4/DHCP 获取最多 15 秒；整个配置事务最多 3 次尝试、总计 30 秒，整体 30 秒截止时间优先于阶段计时。可恢复单次失败保持 `connecting`，只有三次尝试或 30 秒事务耗尽后发布一次 `error`。失败是终态，设备不会在同一 configuration generation 内自动恢复；必须收到新的配置才会重新进入 `connecting`。
 - runtime config frame 和 devd runtime endpoint 必须能更新目标温度、当前 preset slot、`presets_c[10]`、主动散热开关、heater hold 状态、调试用手动 PPS 覆盖、RAM thermal control profile preview、EEPROM-backed saved thermal control profile，以及热失控告警确认 `faultAttentionAcknowledged`。
 - 所有 transport 的 `Status` 必须回显 `faultAttentionPending`。该字段只表示温度已从 `>=420°C` 热失控回落到 `<420°C`、但告警尚未确认；`SensorShort / SensorOpen / AdcReadFailed` 不得置位。`faultAttentionAcknowledged=true` 只确认热失控告警与解除对应 attention/强制风扇锁定，不得在温度仍为 `>=420°C` 时解除绝对停热、fault-latch 或每 `1s` 的热失控提示。
-- PT1000 温度换算必须遵循硬件 `3V3 -> 2.49 kOhm -> PT1000` 分压拓扑，以 `3300mV` 作为电路模型电源；板级 ADC 增益和偏移只能通过持久化 RTD ADC calibration 修正，不得通过修改分压电源常量吸收。
+- PT1000 温度换算必须遵循硬件 `3V3 -> 2.49 kOhm -> PT1000` 分压拓扑。`3V3` 的 `TPS62933` 反馈网络为 `31.6 kOhm / 10 kOhm`，按 `0.8V` 典型反馈参考得到 `3328mV` 设计名义值；固件必须使用该名义值作为电路模型电源。它不是组装板实测值或校准参考；板级 ADC 增益和偏移只能通过持久化 RTD ADC calibration 修正，也不得反过来用 ADC calibration 掩盖错误的分压拓扑常量。
 - calibration frame 和 devd calibration endpoint 必须能读取 channel-centered calibration state、编辑共享样本、编辑 A/B 槽位、切换当前激活槽位，并导入完整 calibration state。
 - Web app 必须在目标下拉的底部只提供一个 `Add device` 入口；选择该入口后进入单独的 Add device 页面，并在该页面提供 WiFi、Web Serial 与 Bridge 三种新增类型。
 - Web app 在 live 模式没有选中真实目标时，主工作区必须显示全宽设备选择页；该页上半部分显示 known devices 网格，空设备提示不得呈现为卡片，中间显示分隔线，下半部分以单行三卡片显示 WiFi、Web Serial 与 Bridge 三种新增类型，且不显示右侧全局日志列或额外的分区标题。

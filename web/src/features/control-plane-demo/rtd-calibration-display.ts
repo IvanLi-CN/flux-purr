@@ -1,3 +1,5 @@
+const RTD_DIVIDER_NOMINAL_SUPPLY_MV = 3328
+
 export function rtdAdcMvForTemperature(tempC: number) {
   const resistance =
     tempC >= 0
@@ -7,7 +9,7 @@ export function rtdAdcMvForTemperature(tempC: number) {
           3.9083e-3 * tempC -
           5.775e-7 * tempC * tempC -
           4.183e-12 * (tempC - 100) * tempC * tempC * tempC)
-  return Math.round((3000 * resistance) / (2490 + resistance))
+  return Math.round((RTD_DIVIDER_NOMINAL_SUPPLY_MV * resistance) / (2490 + resistance))
 }
 
 export function rtdTemperatureForAdcMv(targetMv: number) {
