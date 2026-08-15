@@ -5198,51 +5198,25 @@ fn load_eeprom_memory_record(
 
     let mut eeprom = M24c64::with_address(i2c, address);
     let mut contains_data = false;
-    let mut selected =
-        read_eeprom_bytes_chunked(&mut eeprom, MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
+    let mut selected = None;
+    for (offset, length) in [
+        (MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_SIZE),
+        (MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE),
+        (PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE),
+        (PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE),
+        (LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
+        (LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE),
+    ] {
+        let bytes = &mut scratch.record_bytes[..length];
+        let candidate = read_eeprom_bytes_chunked(&mut eeprom, offset, bytes)
             .map(|_| {
-                contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes);
-                decode_memory_record(&scratch.record_bytes)
+                contains_data |= eeprom_bytes_contain_data(bytes);
+                decode_memory_record(bytes)
             })
             .ok()
             .and_then(Result::ok);
-    let slot_b =
-        read_eeprom_bytes_chunked(&mut eeprom, MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
-            .map(|_| {
-                contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes);
-                decode_memory_record(&scratch.record_bytes)
-            })
-            .ok()
-            .and_then(Result::ok);
-    selected = select_latest_optional_memory_record(selected, slot_b);
-
-    let previous_slot_a = read_eeprom_bytes_chunked(
-        &mut eeprom,
-        PREVIOUS_MEMORY_SLOT_A_OFFSET,
-        &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
-    )
-    .map(|_| {
-        contains_data |=
-            eeprom_bytes_contain_data(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]);
-        decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE])
-    })
-    .ok()
-    .and_then(Result::ok);
-    selected = select_latest_optional_memory_record(selected, previous_slot_a);
-
-    let previous_slot_b = read_eeprom_bytes_chunked(
-        &mut eeprom,
-        PREVIOUS_MEMORY_SLOT_B_OFFSET,
-        &mut scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE],
-    )
-    .map(|_| {
-        contains_data |=
-            eeprom_bytes_contain_data(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE]);
-        decode_memory_record(&scratch.record_bytes[..PREVIOUS_MEMORY_SLOT_SIZE])
-    })
-    .ok()
-    .and_then(Result::ok);
-    selected = select_latest_optional_memory_record(selected, previous_slot_b);
+        selected = select_latest_optional_memory_record(selected, candidate);
+    }
 
     let unused_gap = read_eeprom_bytes_chunked(
         &mut eeprom,
@@ -5252,34 +5226,6 @@ fn load_eeprom_memory_record(
     if unused_gap.is_ok() {
         contains_data |= eeprom_bytes_contain_data(&scratch.record_bytes[..EEPROM_UNUSED_GAP_LEN]);
     }
-
-    let legacy_slot_a = read_eeprom_bytes_chunked(
-        &mut eeprom,
-        LEGACY_MEMORY_SLOT_A_OFFSET,
-        &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
-    )
-    .map(|_| {
-        contains_data |=
-            eeprom_bytes_contain_data(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]);
-        decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE])
-    })
-    .ok()
-    .and_then(Result::ok);
-    selected = select_latest_optional_memory_record(selected, legacy_slot_a);
-
-    let legacy_slot_b = read_eeprom_bytes_chunked(
-        &mut eeprom,
-        LEGACY_MEMORY_SLOT_B_OFFSET,
-        &mut scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE],
-    )
-    .map(|_| {
-        contains_data |=
-            eeprom_bytes_contain_data(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE]);
-        decode_memory_record(&scratch.record_bytes[..LEGACY_MEMORY_SLOT_SIZE])
-    })
-    .ok()
-    .and_then(Result::ok);
-    selected = select_latest_optional_memory_record(selected, legacy_slot_b);
 
     if let Some(record) = &selected {
         info!(
@@ -10430,10 +10376,10 @@ async fn main(_spawner: Spawner) {
     init_runtime_heap();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
+    let status_light_started_ms = Instant::now().as_millis();
     let status_light_red = Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
     let status_light_green = Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
     let status_light_blue = Output::new(peripherals.GPIO37, Level::High, OutputConfig::default());
-    let status_light_started_ms = Instant::now().as_millis();
     _spawner
         .spawn(run_status_light_task(
             status_light_red,
