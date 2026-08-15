@@ -19,6 +19,7 @@ use std::{
 
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{Path as AxumPath, Query, State},
     http::{HeaderValue, Method, StatusCode},
     response::{
@@ -34,6 +35,7 @@ use tokio::{process::Command, sync::broadcast};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+pub mod firmware_bundle;
 pub mod lan;
 
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
@@ -228,6 +230,7 @@ pub struct AppState {
     events: broadcast::Sender<DevdEvent>,
     serial_rpc: Arc<tokio::sync::Mutex<()>>,
     serial_sessions: Arc<Mutex<SerialSessionMap>>,
+    bundle_store: Arc<tempfile::TempDir>,
 }
 
 impl AppState {
@@ -241,6 +244,12 @@ impl AppState {
             events,
             serial_rpc: Arc::new(tokio::sync::Mutex::new(())),
             serial_sessions: Arc::new(Mutex::new(HashMap::new())),
+            bundle_store: Arc::new(
+                tempfile::Builder::new()
+                    .prefix("flux-purr-bundles-")
+                    .tempdir()
+                    .expect("create private firmware bundle store"),
+            ),
         }
     }
 
@@ -278,7 +287,21 @@ struct DevdState {
     devices: HashMap<String, DeviceRecord>,
     leases: HashMap<String, WebLease>,
     dry_run_passes: HashMap<String, FlashDryRunApproval>,
+    firmware_approvals: HashMap<String, FirmwareApproval>,
     sequence: u64,
+}
+
+#[derive(Debug, Clone)]
+struct FirmwareApproval {
+    lease_id: String,
+    device_id: String,
+    port_path: String,
+    rom_mac: String,
+    bundle_sha256: String,
+    operation: FirmwareOperation,
+    allow_downgrade: bool,
+    preflight_digest: String,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1928,6 +1951,97 @@ impl BootObservation {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareBundleCatalog {
+    pub bundles: Vec<FirmwareBundleSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareBundleSummary {
+    pub artifact_id: String,
+    pub source: String,
+    pub channel: firmware_bundle::BundleChannel,
+    pub version: String,
+    pub source_sha: String,
+    pub build_id: String,
+    pub bundle_sha256: String,
+    pub size: u64,
+    pub layout_id: String,
+    pub operations: Vec<FirmwareOperation>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FirmwareOperation {
+    Update,
+    InstallRecovery,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FirmwareOperationRequest {
+    pub lease_id: String,
+    pub artifact_id: String,
+    pub operation: FirmwareOperation,
+    pub dry_run: bool,
+    pub approval_token: Option<String>,
+    pub confirm: Option<String>,
+    #[serde(default)]
+    pub allow_downgrade: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirmwareOperationResult {
+    pub artifact_id: String,
+    pub operation: FirmwareOperation,
+    pub dry_run: bool,
+    pub outcome: String,
+    pub approval_token: Option<String>,
+    pub approval_expires_in_ms: Option<u64>,
+    pub stages: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RomSecurityInfo {
+    pub secure_boot_enabled: bool,
+    pub flash_encryption_enabled: bool,
+    pub secure_download_mode_enabled: bool,
+    pub response_known: bool,
+    pub chip_is_esp32s3: bool,
+    pub flash_size_bytes: u64,
+}
+
+impl RomSecurityInfo {
+    fn validate_for_flash(self) -> Result<(), HttpError> {
+        if !self.response_known {
+            return Err(HttpError::forbidden(
+                "security_info_unknown",
+                "The ROM security response is unknown; flashing is blocked.",
+            ));
+        }
+        if self.secure_boot_enabled
+            || self.flash_encryption_enabled
+            || self.secure_download_mode_enabled
+        {
+            return Err(HttpError::forbidden(
+                "security_features_enabled",
+                "Secure Boot, Flash Encryption, or Secure Download Mode blocks this installer.",
+            ));
+        }
+        if !self.chip_is_esp32s3 || self.flash_size_bytes != 4 * 1024 * 1024 {
+            return Err(HttpError::forbidden(
+                "target_mismatch",
+                "The target must be an ESP32-S3 with exactly 4 MiB Flash.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
     pub code: String,
@@ -2082,6 +2196,14 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/artifacts", get(list_artifacts_route))
         .route("/api/v1/artifacts/verify", post(verify_artifact_route))
         .route("/api/v1/devices/{device_id}/flash", post(flash_device))
+        .route(
+            "/api/v1/firmware-bundles",
+            get(list_firmware_bundles).post(import_firmware_bundle),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/firmware",
+            post(firmware_operation),
+        )
         .with_state(state.clone());
 
     if state.config.allow_dev_cors {
@@ -4825,6 +4947,301 @@ async fn list_artifacts_route(
     discover_firmware_artifacts(state.config.artifact_root.as_deref())
         .map(|artifacts| Json(FirmwareArtifactCatalog { artifacts }))
         .map_err(sanitize_io_error)
+}
+
+async fn list_firmware_bundles(
+    State(state): State<AppState>,
+) -> Result<Json<FirmwareBundleCatalog>, HttpError> {
+    let mut bundles = Vec::new();
+    let entries = fs::read_dir(state.bundle_store.path()).map_err(sanitize_io_error)?;
+    for entry in entries {
+        let entry = entry.map_err(sanitize_io_error)?;
+        if entry.path().extension().and_then(|value| value.to_str()) != Some("fluxpurr-fw") {
+            continue;
+        }
+        let bundle = firmware_bundle::read_bundle(&entry.path()).map_err(bundle_http_error)?;
+        bundles.push(bundle_summary(&bundle));
+    }
+    bundles.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+    Ok(Json(FirmwareBundleCatalog { bundles }))
+}
+
+async fn import_firmware_bundle(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Result<(StatusCode, Json<FirmwareBundleSummary>), HttpError> {
+    if body.len() as u64 > firmware_bundle::MAX_BUNDLE_BYTES {
+        return Err(HttpError::bad_request(
+            "bundle_too_large",
+            "Firmware bundle exceeds the 8 MiB limit.",
+        ));
+    }
+    let bundle = firmware_bundle::read_bundle_bytes(&body).map_err(bundle_http_error)?;
+    let filename = format!(
+        "{}.fluxpurr-fw",
+        bundle.bundle_sha256.trim_start_matches("sha256:")
+    );
+    let target = state.bundle_store.path().join(filename);
+    if !target.exists() {
+        let temp = state.bundle_store.path().join(format!(
+            ".import-{}-{}",
+            now_millis(),
+            EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&temp, &body).map_err(sanitize_io_error)?;
+        fs::rename(&temp, &target).map_err(sanitize_io_error)?;
+    }
+    Ok((StatusCode::CREATED, Json(bundle_summary(&bundle))))
+}
+
+fn bundle_summary(bundle: &firmware_bundle::FirmwareBundle) -> FirmwareBundleSummary {
+    FirmwareBundleSummary {
+        artifact_id: bundle.bundle_sha256.clone(),
+        source: "local".into(),
+        channel: bundle.manifest.identity.channel,
+        version: bundle.manifest.identity.version.clone(),
+        source_sha: bundle.manifest.identity.source_sha.clone(),
+        build_id: bundle.manifest.identity.build_id.clone(),
+        bundle_sha256: bundle.bundle_sha256.clone(),
+        size: bundle.archive_size,
+        layout_id: bundle.manifest.layout.id.clone(),
+        operations: vec![
+            FirmwareOperation::Update,
+            FirmwareOperation::InstallRecovery,
+        ],
+    }
+}
+
+fn bundle_http_error(error: firmware_bundle::BundleError) -> HttpError {
+    HttpError::bad_request("firmware_bundle_invalid", &error.to_string())
+}
+
+async fn firmware_operation(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<FirmwareOperationRequest>,
+) -> Result<Json<FirmwareOperationResult>, HttpError> {
+    let bundle_path = state.bundle_store.path().join(format!(
+        "{}.fluxpurr-fw",
+        payload.artifact_id.trim_start_matches("sha256:")
+    ));
+    let bundle = firmware_bundle::read_bundle(&bundle_path).map_err(|error| {
+        HttpError::bad_request(
+            "firmware_bundle_unavailable",
+            &format!("The imported firmware bundle is unavailable: {error}"),
+        )
+    })?;
+    if bundle.bundle_sha256 != payload.artifact_id {
+        return Err(HttpError::bad_request(
+            "artifact_id_mismatch",
+            "artifactId does not match the imported bundle content.",
+        ));
+    }
+
+    let (port_path, rom_mac, transport, current_version, status) = {
+        let mut inner = state.lock()?;
+        inner.require_lease(&device_id, Some(&payload.lease_id))?;
+        let device = inner
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+        if device.transport == DeviceTransport::Lan {
+            return Err(HttpError::bad_request(
+                "lan_flash_unsupported",
+                "Firmware flashing is unavailable through the DEVD LAN bridge.",
+            ));
+        }
+        (
+            device
+                .port_path
+                .clone()
+                .unwrap_or_else(|| "mock://esp32s3".into()),
+            device.identity.device_id.clone(),
+            device.transport,
+            device.identity.firmware_version.clone(),
+            device.status.clone(),
+        )
+    };
+
+    let security = match transport {
+        DeviceTransport::Mock => RomSecurityInfo {
+            secure_boot_enabled: false,
+            flash_encryption_enabled: false,
+            secure_download_mode_enabled: false,
+            response_known: true,
+            chip_is_esp32s3: true,
+            flash_size_bytes: 4 * 1024 * 1024,
+        },
+        DeviceTransport::NativeSerial => RomSecurityInfo {
+            secure_boot_enabled: false,
+            flash_encryption_enabled: false,
+            secure_download_mode_enabled: false,
+            response_known: false,
+            chip_is_esp32s3: true,
+            flash_size_bytes: 0,
+        },
+        DeviceTransport::Lan => unreachable!(),
+    };
+    security.validate_for_flash()?;
+
+    if payload.operation == FirmwareOperation::Update {
+        if transport == DeviceTransport::NativeSerial && !current_version.starts_with("fw/") {
+            return Err(HttpError::forbidden(
+                "update_identity_required",
+                "Update requires a verified Flux Purr runtime identity.",
+            ));
+        }
+        if status.heater_enabled
+            || !status.current_temp_c.is_finite()
+            || status.current_temp_c > 40.0
+        {
+            return Err(HttpError::forbidden(
+                "update_temperature_gate",
+                "Update requires heater off and a valid temperature at or below 40 C.",
+            ));
+        }
+    }
+
+    let preflight_digest = firmware_preflight_digest(
+        &payload,
+        &device_id,
+        &port_path,
+        &rom_mac,
+        &bundle.bundle_sha256,
+    );
+    let stages = firmware_preflight_stages(payload.operation);
+    if payload.dry_run {
+        let token = {
+            let mut inner = state.lock()?;
+            let token = inner.next_id("firmware-approval");
+            inner.firmware_approvals.insert(
+                token.clone(),
+                FirmwareApproval {
+                    lease_id: payload.lease_id.clone(),
+                    device_id: device_id.clone(),
+                    port_path,
+                    rom_mac,
+                    bundle_sha256: bundle.bundle_sha256.clone(),
+                    operation: payload.operation,
+                    allow_downgrade: payload.allow_downgrade,
+                    preflight_digest,
+                    expires_at: Instant::now() + Duration::from_secs(5 * 60),
+                },
+            );
+            token
+        };
+        return Ok(Json(FirmwareOperationResult {
+            artifact_id: bundle.bundle_sha256,
+            operation: payload.operation,
+            dry_run: true,
+            outcome: "passed".into(),
+            approval_token: Some(token),
+            approval_expires_in_ms: Some(5 * 60 * 1000),
+            stages,
+            message: "Preflight passed; no flash write performed.".into(),
+        }));
+    }
+
+    let token = payload.approval_token.as_deref().ok_or_else(|| {
+        HttpError::forbidden(
+            "approval_required",
+            "Execution requires a current single-use approval token.",
+        )
+    })?;
+    {
+        let mut inner = state.lock()?;
+        let approval = inner.firmware_approvals.remove(token).ok_or_else(|| {
+            HttpError::forbidden(
+                "approval_invalid",
+                "The approval token is invalid or already used.",
+            )
+        })?;
+        if approval.expires_at <= Instant::now()
+            || approval.lease_id != payload.lease_id
+            || approval.device_id != device_id
+            || approval.port_path != port_path
+            || approval.rom_mac != rom_mac
+            || approval.bundle_sha256 != bundle.bundle_sha256
+            || approval.operation != payload.operation
+            || approval.allow_downgrade != payload.allow_downgrade
+            || approval.preflight_digest != preflight_digest
+        {
+            return Err(HttpError::forbidden(
+                "approval_mismatch",
+                "The target or preflight facts changed; run preflight again.",
+            ));
+        }
+    }
+    let expected_confirm = match payload.operation {
+        FirmwareOperation::Update => "FLASH",
+        FirmwareOperation::InstallRecovery => "ERASE_INSTALL",
+    };
+    if payload.confirm.as_deref() != Some(expected_confirm) {
+        return Err(HttpError::forbidden(
+            "confirmation_required",
+            &format!("Execution requires confirm={expected_confirm}."),
+        ));
+    }
+    if !state.config.allow_real_flash {
+        return Err(HttpError::forbidden(
+            "real_flash_disabled",
+            "Real flashing is disabled unless FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1.",
+        ));
+    }
+    if transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "real_flash_requires_native_serial",
+            "Real flash requires a native serial target.",
+        ));
+    }
+
+    Err(HttpError::internal(
+        "Protected bundle execution has no authorized hardware transaction in this process.",
+    ))
+}
+
+fn firmware_preflight_stages(operation: FirmwareOperation) -> Vec<String> {
+    let mut stages = vec![
+        "artifact",
+        "transport",
+        "rom_reset",
+        "chip_flash_security",
+        "layout_config",
+        "preflight",
+    ];
+    if operation == FirmwareOperation::InstallRecovery {
+        stages.push("erase");
+    }
+    stages.extend([
+        "write_segments",
+        "rom_md5",
+        "reset",
+        "runtime_reconnect",
+        "runtime_verify",
+    ]);
+    stages.into_iter().map(str::to_string).collect()
+}
+
+fn firmware_preflight_digest(
+    payload: &FirmwareOperationRequest,
+    device_id: &str,
+    port_path: &str,
+    rom_mac: &str,
+    bundle_sha256: &str,
+) -> String {
+    let value = json!({
+        "leaseId": payload.lease_id,
+        "deviceId": device_id,
+        "portPath": port_path,
+        "romMac": rom_mac,
+        "bundleSha256": bundle_sha256,
+        "operation": payload.operation,
+        "allowDowngrade": payload.allow_downgrade,
+    });
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(serde_json::to_vec(&value).unwrap()))
+    )
 }
 
 async fn serial_request_payload<T>(
@@ -11331,5 +11748,121 @@ mod tests {
                 previous = sequence;
             }
         }
+    }
+
+    fn seed_test_bundle(state: &AppState) -> String {
+        let output = state.bundle_store.path().join("seed.fluxpurr-fw");
+        let bundle = firmware_bundle::build_bundle(
+            &output,
+            firmware_bundle::BundleIdentity {
+                version: "0.1.0".into(),
+                source_sha: "e9754917ee23481dd30571fb7a78cb2c486b82a3".into(),
+                build_id: "0123456789abcdef".into(),
+                channel: firmware_bundle::BundleChannel::Local,
+            },
+            &vec![0x11; 0x4000],
+            &vec![0x22; 0x1000],
+            &vec![0x33; 0x4000],
+            Vec::new(),
+        )
+        .unwrap();
+        let canonical = state.bundle_store.path().join(format!(
+            "{}.fluxpurr-fw",
+            bundle.bundle_sha256.trim_start_matches("sha256:")
+        ));
+        fs::rename(output, canonical).unwrap();
+        bundle.bundle_sha256
+    }
+
+    #[test]
+    fn security_info_fails_closed_for_each_protected_state() {
+        let safe = RomSecurityInfo {
+            secure_boot_enabled: false,
+            flash_encryption_enabled: false,
+            secure_download_mode_enabled: false,
+            response_known: true,
+            chip_is_esp32s3: true,
+            flash_size_bytes: 4 * 1024 * 1024,
+        };
+        assert!(safe.validate_for_flash().is_ok());
+        for blocked in [
+            RomSecurityInfo {
+                secure_boot_enabled: true,
+                ..safe
+            },
+            RomSecurityInfo {
+                flash_encryption_enabled: true,
+                ..safe
+            },
+            RomSecurityInfo {
+                secure_download_mode_enabled: true,
+                ..safe
+            },
+            RomSecurityInfo {
+                response_known: false,
+                ..safe
+            },
+            RomSecurityInfo {
+                chip_is_esp32s3: false,
+                ..safe
+            },
+            RomSecurityInfo {
+                flash_size_bytes: 8 * 1024 * 1024,
+                ..safe
+            },
+        ] {
+            assert!(blocked.validate_for_flash().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_preflight_allows_hot_or_foreign_mock_without_physical_confirmation() {
+        let state = AppState::test();
+        let artifact_id = seed_test_bundle(&state);
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let result = firmware_operation(
+            State(state),
+            AxumPath("mock-fp-lab-01".into()),
+            Json(FirmwareOperationRequest {
+                lease_id: lease.lease_id,
+                artifact_id,
+                operation: FirmwareOperation::InstallRecovery,
+                dry_run: true,
+                approval_token: None,
+                confirm: None,
+                allow_downgrade: false,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        assert_eq!(result.outcome, "passed");
+        assert!(result.approval_token.is_some());
+        assert!(result.stages.contains(&"erase".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_preflight_blocks_active_heater_and_high_temperature() {
+        let state = AppState::test();
+        let artifact_id = seed_test_bundle(&state);
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+        let error = firmware_operation(
+            State(state),
+            AxumPath("mock-fp-lab-01".into()),
+            Json(FirmwareOperationRequest {
+                lease_id: lease.lease_id,
+                artifact_id,
+                operation: FirmwareOperation::Update,
+                dry_run: true,
+                approval_token: None,
+                confirm: None,
+                allow_downgrade: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "update_temperature_gate");
     }
 }
