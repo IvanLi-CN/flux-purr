@@ -2029,6 +2029,7 @@ pub struct RomSecurityInfo {
     pub response_known: bool,
     pub chip_is_esp32s3: bool,
     pub flash_size_bytes: u64,
+    pub package_matches: bool,
 }
 
 impl RomSecurityInfo {
@@ -2048,7 +2049,10 @@ impl RomSecurityInfo {
                 "Secure Boot, Flash Encryption, or Secure Download Mode blocks this installer.",
             ));
         }
-        if !self.chip_is_esp32s3 || self.flash_size_bytes != 4 * 1024 * 1024 {
+        if !self.chip_is_esp32s3
+            || self.flash_size_bytes != 4 * 1024 * 1024
+            || !self.package_matches
+        {
             return Err(HttpError::forbidden(
                 "target_mismatch",
                 "The target must be an ESP32-S3 with exactly 4 MiB Flash.",
@@ -5088,6 +5092,7 @@ async fn firmware_operation(
             response_known: true,
             chip_is_esp32s3: true,
             flash_size_bytes: 4 * 1024 * 1024,
+            package_matches: true,
         },
         DeviceTransport::NativeSerial => probe_native_rom_security(&state, &port_path).await?,
         DeviceTransport::Lan => unreachable!(),
@@ -5366,27 +5371,26 @@ async fn run_bundle_flash_transaction(
         "--non-interactive".into(),
     ];
     let preserved_config = if operation == FirmwareOperation::Update {
-        let source_address =
-            if source_partition_hash == Some(firmware_bundle::CURRENT_PARTITION_TABLE_SHA256) {
-                0x210000
-            } else {
-                0x110000
-            };
+        let copy = firmware_bundle::config_copy_plan(
+            source_partition_hash.ok_or_else(|| HttpError::internal("missing source layout"))?,
+            &bundle.manifest.migrations,
+        )
+        .map_err(bundle_http_error)?;
         let path = workspace.path().join("preserved-flux-cfg.bin");
         let mut args = vec!["read-flash".into()];
         args.extend(common.clone());
         args.extend([
-            format!("0x{source_address:x}"),
-            "0x2000".into(),
+            format!("0x{:x}", copy.source_address),
+            format!("0x{:x}", copy.length),
             path.to_string_lossy().into_owned(),
         ]);
         require_espflash_success(&program, &args).await?;
         let bytes = fs::read(&path)
             .map_err(|error| HttpError::internal(&format!("failed to stage flux_cfg: {error}")))?;
-        if bytes.len() != 0x2000 {
+        if bytes.len() as u64 != copy.length {
             return Err(HttpError::internal("flux_cfg staging length differs."));
         }
-        Some((path, bytes))
+        Some((path, bytes, copy))
     } else {
         None
     };
@@ -5431,7 +5435,7 @@ async fn run_bundle_flash_transaction(
             ));
         }
     }
-    if let Some((path, expected)) = preserved_config {
+    if let Some((path, expected, copy)) = preserved_config {
         let mut write = vec!["write-bin".into()];
         write.extend(common.clone());
         write.extend([
@@ -5439,7 +5443,7 @@ async fn run_bundle_flash_transaction(
             "default-reset".into(),
             "--after".into(),
             "no-reset".into(),
-            "0x210000".into(),
+            format!("0x{:x}", copy.target_address),
             path.to_string_lossy().into_owned(),
         ]);
         require_espflash_success(&program, &write).await?;
@@ -5447,8 +5451,8 @@ async fn run_bundle_flash_transaction(
         let mut read = vec!["read-flash".into()];
         read.extend(common.clone());
         read.extend([
-            "0x210000".into(),
-            "0x2000".into(),
+            format!("0x{:x}", copy.target_address),
+            format!("0x{:x}", copy.length),
             verified_path.to_string_lossy().into_owned(),
         ]);
         require_espflash_success(&program, &read).await?;
@@ -5529,6 +5533,19 @@ async fn probe_native_rom_security(
             .map_err(|error| error.to_string())?;
         let info = flasher.security_info().map_err(|error| error.to_string())?;
         let device = flasher.device_info().map_err(|error| error.to_string())?;
+        const ESP32S3_EFUSE_BLOCK1: u32 = 0x6000_7044;
+        let flash_cap = (flasher
+            .connection()
+            .read_reg(ESP32S3_EFUSE_BLOCK1 + 12)
+            .map_err(|error| error.to_string())?
+            >> 27)
+            & 0x07;
+        let psram_cap = (flasher
+            .connection()
+            .read_reg(ESP32S3_EFUSE_BLOCK1 + 16)
+            .map_err(|error| error.to_string())?
+            >> 3)
+            & 0x03;
         Ok(RomSecurityInfo {
             rom_mac: device
                 .mac_address
@@ -5539,6 +5556,7 @@ async fn probe_native_rom_security(
             response_known: true,
             chip_is_esp32s3: flasher.chip().to_string() == "esp32s3",
             flash_size_bytes: u64::from(device.flash_size.size()),
+            package_matches: flash_cap == 2 && psram_cap == 2,
         })
     })
     .await
@@ -12137,6 +12155,7 @@ mod tests {
             response_known: true,
             chip_is_esp32s3: true,
             flash_size_bytes: 4 * 1024 * 1024,
+            package_matches: true,
         };
         assert!(safe.validate_for_flash().is_ok());
         for blocked in [
@@ -12162,6 +12181,10 @@ mod tests {
             },
             RomSecurityInfo {
                 flash_size_bytes: 8 * 1024 * 1024,
+                ..safe.clone()
+            },
+            RomSecurityInfo {
+                package_matches: false,
                 ..safe.clone()
             },
         ] {

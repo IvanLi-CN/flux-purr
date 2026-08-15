@@ -143,6 +143,24 @@ struct MigrationCopy {
     length: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct FlashLayout {
+    partitions: HashMap<String, LayoutPartition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LayoutPartition {
+    address: u64,
+    length: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigCopyPlan {
+    pub source_address: u64,
+    pub target_address: u64,
+    pub length: u64,
+}
+
 pub fn read_bundle(path: &Path) -> Result<FirmwareBundle, BundleError> {
     let metadata = path.metadata()?;
     if metadata.len() > MAX_BUNDLE_BYTES {
@@ -391,6 +409,47 @@ pub fn source_partition_hash_supported(
         migration.source_partition_table_sha256 == source_hash
             && declared_migrations.iter().any(|id| id == &migration.id)
     }))
+}
+
+pub fn config_copy_plan(
+    source_hash: &str,
+    declared_migrations: &[String],
+) -> Result<ConfigCopyPlan, BundleError> {
+    let layout: FlashLayout =
+        serde_json::from_str(include_str!("../../../firmware/flash-layout.json"))?;
+    let target = layout
+        .partitions
+        .get("flux_cfg")
+        .ok_or_else(|| BundleError::Contract("target layout has no flux_cfg partition".into()))?;
+    if source_hash == CURRENT_PARTITION_TABLE_SHA256 {
+        return Ok(ConfigCopyPlan {
+            source_address: target.address,
+            target_address: target.address,
+            length: target.length,
+        });
+    }
+    let registry: MigrationRegistry = serde_json::from_str(include_str!(
+        "../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json"
+    ))?;
+    let migration = registry
+        .migrations
+        .iter()
+        .find(|migration| {
+            migration.source_partition_table_sha256 == source_hash
+                && declared_migrations.iter().any(|id| id == &migration.id)
+        })
+        .ok_or_else(|| BundleError::Contract("source layout has no declared migration".into()))?;
+    if migration.copies.len() != 1 {
+        return Err(BundleError::Contract(
+            "migration must define exactly one flux_cfg copy".into(),
+        ));
+    }
+    let copy = &migration.copies[0];
+    Ok(ConfigCopyPlan {
+        source_address: copy.source_address,
+        target_address: copy.target_address,
+        length: copy.length,
+    })
 }
 
 pub fn build_bundle(
