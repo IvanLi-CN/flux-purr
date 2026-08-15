@@ -66,6 +66,7 @@ export interface ControlPlaneStatus {
   boardTempCenti: number
   rtdRawAdcMv?: number
   vinRawAdcMv?: number
+  adcDiagnostics?: AdcDiagnostics
   pdRequestMv: number
   pdContractMv: number
   pdState: PdState
@@ -81,6 +82,20 @@ export interface ControlPlaneStatus {
   calibration: CalibrationRuntimeState
   frontpanelKey?: 'center' | 'right' | 'down' | 'left' | 'up' | null
   network: NetworkSummary
+}
+
+export interface AdcDiagnostics {
+  calibrationSource: 'efuse' | 'runtime_fallback' | 'unavailable'
+  efuseVersion: number
+  attenuationDb: number
+  initCode?: number | null
+  referenceCode?: number | null
+  referenceMv?: number | null
+  rtdRawCodeMean: number
+  rtdRawCodeMin: number
+  rtdRawCodeMax: number
+  rtdRawCodeSpread: number
+  vinRawCodeMean: number
 }
 
 export type CalibrationMode = 'off' | 'vin_adc' | 'rtd_adc' | 'heater_curve' | 'thermal_plant'

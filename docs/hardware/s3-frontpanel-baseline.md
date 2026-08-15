@@ -71,6 +71,7 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 
 - Sensor type baseline: `PT1000`
 - ADC pin: `GPIO2` / `ADC1_CH1`
+- The populated `TPS62933` feedback network (`31.6 kOhm` high-side, `10 kOhm` low-side, `0.8 V` typical feedback reference) sets the RTD divider excitation to `3.328 V` nominal. This is the firmware circuit-model value, not a measured calibration reference.
 - Recommended protected direct-to-ADC network for `ESP32-S3`:
   - `3V3 -> R_REF = 2.49 kOhm (0.1%, <= 25 ppm/C) -> RTD_SENSE`
   - `PT1000 -> RTD_SENSE to GND`

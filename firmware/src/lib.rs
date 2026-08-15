@@ -1,6 +1,5 @@
 #![no_std]
 
-#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 extern crate alloc;
 
 pub mod adapters;

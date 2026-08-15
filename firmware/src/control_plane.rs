@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use heapless::{String, Vec};
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -175,6 +176,31 @@ pub enum FanDisplayState {
     Run,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AdcCalibrationSourceWire {
+    Efuse,
+    RuntimeFallback,
+    #[default]
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AdcDiagnosticsWire {
+    pub calibration_source: AdcCalibrationSourceWire,
+    pub efuse_version: u8,
+    pub attenuation_db: u8,
+    pub init_code: Option<u16>,
+    pub reference_code: Option<u16>,
+    pub reference_mv: Option<u16>,
+    pub rtd_raw_code_mean: u16,
+    pub rtd_raw_code_min: u16,
+    pub rtd_raw_code_max: u16,
+    pub rtd_raw_code_spread: u16,
+    pub vin_raw_code_mean: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlPlaneStatus {
@@ -203,6 +229,8 @@ pub struct ControlPlaneStatus {
     #[serde(default)]
     pub rtd_raw_adc_spread_mv: u16,
     pub vin_raw_adc_mv: u16,
+    #[serde(default)]
+    pub adc_diagnostics: Box<AdcDiagnosticsWire>,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdStateWire,
@@ -339,6 +367,7 @@ impl ControlPlaneStatus {
             rtd_raw_adc_max_mv: 0,
             rtd_raw_adc_spread_mv: 0,
             vin_raw_adc_mv: status.vin_raw_adc_mv,
+            adc_diagnostics: Box::new(AdcDiagnosticsWire::default()),
             pd_request_mv: status.pd_request_mv,
             pd_contract_mv: status.pd_contract_mv,
             pd_state: status.pd_state.into(),
@@ -2369,12 +2398,25 @@ mod tests {
 
     #[test]
     fn status_frame_serializes_pd_fallback_for_web_contract() {
-        let status = ControlPlaneStatus::from_device_status(
+        let mut status = ControlPlaneStatus::from_device_status(
             snapshot_at(17, 0),
             &MemoryConfig::default(),
             17,
             NetworkSummary::default(),
         );
+        status.adc_diagnostics = Box::new(AdcDiagnosticsWire {
+            calibration_source: AdcCalibrationSourceWire::Efuse,
+            efuse_version: 1,
+            attenuation_db: 6,
+            init_code: Some(1850),
+            reference_code: Some(1600),
+            reference_mv: Some(850),
+            rtd_raw_code_mean: 2100,
+            rtd_raw_code_min: 2098,
+            rtd_raw_code_max: 2102,
+            rtd_raw_code_spread: 4,
+            vin_raw_code_mean: 1800,
+        });
         let frame = UsbFrame::Response {
             request_id: string("req-pd"),
             ok: true,
@@ -2387,7 +2429,11 @@ mod tests {
         assert!(json.contains(r#""pdState":"fallback_5v""#));
         assert!(json.contains(r#""manualPpsEnabled":false"#));
         assert!(json.contains(r#""heaterLockReason":null"#));
+        assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""ppsCapabilityMinMv":null"#));
+        assert!(json.contains(r#""adcDiagnostics":{"calibrationSource":"efuse"#));
+        assert!(json.contains(r#""rtdRawCodeSpread":4"#));
+        assert!(json.len() <= USB_LINE_MAX_LEN);
         assert!(!json.contains("fallback5v"));
     }
 

@@ -77,6 +77,12 @@
 - 样本操作、槽位编辑和激活槽位切换都必须立即写入设备持久化后端；不存在额外 preview/apply 层。固件优先使用 EEPROM，EEPROM 不可达时使用 ESP flash fallback。
 - 运行时 ADC 修正必须统一读取当前 `activeSlot` 对应的 `gain + offset`。
 - `Status` / `runtime_config` 必须暴露当前 calibration mode live state：`mode`、`ppsEnabled`、`ppsMv`、`ppsMa`、`heaterEnabled`、`targetAdcMv`、`stable`、`stabilityErrorMv`、`error` 与 `job`。其中 `ppsMa` 只作为状态读数暴露，不作为 owner-facing 校准控制输入。
+- 默认 `web_serial` 产品固件的 `Status.adcDiagnostics` 必须作为只读诊断契约公开 ADC calibration source、eFuse version、6 dB attenuation、init/reference code、reference mV、RTD 12-bit code mean/min/max/spread 和 VIN 12-bit code mean；Web 不需要展示该对象。ADC conversion 与温度/VIN 计算不得依赖这些 USB 遥测存储；未编译 `web_serial` 时不得保留对其 atomics 或 wire types 的引用。
+- `rtdRawAdcMv` / `vinRawAdcMv` 保持既有字段名和语义，表示项目 A/B 校准前、eFuse curve 后的 mV，不得将它们描述成 12-bit raw code。
+- 同一采样批次必须先通过 `AdcCalBasic` 取得 code，再把这些 code 显式交给使用相同 eFuse 参数创建的 `AdcCalCurve` 换算 mV；mV 继续按逐样本换算后求均值，不得另做一次 ADC 转换来伪造 code/mV 配对。
+- eFuse calibration version、reference code 或 reference mV 缺失时，诊断必须报告 `runtime_fallback` 并停止温度准确性验证；不得使用假定 1100 mV 的 gain calibration 继续宣称温度准确。
+- ADC 根因验证不得使用 VIN、环境温度、冷启动首个读数或按 uptime 变化的经验曲线作为校准参考。
+- ADC1 必须在其它硬件外设及 heater-disabled power synchronization 完成后创建；首次 RTD/VIN 采样和依赖测量的安全/UI/output 投影成功后，固件必须通过 USB 发布完整的 `boot_stage=runtime_ready\n`，使受保护烧录路径能够区分正常运行、启动失败与重启循环。
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
 - `电压读数标定` 手动模式必须支持直接输入和 `1V` 步进；自动模式必须按 `1V` 步进在实时 PPS capability 内扫点，并以“请求 PPS 电压”作为 reference 写入 `vin_adc samples`。
 - `温度标定` 只能是手动/半自动；firmware 必须按目标 `RTD_ADC` 毫伏值持续控热并暴露稳定状态，最终 capture 继续写 `rtd_adc samples`。
@@ -173,6 +179,8 @@ Arrays normalize to length `8`; empty slots are `null`.
 - Given shared samples change, When fit is recomputed, Then `fittedFit` updates but `slots.a` / `slots.b` remain unchanged.
 - Given operator saves slot A or B, When that slot is also the active slot, Then runtime corrected ADC / temperature / voltage immediately switch to the new slot values.
 - Given firmware status is read after VIN ADC sampling, Then `voltageMv` is the calibrated measured VIN and `pdContractMv` is still the PD contract.
+- Given a status sample from firmware, When `adcDiagnostics` is present, Then its RTD raw-code statistics describe the same retained conversion batch used for `rtdRawAdcMv`.
+- Given required eFuse ADC calibration data is absent, When ADC initialization completes, Then `calibrationSource` is `runtime_fallback`, no assumed-1100-mV curve is used, and temperature-accuracy validation stops.
 - Given raw RTD ADC indicates open or short, Then fault detection uses raw ADC thresholds regardless of calibration.
 - Given Web Calibration workbench is opened, Then it shows `电压读数标定`、`温度标定`、`加热曲线标定` three-mode entry points, with RTD/VIN technical panels retained as secondary sections inside the relevant mode.
 - Given a PPS request falls outside `5V~28V` or the advertised capability, When any live control or auto job is started, Then Web blocks submit inline, CLI exits with an error, and firmware/devd refuse the request without issuing an illegal voltage request.
