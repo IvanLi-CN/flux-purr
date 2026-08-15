@@ -163,13 +163,8 @@
 - Web Serial 正式支持 HTTPS/localhost 下桌面 Chrome 与 Edge；其他浏览器只能使用可用 devd。
 - stable 为默认源，RC opt-in，本地文件由用户信任但不豁免校验。
 
-## Visual Evidence
-
-视觉证据将在实现冻结后绑定 current HEAD；PR 仅包含带 `PR: include` 标记的最终图片。
-
 ## 参考（References）
 
 - `../m8r4q-real-control-plane-runtime/SPEC.md`
 - `../35bta-eeprom-memory-config/SPEC.md`
 - `../hhwq8-web-control-plane-demo/SPEC.md`
-
