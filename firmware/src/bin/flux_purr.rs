@@ -9146,6 +9146,14 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 "Install status is unavailable until persistence restoration completes.",
                 true,
             ),
+            UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => {
+                usb_error_response_with_retryable(
+                    request_id,
+                    "startup_busy",
+                    "Persistence changes are unavailable until restoration completes.",
+                    true,
+                )
+            }
             // The boot-time memory argument is still the zero-value placeholder
             // until the main loop has completed EEPROM/flash restoration. Never
             // expose it as a network snapshot: a configured device would appear
@@ -9368,6 +9376,11 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                     true,
                 )),
             ),
+            UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => usb_error_response(
+                request_id,
+                "hardware_bringup_failed",
+                "Persistence changes are unavailable because hardware bring-up failed.",
+            ),
             UsbRequestOp::GetNetwork => usb_response(
                 request_id,
                 UsbResponsePayload::Network(network_from_memory(memory_config)),
@@ -9539,6 +9552,56 @@ async fn process_control_line(
                     heater_controller.fault_latched().is_some(),
                 )),
             ),
+            UsbRequestOp::CompleteSetup => {
+                let sensor_ready = current_rtd_fault.is_none() && latest_status_temp_c.is_finite();
+                let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
+                    &memory_config.adc_calibration,
+                    flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
+                )
+                .sample_count
+                    >= 2
+                    && flux_purr_firmware::memory::adc_calibration_fit(
+                        &memory_config.adc_calibration,
+                        flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
+                    )
+                    .sample_count
+                        >= 2
+                    && memory_config
+                        .active_heater_curve
+                        .points
+                        .iter()
+                        .flatten()
+                        .count()
+                        >= 2;
+                match memory_config.complete_setup(sensor_ready, calibration_ready) {
+                    Ok(()) => {
+                        *memory_commit_due_ms =
+                            Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                        usb_response(request_id, UsbResponsePayload::Ack)
+                    }
+                    Err(flux_purr_firmware::memory::SetupCompletionError::SensorNotReady) => {
+                        usb_error_response(
+                            request_id,
+                            "sensor_unready",
+                            "Sensor readiness is required before setup completion.",
+                        )
+                    }
+                    Err(flux_purr_firmware::memory::SetupCompletionError::CalibrationRequired) => {
+                        usb_error_response(
+                            request_id,
+                            "calibration_required",
+                            "Calibration is required before setup completion.",
+                        )
+                    }
+                }
+            }
+            UsbRequestOp::ResetPersistence => {
+                memory_config.reset_for_commissioning();
+                apply_memory_config_to_ui(ui_state, memory_config);
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                needs_redraw = true;
+                usb_response(request_id, UsbResponsePayload::Ack)
+            }
             UsbRequestOp::GetNetwork => {
                 #[cfg(feature = "net_http")]
                 let network = flux_purr_firmware::net::lan_network_summary().await;

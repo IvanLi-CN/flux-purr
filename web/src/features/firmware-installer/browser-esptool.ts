@@ -94,6 +94,13 @@ export async function preflightBrowserTarget(loader: LoaderPort) {
   if (flashSize !== '4MB') {
     throw new Error('Target Flash must be exactly 4 MiB.')
   }
+  const features = await loader.chip.getChipFeatures(loader as ESPLoader)
+  if (
+    !features.some((feature) => feature.startsWith('Embedded Flash 4MB')) ||
+    !features.some((feature) => feature.startsWith('Embedded PSRAM 2MB'))
+  ) {
+    throw new Error('Target package must expose embedded 4 MiB Flash and 2 MiB PSRAM.')
+  }
   const security = await getEsp32S3SecurityInfo(loader)
   if (
     !security.responseKnown ||

@@ -1931,6 +1931,8 @@ impl From<&UsbFrame> for UsbFrameWire {
 pub enum UsbRequestOp {
     GetIdentity,
     GetInstallStatus,
+    CompleteSetup,
+    ResetPersistence,
     GetNetwork,
     GetStatus,
     GetLanPairingCode,
@@ -1948,6 +1950,8 @@ impl UsbRequestOp {
         match self {
             Self::GetIdentity => "get_identity",
             Self::GetInstallStatus => "get_install_status",
+            Self::CompleteSetup => "complete_setup",
+            Self::ResetPersistence => "reset_persistence",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
             Self::GetLanPairingCode => "get_lan_pairing_code",
@@ -2314,6 +2318,8 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
     match value {
         Some("get_identity") => Ok(UsbRequestOp::GetIdentity),
         Some("get_install_status") => Ok(UsbRequestOp::GetInstallStatus),
+        Some("complete_setup") => Ok(UsbRequestOp::CompleteSetup),
+        Some("reset_persistence") => Ok(UsbRequestOp::ResetPersistence),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
@@ -3081,6 +3087,24 @@ mod tests {
                 op: UsbRequestOp::GetStatus,
             }
         );
+    }
+
+    #[test]
+    fn parses_commissioning_persistence_requests() {
+        for (op, expected) in [
+            ("complete_setup", UsbRequestOp::CompleteSetup),
+            ("reset_persistence", UsbRequestOp::ResetPersistence),
+        ] {
+            let line =
+                std::format!(r#"{{"type":"request","requestId":"commissioning","op":"{op}"}}"#);
+            assert_eq!(
+                parse_usb_frame(&line).unwrap(),
+                UsbFrame::Request {
+                    request_id: string("commissioning"),
+                    op: expected,
+                }
+            );
+        }
     }
 
     #[test]
