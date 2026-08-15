@@ -14184,6 +14184,8 @@ mod tests {
 
     #[test]
     fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
+        const SYNTHETIC_TARGET_MARGIN_C: f32 = 2.0;
+
         fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
             let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
             (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
@@ -14231,39 +14233,38 @@ mod tests {
         let mut sample_count = 1usize;
         let mut temperature_c = ambient_temp_c;
         let mut heating = true;
-        let mut last_saved_temp_c =
-            projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv_for_temp(ambient_temp_c))
-                .unwrap();
+        let mut last_saved_temp_c = ambient_temp_c;
         for tick in 2..=60_000_u16 {
-            let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
-            let reported_temp_c =
-                projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
-            let reached_cutoff = heating && reported_temp_c >= THERMAL_PLANT_TARGET_TEMP_C;
+            let reached_cutoff =
+                heating && temperature_c >= THERMAL_PLANT_TARGET_TEMP_C + SYNTHETIC_TARGET_MARGIN_C;
             let duty_percent = u8::from(heating) * 100;
             if sample_count < 24
-                || (reported_temp_c - last_saved_temp_c).abs()
-                    >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C
+                || (temperature_c - last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C
                 || reached_cutoff
-                || (!heating && reported_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C)
+                || (!heating
+                    && temperature_c
+                        <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C - SYNTHETIC_TARGET_MARGIN_C)
             {
                 if sample_count >= THERMAL_PLANT_TRANSIENT_MAX_SAMPLES {
                     panic!("synthetic trace exceeded fixed capacity");
                 }
                 samples[sample_count] = ThermalPlantTransientSample {
                     elapsed_ticks: tick,
-                    raw_rtd_adc_mv,
+                    raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temperature_c),
                     heater_voltage_100mv: if heating { 200 } else { 0 },
                     duty_percent,
                 };
                 sample_count += 1;
-                last_saved_temp_c = reported_temp_c;
+                last_saved_temp_c = temperature_c;
             }
             if reached_cutoff {
                 heating = false;
                 last_saved_temp_c = f32::MIN;
                 continue;
             }
-            if !heating && reported_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C {
+            if !heating
+                && temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C - SYNTHETIC_TARGET_MARGIN_C
+            {
                 break;
             }
             let resistance_ohms =
