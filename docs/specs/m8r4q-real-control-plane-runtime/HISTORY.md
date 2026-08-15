@@ -23,7 +23,7 @@
 - LAN lease 心跳的设备协议错误保留为可操作的页面反馈；只有浏览器未获得响应时才使用泛化 transport 结果，过期 lease 不得继续参与写入。
 - Browser direct-LAN runtime 写入在旧 session revision 与设备状态竞争时，现会在 PUT 前读取最新 snapshot；若写入仍被 `stale_write` 拒绝，只回读一次并恢复 UI 到设备事实，绝不自动重放原控制命令或报告成功。
 
-- 生产板环境温度约 `31°C` 时，稳定 RTD 原始读数约 `1030mV` 被旧 `3000mV` 分压假设误算为约 `78°C`。硬件基线实际为 `3V3 -> 2.49 kOhm -> PT1000`，运行时恢复 `3300mV` 电路模型；同一真机读数回报 `33.42°C`。ADC 个体误差继续由持久化 RTD calibration 承担，不再污染分压拓扑常量。
+- 生产板 RTD 分压模型曾先后使用 `3000mV` 经验值和 `3300mV` 通用 3V3 假设。网表中的 `TPS62933` 反馈网络实际为 `31.6 kOhm / 10 kOhm`，按 `0.8V` 典型反馈参考得到 `3328mV` 设计名义值；运行时改用该值。约 `31°C` 的 PT1000 理论节点电压为 `1032.9mV`，若仍按 `3300mV` 反算会错误回报约 `34.58°C`。ADC 个体误差继续由持久化 RTD calibration 承担，分压供电名义值不作为 ADC 校准参数。
 - Web Serial 连接曾把 `navigator.serial.requestPort()` 的无限等待直接映射为 `Web Serial (connecting)`，且点击后仍保留旧的 devd `Failed to fetch` 反馈。连接事务现以 `60s` 为总预算，端口打开后不写 DTR/RTS、不等待设备重启，直接执行有界只读 probe；开始时立即显示等待串口选择提示，超时后给出可重试错误并关闭迟到的端口。
 - Browser Web Serial 曾使用 `2 KiB` 单行缓冲，而 firmware 与 native devd 的 USB JSONL 合同为 `8 KiB`。identity/network 能被读取，但完整 status 超过浏览器上限后被静默丢弃，最终表现为连接超时。浏览器 reader 现与协议统一为 `8 KiB`，测试用超过 `2 KiB` 的 status fixture 锁定该回归；真机已通过 identity/network/status 和 `runtime_config` 写入回读。
 - Browser Web Serial 曾静默丢弃 firmware 的 reset/panic 标记，设备复位后页面只能留下旧状态或泛化断线。reader 现仅接受协议定义的 `reset_reason=` 与 `panic=` 标记，清除复位前 snapshot 并显示设备报告的原因；任意 boot chatter 仍不会改变 UI 状态。

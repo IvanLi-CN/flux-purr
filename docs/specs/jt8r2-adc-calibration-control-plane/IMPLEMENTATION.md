@@ -15,6 +15,9 @@
   - `>=2` 样本：共享样本线性拟合
 - RTD raw ADC 先用于开路/短路故障判断，再对有效 ADC 读数应用当前激活槽位并换算温度。
 - VIN ADC 由 `GPIO1` 采样，当前激活槽位校正后按分压比换算为 `status.voltageMv`。
+- ADC1 pin 使用 `AdcCalBasic` 返回同次转换值，产品采样路径无条件移除高位 SAR 状态位并保留 12-bit code，再由独立 `AdcCalCurve` 逐样本换算 mV；`Status.adcDiagnostics` 贯通 USB JSONL、devd、CLI JSON 与 Web runtime contract。
+- eFuse calibration version、init/reference code 或 reference mV 缺失时报告 `runtime_fallback`，不创建使用假定 1100 mV reference 的 curve，也不继续温度准确性验证。
+- 冷启动矩阵未证明 measurement-status wait、禁用 Wi-Fi、提前初始化 ADC、请求负载隔离或单外设 quiet mode 能一致消除 residual raw-code movement。两个 ADC1 外部通道的 common-mode movement 在没有已知独立输入时不能区分 ADC transfer/reference 与外部模拟节点变化；不得据此加入环境温度、VIN、首次读数或时间曲线补偿。可复用诊断边界见 [`ESP32-S3 ADC absolute-accuracy diagnosis`](../../solutions/device-control/esp32-s3-adc-accuracy-diagnosis.md)。
 - USB JSONL 已移除 `calibration_apply`，改为 `get_calibration` + `calibration_config`，并支持 `capture`、`delete`、`clear`、`import`、`set_active_slot`、`set_slot_fit`。
 - `devd` 已暴露 `GET|PUT /api/v1/devices/:id/calibration`，不再保留 `POST /api/v1/devices/:id/calibration/apply`。
 - `flux-purr calibration` CLI 已支持 get/capture/delete/clear/import/export/set-slot-fit/set-active-slot。
@@ -34,6 +37,7 @@
 - `cargo test -p flux-purr-devd --quiet`
 - `./node_modules/.bin/tsc --noEmit --pretty false`
 - `./node_modules/.bin/vitest --config vitest.unit.config.ts --run src/features/control-plane-demo/web-serial.test.ts src/features/control-plane-demo/transport-client.test.ts src/features/control-plane-demo/calibration-slider-value.test.ts`
+- ESP32-S3 release build covers the production ADC diagnostics path.
 
 ## Remaining Work
 

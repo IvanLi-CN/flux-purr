@@ -254,7 +254,7 @@ None
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
-- `flux-purr` 已完成 RTD 经验标定（当前按约 `3000 mV` 有效分压换算）。
+- `flux-purr` 的 RTD 换算使用硬件反馈网络确定的 `3328mV` 名义分压电源；需要绝对精度的 ADC 或温度标定仍必须使用合格参考，不能用经验有效电压替代物理分压模型。
 - 前面板五向输入与现有 Dashboard / Menu 路由已可在真机上稳定使用。
 - 板级烧录通过仓库内 `flux-purr` CLI 与 `flux-purr-devd` 执行；`mcu-agentd` 仅用于不写入设备的诊断。
 

@@ -72,6 +72,19 @@ During firmware boot, before EEPROM/flash restoration and WiFi task startup comp
   "boardTempCenti": 3840,
   "rtdRawAdcMv": 1123,
   "vinRawAdcMv": 1678,
+  "adcDiagnostics": {
+    "calibrationSource": "efuse",
+    "efuseVersion": 1,
+    "attenuationDb": 6,
+    "initCode": 1850,
+    "referenceCode": 1600,
+    "referenceMv": 850,
+    "rtdRawCodeMean": 2100,
+    "rtdRawCodeMin": 2098,
+    "rtdRawCodeMax": 2102,
+    "rtdRawCodeSpread": 4,
+    "vinRawCodeMean": 1800
+  },
   "pdRequestMv": 20000,
   "pdContractMv": 20000,
   "pdState": "ready",
@@ -92,7 +105,7 @@ During firmware boot, before EEPROM/flash restoration and WiFi task startup comp
 `fanDisplayState`: `OFF | AUTO | RUN`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
-`rtdRawAdcMv` and `vinRawAdcMv` expose the latest raw RTD/VIN ADC millivolt readings for calibration capture and host-side diagnostics.
+`rtdRawAdcMv` and `vinRawAdcMv` retain their existing contract names but expose eFuse curve-calibrated millivolt readings before the project-level A/B calibration fit. They are not hardware ADC codes. `adcDiagnostics` is a read-only, optional diagnostic object so hosts remain compatible with older firmware. Its RTD mean/min/max/spread and VIN mean are 12-bit codes obtained through `AdcCalBasic` from the same conversions used for curve-calibrated mV; firmware always masks off upper SAR status bits before diagnostics and curve conversion. `calibrationSource=runtime_fallback` means required eFuse calibration data is missing; temperature-accuracy validation must stop, and firmware does not substitute the assumed 1100 mV gain reference. VBUS, VIN, ambient temperature, uptime, and an initial reading are never calibration references for this object.
 `faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
 `manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the persistent saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation, legacy-profile inflate when importing old data, and safety clamps are applied. On a PPS/AVS backend, the selected APDO's voltage and current contract bounds production power; `R(T)` is used for heater-watt estimation but neither it nor `heaterCurrentReserveMa` lowers the adjustable-voltage request ceiling. The current-reserve field remains relevant only to the fixed-PD PWM fallback.
 
