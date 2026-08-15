@@ -94,6 +94,17 @@ export const MobileRecovery: Story = {
     updateEligible: false,
   },
   parameters: {
-    viewport: { defaultViewport: 'mobile1' },
+    viewport: {
+      options: {
+        responsive393: {
+          name: 'Responsive review 393x852',
+          styles: { width: '393px', height: '852px' },
+          type: 'mobile',
+        },
+      },
+    },
+  },
+  globals: {
+    viewport: { value: 'responsive393', isRotated: false },
   },
 }
