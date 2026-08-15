@@ -1099,7 +1099,7 @@ export const LiveKnownWebSerialReconnect: Story = {
         await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
         await userEvent.click(
           await documentRoot.findByRole('button', {
-            name: 'Web Serial · flux-purr-a0f262f20d6c',
+            name: 'Web Serial · Browser Web Serial · flux-purr-a0f262f20d6c',
           })
         )
 
@@ -1117,7 +1117,7 @@ export const LiveKnownWebSerialReconnect: Story = {
     await step('an explicit LAN choice remains selected after Web Serial connected', async () => {
       await userEvent.click(
         await documentRoot.findByRole('button', {
-          name: 'WiFi / LAN · flux-purr-s3-001',
+          name: 'WiFi / LAN · 192.168.31.189 · flux-purr-s3-001',
         })
       )
 
@@ -2378,7 +2378,7 @@ export const LiveLanHeartbeatExpiryRequiresExplicitReselection: Story = {
       const picker = within(await canvas.findByRole('dialog', { name: '设备与连接方式' }))
       await userEvent.click(
         await picker.findByRole('button', {
-          name: `WiFi / LAN · ${lanIdentity.hostname}`,
+          name: `WiFi / LAN · 192.168.1.42 · ${lanIdentity.hostname}`,
         })
       )
       await expect(await canvas.findByText('LAN 设备已连接')).toBeVisible()

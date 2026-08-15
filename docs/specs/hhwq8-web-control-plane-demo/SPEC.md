@@ -12,7 +12,7 @@
 
 ### Goals
 
-- 提供独立的 `control-plane-demo` Web demo，作为 `web/src/App.tsx` 第一屏。
+- 提供独立的 `control-plane-demo` Web console，由 TanStack Router 驱动设备作用域页面与可分享深链。
 - 把产品形态收敛成固定高度 bench console：顶部辅助状态栏、Dashboard / Settings / Update 三个界面、桌面端常驻全局日志。
 - 使用 deterministic mock fixtures 展示 devd、serial、mock 三类设备，不接真实硬件。
 - 保留工业拟物视觉：浅色 chassis、物理按钮、内凹数据槽、LED、暗色全局 trace 面。
@@ -23,7 +23,8 @@
 
 - 不做管理后台、fleet dashboard、artifact catalog 管理页或全量控制平面配置面。
 - 不实现 native USB daemon、USB CDC、WiFi HTTP、真实 firmware flashing 或真实硬件连接。
-- 不引入路由框架、后端服务、认证、持久化存储或真实 artifact catalog。
+- 不引入后端服务、认证、凭据持久化或真实 artifact catalog。
+- 不使用 hash routing，也不把 transport target ID、设备别名、网络地址或凭据写入 URL。
 - 不替换 `160×50` 前面板 preview 或既有前面板 specs。
 - 不建立生产级视觉回归系统；本 spec 只要求 mock UI 视觉证据。
 
@@ -34,6 +35,7 @@
 - `web/src/features/control-plane-demo/**`
 - `web/src/stories/ControlPlaneDemo.stories.tsx`
 - `web/src/App.tsx`
+- `web/src/routes/**` 与 TanStack Router app shell
 - `web/src/index.css` 中的工业风 token 与轻工具组件样式
 - 本 spec 目录与视觉证据资产
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md` 的相关 spec 关联
@@ -53,6 +55,12 @@
 - Demo 必须在无硬件、无 daemon、无网络服务的情况下完整渲染。
 - Demo 必须始终保持一屏轻工具心智模型；桌面端默认不依赖页面滚动。
 - Demo 必须提供 `Dashboard`、`Settings`、`Update` 三个界面，不得把所有能力堆成一个长页面。
+- 生产 Web App 必须以 TanStack Router 作为页面、设备与校准 workspace tab 的唯一导航真相源。
+- 规范路径必须为 `/devices/:deviceId/overview`、`/devices/:deviceId/settings`、`/devices/:deviceId/update`、`/devices/:deviceId/calibration/heater-curve`、`/devices/:deviceId/calibration/rtd-adc`、`/devices/:deviceId/calibration/vin-adc` 与 `/devices/new`。
+- `:deviceId` 必须使用稳定物理 `identityId`；transport target ID 只能用于本地连接候选解析。
+- `/` 必须 replace 到当前 variant 最近设备的 overview；没有有效记录时 replace 到 `/devices/new`。`/devices`、`/devices/:deviceId` 与 `/devices/:deviceId/calibration` 必须 replace 到对应规范页。
+- `demo` 与 `uiDemo` 必须由 router 作为 typed search 参数验证、规范化并在站内导航中保留；不得使用裸 History API 绕过 router 状态。
+- 结构无效的路径必须显示 404；结构有效但设备未知或不可连接时必须保留原 URL，并提供重试、选择设备与添加连接动作。
 - 桌面端必须提供全局日志面板，并能与 `Dashboard` / `Settings` / `Update` 当前内容同时显示。
 - 桌面端全局日志不得退化成窄侧栏；在宽桌面上应以可读 trace console 呈现，保留足够行宽阅读 message。
 - Demo 不得出现侧边管理导航、后台式指标墙或多层 fleet 管理结构。
@@ -66,6 +74,9 @@
 - 全局日志必须支持至少 1000 条 mock trace，通过虚拟列表渲染；滚动条仅在 hover/滚动时显示。
 - Storybook 必须提供 default、degraded、gallery、mobile review 与交互 smoke story。
 - 所有可点击控件必须具备 hover/focus/active 视觉反馈，移动端触控目标高度不低于 48px。
+- 一级页面 tabs 与校准 workspace tabs 必须使用链接语义、支持键盘操作，并正确表达 `aria-current`。
+- 校准运行期间，站内 Link、程序跳转、设备切换、variant/search 变化与浏览器 Back/Forward 必须共用同一离开保护；页面关闭或地址栏导航必须启用原生 `beforeunload`。
+- 生产静态构建必须包含 EdgeOne history fallback，将非静态资源 pathname rewrite 到 `/index.html`。
 
 ### SHOULD
 
@@ -86,6 +97,14 @@
   - 展示 `devd`、`serial`、`mock` 三类 target。
   - 设备切换是低频操作，只能放在顶部辅助状态栏，不得成为独立主模块或占用主工作区空间。
   - 选择 target 后，顶部状态栏和当前动作上下文切换到对应设备。
+  - 设备切换保留当前页面或校准 tab 的 route suffix；添加连接成功后进入新设备 overview。
+  - 深链恢复按最近成功 transport、当前 active/healthy、LAN、唯一已授权且匹配的 Web Serial、devd/bridge、匹配 demo mock 的顺序串行尝试。
+  - 自动恢复不得调用 `requestPort()`；没有唯一预授权 Web Serial 候选时只能提供显式用户动作。
+- `Routing`
+  - 生产 app shell 持续挂载 `ControlPlaneDemo`，leaf route 只提供类型化 `ConsoleRouteState`，切换 tabs 不得重建 transport/runtime 状态。
+  - Storybook 未提供 production navigation adapter 时继续使用 `initialView` 与组件本地 state。
+  - `uiDemo=true` 保持 query-driven UI demo 语义，并规范化到根路径；普通根路径按最近设备规则跳转。
+  - 设备偏好使用版本化本地结构，只保存 variant 对应 identity 和 identity 对应 transport kind；损坏值必须忽略。
 - `Dashboard`
   - 当前温度是唯一主视觉，不得被连接、WiFi 或日志抢占层级。
   - 展示 target temp、heater output、PD contract、fan policy / active cooling 等热控摘要。
@@ -123,6 +142,9 @@
 | `ControlPlaneScenario` | TypeScript type | internal | New | None | web | demo app-shell / Storybook | Mock scenario model only |
 | `DeviceTarget` | TypeScript type | internal | New | None | web | demo app-shell / Storybook | Mock target model only |
 | `ControlPlaneDemo` | React component | internal | New | None | web | `App.tsx` / Storybook | Pure web light tool |
+| `ConsoleRouteState` | TypeScript union | internal | New | 本文 | web | router app shell / `ControlPlaneDemo` | Device identity, page and optional calibration tab |
+| `ConsoleNavigationAdapter` | TypeScript interface | internal | New | 本文 | web | router app shell / `ControlPlaneDemo` | Controlled production navigation with Storybook fallback |
+| Device route schema | URL contract | public Web surface | New | 本文 | web | users / browser history / EdgeOne | Stable identity path and typed `demo` / `uiDemo` search |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -141,6 +163,12 @@
 - Given 禁用某个 preset，When 查看 preset grid，Then 对应 slot 变为 disabled 状态，且仍可重新启用。
 - Given 点击 `Update`，When 切换 firmware artifact，Then 可以看到 compatibility verdict、dry-check progress 与 blocked/warning 状态。
 - Given 点击 `Degrade mock`，When 查看当前页面，Then 能看到 degraded runtime 或 blocked artifact state。
+- Given 任意规范设备深链，When 直接打开、刷新或使用 Back/Forward，Then 设备、页面、校准 tab 与 active state 均由 URL 恢复。
+- Given 缺少 pathname 或打开索引路径，When router 解析位置，Then 使用 replace 导向最近设备 overview 或 `/devices/new`，并保留规范化后的 `demo` / `uiDemo`。
+- Given 一个结构有效但未知的 `identityId`，When 自动恢复无法匹配连接，Then pathname 保持不变并显示可操作恢复态，而不是跳到其他设备。
+- Given 校准模式正在运行，When 用户切换页面、tab、设备或浏览器历史，Then 离开确认先退出模式，只有成功后才继续导航；取消或失败保持原路由。
+- Given 自动恢复 Web Serial，When 没有唯一已授权且匹配的 port，Then 页面不调用 `requestPort()` 并要求用户显式选择。
+- Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
 
 ## 验收清单（Acceptance checklist）
 
@@ -158,6 +186,8 @@
 - `bun run --cwd web build`
 - `bun run --cwd web build-storybook`
 - `bun run --cwd web test:storybook`
+- `bun run --cwd web test:unit`
+- `bun run check:e2e`
 
 ### UI / Storybook
 
@@ -170,14 +200,32 @@
 
 ### Quality checks
 
-- 视觉证据覆盖 desktop 与 mobile mock UI。
+- 视觉证据通过 mock-only `ui_demo` 覆盖 desktop、mobile 与未知设备恢复态。
 - owner-facing 图片必须先通过 immutable snapshot 回传。
 
 ## Visual Evidence
 
 - 证据来源：Storybook / Vite mock UI，deterministic fixtures。
-- 绑定说明：以下图片来自 Storybook canvas，覆盖 Dashboard、Settings、Update 与 mobile mock UI。
-- 布局检查：1440×1000 与 375×812 均无页面滚动、横向溢出或越界元素。
+- 绑定说明：工作台基线图来自 Storybook canvas；路由证据来自 Vite mock-only `uiDemo` 与未知 identity 恢复态。
+- 布局检查：1440×1000 与 375×812 均无横向溢出或越界元素；移动 UI Demo 控件保持稳定宽度，恢复操作触摸高度不小于 48px。
+
+### Routed UI Demo desktop 1440×1000
+
+PR: include
+
+![Routed UI demo desktop](./assets/routing-ui-demo-desktop.png)
+
+### Routed UI Demo mobile 375×812
+
+PR: include
+
+![Routed UI demo mobile](./assets/routing-ui-demo-mobile.png)
+
+### Unknown device recovery 1440×1000
+
+PR: include
+
+![Unknown device recovery](./assets/routing-unknown-device.png)
 
 ### Dashboard desktop 1440px
 

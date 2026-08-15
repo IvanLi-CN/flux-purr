@@ -3,6 +3,7 @@ import {
   deviceIdentityId,
   isDeviceConnectionAvailable,
   mergeDeviceChoices,
+  preferredDeviceConnection,
 } from './device-target-picker'
 import type { DeviceTarget } from './types'
 
@@ -49,7 +50,7 @@ describe('device target picker', () => {
     )
   })
 
-  it('renders one device card with at most the three public connection methods', () => {
+  it('renders one device card while preserving distinct bridge sources', () => {
     const choices = mergeDeviceChoices([
       target({ id: 'native-device-1', transport: 'devd', bridgeTransport: 'usb' }),
       target({
@@ -78,14 +79,20 @@ describe('device target picker', () => {
       'wifi',
       'web-serial',
       'bridge',
+      'bridge',
     ])
-    expect(choices[0].connections).toHaveLength(3)
+    expect(choices[0].connections).toHaveLength(4)
     expect(choices[0].connections.map((connection) => connection.label)).toEqual([
       'WiFi / LAN',
       'Web Serial',
       '桥接',
+      '桥接',
     ])
     expect(choices[0].connections[2].detail).toContain('USB')
+    expect(choices[0].connections[3].detail).toContain('WiFi / LAN')
+    expect(preferredDeviceConnection(choices[0], 'bridge', 'bridge-lan-device-1')?.target.id).toBe(
+      'bridge-lan-device-1'
+    )
   })
 
   it('does not expose mock connections in live mode', () => {
@@ -134,5 +141,20 @@ describe('device target picker', () => {
     expect(choices[0].connections).toHaveLength(1)
     expect(choices[0].connections[0].target.id).toBe('lan-live-device-1')
     expect(choices[0].primary.id).toBe('lan-live-device-1')
+  })
+
+  it('prefers the last successful transport before the active healthy fallback', () => {
+    const choice = mergeDeviceChoices([
+      target({ id: 'bridge-device-1', transport: 'devd', leaseState: 'active' }),
+      target({
+        id: 'lan-device-1',
+        transport: 'wifi',
+        baseUrl: 'http://192.168.1.42',
+        leaseState: 'none',
+      }),
+    ])[0]
+
+    expect(preferredDeviceConnection(choice, 'wifi')?.target.id).toBe('lan-device-1')
+    expect(preferredDeviceConnection(choice)?.target.id).toBe('bridge-device-1')
   })
 })

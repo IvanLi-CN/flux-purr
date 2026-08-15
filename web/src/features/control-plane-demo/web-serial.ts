@@ -54,13 +54,22 @@ export interface BrowserSerialPort {
 export function selectBrowserSerialPort(
   serial: BrowserSerial,
   preauthorizedPorts?: readonly BrowserSerialPort[],
-  forcePortSelection = false
+  forcePortSelection = false,
+  requestPortWhenUnavailable = true
 ): Promise<BrowserSerialPort> {
   if (forcePortSelection) {
     return serial.requestPort()
   }
   const preauthorizedPort = preauthorizedPorts?.length === 1 ? preauthorizedPorts[0] : null
-  return preauthorizedPort ? Promise.resolve(preauthorizedPort) : serial.requestPort()
+  if (preauthorizedPort) return Promise.resolve(preauthorizedPort)
+  if (requestPortWhenUnavailable) return serial.requestPort()
+  return Promise.reject(
+    new ControlPlaneClientError(
+      '没有唯一的已授权 Web Serial 端口，请手动选择设备。',
+      'web_serial_port_required',
+      true
+    )
+  )
 }
 
 export interface WebSerialProbe {
@@ -158,6 +167,7 @@ export class WebSerialControlPlaneClient {
   private readonly pending = new Map<string, PendingRequest>()
   private readonly preauthorizedPorts?: readonly BrowserSerialPort[]
   private readonly onDiagnostic?: (diagnostic: WebSerialDiagnostic) => void
+  private readonly requestPortWhenUnavailable: boolean
   private port: BrowserSerialPort | null = null
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   private lineBuffer = ''
@@ -170,11 +180,13 @@ export class WebSerialControlPlaneClient {
     baudRate = WEB_SERIAL_BAUD_RATE,
     preauthorizedPorts,
     onDiagnostic,
+    requestPortWhenUnavailable = true,
   }: {
     serial?: BrowserSerial | null
     baudRate?: number
     preauthorizedPorts?: readonly BrowserSerialPort[]
     onDiagnostic?: (diagnostic: WebSerialDiagnostic) => void
+    requestPortWhenUnavailable?: boolean
   } = {}) {
     if (!serial) {
       throw new ControlPlaneClientError(
@@ -187,13 +199,19 @@ export class WebSerialControlPlaneClient {
     this.baudRate = baudRate
     this.preauthorizedPorts = preauthorizedPorts
     this.onDiagnostic = onDiagnostic
+    this.requestPortWhenUnavailable = requestPortWhenUnavailable
   }
 
   async connect() {
     const attempt = ++this.connectionAttempt
     let port: BrowserSerialPort
     try {
-      port = await selectBrowserSerialPort(this.serial, this.preauthorizedPorts)
+      port = await selectBrowserSerialPort(
+        this.serial,
+        this.preauthorizedPorts,
+        false,
+        this.requestPortWhenUnavailable
+      )
     } catch (error) {
       throw normalizeBrowserSerialError(error)
     }

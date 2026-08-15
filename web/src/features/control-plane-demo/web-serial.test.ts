@@ -82,6 +82,18 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
+  it('does not open the chooser during preauthorized-only recovery', async () => {
+    const serial = new AuthorizedSerial()
+    const client = new WebSerialControlPlaneClient({
+      serial,
+      preauthorizedPorts: [],
+      requestPortWhenUnavailable: false,
+    })
+
+    await expect(client.connect()).rejects.toMatchObject({ code: 'web_serial_port_required' })
+    expect(serial.requestPortCalls).toBe(0)
+  })
+
   it('explains when the browser serial chooser closes without a selected port', async () => {
     const client = new WebSerialControlPlaneClient({
       serial: new CancelledChooserSerial(),

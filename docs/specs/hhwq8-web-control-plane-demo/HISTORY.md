@@ -13,11 +13,17 @@
 - Preset slot 增加启用/禁用状态，并用 UI library switch 表达；disabled slot 仍可选择编辑，但视觉层级低于可用 preset。
 - 全局日志从少量静态行改为 1000 条 mock trace 的虚拟列表；follow-tail 不再默认强制滚到底部，滚动条仅在 hover/滚动时出现。
 - Demo 使用独立 `control-plane-demo` feature，避免把轻量连接工具与既有 `160×50` 前面板 preview contract 混在一起。
+- 生产导航采用 TanStack Router file-based routing：设备稳定 identity 位于一级路径，工作台 view 与校准 workspace 位于二级路径；浏览器 history、刷新和分享链接因此使用同一状态源。
+- Storybook 保留无 router adapter 的本地状态模式，生产应用则通过 `ConsoleNavigationAdapter` 把同一控制台组件受控化，避免复制视觉与业务实现。
+- `demo` 与 `uiDemo` 保留为 typed search，而不是组件内模式 state；EdgeOne 通过 SPA rewrite 承接 history 深链。
+- transport target id、设备地址与凭据不具备跨连接稳定性，因此规范 URL 只接受探针验证后的物理 identity；无法恢复时保留地址并显示恢复操作。
+- 校准离开保护迁入 router blocker，使 Link、程序导航、设备切换、search 变化和浏览器历史共享“先退出校准、成功后继续”的安全顺序。
 
 ## Key Reasons / Replacements
 
 - 工业拟物风格用于表达硬件工具的物理可靠性，但信息架构必须保持轻，不能扩张成 fleet 管理后台，也不能通过长滚动堆复杂度。
 - Storybook 是 Web UI 的稳定视觉证据来源，优先于临时浏览器窗口截图。
+- 路由视觉证据使用 mock-only `uiDemo` 与离线 identity 恢复态，不以真实设备状态或真实硬件截图作为验收输入。
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md` 继续作为跨任务复用经验；本 spec 只冻结 Flux Purr 当前 demo surface。
 
 ## References
