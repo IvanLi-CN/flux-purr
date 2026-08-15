@@ -77,7 +77,7 @@
 - 样本操作、槽位编辑和激活槽位切换都必须立即写入设备持久化后端；不存在额外 preview/apply 层。固件优先使用 EEPROM，EEPROM 不可达时使用 ESP flash fallback。
 - 运行时 ADC 修正必须统一读取当前 `activeSlot` 对应的 `gain + offset`。
 - `Status` / `runtime_config` 必须暴露当前 calibration mode live state：`mode`、`ppsEnabled`、`ppsMv`、`ppsMa`、`heaterEnabled`、`targetAdcMv`、`stable`、`stabilityErrorMv`、`error` 与 `job`。其中 `ppsMa` 只作为状态读数暴露，不作为 owner-facing 校准控制输入。
-- `Status.adcDiagnostics` 必须作为只读诊断契约公开 ADC calibration source、eFuse version、6 dB attenuation、init/reference code、reference mV、RTD 12-bit code mean/min/max/spread 和 VIN 12-bit code mean；Web 不需要展示该对象。
+- 默认 `web_serial` 产品固件的 `Status.adcDiagnostics` 必须作为只读诊断契约公开 ADC calibration source、eFuse version、6 dB attenuation、init/reference code、reference mV、RTD 12-bit code mean/min/max/spread 和 VIN 12-bit code mean；Web 不需要展示该对象。ADC conversion 与温度/VIN 计算不得依赖这些 USB 遥测存储；未编译 `web_serial` 时不得保留对其 atomics 或 wire types 的引用。
 - `rtdRawAdcMv` / `vinRawAdcMv` 保持既有字段名和语义，表示项目 A/B 校准前、eFuse curve 后的 mV，不得将它们描述成 12-bit raw code。
 - 同一采样批次必须先通过 `AdcCalBasic` 取得 code，再把这些 code 显式交给使用相同 eFuse 参数创建的 `AdcCalCurve` 换算 mV；mV 继续按逐样本换算后求均值，不得另做一次 ADC 转换来伪造 code/mV 配对。
 - eFuse calibration version、reference code 或 reference mV 缺失时，诊断必须报告 `runtime_fallback` 并停止温度准确性验证；不得使用假定 1100 mV 的 gain calibration 继续宣称温度准确。
