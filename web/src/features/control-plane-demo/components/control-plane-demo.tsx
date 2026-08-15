@@ -1670,7 +1670,7 @@ export function ControlPlaneDemo({
       return
     }
     if (allowDemoControls) {
-      setRouteResumeFailed(false)
+      setRouteResumeFailed(routeConnectionUnavailable)
       return
     }
     if (routeConnectionKind !== 'web-serial') {
@@ -2570,27 +2570,42 @@ export function ControlPlaneDemo({
     [activeView, visibleCalibrationWorkspaceTab, visibleRuntimeCalibration.mode]
   )
 
-  const handleDeviceChange = (deviceId: string) => {
+  const handleDeviceChange = (deviceId: string, deviceOverride?: DeviceTarget) => {
     if (navigation) {
       if (deviceId === ADD_DEVICE_VALUE) {
-        void navigation.navigate({ kind: 'add-device' })
+        void requestCalibrationLeave(
+          {
+            reason: 'add-device-flow',
+            nextLabel: '添加设备',
+            nextView: 'add-device',
+          },
+          () => navigation.navigate({ kind: 'add-device' })
+        )
         return
       }
-      const nextDevice = deviceOptions.find((device) => device.id === deviceId)
+      const nextDevice = deviceOverride ?? deviceOptions.find((device) => device.id === deviceId)
       if (!nextDevice) return
       const identityId = deviceIdentityId(nextDevice)
       const connection = routeDeviceChoices
         .find((choice) => choice.identityId === identityId)
         ?.connections.find((candidate) => candidate.target.id === nextDevice.id)
-      if (connection) {
-        requestedConnectionByIdentityRef.current[identityId] = connection.kind
-        setRouteFallbackKind(undefined)
-      }
-      const currentState = navigation.state
-      void navigation.navigate(
-        currentState.kind === 'device'
-          ? { ...currentState, deviceId: identityId }
-          : { kind: 'device', deviceId: identityId, view: 'dashboard' }
+      void requestCalibrationLeave(
+        {
+          reason: 'device-change',
+          nextLabel: nextDevice.alias,
+        },
+        () => {
+          if (connection) {
+            requestedConnectionByIdentityRef.current[identityId] = connection.kind
+            setRouteFallbackKind(undefined)
+          }
+          const currentState = navigation.state
+          return navigation.navigate(
+            currentState.kind === 'device'
+              ? { ...currentState, deviceId: identityId }
+              : { kind: 'device', deviceId: identityId, view: 'dashboard' }
+          )
+        }
       )
       return
     }
@@ -2743,15 +2758,9 @@ export function ControlPlaneDemo({
 
   const handleBridgeTargetSelect = (device: DeviceTarget) => {
     setPendingDevices((current) => upsertLanDeviceTarget(current, device))
-    handleDeviceChange(device.id)
+    handleDeviceChange(device.id, device)
     setSelectedAddDeviceKind(defaultAddDeviceKind)
-    if (navigation) {
-      void navigation.navigate({
-        kind: 'device',
-        deviceId: deviceIdentityId(device),
-        view: 'dashboard',
-      })
-    } else {
+    if (!navigation) {
       void setConsoleView('dashboard')
     }
   }
@@ -3837,6 +3846,19 @@ export function ControlPlaneDemo({
   const unavailableRouteState = navigation?.state.kind === 'device' ? navigation.state : null
   if (navigation && unavailableRouteState && (!routeDeviceChoice || routeResumeFailed)) {
     const routeNavigation = navigation
+    const recoveryLeaveGuard = calibrationLeaveGuard
+      ? {
+          nextLabel: calibrationLeaveGuard.nextLabel,
+          onDismiss: cancelCalibrationLeaveGuard,
+          onContinue: async () => {
+            const continueAction = calibrationLeaveGuard.continueAction
+            const exited = await handleCalibrationModeExit()
+            if (!exited) return
+            dismissCalibrationLeaveGuard()
+            await continueAction()
+          },
+        }
+      : null
     return (
       <RouteDeviceRecovery
         identityId={unavailableRouteState.deviceId}
@@ -3847,6 +3869,7 @@ export function ControlPlaneDemo({
         }
         addDevice={() => routeNavigation.navigate({ kind: 'add-device' })}
         feedback={feedback}
+        leaveGuard={recoveryLeaveGuard}
       />
     )
   }
@@ -4016,6 +4039,7 @@ function RouteDeviceRecovery({
   chooseDevice,
   addDevice,
   feedback,
+  leaveGuard,
 }: {
   identityId: string
   choices: DeviceChoice[]
@@ -4023,6 +4047,11 @@ function RouteDeviceRecovery({
   chooseDevice: (identityId: string) => void | Promise<void>
   addDevice: () => void | Promise<void>
   feedback: ActionFeedback
+  leaveGuard: {
+    nextLabel: string
+    onDismiss: () => void
+    onContinue: () => void
+  } | null
 }) {
   return (
     <main className="industrial-shell industrial-shell--fixed text-[var(--industrial-text)]">
@@ -4037,6 +4066,20 @@ function RouteDeviceRecovery({
           </p>
         </div>
         <div className="industrial-route-message__actions">
+          {leaveGuard ? (
+            <span id="route-recovery-calibration-anchor">
+              <Button type="button" variant="outline">
+                <AlertTriangle aria-hidden="true" />
+                处理校准退出
+              </Button>
+              <CalibrationLeaveGuardBubble
+                anchorId="route-recovery-calibration-anchor"
+                nextLabel={leaveGuard.nextLabel}
+                onDismiss={leaveGuard.onDismiss}
+                onContinue={leaveGuard.onContinue}
+              />
+            </span>
+          ) : null}
           <Button type="button" variant="outline" onClick={retry}>
             <RefreshCw aria-hidden="true" />
             重试发现

@@ -52,6 +52,14 @@ test.describe('device-scoped routing', () => {
     expect(actionHeights.every((height) => height >= 48)).toBe(true)
   })
 
+  test('keeps a known offline identity in the URL and offers recovery', async ({ page }) => {
+    await page.goto('/devices/fp-demo-03/overview?demo=true')
+
+    await expect(page).toHaveURL(/\/devices\/fp-demo-03\/overview\?demo=true$/)
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
+  })
+
   test('pushes one history entry for a calibration tab mouse click', async ({ page }) => {
     await page.goto(`/devices/${identity}/calibration/heater-curve?demo=true`)
 
@@ -71,8 +79,32 @@ test.describe('device-scoped routing', () => {
 
     await page.goto(`/devices/${identity}/overview?demo=true`)
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
+
+    await page.goto(`/devices/${identity}?demo=true`)
+    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/overview\\?demo=true$`))
+
+    await page.goto(`/devices/${identity}/calibration?demo=true`)
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+    )
+
     await page.goto('/?demo=true')
     await expect(page).toHaveURL(new RegExp(`/devices/${identity}/overview\\?demo=true$`))
+  })
+
+  test('blocks a routed device switch until calibration exits', async ({ page }) => {
+    await page.goto(`/devices/${identity}/calibration/heater-curve?demo=true`)
+    await page.getByRole('switch', { name: '标定模式' }).click()
+
+    await page.getByRole('button', { name: '目标设备' }).click()
+    await page.locator('[data-device-id="fp-kit-02"]').getByRole('button').first().click()
+
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+    )
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
+    await page.getByRole('button', { name: '关闭并继续' }).click()
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/calibration\/heater-curve\?demo=true$/)
   })
 
   test('shows a router 404 for structurally invalid paths', async ({ page }) => {
