@@ -10,12 +10,10 @@ use alloc::{
     alloc::{Layout, alloc},
     boxed::Box,
 };
+#[cfg(any(target_arch = "xtensa", test))]
+use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
-use core::{
-    mem::MaybeUninit,
-    panic::PanicInfo,
-    sync::atomic::{AtomicU8, Ordering},
-};
+use core::{mem::MaybeUninit, panic::PanicInfo};
 #[cfg(target_arch = "xtensa")]
 use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
@@ -37,9 +35,10 @@ use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
     Blocking,
-    analog::adc::{Adc, AdcCalCurve, AdcConfig, Attenuation},
+    analog::adc::{Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcConfig, Attenuation},
     clock::CpuClock,
     delay::Delay,
+    efuse::{AdcCalibUnit, Efuse},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c},
     mcpwm::{
@@ -81,13 +80,13 @@ use flux_purr_firmware::control_plane::WifiConfigReceipt;
 use flux_purr_firmware::control_plane::hello_frame;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
-    ApiError, CalibrationControlCommand, CalibrationJobKindWire, CalibrationJobStateWire,
-    CalibrationJobStatusWire, CalibrationModeWire, CalibrationRuntimeStateWire, ControlPlaneStatus,
-    Identity, RuntimeConfigCommand, ThermalControlProfileOp, ThermalControlProfilePointWire,
-    ThermalControlProfileSettingsWire, ThermalControlProfileWire, ThermalControlRuntimeWire,
-    ThermalPlantRuntimeWire, UsbFrame, UsbFrameError, UsbRequestOp, UsbResponsePayload,
-    calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
-    parse_usb_frame, write_usb_frame,
+    AdcCalibrationSourceWire, AdcDiagnosticsWire, ApiError, CalibrationControlCommand,
+    CalibrationJobKindWire, CalibrationJobStateWire, CalibrationJobStatusWire, CalibrationModeWire,
+    CalibrationRuntimeStateWire, ControlPlaneStatus, Identity, RuntimeConfigCommand,
+    ThermalControlProfileOp, ThermalControlProfilePointWire, ThermalControlProfileSettingsWire,
+    ThermalControlProfileWire, ThermalControlRuntimeWire, ThermalPlantRuntimeWire, UsbFrame,
+    UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
+    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -3162,6 +3161,59 @@ struct RtdAdcBatch {
     mean_mv: f32,
     min_mv: u16,
     max_mv: u16,
+    mean_raw_code: u16,
+    min_raw_code: u16,
+    max_raw_code: u16,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AdcConvertedSample {
+    raw_code: u16,
+    calibrated_mv: u16,
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static ADC_CALIBRATION_SOURCE: AtomicU8 = AtomicU8::new(2);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static ADC_EFUSE_VERSION: AtomicU8 = AtomicU8::new(0);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static ADC_INIT_CODE: AtomicU16 = AtomicU16::new(u16::MAX);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static ADC_REFERENCE_CODE: AtomicU16 = AtomicU16::new(u16::MAX);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static ADC_REFERENCE_MV: AtomicU16 = AtomicU16::new(u16::MAX);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static RTD_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static RTD_RAW_CODE_MIN: AtomicU16 = AtomicU16::new(0);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static RTD_RAW_CODE_MAX: AtomicU16 = AtomicU16::new(0);
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+static VIN_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
+    let optional_code = |value: u16| (value != u16::MAX).then_some(value);
+    let raw_min = RTD_RAW_CODE_MIN.load(Ordering::Relaxed);
+    let raw_max = RTD_RAW_CODE_MAX.load(Ordering::Relaxed);
+    AdcDiagnosticsWire {
+        calibration_source: match ADC_CALIBRATION_SOURCE.load(Ordering::Relaxed) {
+            0 => AdcCalibrationSourceWire::Efuse,
+            1 => AdcCalibrationSourceWire::RuntimeFallback,
+            _ => AdcCalibrationSourceWire::Unavailable,
+        },
+        efuse_version: ADC_EFUSE_VERSION.load(Ordering::Relaxed),
+        attenuation_db: 6,
+        init_code: optional_code(ADC_INIT_CODE.load(Ordering::Relaxed)),
+        reference_code: optional_code(ADC_REFERENCE_CODE.load(Ordering::Relaxed)),
+        reference_mv: optional_code(ADC_REFERENCE_MV.load(Ordering::Relaxed)),
+        rtd_raw_code_mean: RTD_RAW_CODE_MEAN.load(Ordering::Relaxed),
+        rtd_raw_code_min: raw_min,
+        rtd_raw_code_max: raw_max,
+        rtd_raw_code_spread: raw_max.saturating_sub(raw_min),
+        vin_raw_code_mean: VIN_RAW_CODE_MEAN.load(Ordering::Relaxed),
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4429,6 +4481,9 @@ where
         mean_mv,
         min_mv,
         max_mv,
+        mean_raw_code: mean_mv.round() as u16,
+        min_raw_code: min_mv,
+        max_raw_code: max_mv,
     })
 }
 
@@ -4441,7 +4496,7 @@ fn phase_averaged_rtd_batch_with_discard<F, W>(
     mut wait_for_next_phase: W,
 ) -> Option<RtdAdcBatch>
 where
-    F: FnMut() -> Option<u16>,
+    F: FnMut() -> Option<AdcConvertedSample>,
     W: FnMut(),
 {
     if retained_samples == 0 || phase_count == 0 || !retained_samples.is_multiple_of(phase_count) {
@@ -4450,13 +4505,16 @@ where
 
     let samples_per_phase = retained_samples / phase_count;
     let mut sum_mv: u32 = 0;
+    let mut sum_raw_code: u32 = 0;
     let mut min_mv = u16::MAX;
     let mut max_mv = 0_u16;
+    let mut min_raw_code = u16::MAX;
+    let mut max_raw_code = 0_u16;
     let mut valid_samples = 0_usize;
     let mut discarded_valid_samples = 0_usize;
 
     for _ in 0..retained_samples.saturating_add(discard_valid_prefix_samples) {
-        let Some(sample_mv) = read_sample() else {
+        let Some(sample) = read_sample() else {
             continue;
         };
         if discarded_valid_samples < discard_valid_prefix_samples {
@@ -4464,9 +4522,12 @@ where
             continue;
         }
 
-        sum_mv = sum_mv.saturating_add(sample_mv as u32);
-        min_mv = min_mv.min(sample_mv);
-        max_mv = max_mv.max(sample_mv);
+        sum_mv = sum_mv.saturating_add(sample.calibrated_mv as u32);
+        sum_raw_code = sum_raw_code.saturating_add(sample.raw_code as u32);
+        min_mv = min_mv.min(sample.calibrated_mv);
+        max_mv = max_mv.max(sample.calibrated_mv);
+        min_raw_code = min_raw_code.min(sample.raw_code);
+        max_raw_code = max_raw_code.max(sample.raw_code);
         valid_samples = valid_samples.saturating_add(1);
 
         if valid_samples.is_multiple_of(samples_per_phase) && valid_samples < retained_samples {
@@ -4478,7 +4539,64 @@ where
         mean_mv,
         min_mv,
         max_mv,
+        mean_raw_code: (sum_raw_code / valid_samples as u32) as u16,
+        min_raw_code,
+        max_raw_code,
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const fn mask_adc1_raw_code(value: u16) -> u16 {
+    value & 0x0fff
+}
+
+#[cfg(target_arch = "xtensa")]
+type Adc1Driver = Adc<'static, esp_hal::peripherals::ADC1<'static>, esp_hal::Blocking>;
+#[cfg(target_arch = "xtensa")]
+type VinAdcPin = esp_hal::analog::adc::AdcPin<
+    esp_hal::peripherals::GPIO1<'static>,
+    esp_hal::peripherals::ADC1<'static>,
+    AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
+>;
+#[cfg(target_arch = "xtensa")]
+type RtdAdcPin = esp_hal::analog::adc::AdcPin<
+    esp_hal::peripherals::GPIO2<'static>,
+    esp_hal::peripherals::ADC1<'static>,
+    AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
+>;
+#[cfg(target_arch = "xtensa")]
+type Adc1Curve = AdcCalCurve<esp_hal::peripherals::ADC1<'static>>;
+
+#[cfg(target_arch = "xtensa")]
+fn initialize_adc1(
+    adc: esp_hal::peripherals::ADC1<'static>,
+    vin_gpio: esp_hal::peripherals::GPIO1<'static>,
+    rtd_gpio: esp_hal::peripherals::GPIO2<'static>,
+) -> (Adc1Driver, VinAdcPin, RtdAdcPin, Option<Adc1Curve>) {
+    let efuse_version = Efuse::rtc_calib_version();
+    let init_code = Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION);
+    let reference_code = Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION);
+    let reference_mv = (efuse_version == 1)
+        .then(|| Efuse::rtc_calib_cal_mv(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION));
+    let efuse_ready = efuse_version == 1
+        && init_code.is_some()
+        && reference_code.is_some()
+        && reference_mv.is_some();
+    #[cfg(feature = "web_serial")]
+    {
+        ADC_CALIBRATION_SOURCE.store(if efuse_ready { 0 } else { 1 }, Ordering::Relaxed);
+        ADC_EFUSE_VERSION.store(efuse_version, Ordering::Relaxed);
+        ADC_INIT_CODE.store(init_code.unwrap_or(u16::MAX), Ordering::Relaxed);
+        ADC_REFERENCE_CODE.store(reference_code.unwrap_or(u16::MAX), Ordering::Relaxed);
+        ADC_REFERENCE_MV.store(reference_mv.unwrap_or(u16::MAX), Ordering::Relaxed);
+    }
+
+    let mut config = AdcConfig::new();
+    let vin_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(vin_gpio, RTD_SAMPLE_ATTENUATION);
+    let rtd_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(rtd_gpio, RTD_SAMPLE_ATTENUATION);
+    let adc = Adc::new(adc, config);
+    let curve = efuse_ready.then(|| Adc1Curve::new_cal(RTD_SAMPLE_ATTENUATION));
+    (adc, vin_pin, rtd_pin, curve)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -4487,8 +4605,9 @@ fn read_rtd_adc_mv<'a>(
     pin: &mut esp_hal::analog::adc::AdcPin<
         esp_hal::peripherals::GPIO2<'a>,
         esp_hal::peripherals::ADC1<'a>,
-        AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
     >,
+    curve: &AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
 ) -> Option<RtdAdcBatch> {
     let delay = Delay::new();
     delay.delay_micros(RTD_CHANNEL_SWITCH_SETTLE_US);
@@ -4496,12 +4615,19 @@ fn read_rtd_adc_mv<'a>(
         RTD_SAMPLE_COUNT,
         RTD_SAMPLE_PWM_PHASE_COUNT,
         RTD_SETTLE_DISCARD_SAMPLE_COUNT,
-        || loop {
-            match adc.read_oneshot(pin) {
-                Ok(value) => break Some(value),
-                Err(nb::Error::WouldBlock) => continue,
-                Err(_) => break None,
-            }
+        || {
+            let raw_code = loop {
+                match adc.read_oneshot(pin) {
+                    Ok(value) => break value,
+                    Err(nb::Error::WouldBlock) => continue,
+                    Err(_) => return None,
+                }
+            };
+            let raw_code = mask_adc1_raw_code(raw_code);
+            Some(AdcConvertedSample {
+                raw_code,
+                calibrated_mv: curve.adc_val(raw_code),
+            })
         },
         || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
     )?;
@@ -4514,22 +4640,32 @@ fn read_vin_adc_mv<'a>(
     pin: &mut esp_hal::analog::adc::AdcPin<
         esp_hal::peripherals::GPIO1<'a>,
         esp_hal::peripherals::ADC1<'a>,
-        AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
     >,
-) -> Option<u16> {
-    let mut sum_mv: u32 = 0;
-    for _ in 0..RTD_SAMPLE_COUNT {
-        let sample_mv = loop {
-            match adc.read_oneshot(pin) {
-                Ok(value) => break value,
-                Err(nb::Error::WouldBlock) => continue,
-                Err(_) => return None,
-            }
-        };
-        sum_mv = sum_mv.saturating_add(sample_mv as u32);
-    }
-
-    Some((sum_mv / RTD_SAMPLE_COUNT as u32) as u16)
+    curve: &AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+) -> Option<RtdAdcBatch> {
+    let delay = Delay::new();
+    delay.delay_micros(RTD_CHANNEL_SWITCH_SETTLE_US);
+    phase_averaged_rtd_batch_with_discard(
+        RTD_SAMPLE_COUNT,
+        RTD_SAMPLE_PWM_PHASE_COUNT,
+        RTD_SETTLE_DISCARD_SAMPLE_COUNT,
+        || {
+            let raw_code = loop {
+                match adc.read_oneshot(pin) {
+                    Ok(value) => break value,
+                    Err(nb::Error::WouldBlock) => continue,
+                    Err(_) => return None,
+                }
+            };
+            let raw_code = mask_adc1_raw_code(raw_code);
+            Some(AdcConvertedSample {
+                raw_code,
+                calibrated_mv: curve.adc_val(raw_code),
+            })
+        },
+        || delay.delay_micros(RTD_SAMPLE_PWM_PHASE_SPACING_US),
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -4538,17 +4674,23 @@ fn read_calibrated_vin_mv<'a>(
     pin: &mut esp_hal::analog::adc::AdcPin<
         esp_hal::peripherals::GPIO1<'a>,
         esp_hal::peripherals::ADC1<'a>,
-        AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
     >,
+    curve: Option<&AdcCalCurve<esp_hal::peripherals::ADC1<'a>>>,
     memory_config: &MemoryConfig,
-) -> Option<(u16, u16, u32)> {
-    let raw_adc_mv = read_vin_adc_mv(adc, pin)?;
+) -> Option<(u16, u16, u16, u32)> {
+    let curve = curve?;
+    let batch = read_vin_adc_mv(adc, pin, curve)?;
+    let raw_code = batch.mean_raw_code;
+    let raw_adc_mv = batch.mean_mv.round() as u16;
+    VIN_RAW_CODE_MEAN.store(raw_code, Ordering::Relaxed);
     let corrected_adc_mv = correct_adc_mv(
         &memory_config.adc_calibration,
         AdcCalibrationChannel::Vin,
         raw_adc_mv,
     );
     Some((
+        raw_code,
         raw_adc_mv,
         corrected_adc_mv,
         vin_input_mv_from_adc_mv(corrected_adc_mv),
@@ -4561,16 +4703,26 @@ fn read_rtd_sample<'a>(
     pin: &mut esp_hal::analog::adc::AdcPin<
         esp_hal::peripherals::GPIO2<'a>,
         esp_hal::peripherals::ADC1<'a>,
-        AdcCalCurve<esp_hal::peripherals::ADC1<'a>>,
+        AdcCalBasic<esp_hal::peripherals::ADC1<'a>>,
     >,
+    curve: Option<&AdcCalCurve<esp_hal::peripherals::ADC1<'a>>>,
     memory_config: &MemoryConfig,
 ) -> RtdSample {
-    let Some(batch) = read_rtd_adc_mv(adc, pin) else {
+    let Some(curve) = curve else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
+    let Some(batch) = read_rtd_adc_mv(adc, pin, curve) else {
+        return RtdSample::Fault {
+            adc_mv: None,
+            reason: HeaterFaultReason::AdcReadFailed,
+        };
+    };
+    RTD_RAW_CODE_MEAN.store(batch.mean_raw_code, Ordering::Relaxed);
+    RTD_RAW_CODE_MIN.store(batch.min_raw_code, Ordering::Relaxed);
+    RTD_RAW_CODE_MAX.store(batch.max_raw_code, Ordering::Relaxed);
     let raw_adc_mv = batch.mean_mv.round() as u16;
     let raw_adc_fractional_mv = batch.mean_mv;
 
@@ -6766,6 +6918,7 @@ fn usb_runtime_status_with_calibration(
         .latest_rtd_raw_adc_max_mv
         .saturating_sub(context.latest_rtd_raw_adc_min_mv);
     status.vin_raw_adc_mv = context.latest_vin_raw_adc_mv;
+    status.adc_diagnostics = Box::new(adc_diagnostics_wire());
     status.manual_pps_enabled = context.manual_pps.enabled;
     status.manual_pps_mv = context.manual_pps.target_mv;
     status.manual_pps_ma = context.manual_pps.target_ma;
@@ -10543,16 +10696,8 @@ async fn main(_spawner: Spawner) {
         usb_tx_buf,
         &memory_config,
     );
-    let mut adc1_config = AdcConfig::new();
-    let mut vin_adc_pin = adc1_config
-        .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO1, RTD_SAMPLE_ATTENUATION);
-    let mut rtd_adc_pin = adc1_config
-        .enable_pin_with_cal::<_, AdcCalCurve<_>>(peripherals.GPIO2, RTD_SAMPLE_ATTENUATION);
-    let mut adc1 = Adc::new(peripherals.ADC1, adc1_config);
-    info!(
-        "adc monitor active: vin_gpio1 rtd_gpio2 atten={=str} samples={=u8} interval_ms={=u64}",
-        "6dB", RTD_SAMPLE_COUNT as u8, RTD_LOG_INTERVAL_MS,
-    );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
     let pwm_clock_cfg =
         PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
@@ -10693,6 +10838,7 @@ async fn main(_spawner: Spawner) {
         last_pd_observation.map(|status| status.status),
     );
     let mut hold_pps_governor = HoldPpsGovernor::new();
+    let mut last_heater_duty = 0_u8;
     match heater_power_backend {
         HeaterPowerBackend::PpsMos {
             pps_min_mv,
@@ -10720,7 +10866,89 @@ async fn main(_spawner: Spawner) {
             fixed_request.millivolts(),
         ),
     }
-    let initial_rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pre_adc_heater_sync_start\n");
+    let _ = apply_heater_power_output(
+        &mut pd_i2c,
+        ch224q_address,
+        &mut heater_pwm,
+        &mut heater_power_backend,
+        &mut hold_pps_governor,
+        &mut manual_pps_state,
+        last_pd_observation,
+        0,
+        0.0,
+        0,
+        false,
+        HeaterControlPhase::Warmup,
+        0.0,
+        0.0,
+        0,
+        &mut last_heater_duty,
+        preview_heater_curve_config(preview_heater_curve.as_ref()),
+        &memory_config,
+        active_thermal_settings,
+        0,
+    )
+    .await;
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pre_adc_power_settle_start\n");
+    EmbassyTimer::after_millis(HEATER_PPS_SMALL_TRANSITION_MS).await;
+    let _ = apply_heater_power_output(
+        &mut pd_i2c,
+        ch224q_address,
+        &mut heater_pwm,
+        &mut heater_power_backend,
+        &mut hold_pps_governor,
+        &mut manual_pps_state,
+        last_pd_observation,
+        0,
+        0.0,
+        0,
+        false,
+        HeaterControlPhase::Warmup,
+        0.0,
+        0.0,
+        0,
+        &mut last_heater_duty,
+        preview_heater_curve_config(preview_heater_curve.as_ref()),
+        &memory_config,
+        active_thermal_settings,
+        HEATER_PPS_SMALL_TRANSITION_MS,
+    )
+    .await;
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(
+        &mut usb_serial,
+        b"boot_stage=pre_adc_power_settle_complete\n",
+    );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(
+        &mut usb_serial,
+        b"boot_stage=pre_adc_heater_sync_complete\n",
+    );
+
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_start\n");
+    let (mut adc1, mut vin_adc_pin, mut rtd_adc_pin, adc_curve) =
+        initialize_adc1(peripherals.ADC1, peripherals.GPIO1, peripherals.GPIO2);
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=adc_init_complete\n");
+    info!(
+        "adc monitor active: vin_gpio1 rtd_gpio2 atten={=str} samples={=u8} interval_ms={=u64}",
+        "6dB", RTD_SAMPLE_COUNT as u8, RTD_LOG_INTERVAL_MS,
+    );
+
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_start\n");
+    let initial_rtd_sample = read_rtd_sample(
+        &mut adc1,
+        &mut rtd_adc_pin,
+        adc_curve.as_ref(),
+        &memory_config,
+    );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_rtd_complete\n");
     let mut controller = FrontPanelInputController::new(
         FrontPanelKeyMap::default(),
         FrontPanelInputTimings::default(),
@@ -10791,17 +11019,23 @@ async fn main(_spawner: Spawner) {
             );
         }
     }
-    if let Some((raw_adc_mv, corrected_adc_mv, vin_mv)) =
-        read_calibrated_vin_mv(&mut adc1, &mut vin_adc_pin, &memory_config)
-    {
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_start\n");
+    if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
+        &mut adc1,
+        &mut vin_adc_pin,
+        adc_curve.as_ref(),
+        &memory_config,
+    ) {
         latest_vin_raw_adc_mv = raw_adc_mv;
         latest_vin_mv = vin_mv;
         info!(
-            "vin initial raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
-            raw_adc_mv, corrected_adc_mv, vin_mv,
+            "vin initial raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
+            raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
         );
     }
-    let mut last_heater_duty = 0_u8;
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=initial_vin_complete\n");
     let mut last_pid_snapshot = HeaterPidSnapshot {
         duty_percent: 0,
         warmup_soft_start_percent: 0,
@@ -10854,29 +11088,6 @@ async fn main(_spawner: Spawner) {
         ),
         0,
     );
-    let _ = apply_heater_power_output(
-        &mut pd_i2c,
-        ch224q_address,
-        &mut heater_pwm,
-        &mut heater_power_backend,
-        &mut hold_pps_governor,
-        &mut manual_pps_state,
-        last_pd_observation,
-        latest_vin_mv,
-        latest_temp_c,
-        0,
-        false,
-        HeaterControlPhase::Warmup,
-        0.0,
-        0.0,
-        0,
-        &mut last_heater_duty,
-        preview_heater_curve_config(preview_heater_curve.as_ref()),
-        &memory_config,
-        active_thermal_settings,
-        0,
-    )
-    .await;
     ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
     apply_fan_output(
         &mut fan_enable,
@@ -11450,7 +11661,12 @@ async fn main(_spawner: Spawner) {
 
             let previous_vin_raw_adc_mv = latest_vin_raw_adc_mv;
             let current_request_mv = heater_power_backend.pd_request_mv();
-            let mut rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
+            let mut rtd_sample = read_rtd_sample(
+                &mut adc1,
+                &mut rtd_adc_pin,
+                adc_curve.as_ref(),
+                &memory_config,
+            );
             let first_rtd_snapshot = match &rtd_sample {
                 RtdSample::Valid(measurement) => {
                     (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -11458,9 +11674,12 @@ async fn main(_spawner: Spawner) {
                 RtdSample::Fault { adc_mv, reason } => (adc_mv.unwrap_or(0), 0.0, reason.label()),
             };
 
-            if let Some((raw_adc_mv, corrected_adc_mv, vin_mv)) =
-                read_calibrated_vin_mv(&mut adc1, &mut vin_adc_pin, &memory_config)
-            {
+            if let Some((raw_code, raw_adc_mv, corrected_adc_mv, vin_mv)) = read_calibrated_vin_mv(
+                &mut adc1,
+                &mut vin_adc_pin,
+                adc_curve.as_ref(),
+                &memory_config,
+            ) {
                 let retry_rtd_after_power_step = should_retry_rtd_sample_after_power_step(
                     last_rtd_sample_request_mv,
                     current_request_mv,
@@ -11473,11 +11692,16 @@ async fn main(_spawner: Spawner) {
                     needs_redraw = true;
                 }
                 info!(
-                    "vin sample raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
-                    raw_adc_mv, corrected_adc_mv, vin_mv,
+                    "vin sample raw_code={=u16} raw_adc_mv={=u16} adc_mv={=u16} input_mv={=u32}",
+                    raw_code, raw_adc_mv, corrected_adc_mv, vin_mv,
                 );
                 if retry_rtd_after_power_step {
-                    rtd_sample = read_rtd_sample(&mut adc1, &mut rtd_adc_pin, &memory_config);
+                    rtd_sample = read_rtd_sample(
+                        &mut adc1,
+                        &mut rtd_adc_pin,
+                        adc_curve.as_ref(),
+                        &memory_config,
+                    );
                     let second_rtd_snapshot = match &rtd_sample {
                         RtdSample::Valid(measurement) => {
                             (measurement.raw_adc_mv, measurement.temp_c, "valid")
@@ -14055,33 +14279,39 @@ mod tests {
         let mut sample_count = 1usize;
         let mut temperature_c = ambient_temp_c;
         let mut heating = true;
-        let mut last_saved_temp_c = ambient_temp_c;
+        let mut last_saved_temp_c =
+            projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv_for_temp(ambient_temp_c))
+                .unwrap();
         for tick in 2..=60_000_u16 {
-            let reached_cutoff = heating && temperature_c >= THERMAL_PLANT_TARGET_TEMP_C;
+            let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
+            let reported_temp_c =
+                projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
+            let reached_cutoff = heating && reported_temp_c >= THERMAL_PLANT_TARGET_TEMP_C;
             let duty_percent = u8::from(heating) * 100;
             if sample_count < 24
-                || (temperature_c - last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C
+                || (reported_temp_c - last_saved_temp_c).abs()
+                    >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C
                 || reached_cutoff
-                || (!heating && temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C)
+                || (!heating && reported_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C)
             {
                 if sample_count >= THERMAL_PLANT_TRANSIENT_MAX_SAMPLES {
                     panic!("synthetic trace exceeded fixed capacity");
                 }
                 samples[sample_count] = ThermalPlantTransientSample {
                     elapsed_ticks: tick,
-                    raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temperature_c),
+                    raw_rtd_adc_mv,
                     heater_voltage_100mv: if heating { 200 } else { 0 },
                     duty_percent,
                 };
                 sample_count += 1;
-                last_saved_temp_c = temperature_c;
+                last_saved_temp_c = reported_temp_c;
             }
             if reached_cutoff {
                 heating = false;
                 last_saved_temp_c = f32::MIN;
                 continue;
             }
-            if !heating && temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C {
+            if !heating && reported_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C {
                 break;
             }
             let resistance_ohms =
@@ -14391,13 +14621,16 @@ mod tests {
                 } else {
                     0
                 };
+                let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
+                let reported_temp_c =
+                    projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
                 update_calibration_job_state(
                     &mut calibration,
                     &mut memory_config,
                     &mut manual_pps,
-                    raw_rtd_adc_mv_for_temp(temperature_c),
+                    raw_rtd_adc_mv,
                     0,
-                    temperature_c,
+                    reported_temp_c,
                     pd_current_ma,
                     measured_heater_mv,
                     heater_duty_percent,
@@ -18872,7 +19105,12 @@ mod tests {
             RTD_SAMPLE_COUNT,
             RTD_SAMPLE_PWM_PHASE_COUNT,
             RTD_SETTLE_DISCARD_SAMPLE_COUNT,
-            || iter.next().flatten(),
+            || {
+                iter.next().flatten().map(|value| AdcConvertedSample {
+                    raw_code: value.saturating_mul(2),
+                    calibrated_mv: value,
+                })
+            },
             || phase_waits = phase_waits.saturating_add(1),
         )
         .expect("RTD phase batch has enough valid conversions");
@@ -18880,13 +19118,33 @@ mod tests {
         assert!((batch.mean_mv - 910.0).abs() < 0.001);
         assert_eq!(batch.min_mv, 900);
         assert_eq!(batch.max_mv, 920);
+        assert_eq!(batch.mean_raw_code, 1_820);
+        assert_eq!(batch.min_raw_code, 1_800);
+        assert_eq!(batch.max_raw_code, 1_840);
         assert_eq!(phase_waits, RTD_SAMPLE_PWM_PHASE_COUNT - 1);
+    }
+
+    #[test]
+    fn adc_samples_always_mask_status_bits_to_twelve_bit_code() {
+        assert_eq!(mask_adc1_raw_code(0xfabc), 0x0abc);
+        assert_eq!(mask_adc1_raw_code(0x0fff), 0x0fff);
     }
 
     #[test]
     fn rtd_phase_sampling_rejects_an_invalid_phase_plan() {
         assert_eq!(
-            phase_averaged_rtd_batch_with_discard(79, 10, 0, || Some(900), || {}),
+            phase_averaged_rtd_batch_with_discard(
+                79,
+                10,
+                0,
+                || {
+                    Some(AdcConvertedSample {
+                        raw_code: 1_800,
+                        calibrated_mv: 900,
+                    })
+                },
+                || {}
+            ),
             None
         );
     }

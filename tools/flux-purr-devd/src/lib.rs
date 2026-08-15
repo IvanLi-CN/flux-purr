@@ -466,6 +466,7 @@ impl DeviceRecord {
             rtd_raw_adc_max_mv: Some(1_124),
             rtd_raw_adc_spread_mv: Some(2),
             vin_raw_adc_mv: Some(1_678),
+            adc_diagnostics: None,
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: DEFAULT_PD_REQUEST_MV,
             pd_state: "ready".to_string(),
@@ -561,6 +562,7 @@ impl DeviceRecord {
             rtd_raw_adc_max_mv: None,
             rtd_raw_adc_spread_mv: None,
             vin_raw_adc_mv: None,
+            adc_diagnostics: None,
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: 0,
             pd_state: "unknown".to_string(),
@@ -785,6 +787,8 @@ pub struct ControlPlaneStatus {
     pub rtd_raw_adc_spread_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vin_raw_adc_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adc_diagnostics: Option<AdcDiagnostics>,
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: String,
@@ -842,6 +846,22 @@ pub struct ControlPlaneStatus {
     pub thermal_plant_model: ThermalPlantRuntime,
     pub frontpanel_key: Option<String>,
     pub network: NetworkSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdcDiagnostics {
+    pub calibration_source: String,
+    pub efuse_version: u8,
+    pub attenuation_db: u8,
+    pub init_code: Option<u16>,
+    pub reference_code: Option<u16>,
+    pub reference_mv: Option<u16>,
+    pub rtd_raw_code_mean: u16,
+    pub rtd_raw_code_min: u16,
+    pub rtd_raw_code_max: u16,
+    pub rtd_raw_code_spread: u16,
+    pub vin_raw_code_mean: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -10294,6 +10314,23 @@ mod tests {
         assert_eq!(status.target_temp_c, 240);
         assert!(status.heater_enabled);
         assert!(!status.active_cooling_enabled);
+        assert!(status.adc_diagnostics.is_none());
+    }
+
+    #[test]
+    fn usb_response_decoder_preserves_adc_diagnostics() {
+        let payload = decode_usb_response_line(
+            br#"{"type":"response","requestId":"status-adc","ok":true,"result":{"status":{"mode":"sampling","uptimeSeconds":12,"currentTempC":31.5,"targetTempC":240,"heaterEnabled":false,"heaterOutputPercent":0,"activeCoolingEnabled":false,"fanDisplayState":"OFF","fanEnabled":false,"fanPwmPermille":0,"voltageMv":20000,"currentMa":0,"boardTempCenti":3150,"adcDiagnostics":{"calibrationSource":"efuse","efuseVersion":1,"attenuationDb":6,"initCode":1850,"referenceCode":1600,"referenceMv":850,"rtdRawCodeMean":2100,"rtdRawCodeMin":2098,"rtdRawCodeMax":2102,"rtdRawCodeSpread":4,"vinRawCodeMean":1800},"pdRequestMv":20000,"pdContractMv":20000,"pdState":"ready","frontpanelKey":null,"network":{"state":"idle","dns":[],"wifiRssi":null}}}}"#,
+            "status-adc",
+        )
+        .unwrap()
+        .unwrap();
+
+        let status = extract_usb_payload::<ControlPlaneStatus>(payload, "status").unwrap();
+        let diagnostics = status.adc_diagnostics.expect("ADC diagnostics present");
+
+        assert_eq!(diagnostics.calibration_source, "efuse");
+        assert_eq!(diagnostics.rtd_raw_code_spread, 4);
     }
 
     #[test]
@@ -10387,6 +10424,7 @@ mod tests {
             rtd_raw_adc_max_mv: Some(935),
             rtd_raw_adc_spread_mv: Some(2),
             vin_raw_adc_mv: Some(1003),
+            adc_diagnostics: None,
             pd_request_mv: 12_000,
             pd_contract_mv: 12_000,
             pd_state: "ready".to_string(),
