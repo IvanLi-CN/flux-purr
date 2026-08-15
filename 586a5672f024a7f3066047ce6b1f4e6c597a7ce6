@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "9d27d83b956d4231b41a36a12605423065e3db6a",
+  "pr_number": 68,
+  "pr_title": "fix(firmware): correct ADC readings and boot verification",
+  "product": {
+    "effective_version": "0.16.4",
+    "tag": "v0.16.4"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "586a5672f024a7f3066047ce6b1f4e6c597a7ce6",
+  "type_label": "type:patch"
+}
