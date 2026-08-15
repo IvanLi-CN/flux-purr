@@ -7,19 +7,33 @@ const meta = {
   title: 'Components/FirmwareWorkbench',
   component: FirmwareWorkbench,
   tags: ['autodocs'],
+  parameters: {
+    layout: 'fullscreen',
+  },
   decorators: [
     (Story) => (
       <div
-        className="industrial-shell"
+        data-testid="firmware-evidence-surface"
         style={{
-          width: 'min(900px, calc(100vw - 32px))',
+          width: 'min(932px, 100vw)',
           boxSizing: 'border-box',
           margin: 0,
           padding: '16px',
-          background: 'var(--industrial-bg)',
+          background: '#fcfcf7',
         }}
       >
-        <Story />
+        <div
+          className="industrial-shell"
+          style={{
+            width: '100%',
+            boxSizing: 'border-box',
+            margin: 0,
+            padding: '16px',
+            background: 'var(--industrial-bg)',
+          }}
+        >
+          <Story />
+        </div>
       </div>
     ),
   ],
