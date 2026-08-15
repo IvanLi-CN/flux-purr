@@ -4691,6 +4691,7 @@ fn read_calibrated_vin_mv<'a>(
     let batch = read_vin_adc_mv(adc, pin, curve)?;
     let raw_code = batch.mean_raw_code;
     let raw_adc_mv = batch.mean_mv.round() as u16;
+    #[cfg(feature = "web_serial")]
     VIN_RAW_CODE_MEAN.store(raw_code, Ordering::Relaxed);
     let corrected_adc_mv = correct_adc_mv(
         &memory_config.adc_calibration,
@@ -4728,9 +4729,12 @@ fn read_rtd_sample<'a>(
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
-    RTD_RAW_CODE_MEAN.store(batch.mean_raw_code, Ordering::Relaxed);
-    RTD_RAW_CODE_MIN.store(batch.min_raw_code, Ordering::Relaxed);
-    RTD_RAW_CODE_MAX.store(batch.max_raw_code, Ordering::Relaxed);
+    #[cfg(feature = "web_serial")]
+    {
+        RTD_RAW_CODE_MEAN.store(batch.mean_raw_code, Ordering::Relaxed);
+        RTD_RAW_CODE_MIN.store(batch.min_raw_code, Ordering::Relaxed);
+        RTD_RAW_CODE_MAX.store(batch.max_raw_code, Ordering::Relaxed);
+    }
     let raw_adc_mv = batch.mean_mv.round() as u16;
     let raw_adc_fractional_mv = batch.mean_mv;
 
