@@ -82,6 +82,7 @@
 - 同一采样批次必须先通过 `AdcCalBasic` 取得 code，再把这些 code 显式交给使用相同 eFuse 参数创建的 `AdcCalCurve` 换算 mV；mV 继续按逐样本换算后求均值，不得另做一次 ADC 转换来伪造 code/mV 配对。
 - eFuse calibration version、reference code 或 reference mV 缺失时，诊断必须报告 `runtime_fallback` 并停止温度准确性验证；不得使用假定 1100 mV 的 gain calibration 继续宣称温度准确。
 - ADC 根因验证不得使用 VIN、环境温度、冷启动首个读数或按 uptime 变化的经验曲线作为校准参考。
+- ADC1 必须在其它硬件外设及 heater-disabled power synchronization 完成后创建；首次 RTD/VIN 采样和依赖测量的安全/UI/output 投影成功后，固件必须通过 USB 发布完整的 `boot_stage=runtime_ready\n`，使受保护烧录路径能够区分正常运行、启动失败与重启循环。
 - calibration live state 必须与旧 `manualPps*` 调试字段分离；后者继续保留给调试语义，不能作为新模式的 owner-facing 真相源。
 - `电压读数标定` 手动模式必须支持直接输入和 `1V` 步进；自动模式必须按 `1V` 步进在实时 PPS capability 内扫点，并以“请求 PPS 电压”作为 reference 写入 `vin_adc samples`。
 - `温度标定` 只能是手动/半自动；firmware 必须按目标 `RTD_ADC` 毫伏值持续控热并暴露稳定状态，最终 capture 继续写 `rtd_adc samples`。
