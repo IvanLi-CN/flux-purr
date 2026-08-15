@@ -16,7 +16,7 @@ pub const MAX_BUNDLE_BYTES: u64 = 8 * 1024 * 1024;
 pub const LAYOUT_ID: &str = "flux-purr.esp32s3fh4r2.factory";
 pub const LAYOUT_VERSION: u32 = 1;
 pub const CURRENT_PARTITION_TABLE_SHA256: &str =
-    "sha256:9289adf2eb03a122c0db1fb569eee9af851cb350bac85d34d5e4a2574140b110";
+    "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e";
 const REQUIRED_PATHS: [&str; 4] = [
     "images/bootloader.bin",
     "images/factory-app.bin",
@@ -231,7 +231,8 @@ fn validate_manifest(
             "unsupported schema or media type".into(),
         ));
     }
-    if manifest.identity.source_sha.len() != 40
+    if semver::Version::parse(&manifest.identity.version).is_err()
+        || manifest.identity.source_sha.len() != 40
         || !manifest
             .identity
             .source_sha
@@ -318,6 +319,16 @@ fn validate_manifest(
             )));
         }
     }
+    let partition_table = manifest
+        .segments
+        .iter()
+        .find(|segment| segment.kind == SegmentKind::PartitionTable)
+        .ok_or_else(|| BundleError::Contract("partition table segment is missing".into()))?;
+    if partition_table.sha256 != manifest.layout.partition_table_sha256 {
+        return Err(BundleError::Contract(
+            "partition table segment hash does not match layout".into(),
+        ));
+    }
     if entries["images/partition-table.bin"].len() != 0x1000 {
         return Err(BundleError::Contract(
             "partition table must be exactly 4 KiB".into(),
@@ -366,6 +377,22 @@ fn validate_manifest(
     Ok(())
 }
 
+pub fn source_partition_hash_supported(
+    source_hash: &str,
+    declared_migrations: &[String],
+) -> Result<bool, BundleError> {
+    if source_hash == CURRENT_PARTITION_TABLE_SHA256 {
+        return Ok(true);
+    }
+    let registry: MigrationRegistry = serde_json::from_str(include_str!(
+        "../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json"
+    ))?;
+    Ok(registry.migrations.iter().any(|migration| {
+        migration.source_partition_table_sha256 == source_hash
+            && declared_migrations.iter().any(|id| id == &migration.id)
+    }))
+}
+
 pub fn build_bundle(
     output: &Path,
     identity: BundleIdentity,
@@ -374,6 +401,14 @@ pub fn build_bundle(
     factory_app: &[u8],
     migrations: Vec<String>,
 ) -> Result<FirmwareBundle, BundleError> {
+    if partition_table.len() > 0x1000 {
+        return Err(BundleError::Contract(
+            "partition table input exceeds the 4 KiB flash segment".into(),
+        ));
+    }
+    let mut padded_partition_table = vec![0xff; 0x1000];
+    padded_partition_table[..partition_table.len()].copy_from_slice(partition_table);
+    let partition_table = padded_partition_table.as_slice();
     let segments = [
         segment(
             SegmentKind::Bootloader,
@@ -484,10 +519,10 @@ mod tests {
         let one = dir.path().join("one.fluxpurr-fw");
         let two = dir.path().join("two.fluxpurr-fw");
         let bootloader = vec![0x11; 0x4000];
-        let partition = vec![0x22; 0x1000];
+        let partition = include_bytes!("../../../firmware/partitions.bin");
         let app = vec![0x33; 0x4000];
-        build_bundle(&one, identity(), &bootloader, &partition, &app, Vec::new()).unwrap();
-        build_bundle(&two, identity(), &bootloader, &partition, &app, Vec::new()).unwrap();
+        build_bundle(&one, identity(), &bootloader, partition, &app, Vec::new()).unwrap();
+        build_bundle(&two, identity(), &bootloader, partition, &app, Vec::new()).unwrap();
         assert_eq!(std::fs::read(&one).unwrap(), std::fs::read(&two).unwrap());
         let parsed = read_bundle(&one).unwrap();
         assert_eq!(parsed.manifest.segments.len(), 3);

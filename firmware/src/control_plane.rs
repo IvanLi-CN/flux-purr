@@ -24,7 +24,7 @@ pub const BUILD_ID_MAX_LEN: usize = 48;
 pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
-pub const CAPABILITY_COUNT_MAX: usize = 10;
+pub const CAPABILITY_COUNT_MAX: usize = 12;
 // A fully materialized 9-point thermal profile save request is about 5 KiB.
 // Keep one shared bound for firmware and devd JSONL frames so it can persist.
 pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
@@ -125,6 +125,7 @@ impl Identity {
         push_str(&mut capabilities, "status");
         push_str(&mut capabilities, "network");
         push_str(&mut capabilities, "calibration");
+        push_str(&mut capabilities, "install_status");
         #[cfg(feature = "web_serial")]
         {
             push_str(&mut capabilities, "usb_jsonl");
@@ -1929,6 +1930,7 @@ impl From<&UsbFrame> for UsbFrameWire {
 #[serde(rename_all = "snake_case")]
 pub enum UsbRequestOp {
     GetIdentity,
+    GetInstallStatus,
     GetNetwork,
     GetStatus,
     GetLanPairingCode,
@@ -1945,6 +1947,7 @@ impl UsbRequestOp {
     const fn as_str(self) -> &'static str {
         match self {
             Self::GetIdentity => "get_identity",
+            Self::GetInstallStatus => "get_install_status",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
             Self::GetLanPairingCode => "get_lan_pairing_code",
@@ -2004,6 +2007,7 @@ impl WifiConfigOp {
 #[serde(rename_all = "snake_case")]
 pub enum UsbResponsePayload {
     Identity(Identity),
+    InstallStatus(InstallStatus),
     Network(NetworkSummary),
     Status(ControlPlaneStatus),
     LanPairingCode(LanPairingCode),
@@ -2013,6 +2017,55 @@ pub enum UsbResponsePayload {
     HeaterCurve(HeaterCurveStateWire),
     EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
     Ack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallStatus {
+    pub layout_id: String<48>,
+    pub layout_version: u32,
+    pub partition_table_sha256: String<72>,
+    pub persistence_source: String<32>,
+    pub record_state: String<24>,
+    pub record_sequence: u32,
+    pub commissioning_required: bool,
+    pub setup_reason: Option<String<32>>,
+    pub sensor_state: String<24>,
+    pub heater_locked: bool,
+}
+
+impl InstallStatus {
+    pub fn from_runtime(
+        config: &crate::memory::MemoryConfig,
+        persistence_source: &str,
+        record_state: &str,
+        record_sequence: u32,
+        sensor_ready: bool,
+        heater_fault_latched: bool,
+    ) -> Self {
+        Self {
+            layout_id: string("flux-purr.esp32s3fh4r2.factory"),
+            layout_version: 1,
+            partition_table_sha256: string(
+                "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e",
+            ),
+            persistence_source: string(persistence_source),
+            record_state: string(record_state),
+            record_sequence,
+            commissioning_required: config.commissioning_required,
+            setup_reason: if config.commissioning_required {
+                Some(string(if record_sequence == 0 {
+                    "blank_persistence"
+                } else {
+                    "explicit_reset"
+                }))
+            } else {
+                None
+            },
+            sensor_state: string(if sensor_ready { "ready" } else { "unavailable" }),
+            heater_locked: config.commissioning_required || !sensor_ready || heater_fault_latched,
+        }
+    }
 }
 
 /// A transient code is intentionally available through the already-authorized
@@ -2260,6 +2313,7 @@ fn push_str<const N: usize, const C: usize>(values: &mut Vec<String<N>, C>, valu
 fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameError> {
     match value {
         Some("get_identity") => Ok(UsbRequestOp::GetIdentity),
+        Some("get_install_status") => Ok(UsbRequestOp::GetInstallStatus),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),

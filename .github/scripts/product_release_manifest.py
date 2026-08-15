@@ -9,6 +9,17 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+FIRMWARE_BUNDLE_MEDIA_TYPE = "application/vnd.flux-purr.firmware-bundle+zip"
+
+
+def media_type_for_asset(path: Path) -> str:
+    if path.name.endswith(".fluxpurr-fw"):
+        return FIRMWARE_BUNDLE_MEDIA_TYPE
+    if path.name.endswith(".tar.gz"):
+        return "application/gzip"
+    if path.name.endswith(".zip"):
+        return "application/zip"
+    return "application/octet-stream"
 
 
 class ManifestError(RuntimeError):
@@ -86,6 +97,8 @@ def build_component(
                 "path": str(raw_path),
                 "size": asset_path.stat().st_size,
                 "sha256": sha256_file(asset_path),
+                "mediaType": media_type_for_asset(asset_path),
+                "channel": component.get("channel", "stable"),
             }
         )
     content_payload = {
@@ -125,6 +138,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "version": args.version,
         "tag": args.tag,
         "sourceSha": args.source_sha,
+        "channel": getattr(args, "channel", "stable"),
         "components": components,
     }
 
@@ -134,6 +148,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--channel", choices=("stable", "rc"), default="stable")
     parser.add_argument("--asset-root", default=".")
     parser.add_argument("--previous-manifest")
     parser.add_argument("--component", action="append", required=True)

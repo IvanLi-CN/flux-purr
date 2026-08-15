@@ -137,7 +137,37 @@ jobs:
           buildtargets: esp32s3
 
       - name: Build ESP32-S3 firmware
+        env:
+          FLUX_PURR_FIRMWARE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          FLUX_PURR_SOURCE_SHA: ${{ needs.release-meta.outputs.target_sha }}
         run: bash scripts/check-firmware-build.sh
+
+      - name: Build deterministic firmware bundle
+        env:
+          PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          TARGET_SHA: ${{ needs.release-meta.outputs.target_sha }}
+          RELEASE_CHANNEL: ${{ needs.release-meta.outputs.channel }}
+          FW_ELF: firmware/target/xtensa-esp32s3-none-elf/release/flux-purr
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install espflash --version 4.5.0 --locked
+          cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bin flux-purr-bundle
+          espflash save-image --chip esp32s3 --flash-mode dio --flash-freq 40mhz --flash-size 4mb \
+            --partition-table firmware/partitions.csv --merge --skip-padding \
+            "${FW_ELF}" merged-firmware.bin
+          dd if=merged-firmware.bin of=bootloader.bin bs=1 count=$((0x8000)) status=none
+          dd if=merged-firmware.bin of=factory-app.bin bs=1 skip=$((0x10000)) status=none
+          build_id="${TARGET_SHA:0:16}"
+          target/release/flux-purr-bundle \
+            --bootloader bootloader.bin \
+            --partition-table firmware/partitions.bin \
+            --factory-app factory-app.bin \
+            --version "${PRODUCT_EFFECTIVE_VERSION}" \
+            --source-sha "${TARGET_SHA}" \
+            --build-id "${build_id}" \
+            --channel "${RELEASE_CHANNEL}" \
+            --output "flux-purr-firmware-v${PRODUCT_EFFECTIVE_VERSION}.fluxpurr-fw"
 
       - name: Package firmware artifact
         env:
@@ -149,7 +179,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-firmware
-          path: flux-purr-firmware-v*.tar.gz
+          path: |
+            flux-purr-firmware-v*.tar.gz
+            flux-purr-firmware-v*.fluxpurr-fw
 
   host-tools:
     name: Release Product Host Tools
@@ -237,6 +269,7 @@ jobs:
           PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
           PRODUCT_TAG: ${{ needs.release-meta.outputs.tag }}
           TARGET_SHA: ${{ needs.release-meta.outputs.target_sha }}
+          RELEASE_CHANNEL: ${{ needs.release-meta.outputs.channel }}
         shell: bash
         run: |
           set -euo pipefail
@@ -254,7 +287,7 @@ jobs:
           fi
 
           web_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"web","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-web-*.tar.gz")]}))')"
-          firmware_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"protocolVersions":["flux-purr.usb.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-firmware-*.tar.gz")]}))')"
+          firmware_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"channel":os.environ["RELEASE_CHANNEL"],"protocolVersions":["flux-purr.usb.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-firmware-*")]}))')"
           host_tools_component="$(python3 -c 'import glob,json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_EFFECTIVE_VERSION"],"protocolVersions":["flux-purr.devd-http.v1"],"assets":[os.path.basename(p) for p in glob.glob("release-assets/flux-purr-host-tools-*")]}))')"
 
           manifest_name="flux-purr-release-manifest-${PRODUCT_TAG}.json"
@@ -262,6 +295,7 @@ jobs:
             --version "${PRODUCT_EFFECTIVE_VERSION}" \
             --tag "${PRODUCT_TAG}" \
             --source-sha "${TARGET_SHA}" \
+            --channel "${RELEASE_CHANNEL}" \
             --asset-root release-assets \
             "${previous_arg[@]}" \
             --component "${web_component}" \

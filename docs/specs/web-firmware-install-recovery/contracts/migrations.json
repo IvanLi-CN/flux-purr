@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "targetLayoutId": "flux-purr.esp32s3fh4r2.factory",
   "targetLayoutVersion": 1,
-  "targetPartitionTableSha256": "sha256:9289adf2eb03a122c0db1fb569eee9af851cb350bac85d34d5e4a2574140b110",
+  "targetPartitionTableSha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e",
   "migrations": [
     {
       "id": "legacy-raw-v1-to-flux-cfg-v1",

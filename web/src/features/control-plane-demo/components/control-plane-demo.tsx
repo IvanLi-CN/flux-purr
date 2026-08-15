@@ -24,7 +24,6 @@ import {
   Wifi,
   Wrench,
   X,
-  Zap,
 } from 'lucide-react'
 import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
 import {
@@ -44,13 +43,6 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
@@ -59,6 +51,7 @@ import { cn } from '@/lib/utils'
 import type { ConsoleRouteState } from '@/routing/console-route'
 import { readRoutePreferences, rememberSuccessfulRoute } from '@/routing/route-preferences'
 import type { AppSearch } from '@/routing/search'
+import { FirmwareWorkbench } from '../../firmware-installer'
 import {
   bridgeCandidatesForTransport,
   bridgeProbeToDeviceTarget,
@@ -5541,6 +5534,7 @@ function ViewPanel({
         onArtifactChange={onArtifactChange}
         onStartDryRun={onStartDryRun}
         onStartFlash={onStartFlash}
+        devdBaseUrl={devdBaseUrl}
       />
     )
   }
@@ -9075,14 +9069,13 @@ function PresetTemperatureEditor({
 
 function UpdateView({
   device,
-  artifacts,
   artifact,
   flashPhases,
   feedback,
   flashRun,
-  onArtifactChange,
   onStartDryRun,
   onStartFlash,
+  devdBaseUrl,
 }: {
   device: DeviceTarget
   artifacts: FirmwareArtifact[]
@@ -9093,6 +9086,7 @@ function UpdateView({
   onArtifactChange: (artifactId: string) => void
   onStartDryRun: () => void
   onStartFlash: () => void
+  devdBaseUrl: string | null
 }) {
   const blockedPhase = flashPhases.find((phase) => phase.state === 'blocked')
   const activePhase = flashPhases.find((phase) => phase.state === 'active') ?? flashPhases[0]
@@ -9106,11 +9100,6 @@ function UpdateView({
     device.leaseState === 'conflict' ||
     device.leaseState === 'expired'
   const isBusy = flashRun.status === 'running' || flashRun.status === 'flashing'
-  const canFlash =
-    flashRun.status === 'passed' &&
-    device.transport === 'devd' &&
-    !isBlocked &&
-    Boolean(device.leaseId)
   const verdict = isBlocked
     ? {
         tone: 'danger',
@@ -9161,80 +9150,41 @@ function UpdateView({
 
   return (
     <div className="industrial-view-panel">
-      <PanelHeader kicker="Update" title="Firmware check" />
-      <div className={`industrial-gate-verdict is-${verdict.tone}`}>
-        <div>
-          <p className="industrial-label">Compatibility</p>
-          <strong>{verdict.title}</strong>
-          <span>{verdict.detail}</span>
-        </div>
-        <CheckCircle2 size={22} aria-hidden="true" />
-      </div>
-      <div className="industrial-update-grid">
-        <div className="industrial-artifact industrial-artifact--compact">
-          <p className="industrial-label">Artifact</p>
-          <Select value={artifact?.id} onValueChange={onArtifactChange}>
-            <SelectTrigger
-              aria-label="Firmware artifact"
-              className="industrial-artifact-select industrial-radix-select"
-              disabled={isBusy || artifacts.length === 0}
-            >
-              <SelectValue placeholder="No firmware artifact" />
-            </SelectTrigger>
-            <SelectContent className="industrial-select-content">
-              {artifacts.map((item) => (
-                <SelectItem key={item.id} value={item.id} className="industrial-select-item">
-                  {item.version} · {item.profile}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="industrial-mono text-xs">
-            {artifact?.target ?? 'target unknown'} · {artifact?.protocol ?? 'protocol unknown'} ·{' '}
-            {artifact?.hash ?? 'hash unavailable'}
-          </p>
-          <div
-            className="industrial-progress"
-            role="progressbar"
-            aria-label={`${artifact?.id ?? 'artifact'} flash progress`}
-            aria-valuenow={currentProgress}
-            aria-valuemin={0}
-            aria-valuemax={100}
-          >
-            <span
-              style={{
-                width: `${currentProgress}%`,
-              }}
-            />
-          </div>
-        </div>
-        <CompactPhase label="Dry-run" phases={flashPhases} />
-      </div>
+      <PanelHeader kicker="Firmware" title="安装与恢复" />
+      <FirmwareWorkbench
+        devdAvailable={device.transport === 'devd' && device.capabilities.includes('flash')}
+        browserAvailable={
+          typeof navigator !== 'undefined' && 'serial' in navigator && window.isSecureContext
+        }
+        updateEligible={
+          device.firmware !== 'unknown' &&
+          device.severity !== 'offline' &&
+          device.capabilities.includes('install_status')
+        }
+        currentVersion={device.firmware}
+        currentTemperatureC={device.currentTempC}
+        heaterEnabled={device.heaterEnabled}
+        busy={isBusy}
+        progress={currentProgress}
+        outcome={
+          flashRun.status === 'running' || flashRun.status === 'flashing'
+            ? 'running'
+            : flashRun.status === 'passed'
+              ? 'preflight_passed'
+              : flashRun.status === 'flashed'
+                ? 'verified'
+                : isBlocked
+                  ? 'blocked'
+                  : 'idle'
+        }
+        message={verdict.detail}
+        devdBaseUrl={devdBaseUrl}
+        deviceId={device.id}
+        leaseId={device.leaseId}
+        onPreflight={onStartDryRun}
+        onInstall={onStartFlash}
+      />
       {recoveryNote ? <p className="industrial-mono text-xs">{recoveryNote}</p> : null}
-      <div className="industrial-command-row">
-        <button
-          type="button"
-          className="industrial-button industrial-button--primary"
-          disabled={isBusy || isBlocked}
-          onClick={onStartDryRun}
-        >
-          <Upload size={16} aria-hidden="true" />
-          {flashRun.status === 'running' ? 'Checking' : 'Run dry-check'}
-        </button>
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary"
-          disabled={!canFlash || isBusy}
-          onClick={onStartFlash}
-        >
-          <Zap size={16} aria-hidden="true" />
-          {flashRun.status === 'flashing'
-            ? 'Flashing'
-            : flashRun.status === 'flashed'
-              ? 'Flashed'
-              : 'Flash'}
-        </button>
-      </div>
       <ActionFeedbackPanel feedback={feedback} />
     </div>
   )
@@ -9384,22 +9334,6 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
         </div>
       </SimpleBar>
     </aside>
-  )
-}
-
-function CompactPhase({ label, phases }: { label: string; phases: WorkflowPhase[] }) {
-  return (
-    <div className="industrial-compact-phase">
-      <p className="industrial-label">{label}</p>
-      <div className="industrial-phase-dots">
-        {phases.slice(0, 4).map((phase) => (
-          <span key={phase.label} className={`is-${phase.state}`} title={phase.label}>
-            {phase.state === 'done' ? <CheckCircle2 size={14} /> : null}
-          </span>
-        ))}
-      </div>
-      <strong>{phases.find((phase) => phase.state === 'active')?.label ?? phases[0]?.label}</strong>
-    </div>
   )
 }
 

@@ -21,6 +21,5 @@
     "factory": { "address": 65536, "length": 2097152 },
     "flux_cfg": { "address": 2162688, "length": 8192 }
   },
-  "partitionTableSha256": "sha256:9289adf2eb03a122c0db1fb569eee9af851cb350bac85d34d5e4a2574140b110"
+  "partitionTableSha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e"
 }
-

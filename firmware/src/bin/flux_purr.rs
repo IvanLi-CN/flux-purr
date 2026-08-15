@@ -82,7 +82,7 @@ use flux_purr_firmware::control_plane::hello_frame;
 use flux_purr_firmware::control_plane::{
     AdcCalibrationSourceWire, AdcDiagnosticsWire, ApiError, CalibrationControlCommand,
     CalibrationJobKindWire, CalibrationJobStateWire, CalibrationJobStatusWire, CalibrationModeWire,
-    CalibrationRuntimeStateWire, ControlPlaneStatus, Identity, RuntimeConfigCommand,
+    CalibrationRuntimeStateWire, ControlPlaneStatus, Identity, InstallStatus, RuntimeConfigCommand,
     ThermalControlProfileOp, ThermalControlProfilePointWire, ThermalControlProfileSettingsWire,
     ThermalControlProfileWire, ThermalControlRuntimeWire, ThermalPlantRuntimeWire, UsbFrame,
     UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
@@ -9140,6 +9140,12 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
             ),
+            UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "Install status is unavailable until persistence restoration completes.",
+                true,
+            ),
             // The boot-time memory argument is still the zero-value placeholder
             // until the main loop has completed EEPROM/flash restoration. Never
             // expose it as a network snapshot: a configured device would appear
@@ -9351,6 +9357,17 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
             ),
+            UsbRequestOp::GetInstallStatus => usb_response(
+                request_id,
+                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                    memory_config,
+                    "defaults",
+                    "incompatible",
+                    0,
+                    false,
+                    true,
+                )),
+            ),
             UsbRequestOp::GetNetwork => usb_response(
                 request_id,
                 UsbResponsePayload::Network(network_from_memory(memory_config)),
@@ -9437,6 +9454,8 @@ async fn process_control_line(
     preview_heater_curve: &mut Option<HeaterCurvePreview>,
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
+    persistence_source: &'static str,
+    persistence_record_state: &'static str,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
     ch224q_address: Address,
     flash_storage: &mut FlashStorage,
@@ -9508,6 +9527,17 @@ async fn process_control_line(
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
+            ),
+            UsbRequestOp::GetInstallStatus => usb_response(
+                request_id,
+                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                    memory_config,
+                    persistence_source,
+                    persistence_record_state,
+                    *memory_sequence,
+                    current_rtd_fault.is_none() && latest_status_temp_c.is_finite(),
+                    heater_controller.fault_latched().is_some(),
+                )),
             ),
             UsbRequestOp::GetNetwork => {
                 #[cfg(feature = "net_http")]
@@ -10056,6 +10086,13 @@ fn lan_frame_response(
             ..
         } => match result {
             UsbResponsePayload::Identity(value) => lan_json_response(value),
+            UsbResponsePayload::InstallStatus(_) => (
+                404,
+                lan_error_json(
+                    "unsupported_operation",
+                    "Install status is available only through USB/devd.",
+                ),
+            ),
             UsbResponsePayload::Network(value) => lan_json_response(value),
             UsbResponsePayload::Status(value) => {
                 let mut status = value.clone();
@@ -10758,6 +10795,20 @@ async fn main(_spawner: Spawner) {
         } else {
             (None, false, None)
         };
+    let persistence_source = match (&eeprom_memory_record, &flash_memory_record) {
+        (Some(eeprom), Some(flash)) if eeprom.sequence >= flash.sequence => "eeprom",
+        (Some(_), Some(_)) | (None, Some(_)) => "flux_cfg",
+        (Some(_), None) => "eeprom",
+        (None, None) => "defaults",
+    };
+    let persistence_record_state =
+        if eeprom_memory_record.is_some() || flash_memory_record.is_some() {
+            "valid"
+        } else if eeprom_data_incompatible {
+            "incompatible"
+        } else {
+            "blank"
+        };
     let restored_memory_record =
         select_latest_optional_memory_record(eeprom_memory_record, flash_memory_record);
     let (mut memory_config, mut memory_sequence) = restored_memory_record
@@ -11295,6 +11346,8 @@ async fn main(_spawner: Spawner) {
                         &mut preview_heater_curve,
                         &mut memory_commit_due_ms,
                         &mut memory_sequence,
+                        persistence_source,
+                        persistence_record_state,
                         &mut pd_i2c,
                         ch224q_address,
                         &mut flash_storage,
@@ -11440,6 +11493,8 @@ async fn main(_spawner: Spawner) {
                 &mut preview_heater_curve,
                 &mut memory_commit_due_ms,
                 &mut memory_sequence,
+                persistence_source,
+                persistence_record_state,
                 &mut pd_i2c,
                 ch224q_address,
                 &mut flash_storage,
@@ -14428,7 +14483,10 @@ mod tests {
                 .round() as u16
         }
 
-        let mut memory_config = MemoryConfig::default();
+        let mut memory_config = MemoryConfig {
+            commissioning_required: false,
+            ..MemoryConfig::default()
+        };
         memory_config.active_heater_curve.points[0] = Some(HeaterCurvePoint {
             temp_centi_c: 2_500,
             resistance_milliohms: 4_000,

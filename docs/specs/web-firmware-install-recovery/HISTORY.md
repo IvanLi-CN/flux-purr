@@ -9,9 +9,9 @@
 - install/recovery 不依赖 Flux runtime 身份，并明确禁止 PCB/heater 物理状态推断或限制；update 仍要求软件可观测的停热与温度门禁。
 - EEPROM 位于 MCU internal Flash 之外；full erase 只作用于 internal Flash。`flux_cfg` 通过精确 layout migration 在 update 中保全。
 - v1 不引入签名，把来源可信度留给 HTTPS/GitHub Release 和公开 SHA-256。
+- partition-table source binary is padded with `0xff` to its exact 4 KiB flash segment before hashing and packaging, so layout identity always describes written bytes.
 
 ## References
 
 - `./SPEC.md`
 - `./IMPLEMENTATION.md`
-

@@ -717,6 +717,21 @@ pub struct Identity {
     pub capabilities: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallStatus {
+    pub layout_id: String,
+    pub layout_version: u32,
+    pub partition_table_sha256: String,
+    pub persistence_source: String,
+    pub record_state: String,
+    pub record_sequence: u32,
+    pub commissioning_required: bool,
+    pub setup_reason: String,
+    pub sensor_state: String,
+    pub heater_locked: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkState {
@@ -2005,8 +2020,9 @@ pub struct FirmwareOperationResult {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RomSecurityInfo {
+    pub rom_mac: String,
     pub secure_boot_enabled: bool,
     pub flash_encryption_enabled: bool,
     pub secure_download_mode_enabled: bool,
@@ -2016,7 +2032,7 @@ pub struct RomSecurityInfo {
 }
 
 impl RomSecurityInfo {
-    fn validate_for_flash(self) -> Result<(), HttpError> {
+    fn validate_for_flash(&self) -> Result<(), HttpError> {
         if !self.response_known {
             return Err(HttpError::forbidden(
                 "security_info_unknown",
@@ -5038,7 +5054,7 @@ async fn firmware_operation(
         ));
     }
 
-    let (port_path, rom_mac, transport, current_version, status) = {
+    let (port_path, mock_identity, transport, current_version, status) = {
         let mut inner = state.lock()?;
         inner.require_lease(&device_id, Some(&payload.lease_id))?;
         let device = inner
@@ -5065,6 +5081,7 @@ async fn firmware_operation(
 
     let security = match transport {
         DeviceTransport::Mock => RomSecurityInfo {
+            rom_mac: mock_identity,
             secure_boot_enabled: false,
             flash_encryption_enabled: false,
             secure_download_mode_enabled: false,
@@ -5072,20 +5089,17 @@ async fn firmware_operation(
             chip_is_esp32s3: true,
             flash_size_bytes: 4 * 1024 * 1024,
         },
-        DeviceTransport::NativeSerial => RomSecurityInfo {
-            secure_boot_enabled: false,
-            flash_encryption_enabled: false,
-            secure_download_mode_enabled: false,
-            response_known: false,
-            chip_is_esp32s3: true,
-            flash_size_bytes: 0,
-        },
+        DeviceTransport::NativeSerial => probe_native_rom_security(&state, &port_path).await?,
         DeviceTransport::Lan => unreachable!(),
     };
     security.validate_for_flash()?;
+    let rom_mac = security.rom_mac.clone();
 
+    let mut source_partition_hash = None;
     if payload.operation == FirmwareOperation::Update {
-        if transport == DeviceTransport::NativeSerial && !current_version.starts_with("fw/") {
+        if transport == DeviceTransport::NativeSerial
+            && (current_version == "unknown" || current_version.trim().is_empty())
+        {
             return Err(HttpError::forbidden(
                 "update_identity_required",
                 "Update requires a verified Flux Purr runtime identity.",
@@ -5100,6 +5114,39 @@ async fn firmware_operation(
                 "Update requires heater off and a valid temperature at or below 40 C.",
             ));
         }
+        if transport == DeviceTransport::NativeSerial {
+            let source_hash = probe_native_partition_hash(&state, &port_path).await?;
+            if !firmware_bundle::source_partition_hash_supported(
+                &source_hash,
+                &bundle.manifest.migrations,
+            )
+            .map_err(bundle_http_error)?
+            {
+                return Err(HttpError::forbidden(
+                    "source_layout_unsupported",
+                    "The current partition-table hash has no declared supported migration.",
+                ));
+            }
+            source_partition_hash = Some(source_hash);
+        }
+        let current_semver = semver::Version::parse(
+            current_version
+                .trim_start_matches("fw/")
+                .trim_start_matches('v'),
+        );
+        let target_semver =
+            semver::Version::parse(bundle.manifest.identity.version.trim_start_matches('v'));
+        if current_semver
+            .ok()
+            .zip(target_semver.ok())
+            .is_some_and(|(current, target)| target < current)
+            && !payload.allow_downgrade
+        {
+            return Err(HttpError::forbidden(
+                "downgrade_confirmation_required",
+                "The target firmware is older; explicit allowDowngrade is required.",
+            ));
+        }
     }
 
     let preflight_digest = firmware_preflight_digest(
@@ -5108,6 +5155,7 @@ async fn firmware_operation(
         &port_path,
         &rom_mac,
         &bundle.bundle_sha256,
+        source_partition_hash.as_deref(),
     );
     let stages = firmware_preflight_stages(payload.operation);
     if payload.dry_run {
@@ -5195,9 +5243,312 @@ async fn firmware_operation(
         ));
     }
 
-    Err(HttpError::internal(
-        "Protected bundle execution has no authorized hardware transaction in this process.",
-    ))
+    run_bundle_flash_transaction(
+        &state,
+        &bundle,
+        payload.operation,
+        &port_path,
+        source_partition_hash.as_deref(),
+    )
+    .await?;
+    let target = {
+        let inner = state.lock()?;
+        inner
+            .devices
+            .get(&device_id)
+            .cloned()
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+    };
+    let identity =
+        serial_request_payload::<Identity>(&state, &target, "get_identity", "identity").await;
+    let install_status = serial_request_payload::<InstallStatus>(
+        &state,
+        &target,
+        "get_install_status",
+        "install_status",
+    )
+    .await;
+    let verified = identity.as_ref().is_ok_and(|identity| {
+        identity.firmware_version == bundle.manifest.identity.version
+            && identity.git_sha == bundle.manifest.identity.source_sha
+            && identity.build_id == bundle.manifest.identity.build_id
+    }) && install_status.as_ref().is_ok_and(|status| {
+        status.layout_id == bundle.manifest.layout.id
+            && status.layout_version == bundle.manifest.layout.version
+            && status.partition_table_sha256 == bundle.manifest.layout.partition_table_sha256
+    });
+    Ok(Json(FirmwareOperationResult {
+        artifact_id: bundle.bundle_sha256,
+        operation: payload.operation,
+        dry_run: false,
+        outcome: if verified {
+            "verified"
+        } else {
+            "write_complete_unverified"
+        }
+        .into(),
+        approval_token: None,
+        approval_expires_in_ms: None,
+        stages,
+        message: if verified {
+            "Firmware bytes and runtime install status verified."
+        } else {
+            "Firmware bytes verified, but runtime identity or install status did not verify."
+        }
+        .into(),
+    }))
+}
+
+async fn probe_native_partition_hash(
+    state: &AppState,
+    port_path: &str,
+) -> Result<String, HttpError> {
+    let _serial_rpc =
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+    drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    let workspace = tempfile::tempdir().map_err(|error| {
+        HttpError::internal(&format!("failed to create preflight workspace: {error}"))
+    })?;
+    let output_path = workspace.path().join("partition-table.bin");
+    let args = vec![
+        "read-flash".into(),
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port_path.into(),
+        "--non-interactive".into(),
+        "0x8000".into(),
+        "0x1000".into(),
+        output_path.to_string_lossy().into_owned(),
+    ];
+    require_espflash_success(&resolve_espflash_program(), &args).await?;
+    let bytes = fs::read(output_path).map_err(|error| {
+        HttpError::internal(&format!("failed to read partition preflight: {error}"))
+    })?;
+    if bytes.len() != 0x1000 {
+        return Err(HttpError::forbidden(
+            "source_layout_unknown",
+            "The target partition table could not be read exactly.",
+        ));
+    }
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+async fn run_bundle_flash_transaction(
+    state: &AppState,
+    bundle: &firmware_bundle::FirmwareBundle,
+    operation: FirmwareOperation,
+    port_path: &str,
+    source_partition_hash: Option<&str>,
+) -> Result<(), HttpError> {
+    let _serial_rpc =
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+    drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    let workspace = tempfile::tempdir().map_err(|error| {
+        HttpError::internal(&format!("failed to create flash workspace: {error}"))
+    })?;
+    for segment in &bundle.manifest.segments {
+        let bytes = bundle.images.get(&segment.path).ok_or_else(|| {
+            HttpError::internal("validated bundle segment disappeared before execution")
+        })?;
+        fs::write(
+            workspace.path().join(format!("{:?}.bin", segment.kind)),
+            bytes,
+        )
+        .map_err(|error| HttpError::internal(&format!("failed to stage segment: {error}")))?;
+    }
+    let program = resolve_espflash_program();
+    let common = vec![
+        "--chip".into(),
+        "esp32s3".into(),
+        "--port".into(),
+        port_path.into(),
+        "--non-interactive".into(),
+    ];
+    let preserved_config = if operation == FirmwareOperation::Update {
+        let source_address =
+            if source_partition_hash == Some(firmware_bundle::CURRENT_PARTITION_TABLE_SHA256) {
+                0x210000
+            } else {
+                0x110000
+            };
+        let path = workspace.path().join("preserved-flux-cfg.bin");
+        let mut args = vec!["read-flash".into()];
+        args.extend(common.clone());
+        args.extend([
+            format!("0x{source_address:x}"),
+            "0x2000".into(),
+            path.to_string_lossy().into_owned(),
+        ]);
+        require_espflash_success(&program, &args).await?;
+        let bytes = fs::read(&path)
+            .map_err(|error| HttpError::internal(&format!("failed to stage flux_cfg: {error}")))?;
+        if bytes.len() != 0x2000 {
+            return Err(HttpError::internal("flux_cfg staging length differs."));
+        }
+        Some((path, bytes))
+    } else {
+        None
+    };
+    if operation == FirmwareOperation::InstallRecovery {
+        let mut args = vec!["erase-flash".into()];
+        args.extend(common.clone());
+        args.extend([
+            "--before".into(),
+            "default-reset".into(),
+            "--after".into(),
+            "no-reset".into(),
+        ]);
+        require_espflash_success(&program, &args).await?;
+    }
+    for segment in &bundle.manifest.segments {
+        let mut args = vec!["write-bin".into()];
+        args.extend(common.clone());
+        args.extend([
+            "--before".into(),
+            "default-reset".into(),
+            "--after".into(),
+            "no-reset".into(),
+            format!("0x{:x}", segment.address),
+            workspace
+                .path()
+                .join(format!("{:?}.bin", segment.kind))
+                .to_string_lossy()
+                .into_owned(),
+        ]);
+        require_espflash_success(&program, &args).await?;
+        let mut checksum = vec!["checksum-md5".into()];
+        checksum.extend(common.clone());
+        checksum.extend([
+            format!("0x{:x}", segment.address),
+            segment.length.to_string(),
+        ]);
+        let output = require_espflash_success(&program, &checksum).await?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        if !stdout.contains(&segment.md5) {
+            return Err(HttpError::internal(
+                "ROM MD5 did not match the validated bundle segment.",
+            ));
+        }
+    }
+    if let Some((path, expected)) = preserved_config {
+        let mut write = vec!["write-bin".into()];
+        write.extend(common.clone());
+        write.extend([
+            "--before".into(),
+            "default-reset".into(),
+            "--after".into(),
+            "no-reset".into(),
+            "0x210000".into(),
+            path.to_string_lossy().into_owned(),
+        ]);
+        require_espflash_success(&program, &write).await?;
+        let verified_path = workspace.path().join("verified-flux-cfg.bin");
+        let mut read = vec!["read-flash".into()];
+        read.extend(common.clone());
+        read.extend([
+            "0x210000".into(),
+            "0x2000".into(),
+            verified_path.to_string_lossy().into_owned(),
+        ]);
+        require_espflash_success(&program, &read).await?;
+        let actual = fs::read(verified_path).map_err(|error| {
+            HttpError::internal(&format!("failed to verify preserved flux_cfg: {error}"))
+        })?;
+        if actual != expected {
+            return Err(HttpError::internal("flux_cfg byte verification failed."));
+        }
+    }
+    let mut reset = vec!["reset".into()];
+    reset.extend(common);
+    require_espflash_success(&program, &reset).await?;
+    Ok(())
+}
+
+async fn require_espflash_success(program: &Path, args: &[String]) -> Result<Output, HttpError> {
+    let output = run_espflash_command_with_timeout(program, args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "espflash_failed",
+            "Protected espflash transaction failed.",
+            true,
+        ))
+    }
+}
+
+async fn probe_native_rom_security(
+    state: &AppState,
+    port_path: &str,
+) -> Result<RomSecurityInfo, HttpError> {
+    use espflash::{
+        connection::{Connection, ResetAfterOperation, ResetBeforeOperation},
+        flasher::Flasher,
+    };
+    use serialport::{FlowControl, SerialPortType, UsbPortInfo};
+
+    let _serial_rpc =
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+    drop_cached_serial_session(&state.serial_sessions, port_path)?;
+    let port_path = port_path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let port_info = serialport::available_ports()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .find(|candidate| candidate.port_name == port_path)
+            .ok_or_else(|| "authorized serial port is no longer enumerated".to_string())?;
+        let usb_info = match port_info.port_type {
+            SerialPortType::UsbPort(info) => info,
+            SerialPortType::PciPort | SerialPortType::Unknown => UsbPortInfo {
+                vid: 0,
+                pid: 0,
+                serial_number: None,
+                manufacturer: None,
+                product: None,
+            },
+            _ => {
+                return Err(String::from(
+                    "authorized port is not a supported USB serial target",
+                ));
+            }
+        };
+        let serial = serialport::new(&port_path, 115_200)
+            .flow_control(FlowControl::None)
+            .open_native()
+            .map_err(|error| error.to_string())?;
+        let connection = Connection::new(
+            serial,
+            usb_info,
+            ResetAfterOperation::HardReset,
+            ResetBeforeOperation::DefaultReset,
+            115_200,
+        );
+        let mut flasher = Flasher::connect(connection, false, true, false, None, None)
+            .map_err(|error| error.to_string())?;
+        let info = flasher.security_info().map_err(|error| error.to_string())?;
+        let device = flasher.device_info().map_err(|error| error.to_string())?;
+        Ok(RomSecurityInfo {
+            rom_mac: device
+                .mac_address
+                .ok_or_else(|| "ROM MAC is unavailable".to_string())?,
+            secure_boot_enabled: info.flags & 0x1 != 0,
+            flash_encryption_enabled: info.flash_crypt_cnt.count_ones() % 2 == 1,
+            secure_download_mode_enabled: info.flags & 0x4 != 0 || flasher.secure_download_mode(),
+            response_known: true,
+            chip_is_esp32s3: flasher.chip().to_string() == "esp32s3",
+            flash_size_bytes: u64::from(device.flash_size.size()),
+        })
+    })
+    .await
+    .map_err(|error| HttpError::internal(&format!("ROM security probe task failed: {error}")))?
+    .map_err(|error| {
+        HttpError::forbidden(
+            "security_info_unknown",
+            &format!("ROM security probe failed; flashing is blocked: {error}"),
+        )
+    })
 }
 
 fn firmware_preflight_stages(operation: FirmwareOperation) -> Vec<String> {
@@ -5228,6 +5579,7 @@ fn firmware_preflight_digest(
     port_path: &str,
     rom_mac: &str,
     bundle_sha256: &str,
+    source_partition_hash: Option<&str>,
 ) -> String {
     let value = json!({
         "leaseId": payload.lease_id,
@@ -5235,6 +5587,7 @@ fn firmware_preflight_digest(
         "portPath": port_path,
         "romMac": rom_mac,
         "bundleSha256": bundle_sha256,
+        "sourcePartitionTableSha256": source_partition_hash,
         "operation": payload.operation,
         "allowDowngrade": payload.allow_downgrade,
     });
@@ -11761,7 +12114,7 @@ mod tests {
                 channel: firmware_bundle::BundleChannel::Local,
             },
             &vec![0x11; 0x4000],
-            &vec![0x22; 0x1000],
+            include_bytes!("../../../firmware/partitions.bin"),
             &vec![0x33; 0x4000],
             Vec::new(),
         )
@@ -11777,6 +12130,7 @@ mod tests {
     #[test]
     fn security_info_fails_closed_for_each_protected_state() {
         let safe = RomSecurityInfo {
+            rom_mac: "00:11:22:33:44:55".into(),
             secure_boot_enabled: false,
             flash_encryption_enabled: false,
             secure_download_mode_enabled: false,
@@ -11788,27 +12142,27 @@ mod tests {
         for blocked in [
             RomSecurityInfo {
                 secure_boot_enabled: true,
-                ..safe
+                ..safe.clone()
             },
             RomSecurityInfo {
                 flash_encryption_enabled: true,
-                ..safe
+                ..safe.clone()
             },
             RomSecurityInfo {
                 secure_download_mode_enabled: true,
-                ..safe
+                ..safe.clone()
             },
             RomSecurityInfo {
                 response_known: false,
-                ..safe
+                ..safe.clone()
             },
             RomSecurityInfo {
                 chip_is_esp32s3: false,
-                ..safe
+                ..safe.clone()
             },
             RomSecurityInfo {
                 flash_size_bytes: 8 * 1024 * 1024,
-                ..safe
+                ..safe.clone()
             },
         ] {
             assert!(blocked.validate_for_flash().is_err());
