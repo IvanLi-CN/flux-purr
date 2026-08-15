@@ -10,12 +10,13 @@ const meta = {
   decorators: [
     (Story) => (
       <div
+        className="industrial-shell"
         style={{
-          width: 'min(800px, calc(100vw - 64px))',
+          width: 'min(900px, calc(100vw - 32px))',
           boxSizing: 'border-box',
-          margin: '16px',
+          margin: 0,
           padding: '16px',
-          background: '#d8e2e8',
+          background: 'var(--industrial-bg)',
         }}
       >
         <Story />

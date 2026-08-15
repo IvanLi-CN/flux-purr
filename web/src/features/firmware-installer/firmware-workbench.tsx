@@ -73,6 +73,7 @@ export function FirmwareWorkbench({
   const effectiveProgress = browserOutcome ? browserProgress : progress
   const effectiveMessage = browserMessage ?? message
   const stages = useMemo(() => firmwareStages(operation), [operation])
+  const activeStageIndex = firmwareStageIndex(stages.length, effectiveOutcome, effectiveProgress)
   const transportAvailable = transport === 'devd' ? devdAvailable : browserAvailable
   const canRun = transportAvailable && !busy && (channel !== 'local' || localBundle !== null)
 
@@ -299,30 +300,42 @@ export function FirmwareWorkbench({
         <button
           type="button"
           className={operation === 'update' ? 'is-active' : undefined}
+          aria-pressed={operation === 'update'}
           disabled={!updateEligible || busy}
           onClick={() => chooseOperation('update')}
         >
-          <RotateCcw size={18} aria-hidden="true" />
+          <span className="firmware-workbench__task-icon">
+            <RotateCcw size={19} aria-hidden="true" />
+          </span>
           <span>
             <strong>更新现有设备</strong>
             <small>保留设备配置并验证运行时身份</small>
           </span>
+          <em>保留配置</em>
         </button>
         <button
           type="button"
           className={operation === 'install_recovery' ? 'is-active' : undefined}
+          aria-pressed={operation === 'install_recovery'}
           disabled={busy}
           onClick={() => chooseOperation('install_recovery')}
         >
-          <Zap size={18} aria-hidden="true" />
+          <span className="firmware-workbench__task-icon">
+            <Zap size={19} aria-hidden="true" />
+          </span>
           <span>
             <strong>安装或恢复</strong>
             <small>适用于空片、外来固件或无法启动的设备</small>
           </span>
+          <em>完整安装</em>
         </button>
       </fieldset>
 
       <div className="firmware-workbench__controls">
+        <div className="firmware-workbench__controls-heading">
+          <strong>连接与固件</strong>
+          <span>{transport === 'devd' ? '本机受保护事务' : '浏览器直接连接 ROM'}</span>
+        </div>
         <fieldset>
           <legend>连接引擎</legend>
           <label>
@@ -405,6 +418,13 @@ export function FirmwareWorkbench({
         </label>
       ) : null}
 
+      {operation === 'install_recovery' ? (
+        <p className="firmware-workbench__erase-notice">
+          <Zap size={15} aria-hidden="true" />
+          MCU Flash 将完整擦除；外置 EEPROM 不在擦除范围内。
+        </p>
+      ) : null}
+
       {localError ? (
         <p className="firmware-workbench__error" role="alert">
           {localError}
@@ -412,12 +432,15 @@ export function FirmwareWorkbench({
       ) : null}
 
       <div className="firmware-workbench__status" data-outcome={effectiveOutcome}>
-        <div>
-          <ShieldCheck size={19} aria-hidden="true" />
+        <div className="firmware-workbench__status-heading">
+          <span className="firmware-workbench__status-icon">
+            <ShieldCheck size={20} aria-hidden="true" />
+          </span>
           <span>
             <strong>{outcomeLabel(effectiveOutcome)}</strong>
             <small>{effectiveMessage}</small>
           </span>
+          <output aria-label="固件操作进度">{Math.round(effectiveProgress)}%</output>
         </div>
         <div
           className="firmware-workbench__progress"
@@ -427,35 +450,90 @@ export function FirmwareWorkbench({
           aria-valuemax={100}
           aria-valuenow={effectiveProgress}
         >
-          <span style={{ width: `${Math.max(0, Math.min(effectiveProgress, 100))}%` }} />
+          <span
+            style={{
+              transform: `scaleX(${Math.max(0, Math.min(effectiveProgress, 100)) / 100})`,
+            }}
+          />
         </div>
         <ol aria-label="固件操作阶段">
-          {stages.map((stage) => (
-            <li key={stage}>{stage.replaceAll('_', ' ')}</li>
+          {stages.map((stage, index) => (
+            <li
+              key={stage}
+              data-state={
+                index < activeStageIndex
+                  ? 'done'
+                  : index === activeStageIndex
+                    ? 'active'
+                    : 'pending'
+              }
+            >
+              <span aria-hidden="true" />
+              {firmwareStageLabel(stage)}
+            </li>
           ))}
         </ol>
       </div>
 
       <div className="firmware-workbench__actions">
-        <button type="button" disabled={!canRun} onClick={() => void runPreflight()}>
+        <button
+          type="button"
+          className={`industrial-button ${effectiveOutcome === 'preflight_passed' ? 'industrial-button--secondary' : 'industrial-button--primary'}`}
+          disabled={!canRun}
+          onClick={() => void runPreflight()}
+        >
           <ShieldCheck size={17} aria-hidden="true" />
           运行预检
         </button>
         <button
           type="button"
-          className="is-primary"
+          className={`industrial-button firmware-workbench__install ${effectiveOutcome === 'preflight_passed' ? 'industrial-button--primary' : 'industrial-button--secondary'}`}
           disabled={!canRun || effectiveOutcome !== 'preflight_passed'}
           onClick={() => void runInstall()}
         >
           <Zap size={17} aria-hidden="true" />
           {operation === 'update' ? '开始更新' : '擦除并安装'}
         </button>
-        <button type="button" aria-label="下载本地诊断报告" onClick={downloadDiagnostic}>
+        <button
+          type="button"
+          className="industrial-button industrial-button--ghost firmware-workbench__download"
+          aria-label="下载本地诊断报告"
+          title="下载本地诊断报告"
+          onClick={downloadDiagnostic}
+        >
           <Download size={17} aria-hidden="true" />
         </button>
       </div>
     </section>
   )
+}
+
+function firmwareStageIndex(length: number, outcome: FirmwareOutcome, progress: number) {
+  if (outcome === 'verified') return length - 1
+  if (outcome === 'write_complete_unverified') return Math.max(0, length - 2)
+  if (outcome === 'preflight_passed') return Math.min(length - 1, 5)
+  if (outcome === 'running') {
+    return Math.min(length - 1, Math.max(0, Math.floor((progress / 100) * length)))
+  }
+  return 0
+}
+
+function firmwareStageLabel(stage: ReturnType<typeof firmwareStages>[number]) {
+  const labels = {
+    artifact: '固件包',
+    transport: '连接',
+    rom_reset: 'ROM 模式',
+    chip_flash_security: '芯片安全',
+    layout_config: '布局配置',
+    preflight: '预检',
+    erase: '擦除',
+    write_segments: '写入',
+    rom_md5: 'ROM 校验',
+    reset: '复位',
+    runtime_reconnect: '运行时重连',
+    runtime_verify: '身份验证',
+  } satisfies Record<ReturnType<typeof firmwareStages>[number], string>
+  return labels[stage]
 }
 
 function compareSemver(left: string, right: string) {
