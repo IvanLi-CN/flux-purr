@@ -1,0 +1,92 @@
+import { expect, test } from '@playwright/test'
+
+const identity = 'fp-lab-01'
+
+test.describe('device-scoped routing', () => {
+  test('deep links, tabs, refresh, and browser history keep route state', async ({ page }) => {
+    await page.goto(`/devices/${identity}/overview?demo=true`)
+    await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/overview\\?demo=true$`))
+
+    await page.getByRole('link', { name: /设置/ }).click()
+    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/settings\\?demo=true$`))
+    await expect(page.getByRole('link', { name: /设置/ })).toHaveAttribute('aria-current', 'page')
+
+    await page.getByRole('link', { name: /校准/ }).click()
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+    )
+    const heaterCurveTab = page.getByRole('tab', { name: '加热曲线标定' })
+    await heaterCurveTab.focus()
+    await heaterCurveTab.press('ArrowRight')
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/rtd-adc\\?demo=true$`)
+    )
+
+    await page.reload()
+    await expect(page.getByRole('tab', { name: '温度标定' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+    await page.goBack()
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+    )
+    await page.goForward()
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/rtd-adc\\?demo=true$`)
+    )
+  })
+
+  test('keeps an unknown stable identity in the URL and offers recovery', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 })
+    await page.goto('/devices/missing-device/settings?demo=true')
+    await expect(page).toHaveURL(/\/devices\/missing-device\/settings\?demo=true$/)
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '添加连接' })).toBeVisible()
+    const actionHeights = await page
+      .getByRole('region', { name: '目标设备暂不可用' })
+      .getByRole('button')
+      .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().height))
+    expect(actionHeights.every((height) => height >= 48)).toBe(true)
+  })
+
+  test('pushes one history entry for a calibration tab mouse click', async ({ page }) => {
+    await page.goto(`/devices/${identity}/calibration/heater-curve?demo=true`)
+
+    await page.getByRole('tab', { name: '温度标定' }).click()
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/rtd-adc\\?demo=true$`)
+    )
+    await page.goBack()
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+    )
+  })
+
+  test('redirects indexes with replace and preserves typed search', async ({ page }) => {
+    await page.goto('/devices?demo=true')
+    await expect(page).toHaveURL(/\/devices\/new\?demo=true$/)
+
+    await page.goto(`/devices/${identity}/overview?demo=true`)
+    await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
+    await page.goto('/?demo=true')
+    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/overview\\?demo=true$`))
+  })
+
+  test('shows a router 404 for structurally invalid paths', async ({ page }) => {
+    await page.goto('/devices/fp-lab-01/calibration/unknown?demo=true')
+    await expect(page.getByRole('heading', { name: '路径不存在' })).toBeVisible()
+  })
+
+  test('normalizes bare UI demo search from any path and renders the mock surface', async ({
+    page,
+  }) => {
+    await page.goto('/devices/missing-device/settings?uiDemo&demo=true')
+
+    await expect(page).toHaveURL(/\/\?(?=.*demo=true)(?=.*uiDemo=true)/)
+    await expect(page.getByLabel('LAN pairing demo')).toBeVisible()
+    await expect(page.getByLabel('设备地址')).toHaveValue('http://192.168.1.18')
+  })
+})

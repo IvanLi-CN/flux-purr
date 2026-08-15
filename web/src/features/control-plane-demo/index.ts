@@ -1,3 +1,8 @@
+export type {
+  BlockedConsoleNavigation,
+  CalibrationRouteGuard,
+  ConsoleNavigationAdapter,
+} from './components/control-plane-demo'
 export {
   ControlPlaneDemo,
   controlPlaneScenario,

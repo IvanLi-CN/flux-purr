@@ -3,6 +3,7 @@ import {
   deviceIdentityId,
   isDeviceConnectionAvailable,
   mergeDeviceChoices,
+  preferredDeviceConnection,
 } from './device-target-picker'
 import type { DeviceTarget } from './types'
 
@@ -134,5 +135,20 @@ describe('device target picker', () => {
     expect(choices[0].connections).toHaveLength(1)
     expect(choices[0].connections[0].target.id).toBe('lan-live-device-1')
     expect(choices[0].primary.id).toBe('lan-live-device-1')
+  })
+
+  it('prefers the last successful transport before the active healthy fallback', () => {
+    const choice = mergeDeviceChoices([
+      target({ id: 'bridge-device-1', transport: 'devd', leaseState: 'active' }),
+      target({
+        id: 'lan-device-1',
+        transport: 'wifi',
+        baseUrl: 'http://192.168.1.42',
+        leaseState: 'none',
+      }),
+    ])[0]
+
+    expect(preferredDeviceConnection(choice, 'wifi')?.target.id).toBe('lan-device-1')
+    expect(preferredDeviceConnection(choice)?.target.id).toBe('bridge-device-1')
   })
 })

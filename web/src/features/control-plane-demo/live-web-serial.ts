@@ -37,11 +37,14 @@ export interface LiveWebSerialOptions {
 export interface LiveWebSerialControls {
   state: WebSerialConnectionState
   supported: boolean
+  preauthorizedPortsReady: boolean
   error?: string
   deviceId?: string
   connect: (options?: {
     forcePortSelection?: boolean
     replaceExisting?: boolean
+    preauthorizedOnly?: boolean
+    signal?: AbortSignal
   }) => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
@@ -71,7 +74,11 @@ export function useLiveWebSerialScenario(
   const browserSerial = getBrowserSerial()
   const supported = enabled && isWebSerialSupported(browserSerial)
   const clientRef = useRef<WebSerialControlPlaneClient | null>(null)
+  const connectAttemptRef = useRef(0)
   const preauthorizedPortsRef = useRef<BrowserSerialPort[] | undefined>(undefined)
+  const [preauthorizedPortsReady, setPreauthorizedPortsReady] = useState(
+    !enabled || !browserSerial?.getPorts
+  )
   const [state, setState] = useState<WebSerialConnectionState>(supported ? 'idle' : 'unsupported')
   const [device, setDevice] = useState<DeviceTarget | null>(null)
   const [events, setEvents] = useState<EventLogEntry[]>([])
@@ -96,20 +103,24 @@ export function useLiveWebSerialScenario(
   useEffect(() => {
     preauthorizedPortsRef.current = undefined
     if (!enabled || !browserSerial?.getPorts) {
+      setPreauthorizedPortsReady(true)
       return
     }
 
+    setPreauthorizedPortsReady(false)
     let cancelled = false
     void browserSerial
       .getPorts()
       .then((ports) => {
         if (!cancelled) {
           preauthorizedPortsRef.current = ports
+          setPreauthorizedPortsReady(true)
         }
       })
       .catch(() => {
         if (!cancelled) {
           preauthorizedPortsRef.current = undefined
+          setPreauthorizedPortsReady(true)
         }
       })
     return () => {
@@ -132,7 +143,20 @@ export function useLiveWebSerialScenario(
   }, [])
 
   const connect = useCallback(
-    async ({ forcePortSelection = false, replaceExisting = false } = {}) => {
+    async ({
+      forcePortSelection = false,
+      replaceExisting = false,
+      preauthorizedOnly = false,
+      signal,
+    }: {
+      forcePortSelection?: boolean
+      replaceExisting?: boolean
+      preauthorizedOnly?: boolean
+      signal?: AbortSignal
+    } = {}) => {
+      if (signal?.aborted) return false
+      const attemptId = ++connectAttemptRef.current
+      const isCurrentAttempt = () => connectAttemptRef.current === attemptId
       if (!enabled || !supported) {
         setError('Web Serial is not available in this browser.')
         setState('unsupported')
@@ -146,27 +170,37 @@ export function useLiveWebSerialScenario(
       const replacingConnectedClient = replaceExisting && clientRef.current != null
       let previousClientDisconnected = false
       try {
+        if (preauthorizedOnly && preauthorizedPortsRef.current?.length !== 1) {
+          setError('没有唯一的已授权 Web Serial 端口，请手动选择设备。')
+          setState('idle')
+          return false
+        }
         const selectedPortPromise =
           replaceExisting && !clientFactory && browserSerial
             ? selectBrowserSerialPort(
                 browserSerial,
                 preauthorizedPortsRef.current,
-                forcePortSelection
+                forcePortSelection,
+                !preauthorizedOnly
               )
             : null
         const selectedPort = selectedPortPromise ? await selectedPortPromise : null
+        if (signal?.aborted || !isCurrentAttempt()) return false
         if (replaceExisting) {
           const currentClient = clientRef.current
           clientRef.current = null
           await currentClient?.disconnect()
           previousClientDisconnected = true
         }
+        if (signal?.aborted || !isCurrentAttempt()) return false
         client =
           clientFactory?.() ??
           new WebSerialControlPlaneClient({
             serial: browserSerial,
             preauthorizedPorts: selectedPort ? [selectedPort] : preauthorizedPortsRef.current,
+            requestPortWhenUnavailable: !preauthorizedOnly,
             onDiagnostic: (diagnostic) => {
+              if (signal?.aborted || !isCurrentAttempt()) return
               const message = webSerialDiagnosticMessage(diagnostic)
               appendEvent(message, 'warning')
               if (connectionEstablished) {
@@ -185,6 +219,11 @@ export function useLiveWebSerialScenario(
             true
           )
         )
+        if (signal?.aborted || !isCurrentAttempt()) {
+          await client.disconnect()
+          if (isCurrentAttempt()) setState('idle')
+          return false
+        }
         clientRef.current = client
         connectionEstablished = true
         const nextDevice = webSerialProbeToDeviceTarget(probe)
@@ -205,6 +244,11 @@ export function useLiveWebSerialScenario(
         appendEvent(`${nextDevice.alias} connected over browser Web Serial`, 'success')
         return true
       } catch (error) {
+        if (signal?.aborted || !isCurrentAttempt()) {
+          await client?.disconnect()
+          if (isCurrentAttempt()) setState('idle')
+          return false
+        }
         const normalizedError = normalizeBrowserSerialError(error)
         const message = normalizedError.message
         if (replacingConnectedClient && !previousClientDisconnected) {
@@ -234,6 +278,7 @@ export function useLiveWebSerialScenario(
   )
 
   const disconnect = useCallback(async () => {
+    connectAttemptRef.current += 1
     const client = clientRef.current
     clientRef.current = null
     setDevice(null)
@@ -482,6 +527,7 @@ export function useLiveWebSerialScenario(
     () => ({
       state,
       supported,
+      preauthorizedPortsReady,
       error,
       deviceId: device?.id,
       connect,
@@ -508,6 +554,7 @@ export function useLiveWebSerialScenario(
       getCalibration,
       getCalibrationJob,
       getHeaterCurve,
+      preauthorizedPortsReady,
       previewHeaterCurve,
       saveHeaterCurve,
       state,

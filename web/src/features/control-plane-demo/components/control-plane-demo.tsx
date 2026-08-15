@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertTriangle,
@@ -38,6 +39,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import SimpleBar from 'simplebar-react'
+import type { AppVariant } from '@/app-mode'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -54,6 +56,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import type { ConsoleRouteState } from '@/routing/console-route'
+import { readRoutePreferences, rememberSuccessfulRoute } from '@/routing/route-preferences'
+import type { AppSearch } from '@/routing/search'
 import {
   bridgeCandidatesForTransport,
   bridgeProbeToDeviceTarget,
@@ -95,8 +100,11 @@ import type {
 } from '../contracts'
 import {
   type DeviceChoice,
+  type DeviceConnectionKind,
   type DeviceConnectionOption,
+  deviceIdentityId,
   mergeDeviceChoices,
+  preferredDeviceConnection,
 } from '../device-target-picker'
 import {
   knownWebSerialDeviceToTarget,
@@ -188,9 +196,34 @@ export interface LanRuntimeDependencies {
 
 type LanPairingOverrides = Omit<LanPairingPanelProps, 'onPaired'>
 
+export interface BlockedConsoleNavigation {
+  next: ConsoleRouteState | null
+  nextLabel: string
+  proceed: () => void
+  reset: () => void
+}
+
+export interface CalibrationRouteGuard {
+  deviceId: string
+  workspaceTab: CalibrationWorkspaceTab
+}
+
+export interface ConsoleNavigationAdapter {
+  state: ConsoleRouteState
+  variant: AppVariant
+  search: AppSearch
+  navigate: (
+    state: ConsoleRouteState,
+    options?: { replace?: boolean; ignoreBlocker?: boolean }
+  ) => Promise<void>
+  blockedNavigation: BlockedConsoleNavigation | null
+  onCalibrationGuardChange: (guard: CalibrationRouteGuard | null) => void
+}
+
 interface ControlPlaneDemoProps {
   scenario?: ControlPlaneScenario
   initialView?: ConsoleView
+  navigation?: ConsoleNavigationAdapter
   devd?: LiveDevdOptions
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
@@ -212,6 +245,7 @@ interface ActionFeedback {
 
 interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
   continueAction: () => void | Promise<void>
+  cancelAction?: () => void
   nextView?: ConsoleView
   nextWorkspaceTab?: CalibrationWorkspaceTab
   anchorId?: string
@@ -238,6 +272,15 @@ const LOG_FILTER_OPTIONS: Array<{ value: LogFilter; label: string }> = [
 const TARGET_TEMP_MIN = 0
 const TARGET_TEMP_MAX = 400
 const TARGET_TEMP_STEP = 5
+
+function resumeConnectionPriority(connection: DeviceConnectionOption) {
+  if (connection.target.severity === 'nominal' && connection.target.leaseState === 'active')
+    return 0
+  if (connection.kind === 'wifi') return 1
+  if (connection.kind === 'web-serial') return 2
+  if (connection.kind === 'bridge') return 3
+  return 4
+}
 const PPS_STEP_MV = 100
 const PPS_HARDWARE_MIN_MV = 5_000
 const PPS_HARDWARE_MAX_MV = 28_000
@@ -315,7 +358,7 @@ const addDeviceOptions: Array<{
 const NO_LIVE_TARGET_ID = 'live-no-target'
 
 const consoleViews: Array<{
-  id: ConsoleView
+  id: Exclude<ConsoleView, 'add-device'>
   label: string
   caption: string
   icon: typeof Gauge
@@ -345,6 +388,92 @@ const consoleViews: Array<{
     icon: Upload,
   },
 ]
+
+function ConsoleViewLink({
+  deviceId,
+  view,
+  calibrationTab,
+  active,
+  className,
+  search,
+  children,
+}: {
+  deviceId: string
+  view: Exclude<ConsoleView, 'add-device'>
+  calibrationTab: CalibrationWorkspaceTab
+  active: boolean
+  className: string
+  search: AppSearch
+  children: ReactNode
+}) {
+  const shared = {
+    className,
+    'aria-current': active ? ('page' as const) : undefined,
+    search,
+    children,
+  }
+  if (view === 'dashboard') {
+    return <Link {...shared} to="/devices/$deviceId/overview" params={{ deviceId }} />
+  }
+  if (view === 'settings') {
+    return <Link {...shared} to="/devices/$deviceId/settings" params={{ deviceId }} />
+  }
+  if (view === 'update') {
+    return <Link {...shared} to="/devices/$deviceId/update" params={{ deviceId }} />
+  }
+  const calibrationPaths = {
+    heater_curve: '/devices/$deviceId/calibration/heater-curve',
+    rtd_adc: '/devices/$deviceId/calibration/rtd-adc',
+    vin_adc: '/devices/$deviceId/calibration/vin-adc',
+  } as const
+  return <Link {...shared} to={calibrationPaths[calibrationTab]} params={{ deviceId }} />
+}
+
+function CalibrationRouteTab({
+  navigation,
+  tab,
+  children,
+}: {
+  navigation?: ConsoleNavigationAdapter
+  tab: CalibrationWorkspaceTab
+  children: ReactNode
+}) {
+  if (!navigation || navigation.state.kind !== 'device') {
+    return (
+      <TabsTrigger value={tab} className="industrial-calibration-tab">
+        <span>{children}</span>
+      </TabsTrigger>
+    )
+  }
+  const paths = {
+    heater_curve: '/devices/$deviceId/calibration/heater-curve',
+    rtd_adc: '/devices/$deviceId/calibration/rtd-adc',
+    vin_adc: '/devices/$deviceId/calibration/vin-adc',
+  } as const
+  return (
+    <TabsTrigger value={tab} className="industrial-calibration-tab" asChild>
+      <Link
+        to={paths[tab]}
+        params={{ deviceId: navigation.state.deviceId }}
+        search={navigation.search}
+        aria-current={navigation.state.calibrationTab === tab ? 'page' : undefined}
+        onClick={(event) => {
+          if (
+            event.button === 0 &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey
+          ) {
+            event.preventDefault()
+          }
+        }}
+      >
+        <span>{children}</span>
+      </Link>
+    </TabsTrigger>
+  )
+}
 
 function pendingDeviceId(kind: AddDeviceKind) {
   return `pending-${kind}-target`
@@ -462,6 +591,7 @@ export function shouldUseWifiReceipt(
 export function ControlPlaneDemo({
   scenario = controlPlaneScenario,
   initialView = 'dashboard',
+  navigation,
   devd,
   webSerial: webSerialOptions,
   allowDemoControls = true,
@@ -469,7 +599,20 @@ export function ControlPlaneDemo({
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
-  const [activeView, setActiveView] = useState<ConsoleView>(initialView)
+  const [localActiveView, setLocalActiveView] = useState<ConsoleView>(initialView)
+  const activeView = navigation
+    ? navigation.state.kind === 'add-device'
+      ? 'add-device'
+      : navigation.state.view
+    : localActiveView
+  const [routePreferences, setRoutePreferences] = useState(readRoutePreferences)
+  const [routeResumeFailed, setRouteResumeFailed] = useState(false)
+  const [routeFallbackKind, setRouteFallbackKind] = useState<DeviceConnectionKind | undefined>()
+  const automaticResumeKeyRef = useRef<string | null>(null)
+  const successfulRouteKeyRef = useRef<string | null>(null)
+  const previousRouteDeviceIdRef = useRef<string | null>(null)
+  const requestedConnectionByIdentityRef = useRef<Record<string, DeviceConnectionKind>>({})
+  const invalidLanCredentialIdentityIdsRef = useRef(new Set<string>())
   const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
     useState<AddDeviceKind>(defaultAddDeviceKind)
   const liveDevdScenario = useLiveDevdScenario(scenario, {
@@ -592,7 +735,27 @@ export function ControlPlaneDemo({
     () => [...activeScenario.devices, ...pendingDevices],
     [activeScenario.devices, pendingDevices]
   )
+  const routeDeviceChoices = useMemo(
+    () => mergeDeviceChoices(deviceOptions, { allowDemoControls }),
+    [allowDemoControls, deviceOptions]
+  )
+  const routedConsoleState = navigation?.state
+  const routeDeviceChoice =
+    routedConsoleState?.kind === 'device'
+      ? routeDeviceChoices.find((choice) => choice.identityId === routedConsoleState.deviceId)
+      : undefined
+  const routeDeviceConnection = routeDeviceChoice
+    ? preferredDeviceConnection(
+        routeDeviceChoice,
+        routeFallbackKind ??
+          requestedConnectionByIdentityRef.current[routeDeviceChoice.identityId] ??
+          routePreferences.transportByIdentity[routeDeviceChoice.identityId]
+      )
+    : undefined
   const preferredSelectedDeviceId = useMemo(() => {
+    if (navigation?.state.kind === 'device' && routeDeviceConnection) {
+      return routeDeviceConnection.target.id
+    }
     const selectedOption = deviceOptions.find((device) => device.id === selectedDeviceId)
     if (!selectedOption) {
       return activeScenario.selectedDeviceId
@@ -610,7 +773,14 @@ export function ControlPlaneDemo({
     }
 
     return selectedDeviceId
-  }, [activeScenario.selectedDeviceId, deviceOptions, scenario.selectedDeviceId, selectedDeviceId])
+  }, [
+    activeScenario.selectedDeviceId,
+    deviceOptions,
+    navigation?.state.kind,
+    routeDeviceConnection,
+    scenario.selectedDeviceId,
+    selectedDeviceId,
+  ])
 
   useEffect(() => {
     if (pendingDeviceModeRef.current === allowDemoControls) {
@@ -637,6 +807,7 @@ export function ControlPlaneDemo({
     let cancelled = false
     for (const session of listSavedLanDeviceSessions()) {
       const rememberedTarget = savedLanSessionToDeviceTarget(session)
+      const rememberedIdentityId = rememberedTarget ? deviceIdentityId(rememberedTarget) : null
       if (rememberedTarget) {
         setPendingDevices((current) => upsertLanDeviceTarget(current, rememberedTarget))
       }
@@ -653,6 +824,9 @@ export function ControlPlaneDemo({
             error.code !== 'unauthorized'
           ) {
             return
+          }
+          if (rememberedIdentityId) {
+            invalidLanCredentialIdentityIdsRef.current.add(rememberedIdentityId)
           }
           setFeedback({
             title: 'LAN 配对凭据已失效',
@@ -692,6 +866,23 @@ export function ControlPlaneDemo({
     ]
   )
 
+  const routeDeviceId = navigation?.state.kind === 'device' ? navigation.state.deviceId : null
+
+  useEffect(() => {
+    if (previousRouteDeviceIdRef.current === routeDeviceId) return
+    previousRouteDeviceIdRef.current = routeDeviceId
+    setRouteResumeFailed(false)
+    setRouteFallbackKind(undefined)
+    automaticResumeKeyRef.current = null
+    successfulRouteKeyRef.current = null
+  }, [routeDeviceId])
+
+  useEffect(() => {
+    const routeTarget = routeDeviceConnection?.target
+    if (!navigation || navigation.state.kind !== 'device' || !routeTarget) return
+    if (selectedDeviceId !== routeTarget.id) setSelectedDeviceId(routeTarget.id)
+  }, [navigation, routeDeviceConnection, selectedDeviceId])
+
   useEffect(() => {
     if (!deviceOptions.some((device) => device.id === selectedDeviceId)) {
       setSelectedDeviceId(activeScenario.selectedDeviceId)
@@ -714,6 +905,13 @@ export function ControlPlaneDemo({
     const connectedTarget = activeScenario.devices.find(
       (device) => device.id === webSerial.deviceId
     )
+    if (navigation?.state.kind === 'add-device' && connectedTarget) {
+      void navigation.navigate({
+        kind: 'device',
+        deviceId: deviceIdentityId(connectedTarget),
+        view: 'dashboard',
+      })
+    }
     if (persistKnownWebSerialDevices && connectedTarget) {
       const deviceId = connectedTarget.identityId ?? connectedTarget.id.replace(/^web-serial-/, '')
       const remembered = {
@@ -751,6 +949,7 @@ export function ControlPlaneDemo({
     deviceOptions,
     preferredSelectedDeviceId,
     activeScenario.devices,
+    navigation,
     persistKnownWebSerialDevices,
     selectedAddDeviceKind,
     webSerial.deviceId,
@@ -1279,13 +1478,215 @@ export function ControlPlaneDemo({
     activeScenario.devices.find((device) => device.id === visibleDevice.id)?.heaterCurve ??
     createDefaultHeaterCurveState()
   const visibleCalibrationWorkspaceTab =
-    calibrationWorkspaceTabByDevice[visibleDevice.id] ?? 'heater_curve'
+    navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
+      ? (navigation.state.calibrationTab ?? 'heater_curve')
+      : (calibrationWorkspaceTabByDevice[visibleDevice.id] ?? 'heater_curve')
   const visibleCalibrationRefs = calibrationRefsByDevice[visibleDevice.id] ?? {
     rtdTempC: isRenderableTemperature(visibleDevice.currentTempC)
       ? Number(visibleDevice.currentTempC.toFixed(1))
       : 25,
     vinMv: visibleDevice.voltageMv,
   }
+
+  const setConsoleView = useCallback(
+    (nextView: ConsoleView, options?: { replace?: boolean }) => {
+      if (!navigation) {
+        setLocalActiveView(nextView)
+        return Promise.resolve()
+      }
+      if (nextView === 'add-device') {
+        return navigation.navigate({ kind: 'add-device' }, options)
+      }
+      const deviceId =
+        navigation.state.kind === 'device'
+          ? navigation.state.deviceId
+          : deviceIdentityId(visibleDevice)
+      return navigation.navigate(
+        {
+          kind: 'device',
+          deviceId,
+          view: nextView,
+          ...(nextView === 'calibration' ? { calibrationTab: visibleCalibrationWorkspaceTab } : {}),
+        },
+        options
+      )
+    },
+    [navigation, visibleCalibrationWorkspaceTab, visibleDevice]
+  )
+
+  const setWorkspaceTab = useCallback(
+    (
+      nextTab: CalibrationWorkspaceTab,
+      options?: { replace?: boolean; ignoreBlocker?: boolean }
+    ) => {
+      if (!navigation || navigation.state.kind !== 'device') {
+        setCalibrationWorkspaceTabByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: nextTab,
+        }))
+        return Promise.resolve()
+      }
+      return navigation.navigate(
+        {
+          kind: 'device',
+          deviceId: navigation.state.deviceId,
+          view: 'calibration',
+          calibrationTab: nextTab,
+        },
+        options
+      )
+    },
+    [navigation, visibleDevice.id]
+  )
+
+  useEffect(() => {
+    if (!navigation) return
+    const guard =
+      activeView === 'calibration' && visibleRuntimeCalibration.mode !== 'off'
+        ? {
+            deviceId:
+              navigation.state.kind === 'device'
+                ? navigation.state.deviceId
+                : deviceIdentityId(visibleDevice),
+            workspaceTab: visibleCalibrationWorkspaceTab,
+          }
+        : null
+    navigation.onCalibrationGuardChange(guard)
+    return () => navigation.onCalibrationGuardChange(null)
+  }, [
+    activeView,
+    navigation,
+    visibleCalibrationWorkspaceTab,
+    visibleDevice,
+    visibleRuntimeCalibration.mode,
+  ])
+
+  useEffect(() => {
+    const blocked = navigation?.blockedNavigation
+    if (!blocked || calibrationLeaveGuard) return
+    setCalibrationLeaveGuard({
+      reason: 'view-change',
+      nextLabel: blocked.nextLabel,
+      nextView: blocked.next?.kind === 'device' ? blocked.next.view : 'add-device',
+      nextWorkspaceTab: blocked.next?.kind === 'device' ? blocked.next.calibrationTab : undefined,
+      continueAction: blocked.proceed,
+      cancelAction: blocked.reset,
+    })
+    setFeedback({
+      title: '请先关闭校准控制',
+      detail: `${calibrationModeLabel(visibleCalibrationWorkspaceTab)}仍在运行，离开前请先关闭开关。`,
+      tone: 'warning',
+    })
+  }, [calibrationLeaveGuard, navigation?.blockedNavigation, visibleCalibrationWorkspaceTab])
+
+  const connectPreauthorizedWebSerial = useCallback(
+    (signal: AbortSignal) =>
+      webSerial.connect({ replaceExisting: true, preauthorizedOnly: true, signal }),
+    [webSerial.connect]
+  )
+
+  const routeRecoveryIdentityId =
+    navigation?.state.kind === 'device' ? navigation.state.deviceId : null
+  const routeRecoveryVariant = navigation?.variant
+  const routeConnectionKind = routeDeviceConnection?.kind
+  const routeConnectionTargetId = routeDeviceConnection?.target.id
+  const routeConnectionTargetAlias = routeDeviceConnection?.target.alias
+  const routeFallbackConnection = routeDeviceChoice?.connections
+    .filter((connection) => connection.kind !== 'web-serial')
+    .sort((left, right) => resumeConnectionPriority(left) - resumeConnectionPriority(right))[0]
+  const routeFallbackConnectionKind = routeFallbackConnection?.kind
+  const routeFallbackConnectionLabel = routeFallbackConnection?.label
+
+  useEffect(() => {
+    if (
+      !routeRecoveryIdentityId ||
+      !routeRecoveryVariant ||
+      !routeConnectionKind ||
+      !routeConnectionTargetId ||
+      !routeConnectionTargetAlias
+    ) {
+      return
+    }
+    if (routeConnectionKind !== 'web-serial') {
+      setRouteResumeFailed(false)
+      return
+    }
+    if (
+      webSerial.deviceId &&
+      deviceIdentityId({ id: webSerial.deviceId, identityId: routeRecoveryIdentityId }) ===
+        routeRecoveryIdentityId
+    ) {
+      setRouteResumeFailed(false)
+      return
+    }
+    if (!webSerial.preauthorizedPortsReady) return
+
+    const attemptKey = `${routeRecoveryVariant}:${routeRecoveryIdentityId}:${routeConnectionTargetId}`
+    if (automaticResumeKeyRef.current === attemptKey) return
+    automaticResumeKeyRef.current = attemptKey
+    setFeedback({
+      title: '正在恢复 Web Serial',
+      detail: `正在使用已授权端口验证 ${routeConnectionTargetAlias}，不会打开系统设备选择器。`,
+      tone: 'info',
+    })
+    const controller = new AbortController()
+    void connectPreauthorizedWebSerial(controller.signal).then((connected) => {
+      if (controller.signal.aborted) return
+      if (connected) {
+        setFeedback({
+          title: 'Web Serial connected',
+          detail: 'Browser direct USB JSONL control is active.',
+          tone: 'success',
+        })
+        setRouteResumeFailed(false)
+        return
+      }
+      if (routeFallbackConnectionKind && routeFallbackConnectionLabel) {
+        setRouteFallbackKind(routeFallbackConnectionKind)
+        setFeedback({
+          title: '已切换备用连接',
+          detail: `${routeConnectionTargetAlias} 的预授权串口不可用，正在尝试 ${routeFallbackConnectionLabel}。`,
+          tone: 'warning',
+        })
+        return
+      }
+      setFeedback({
+        title: 'Web Serial unavailable',
+        detail: 'Browser direct USB control could not be opened.',
+        tone: 'warning',
+      })
+      setRouteResumeFailed(true)
+    })
+    return () => controller.abort()
+  }, [
+    connectPreauthorizedWebSerial,
+    routeConnectionKind,
+    routeConnectionTargetAlias,
+    routeConnectionTargetId,
+    routeFallbackConnectionKind,
+    routeFallbackConnectionLabel,
+    routeRecoveryIdentityId,
+    routeRecoveryVariant,
+    webSerial.deviceId,
+    webSerial.preauthorizedPortsReady,
+  ])
+
+  useEffect(() => {
+    if (!navigation || navigation.state.kind !== 'device' || !routeDeviceConnection) return
+    const identityId = navigation.state.deviceId
+    if (deviceIdentityId(visibleDevice) !== identityId) return
+    const successful =
+      visibleDevice.connectionAvailable !== false &&
+      visibleDevice.severity === 'nominal' &&
+      (routeDeviceConnection.kind === 'mock' || visibleDevice.leaseState === 'active')
+    if (!successful) return
+    const successKey = `${navigation.variant}:${identityId}:${routeDeviceConnection.kind}`
+    if (successfulRouteKeyRef.current === successKey) return
+    successfulRouteKeyRef.current = successKey
+    rememberSuccessfulRoute(navigation.variant, identityId, routeDeviceConnection.kind)
+    delete requestedConnectionByIdentityRef.current[identityId]
+    setRoutePreferences(readRoutePreferences())
+  }, [navigation, routeDeviceConnection, visibleDevice])
 
   useEffect(() => {
     if (!calibrationLeaveGuard) {
@@ -1307,14 +1708,15 @@ export function ControlPlaneDemo({
       return
     }
 
-    setCalibrationWorkspaceTabByDevice((current) => ({
-      ...current,
-      [visibleDevice.id]: activeMode,
-    }))
-  }, [activeView, visibleCalibrationWorkspaceTab, visibleDevice.id, visibleRuntimeCalibration.mode])
+    void setWorkspaceTab(activeMode, { replace: true, ignoreBlocker: true })
+  }, [activeView, setWorkspaceTab, visibleCalibrationWorkspaceTab, visibleRuntimeCalibration.mode])
 
   useEffect(() => {
     if (!shouldShowDeviceControlBlockFeedback(visibleDevice)) {
+      return
+    }
+
+    if (invalidLanCredentialIdentityIdsRef.current.has(deviceIdentityId(visibleDevice))) {
       return
     }
 
@@ -1651,11 +2053,20 @@ export function ControlPlaneDemo({
           leaseId: lease.leaseId,
           leaseState: 'active',
         }
+        invalidLanCredentialIdentityIdsRef.current.delete(deviceIdentityId(leasedTarget))
         setLanLeasesByDevice((current) => ({ ...current, [target.id]: lease }))
         setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
         setSelectedDeviceId(target.id)
         setSelectedAddDeviceKind(defaultAddDeviceKind)
-        setActiveView('dashboard')
+        if (navigation) {
+          await navigation.navigate({
+            kind: 'device',
+            deviceId: deviceIdentityId(leasedTarget),
+            view: 'dashboard',
+          })
+        } else {
+          await setConsoleView('dashboard')
+        }
         setFeedback({
           title: 'LAN 设备已连接',
           detail: `${target.alias} 已取得控制 lease。`,
@@ -1672,7 +2083,7 @@ export function ControlPlaneDemo({
         throw error
       }
     },
-    [emitEvent, lanRuntime]
+    [emitEvent, lanRuntime, navigation, setConsoleView]
   )
 
   useEffect(() => {
@@ -2036,6 +2447,13 @@ export function ControlPlaneDemo({
     setCalibrationLeaveGuard(null)
   }, [])
 
+  const cancelCalibrationLeaveGuard = useCallback(() => {
+    setCalibrationLeaveGuard((current) => {
+      current?.cancelAction?.()
+      return null
+    })
+  }, [])
+
   const requestCalibrationLeave = useCallback(
     async (
       request: CalibrationLeaveRequest,
@@ -2087,6 +2505,27 @@ export function ControlPlaneDemo({
   )
 
   const handleDeviceChange = (deviceId: string) => {
+    if (navigation) {
+      if (deviceId === ADD_DEVICE_VALUE) {
+        void navigation.navigate({ kind: 'add-device' })
+        return
+      }
+      const nextDevice = deviceOptions.find((device) => device.id === deviceId)
+      if (!nextDevice) return
+      const identityId = deviceIdentityId(nextDevice)
+      const connection = routeDeviceChoices
+        .find((choice) => choice.identityId === identityId)
+        ?.connections.find((candidate) => candidate.target.id === nextDevice.id)
+      if (connection) requestedConnectionByIdentityRef.current[identityId] = connection.kind
+      const currentState = navigation.state
+      void navigation.navigate(
+        currentState.kind === 'device'
+          ? { ...currentState, deviceId: identityId }
+          : { kind: 'device', deviceId: identityId, view: 'dashboard' }
+      )
+      return
+    }
+
     if (deviceId === ADD_DEVICE_VALUE) {
       void requestCalibrationLeave(
         {
@@ -2095,7 +2534,7 @@ export function ControlPlaneDemo({
           nextView: 'add-device',
         },
         () => {
-          setActiveView('add-device')
+          void setConsoleView('add-device')
           setSelectedAddDeviceKind(defaultAddDeviceKind)
           setFlashRun({ status: 'idle', progress: 0 })
           flashCompletionEmittedRef.current = false
@@ -2130,7 +2569,7 @@ export function ControlPlaneDemo({
           })
           emitEvent('webserial', `verifying remembered device ${nextDevice.alias}`, 'info')
           void handleWebSerialConnect({ replaceExisting: true }).then((connected) => {
-            if (connected) setActiveView('dashboard')
+            if (connected) void setConsoleView('dashboard')
           })
           return
         }
@@ -2187,7 +2626,7 @@ export function ControlPlaneDemo({
         replaceExisting: true,
       })
       if (connected) {
-        setActiveView('dashboard')
+        void setConsoleView('dashboard')
       }
       return
     }
@@ -2197,7 +2636,9 @@ export function ControlPlaneDemo({
       current.some((device) => device.id === nextDevice.id) ? current : [...current, nextDevice]
     )
     setSelectedDeviceId(nextDevice.id)
-    setActiveView(showPendingDashboard ? 'dashboard' : 'add-device')
+    if (!navigation) {
+      void setConsoleView(showPendingDashboard ? 'dashboard' : 'add-device')
+    }
     setFeedback({
       title: `${nextDevice.alias} added`,
       detail:
@@ -2235,7 +2676,15 @@ export function ControlPlaneDemo({
     setPendingDevices((current) => upsertLanDeviceTarget(current, device))
     handleDeviceChange(device.id)
     setSelectedAddDeviceKind(defaultAddDeviceKind)
-    setActiveView('dashboard')
+    if (navigation) {
+      void navigation.navigate({
+        kind: 'device',
+        deviceId: deviceIdentityId(device),
+        view: 'dashboard',
+      })
+    } else {
+      void setConsoleView('dashboard')
+    }
   }
 
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {
@@ -2246,7 +2695,7 @@ export function ControlPlaneDemo({
         nextView: 'add-device',
       },
       async () => {
-        setActiveView('add-device')
+        void setConsoleView('add-device')
         await handleAddDeviceChoice(kind, { showPendingDashboard: false })
       }
     )
@@ -2259,6 +2708,11 @@ export function ControlPlaneDemo({
         return
       }
 
+      if (navigation) {
+        void setConsoleView(nextView)
+        return
+      }
+
       void requestCalibrationLeave(
         {
           reason: 'view-change',
@@ -2267,17 +2721,22 @@ export function ControlPlaneDemo({
         },
         () => {
           dismissCalibrationLeaveGuard()
-          setActiveView(nextView)
+          void setConsoleView(nextView)
         }
       )
     },
-    [activeView, dismissCalibrationLeaveGuard, requestCalibrationLeave]
+    [activeView, dismissCalibrationLeaveGuard, navigation, requestCalibrationLeave, setConsoleView]
   )
 
   const handleGuardedWorkspaceTabChange = useCallback(
     (nextTab: CalibrationWorkspaceTab) => {
       if (nextTab === visibleCalibrationWorkspaceTab) {
         dismissCalibrationLeaveGuard()
+        return
+      }
+
+      if (navigation) {
+        void setWorkspaceTab(nextTab)
         return
       }
 
@@ -2289,24 +2748,23 @@ export function ControlPlaneDemo({
         },
         () => {
           dismissCalibrationLeaveGuard()
-          setCalibrationWorkspaceTabByDevice((current) => ({
-            ...current,
-            [visibleDevice.id]: nextTab,
-          }))
+          void setWorkspaceTab(nextTab)
         }
       )
     },
     [
       dismissCalibrationLeaveGuard,
+      navigation,
       requestCalibrationLeave,
+      setWorkspaceTab,
       visibleCalibrationWorkspaceTab,
-      visibleDevice.id,
     ]
   )
 
   async function handleWebSerialConnect(options?: {
     forcePortSelection?: boolean
     replaceExisting?: boolean
+    preauthorizedOnly?: boolean
   }) {
     const connected = await webSerial.connect(options)
     setFeedback(
@@ -3307,6 +3765,22 @@ export function ControlPlaneDemo({
     emitEvent('calibration', `entered ${calibrationModeLabel(mode)}`, 'success')
   }
 
+  const unavailableRouteState = navigation?.state.kind === 'device' ? navigation.state : null
+  if (navigation && unavailableRouteState && (!routeDeviceChoice || routeResumeFailed)) {
+    const routeNavigation = navigation
+    return (
+      <RouteDeviceRecovery
+        identityId={unavailableRouteState.deviceId}
+        choices={routeDeviceChoices}
+        retry={() => window.location.reload()}
+        chooseDevice={(identityId) =>
+          routeNavigation.navigate({ ...unavailableRouteState, deviceId: identityId })
+        }
+        addDevice={() => routeNavigation.navigate({ kind: 'add-device' })}
+      />
+    )
+  }
+
   if (!visibleDevice) {
     return null
   }
@@ -3337,19 +3811,44 @@ export function ControlPlaneDemo({
             {consoleViews.map((view) => {
               const Icon = view.icon
               const isActive = view.id === activeView
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  className={isActive ? 'industrial-view-tab is-selected' : 'industrial-view-tab'}
-                  aria-pressed={isActive}
-                  onClick={() => handleGuardedViewChange(view.id)}
-                >
+              const content = (
+                <>
                   <Icon size={18} aria-hidden="true" />
                   <span>
                     <strong>{view.label}</strong>
                     <small>{view.caption}</small>
                   </span>
+                </>
+              )
+              const className = isActive ? 'industrial-view-tab is-selected' : 'industrial-view-tab'
+              if (navigation) {
+                return (
+                  <ConsoleViewLink
+                    key={view.id}
+                    deviceId={
+                      navigation.state.kind === 'device'
+                        ? navigation.state.deviceId
+                        : deviceIdentityId(visibleDevice)
+                    }
+                    view={view.id}
+                    calibrationTab={visibleCalibrationWorkspaceTab}
+                    active={isActive}
+                    className={className}
+                    search={navigation.search}
+                  >
+                    {content}
+                  </ConsoleViewLink>
+                )
+              }
+              return (
+                <button
+                  key={view.id}
+                  type="button"
+                  className={className}
+                  aria-pressed={isActive}
+                  onClick={() => handleGuardedViewChange(view.id)}
+                >
+                  {content}
                 </button>
               )
             })}
@@ -3365,6 +3864,7 @@ export function ControlPlaneDemo({
             <section className="industrial-panel industrial-console__main">
               <ViewPanel
                 view={activeView}
+                navigation={navigation}
                 device={visibleDevice}
                 showDeviceSelection={showDeviceSelection}
                 knownDevices={knownDevices}
@@ -3415,7 +3915,8 @@ export function ControlPlaneDemo({
                 onHeaterCurveSave={handleHeaterCurveSave}
                 onCalibrationWorkspaceTabChange={handleGuardedWorkspaceTabChange}
                 calibrationLeaveGuard={activeView === 'calibration' ? calibrationLeaveGuard : null}
-                onCalibrationLeaveGuardDismiss={dismissCalibrationLeaveGuard}
+                onCalibrationLeaveGuardDismiss={cancelCalibrationLeaveGuard}
+                onCalibrationLeaveGuardClear={dismissCalibrationLeaveGuard}
                 onDeviceSelect={handleDeviceChange}
                 onBridgeTargetSelect={handleBridgeTargetSelect}
                 controlClient={controlClient}
@@ -3434,6 +3935,57 @@ export function ControlPlaneDemo({
           </div>
         </section>
       </div>
+    </main>
+  )
+}
+
+function RouteDeviceRecovery({
+  identityId,
+  choices,
+  retry,
+  chooseDevice,
+  addDevice,
+}: {
+  identityId: string
+  choices: DeviceChoice[]
+  retry: () => void
+  chooseDevice: (identityId: string) => void | Promise<void>
+  addDevice: () => void | Promise<void>
+}) {
+  return (
+    <main className="industrial-shell industrial-shell--fixed text-[var(--industrial-text)]">
+      <div className="industrial-noise" aria-hidden="true" />
+      <section className="industrial-route-message" aria-labelledby="route-device-title">
+        <Cable aria-hidden="true" />
+        <div>
+          <h1 id="route-device-title">目标设备暂不可用</h1>
+          <p>
+            无法恢复身份 <strong>{identityId}</strong>{' '}
+            的已知连接。地址已保留，可重试发现或明确选择其他目标。
+          </p>
+        </div>
+        <div className="industrial-route-message__actions">
+          <Button type="button" variant="outline" onClick={retry}>
+            <RefreshCw aria-hidden="true" />
+            重试发现
+          </Button>
+          {choices.map((choice) => (
+            <Button
+              key={choice.identityId}
+              type="button"
+              variant="outline"
+              onClick={() => chooseDevice(choice.identityId)}
+            >
+              <Router aria-hidden="true" />
+              选择 {choice.name}
+            </Button>
+          ))}
+          <Button type="button" onClick={() => addDevice()}>
+            <Plus aria-hidden="true" />
+            添加连接
+          </Button>
+        </div>
+      </section>
     </main>
   )
 }
@@ -4387,6 +4939,7 @@ function DeviceConnectionButton({
 
 function ViewPanel({
   view,
+  navigation,
   device,
   showDeviceSelection,
   knownDevices,
@@ -4445,8 +4998,10 @@ function ViewPanel({
   onCalibrationWorkspaceTabChange,
   calibrationLeaveGuard,
   onCalibrationLeaveGuardDismiss,
+  onCalibrationLeaveGuardClear,
 }: {
   view: ConsoleView
+  navigation?: ConsoleNavigationAdapter
   device: DeviceTarget
   showDeviceSelection: boolean
   knownDevices: DeviceTarget[]
@@ -4527,6 +5082,7 @@ function ViewPanel({
   onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
   calibrationLeaveGuard: CalibrationLeaveGuardState | null
   onCalibrationLeaveGuardDismiss: () => void
+  onCalibrationLeaveGuardClear: () => void
 }) {
   if (showDeviceSelection) {
     return (
@@ -4597,6 +5153,7 @@ function ViewPanel({
   if (view === 'calibration') {
     return (
       <CalibrationView
+        navigation={navigation}
         device={device}
         calibration={calibration}
         heaterCurve={heaterCurve}
@@ -4621,6 +5178,7 @@ function ViewPanel({
         onCalibrationWorkspaceTabChange={onCalibrationWorkspaceTabChange}
         calibrationLeaveGuard={calibrationLeaveGuard}
         onCalibrationLeaveGuardDismiss={onCalibrationLeaveGuardDismiss}
+        onCalibrationLeaveGuardClear={onCalibrationLeaveGuardClear}
       />
     )
   }
@@ -5780,6 +6338,7 @@ function SettingsView({
 }
 
 function CalibrationView({
+  navigation,
   device,
   calibration,
   heaterCurve,
@@ -5804,7 +6363,9 @@ function CalibrationView({
   onCalibrationWorkspaceTabChange,
   calibrationLeaveGuard,
   onCalibrationLeaveGuardDismiss,
+  onCalibrationLeaveGuardClear,
 }: {
+  navigation?: ConsoleNavigationAdapter
   device: DeviceTarget
   calibration: CalibrationState
   heaterCurve: HeaterCurveState
@@ -5851,6 +6412,7 @@ function CalibrationView({
   onCalibrationWorkspaceTabChange: (nextTab: CalibrationWorkspaceTab) => void
   calibrationLeaveGuard: CalibrationLeaveGuardState | null
   onCalibrationLeaveGuardDismiss: () => void
+  onCalibrationLeaveGuardClear: () => void
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [heaterCurveDraftText, setHeaterCurveDraftText] = useState('')
@@ -6234,7 +6796,7 @@ function CalibrationView({
           if (!exited) {
             return
           }
-          onCalibrationLeaveGuardDismiss()
+          onCalibrationLeaveGuardClear()
           await continueAction()
         },
       }
@@ -6291,15 +6853,15 @@ function CalibrationView({
             className="industrial-calibration-tabs__list"
             aria-label="Calibration tools"
           >
-            <TabsTrigger value="heater_curve" className="industrial-calibration-tab">
-              <span>加热曲线标定</span>
-            </TabsTrigger>
-            <TabsTrigger value="rtd_adc" className="industrial-calibration-tab">
-              <span>温度标定</span>
-            </TabsTrigger>
-            <TabsTrigger value="vin_adc" className="industrial-calibration-tab">
-              <span>电压读数标定</span>
-            </TabsTrigger>
+            <CalibrationRouteTab navigation={navigation} tab="heater_curve">
+              加热曲线标定
+            </CalibrationRouteTab>
+            <CalibrationRouteTab navigation={navigation} tab="rtd_adc">
+              温度标定
+            </CalibrationRouteTab>
+            <CalibrationRouteTab navigation={navigation} tab="vin_adc">
+              电压读数标定
+            </CalibrationRouteTab>
           </TabsList>
 
           <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">

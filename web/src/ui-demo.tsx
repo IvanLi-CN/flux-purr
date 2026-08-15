@@ -43,10 +43,6 @@ const mockProbe: LanProbe = {
 }
 
 export function UiDemo() {
-  const params = new URLSearchParams(window.location.search)
-  if (params.get('uiDemo') !== 'lan-pairing') {
-    return null
-  }
   return (
     <main className="industrial-ui-demo" aria-label="LAN pairing demo">
       <LanPairingPanel

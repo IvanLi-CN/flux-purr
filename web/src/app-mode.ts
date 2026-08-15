@@ -1,21 +1,8 @@
-import { useEffect, useState } from 'react'
-
 export type AppVariant = 'demo' | 'live'
 
 const DEMO_PARAM = 'demo'
-const DEMO_STORAGE_KEY = 'flux-purr.demoMode'
+export const DEMO_STORAGE_KEY = 'flux-purr.demoMode'
 const DEFAULT_APP_VARIANT: AppVariant = 'demo'
-
-export function useAppVariant() {
-  const [variant] = useState(resolveInitialAppVariant)
-
-  useEffect(() => {
-    persistAppVariant(variant)
-    ensureVariantUrlParam(variant)
-  }, [variant])
-
-  return variant
-}
 
 export function resolveAppVariantFromUrl(search: string, storedVariant: string | null): AppVariant {
   const params = new URLSearchParams(search)
@@ -26,44 +13,24 @@ export function resolveAppVariantFromUrl(search: string, storedVariant: string |
   )
 }
 
-function resolveInitialAppVariant() {
-  if (typeof window === 'undefined') {
-    return DEFAULT_APP_VARIANT
-  }
-
-  const fromUrl = normalizeDemoParam(new URLSearchParams(window.location.search).get(DEMO_PARAM))
-  if (fromUrl) {
-    persistAppVariant(fromUrl)
-    return fromUrl
-  }
-
+export function resolveAppVariant(value: unknown, storedVariant: string | null): AppVariant {
   return (
-    normalizeStoredVariant(window.localStorage.getItem(DEMO_STORAGE_KEY)) ?? DEFAULT_APP_VARIANT
+    normalizeDemoParam(typeof value === 'string' ? value : null) ??
+    (typeof value === 'boolean' ? (value ? 'demo' : 'live') : null) ??
+    normalizeStoredVariant(storedVariant) ??
+    DEFAULT_APP_VARIANT
   )
 }
 
-function persistAppVariant(variant: AppVariant) {
-  if (typeof window === 'undefined') {
+export function persistAppVariant(variant: AppVariant, storage: Storage | null = browserStorage()) {
+  if (!storage) {
     return
   }
-
-  window.localStorage.setItem(DEMO_STORAGE_KEY, variant === 'demo' ? 'true' : 'false')
+  storage.setItem(DEMO_STORAGE_KEY, variant === 'demo' ? 'true' : 'false')
 }
 
-function ensureVariantUrlParam(variant: AppVariant) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  const url = new URL(window.location.href)
-  const demoValue = variant === 'demo' ? 'true' : 'false'
-  if (url.searchParams.get(DEMO_PARAM) === demoValue) {
-    return
-  }
-
-  url.searchParams.delete('variant')
-  url.searchParams.set(DEMO_PARAM, demoValue)
-  window.history.replaceState(window.history.state, '', url)
+export function readStoredAppVariant(storage: Storage | null = browserStorage()) {
+  return storage?.getItem(DEMO_STORAGE_KEY) ?? null
 }
 
 function normalizeDemoParam(value: string | null): AppVariant | null {
@@ -78,4 +45,8 @@ function normalizeDemoParam(value: string | null): AppVariant | null {
 
 function normalizeStoredVariant(value: string | null): AppVariant | null {
   return normalizeDemoParam(value) ?? (value === 'demo' || value === 'live' ? value : null)
+}
+
+function browserStorage() {
+  return typeof window === 'undefined' ? null : window.localStorage
 }

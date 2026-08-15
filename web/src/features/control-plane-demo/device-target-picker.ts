@@ -115,6 +115,27 @@ export function mergeDeviceChoices(
   }))
 }
 
+export function preferredDeviceConnection(
+  choice: DeviceChoice,
+  preferredKind?: DeviceConnectionKind
+) {
+  const preferred = preferredKind
+    ? choice.connections.find((connection) => connection.kind === preferredKind)
+    : undefined
+  if (preferred) return preferred
+
+  const activeHealthy = choice.connections.find(
+    ({ target }) => target.severity === 'nominal' && target.leaseState === 'active'
+  )
+  if (activeHealthy) return activeHealthy
+
+  for (const kind of ['wifi', 'web-serial', 'bridge', 'mock'] as const) {
+    const connection = choice.connections.find((candidate) => candidate.kind === kind)
+    if (connection) return connection
+  }
+  return choice.connections[0]
+}
+
 function connectionKind(device: DeviceTarget): DeviceConnectionKind {
   if (device.transport === 'wifi' || device.transport === 'http') return 'wifi'
   if (device.transport === 'serial') return 'web-serial'

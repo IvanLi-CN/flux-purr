@@ -440,7 +440,7 @@ test.describe('control plane live devd bridge', () => {
   test('discovers live devd target and completes artifact dry-check through HTTP bridge', async ({
     page,
   }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     const targetRegion = page.getByRole('region', { name: '当前目标' })
     await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
@@ -453,7 +453,7 @@ test.describe('control plane live devd bridge', () => {
     await expect(page.getByText('Heater 18%')).toBeVisible()
     await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
 
-    await page.getByRole('button', { name: /更新/i }).click()
+    await page.getByRole('link', { name: /更新/i }).click()
     await expect(page.getByRole('combobox', { name: 'Firmware artifact' })).toContainText(
       'local-build'
     )
@@ -494,7 +494,7 @@ test.describe('control plane live devd bridge', () => {
   test('keeps the live workspace visible while devd is still reclaiming the first native probe', async ({
     page,
   }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
@@ -510,7 +510,7 @@ test.describe('control plane live devd bridge', () => {
   test('lists discovered USB bridge candidates with an explicit connect action', async ({
     page,
   }) => {
-    await page.goto('/?demo=false')
+    await page.goto('/devices/new?demo=false')
 
     await page.getByRole('button', { name: '目标设备' }).click()
     await page.getByRole('button', { name: '添加设备' }).click()
@@ -530,11 +530,11 @@ test.describe('control plane live devd bridge', () => {
   test('preserves the chosen calibration tab and blocks calibration controls while devd is still reacquiring the lease', async ({
     page,
   }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
       .getByRole('navigation', { name: 'Console views' })
-      .getByRole('button', { name: /校准/i })
+      .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
 
@@ -550,14 +550,35 @@ test.describe('control plane live devd bridge', () => {
     await expect(calibrationModeToggle).toBeEnabled()
   })
 
+  test('replaces a mismatched calibration URL with the running device mode', async ({ page }) => {
+    runtimeStatus = {
+      ...runtimeStatus,
+      calibration: {
+        ...calibrationRuntimeState(),
+        mode: 'rtd_adc',
+        ppsEnabled: true,
+      },
+    }
+
+    await page.goto(`/devices/${deviceId}/calibration/heater-curve?demo=false`)
+
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${deviceId}/calibration/rtd-adc\\?demo=false$`)
+    )
+    await expect(page.getByRole('tab', { name: '温度标定' })).toHaveAttribute(
+      'aria-current',
+      'page'
+    )
+  })
+
   test('updates the RTD calibration target after heater start instead of leaving the old target latched', async ({
     page,
   }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
       .getByRole('navigation', { name: 'Console views' })
-      .getByRole('button', { name: /校准/i })
+      .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
     const targetAdcInput = page.getByLabel('目标 ADC 输入')
@@ -595,11 +616,11 @@ test.describe('control plane live devd bridge', () => {
   test('keeps dashboard target temperature writable after RTD calibration heater start', async ({
     page,
   }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
       .getByRole('navigation', { name: 'Console views' })
-      .getByRole('button', { name: /校准/i })
+      .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
     const targetAdcInput = page.getByLabel('目标 ADC 输入')
@@ -618,14 +639,14 @@ test.describe('control plane live devd bridge', () => {
 
     await page
       .getByRole('navigation', { name: 'Console views' })
-      .getByRole('button', { name: /总览/i })
+      .getByRole('link', { name: /总览/i })
       .click()
     await expect(page.getByText('请先关闭校准控制')).toBeVisible()
     await page.getByRole('button', { name: '关闭并继续' }).click({ force: true })
     await page.waitForTimeout(500)
     await page
       .getByRole('navigation', { name: 'Console views' })
-      .getByRole('button', { name: /总览/i })
+      .getByRole('link', { name: /总览/i })
       .click()
     const dashboardTarget = page.getByLabel('Dashboard target temperature')
 
@@ -659,11 +680,11 @@ test.describe('control plane live devd bridge', () => {
   })
 
   test('keeps RTD slot fit after the devd calibration response is applied', async ({ page }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
       .getByRole('navigation', { name: 'Console views' })
-      .getByRole('button', { name: /校准/i })
+      .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
     await expect(page.getByLabel('目标 ADC 输入')).toBeVisible()
@@ -684,20 +705,20 @@ test.describe('control plane live devd bridge', () => {
   })
 
   test('sends runtime commands through the active devd lease', async ({ page }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
     await expect(page.getByText('运行时已同步')).toBeVisible()
 
-    await page.getByRole('button', { name: /总览/i }).click()
+    await page.getByRole('link', { name: /总览/i }).click()
     await page.getByLabel('Dashboard target temperature').fill('235')
     await expect(page.getByText('Target updated')).toBeVisible()
 
-    await page.getByRole('button', { name: /设置/i }).click()
+    await page.getByRole('link', { name: /设置/i }).click()
     await page.getByRole('button', { name: 'OFF' }).click()
     await expect(page.getByText('Fan policy updated', { exact: true })).toBeVisible()
 
-    await page.getByRole('button', { name: /总览/i }).click()
+    await page.getByRole('link', { name: /总览/i }).click()
     await page.getByRole('button', { name: 'Hold heater' }).click()
     await expect(page.getByText('Heater hold requested')).toBeVisible()
 
@@ -730,12 +751,12 @@ test.describe('control plane live devd bridge', () => {
   })
 
   test('writes and clears WiFi settings through the active devd lease', async ({ page }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
       timeout: 10_000,
     })
-    await page.getByRole('button', { name: /设置/i }).click()
+    await page.getByRole('link', { name: /设置/i }).click()
 
     const wifiSettings = page.getByLabel('WiFi 设置')
     await expect(wifiSettings).toBeVisible()
@@ -769,7 +790,7 @@ test.describe('control plane live devd bridge', () => {
   })
 
   test('keeps the live devd workspace visible across repeated reloads', async ({ page }) => {
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     for (let reloadIndex = 0; reloadIndex < 3; reloadIndex += 1) {
       await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
@@ -793,24 +814,18 @@ test.describe('control plane live devd bridge', () => {
     }
   })
 
-  test('keeps a devd bridge placeholder when the device list refresh fails', async ({ page }) => {
+  test('keeps the identity URL and offers recovery when the device list refresh fails', async ({
+    page,
+  }) => {
     injectStatusTimeoutEvent = true
     failDeviceList = true
 
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
-    const targetRegion = page.getByRole('region', { name: '当前目标' })
-    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
-    await expect(targetRegion).toContainText('传输')
-    await expect(targetRegion).toContainText('DEVD')
-    await expect(targetRegion).toContainText('租约')
-    await expect(targetRegion).toContainText('无')
-    await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
-    await expect(page.getByText('No known devices')).toHaveCount(0)
-    await expect(
-      page.getByLabel('Transport capabilities').getByText('Failed to fetch')
-    ).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`/devices/${deviceId}/overview\\?demo=false$`))
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '添加连接' })).toBeVisible()
     injectStatusTimeoutEvent = false
   })
 
@@ -819,7 +834,7 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     missingAuthorizedPort = true
 
-    await page.goto('/?demo=false')
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     const targetRegion = page.getByRole('region', { name: '当前目标' })
     await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
