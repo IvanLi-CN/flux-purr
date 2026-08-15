@@ -18,22 +18,23 @@ const meta = {
           width: 'min(936px, 100vw)',
           boxSizing: 'border-box',
           margin: 0,
-          overflow: 'hidden',
           padding: 'clamp(16px, 2vw, 18px)',
           background: '#fcfcf7',
         }}
       >
-        <div
-          className="industrial-shell"
-          style={{
-            width: '100%',
-            boxSizing: 'border-box',
-            margin: 0,
-            padding: '16px',
-            background: 'var(--industrial-bg)',
-          }}
-        >
-          <Story />
+        <div style={{ width: '100%', overflow: 'hidden' }}>
+          <div
+            className="industrial-shell"
+            style={{
+              width: '100%',
+              boxSizing: 'border-box',
+              margin: 0,
+              padding: '16px',
+              background: 'var(--industrial-bg)',
+            }}
+          >
+            <Story />
+          </div>
         </div>
       </div>
     ),
