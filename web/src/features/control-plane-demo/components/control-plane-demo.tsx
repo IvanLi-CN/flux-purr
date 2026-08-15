@@ -5059,7 +5059,7 @@ function DeviceConnectionButton({
       type="button"
       className={cn('industrial-device-connection-button', active && 'is-active')}
       onClick={() => onChoose(connection.target.id)}
-      aria-label={`${connection.label} · ${connection.target.alias}`}
+      aria-label={`${connection.label} · ${connection.detail} · ${connection.target.alias}`}
       aria-pressed={active}
     >
       <ConnectionIcon aria-hidden="true" className="industrial-device-connection-button__icon" />

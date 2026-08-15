@@ -284,7 +284,7 @@ test.describe('control plane direct LAN', () => {
     await page.getByRole('button', { name: '目标设备' }).click()
     const targetPicker = page.getByRole('dialog', { name: '设备与连接方式' })
     const lanConnection = targetPicker.getByRole('button', {
-      name: /WiFi \/ LAN · flux-purr-001122334455/,
+      name: 'WiFi / LAN · 192.168.1.18 · flux-purr-001122334455',
     })
     await expect(lanConnection).toBeVisible()
     await lanConnection.click()

@@ -206,12 +206,24 @@ export const MergedDeviceConnections: Story = {
     await expect(dialog).toHaveTextContent('桥接')
     await expect(dialog).toHaveTextContent('WiFi / LAN')
     await expect(dialog).toHaveTextContent('Web Serial')
-    await expect(dialog.querySelectorAll('button[aria-label*="flux-purr-device-1"]')).toHaveLength(
-      3
-    )
+    const connectionButtons = dialog.querySelectorAll('button[aria-label*="flux-purr-device-1"]')
+    await expect(connectionButtons).toHaveLength(4)
+    await expect(
+      new Set(Array.from(connectionButtons, (button) => button.getAttribute('aria-label'))).size
+    ).toBe(4)
+    await expect(
+      within(dialog).getByRole('button', {
+        name: '桥接 · USB · /dev/cu.usbmodem2111401 · flux-purr-device-1',
+      })
+    ).toBeInTheDocument()
+    await expect(
+      within(dialog).getByRole('button', {
+        name: '桥接 · WiFi / LAN · 192.168.1.42 · flux-purr-device-1',
+      })
+    ).toBeInTheDocument()
     await expect(
       dialog.querySelectorAll('.industrial-device-connection-button__icon')
-    ).toHaveLength(4)
+    ).toHaveLength(5)
     await expect(dialog.querySelectorAll('.industrial-device-picker__add > svg')).toHaveLength(1)
     await expect(dialog).not.toHaveTextContent('桥接 · USB')
     await expect(dialog).not.toHaveTextContent('桥接 · WiFi / LAN')
