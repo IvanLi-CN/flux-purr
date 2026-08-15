@@ -15,10 +15,11 @@ const meta = {
       <div
         data-testid="firmware-evidence-surface"
         style={{
-          width: 'min(948px, 100vw)',
+          width: 'min(936px, 100vw)',
           boxSizing: 'border-box',
           margin: 0,
-          padding: '24px',
+          overflow: 'hidden',
+          padding: 'clamp(16px, 2vw, 18px)',
           background: '#fcfcf7',
         }}
       >
