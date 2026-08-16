@@ -211,42 +211,48 @@
 
 ## Visual Evidence
 
-- 证据来源：Storybook / Vite mock UI，deterministic fixtures。
-- 绑定说明：工作台基线图来自 Storybook canvas；路由证据来自 Vite mock-only `uiDemo` 与未知 identity 恢复态。
+- 证据来源：Vite mock-only `uiDemo`，deterministic fixtures。
+- 绑定说明：当前 PR 图来自 Chrome 中的未知 identity 恢复态，固定为 `fp-demo-03` normal 场景。
 - 布局检查：1440×1000 保持 1280px 固定工作区且 Inspector 为非侵入 bubble；仅 1700px+ 在保留 1280px 工作区与 24px gutter 后 dock Inspector。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
 - Public Demo target fixtures display English names: `Bench Fixture A`, `Field Kit`, and `Offline Mock Device`.
 
-### Public Demo target fixture names
+### Current Public Demo Inspector
 
 PR: include
+
+![Current Public Demo Inspector](./assets/public-demo-inspector-current.jpg)
+
+## Historical Visual Reference
+
+### Public Demo target fixture names
+
+PR: none
 
 ![Public demo Inspector English target fixtures](./assets/public-demo-inspector-english-targets.png)
 
 ### Public Demo Inspector desktop 1440×1000
 
-PR: include
+PR: none
 
 ![Public demo Inspector desktop](./assets/public-demo-inspector-desktop.png)
 
 ### Public Demo Inspector wide dock 1700×1000
 
-PR: include
+PR: none
 
 ![Public demo Inspector wide dock](./assets/public-demo-inspector-wide-docked.png)
 
 ### Public Demo Inspector tablet 1024×900
 
-PR: include
+PR: none
 
 ![Public demo Inspector tablet](./assets/public-demo-inspector-tablet.png)
 
 ### Public Demo Inspector mobile 375×812
 
-PR: include
+PR: none
 
 ![Public demo Inspector mobile](./assets/public-demo-inspector-mobile.png)
-
-## Historical Visual Reference
 
 ### Routed UI Demo desktop 1440×1000
 
