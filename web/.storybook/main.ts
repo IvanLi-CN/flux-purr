@@ -8,6 +8,7 @@ const config: StorybookConfig = {
     '@storybook/addon-a11y',
     '@storybook/addon-docs',
     '@storybook/addon-onboarding',
+    './build-static-assets-preset.ts',
   ],
   framework: '@storybook/react-vite',
 }
