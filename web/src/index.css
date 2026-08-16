@@ -7737,7 +7737,15 @@
     display: none;
   }
 
-  @media (min-width: 1180px) {
+  @media (min-width: 1280px) {
+    .industrial-shell--fixed:has(+ .demo-inspector) .industrial-console-wrap {
+      padding-right: calc(21rem + 3rem);
+    }
+
+    .industrial-shell--fixed:has(+ .demo-inspector) .industrial-console {
+      width: min(100%, 66rem);
+    }
+
     .demo-inspector {
       right: max(1.5rem, calc((100vw - 1450px) / 2));
       width: 21rem;

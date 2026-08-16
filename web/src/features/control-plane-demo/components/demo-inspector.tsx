@@ -32,7 +32,7 @@ export function DemoInspector({
   onSelectDevice,
   onSimulate,
 }: DemoInspectorProps) {
-  const [open, setOpen] = useState(() => typeof window === 'undefined' || window.innerWidth > 759)
+  const [open, setOpen] = useState(() => typeof window === 'undefined' || window.innerWidth >= 1280)
   const [copied, setCopied] = useState(false)
   const stateSummary = useMemo(
     () =>
