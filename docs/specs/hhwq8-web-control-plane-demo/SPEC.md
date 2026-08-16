@@ -213,13 +213,19 @@
 
 - 证据来源：Storybook / Vite mock UI，deterministic fixtures。
 - 绑定说明：工作台基线图来自 Storybook canvas；路由证据来自 Vite mock-only `uiDemo` 与未知 identity 恢复态。
-- 布局检查：1440×1000 与 375×812 均无横向溢出或越界元素；移动 UI Demo 控件保持稳定宽度，恢复操作触摸高度不小于 48px。
+- 布局检查：1440×1000 保持 1280px 固定工作区且 Inspector 为非侵入 bubble；仅 1700px+ 在保留 1280px 工作区与 24px gutter 后 dock Inspector。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
 
 ### Public Demo Inspector desktop 1440×1000
 
 PR: include
 
 ![Public demo Inspector desktop](./assets/public-demo-inspector-desktop.png)
+
+### Public Demo Inspector wide dock 1700×1000
+
+PR: include
+
+![Public demo Inspector wide dock](./assets/public-demo-inspector-wide-docked.png)
 
 ### Public Demo Inspector tablet 1024×900
 
