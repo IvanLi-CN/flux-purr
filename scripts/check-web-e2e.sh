@@ -60,6 +60,7 @@ PY
   export E2E_DEVD_PORT="${E2E_DEVD_PORT:-$(allocate_port devd-e2e)}"
   echo "E2E_WEB_PORT=$E2E_WEB_PORT E2E_DEVD_PORT=$E2E_DEVD_PORT"
   bun run --cwd web test:e2e
+  bun run --cwd web test:e2e:public-demo
 else
   echo "test:e2e script not available; skipping"
 fi

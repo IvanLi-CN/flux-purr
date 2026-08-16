@@ -5,3 +5,4 @@ if [[ ! -d web ]]; then
   exit 0
 fi
 bun run --cwd web build
+bun run --cwd web build:demo

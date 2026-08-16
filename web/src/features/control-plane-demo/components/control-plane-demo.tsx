@@ -231,6 +231,7 @@ interface ControlPlaneDemoProps {
   devd?: LiveDevdOptions
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
+  mockOnly?: boolean
   lanPairing?: LanPairingOverrides
   lanRuntime?: LanRuntimeDependencies
 }
@@ -240,6 +241,22 @@ type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 type LogFilter = 'all' | EventLogEntry['tone']
 
 const defaultAddDeviceKind: AddDeviceKind = 'wifi'
+const mockOnlyTransportMessage = 'Public demo is mock-only and cannot connect to LAN devices.'
+
+const mockOnlyLanRuntime: Required<LanRuntimeDependencies> = {
+  createLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  releaseLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  startLeaseHeartbeat: () => () => undefined,
+  streamEvents: async function* () {
+    yield* []
+  },
+  probeDevice: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  getPublicInfo: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  writeRuntime: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  readStatus: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  readCalibration: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  readHeaterCurve: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+}
 
 interface ActionFeedback {
   title: string
@@ -618,6 +635,7 @@ export function ControlPlaneDemo({
   devd,
   webSerial: webSerialOptions,
   allowDemoControls = true,
+  mockOnly = false,
   lanPairing,
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
@@ -677,9 +695,10 @@ export function ControlPlaneDemo({
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
     [devd?.httpClient]
   )
-  const devdBaseUrl = devd?.devdBaseUrl ?? defaultDevdBaseUrl()
-  const lanRuntime = useMemo(
-    () => ({
+  const devdBaseUrl = mockOnly ? null : (devd?.devdBaseUrl ?? defaultDevdBaseUrl())
+  const lanRuntime = useMemo(() => {
+    if (mockOnly) return mockOnlyLanRuntime
+    return {
       createLease: lanRuntimeOptions?.createLease ?? createLanLease,
       releaseLease: lanRuntimeOptions?.releaseLease ?? releaseLanLease,
       startLeaseHeartbeat: lanRuntimeOptions?.startLeaseHeartbeat ?? startLanLeaseHeartbeat,
@@ -699,20 +718,20 @@ export function ControlPlaneDemo({
         lanRuntimeOptions?.readHeaterCurve ??
         ((session: LanDeviceSession) =>
           authorizedLanRequest<HeaterCurveState>(session, directLanStaleReadPath('heater-curve'))),
-    }),
-    [
-      lanRuntimeOptions?.createLease,
-      lanRuntimeOptions?.releaseLease,
-      lanRuntimeOptions?.startLeaseHeartbeat,
-      lanRuntimeOptions?.streamEvents,
-      lanRuntimeOptions?.probeDevice,
-      lanRuntimeOptions?.getPublicInfo,
-      lanRuntimeOptions?.writeRuntime,
-      lanRuntimeOptions?.readStatus,
-      lanRuntimeOptions?.readCalibration,
-      lanRuntimeOptions?.readHeaterCurve,
-    ]
-  )
+    }
+  }, [
+    mockOnly,
+    lanRuntimeOptions?.createLease,
+    lanRuntimeOptions?.releaseLease,
+    lanRuntimeOptions?.startLeaseHeartbeat,
+    lanRuntimeOptions?.streamEvents,
+    lanRuntimeOptions?.probeDevice,
+    lanRuntimeOptions?.getPublicInfo,
+    lanRuntimeOptions?.writeRuntime,
+    lanRuntimeOptions?.readStatus,
+    lanRuntimeOptions?.readCalibration,
+    lanRuntimeOptions?.readHeaterCurve,
+  ])
   const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
@@ -3318,6 +3337,18 @@ export function ControlPlaneDemo({
       tone: selectedArtifact.compatibility === 'warning' ? 'warning' : 'info',
     })
     emitEvent('flash', `${selectedArtifact.version} dry-check started`, 'info')
+
+    if (mockOnly) {
+      flashCompletionEmittedRef.current = true
+      setFlashRun({ status: 'passed', progress: 100 })
+      setFeedback({
+        title: 'Simulated dry-run passed',
+        detail: `${selectedArtifact.version} was verified against the deterministic public demo fixture.`,
+        tone: 'success',
+      })
+      emitEvent('flash', `${selectedArtifact.version} verified by public demo fixture`, 'success')
+      return
+    }
 
     if (!devdBaseUrl || !selectedArtifact.files?.length) {
       return

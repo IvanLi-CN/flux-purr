@@ -1,3 +1,5 @@
+import { isPublicDemoBuild } from '@/public-demo'
+
 export type AppVariant = 'demo' | 'live'
 
 const DEMO_PARAM = 'demo'
@@ -5,6 +7,7 @@ export const DEMO_STORAGE_KEY = 'flux-purr.demoMode'
 const DEFAULT_APP_VARIANT: AppVariant = 'demo'
 
 export function resolveAppVariantFromUrl(search: string, storedVariant: string | null): AppVariant {
+  if (isPublicDemoBuild()) return 'demo'
   const params = new URLSearchParams(search)
   return (
     normalizeDemoParam(params.get(DEMO_PARAM)) ??
@@ -14,6 +17,7 @@ export function resolveAppVariantFromUrl(search: string, storedVariant: string |
 }
 
 export function resolveAppVariant(value: unknown, storedVariant: string | null): AppVariant {
+  if (isPublicDemoBuild()) return 'demo'
   return (
     normalizeDemoParam(typeof value === 'string' ? value : null) ??
     (typeof value === 'boolean' ? (value ? 'demo' : 'live') : null) ??
@@ -23,6 +27,7 @@ export function resolveAppVariant(value: unknown, storedVariant: string | null):
 }
 
 export function persistAppVariant(variant: AppVariant, storage: Storage | null = browserStorage()) {
+  if (isPublicDemoBuild()) return
   if (!storage) {
     return
   }

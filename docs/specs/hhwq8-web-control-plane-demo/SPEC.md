@@ -16,6 +16,7 @@
 - 把产品形态收敛成固定高度 bench console：顶部辅助状态栏、Dashboard / Settings / Update 三个界面、桌面端常驻全局日志。
 - 使用 deterministic mock fixtures 展示 devd、serial、mock 三类设备，不接真实硬件。
 - 保留工业拟物视觉：浅色 chassis、物理按钮、内凹数据槽、LED、暗色全局 trace 面。
+- 提供可收起的 Demo Inspector，以 typed URL 复现确定性 scene、lease/network/artifact 故障与模拟动作；公开构建始终为 mock-only 完整控制台。
 - 保留现有 `device-console` 与 `frontpanel-preview` 代码和 Storybook stories，不做破坏性重构。
 - Storybook 提供 default、degraded、gallery、mobile review 与交互 smoke coverage。
 
@@ -59,7 +60,7 @@
 - 规范路径必须为 `/devices/:deviceId/overview`、`/devices/:deviceId/settings`、`/devices/:deviceId/update`、`/devices/:deviceId/calibration/heater-curve`、`/devices/:deviceId/calibration/rtd-adc`、`/devices/:deviceId/calibration/vin-adc` 与 `/devices/new`。
 - `:deviceId` 必须使用稳定物理 `identityId`；transport target ID 只能用于本地连接候选解析。
 - `/` 必须 replace 到当前 variant 最近设备的 overview；没有有效记录时 replace 到 `/devices/new`。`/devices`、`/devices/:deviceId` 与 `/devices/:deviceId/calibration` 必须 replace 到对应规范页。
-- `demo` 与 `uiDemo` 必须由 router 作为 typed search 参数验证、规范化并在站内导航中保留；不得使用裸 History API 绕过 router 状态。
+- `demo`、`uiDemo`、`demoScene`、`demoLease`、`demoNetwork` 与 `demoArtifact` 必须由 router 作为 typed search 参数验证和规范化；`demo` 与 Inspector state 在站内导航中保留，`uiDemo` 保持 production 根入口专用，不得使用裸 History API 绕过 router 状态。
 - 结构无效的路径必须显示 404；结构有效但设备未知或不可连接时必须保留原 URL，并提供重试、选择设备与添加连接动作。
 - 桌面端必须提供全局日志面板，并能与 `Dashboard` / `Settings` / `Update` 当前内容同时显示。
 - 桌面端全局日志不得退化成窄侧栏；在宽桌面上应以可读 trace console 呈现，保留足够行宽阅读 message。
@@ -77,6 +78,7 @@
 - 一级页面 tabs 与校准 workspace tabs 必须使用链接语义、支持键盘操作，并正确表达 `aria-current`。
 - 校准运行期间，站内 Link、程序跳转、设备切换、variant/search 变化与浏览器 Back/Forward 必须共用同一离开保护；页面关闭或地址栏导航必须启用原生 `beforeunload`。
 - 生产静态构建必须包含 EdgeOne history fallback，将非静态资源 pathname rewrite 到 `/index.html`。
+- `build:demo` 必须生成独立静态 artifact，并在运行时强制 mock fixture、关闭 devd/Web Serial/direct LAN；根路径必须 replace 到 `/devices/fp-lab-01/overview`，忽略 `uiDemo` 与本地 live preference。
 
 ### SHOULD
 
@@ -104,6 +106,7 @@
   - 生产 app shell 持续挂载 `ControlPlaneDemo`，leaf route 只提供类型化 `ConsoleRouteState`，切换 tabs 不得重建 transport/runtime 状态。
   - Storybook 未提供 production navigation adapter 时继续使用 `initialView` 与组件本地 state。
   - `uiDemo=true` 保持 query-driven UI demo 语义，并规范化到根路径；普通根路径按最近设备规则跳转。
+  - 公开 Demo build 把根路径固定到 `fp-lab-01` overview，Inspector 的 scene/fault query 使用 client-side replace；面板布局状态不写入 URL。
   - 设备偏好使用版本化本地结构，只保存 variant 对应 identity 和 identity 对应 transport kind；损坏值必须忽略。
 - `Dashboard`
   - 当前温度是唯一主视觉，不得被连接、WiFi 或日志抢占层级。
@@ -144,7 +147,8 @@
 | `ControlPlaneDemo` | React component | internal | New | None | web | `App.tsx` / Storybook | Pure web light tool |
 | `ConsoleRouteState` | TypeScript union | internal | New | 本文 | web | router app shell / `ControlPlaneDemo` | Device identity, page and optional calibration tab |
 | `ConsoleNavigationAdapter` | TypeScript interface | internal | New | 本文 | web | router app shell / `ControlPlaneDemo` | Controlled production navigation with Storybook fallback |
-| Device route schema | URL contract | public Web surface | New | 本文 | web | users / browser history / EdgeOne | Stable identity path and typed `demo` / `uiDemo` search |
+| `DemoInspectorState` | TypeScript type | internal | New | 本文 | web | public demo app shell / Inspector | Deterministic fixture and fault state only |
+| Device route schema | URL contract | public Web surface | New | 本文 | web | users / browser history / EdgeOne | Stable identity path and typed demo Inspector search |
 
 ### 契约文档（按 Kind 拆分）
 
@@ -164,11 +168,13 @@
 - Given 点击 `Update`，When 切换 firmware artifact，Then 可以看到 compatibility verdict、dry-check progress 与 blocked/warning 状态。
 - Given 点击 `Degrade mock`，When 查看当前页面，Then 能看到 degraded runtime 或 blocked artifact state。
 - Given 任意规范设备深链，When 直接打开、刷新或使用 Back/Forward，Then 设备、页面、校准 tab 与 active state 均由 URL 恢复。
-- Given 缺少 pathname 或打开索引路径，When router 解析位置，Then 使用 replace 导向最近设备 overview 或 `/devices/new`，并保留规范化后的 `demo` / `uiDemo`。
+- Given 缺少 pathname 或打开索引路径，When router 解析位置，Then 使用 replace 导向最近设备 overview 或 `/devices/new`，并保留规范化后的 `demo`；production `uiDemo` 仍规范化到根路径。
 - Given 一个结构有效但未知的 `identityId`，When 自动恢复无法匹配连接，Then pathname 保持不变并显示可操作恢复态，而不是跳到其他设备。
 - Given 校准模式正在运行，When 用户切换页面、tab、设备或浏览器历史，Then 离开确认先退出模式，只有成功后才继续导航；取消或失败保持原路由。
 - Given 自动恢复 Web Serial，When 没有唯一已授权且匹配的 port，Then 页面不调用 `requestPort()` 并要求用户显式选择。
 - Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
+- Given public Demo build，When 打开 `/?demo=false&uiDemo=true`，Then 始终进入完整 mock-only console，不出现 LAN pairing 页面且不会启动 devd、Web Serial 或 direct LAN。
+- Given Demo Inspector，When 切换 scene、lease/network/artifact 覆盖或模拟动作，Then console 与全局 trace 同步更新，URL 可刷新恢复；选择 Calibration active 时同一校准离开保护生效。
 
 ## 验收清单（Acceptance checklist）
 
@@ -200,7 +206,7 @@
 
 ### Quality checks
 
-- 视觉证据通过 mock-only `ui_demo` 覆盖 desktop、mobile 与未知设备恢复态。
+- 视觉证据通过 mock-only public `ui_demo` 覆盖 desktop、mobile、Inspector 与未知设备恢复态。
 - owner-facing 图片必须先通过 immutable snapshot 回传。
 
 ## Visual Evidence

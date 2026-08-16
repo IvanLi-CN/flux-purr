@@ -121,6 +121,14 @@ jobs:
           path: web/dist
           if-no-files-found: error
 
+      - name: Upload verified public demo bundle
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-demo-bundle
+          path: web/dist-demo
+          if-no-files-found: error
+
   worktree-bootstrap:
     name: Worktree bootstrap
     runs-on: ubuntu-latest

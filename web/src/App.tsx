@@ -6,8 +6,16 @@ import {
   type ConsoleNavigationAdapter,
   ControlPlaneDemo,
 } from '@/features/control-plane-demo'
+import { DemoInspector } from '@/features/control-plane-demo/components/demo-inspector'
+import {
+  type DemoInspectorState,
+  demoInspectorSearch,
+  demoInspectorStateFromSearch,
+  deriveDemoScenario,
+} from '@/features/control-plane-demo/demo-inspector-state'
 import { liveControlPlaneScenario } from '@/features/control-plane-demo/live-scenario'
-import { controlPlaneScenario } from '@/features/control-plane-demo/mock-data'
+import type { EventLogEntry } from '@/features/control-plane-demo/types'
+import { isPublicDemoBuild } from '@/public-demo'
 import { Route as RootRoute } from '@/routes/__root'
 import { consoleRoutePath, parseConsoleRoute, routeLabel } from '@/routing/console-route'
 import { appVariantFromSearch } from '@/routing/search'
@@ -16,6 +24,7 @@ import { UiDemo } from '@/ui-demo'
 function App() {
   const search = RootRoute.useSearch()
   const variant = appVariantFromSearch(search)
+  const publicDemo = isPublicDemoBuild()
   const navigate = useNavigate()
   const location = useRouterState({ select: (state) => state.location })
   const routeState = useMemo(() => parseConsoleRoute(location.pathname), [location.pathname])
@@ -26,21 +35,32 @@ function App() {
     id: symbol
     resolve: (shouldBlock: boolean) => void
   } | null>(null)
+  const [inspectorEvents, setInspectorEvents] = useState<EventLogEntry[]>([])
+  const inspectorState = useMemo(() => demoInspectorStateFromSearch(search), [search])
+  const isLive = variant === 'live'
+  const activeScenario = useMemo(
+    () => (isLive ? liveControlPlaneScenario : deriveDemoScenario(inspectorState, inspectorEvents)),
+    [inspectorEvents, inspectorState, isLive]
+  )
 
-  useEffect(() => persistAppVariant(variant), [variant])
+  useEffect(() => {
+    if (!publicDemo) persistAppVariant(variant)
+  }, [publicDemo, variant])
 
   useEffect(() => {
     const expectedDemo = search.demo ? 'true' : 'false'
     const rawSearch = new URLSearchParams(location.searchStr)
     const needsDemoNormalization = rawSearch.get('demo') !== expectedDemo
     const needsUiDemoPathNormalization = Boolean(search.uiDemo) && location.pathname !== '/'
-    if (!needsDemoNormalization && !needsUiDemoPathNormalization) return
+    const needsPublicUiDemoRemoval = publicDemo && rawSearch.has('uiDemo')
+    if (!needsDemoNormalization && !needsUiDemoPathNormalization && !needsPublicUiDemoRemoval)
+      return
     void navigate({
       to: (needsUiDemoPathNormalization ? '/' : location.pathname) as '/',
       search,
       replace: true,
     })
-  }, [location.pathname, location.searchStr, navigate, search])
+  }, [location.pathname, location.searchStr, navigate, publicDemo, search])
 
   const settlePendingBlock = useCallback((id: symbol, shouldBlock: boolean) => {
     const pending = pendingBlockRef.current
@@ -70,7 +90,12 @@ function App() {
     shouldBlockFn: async ({ current, next }) => {
       if (!calibrationGuard) return false
       const sameSearch =
-        current.search.demo === next.search.demo && current.search.uiDemo === next.search.uiDemo
+        current.search.demo === next.search.demo &&
+        current.search.uiDemo === next.search.uiDemo &&
+        current.search.demoScene === next.search.demoScene &&
+        current.search.demoLease === next.search.demoLease &&
+        current.search.demoNetwork === next.search.demoNetwork &&
+        current.search.demoArtifact === next.search.demoArtifact
       if (current.pathname === next.pathname && sameSearch) return false
       const activeCalibrationPath = consoleRoutePath({
         kind: 'device',
@@ -186,6 +211,67 @@ function App() {
     })
   }, [])
 
+  const updateInspectorState = useCallback(
+    async (nextState: DemoInspectorState) => {
+      const {
+        demoScene: _demoScene,
+        demoLease: _demoLease,
+        demoNetwork: _demoNetwork,
+        demoArtifact: _demoArtifact,
+        ...searchWithoutInspector
+      } = search
+      const nextSearch = {
+        ...searchWithoutInspector,
+        ...demoInspectorSearch(nextState),
+      }
+      const sceneChanged = nextState.demoScene !== inspectorState.demoScene
+      const nextScenario = deriveDemoScenario(nextState, inspectorEvents)
+      if (sceneChanged) {
+        const isCalibration = nextState.demoScene === 'calibration-active'
+        await navigate({
+          to: (isCalibration
+            ? '/devices/$deviceId/calibration/heater-curve'
+            : '/devices/$deviceId/overview') as '/',
+          params: { deviceId: nextScenario.selectedDeviceId },
+          search: nextSearch,
+          replace: true,
+        })
+        return
+      }
+      await navigate({ to: location.pathname as '/', search: nextSearch, replace: true })
+    },
+    [inspectorEvents, inspectorState.demoScene, location.pathname, navigate, search]
+  )
+
+  const selectInspectorDevice = useCallback(
+    async (deviceId: string) => {
+      const current = routeState
+      if (current?.kind === 'device' && current.view === 'calibration') {
+        await navigate({
+          to: '/devices/$deviceId/calibration/$tab' as '/',
+          params: { deviceId, tab: current.calibrationTab },
+          search,
+        })
+        return
+      }
+      await navigate({ to: '/devices/$deviceId/overview' as '/', params: { deviceId }, search })
+    },
+    [navigate, routeState, search]
+  )
+
+  const simulateInspectorEvent = useCallback((event: Pick<EventLogEntry, 'message' | 'tone'>) => {
+    setInspectorEvents((current) =>
+      [
+        ...current,
+        {
+          time: `20:19:${String(10 + current.length * 3).padStart(2, '0')}`,
+          source: 'demo',
+          ...event,
+        },
+      ].slice(-12)
+    )
+  }, [])
+
   const navigation = useMemo<ConsoleNavigationAdapter | undefined>(() => {
     if (!routeState) return undefined
     return {
@@ -200,21 +286,34 @@ function App() {
 
   if (search.uiDemo) return <UiDemo />
   if (!routeState || !navigation) return null
-  const isLive = variant === 'live'
-
   return (
-    <ControlPlaneDemo
-      scenario={isLive ? liveControlPlaneScenario : controlPlaneScenario}
-      navigation={navigation}
-      allowDemoControls={!isLive}
-      devd={{
-        enabled: isLive,
-        includeMockDevices: false,
-      }}
-      webSerial={{
-        enabled: isLive,
-      }}
-    />
+    <>
+      <ControlPlaneDemo
+        scenario={activeScenario}
+        navigation={navigation}
+        allowDemoControls={!isLive}
+        mockOnly={publicDemo}
+        devd={{
+          enabled: isLive && !publicDemo,
+          includeMockDevices: false,
+        }}
+        webSerial={{
+          enabled: isLive && !publicDemo,
+        }}
+      />
+      {!isLive && !search.uiDemo ? (
+        <DemoInspector
+          state={inspectorState}
+          devices={activeScenario.devices}
+          selectedDeviceId={
+            routeState?.kind === 'device' ? routeState.deviceId : activeScenario.selectedDeviceId
+          }
+          onStateChange={(next) => void updateInspectorState(next)}
+          onSelectDevice={(deviceId) => void selectInspectorDevice(deviceId)}
+          onSimulate={simulateInspectorEvent}
+        />
+      ) : null}
+    </>
   )
 }
 
