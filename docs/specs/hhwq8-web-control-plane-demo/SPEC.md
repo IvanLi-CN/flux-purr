@@ -214,6 +214,13 @@
 - 证据来源：Storybook / Vite mock UI，deterministic fixtures。
 - 绑定说明：工作台基线图来自 Storybook canvas；路由证据来自 Vite mock-only `uiDemo` 与未知 identity 恢复态。
 - 布局检查：1440×1000 保持 1280px 固定工作区且 Inspector 为非侵入 bubble；仅 1700px+ 在保留 1280px 工作区与 24px gutter 后 dock Inspector。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
+- Public Demo target fixtures display English names: `Bench Fixture A`, `Field Kit`, and `Offline Mock Device`.
+
+### Public Demo target fixture names
+
+PR: include
+
+![Public demo Inspector English target fixtures](./assets/public-demo-inspector-english-targets.png)
 
 ### Public Demo Inspector desktop 1440×1000
 
