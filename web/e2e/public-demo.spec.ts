@@ -63,14 +63,18 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('heading', { name: 'Demo Inspector' })).toBeVisible()
     const dockedLayout = await page.evaluate(() => {
       const console = document.querySelector('.industrial-console')?.getBoundingClientRect()
+      const inspector = document.querySelector('.demo-inspector')?.getBoundingClientRect()
       const wrap = document.querySelector('.industrial-console-wrap')
       return {
         consoleWidth: console?.width ?? 0,
+        consoleRight: console?.right ?? 0,
+        inspectorLeft: inspector?.left ?? 0,
         paddingRight: Number.parseFloat(getComputedStyle(wrap).paddingRight),
       }
     })
 
     expect(dockedLayout.consoleWidth).toBeGreaterThanOrEqual(1279)
     expect(dockedLayout.paddingRight).toBeGreaterThanOrEqual(380)
+    expect(dockedLayout.inspectorLeft - dockedLayout.consoleRight).toBeGreaterThanOrEqual(24)
   })
 })

@@ -7766,7 +7766,7 @@
     }
 
     .demo-inspector {
-      right: max(1.5rem, calc((100vw - 1450px) / 2));
+      right: 1.5rem;
       width: 21rem;
     }
   }
