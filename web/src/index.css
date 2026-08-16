@@ -7491,8 +7491,23 @@
 
 @layer components {
   .demo-inspector {
+    --industrial-bg: oklch(0.928 0.014 248);
+    --industrial-panel: oklch(0.968 0.007 235);
+    --industrial-muted: oklch(0.89 0.018 241);
+    --industrial-text: oklch(0.302 0.026 255);
+    --industrial-muted-text: oklch(0.392 0.022 252);
+    --industrial-accent: oklch(0.58 0.209 25);
+    --industrial-shadow: oklch(0.79 0.02 248);
+    --industrial-shadow-deep: oklch(0.738 0.023 247);
+    --industrial-light: oklch(0.996 0.003 220);
+    --industrial-panel-border: oklch(0.72 0.024 247 / 0.3);
+    --industrial-panel-border-strong: oklch(0.64 0.03 247 / 0.36);
+    --industrial-panel-tint: oklch(0.982 0.004 230 / 0.56);
+    --industrial-surface-inset:
+      inset 1px 1px 2px color-mix(in oklch, var(--industrial-shadow) 36%, transparent),
+      inset -1px -1px 2px color-mix(in oklch, var(--industrial-light) 72%, transparent);
     position: fixed;
-    z-index: 30;
+    z-index: 60;
     right: clamp(1rem, 2vw, 2rem);
     top: 50%;
     width: min(22.5rem, calc(100vw - 2rem));
@@ -7769,14 +7784,19 @@
     }
 
     .demo-inspector.is-open {
-      inset: 0.5rem;
+      right: 0.5rem;
+      bottom: 0.5rem;
+      left: 0.5rem;
+      top: auto;
       width: auto;
+      height: min(74dvh, 42rem);
       transform: none;
     }
 
     .demo-inspector.is-open .demo-inspector__surface {
-      height: calc(100dvh - 1rem);
+      height: 100%;
       max-height: none;
+      background: var(--industrial-panel);
       padding: 1rem;
     }
 
