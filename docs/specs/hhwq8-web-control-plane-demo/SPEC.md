@@ -215,37 +215,63 @@
 - 绑定说明：工作台基线图来自 Storybook canvas；路由证据来自 Vite mock-only `uiDemo` 与未知 identity 恢复态。
 - 布局检查：1440×1000 与 375×812 均无横向溢出或越界元素；移动 UI Demo 控件保持稳定宽度，恢复操作触摸高度不小于 48px。
 
-### Routed UI Demo desktop 1440×1000
+### Public Demo Inspector desktop 1440×1000
 
 PR: include
+
+![Public demo Inspector desktop](./assets/public-demo-inspector-desktop.png)
+
+### Public Demo Inspector tablet 1024×900
+
+PR: include
+
+![Public demo Inspector tablet](./assets/public-demo-inspector-tablet.png)
+
+### Public Demo Inspector mobile 375×812
+
+PR: include
+
+![Public demo Inspector mobile](./assets/public-demo-inspector-mobile.png)
+
+### Routed UI Demo desktop 1440×1000
+
+PR: none
 
 ![Routed UI demo desktop](./assets/routing-ui-demo-desktop.png)
 
 ### Routed UI Demo mobile 375×812
 
-PR: include
+PR: none
 
 ![Routed UI demo mobile](./assets/routing-ui-demo-mobile.png)
 
 ### Unknown device recovery 1440×1000
 
-PR: include
+PR: none
 
 ![Unknown device recovery](./assets/routing-unknown-device.png)
 
 ### Dashboard desktop 1440px
 
+PR: none
+
 ![Control plane demo desktop](./assets/control-plane-demo-desktop.png)
 
 ### Settings desktop 1440px
+
+PR: none
 
 ![Control plane demo settings](./assets/control-plane-demo-settings.png)
 
 ### Update desktop 1440px
 
+PR: none
+
 ![Control plane demo update](./assets/control-plane-demo-update.png)
 
 ### Mobile 375px
+
+PR: none
 
 ![Control plane demo mobile](./assets/control-plane-demo-mobile.png)
 
