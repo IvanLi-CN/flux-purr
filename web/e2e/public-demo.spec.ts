@@ -78,11 +78,20 @@ test.describe('public demo build', () => {
     expect(dockedLayout.inspectorLeft - dockedLayout.consoleRight).toBeGreaterThanOrEqual(24)
   })
 
+  test('uses English names for every demo target fixture', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await expect(page.getByRole('button', { name: /Bench Fixture A MOCK/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ })).toBeVisible()
+    await expect(page.getByRole('button', { name: /Offline Mock Device MOCK/ })).toBeVisible()
+  })
+
   test('keeps mock targets usable and guards a calibration target switch', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
-    const fieldKit = page.getByRole('button', { name: /现场工具箱 SIMULATED SERIAL/ })
+    const fieldKit = page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ })
     await fieldKit.click()
     await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demo=true$/)
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
