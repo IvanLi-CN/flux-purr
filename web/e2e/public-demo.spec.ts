@@ -77,4 +77,65 @@ test.describe('public demo build', () => {
     expect(dockedLayout.paddingRight).toBeGreaterThanOrEqual(380)
     expect(dockedLayout.inspectorLeft - dockedLayout.consoleRight).toBeGreaterThanOrEqual(24)
   })
+
+  test('keeps mock targets usable and guards a calibration target switch', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    const fieldKit = page.getByRole('button', { name: /现场工具箱 SIMULATED SERIAL/ })
+    await fieldKit.click()
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demo=true$/)
+    await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Calibration Leave guard active' }).click()
+    await expect(page).toHaveURL(
+      /\/devices\/fp-lab-01\/calibration\/heater-curve\?(?=.*demo=true)(?=.*demoScene=calibration-active)/
+    )
+    await expect(page.getByRole('switch', { name: '标定模式' })).toBeChecked()
+
+    await fieldKit.click()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
+    await expect(page).toHaveURL(
+      /\/devices\/fp-lab-01\/calibration\/heater-curve\?(?=.*demoScene=calibration-active)/
+    )
+    await page.getByRole('button', { name: '留在当前页' }).click()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toHaveCount(0)
+
+    await fieldKit.click()
+    await page.getByRole('button', { name: '关闭并继续' }).click()
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demo=true$/)
+    await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
+  })
+
+  test('renders every public demo scene through its deterministic route', async ({ page }) => {
+    const scenes = [
+      {
+        url: '/devices/fp-lab-01/overview?demo=true',
+        visibleHeading: '热控工作台',
+      },
+      {
+        url: '/devices/fp-kit-02/overview?demo=true&demoScene=degraded',
+        visibleHeading: '热控工作台',
+      },
+      {
+        url: '/devices/fp-demo-03/overview?demo=true&demoScene=offline',
+        visibleHeading: '目标设备暂不可用',
+      },
+      {
+        url: '/devices/fp-lab-01/overview?demo=true&demoScene=blocked-artifact',
+        visibleHeading: '热控工作台',
+      },
+      {
+        url: '/devices/fp-lab-01/calibration/heater-curve?demo=true&demoScene=calibration-active',
+        visibleHeading: '热控工作台',
+      },
+    ]
+
+    for (const scene of scenes) {
+      await page.goto(scene.url)
+      await expect(page.getByRole('heading', { name: scene.visibleHeading })).toBeVisible()
+    }
+  })
 })

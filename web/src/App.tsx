@@ -44,6 +44,39 @@ function App() {
   )
 
   useEffect(() => {
+    const routedDeviceId = routeState?.kind === 'device' ? routeState.deviceId : null
+    if (
+      isLive ||
+      inspectorState.demoScene !== 'calibration-active' ||
+      !routedDeviceId ||
+      routedDeviceId === activeScenario.selectedDeviceId
+    ) {
+      return
+    }
+    const {
+      demoScene: _demoScene,
+      demoLease: _demoLease,
+      demoNetwork: _demoNetwork,
+      demoArtifact: _demoArtifact,
+      ...searchWithoutInspector
+    } = search
+    void navigate({
+      to: location.pathname as '/',
+      search: searchWithoutInspector,
+      replace: true,
+      ignoreBlocker: true,
+    })
+  }, [
+    activeScenario.selectedDeviceId,
+    inspectorState.demoScene,
+    isLive,
+    location.pathname,
+    navigate,
+    routeState,
+    search,
+  ])
+
+  useEffect(() => {
     if (!publicDemo) persistAppVariant(variant)
   }, [publicDemo, variant])
 
@@ -245,18 +278,24 @@ function App() {
 
   const selectInspectorDevice = useCallback(
     async (deviceId: string) => {
-      const current = routeState
-      if (current?.kind === 'device' && current.view === 'calibration') {
-        await navigate({
-          to: '/devices/$deviceId/calibration/$tab' as '/',
-          params: { deviceId, tab: current.calibrationTab },
-          search,
-        })
-        return
-      }
-      await navigate({ to: '/devices/$deviceId/overview' as '/', params: { deviceId }, search })
+      const nextInspectorState =
+        inspectorState.demoScene === 'calibration-active'
+          ? { ...inspectorState, demoScene: 'normal' as const }
+          : inspectorState
+      const {
+        demoScene: _demoScene,
+        demoLease: _demoLease,
+        demoNetwork: _demoNetwork,
+        demoArtifact: _demoArtifact,
+        ...searchWithoutInspector
+      } = search
+      await navigate({
+        to: '/devices/$deviceId/overview',
+        params: { deviceId },
+        search: { ...searchWithoutInspector, ...demoInspectorSearch(nextInspectorState) },
+      })
     },
-    [navigate, routeState, search]
+    [inspectorState, navigate, search]
   )
 
   const simulateInspectorEvent = useCallback((event: Pick<EventLogEntry, 'message' | 'tone'>) => {

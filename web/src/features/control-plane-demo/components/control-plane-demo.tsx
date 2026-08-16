@@ -304,10 +304,12 @@ function resumeConnectionPriority(connection: DeviceConnectionOption) {
 }
 
 function isHealthyRouteConnection(connection: DeviceConnectionOption) {
+  const isAvailableMockFixture =
+    connection.kind === 'mock' && connection.target.severity !== 'offline'
   return (
     connection.target.connectionAvailable !== false &&
-    connection.target.severity === 'nominal' &&
-    (connection.kind === 'mock' || connection.target.leaseState === 'active')
+    (isAvailableMockFixture ||
+      (connection.target.severity === 'nominal' && connection.target.leaseState === 'active'))
   )
 }
 const PPS_STEP_MV = 100

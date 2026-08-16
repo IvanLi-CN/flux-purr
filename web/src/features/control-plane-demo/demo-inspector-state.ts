@@ -39,10 +39,10 @@ export function demoInspectorStateFromSearch(search: Record<string, unknown>): D
 
 export function demoInspectorSearch(state: DemoInspectorState) {
   return {
-    ...(state.demoScene === 'normal' ? {} : { demoScene: state.demoScene }),
-    ...(state.demoLease === 'none' ? {} : { demoLease: state.demoLease }),
-    ...(state.demoNetwork === 'healthy' ? {} : { demoNetwork: state.demoNetwork }),
-    ...(state.demoArtifact === 'ready' ? {} : { demoArtifact: state.demoArtifact }),
+    demoScene: state.demoScene === 'normal' ? undefined : state.demoScene,
+    demoLease: state.demoLease === 'none' ? undefined : state.demoLease,
+    demoNetwork: state.demoNetwork === 'healthy' ? undefined : state.demoNetwork,
+    demoArtifact: state.demoArtifact === 'ready' ? undefined : state.demoArtifact,
   }
 }
 
