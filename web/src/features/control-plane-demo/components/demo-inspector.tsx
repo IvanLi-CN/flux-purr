@@ -24,6 +24,8 @@ const scenes: Array<{ id: DemoSceneId; label: string; description: string }> = [
   { id: 'calibration-active', label: 'Calibration', description: 'Leave guard active' },
 ]
 
+const dockedInspectorMinViewport = 1700
+
 export function DemoInspector({
   state,
   devices,
@@ -32,7 +34,9 @@ export function DemoInspector({
   onSelectDevice,
   onSimulate,
 }: DemoInspectorProps) {
-  const [open, setOpen] = useState(() => typeof window === 'undefined' || window.innerWidth >= 1280)
+  const [open, setOpen] = useState(
+    () => typeof window === 'undefined' || window.innerWidth >= dockedInspectorMinViewport
+  )
   const [copied, setCopied] = useState(false)
   const stateSummary = useMemo(
     () =>

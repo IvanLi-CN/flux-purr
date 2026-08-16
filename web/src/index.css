@@ -7752,13 +7752,17 @@
     display: none;
   }
 
-  @media (min-width: 1280px) {
-    .industrial-shell--fixed:has(+ .demo-inspector) .industrial-console-wrap {
-      padding-right: calc(21rem + 3rem);
-    }
+  .demo-inspector:not(.is-open) {
+    right: 1rem;
+    top: auto;
+    bottom: 1rem;
+    width: auto;
+    transform: none;
+  }
 
-    .industrial-shell--fixed:has(+ .demo-inspector) .industrial-console {
-      width: min(100%, 66rem);
+  @media (min-width: 1700px) {
+    .industrial-shell--fixed:has(+ .demo-inspector.is-open) .industrial-console-wrap {
+      padding-right: calc(21rem + 3rem);
     }
 
     .demo-inspector {
