@@ -7812,7 +7812,9 @@
       min-height: 3rem;
     }
 
+    .demo-inspector__icon-button,
     .demo-inspector__bubble {
+      width: 3rem;
       height: 3rem;
     }
 

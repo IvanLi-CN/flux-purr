@@ -37,6 +37,15 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('heading', { name: 'Demo Inspector' })).toBeVisible()
     const reset = page.getByRole('button', { name: 'Reset demo state' })
     expect((await reset.boundingBox())?.height).toBeGreaterThanOrEqual(48)
+
+    for (const button of [
+      page.getByRole('button', { name: '收起 Demo Inspector' }),
+      page.getByRole('button', { name: '复制 Demo 分享链接' }),
+    ]) {
+      const box = await button.boundingBox()
+      expect(box?.height).toBeGreaterThanOrEqual(48)
+      expect(box?.width).toBeGreaterThanOrEqual(48)
+    }
   })
 
   test('keeps the fixed desktop workstation at its natural width before the dock threshold', async ({

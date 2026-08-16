@@ -216,11 +216,17 @@
 - 布局检查：1440×1000 保持 1280px 固定工作区且 Inspector 为非侵入 bubble；仅 1700px+ 在保留 1280px 工作区与 24px gutter 后 dock Inspector。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
 - Public Demo target fixtures display English names: `Bench Fixture A`, `Field Kit`, and `Offline Mock Device`.
 
-### Current Public Demo Console with Inspector
+### Current Public Demo Console with Inspector (1746×1136)
 
 PR: include
 
 ![Current Public Demo Console with Inspector](./assets/public-demo-inspector-canonical-console.jpg)
+
+### Current Public Demo Inspector drawer (375×812)
+
+PR: include
+
+![Current Public Demo Inspector drawer](./assets/public-demo-inspector-current-mobile.jpg)
 
 ## Historical Visual Reference
 
