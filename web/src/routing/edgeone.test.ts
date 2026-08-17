@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('EdgeOne SPA fallback', () => {
-  it('rewrites every history path to the production entrypoint', async () => {
+  it('rewrites device history paths without catching static assets', async () => {
     const config = JSON.parse(
       await readFile(resolve(process.cwd(), 'public/edgeone.json'), 'utf8')
     ) as {
@@ -11,6 +11,14 @@ describe('EdgeOne SPA fallback', () => {
     }
 
     expect(config.rewrites).toContainEqual({
+      source: '/devices',
+      destination: '/index.html',
+    })
+    expect(config.rewrites).toContainEqual({
+      source: '/devices/*',
+      destination: '/index.html',
+    })
+    expect(config.rewrites).not.toContainEqual({
       source: '/*',
       destination: '/index.html',
     })
