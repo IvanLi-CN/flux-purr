@@ -441,14 +441,29 @@ test.describe('control plane direct LAN', () => {
     await page.goto('/?demo=false')
     await openLanPairing(page)
 
+    await page.evaluate(() => {
+      window.localStorage.setItem(
+        'flux-purr:lan-device:http://192.168.1.17',
+        JSON.stringify({
+          baseUrl: 'http://192.168.1.17',
+          token: 'b'.repeat(64),
+          deviceId: '001122334456',
+          hostname: 'flux-purr-001122334456',
+        })
+      )
+    })
     await pairRequiredLanDevice(page)
     await expect(page.getByText('LAN 设备已连接')).toBeVisible()
 
-    await page.evaluate(() => {
-      window.localStorage.setItem(
-        'flux-purr:lan-device:http://192.168.1.19',
-        JSON.stringify({ baseUrl: 'http://192.168.1.19', token: 'b'.repeat(64) })
-      )
+    await page.route('http://192.168.1.17/**', async (route) => {
+      const requestOrigin = route.request().headers().origin ?? 'http://127.0.0.1:4173'
+      await route.fulfill({
+        status: 503,
+        headers: jsonHeaders(requestOrigin),
+        body: JSON.stringify({
+          error: { code: 'device_unavailable', message: 'Device is unavailable.' },
+        }),
+      })
     })
     rejectBearerRequests = true
     await page.reload()
@@ -466,8 +481,8 @@ test.describe('control plane direct LAN', () => {
       })
     ).toEqual({
       keys: [
+        'flux-purr:lan-device:http://192.168.1.17',
         'flux-purr:lan-device:http://192.168.1.18',
-        'flux-purr:lan-device:http://192.168.1.19',
       ],
       rejected: expect.objectContaining({
         baseUrl: 'http://192.168.1.18',

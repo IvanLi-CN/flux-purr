@@ -671,7 +671,21 @@ export function ControlPlaneDemo({
   const [requestedConnectionByIdentity, setRequestedConnectionByIdentity] = useState<
     Record<string, { kind: DeviceConnectionKind; targetId: string }>
   >({})
-  const invalidLanCredentialIdentityIdsRef = useRef(new Set<string>())
+  const [invalidLanCredentialIdentityIds, setInvalidLanCredentialIdentityIds] = useState<
+    Set<string>
+  >(
+    () =>
+      new Set(
+        allowDemoControls
+          ? []
+          : listSavedLanDeviceSessions().flatMap((session) => {
+              const target = savedLanSessionToDeviceTarget(session)
+              return session.authorizationState === 'invalid' && target
+                ? [deviceIdentityId(target)]
+                : []
+            })
+      )
+  )
   const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
     useState<AddDeviceKind>(defaultAddDeviceKind)
   const routedRecoveryIdentityId =
@@ -766,11 +780,17 @@ export function ControlPlaneDemo({
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
   const persistKnownWebSerialDevices =
     !allowDemoControls && webSerialOptions?.persistKnownDevices !== false
-  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() =>
-    persistKnownWebSerialDevices
+  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() => [
+    ...(!allowDemoControls
+      ? listSavedLanDeviceSessions().flatMap((session) => {
+          const target = savedLanSessionToDeviceTarget(session)
+          return target ? [target] : []
+        })
+      : []),
+    ...(persistKnownWebSerialDevices
       ? listKnownWebSerialDevices().map(knownWebSerialDeviceToTarget)
-      : []
-  )
+      : []),
+  ])
   const [wifiSnapshotsByDevice, setWifiSnapshotsByDevice] = useState<
     Record<string, NetworkSummary>
   >({})
@@ -909,12 +929,21 @@ export function ControlPlaneDemo({
         const rememberedTarget = savedLanSessionToDeviceTarget(session)
         const rememberedIdentityId = rememberedTarget ? deviceIdentityId(rememberedTarget) : null
         if (rememberedTarget) {
-          setPendingDevices((current) =>
-            upsertLanDeviceTarget(current, { ...rememberedTarget, connectionAvailable: false })
-          )
+          setPendingDevices((current) => upsertLanDeviceTarget(current, rememberedTarget))
         }
         if (!rememberedTarget || !rememberedIdentityId) continue
         try {
+          if (session.authorizationState === 'invalid') {
+            setInvalidLanCredentialIdentityIds((current) =>
+              new Set(current).add(rememberedIdentityId)
+            )
+            setFeedback({
+              title: 'LAN 配对凭据已失效',
+              detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+              tone: 'warning',
+            })
+            continue
+          }
           const health = await lanRuntime.getPublicInfo(session.baseUrl)
           const resumed = await resumeLanDeviceSession(
             session.baseUrl,
@@ -923,6 +952,20 @@ export function ControlPlaneDemo({
           )
           if (cancelled) return
           if (!resumed) {
+            const invalidatedSession = listSavedLanDeviceSessions().find(
+              (candidate) => candidate.baseUrl === session.baseUrl
+            )
+            if (invalidatedSession?.authorizationState === 'invalid') {
+              setInvalidLanCredentialIdentityIds((current) =>
+                new Set(current).add(rememberedIdentityId)
+              )
+              setFeedback({
+                title: 'LAN 配对凭据已失效',
+                detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+                tone: 'warning',
+              })
+              continue
+            }
             setPendingDevices((current) =>
               current.filter((device) => device.id !== rememberedTarget.id)
             )
@@ -936,10 +979,12 @@ export function ControlPlaneDemo({
             !(error instanceof ControlPlaneClientError) ||
             error.code !== 'unauthorized'
           ) {
-            return
+            continue
           }
           if (rememberedIdentityId) {
-            invalidLanCredentialIdentityIdsRef.current.add(rememberedIdentityId)
+            setInvalidLanCredentialIdentityIds((current) =>
+              new Set(current).add(rememberedIdentityId)
+            )
           }
           setFeedback({
             title: 'LAN 配对凭据已失效',
@@ -1721,6 +1766,8 @@ export function ControlPlaneDemo({
   const routeRecoveryIdentityId =
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const routeRecoveryVariant = navigation?.variant
+  const routeHasInvalidLanCredential =
+    routeRecoveryIdentityId != null && invalidLanCredentialIdentityIds.has(routeRecoveryIdentityId)
   const routeConnectionKind = routeDeviceConnection?.kind
   const routeConnectionUnavailable = routeDeviceConnection
     ? !isHealthyRouteConnection(routeDeviceConnection)
@@ -1747,6 +1794,10 @@ export function ControlPlaneDemo({
     }
     if (allowDemoControls) {
       setRouteResumeFailed(routeConnectionUnavailable)
+      return
+    }
+    if (routeHasInvalidLanCredential) {
+      setRouteResumeFailed(false)
       return
     }
     if (pendingLanResumeIdentityIds.has(routeRecoveryIdentityId)) {
@@ -1808,7 +1859,7 @@ export function ControlPlaneDemo({
           })
           return
         }
-        if (!invalidLanCredentialIdentityIdsRef.current.has(routeRecoveryIdentityId)) {
+        if (!routeHasInvalidLanCredential) {
           setFeedback({
             title: 'Web Serial unavailable',
             detail: 'Browser direct USB control could not be opened.',
@@ -1830,6 +1881,7 @@ export function ControlPlaneDemo({
     routeDeviceChoice?.name,
     routeFallbackConnectionKind,
     routeFallbackConnectionLabel,
+    routeHasInvalidLanCredential,
     routeHasRecoverableTransportCandidate,
     routeRecoveryIdentityId,
     routeRecoveryVariant,
@@ -1837,6 +1889,17 @@ export function ControlPlaneDemo({
     webSerial.deviceIdentityId,
     webSerial.preauthorizedPortsReady,
   ])
+
+  useEffect(() => {
+    if (!routeHasInvalidLanCredential) {
+      return
+    }
+    setFeedback({
+      title: 'LAN 配对凭据已失效',
+      detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+      tone: 'warning',
+    })
+  }, [routeHasInvalidLanCredential])
 
   useEffect(() => {
     if (!navigation || navigation.state.kind !== 'device' || !routeDeviceConnection) return
@@ -1900,7 +1963,7 @@ export function ControlPlaneDemo({
       return
     }
 
-    if (invalidLanCredentialIdentityIdsRef.current.has(deviceIdentityId(visibleDevice))) {
+    if (invalidLanCredentialIdentityIds.has(deviceIdentityId(visibleDevice))) {
       return
     }
 
@@ -1933,7 +1996,13 @@ export function ControlPlaneDemo({
         tone: 'warning',
       }
     })
-  }, [activeView, selectedAddDeviceKind, visibleDevice, webSerial.state])
+  }, [
+    activeView,
+    invalidLanCredentialIdentityIds,
+    selectedAddDeviceKind,
+    visibleDevice,
+    webSerial.state,
+  ])
 
   useEffect(() => {
     if (!visibleDeviceIsLive || !visibleDevice.heaterLockReason) {
@@ -2237,7 +2306,13 @@ export function ControlPlaneDemo({
           leaseId: lease.leaseId,
           leaseState: 'active',
         }
-        invalidLanCredentialIdentityIdsRef.current.delete(deviceIdentityId(leasedTarget))
+        setInvalidLanCredentialIdentityIds((current) => {
+          const identityId = deviceIdentityId(leasedTarget)
+          if (!current.has(identityId)) return current
+          const next = new Set(current)
+          next.delete(identityId)
+          return next
+        })
         setLanLeasesByDevice((current) => ({ ...current, [target.id]: lease }))
         setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
         setSelectedDeviceId(target.id)
@@ -3979,7 +4054,12 @@ export function ControlPlaneDemo({
   }
 
   const unavailableRouteState = navigation?.state.kind === 'device' ? navigation.state : null
-  if (navigation && unavailableRouteState && (!routeDeviceChoice || routeResumeFailed)) {
+  if (
+    navigation &&
+    unavailableRouteState &&
+    !routeHasInvalidLanCredential &&
+    (!routeDeviceChoice || routeResumeFailed)
+  ) {
     const routeNavigation = navigation
     const recoveryLeaveGuard = calibrationLeaveGuard
       ? {

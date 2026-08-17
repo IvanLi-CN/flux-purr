@@ -4,6 +4,7 @@
     "includes": [
       "**",
       "!dist",
+      "!dist-demo",
       "!storybook-static",
       "!playwright-report",
       "!test-results",
