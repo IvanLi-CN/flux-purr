@@ -41,5 +41,9 @@ runs:
         source "$ESPUP_EXPORT_FILE"
 
         echo "$PATH" >> "$GITHUB_PATH"
-        echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
-        echo "CLANG_PATH=${CLANG_PATH}" >> "$GITHUB_ENV"
+        if [[ -n "${LIBCLANG_PATH:-}" ]]; then
+          echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
+        fi
+        if [[ -n "${CLANG_PATH:-}" ]]; then
+          echo "CLANG_PATH=${CLANG_PATH}" >> "$GITHUB_ENV"
+        fi
