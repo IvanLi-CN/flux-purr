@@ -1169,16 +1169,12 @@ export function ControlPlaneDemo({
       return
     }
 
-    setFeedback((current) =>
-      routeHasActiveLanLease
-        ? current
-        : {
-            title: 'Web Serial unavailable',
-            detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
-            tone: 'warning',
-          }
-    )
-  }, [selectedAddDeviceKind, webSerial.error, webSerial.state, routeHasActiveLanLease])
+    setFeedback({
+      title: 'Web Serial unavailable',
+      detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+      tone: 'warning',
+    })
+  }, [selectedAddDeviceKind, webSerial.error, webSerial.state])
 
   useEffect(() => {
     if (webSerial.state !== 'connected') {

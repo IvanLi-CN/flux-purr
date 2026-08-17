@@ -21,6 +21,28 @@ import { consoleRoutePath, parseConsoleRoute, routeLabel } from '@/routing/conso
 import { appVariantFromSearch } from '@/routing/search'
 import { UiDemo } from '@/ui-demo'
 
+function inspectorNavigationTargetKey(
+  pathname: string,
+  search: {
+    demo?: unknown
+    uiDemo?: unknown
+    demoScene?: unknown
+    demoLease?: unknown
+    demoNetwork?: unknown
+    demoArtifact?: unknown
+  }
+) {
+  return [
+    pathname,
+    search.demo,
+    search.uiDemo,
+    search.demoScene,
+    search.demoLease,
+    search.demoNetwork,
+    search.demoArtifact,
+  ].join('\u0001')
+}
+
 function App() {
   const search = RootRoute.useSearch()
   const variant = appVariantFromSearch(search)
@@ -34,6 +56,8 @@ function App() {
   const pendingBlockRef = useRef<{
     id: symbol
     resolve: (shouldBlock: boolean) => void
+    targetKey: string
+    promise: Promise<boolean>
   } | null>(null)
   const [inspectorEvents, setInspectorEvents] = useState<EventLogEntry[]>([])
   const inspectorState = useMemo(() => demoInspectorStateFromSearch(search), [search])
@@ -43,6 +67,7 @@ function App() {
   const inspectorNavigationQueueRef = useRef(Promise.resolve())
   const inspectorPendingNavigationCountRef = useRef(0)
   const inspectorNavigationAbortRef = useRef<(() => void) | null>(null)
+  const inspectorNavigationTargetRef = useRef<string | null>(null)
   useEffect(() => {
     if (inspectorPendingNavigationCountRef.current > 0) return
     inspectorStateRef.current = inspectorState
@@ -157,18 +182,27 @@ function App() {
       ) {
         return false
       }
-      pendingBlockRef.current?.resolve(true)
+      const targetKey = inspectorNavigationTargetKey(next.pathname, next.search)
+      const pending = pendingBlockRef.current
+      if (pending?.targetKey === targetKey) return pending.promise
+      pending?.resolve(true)
+      if (inspectorNavigationTargetRef.current !== targetKey) {
+        inspectorNavigationAbortRef.current?.()
+      }
       const id = Symbol('blocked-navigation')
-      return new Promise<boolean>((resolve) => {
-        pendingBlockRef.current = { id, resolve }
-        const nextRoute = parseConsoleRoute(next.pathname)
-        setBlockedNavigation({
-          next: nextRoute,
-          nextLabel: routeLabel(nextRoute),
-          proceed: () => settlePendingBlock(id, false),
-          reset: () => settlePendingBlock(id, true),
-        })
+      let resolveBlock: (shouldBlock: boolean) => void = () => undefined
+      const blockPromise = new Promise<boolean>((resolve) => {
+        resolveBlock = resolve
       })
+      pendingBlockRef.current = { id, resolve: resolveBlock, targetKey, promise: blockPromise }
+      const nextRoute = parseConsoleRoute(next.pathname)
+      setBlockedNavigation({
+        next: nextRoute,
+        nextLabel: routeLabel(nextRoute),
+        proceed: () => settlePendingBlock(id, false),
+        reset: () => settlePendingBlock(id, true),
+      })
+      return blockPromise
     },
     enableBeforeUnload: Boolean(calibrationGuard),
     disabled: false,
@@ -273,33 +307,53 @@ function App() {
   }, [])
 
   // A cancelled route blocker does not settle TanStack's navigation promise.
-  const settleInspectorNavigation = useCallback((navigation: () => Promise<void>) => {
-    return new Promise<boolean>((resolve, reject) => {
-      let settled = false
-      const settle = (completed: boolean) => {
-        if (settled) return
-        settled = true
-        if (inspectorNavigationAbortRef.current === abort) {
-          inspectorNavigationAbortRef.current = null
-        }
-        resolve(completed)
-      }
-      const abort = () => settle(false)
-      inspectorNavigationAbortRef.current = abort
-      void navigation().then(
-        () => settle(true),
-        (error: unknown) => {
-          if (!settled) {
-            settled = true
-            if (inspectorNavigationAbortRef.current === abort) {
-              inspectorNavigationAbortRef.current = null
-            }
-            reject(error)
+  const settleInspectorNavigation = useCallback(
+    (navigation: () => Promise<void>, targetKey: string) => {
+      return new Promise<boolean>((resolve, reject) => {
+        let settled = false
+        const settle = (completed: boolean) => {
+          if (settled) return
+          settled = true
+          if (inspectorNavigationTargetRef.current === targetKey) {
+            inspectorNavigationTargetRef.current = null
           }
+          if (inspectorNavigationAbortRef.current === abort) {
+            inspectorNavigationAbortRef.current = null
+          }
+          resolve(completed)
         }
-      )
-    })
-  }, [])
+        const abort = () => settle(false)
+        inspectorNavigationAbortRef.current = abort
+        inspectorNavigationTargetRef.current = targetKey
+        let navigationPromise: Promise<void>
+        try {
+          navigationPromise = navigation()
+        } catch (error) {
+          if (inspectorNavigationTargetRef.current === targetKey) {
+            inspectorNavigationTargetRef.current = null
+          }
+          reject(error)
+          return
+        }
+        void navigationPromise.then(
+          () => settle(true),
+          (error: unknown) => {
+            if (!settled) {
+              settled = true
+              if (inspectorNavigationTargetRef.current === targetKey) {
+                inspectorNavigationTargetRef.current = null
+              }
+              if (inspectorNavigationAbortRef.current === abort) {
+                inspectorNavigationAbortRef.current = null
+              }
+              reject(error)
+            }
+          }
+        )
+      })
+    },
+    []
+  )
 
   const updateInspectorState = useCallback(
     (nextState: Partial<DemoInspectorState>) =>
@@ -324,12 +378,14 @@ function App() {
             ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
             : `/devices/${nextScenario.selectedDeviceId}/overview`
           : inspectorPathnameRef.current
-        const completed = await settleInspectorNavigation(() =>
-          navigate({
-            to: nextPathname as '/',
-            search: nextSearch,
-            replace: true,
-          })
+        const completed = await settleInspectorNavigation(
+          () =>
+            navigate({
+              to: nextPathname as '/',
+              search: nextSearch,
+              replace: true,
+            }),
+          inspectorNavigationTargetKey(nextPathname, nextSearch)
         )
         if (!completed) return
         inspectorStateRef.current = mergedState
@@ -361,7 +417,10 @@ function App() {
           params: { deviceId },
           search: nextSearch,
         } as const
-        const completed = await settleInspectorNavigation(() => navigate(targetNavigation))
+        const completed = await settleInspectorNavigation(
+          () => navigate(targetNavigation),
+          inspectorNavigationTargetKey(nextPathname, nextSearch)
+        )
         if (!completed) return
         inspectorPathnameRef.current = nextPathname
         inspectorSearchRef.current = nextSearch
