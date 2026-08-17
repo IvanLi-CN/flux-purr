@@ -837,8 +837,8 @@ export function ControlPlaneDemo({
       ),
     [deviceOptions, lanLeasesByDevice]
   )
-  const webSerialHasActiveLanLease = Boolean(
-    webSerial.deviceIdentityId && activeLanLeaseIdentityIds.has(webSerial.deviceIdentityId)
+  const routeHasActiveLanLease = Boolean(
+    routedRecoveryIdentityId && activeLanLeaseIdentityIds.has(routedRecoveryIdentityId)
   )
   const routeDeviceChoices = useMemo(
     () => mergeDeviceChoices(deviceOptions, { allowDemoControls }),
@@ -1170,7 +1170,7 @@ export function ControlPlaneDemo({
     }
 
     setFeedback((current) =>
-      webSerialHasActiveLanLease
+      routeHasActiveLanLease
         ? current
         : {
             title: 'Web Serial unavailable',
@@ -1178,7 +1178,7 @@ export function ControlPlaneDemo({
             tone: 'warning',
           }
     )
-  }, [selectedAddDeviceKind, webSerial.error, webSerial.state, webSerialHasActiveLanLease])
+  }, [selectedAddDeviceKind, webSerial.error, webSerial.state, routeHasActiveLanLease])
 
   useEffect(() => {
     if (webSerial.state !== 'connected') {
@@ -1209,7 +1209,7 @@ export function ControlPlaneDemo({
   useEffect(() => {
     if (webSerial.state === 'error' && webSerial.error) {
       setFeedback((current) =>
-        webSerialHasActiveLanLease
+        routeHasActiveLanLease
           ? current
           : {
               title: 'Web Serial unavailable',
@@ -1218,7 +1218,7 @@ export function ControlPlaneDemo({
             }
       )
     }
-  }, [webSerial.error, webSerial.state, webSerialHasActiveLanLease])
+  }, [webSerial.error, webSerial.state, routeHasActiveLanLease])
 
   useEffect(() => {
     const liveDevdDevice = activeScenario.devices.find((device) => device.transport === 'devd')

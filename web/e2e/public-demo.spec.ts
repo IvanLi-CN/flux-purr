@@ -6,7 +6,38 @@ test.describe('public demo build', () => {
   }) => {
     const controlRequests: string[] = []
     page.on('request', (request) => {
-      if (/127\.0\.0\.1:30080|\/api\/v1\//.test(request.url())) controlRequests.push(request.url())
+      if (/127\.0\.0\.1:30080|192\.168\.1\.77|\/api\/v1\//.test(request.url())) {
+        controlRequests.push(request.url())
+      }
+    })
+    await page.addInitScript(() => {
+      const serialCalls = { getPorts: 0, requestPort: 0 }
+      Object.defineProperty(window, '__publicDemoSerialCalls', {
+        configurable: true,
+        value: serialCalls,
+      })
+      Object.defineProperty(navigator, 'serial', {
+        configurable: true,
+        value: {
+          getPorts: () => {
+            serialCalls.getPorts += 1
+            return Promise.resolve([])
+          },
+          requestPort: () => {
+            serialCalls.requestPort += 1
+            return Promise.resolve(null)
+          },
+        },
+      })
+      window.localStorage.setItem(
+        'flux-purr:lan-device:http://192.168.1.77',
+        JSON.stringify({
+          baseUrl: 'http://192.168.1.77',
+          token: 'a'.repeat(64),
+          deviceId: '001122334477',
+          hostname: 'saved-lan-target',
+        })
+      )
     })
 
     await page.goto('/?demo=false&uiDemo=true')
@@ -26,6 +57,11 @@ test.describe('public demo build', () => {
     )
     await expect(page.getByText('Simulate lease conflict')).toBeVisible()
     expect(controlRequests).toEqual([])
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __publicDemoSerialCalls: unknown }).__publicDemoSerialCalls
+      )
+    ).toEqual({ getPorts: 0, requestPort: 0 })
   })
 
   test('serializes concurrent inspector changes into one share state', async ({ page }) => {
@@ -78,6 +114,16 @@ test.describe('public demo build', () => {
     )
   })
 
+  test('keeps the exact calibration subroute when share state changes', async ({ page }) => {
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+    await page.getByRole('checkbox', { name: 'Simulate lease conflict' }).check()
+
+    await expect(page).toHaveURL(
+      /\/devices\/fp-lab-01\/calibration\/rtd-adc\?(?=.*demo=true)(?=.*demoLease=conflict)/
+    )
+  })
+
   test('uses a mobile bubble that opens a touch-safe drawer', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await page.goto('/')
@@ -97,6 +143,11 @@ test.describe('public demo build', () => {
       expect(box?.height).toBeGreaterThanOrEqual(48)
       expect(box?.width).toBeGreaterThanOrEqual(48)
     }
+    const viewport = await page.evaluate(() => ({
+      viewportWidth: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }))
+    expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.viewportWidth)
   })
 
   test('keeps the fixed desktop workstation at its natural width before the dock threshold', async ({
@@ -112,11 +163,15 @@ test.describe('public demo build', () => {
       return {
         consoleWidth: console?.width ?? 0,
         paddingRight: Number.parseFloat(getComputedStyle(wrap).paddingRight),
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
       }
     })
 
     expect(layout.consoleWidth).toBeGreaterThanOrEqual(1279)
+    expect(layout.consoleWidth).toBeLessThanOrEqual(1281)
     expect(layout.paddingRight).toBeLessThan(100)
+    expect(layout.scrollWidth).toBeLessThanOrEqual(layout.viewportWidth)
 
     await page.setViewportSize({ width: 1700, height: 1000 })
     await page.goto('/')
@@ -130,12 +185,16 @@ test.describe('public demo build', () => {
         consoleRight: console?.right ?? 0,
         inspectorLeft: inspector?.left ?? 0,
         paddingRight: Number.parseFloat(getComputedStyle(wrap).paddingRight),
+        scrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth,
       }
     })
 
     expect(dockedLayout.consoleWidth).toBeGreaterThanOrEqual(1279)
+    expect(dockedLayout.consoleWidth).toBeLessThanOrEqual(1281)
     expect(dockedLayout.paddingRight).toBeGreaterThanOrEqual(380)
     expect(dockedLayout.inspectorLeft - dockedLayout.consoleRight).toBeGreaterThanOrEqual(24)
+    expect(dockedLayout.scrollWidth).toBeLessThanOrEqual(dockedLayout.viewportWidth)
   })
 
   test('uses English names for every demo target fixture', async ({ page }) => {
@@ -178,6 +237,27 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
   })
 
+  test('serializes target and override changes behind the calibration leave guard', async ({
+    page,
+  }) => {
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true&demoScene=calibration-active')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).evaluate((target) => {
+      const lease = Array.from(document.querySelectorAll<HTMLInputElement>('input')).find((input) =>
+        input.parentElement?.textContent?.includes('Simulate lease conflict')
+      )
+      target.click()
+      lease?.click()
+    })
+
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
+    await page.getByRole('button', { name: '关闭并继续' }).click()
+    await expect(page).toHaveURL(
+      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoLease=conflict)/
+    )
+  })
+
   test('renders every public demo scene through its deterministic route', async ({ page }) => {
     const scenes = [
       {
@@ -206,5 +286,13 @@ test.describe('public demo build', () => {
       await page.goto(scene.url)
       await expect(page.getByRole('heading', { name: scene.visibleHeading })).toBeVisible()
     }
+
+    await page.goto('/devices/fp-demo-03/overview?demo=true&demoScene=offline')
+    await expect(page.getByText('Offline Mock Device')).toBeVisible()
+    await expect(page.getByText('-54 dBm')).toHaveCount(0)
+
+    await page.goto('/devices/fp-lab-01/update?demo=true&demoScene=blocked-artifact')
+    await expect(page.getByText('Not compatible')).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Run dry-check' })).toBeDisabled()
   })
 })

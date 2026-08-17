@@ -42,6 +42,7 @@ function App() {
   const inspectorPathnameRef = useRef(location.pathname)
   const inspectorNavigationQueueRef = useRef(Promise.resolve())
   const inspectorPendingNavigationCountRef = useRef(0)
+  const inspectorNavigationAbortRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (inspectorPendingNavigationCountRef.current > 0) return
     inspectorStateRef.current = inspectorState
@@ -112,12 +113,14 @@ function App() {
     pendingBlockRef.current = null
     setBlockedNavigation(null)
     pending.resolve(shouldBlock)
+    if (shouldBlock) inspectorNavigationAbortRef.current?.()
   }, [])
 
   useEffect(
     () => () => {
       pendingBlockRef.current?.resolve(true)
       pendingBlockRef.current = null
+      inspectorNavigationAbortRef.current?.()
     },
     []
   )
@@ -255,14 +258,54 @@ function App() {
     })
   }, [])
 
-  const updateInspectorState = useCallback(
-    (nextState: Partial<DemoInspectorState>) => {
-      const previousState = inspectorStateRef.current
-      const mergedState = { ...previousState, ...nextState }
-      inspectorStateRef.current = mergedState
-      inspectorPendingNavigationCountRef.current += 1
+  const enqueueInspectorNavigation = useCallback((runNavigation: () => Promise<void>) => {
+    inspectorPendingNavigationCountRef.current += 1
+    const queuedNavigation = inspectorNavigationQueueRef.current.then(runNavigation, runNavigation)
+    inspectorNavigationQueueRef.current = queuedNavigation.then(
+      () => {
+        inspectorPendingNavigationCountRef.current -= 1
+      },
+      () => {
+        inspectorPendingNavigationCountRef.current -= 1
+      }
+    )
+    return queuedNavigation
+  }, [])
 
-      const runNavigation = async () => {
+  // A cancelled route blocker does not settle TanStack's navigation promise.
+  const settleInspectorNavigation = useCallback((navigation: () => Promise<void>) => {
+    return new Promise<boolean>((resolve, reject) => {
+      let settled = false
+      const settle = (completed: boolean) => {
+        if (settled) return
+        settled = true
+        if (inspectorNavigationAbortRef.current === abort) {
+          inspectorNavigationAbortRef.current = null
+        }
+        resolve(completed)
+      }
+      const abort = () => settle(false)
+      inspectorNavigationAbortRef.current = abort
+      void navigation().then(
+        () => settle(true),
+        (error: unknown) => {
+          if (!settled) {
+            settled = true
+            if (inspectorNavigationAbortRef.current === abort) {
+              inspectorNavigationAbortRef.current = null
+            }
+            reject(error)
+          }
+        }
+      )
+    })
+  }, [])
+
+  const updateInspectorState = useCallback(
+    (nextState: Partial<DemoInspectorState>) =>
+      enqueueInspectorNavigation(async () => {
+        const previousState = inspectorStateRef.current
+        const mergedState = { ...previousState, ...nextState }
         const {
           demoScene: _demoScene,
           demoLease: _demoLease,
@@ -274,7 +317,6 @@ function App() {
           ...searchWithoutInspector,
           ...demoInspectorSearch(mergedState),
         }
-        inspectorSearchRef.current = nextSearch
         const sceneChanged = mergedState.demoScene !== previousState.demoScene
         const nextScenario = deriveDemoScenario(mergedState, inspectorEvents)
         const nextPathname = sceneChanged
@@ -282,52 +324,24 @@ function App() {
             ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
             : `/devices/${nextScenario.selectedDeviceId}/overview`
           : inspectorPathnameRef.current
-        inspectorPathnameRef.current = nextPathname
-        const nextRoute = nextPathname.includes('/calibration/')
-          ? '/devices/$deviceId/calibration/heater-curve'
-          : '/devices/$deviceId/overview'
-        const nextRouteState = parseConsoleRoute(nextPathname)
-        const nextDeviceId =
-          nextRouteState?.kind === 'device'
-            ? nextRouteState.deviceId
-            : nextScenario.selectedDeviceId
-        if (sceneChanged) {
-          await navigate({
-            to: nextRoute as '/',
-            params: { deviceId: nextDeviceId },
+        const completed = await settleInspectorNavigation(() =>
+          navigate({
+            to: nextPathname as '/',
             search: nextSearch,
             replace: true,
           })
-          return
-        }
-        await navigate({
-          to: nextRoute as '/',
-          params: { deviceId: nextDeviceId },
-          search: nextSearch,
-          replace: true,
-        })
-      }
-
-      const queuedNavigation = inspectorNavigationQueueRef.current.then(
-        runNavigation,
-        runNavigation
-      )
-      inspectorNavigationQueueRef.current = queuedNavigation.then(
-        () => {
-          inspectorPendingNavigationCountRef.current -= 1
-        },
-        () => {
-          inspectorPendingNavigationCountRef.current -= 1
-        }
-      )
-      return queuedNavigation
-    },
-    [inspectorEvents, navigate]
+        )
+        if (!completed) return
+        inspectorStateRef.current = mergedState
+        inspectorSearchRef.current = nextSearch
+        inspectorPathnameRef.current = nextPathname
+      }),
+    [enqueueInspectorNavigation, inspectorEvents, navigate, settleInspectorNavigation]
   )
 
   const selectInspectorDevice = useCallback(
-    async (deviceId: string) => {
-      const runNavigation = async () => {
+    async (deviceId: string) =>
+      enqueueInspectorNavigation(async () => {
         const currentState = inspectorStateRef.current
         const nextInspectorState =
           currentState.demoScene === 'calibration-active'
@@ -347,31 +361,13 @@ function App() {
           params: { deviceId },
           search: nextSearch,
         } as const
-        if (currentState.demoScene === 'calibration-active') {
-          void navigate(targetNavigation).catch(() => undefined)
-          return
-        }
-        await navigate(targetNavigation)
+        const completed = await settleInspectorNavigation(() => navigate(targetNavigation))
+        if (!completed) return
         inspectorPathnameRef.current = nextPathname
         inspectorSearchRef.current = nextSearch
         inspectorStateRef.current = nextInspectorState
-      }
-      inspectorPendingNavigationCountRef.current += 1
-      const queuedNavigation = inspectorNavigationQueueRef.current.then(
-        runNavigation,
-        runNavigation
-      )
-      inspectorNavigationQueueRef.current = queuedNavigation.then(
-        () => {
-          inspectorPendingNavigationCountRef.current -= 1
-        },
-        () => {
-          inspectorPendingNavigationCountRef.current -= 1
-        }
-      )
-      await queuedNavigation
-    },
-    [navigate]
+      }),
+    [enqueueInspectorNavigation, navigate, settleInspectorNavigation]
   )
 
   const simulateInspectorEvent = useCallback((event: Pick<EventLogEntry, 'message' | 'tone'>) => {
