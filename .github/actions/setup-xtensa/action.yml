@@ -1,0 +1,45 @@
+name: Setup Xtensa toolchain
+description: Install the pinned ESP32-S3 Xtensa Rust toolchain without querying the broken release-list endpoint.
+
+inputs:
+  version:
+    description: Xtensa Rust toolchain version.
+    required: false
+    default: 1.95.0.0
+  buildtargets:
+    description: Comma-separated Espressif build targets.
+    required: false
+    default: esp32s3
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        ESPUP_VERSION: 0.16.0
+        XTENSA_TOOLCHAIN_VERSION: ${{ inputs.version }}
+        XTENSA_BUILD_TARGETS: ${{ inputs.buildtargets }}
+      run: |
+        set -euo pipefail
+
+        host_target="$(rustup show | grep 'Default host' | sed -e 's/.* //')"
+        espup_archive="espup-${host_target}.zip"
+        espup_url="https://github.com/esp-rs/espup/releases/download/v${ESPUP_VERSION}/${espup_archive}"
+
+        curl --fail --location --retry 3 --retry-all-errors --connect-timeout 30 \
+          --output "$RUNNER_TEMP/$espup_archive" \
+          "$espup_url"
+        unzip -o "$RUNNER_TEMP/$espup_archive" -d "$HOME/.cargo/bin"
+        chmod +x "$HOME/.cargo/bin/espup"
+
+        export ESPUP_EXPORT_FILE="$HOME/exports"
+        "$HOME/.cargo/bin/espup" install \
+          --targets "$XTENSA_BUILD_TARGETS" \
+          --toolchain-version "$XTENSA_TOOLCHAIN_VERSION" \
+          --skip-version-parse \
+          --name esp
+        source "$ESPUP_EXPORT_FILE"
+
+        echo "$PATH" >> "$GITHUB_PATH"
+        echo "LIBCLANG_PATH=${LIBCLANG_PATH}" >> "$GITHUB_ENV"
+        echo "CLANG_PATH=${CLANG_PATH}" >> "$GITHUB_ENV"
