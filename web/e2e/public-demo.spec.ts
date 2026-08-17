@@ -44,6 +44,40 @@ test.describe('public demo build', () => {
     await expect.poll(() => new URL(page.url()).searchParams.get('demoNetwork')).toBe('timeout')
   })
 
+  test('keeps scene routing and overrides aligned during concurrent changes', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('button', { name: 'Degraded' }).evaluate((scene) => {
+      const lease = Array.from(document.querySelectorAll<HTMLInputElement>('input')).find((input) =>
+        input.parentElement?.textContent?.includes('Simulate lease conflict')
+      )
+      scene.click()
+      lease?.click()
+    })
+
+    await expect(page).toHaveURL(
+      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoScene=degraded)(?=.*demoLease=conflict)/
+    )
+  })
+
+  test('preserves queued overrides when selecting a target', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).evaluate((target) => {
+      const lease = Array.from(document.querySelectorAll<HTMLInputElement>('input')).find((input) =>
+        input.parentElement?.textContent?.includes('Simulate lease conflict')
+      )
+      lease?.click()
+      target.click()
+    })
+
+    await expect(page).toHaveURL(
+      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoLease=conflict)/
+    )
+  })
+
   test('uses a mobile bubble that opens a touch-safe drawer', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await page.goto('/')

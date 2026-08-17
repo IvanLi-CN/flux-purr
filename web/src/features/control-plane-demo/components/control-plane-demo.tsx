@@ -798,9 +798,6 @@ export function ControlPlaneDemo({
     Record<string, NetworkSummary>
   >({})
   const [lanLeasesByDevice, setLanLeasesByDevice] = useState<Record<string, LanLease>>({})
-  const hasActiveLanLease = Object.values(lanLeasesByDevice).some(
-    (lease) => lease.leaseId.trim().length > 0
-  )
   const pendingDeviceModeRef = useRef(allowDemoControls)
   const [flashRun, setFlashRun] = useState<{
     status: FlashRunStatus
@@ -830,6 +827,18 @@ export function ControlPlaneDemo({
   const deviceOptions = useMemo(
     () => [...activeScenario.devices, ...pendingDevices],
     [activeScenario.devices, pendingDevices]
+  )
+  const activeLanLeaseIdentityIds = useMemo(
+    () =>
+      new Set(
+        deviceOptions.flatMap((device) =>
+          lanLeasesByDevice[device.id]?.leaseId.trim() ? [deviceIdentityId(device)] : []
+        )
+      ),
+    [deviceOptions, lanLeasesByDevice]
+  )
+  const webSerialHasActiveLanLease = Boolean(
+    webSerial.deviceIdentityId && activeLanLeaseIdentityIds.has(webSerial.deviceIdentityId)
   )
   const routeDeviceChoices = useMemo(
     () => mergeDeviceChoices(deviceOptions, { allowDemoControls }),
@@ -1155,7 +1164,7 @@ export function ControlPlaneDemo({
     }
 
     setFeedback((current) =>
-      hasActiveLanLease || current.title === 'LAN 设备已连接'
+      webSerialHasActiveLanLease
         ? current
         : {
             title: 'Web Serial unavailable',
@@ -1163,7 +1172,7 @@ export function ControlPlaneDemo({
             tone: 'warning',
           }
     )
-  }, [hasActiveLanLease, selectedAddDeviceKind, webSerial.error, webSerial.state])
+  }, [selectedAddDeviceKind, webSerial.error, webSerial.state, webSerialHasActiveLanLease])
 
   useEffect(() => {
     if (webSerial.state !== 'connected') {
@@ -1194,7 +1203,7 @@ export function ControlPlaneDemo({
   useEffect(() => {
     if (webSerial.state === 'error' && webSerial.error) {
       setFeedback((current) =>
-        hasActiveLanLease || current.title === 'LAN 设备已连接'
+        webSerialHasActiveLanLease
           ? current
           : {
               title: 'Web Serial unavailable',
@@ -1203,7 +1212,7 @@ export function ControlPlaneDemo({
             }
       )
     }
-  }, [hasActiveLanLease, webSerial.error, webSerial.state])
+  }, [webSerial.error, webSerial.state, webSerialHasActiveLanLease])
 
   useEffect(() => {
     const liveDevdDevice = activeScenario.devices.find((device) => device.transport === 'devd')
@@ -1859,7 +1868,7 @@ export function ControlPlaneDemo({
     if (automaticResumeKeyRef.current === attemptKey) return
     automaticResumeKeyRef.current = attemptKey
     setFeedback((current) =>
-      hasActiveLanLease
+      activeLanLeaseIdentityIds.has(routeRecoveryIdentityId)
         ? current
         : {
             title: '正在恢复 Web Serial',
@@ -1873,7 +1882,7 @@ export function ControlPlaneDemo({
         if (controller.signal.aborted) return
         if (connected) {
           setFeedback((current) =>
-            hasActiveLanLease
+            activeLanLeaseIdentityIds.has(routeRecoveryIdentityId)
               ? current
               : {
                   title: 'Web Serial connected',
@@ -1907,7 +1916,7 @@ export function ControlPlaneDemo({
         }
         if (!routeHasInvalidLanCredential) {
           setFeedback((current) =>
-            hasActiveLanLease
+            activeLanLeaseIdentityIds.has(routeRecoveryIdentityId)
               ? current
               : {
                   title: 'Web Serial unavailable',
@@ -1936,7 +1945,7 @@ export function ControlPlaneDemo({
     routeRecoveryIdentityId,
     routeRecoveryVariant,
     pendingLanResumeIdentityIds,
-    hasActiveLanLease,
+    activeLanLeaseIdentityIds,
     webSerial.deviceIdentityId,
     webSerial.preauthorizedPortsReady,
   ])
