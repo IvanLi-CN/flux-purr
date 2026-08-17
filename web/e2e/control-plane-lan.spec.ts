@@ -509,17 +509,30 @@ test.describe('control plane direct LAN', () => {
   }) => {
     await page.goto('/?demo=false')
     await page.evaluate(
-      (session) => {
+      ({ routedSession, backgroundSession }) => {
         window.localStorage.setItem(
-          `flux-purr:lan-device:${session.baseUrl}`,
-          JSON.stringify(session)
+          `flux-purr:lan-device:${routedSession.baseUrl}`,
+          JSON.stringify(routedSession)
+        )
+        window.localStorage.setItem(
+          `flux-purr:lan-device:${backgroundSession.baseUrl}`,
+          JSON.stringify(backgroundSession)
         )
       },
       {
-        baseUrl: deviceUrl,
-        token,
-        deviceId,
-        hostname: 'flux-purr-001122334455',
+        routedSession: {
+          baseUrl: deviceUrl,
+          token,
+          deviceId,
+          hostname: 'flux-purr-001122334455',
+        },
+        backgroundSession: {
+          baseUrl: 'http://192.168.1.19',
+          token: 'b'.repeat(64),
+          deviceId: '001122334457',
+          hostname: 'flux-purr-001122334457',
+          authorizationState: 'invalid',
+        },
       }
     )
     rejectHealth = true
@@ -527,6 +540,7 @@ test.describe('control plane direct LAN', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
     await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
     await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
+    await expect(page.getByText('LAN 配对凭据已失效')).toHaveCount(0)
   })
 
   test('disables writes when a LAN lease heartbeat expires', async ({ page }) => {

@@ -952,11 +952,13 @@ export function ControlPlaneDemo({
             setInvalidLanCredentialIdentityIds((current) =>
               new Set(current).add(rememberedIdentityId)
             )
-            setFeedback({
-              title: 'LAN 配对凭据已失效',
-              detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
-              tone: 'warning',
-            })
+            if (rememberedIdentityId === routedRecoveryIdentityId) {
+              setFeedback({
+                title: 'LAN 配对凭据已失效',
+                detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+                tone: 'warning',
+              })
+            }
             continue
           }
           const health = await lanRuntime.getPublicInfo(session.baseUrl)
@@ -974,11 +976,13 @@ export function ControlPlaneDemo({
               setInvalidLanCredentialIdentityIds((current) =>
                 new Set(current).add(rememberedIdentityId)
               )
-              setFeedback({
-                title: 'LAN 配对凭据已失效',
-                detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
-                tone: 'warning',
-              })
+              if (rememberedIdentityId === routedRecoveryIdentityId) {
+                setFeedback({
+                  title: 'LAN 配对凭据已失效',
+                  detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+                  tone: 'warning',
+                })
+              }
               continue
             }
             setPendingDevices((current) =>
@@ -1015,11 +1019,13 @@ export function ControlPlaneDemo({
               new Set(current).add(rememberedIdentityId)
             )
           }
-          setFeedback({
-            title: 'LAN 配对凭据已失效',
-            detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
-            tone: 'warning',
-          })
+          if (rememberedIdentityId === routedRecoveryIdentityId) {
+            setFeedback({
+              title: 'LAN 配对凭据已失效',
+              detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+              tone: 'warning',
+            })
+          }
         } finally {
           setPendingLanResumeIdentityIds((current) => {
             const next = new Set(current)
