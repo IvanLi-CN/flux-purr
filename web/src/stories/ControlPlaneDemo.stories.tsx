@@ -23,7 +23,10 @@ import type {
   LanPublicInfo,
 } from '@/features/control-plane-demo/lan-client'
 import { liveControlPlaneScenario } from '@/features/control-plane-demo/live-scenario'
-import { controlPlaneScenario } from '@/features/control-plane-demo/mock-data'
+import {
+  controlPlaneScenario,
+  degradedControlPlaneScenario,
+} from '@/features/control-plane-demo/mock-data'
 import {
   ControlPlaneClientError,
   type ControlPlaneHttpClient,
@@ -32,7 +35,7 @@ import type { ControlPlaneScenario } from '@/features/control-plane-demo/types'
 import type { WebSerialControlPlaneClient } from '@/features/control-plane-demo/web-serial'
 
 const meta = {
-  title: 'App/ControlPlaneDemo',
+  title: 'Pages/ControlPlaneDemo',
   component: ControlPlaneDemo,
   tags: ['autodocs'],
   parameters: {
@@ -55,6 +58,53 @@ const meta = {
 
 export default meta
 type Story = StoryObj<typeof meta>
+
+const mockDemoStoryArgs = {
+  scenario: controlPlaneScenario,
+  initialView: 'dashboard' as const,
+  allowDemoControls: true,
+  devd: { enabled: false },
+  webSerial: { enabled: false },
+}
+
+export const Default: Story = {
+  args: mockDemoStoryArgs,
+}
+
+export const Degraded: Story = {
+  args: {
+    ...mockDemoStoryArgs,
+    scenario: degradedControlPlaneScenario,
+  },
+}
+
+export const Gallery: Story = {
+  name: 'Docs / Gallery',
+  render: () => (
+    <div style={{ display: 'grid', gap: 32, minWidth: 1280, padding: 24 }}>
+      <ControlPlaneDemo {...mockDemoStoryArgs} />
+      <ControlPlaneDemo {...mockDemoStoryArgs} scenario={degradedControlPlaneScenario} />
+    </div>
+  ),
+}
+
+export const MobileReview: Story = {
+  name: 'Mobile review',
+  args: mockDemoStoryArgs,
+  parameters: {
+    viewport: { defaultViewport: 'mobile1' },
+  },
+}
+
+export const InteractionSmoke: Story = {
+  args: mockDemoStoryArgs,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: /Advanced PPS/ }))
+    await expect(await canvas.findByRole('slider', { name: 'Manual PPS voltage' })).toBeVisible()
+  },
+}
+
 const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
 let webSerialConnectCalls = 0
 let webSerialDisconnectCalls = 0

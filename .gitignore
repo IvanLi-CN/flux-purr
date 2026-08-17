@@ -22,6 +22,7 @@ firmware/target/
 .env
 .env.*
 !.env.example
+!/web/.env.demo
 .mcu-agentd/
 
 # Local screenshots and scratch artifacts

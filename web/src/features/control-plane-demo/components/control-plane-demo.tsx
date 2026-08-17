@@ -231,6 +231,7 @@ interface ControlPlaneDemoProps {
   devd?: LiveDevdOptions
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
+  mockOnly?: boolean
   lanPairing?: LanPairingOverrides
   lanRuntime?: LanRuntimeDependencies
 }
@@ -240,6 +241,22 @@ type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 type LogFilter = 'all' | EventLogEntry['tone']
 
 const defaultAddDeviceKind: AddDeviceKind = 'wifi'
+const mockOnlyTransportMessage = 'Public demo is mock-only and cannot connect to LAN devices.'
+
+const mockOnlyLanRuntime: Required<LanRuntimeDependencies> = {
+  createLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  releaseLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  startLeaseHeartbeat: () => () => undefined,
+  streamEvents: async function* () {
+    yield* []
+  },
+  probeDevice: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  getPublicInfo: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  writeRuntime: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  readStatus: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  readCalibration: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+  readHeaterCurve: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
+}
 
 interface ActionFeedback {
   title: string
@@ -287,10 +304,12 @@ function resumeConnectionPriority(connection: DeviceConnectionOption) {
 }
 
 function isHealthyRouteConnection(connection: DeviceConnectionOption) {
+  const isAvailableMockFixture =
+    connection.kind === 'mock' && connection.target.severity !== 'offline'
   return (
     connection.target.connectionAvailable !== false &&
-    connection.target.severity === 'nominal' &&
-    (connection.kind === 'mock' || connection.target.leaseState === 'active')
+    (isAvailableMockFixture ||
+      (connection.target.severity === 'nominal' && connection.target.leaseState === 'active'))
   )
 }
 const PPS_STEP_MV = 100
@@ -618,6 +637,7 @@ export function ControlPlaneDemo({
   devd,
   webSerial: webSerialOptions,
   allowDemoControls = true,
+  mockOnly = false,
   lanPairing,
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
@@ -630,6 +650,9 @@ export function ControlPlaneDemo({
     : localActiveView
   const [routePreferences, setRoutePreferences] = useState(readRoutePreferences)
   const [routeResumeFailed, setRouteResumeFailed] = useState(false)
+  const [failedLanResumeIdentityIds, setFailedLanResumeIdentityIds] = useState<Set<string>>(
+    new Set()
+  )
   const [routeFallbackKind, setRouteFallbackKind] = useState<DeviceConnectionKind | undefined>()
   const [pendingLanResumeIdentityIds, setPendingLanResumeIdentityIds] = useState<Set<string>>(
     () =>
@@ -651,7 +674,21 @@ export function ControlPlaneDemo({
   const [requestedConnectionByIdentity, setRequestedConnectionByIdentity] = useState<
     Record<string, { kind: DeviceConnectionKind; targetId: string }>
   >({})
-  const invalidLanCredentialIdentityIdsRef = useRef(new Set<string>())
+  const [invalidLanCredentialIdentityIds, setInvalidLanCredentialIdentityIds] = useState<
+    Set<string>
+  >(
+    () =>
+      new Set(
+        allowDemoControls
+          ? []
+          : listSavedLanDeviceSessions().flatMap((session) => {
+              const target = savedLanSessionToDeviceTarget(session)
+              return session.authorizationState === 'invalid' && target
+                ? [deviceIdentityId(target)]
+                : []
+            })
+      )
+  )
   const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
     useState<AddDeviceKind>(defaultAddDeviceKind)
   const routedRecoveryIdentityId =
@@ -677,9 +714,10 @@ export function ControlPlaneDemo({
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
     [devd?.httpClient]
   )
-  const devdBaseUrl = devd?.devdBaseUrl ?? defaultDevdBaseUrl()
-  const lanRuntime = useMemo(
-    () => ({
+  const devdBaseUrl = mockOnly ? null : (devd?.devdBaseUrl ?? defaultDevdBaseUrl())
+  const lanRuntime = useMemo(() => {
+    if (mockOnly) return mockOnlyLanRuntime
+    return {
       createLease: lanRuntimeOptions?.createLease ?? createLanLease,
       releaseLease: lanRuntimeOptions?.releaseLease ?? releaseLanLease,
       startLeaseHeartbeat: lanRuntimeOptions?.startLeaseHeartbeat ?? startLanLeaseHeartbeat,
@@ -699,20 +737,20 @@ export function ControlPlaneDemo({
         lanRuntimeOptions?.readHeaterCurve ??
         ((session: LanDeviceSession) =>
           authorizedLanRequest<HeaterCurveState>(session, directLanStaleReadPath('heater-curve'))),
-    }),
-    [
-      lanRuntimeOptions?.createLease,
-      lanRuntimeOptions?.releaseLease,
-      lanRuntimeOptions?.startLeaseHeartbeat,
-      lanRuntimeOptions?.streamEvents,
-      lanRuntimeOptions?.probeDevice,
-      lanRuntimeOptions?.getPublicInfo,
-      lanRuntimeOptions?.writeRuntime,
-      lanRuntimeOptions?.readStatus,
-      lanRuntimeOptions?.readCalibration,
-      lanRuntimeOptions?.readHeaterCurve,
-    ]
-  )
+    }
+  }, [
+    mockOnly,
+    lanRuntimeOptions?.createLease,
+    lanRuntimeOptions?.releaseLease,
+    lanRuntimeOptions?.startLeaseHeartbeat,
+    lanRuntimeOptions?.streamEvents,
+    lanRuntimeOptions?.probeDevice,
+    lanRuntimeOptions?.getPublicInfo,
+    lanRuntimeOptions?.writeRuntime,
+    lanRuntimeOptions?.readStatus,
+    lanRuntimeOptions?.readCalibration,
+    lanRuntimeOptions?.readHeaterCurve,
+  ])
   const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
@@ -745,11 +783,17 @@ export function ControlPlaneDemo({
   const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
   const persistKnownWebSerialDevices =
     !allowDemoControls && webSerialOptions?.persistKnownDevices !== false
-  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() =>
-    persistKnownWebSerialDevices
+  const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() => [
+    ...(!allowDemoControls
+      ? listSavedLanDeviceSessions().flatMap((session) => {
+          const target = savedLanSessionToDeviceTarget(session)
+          return target ? [target] : []
+        })
+      : []),
+    ...(persistKnownWebSerialDevices
       ? listKnownWebSerialDevices().map(knownWebSerialDeviceToTarget)
-      : []
-  )
+      : []),
+  ])
   const [wifiSnapshotsByDevice, setWifiSnapshotsByDevice] = useState<
     Record<string, NetworkSummary>
   >({})
@@ -783,6 +827,18 @@ export function ControlPlaneDemo({
   const deviceOptions = useMemo(
     () => [...activeScenario.devices, ...pendingDevices],
     [activeScenario.devices, pendingDevices]
+  )
+  const activeLanLeaseIdentityIds = useMemo(
+    () =>
+      new Set(
+        deviceOptions.flatMap((device) =>
+          lanLeasesByDevice[device.id]?.leaseId.trim() ? [deviceIdentityId(device)] : []
+        )
+      ),
+    [deviceOptions, lanLeasesByDevice]
+  )
+  const routeHasActiveLanLease = Boolean(
+    routedRecoveryIdentityId && activeLanLeaseIdentityIds.has(routedRecoveryIdentityId)
   )
   const routeDeviceChoices = useMemo(
     () => mergeDeviceChoices(deviceOptions, { allowDemoControls }),
@@ -888,12 +944,23 @@ export function ControlPlaneDemo({
         const rememberedTarget = savedLanSessionToDeviceTarget(session)
         const rememberedIdentityId = rememberedTarget ? deviceIdentityId(rememberedTarget) : null
         if (rememberedTarget) {
-          setPendingDevices((current) =>
-            upsertLanDeviceTarget(current, { ...rememberedTarget, connectionAvailable: false })
-          )
+          setPendingDevices((current) => upsertLanDeviceTarget(current, rememberedTarget))
         }
         if (!rememberedTarget || !rememberedIdentityId) continue
         try {
+          if (session.authorizationState === 'invalid') {
+            setInvalidLanCredentialIdentityIds((current) =>
+              new Set(current).add(rememberedIdentityId)
+            )
+            if (rememberedIdentityId === routedRecoveryIdentityId) {
+              setFeedback({
+                title: 'LAN 配对凭据已失效',
+                detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+                tone: 'warning',
+              })
+            }
+            continue
+          }
           const health = await lanRuntime.getPublicInfo(session.baseUrl)
           const resumed = await resumeLanDeviceSession(
             session.baseUrl,
@@ -902,29 +969,63 @@ export function ControlPlaneDemo({
           )
           if (cancelled) return
           if (!resumed) {
+            const invalidatedSession = listSavedLanDeviceSessions().find(
+              (candidate) => candidate.baseUrl === session.baseUrl
+            )
+            if (invalidatedSession?.authorizationState === 'invalid') {
+              setInvalidLanCredentialIdentityIds((current) =>
+                new Set(current).add(rememberedIdentityId)
+              )
+              if (rememberedIdentityId === routedRecoveryIdentityId) {
+                setFeedback({
+                  title: 'LAN 配对凭据已失效',
+                  detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+                  tone: 'warning',
+                })
+              }
+              continue
+            }
             setPendingDevices((current) =>
               current.filter((device) => device.id !== rememberedTarget.id)
             )
             continue
           }
           const target = lanProbeToDeviceTarget(resumed.session, resumed.probe)
+          setFailedLanResumeIdentityIds((current) => {
+            if (!current.has(rememberedIdentityId)) return current
+            const next = new Set(current)
+            next.delete(rememberedIdentityId)
+            return next
+          })
           setPendingDevices((current) => upsertLanDeviceTarget(current, target))
         } catch (error: unknown) {
-          if (
-            cancelled ||
-            !(error instanceof ControlPlaneClientError) ||
-            error.code !== 'unauthorized'
-          ) {
-            return
+          if (cancelled) {
+            continue
+          }
+          if (!(error instanceof ControlPlaneClientError) || error.code !== 'unauthorized') {
+            if (rememberedIdentityId === routedRecoveryIdentityId) {
+              setFailedLanResumeIdentityIds((current) => new Set(current).add(rememberedIdentityId))
+              setRouteResumeFailed(true)
+              setFeedback({
+                title: '目标设备暂不可用',
+                detail: '无法恢复已保存的 LAN 设备连接，请重试或选择其他目标。',
+                tone: 'warning',
+              })
+            }
+            continue
           }
           if (rememberedIdentityId) {
-            invalidLanCredentialIdentityIdsRef.current.add(rememberedIdentityId)
+            setInvalidLanCredentialIdentityIds((current) =>
+              new Set(current).add(rememberedIdentityId)
+            )
           }
-          setFeedback({
-            title: 'LAN 配对凭据已失效',
-            detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
-            tone: 'warning',
-          })
+          if (rememberedIdentityId === routedRecoveryIdentityId) {
+            setFeedback({
+              title: 'LAN 配对凭据已失效',
+              detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+              tone: 'warning',
+            })
+          }
         } finally {
           setPendingLanResumeIdentityIds((current) => {
             const next = new Set(current)
@@ -938,7 +1039,7 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [allowDemoControls, lanRuntime])
+  }, [allowDemoControls, lanRuntime, routedRecoveryIdentityId])
 
   useEffect(() => {
     if (!allowDemoControls || activeScenario.events.length < 2) {
@@ -972,6 +1073,12 @@ export function ControlPlaneDemo({
     if (previousRouteDeviceIdRef.current === routeDeviceId) return
     previousRouteDeviceIdRef.current = routeDeviceId
     setRouteResumeFailed(false)
+    setFailedLanResumeIdentityIds((current) => {
+      if (!routeDeviceId || !current.has(routeDeviceId)) return current
+      const next = new Set(current)
+      next.delete(routeDeviceId)
+      return next
+    })
     setRouteFallbackKind(undefined)
     automaticResumeKeyRef.current = null
     successfulRouteKeyRef.current = null
@@ -1097,13 +1204,17 @@ export function ControlPlaneDemo({
 
   useEffect(() => {
     if (webSerial.state === 'error' && webSerial.error) {
-      setFeedback({
-        title: 'Web Serial unavailable',
-        detail: webSerial.error,
-        tone: 'warning',
-      })
+      setFeedback((current) =>
+        routeHasActiveLanLease
+          ? current
+          : {
+              title: 'Web Serial unavailable',
+              detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+              tone: 'warning',
+            }
+      )
     }
-  }, [webSerial.error, webSerial.state])
+  }, [webSerial.error, webSerial.state, routeHasActiveLanLease])
 
   useEffect(() => {
     const liveDevdDevice = activeScenario.devices.find((device) => device.transport === 'devd')
@@ -1700,6 +1811,8 @@ export function ControlPlaneDemo({
   const routeRecoveryIdentityId =
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const routeRecoveryVariant = navigation?.variant
+  const routeHasInvalidLanCredential =
+    routeRecoveryIdentityId != null && invalidLanCredentialIdentityIds.has(routeRecoveryIdentityId)
   const routeConnectionKind = routeDeviceConnection?.kind
   const routeConnectionUnavailable = routeDeviceConnection
     ? !isHealthyRouteConnection(routeDeviceConnection)
@@ -1707,18 +1820,22 @@ export function ControlPlaneDemo({
   const routeHasRecoverableTransportCandidate = routeDeviceChoice?.connections.some(
     (connection) => !allowDemoControls && connection.kind !== 'web-serial'
   )
+  const routeHasFailedLanResume =
+    routeRecoveryIdentityId != null && failedLanResumeIdentityIds.has(routeRecoveryIdentityId)
   const routeFallbackConnection = routeDeviceChoice?.connections
     .filter((connection) => connection.kind !== 'web-serial')
     .filter(isHealthyRouteConnection)
     .sort((left, right) => resumeConnectionPriority(left) - resumeConnectionPriority(right))[0]
   const routeFallbackConnectionKind = routeFallbackConnection?.kind
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
+  const routeHasKnownBridgeTransportIssue =
+    routeDeviceConnection?.kind === 'bridge' && Boolean(routeDeviceConnection.target.transportIssue)
 
   useEffect(() => {
-    if (routeHasRecoverableTransportCandidate && routeResumeFailed) {
+    if (routeHasRecoverableTransportCandidate && routeResumeFailed && !routeHasFailedLanResume) {
       setRouteResumeFailed(false)
     }
-  }, [routeHasRecoverableTransportCandidate, routeResumeFailed])
+  }, [routeHasFailedLanResume, routeHasRecoverableTransportCandidate, routeResumeFailed])
 
   useEffect(() => {
     if (!routeRecoveryIdentityId || !routeRecoveryVariant) {
@@ -1726,6 +1843,10 @@ export function ControlPlaneDemo({
     }
     if (allowDemoControls) {
       setRouteResumeFailed(routeConnectionUnavailable)
+      return
+    }
+    if (routeHasInvalidLanCredential) {
+      setRouteResumeFailed(false)
       return
     }
     if (pendingLanResumeIdentityIds.has(routeRecoveryIdentityId)) {
@@ -1748,21 +1869,29 @@ export function ControlPlaneDemo({
     const attemptKey = `${routeRecoveryVariant}:${routeRecoveryIdentityId}:web-serial`
     if (automaticResumeKeyRef.current === attemptKey) return
     automaticResumeKeyRef.current = attemptKey
-    setFeedback({
-      title: '正在恢复 Web Serial',
-      detail: `正在使用已授权端口验证 ${routeDeviceChoice?.name ?? routeRecoveryIdentityId}，不会打开系统设备选择器。`,
-      tone: 'info',
-    })
+    setFeedback((current) =>
+      activeLanLeaseIdentityIds.has(routeRecoveryIdentityId)
+        ? current
+        : {
+            title: '正在恢复 Web Serial',
+            detail: `正在使用已授权端口验证 ${routeDeviceChoice?.name ?? routeRecoveryIdentityId}，不会打开系统设备选择器。`,
+            tone: 'info',
+          }
+    )
     const controller = new AbortController()
     void connectPreauthorizedWebSerial(controller.signal, routeRecoveryIdentityId).then(
       (connected) => {
         if (controller.signal.aborted) return
         if (connected) {
-          setFeedback({
-            title: 'Web Serial connected',
-            detail: 'Browser direct USB JSONL control is active.',
-            tone: 'success',
-          })
+          setFeedback((current) =>
+            activeLanLeaseIdentityIds.has(routeRecoveryIdentityId)
+              ? current
+              : {
+                  title: 'Web Serial connected',
+                  detail: 'Browser direct USB JSONL control is active.',
+                  tone: 'success',
+                }
+          )
           setRouteResumeFailed(false)
           return
         }
@@ -1787,12 +1916,16 @@ export function ControlPlaneDemo({
           })
           return
         }
-        if (!invalidLanCredentialIdentityIdsRef.current.has(routeRecoveryIdentityId)) {
-          setFeedback({
-            title: 'Web Serial unavailable',
-            detail: 'Browser direct USB control could not be opened.',
-            tone: 'warning',
-          })
+        if (!routeHasInvalidLanCredential) {
+          setFeedback((current) =>
+            activeLanLeaseIdentityIds.has(routeRecoveryIdentityId)
+              ? current
+              : {
+                  title: 'Web Serial unavailable',
+                  detail: 'Browser direct USB control could not be opened.',
+                  tone: 'warning',
+                }
+          )
         }
         setSerialRecoveryExhaustedIdentityIds((current) =>
           new Set(current).add(routeRecoveryIdentityId)
@@ -1809,13 +1942,26 @@ export function ControlPlaneDemo({
     routeDeviceChoice?.name,
     routeFallbackConnectionKind,
     routeFallbackConnectionLabel,
+    routeHasInvalidLanCredential,
     routeHasRecoverableTransportCandidate,
     routeRecoveryIdentityId,
     routeRecoveryVariant,
     pendingLanResumeIdentityIds,
+    activeLanLeaseIdentityIds,
     webSerial.deviceIdentityId,
     webSerial.preauthorizedPortsReady,
   ])
+
+  useEffect(() => {
+    if (!routeHasInvalidLanCredential) {
+      return
+    }
+    setFeedback({
+      title: 'LAN 配对凭据已失效',
+      detail: '此设备的本地配对凭据已被撤销，请在 WiFi Info 页面重新进行物理配对。',
+      tone: 'warning',
+    })
+  }, [routeHasInvalidLanCredential])
 
   useEffect(() => {
     if (!navigation || navigation.state.kind !== 'device' || !routeDeviceConnection) return
@@ -1879,7 +2025,7 @@ export function ControlPlaneDemo({
       return
     }
 
-    if (invalidLanCredentialIdentityIdsRef.current.has(deviceIdentityId(visibleDevice))) {
+    if (invalidLanCredentialIdentityIds.has(deviceIdentityId(visibleDevice))) {
       return
     }
 
@@ -1912,7 +2058,13 @@ export function ControlPlaneDemo({
         tone: 'warning',
       }
     })
-  }, [activeView, selectedAddDeviceKind, visibleDevice, webSerial.state])
+  }, [
+    activeView,
+    invalidLanCredentialIdentityIds,
+    selectedAddDeviceKind,
+    visibleDevice,
+    webSerial.state,
+  ])
 
   useEffect(() => {
     if (!visibleDeviceIsLive || !visibleDevice.heaterLockReason) {
@@ -2216,7 +2368,13 @@ export function ControlPlaneDemo({
           leaseId: lease.leaseId,
           leaseState: 'active',
         }
-        invalidLanCredentialIdentityIdsRef.current.delete(deviceIdentityId(leasedTarget))
+        setInvalidLanCredentialIdentityIds((current) => {
+          const identityId = deviceIdentityId(leasedTarget)
+          if (!current.has(identityId)) return current
+          const next = new Set(current)
+          next.delete(identityId)
+          return next
+        })
         setLanLeasesByDevice((current) => ({ ...current, [target.id]: lease }))
         setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
         setSelectedDeviceId(target.id)
@@ -3319,6 +3477,18 @@ export function ControlPlaneDemo({
     })
     emitEvent('flash', `${selectedArtifact.version} dry-check started`, 'info')
 
+    if (mockOnly) {
+      flashCompletionEmittedRef.current = true
+      setFlashRun({ status: 'passed', progress: 100 })
+      setFeedback({
+        title: 'Simulated dry-run passed',
+        detail: `${selectedArtifact.version} was verified against the deterministic public demo fixture.`,
+        tone: 'success',
+      })
+      emitEvent('flash', `${selectedArtifact.version} verified by public demo fixture`, 'success')
+      return
+    }
+
     if (!devdBaseUrl || !selectedArtifact.files?.length) {
       return
     }
@@ -3946,7 +4116,14 @@ export function ControlPlaneDemo({
   }
 
   const unavailableRouteState = navigation?.state.kind === 'device' ? navigation.state : null
-  if (navigation && unavailableRouteState && (!routeDeviceChoice || routeResumeFailed)) {
+  if (
+    navigation &&
+    unavailableRouteState &&
+    !routeHasInvalidLanCredential &&
+    (!routeDeviceChoice ||
+      routeHasFailedLanResume ||
+      (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
+  ) {
     const routeNavigation = navigation
     const recoveryLeaveGuard = calibrationLeaveGuard
       ? {

@@ -589,7 +589,7 @@ export function listSavedLanDeviceSessions(): LanDeviceSession[] {
       // Ignore malformed local records rather than letting them block LAN setup.
     }
   }
-  return sessions
+  return sessions.sort((left, right) => left.baseUrl.localeCompare(right.baseUrl))
 }
 
 export function forgetLanDeviceSession(baseUrl: string) {

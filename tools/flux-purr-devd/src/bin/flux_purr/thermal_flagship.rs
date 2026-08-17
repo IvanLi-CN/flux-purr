@@ -3167,14 +3167,21 @@ mod tests {
         ThermalApproachGuardAnalysis, ThermalFullSpeedStableAnalysis, ThermalStageAnalysis,
         thermal_default_target_point,
     };
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    static TEST_SAMPLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn write_test_samples(samples: &[Value]) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let path = env::temp_dir().join(format!("thermal-flagship-test-{unique}.ndjson"));
+        let sequence = TEST_SAMPLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path =
+            env::temp_dir().join(format!("thermal-flagship-test-{unique}-{sequence}.ndjson"));
         let body = samples
             .iter()
             .map(|sample| serde_json::to_string(sample).expect("serialize sample"))

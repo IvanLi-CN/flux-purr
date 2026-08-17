@@ -15,9 +15,11 @@
 - Demo 使用独立 `control-plane-demo` feature，避免把轻量连接工具与既有 `160×50` 前面板 preview contract 混在一起。
 - 生产导航采用 TanStack Router file-based routing：设备稳定 identity 位于一级路径，工作台 view 与校准 workspace 位于二级路径；浏览器 history、刷新和分享链接因此使用同一状态源。
 - Storybook 保留无 router adapter 的本地状态模式，生产应用则通过 `ConsoleNavigationAdapter` 把同一控制台组件受控化，避免复制视觉与业务实现。
-- `demo` 与 `uiDemo` 保留为 typed search，而不是组件内模式 state；EdgeOne 通过 SPA rewrite 承接 history 深链。
+- `demo` 与 `uiDemo` 保留为 typed search，而不是组件内模式 state；`uiDemo` 只服务 production 根入口，Inspector state 随站内导航保留，EdgeOne 通过 SPA rewrite 承接 history 深链。
 - transport target id、设备地址与凭据不具备跨连接稳定性，因此规范 URL 只接受探针验证后的物理 identity；无法恢复时保留地址并显示恢复操作。
 - 校准离开保护迁入 router blocker，使 Link、程序导航、设备切换、search 变化和浏览器历史共享“先退出校准、成功后继续”的安全顺序。
+- 公开 Demo 复用正式控制台和路由，而非替换 `uiDemo` LAN pairing surface；Inspector 只控制确定性 fixture state，并通过同一 search blocker 接入校准离开保护。
+- EdgeOne public Demo 使用独立 Makers artifact 与项目绑定，避免把 `demo.flux-purr.ivanli.cc` 误作 live direct-LAN origin。
 
 ## Key Reasons / Replacements
 

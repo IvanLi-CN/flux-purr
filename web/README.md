@@ -49,9 +49,11 @@ Canonical routes:
 - `/devices/:deviceId/calibration/rtd-adc`
 - `/devices/:deviceId/calibration/vin-adc`
 
-`deviceId` is the stable physical identity reported by the device, not a transport target ID, alias, address, or credential. `demo` and `uiDemo` are typed search parameters retained across navigation. Collection and device index routes replace to their canonical leaf; an unknown identity keeps its URL and renders recovery actions.
+`deviceId` is the stable physical identity reported by the device, not a transport target ID, alias, address, or credential. `demo` and the Demo Inspector's `demoScene`, `demoLease`, `demoNetwork`, and `demoArtifact` are typed search parameters retained across navigation. `uiDemo` remains a production-only typed root-entry parameter for the LAN pairing demo. Collection and device index routes replace to their canonical leaf; an unknown identity keeps its URL and renders recovery actions.
 
-The production EdgeOne deployment uses `public/edgeone.json` to rewrite history-route requests to `/index.html`.
+`bun run build:demo` produces `dist-demo`, a public mock-only variant that always opens the full control console at `/devices/fp-lab-01/overview`. It ignores `demo=false`, stored live preference, and `uiDemo`; it never enables devd, Web Serial, direct LAN, or hardware writes. The Demo Inspector stores scene and fault state in the typed URL while its expanded/collapsed layout stays local.
+
+Both EdgeOne variants use `public/edgeone.json` to rewrite history-route requests to `/index.html`. The public Demo pipeline deploys the verified `web-demo-bundle` through `.github/workflows/deploy-edgeone-demo.yml` after a successful `main` push. It requires the restricted `EDGEONE_API_TOKEN` and `EDGEONE_DEMO_PROJECT_NAME` secrets; the `flux-purr-demo` project owns the `demo.flux-purr.ivanli.cc` domain binding and certificate.
 
 The stable implementation surface is:
 

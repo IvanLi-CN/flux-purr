@@ -25,6 +25,7 @@ test.describe('control plane direct LAN', () => {
   let pairingActive = true
   let controlRevision = 7
   let rejectNextRuntimeAsStale = false
+  let rejectHealth = false
 
   test.beforeEach(async ({ page }) => {
     requests.length = 0
@@ -38,6 +39,7 @@ test.describe('control plane direct LAN', () => {
     pairingActive = true
     controlRevision = 7
     rejectNextRuntimeAsStale = false
+    rejectHealth = false
     await page.route(`${deviceUrl}/**`, async (route) => {
       const request = route.request()
       const url = new URL(request.url())
@@ -52,6 +54,16 @@ test.describe('control plane direct LAN', () => {
       }
 
       if (url.pathname === '/health' && request.method() === 'GET') {
+        if (rejectHealth) {
+          await route.fulfill({
+            status: 503,
+            headers: jsonHeaders(requestOrigin),
+            body: JSON.stringify({
+              error: { code: 'device_unavailable', message: 'Device is unavailable.' },
+            }),
+          })
+          return
+        }
         await route.fulfill({
           status: 200,
           headers: jsonHeaders(requestOrigin),
@@ -441,14 +453,29 @@ test.describe('control plane direct LAN', () => {
     await page.goto('/?demo=false')
     await openLanPairing(page)
 
+    await page.evaluate(() => {
+      window.localStorage.setItem(
+        'flux-purr:lan-device:http://192.168.1.17',
+        JSON.stringify({
+          baseUrl: 'http://192.168.1.17',
+          token: 'b'.repeat(64),
+          deviceId: '001122334456',
+          hostname: 'flux-purr-001122334456',
+        })
+      )
+    })
     await pairRequiredLanDevice(page)
     await expect(page.getByText('LAN 设备已连接')).toBeVisible()
 
-    await page.evaluate(() => {
-      window.localStorage.setItem(
-        'flux-purr:lan-device:http://192.168.1.19',
-        JSON.stringify({ baseUrl: 'http://192.168.1.19', token: 'b'.repeat(64) })
-      )
+    await page.route('http://192.168.1.17/**', async (route) => {
+      const requestOrigin = route.request().headers().origin ?? 'http://127.0.0.1:4173'
+      await route.fulfill({
+        status: 503,
+        headers: jsonHeaders(requestOrigin),
+        body: JSON.stringify({
+          error: { code: 'device_unavailable', message: 'Device is unavailable.' },
+        }),
+      })
     })
     rejectBearerRequests = true
     await page.reload()
@@ -466,8 +493,8 @@ test.describe('control plane direct LAN', () => {
       })
     ).toEqual({
       keys: [
+        'flux-purr:lan-device:http://192.168.1.17',
         'flux-purr:lan-device:http://192.168.1.18',
-        'flux-purr:lan-device:http://192.168.1.19',
       ],
       rejected: expect.objectContaining({
         baseUrl: 'http://192.168.1.18',
@@ -475,6 +502,45 @@ test.describe('control plane direct LAN', () => {
         authorizationState: 'invalid',
       }),
     })
+  })
+
+  test('shows route recovery actions when a remembered LAN target is unavailable', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+    await page.evaluate(
+      ({ routedSession, backgroundSession }) => {
+        window.localStorage.setItem(
+          `flux-purr:lan-device:${routedSession.baseUrl}`,
+          JSON.stringify(routedSession)
+        )
+        window.localStorage.setItem(
+          `flux-purr:lan-device:${backgroundSession.baseUrl}`,
+          JSON.stringify(backgroundSession)
+        )
+      },
+      {
+        routedSession: {
+          baseUrl: deviceUrl,
+          token,
+          deviceId,
+          hostname: 'flux-purr-001122334455',
+        },
+        backgroundSession: {
+          baseUrl: 'http://192.168.1.19',
+          token: 'b'.repeat(64),
+          deviceId: '001122334457',
+          hostname: 'flux-purr-001122334457',
+          authorizationState: 'invalid',
+        },
+      }
+    )
+    rejectHealth = true
+
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
+    await expect(page.getByText('LAN 配对凭据已失效')).toHaveCount(0)
   })
 
   test('disables writes when a LAN lease heartbeat expires', async ({ page }) => {

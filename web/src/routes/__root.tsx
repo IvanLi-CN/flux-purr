@@ -1,16 +1,19 @@
 import { createRootRoute, Link, Outlet, redirect, retainSearchParams } from '@tanstack/react-router'
 import { AlertTriangle, Home } from 'lucide-react'
+import { isPublicDemoBuild } from '@/public-demo'
 import { validateAppSearch } from '@/routing/search'
 
 export const Route = createRootRoute({
   validateSearch: validateAppSearch,
   beforeLoad: ({ location, search }) => {
-    if (search.uiDemo && location.pathname !== '/') {
+    if (!isPublicDemoBuild() && search.uiDemo && location.pathname !== '/') {
       throw redirect({ to: '/', search, replace: true })
     }
   },
   search: {
-    middlewares: [retainSearchParams(['demo', 'uiDemo'])],
+    middlewares: [
+      retainSearchParams(['demo', 'demoScene', 'demoLease', 'demoNetwork', 'demoArtifact']),
+    ],
   },
   component: Outlet,
   notFoundComponent: NotFoundPage,

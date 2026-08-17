@@ -7488,3 +7488,338 @@
     min-width: 0;
   }
 }
+
+@layer components {
+  .demo-inspector {
+    --industrial-bg: oklch(0.928 0.014 248);
+    --industrial-panel: oklch(0.968 0.007 235);
+    --industrial-muted: oklch(0.89 0.018 241);
+    --industrial-text: oklch(0.302 0.026 255);
+    --industrial-muted-text: oklch(0.392 0.022 252);
+    --industrial-accent: oklch(0.58 0.209 25);
+    --industrial-shadow: oklch(0.79 0.02 248);
+    --industrial-shadow-deep: oklch(0.738 0.023 247);
+    --industrial-light: oklch(0.996 0.003 220);
+    --industrial-panel-border: oklch(0.72 0.024 247 / 0.3);
+    --industrial-panel-border-strong: oklch(0.64 0.03 247 / 0.36);
+    --industrial-panel-tint: oklch(0.982 0.004 230 / 0.56);
+    --industrial-surface-inset:
+      inset 1px 1px 2px color-mix(in oklch, var(--industrial-shadow) 36%, transparent),
+      inset -1px -1px 2px color-mix(in oklch, var(--industrial-light) 72%, transparent);
+    position: fixed;
+    z-index: 60;
+    right: clamp(1rem, 2vw, 2rem);
+    top: 50%;
+    width: min(22.5rem, calc(100vw - 2rem));
+    transform: translateY(-50%);
+  }
+
+  .demo-inspector__surface {
+    border: 1px solid color-mix(in oklch, var(--industrial-light) 62%, var(--industrial-shadow) 38%);
+    border-radius: 12px;
+    background: color-mix(in oklch, var(--industrial-panel) 92%, var(--industrial-bg) 8%);
+    box-shadow:
+      12px 16px 32px color-mix(in oklch, var(--industrial-shadow-deep) 30%, transparent),
+      -3px -3px 9px color-mix(in oklch, var(--industrial-light) 72%, transparent);
+    color: var(--industrial-text);
+    max-height: calc(100dvh - 2rem);
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: 0.85rem;
+  }
+
+  .demo-inspector__header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    align-items: start;
+    padding-bottom: 0.75rem;
+  }
+
+  .demo-inspector__status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.34rem;
+    color: var(--industrial-accent);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0;
+  }
+
+  .demo-inspector__header h2 {
+    margin-top: 0.28rem;
+    font-size: 1.05rem;
+    font-weight: 850;
+    line-height: 1.1;
+  }
+
+  .demo-inspector__header p,
+  .demo-inspector__hint {
+    color: var(--industrial-muted-text);
+    font-size: 0.72rem;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
+
+  .demo-inspector__header p {
+    margin-top: 0.28rem;
+  }
+
+  .demo-inspector__icon-button,
+  .demo-inspector__bubble {
+    display: inline-grid;
+    width: 2.5rem;
+    height: 2.5rem;
+    place-items: center;
+    border: 1px solid var(--industrial-panel-border-strong);
+    border-radius: 9px;
+    background: var(--industrial-panel-tint);
+    color: var(--industrial-text);
+    box-shadow: var(--industrial-surface-shadow);
+    transition:
+      transform 160ms ease,
+      color 160ms ease,
+      box-shadow 160ms ease;
+  }
+
+  .demo-inspector__icon-button:hover,
+  .demo-inspector__bubble:hover {
+    color: var(--industrial-accent);
+    transform: translateY(-1px);
+  }
+
+  .demo-inspector__icon-button:focus-visible,
+  .demo-inspector__bubble:focus-visible,
+  .demo-inspector button:focus-visible,
+  .demo-inspector input:focus-visible {
+    outline: 3px solid color-mix(in oklch, var(--industrial-accent) 58%, transparent);
+    outline-offset: 2px;
+  }
+
+  .demo-inspector__group {
+    min-inline-size: 0;
+    border-top: 1px solid var(--industrial-panel-border);
+    margin: 0;
+    padding: 0.72rem 0 0.1rem;
+  }
+
+  .demo-inspector__group + .demo-inspector__group {
+    margin-top: 0.64rem;
+  }
+
+  .demo-inspector__group legend {
+    padding: 0 0.38rem 0 0;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.66rem;
+    font-weight: 800;
+  }
+
+  .demo-inspector__scene-grid,
+  .demo-inspector__targets,
+  .demo-inspector__actions {
+    display: grid;
+    gap: 0.42rem;
+  }
+
+  .demo-inspector__scene-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .demo-inspector__scene,
+  .demo-inspector__target,
+  .demo-inspector__actions button,
+  .demo-inspector__reset {
+    min-height: 2.45rem;
+    border: 1px solid var(--industrial-panel-border);
+    border-radius: 8px;
+    background: var(--industrial-panel-tint);
+    color: var(--industrial-text);
+    padding: 0.5rem 0.58rem;
+    text-align: left;
+    transition:
+      border-color 160ms ease,
+      color 160ms ease,
+      transform 160ms ease;
+  }
+
+  .demo-inspector__scene:hover,
+  .demo-inspector__target:hover,
+  .demo-inspector__actions button:hover,
+  .demo-inspector__reset:hover {
+    border-color: var(--industrial-panel-border-strong);
+    color: var(--industrial-accent);
+  }
+
+  .demo-inspector__scene.is-selected,
+  .demo-inspector__target.is-selected {
+    border-color: color-mix(
+      in oklch,
+      var(--industrial-accent) 72%,
+      var(--industrial-panel-border-strong)
+    );
+    background: color-mix(in oklch, var(--industrial-accent) 10%, var(--industrial-panel-tint));
+    box-shadow: var(--industrial-surface-inset);
+  }
+
+  .demo-inspector__scene strong,
+  .demo-inspector__target strong {
+    display: block;
+    font-size: 0.73rem;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+
+  .demo-inspector__scene span,
+  .demo-inspector__target span {
+    display: block;
+    margin-top: 0.18rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.59rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+  }
+
+  .demo-inspector__toggle {
+    display: flex;
+    min-height: 2rem;
+    align-items: center;
+    gap: 0.52rem;
+    color: var(--industrial-text);
+    font-size: 0.72rem;
+  }
+
+  .demo-inspector__toggle input {
+    width: 1rem;
+    height: 1rem;
+    accent-color: var(--industrial-accent);
+  }
+
+  .demo-inspector__actions button {
+    text-align: center;
+    font-size: 0.69rem;
+    font-weight: 750;
+  }
+
+  .demo-inspector__share-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.45rem;
+  }
+
+  .demo-inspector__share-row input {
+    min-width: 0;
+    border: 1px solid var(--industrial-panel-border);
+    border-radius: 8px;
+    background: color-mix(in oklch, var(--industrial-muted) 66%, var(--industrial-panel) 34%);
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.62rem;
+    padding: 0.5rem;
+  }
+
+  .demo-inspector__hint {
+    display: block;
+    margin-top: 0.36rem;
+  }
+
+  .demo-inspector__reset {
+    display: flex;
+    width: 100%;
+    min-height: 2.55rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.42rem;
+    margin-top: 0.75rem;
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-align: center;
+  }
+
+  .demo-inspector__bubble {
+    width: auto;
+    grid-template-columns: auto auto;
+    gap: 0.45rem;
+    padding: 0 0.76rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 800;
+  }
+
+  .demo-inspector__mobile-close {
+    display: none;
+  }
+
+  .demo-inspector:not(.is-open) {
+    right: 1rem;
+    top: auto;
+    bottom: 1rem;
+    width: auto;
+    transform: none;
+  }
+
+  @media (min-width: 1700px) {
+    .industrial-shell--fixed:has(+ .demo-inspector.is-open) .industrial-console-wrap {
+      padding-right: calc(21rem + 3rem);
+    }
+
+    .demo-inspector {
+      right: 1.5rem;
+      width: 21rem;
+    }
+  }
+
+  @media (max-width: 1179px) {
+    .demo-inspector {
+      right: 1rem;
+      top: auto;
+      bottom: 1rem;
+      transform: none;
+    }
+  }
+
+  @media (max-width: 759px) {
+    .demo-inspector {
+      right: 0.75rem;
+      bottom: 0.75rem;
+      width: auto;
+    }
+
+    .demo-inspector.is-open {
+      right: 0.5rem;
+      bottom: 0.5rem;
+      left: 0.5rem;
+      top: auto;
+      width: auto;
+      height: min(74dvh, 42rem);
+      transform: none;
+    }
+
+    .demo-inspector.is-open .demo-inspector__surface {
+      height: 100%;
+      max-height: none;
+      background: var(--industrial-panel);
+      padding: 1rem;
+    }
+
+    .demo-inspector__scene,
+    .demo-inspector__target,
+    .demo-inspector__actions button,
+    .demo-inspector__reset,
+    .demo-inspector__toggle {
+      min-height: 3rem;
+    }
+
+    .demo-inspector__icon-button,
+    .demo-inspector__bubble {
+      width: 3rem;
+      height: 3rem;
+    }
+
+    .demo-inspector__mobile-close {
+      display: none;
+    }
+  }
+}
