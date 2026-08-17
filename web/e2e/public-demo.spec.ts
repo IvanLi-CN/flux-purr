@@ -14,6 +14,7 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
     await expect(page.getByRole('complementary', { name: 'Demo Inspector' })).toBeVisible()
     await expect(page.getByLabel('LAN pairing demo')).toHaveCount(0)
+    expect(await page.locator('script[src="/@vite/client"]').count()).toBe(0)
 
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
     await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
@@ -25,6 +26,22 @@ test.describe('public demo build', () => {
     )
     await expect(page.getByText('Simulate lease conflict')).toBeVisible()
     expect(controlRequests).toEqual([])
+  })
+
+  test('serializes concurrent inspector changes into one share state', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('checkbox', { name: 'Simulate lease conflict' }).evaluate((lease) => {
+      const network = Array.from(
+        document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')
+      ).find((input) => input.parentElement?.textContent?.includes('Simulate network timeout'))
+      ;(lease as HTMLInputElement).click()
+      network?.click()
+    })
+
+    await expect.poll(() => new URL(page.url()).searchParams.get('demoLease')).toBe('conflict')
+    await expect.poll(() => new URL(page.url()).searchParams.get('demoNetwork')).toBe('timeout')
   })
 
   test('uses a mobile bubble that opens a touch-safe drawer', async ({ page }) => {

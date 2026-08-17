@@ -13,7 +13,7 @@ function InspectorStory() {
         state={state}
         devices={controlPlaneScenario.devices}
         selectedDeviceId={controlPlaneScenario.selectedDeviceId}
-        onStateChange={setState}
+        onStateChange={(partial) => setState((current) => ({ ...current, ...partial }))}
         onSelectDevice={() => undefined}
         onSimulate={() => undefined}
       />

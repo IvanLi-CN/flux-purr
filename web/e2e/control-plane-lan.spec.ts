@@ -25,6 +25,7 @@ test.describe('control plane direct LAN', () => {
   let pairingActive = true
   let controlRevision = 7
   let rejectNextRuntimeAsStale = false
+  let rejectHealth = false
 
   test.beforeEach(async ({ page }) => {
     requests.length = 0
@@ -38,6 +39,7 @@ test.describe('control plane direct LAN', () => {
     pairingActive = true
     controlRevision = 7
     rejectNextRuntimeAsStale = false
+    rejectHealth = false
     await page.route(`${deviceUrl}/**`, async (route) => {
       const request = route.request()
       const url = new URL(request.url())
@@ -52,6 +54,16 @@ test.describe('control plane direct LAN', () => {
       }
 
       if (url.pathname === '/health' && request.method() === 'GET') {
+        if (rejectHealth) {
+          await route.fulfill({
+            status: 503,
+            headers: jsonHeaders(requestOrigin),
+            body: JSON.stringify({
+              error: { code: 'device_unavailable', message: 'Device is unavailable.' },
+            }),
+          })
+          return
+        }
         await route.fulfill({
           status: 200,
           headers: jsonHeaders(requestOrigin),
@@ -490,6 +502,31 @@ test.describe('control plane direct LAN', () => {
         authorizationState: 'invalid',
       }),
     })
+  })
+
+  test('shows route recovery actions when a remembered LAN target is unavailable', async ({
+    page,
+  }) => {
+    await page.goto('/?demo=false')
+    await page.evaluate(
+      (session) => {
+        window.localStorage.setItem(
+          `flux-purr:lan-device:${session.baseUrl}`,
+          JSON.stringify(session)
+        )
+      },
+      {
+        baseUrl: deviceUrl,
+        token,
+        deviceId,
+        hostname: 'flux-purr-001122334455',
+      }
+    )
+    rejectHealth = true
+
+    await page.goto(`/devices/${deviceId}/overview?demo=false`)
+    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
   })
 
   test('disables writes when a LAN lease heartbeat expires', async ({ page }) => {

@@ -650,6 +650,9 @@ export function ControlPlaneDemo({
     : localActiveView
   const [routePreferences, setRoutePreferences] = useState(readRoutePreferences)
   const [routeResumeFailed, setRouteResumeFailed] = useState(false)
+  const [failedLanResumeIdentityIds, setFailedLanResumeIdentityIds] = useState<Set<string>>(
+    new Set()
+  )
   const [routeFallbackKind, setRouteFallbackKind] = useState<DeviceConnectionKind | undefined>()
   const [pendingLanResumeIdentityIds, setPendingLanResumeIdentityIds] = useState<Set<string>>(
     () =>
@@ -795,6 +798,9 @@ export function ControlPlaneDemo({
     Record<string, NetworkSummary>
   >({})
   const [lanLeasesByDevice, setLanLeasesByDevice] = useState<Record<string, LanLease>>({})
+  const hasActiveLanLease = Object.values(lanLeasesByDevice).some(
+    (lease) => lease.leaseId.trim().length > 0
+  )
   const pendingDeviceModeRef = useRef(allowDemoControls)
   const [flashRun, setFlashRun] = useState<{
     status: FlashRunStatus
@@ -972,13 +978,27 @@ export function ControlPlaneDemo({
             continue
           }
           const target = lanProbeToDeviceTarget(resumed.session, resumed.probe)
+          setFailedLanResumeIdentityIds((current) => {
+            if (!current.has(rememberedIdentityId)) return current
+            const next = new Set(current)
+            next.delete(rememberedIdentityId)
+            return next
+          })
           setPendingDevices((current) => upsertLanDeviceTarget(current, target))
         } catch (error: unknown) {
-          if (
-            cancelled ||
-            !(error instanceof ControlPlaneClientError) ||
-            error.code !== 'unauthorized'
-          ) {
+          if (cancelled) {
+            continue
+          }
+          if (!(error instanceof ControlPlaneClientError) || error.code !== 'unauthorized') {
+            if (rememberedIdentityId === routedRecoveryIdentityId) {
+              setFailedLanResumeIdentityIds((current) => new Set(current).add(rememberedIdentityId))
+              setRouteResumeFailed(true)
+              setFeedback({
+                title: '目标设备暂不可用',
+                detail: '无法恢复已保存的 LAN 设备连接，请重试或选择其他目标。',
+                tone: 'warning',
+              })
+            }
             continue
           }
           if (rememberedIdentityId) {
@@ -1004,7 +1024,7 @@ export function ControlPlaneDemo({
     return () => {
       cancelled = true
     }
-  }, [allowDemoControls, lanRuntime])
+  }, [allowDemoControls, lanRuntime, routedRecoveryIdentityId])
 
   useEffect(() => {
     if (!allowDemoControls || activeScenario.events.length < 2) {
@@ -1038,6 +1058,12 @@ export function ControlPlaneDemo({
     if (previousRouteDeviceIdRef.current === routeDeviceId) return
     previousRouteDeviceIdRef.current = routeDeviceId
     setRouteResumeFailed(false)
+    setFailedLanResumeIdentityIds((current) => {
+      if (!routeDeviceId || !current.has(routeDeviceId)) return current
+      const next = new Set(current)
+      next.delete(routeDeviceId)
+      return next
+    })
     setRouteFallbackKind(undefined)
     automaticResumeKeyRef.current = null
     successfulRouteKeyRef.current = null
@@ -1128,12 +1154,16 @@ export function ControlPlaneDemo({
       return
     }
 
-    setFeedback({
-      title: 'Web Serial unavailable',
-      detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
-      tone: 'warning',
-    })
-  }, [selectedAddDeviceKind, webSerial.error, webSerial.state])
+    setFeedback((current) =>
+      hasActiveLanLease || current.title === 'LAN 设备已连接'
+        ? current
+        : {
+            title: 'Web Serial unavailable',
+            detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+            tone: 'warning',
+          }
+    )
+  }, [hasActiveLanLease, selectedAddDeviceKind, webSerial.error, webSerial.state])
 
   useEffect(() => {
     if (webSerial.state !== 'connected') {
@@ -1163,13 +1193,17 @@ export function ControlPlaneDemo({
 
   useEffect(() => {
     if (webSerial.state === 'error' && webSerial.error) {
-      setFeedback({
-        title: 'Web Serial unavailable',
-        detail: webSerial.error,
-        tone: 'warning',
-      })
+      setFeedback((current) =>
+        hasActiveLanLease || current.title === 'LAN 设备已连接'
+          ? current
+          : {
+              title: 'Web Serial unavailable',
+              detail: webSerial.error ?? 'Browser direct USB control could not be opened.',
+              tone: 'warning',
+            }
+      )
     }
-  }, [webSerial.error, webSerial.state])
+  }, [hasActiveLanLease, webSerial.error, webSerial.state])
 
   useEffect(() => {
     const liveDevdDevice = activeScenario.devices.find((device) => device.transport === 'devd')
@@ -1775,18 +1809,22 @@ export function ControlPlaneDemo({
   const routeHasRecoverableTransportCandidate = routeDeviceChoice?.connections.some(
     (connection) => !allowDemoControls && connection.kind !== 'web-serial'
   )
+  const routeHasFailedLanResume =
+    routeRecoveryIdentityId != null && failedLanResumeIdentityIds.has(routeRecoveryIdentityId)
   const routeFallbackConnection = routeDeviceChoice?.connections
     .filter((connection) => connection.kind !== 'web-serial')
     .filter(isHealthyRouteConnection)
     .sort((left, right) => resumeConnectionPriority(left) - resumeConnectionPriority(right))[0]
   const routeFallbackConnectionKind = routeFallbackConnection?.kind
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
+  const routeHasKnownBridgeTransportIssue =
+    routeDeviceConnection?.kind === 'bridge' && Boolean(routeDeviceConnection.target.transportIssue)
 
   useEffect(() => {
-    if (routeHasRecoverableTransportCandidate && routeResumeFailed) {
+    if (routeHasRecoverableTransportCandidate && routeResumeFailed && !routeHasFailedLanResume) {
       setRouteResumeFailed(false)
     }
-  }, [routeHasRecoverableTransportCandidate, routeResumeFailed])
+  }, [routeHasFailedLanResume, routeHasRecoverableTransportCandidate, routeResumeFailed])
 
   useEffect(() => {
     if (!routeRecoveryIdentityId || !routeRecoveryVariant) {
@@ -1820,21 +1858,29 @@ export function ControlPlaneDemo({
     const attemptKey = `${routeRecoveryVariant}:${routeRecoveryIdentityId}:web-serial`
     if (automaticResumeKeyRef.current === attemptKey) return
     automaticResumeKeyRef.current = attemptKey
-    setFeedback({
-      title: '正在恢复 Web Serial',
-      detail: `正在使用已授权端口验证 ${routeDeviceChoice?.name ?? routeRecoveryIdentityId}，不会打开系统设备选择器。`,
-      tone: 'info',
-    })
+    setFeedback((current) =>
+      hasActiveLanLease
+        ? current
+        : {
+            title: '正在恢复 Web Serial',
+            detail: `正在使用已授权端口验证 ${routeDeviceChoice?.name ?? routeRecoveryIdentityId}，不会打开系统设备选择器。`,
+            tone: 'info',
+          }
+    )
     const controller = new AbortController()
     void connectPreauthorizedWebSerial(controller.signal, routeRecoveryIdentityId).then(
       (connected) => {
         if (controller.signal.aborted) return
         if (connected) {
-          setFeedback({
-            title: 'Web Serial connected',
-            detail: 'Browser direct USB JSONL control is active.',
-            tone: 'success',
-          })
+          setFeedback((current) =>
+            hasActiveLanLease
+              ? current
+              : {
+                  title: 'Web Serial connected',
+                  detail: 'Browser direct USB JSONL control is active.',
+                  tone: 'success',
+                }
+          )
           setRouteResumeFailed(false)
           return
         }
@@ -1860,11 +1906,15 @@ export function ControlPlaneDemo({
           return
         }
         if (!routeHasInvalidLanCredential) {
-          setFeedback({
-            title: 'Web Serial unavailable',
-            detail: 'Browser direct USB control could not be opened.',
-            tone: 'warning',
-          })
+          setFeedback((current) =>
+            hasActiveLanLease
+              ? current
+              : {
+                  title: 'Web Serial unavailable',
+                  detail: 'Browser direct USB control could not be opened.',
+                  tone: 'warning',
+                }
+          )
         }
         setSerialRecoveryExhaustedIdentityIds((current) =>
           new Set(current).add(routeRecoveryIdentityId)
@@ -1886,6 +1936,7 @@ export function ControlPlaneDemo({
     routeRecoveryIdentityId,
     routeRecoveryVariant,
     pendingLanResumeIdentityIds,
+    hasActiveLanLease,
     webSerial.deviceIdentityId,
     webSerial.preauthorizedPortsReady,
   ])
@@ -4058,7 +4109,9 @@ export function ControlPlaneDemo({
     navigation &&
     unavailableRouteState &&
     !routeHasInvalidLanCredential &&
-    (!routeDeviceChoice || routeResumeFailed)
+    (!routeDeviceChoice ||
+      routeHasFailedLanResume ||
+      (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
   ) {
     const routeNavigation = navigation
     const recoveryLeaveGuard = calibrationLeaveGuard

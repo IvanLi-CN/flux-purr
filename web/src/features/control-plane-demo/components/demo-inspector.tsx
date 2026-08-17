@@ -11,7 +11,7 @@ interface DemoInspectorProps {
   state: DemoInspectorState
   devices: readonly DeviceTarget[]
   selectedDeviceId: string
-  onStateChange: (next: DemoInspectorState) => void
+  onStateChange: (partial: Partial<DemoInspectorState>) => void
   onSelectDevice: (deviceId: string) => void
   onSimulate: (event: Pick<EventLogEntry, 'message' | 'tone'>) => void
 }
@@ -51,7 +51,7 @@ export function DemoInspector({
     onSimulate({ message: 'Demo share URL copied to clipboard', tone: 'success' })
   }
 
-  const update = (partial: Partial<DemoInspectorState>) => onStateChange({ ...state, ...partial })
+  const update = (partial: Partial<DemoInspectorState>) => onStateChange(partial)
 
   return (
     <aside

@@ -37,6 +37,15 @@ function App() {
   } | null>(null)
   const [inspectorEvents, setInspectorEvents] = useState<EventLogEntry[]>([])
   const inspectorState = useMemo(() => demoInspectorStateFromSearch(search), [search])
+  const inspectorStateRef = useRef(inspectorState)
+  const inspectorSearchRef = useRef(search)
+  const inspectorNavigationQueueRef = useRef(Promise.resolve())
+  const inspectorPendingNavigationCountRef = useRef(0)
+  useEffect(() => {
+    if (inspectorPendingNavigationCountRef.current > 0) return
+    inspectorStateRef.current = inspectorState
+    inspectorSearchRef.current = search
+  }, [inspectorState, search])
   const isLive = variant === 'live'
   const activeScenario = useMemo(
     () => (isLive ? liveControlPlaneScenario : deriveDemoScenario(inspectorState, inspectorEvents)),
@@ -245,35 +254,57 @@ function App() {
   }, [])
 
   const updateInspectorState = useCallback(
-    async (nextState: DemoInspectorState) => {
-      const {
-        demoScene: _demoScene,
-        demoLease: _demoLease,
-        demoNetwork: _demoNetwork,
-        demoArtifact: _demoArtifact,
-        ...searchWithoutInspector
-      } = search
-      const nextSearch = {
-        ...searchWithoutInspector,
-        ...demoInspectorSearch(nextState),
+    (nextState: Partial<DemoInspectorState>) => {
+      const previousState = inspectorStateRef.current
+      const mergedState = { ...previousState, ...nextState }
+      inspectorStateRef.current = mergedState
+      inspectorPendingNavigationCountRef.current += 1
+
+      const runNavigation = async () => {
+        const {
+          demoScene: _demoScene,
+          demoLease: _demoLease,
+          demoNetwork: _demoNetwork,
+          demoArtifact: _demoArtifact,
+          ...searchWithoutInspector
+        } = inspectorSearchRef.current
+        const nextSearch = {
+          ...searchWithoutInspector,
+          ...demoInspectorSearch(mergedState),
+        }
+        inspectorSearchRef.current = nextSearch
+        const sceneChanged = mergedState.demoScene !== previousState.demoScene
+        const nextScenario = deriveDemoScenario(mergedState, inspectorEvents)
+        if (sceneChanged) {
+          const isCalibration = mergedState.demoScene === 'calibration-active'
+          await navigate({
+            to: (isCalibration
+              ? '/devices/$deviceId/calibration/heater-curve'
+              : '/devices/$deviceId/overview') as '/',
+            params: { deviceId: nextScenario.selectedDeviceId },
+            search: nextSearch,
+            replace: true,
+          })
+          return
+        }
+        await navigate({ to: location.pathname as '/', search: nextSearch, replace: true })
       }
-      const sceneChanged = nextState.demoScene !== inspectorState.demoScene
-      const nextScenario = deriveDemoScenario(nextState, inspectorEvents)
-      if (sceneChanged) {
-        const isCalibration = nextState.demoScene === 'calibration-active'
-        await navigate({
-          to: (isCalibration
-            ? '/devices/$deviceId/calibration/heater-curve'
-            : '/devices/$deviceId/overview') as '/',
-          params: { deviceId: nextScenario.selectedDeviceId },
-          search: nextSearch,
-          replace: true,
-        })
-        return
-      }
-      await navigate({ to: location.pathname as '/', search: nextSearch, replace: true })
+
+      const queuedNavigation = inspectorNavigationQueueRef.current.then(
+        runNavigation,
+        runNavigation
+      )
+      inspectorNavigationQueueRef.current = queuedNavigation.then(
+        () => {
+          inspectorPendingNavigationCountRef.current -= 1
+        },
+        () => {
+          inspectorPendingNavigationCountRef.current -= 1
+        }
+      )
+      return queuedNavigation
     },
-    [inspectorEvents, inspectorState.demoScene, location.pathname, navigate, search]
+    [inspectorEvents, location.pathname, navigate]
   )
 
   const selectInspectorDevice = useCallback(
