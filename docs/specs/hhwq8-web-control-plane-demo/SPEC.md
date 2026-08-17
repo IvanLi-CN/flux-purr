@@ -77,7 +77,7 @@
 - 所有可点击控件必须具备 hover/focus/active 视觉反馈，移动端触控目标高度不低于 48px。
 - 一级页面 tabs 与校准 workspace tabs 必须使用链接语义、支持键盘操作，并正确表达 `aria-current`。
 - 校准运行期间，站内 Link、程序跳转、设备切换、variant/search 变化与浏览器 Back/Forward 必须共用同一离开保护；页面关闭或地址栏导航必须启用原生 `beforeunload`。
-- 生产静态构建必须包含 EdgeOne history fallback，将非静态资源 pathname rewrite 到 `/index.html`。
+- 生产静态构建必须包含 EdgeOne history fallback，将 `/devices` history pathname rewrite 到 `/index.html`，且不得拦截静态资源。
 - `build:demo` 必须生成独立静态 artifact，并在运行时强制 mock fixture、关闭 devd/Web Serial/direct LAN；根路径必须 replace 到 `/devices/fp-lab-01/overview`，忽略 `uiDemo` 与本地 live preference。
 
 ### SHOULD

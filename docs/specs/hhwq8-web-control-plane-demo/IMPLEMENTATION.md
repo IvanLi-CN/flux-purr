@@ -18,7 +18,7 @@
 - 深链恢复按 transport 偏好和健康候选串行解析；Web Serial 自动恢复只读取已授权端口，只有显式添加操作可以调用 chooser。
 - 未知 identity 保留原 URL 并显示重试、选择设备和添加连接操作；结构无效的 URL 由 root 404 处理。
 - 校准运行期间的 Link、程序导航、设备切换、search 变化与浏览器 Back/Forward 统一进入 TanStack blocker resolver；armed 状态同时注册 `beforeunload`。
-- `web/public/edgeone.json` 将 history 路由深链 rewrite 到 `/index.html`。
+- `web/public/edgeone.json` 仅将 `/devices` history 深链 rewrite 到 `/index.html`，让 `/assets/*` 按文件路径提供。
 - `build:demo` 使用 Vite demo mode 输出 `web/dist-demo`；它固定为 fixture runtime、关闭 devd/Web Serial，并把 root replace 到 `fp-lab-01` overview。
 - `DemoInspector` 作为控制台同级的可收起工具层，使用 `demoScene`、`demoLease`、`demoNetwork` 与 `demoArtifact` 复现确定性状态；高级状态只读可复制，面板布局不进入 URL。
 - `.github/workflows/ci-main.yml` 上传独立 `web-demo-bundle`，`.github/workflows/deploy-edgeone-demo.yml` 在成功的 `main` CI 后从 runner 临时目录部署该 artifact 到 `flux-purr-demo`。

@@ -19,7 +19,7 @@
 - transport target id、设备地址与凭据不具备跨连接稳定性，因此规范 URL 只接受探针验证后的物理 identity；无法恢复时保留地址并显示恢复操作。
 - 校准离开保护迁入 router blocker，使 Link、程序导航、设备切换、search 变化和浏览器历史共享“先退出校准、成功后继续”的安全顺序。
 - 公开 Demo 复用正式控制台和路由，而非替换 `uiDemo` LAN pairing surface；Inspector 只控制确定性 fixture state，并通过同一 search blocker 接入校准离开保护。
-- EdgeOne public Demo 使用独立 Makers artifact 与项目绑定，避免把 `demo.flux-purr.ivanli.cc` 误作 live direct-LAN origin。
+- EdgeOne public Demo 使用独立 Makers artifact 与项目绑定，避免把 `flux-purr-demo.ivanli.cc` 误作 live direct-LAN origin。
 
 ## Key Reasons / Replacements
 
