@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "3d221a77f05353a1837de2cb91c71131c6a49685",
+  "pr_number": 69,
+  "pr_title": "feat(web): add public Demo Inspector",
+  "product": {
+    "effective_version": "0.18.0",
+    "tag": "v0.18.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "cfa5836d50c42a94a2ea99d93dadcedef75637e6",
+  "type_label": "type:minor"
+}
