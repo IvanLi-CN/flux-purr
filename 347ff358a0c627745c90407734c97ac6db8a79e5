@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "0acbedde3b5ed915a29068057e2438f76ee9c3e2",
+  "pr_number": 70,
+  "pr_title": "fix(web): serve EdgeOne demo assets",
+  "product": {
+    "effective_version": "0.18.1",
+    "tag": "v0.18.1"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "347ff358a0c627745c90407734c97ac6db8a79e5",
+  "type_label": "type:patch"
+}
