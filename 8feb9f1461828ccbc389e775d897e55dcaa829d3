@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "1b8f442b7a52725d5c53c4c01fc26b517c56123d",
+  "pr_number": 71,
+  "pr_title": "fix(firmware): harden startup after software reset",
+  "product": {
+    "effective_version": "0.18.2",
+    "tag": "v0.18.2"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "patch",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "8feb9f1461828ccbc389e775d897e55dcaa829d3",
+  "type_label": "type:patch"
+}
