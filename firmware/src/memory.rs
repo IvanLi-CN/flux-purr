@@ -1420,8 +1420,12 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     }
 
     let sequence = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    let mut config =
-        decode_config_payload(&bytes[MEMORY_RECORD_HEADER_LEN..payload_end], bytes[4] >= 3)?;
+    let mut config = MemoryConfig::default();
+    decode_config_payload(
+        &bytes[MEMORY_RECORD_HEADER_LEN..payload_end],
+        bytes[4] >= 3,
+        &mut config,
+    )?;
     config.sanitize();
 
     Ok(MemoryRecord { sequence, config })
@@ -1626,8 +1630,8 @@ fn encode_config_payload(
 fn decode_config_payload(
     bytes: &[u8],
     wide_tlv_lengths: bool,
-) -> Result<MemoryConfig, MemoryDecodeError> {
-    let mut config = MemoryConfig::default();
+    config: &mut MemoryConfig,
+) -> Result<(), MemoryDecodeError> {
     let mut legacy_active_adc_calibration = AdcCalibrationConfig::default();
     let mut legacy_draft_adc_calibration = AdcCalibrationConfig::default();
     let mut saw_new_adc_slots = false;
@@ -1812,7 +1816,7 @@ fn decode_config_payload(
     } else if saw_legacy_active && (!saw_new_adc_slots || !saw_new_adc_active_slots) {
         backfill_new_adc_calibration_defaults(&mut config.adc_calibration);
     }
-    Ok(config)
+    Ok(())
 }
 
 fn encode_heater_curve_raw_observations(config: &HeaterCurveRawObservations, out: &mut [u8]) {
@@ -4630,7 +4634,8 @@ mod tests {
         )
         .expect("legacy candidate payload fits");
 
-        let decoded = decode_config_payload(&payload[..cursor], true)
+        let mut decoded = MemoryConfig::default();
+        decode_config_payload(&payload[..cursor], true, &mut decoded)
             .expect("legacy candidate payload decodes");
 
         assert_eq!(decoded.thermal_plant_active, Some(transaction));
@@ -4653,7 +4658,8 @@ mod tests {
         )
         .expect("legacy candidate payload fits");
 
-        let decoded = decode_config_payload(&payload[..cursor], true)
+        let mut decoded = MemoryConfig::default();
+        decode_config_payload(&payload[..cursor], true, &mut decoded)
             .expect("legacy candidate payload decodes");
 
         assert_eq!(decoded.thermal_plant_active, Some(transaction));

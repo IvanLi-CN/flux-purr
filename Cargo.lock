@@ -1759,6 +1759,7 @@ source = "git+https://github.com/IvanLi-CN/gc9d01-rs?rev=6b75d9dc818be04e57932b7
 dependencies = [
  "embedded-graphics-core",
  "embedded-hal 1.0.0",
+ "embedded-hal-async",
  "maybe-async-cfg",
 ]
 
