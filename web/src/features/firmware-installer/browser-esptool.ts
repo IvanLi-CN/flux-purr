@@ -2,6 +2,10 @@ import type { ESPLoader, Transport as EspTransport } from 'esptool-js'
 import SparkMD5 from 'spark-md5'
 
 import migrations from '../../../../docs/specs/web-firmware-install-recovery/contracts/migrations.json'
+import {
+  type BrowserSerial,
+  FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS,
+} from '../control-plane-demo/web-serial'
 import type { FirmwareOperation, ValidatedFirmwareBundle } from './types'
 
 export const ESP_GET_SECURITY_INFO = 0x14
@@ -49,13 +53,12 @@ export async function connectBrowserLoader(port?: BrowserSerialPort): Promise<ES
     throw new Error('Browser USB requires desktop Chrome or Edge on HTTPS or localhost.')
   }
   const { ESPLoader, Transport } = await import('esptool-js')
+  const serial = (navigator as Navigator & { serial?: BrowserSerial }).serial
+  if (!serial) {
+    throw new Error('Browser USB requires desktop Chrome or Edge on HTTPS or localhost.')
+  }
   const selectedPort =
-    port ??
-    (await (
-      navigator as Navigator & {
-        serial: { requestPort(): Promise<BrowserSerialPort> }
-      }
-    ).serial.requestPort())
+    port ?? ((await serial.requestPort(FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS)) as BrowserSerialPort)
   const transport = new Transport(selectedPort, false)
   const loader = new ESPLoader({
     transport,

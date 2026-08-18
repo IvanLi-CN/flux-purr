@@ -156,6 +156,9 @@ describe('Browser ROM connection', () => {
 
     try {
       await connectBrowserLoader()
+      expect(esptoolMocks.requestPort).toHaveBeenCalledWith({
+        filters: [{ usbVendorId: 0x303a, usbProductId: 0x1001 }],
+      })
       expect(esptoolMocks.detectChip).toHaveBeenCalledWith('default_reset')
       expect(esptoolMocks.main).not.toHaveBeenCalled()
     } finally {

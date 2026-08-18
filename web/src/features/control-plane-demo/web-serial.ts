@@ -29,6 +29,20 @@ const WEB_SERIAL_INITIALIZATION_RETRY_MS = 500
 const WEB_SERIAL_INITIALIZATION_ATTEMPTS = 50
 export const WEB_SERIAL_INITIALIZATION_TIMEOUT_MS = 30_000
 
+export interface BrowserSerialPortFilter {
+  readonly usbVendorId: number
+  readonly usbProductId?: number
+}
+
+export interface BrowserSerialRequestOptions {
+  readonly filters?: readonly BrowserSerialPortFilter[]
+}
+
+// ESP32-S3's native USB Serial/JTAG controller identifies as Espressif 303A:1001.
+export const FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS: BrowserSerialRequestOptions = {
+  filters: [{ usbVendorId: 0x303a, usbProductId: 0x1001 }],
+}
+
 export type WebSerialConnectionState = 'unsupported' | 'idle' | 'connecting' | 'connected' | 'error'
 
 export interface WebSerialDiagnostic {
@@ -37,7 +51,7 @@ export interface WebSerialDiagnostic {
 }
 
 export interface BrowserSerial {
-  requestPort(options?: unknown): Promise<BrowserSerialPort>
+  requestPort(options?: BrowserSerialRequestOptions): Promise<BrowserSerialPort>
   getPorts?(): Promise<BrowserSerialPort[]>
 }
 
@@ -60,11 +74,13 @@ export function selectBrowserSerialPort(
   requestPortWhenUnavailable = true
 ): Promise<BrowserSerialPort> {
   if (forcePortSelection) {
-    return serial.requestPort()
+    return serial.requestPort(FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS)
   }
   const preauthorizedPort = preauthorizedPorts?.length === 1 ? preauthorizedPorts[0] : null
   if (preauthorizedPort) return Promise.resolve(preauthorizedPort)
-  if (requestPortWhenUnavailable) return serial.requestPort()
+  if (requestPortWhenUnavailable) {
+    return serial.requestPort(FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS)
+  }
   return Promise.reject(
     new ControlPlaneClientError(
       '没有唯一的已授权 Web Serial 端口，请手动选择设备。',

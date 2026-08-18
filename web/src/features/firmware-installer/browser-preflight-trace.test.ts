@@ -19,6 +19,9 @@ describe('Browser USB preflight trace', () => {
     })
 
     expect(serial.requestPort).toHaveBeenCalledOnce()
+    expect(serial.requestPort).toHaveBeenCalledWith({
+      filters: [{ usbVendorId: 0x303a, usbProductId: 0x1001 }],
+    })
     expect(trace.map((entry) => entry.event)).toEqual(['预检已点击', '浏览器 USB 选择器已请求'])
     await expect(selection).resolves.toBe(port)
     expect(trace.at(-1)).toMatchObject({ event: '浏览器 USB 端口已选择', tone: 'success' })

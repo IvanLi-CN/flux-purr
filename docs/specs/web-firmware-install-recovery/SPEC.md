@@ -57,6 +57,7 @@
 - `verified` 必须同时满足段写入/ROM MD5 验证与 runtime identity/layout/install-status 验证；重连超时返回 `write_complete_unverified`。
 - 失败报告只能由用户下载到本地，不自动上传，且不得包含配置原始字节、凭据或任意主机路径。
 - Browser 预检必须在本地记录用户点击、`requestPort()` 发起、端口选择或拒绝、运行时连接、ROM 连接和终态的有序追踪；该追踪必须写入本地诊断报告，且不得包含配置原始字节、凭据或任意主机路径。
+- Browser 的原生串口选择器必须在首次用户点击同步栈中以 ESP32-S3 USB Serial/JTAG 的 USB 过滤器 `0x303A:0x1001` 调用 `requestPort()`；不得将蓝牙、调试控制台或其他无关主机串口暴露为候选项。
 - 真实写入继续受 exact-port、lease、串口独占和 `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` 门禁约束。
 - Browser 只能读取当前 Web origin 的 `firmware/releases-manifest.json` 与其中声明的精确 `firmware/releases/**.fluxpurr-fw` 路径；不得访问 GitHub API、GitHub download URL、任意目录路径或任意代理 URL。
 
