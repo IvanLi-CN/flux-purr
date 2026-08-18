@@ -19,7 +19,7 @@ use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
 use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
-use embassy_time::{Instant, Timer as EmbassyTimer};
+use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
 #[cfg(target_arch = "xtensa")]
 use embedded_graphics::prelude::RgbColor;
 #[cfg(target_arch = "xtensa")]
@@ -40,7 +40,7 @@ use esp_hal::{
     delay::Delay,
     efuse::{AdcCalibUnit, Efuse},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    i2c::master::{Config as I2cConfig, I2c},
+    i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout},
     mcpwm::{
         McPwm, PeripheralClockConfig,
         operator::PwmPinConfig,
@@ -50,7 +50,7 @@ use esp_hal::{
         Mode as SpiMode,
         master::{Config as SpiConfig, Spi},
     },
-    time::Rate,
+    time::{Duration as HalDuration, Rate},
     timer::timg::TimerGroup,
     usb_serial_jtag::UsbSerialJtag,
 };
@@ -184,15 +184,40 @@ use static_cell::StaticCell;
 #[cfg(target_arch = "xtensa")]
 esp_bootloader_esp_idf::esp_app_desc!();
 
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[unsafe(link_section = ".dram2_uninit")]
+static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> = MaybeUninit::uninit();
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+const RUNTIME_HEAP_SIZE: usize = 64 * 1024;
+
+#[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
+#[unsafe(link_section = ".dram2_uninit")]
+static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> = MaybeUninit::uninit();
+
+#[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
+const RUNTIME_HEAP_SIZE: usize = 8 * 1024;
+
 #[cfg(target_arch = "xtensa")]
 fn init_runtime_heap() {
     // Wi-Fi heap and the USB response buffer share post-boot DRAM2. Keeping
     // the 8 KiB response buffer out of the Embassy task leaves enough primary
-    // DRAM for the startup stack during radio initialization.
-    #[cfg(feature = "net_http")]
-    esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 64 * 1024);
-    #[cfg(not(feature = "net_http"))]
-    esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 8 * 1024);
+    // DRAM for the startup stack during radio initialization. This region is
+    // NOLOAD, so it retains arbitrary bytes across software resets. Clear it
+    // before registration because the Wi-Fi binary embeds ETS timers in heap
+    // objects and treats an initial non-null `priv_` field as a live RTOS timer.
+    let heap_ptr = core::ptr::addr_of_mut!(RUNTIME_HEAP_STORAGE).cast::<u8>();
+    // SAFETY: this runs once before the storage is registered with the global
+    // allocator, and the static region remains exclusively owned by that
+    // allocator for the rest of the program.
+    unsafe {
+        heap_ptr.write_bytes(0, RUNTIME_HEAP_SIZE);
+        esp_alloc::HEAP.add_region(esp_alloc::HeapRegion::new(
+            heap_ptr,
+            RUNTIME_HEAP_SIZE,
+            esp_alloc::MemoryCapability::Internal.into(),
+        ));
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -204,6 +229,25 @@ static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_L
 struct MemoryIoScratch {
     record_bytes: [u8; MEMORY_SLOT_SIZE],
     partition_table: [u8; PARTITION_TABLE_MAX_LEN],
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn zeroize_bytes_volatile(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is an exclusive reference to initialized memory. A
+        // volatile write keeps the scrub from being removed before deallocation.
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+impl Drop for MemoryIoScratch {
+    fn drop(&mut self) {
+        // Wi-Fi reuses this allocator region during radio startup. Do not leave
+        // EEPROM/config bytes where a C timer object can observe stale pointers.
+        zeroize_bytes_volatile(&mut self.record_bytes);
+        zeroize_bytes_volatile(&mut self.partition_table);
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -522,6 +566,8 @@ const RTD_TEMP_MAX_C: f32 = 500.0;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_I2C_FREQUENCY_HZ: u32 = 100_000;
 #[cfg(target_arch = "xtensa")]
+const I2C_TRANSACTION_TIMEOUT_MS: u64 = 500;
+#[cfg(target_arch = "xtensa")]
 const CH224Q_RETRY_ATTEMPTS: u8 = 3;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_RETRY_DELAY_MS: u64 = 50;
@@ -568,19 +614,10 @@ const LEGACY_FLASH_MEMORY_SLOT_B_OFFSET: u32 =
 #[cfg(target_arch = "xtensa")]
 struct DisplayTimer;
 
-#[cfg(any(target_arch = "xtensa", test))]
-fn eager_display_delay(milliseconds: u64, delay_us: impl FnOnce(u32)) -> core::future::Ready<()> {
-    let microseconds = milliseconds.saturating_mul(1_000).min(u32::MAX as u64) as u32;
-    delay_us(microseconds);
-    core::future::ready(())
-}
-
 #[cfg(target_arch = "xtensa")]
 impl Gc9d01Timer for DisplayTimer {
     fn after_millis(milliseconds: u64) -> impl core::future::Future<Output = ()> {
-        // The synchronous gc9d01 transform does not poll the returned future.
-        // Execute the panel timing delay eagerly before returning a ready future.
-        eager_display_delay(milliseconds, esp_hal::rom::ets_delay_us)
+        EmbassyTimer::after_millis(milliseconds)
     }
 }
 
@@ -9220,6 +9257,7 @@ async fn run_usb_recovery_control_loop(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
     memory_config: &MemoryConfig,
     status_light_state: StatusLightState,
+    phase: UsbRecoveryPhase,
 ) -> ! {
     set_status_light_state(status_light_state);
     let mut elapsed_ms = 0_u64;
@@ -9227,8 +9265,12 @@ async fn run_usb_recovery_control_loop(
         loop {
             match usb.read_byte() {
                 Ok(b'\n') => {
-                    let response =
-                        usb_recovery_response(rx_line.as_str(), memory_config, elapsed_ms);
+                    let response = usb_recovery_response_for_phase(
+                        rx_line.as_str(),
+                        memory_config,
+                        elapsed_ms,
+                        phase,
+                    );
                     usb_write_response_frame(usb, &response, tx_buf);
                     rx_line.clear();
                 }
@@ -9244,6 +9286,29 @@ async fn run_usb_recovery_control_loop(
         }
         EmbassyTimer::after_millis(20).await;
         elapsed_ms = elapsed_ms.saturating_add(20);
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UsbRecoveryPhase {
+    BeforePersistentState,
+    RuntimeFault,
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn usb_recovery_response_for_phase(
+    line: &str,
+    memory_config: &MemoryConfig,
+    elapsed_ms: u64,
+    phase: UsbRecoveryPhase,
+) -> UsbFrame {
+    match phase {
+        // Persistence restoration and Wi-Fi initialization have not happened,
+        // so only the early USB contract may answer. In particular, it keeps
+        // network and runtime status behind the retryable startup boundary.
+        UsbRecoveryPhase::BeforePersistentState => usb_early_response(line, memory_config),
+        UsbRecoveryPhase::RuntimeFault => usb_recovery_response(line, memory_config, elapsed_ms),
     }
 }
 
@@ -10078,7 +10143,7 @@ fn present_ui<'a, BUS, DC, RST>(
     state: &FrontPanelUiState,
 ) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
-    BUS: embedded_hal::spi::SpiDevice,
+    BUS: embedded_hal_async::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
@@ -10096,27 +10161,30 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn flush_ui<'a, BUS, DC, RST>(
+async fn flush_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
 ) -> Result<(), gc9d01::Error<BUS::Error, DC::Error>>
 where
-    BUS: embedded_hal::spi::SpiDevice,
+    BUS: embedded_hal_async::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
 {
     present_ui(display, canvas, state)?;
-    display.flush()
+    display.flush().await
 }
+
+#[cfg(target_arch = "xtensa")]
+const DISPLAY_IO_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_arch = "xtensa")]
 async fn request_ch224q_voltage(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     request: ch224q::VoltageRequest,
-) -> Address {
+) -> Option<Address> {
     let payload = ch224q::voltage_request_payload(request);
 
     for attempt in 1..=CH224Q_RETRY_ATTEMPTS {
@@ -10129,7 +10197,7 @@ async fn request_ch224q_voltage(
                     request.control_register_value(),
                     request.millivolts(),
                 );
-                return address;
+                return Some(address);
             }
         }
 
@@ -10143,10 +10211,10 @@ async fn request_ch224q_voltage(
     }
 
     info!(
-        "ch224q request failed after {=u8} attempts; continuing with safe status-only fallback",
+        "ch224q request failed after {=u8} attempts",
         CH224Q_RETRY_ATTEMPTS,
     );
-    Address::Primary
+    None
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -10310,9 +10378,9 @@ async fn run_key_test_runtime<'a, BUS, DC, RST>(
     canvas: &mut DisplayCanvas,
     inputs: FrontPanelInputs<'a>,
     status_light_started_ms: u64,
-) -> !
+) -> Result<(), ()>
 where
-    BUS: embedded_hal::spi::SpiDevice,
+    BUS: embedded_hal_async::spi::SpiDevice,
     DC: embedded_hal::digital::OutputPin,
     RST: embedded_hal::digital::OutputPin<Error = DC::Error>,
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
@@ -10325,7 +10393,13 @@ where
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::KeyTest);
     let mut last_raw_state = FrontPanelRawState::default();
     ui_state.set_raw_state(last_raw_state);
-    flush_ui(display, canvas, &ui_state).expect("failed to draw initial key-test UI");
+    if !matches!(
+        with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, &ui_state)).await,
+        Ok(Ok(()))
+    ) {
+        warn!("initial key-test UI failed; entering recovery");
+        return Err(());
+    }
     log_ui_state(&ui_state);
 
     let mut elapsed_ms: u64 = 0;
@@ -10373,7 +10447,13 @@ where
         }
 
         if needs_redraw {
-            flush_ui(display, canvas, &ui_state).expect("failed to refresh key-test UI");
+            if !matches!(
+                with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, &ui_state)).await,
+                Ok(Ok(()))
+            ) {
+                warn!("key-test UI refresh failed; entering recovery");
+                return Err(());
+            }
             log_ui_state(&ui_state);
         }
     }
@@ -10478,7 +10558,7 @@ async fn main(_spawner: Spawner) {
     backlight.set_low();
     info!("backlight active-low: gpio13 low -> on");
 
-    let spi_device = ExclusiveDevice::new_no_delay(spi, cs)
+    let spi_device = ExclusiveDevice::new_no_delay(spi.into_async(), cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
 
     static DRIVER_FB: StaticCell<
@@ -10506,7 +10586,10 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.dx,
         DISPLAY_PANEL_CONFIG.dy,
     );
-    let display_ready = display.init().is_ok();
+    let display_ready = matches!(
+        with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await,
+        Ok(Ok(()))
+    );
     if !display_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -10515,6 +10598,7 @@ async fn main(_spawner: Spawner) {
             usb_tx_buf,
             &usb_boot_memory_config,
             StatusLightState::Booting,
+            UsbRecoveryPhase::BeforePersistentState,
         )
         .await;
 
@@ -10529,14 +10613,18 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.height,
         canvas.pixels(),
     );
-    let startup_flush_ready = match display.flush() {
-        Ok(()) => true,
-        Err(gc9d01::Error::Bus(_)) => {
+    let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await {
+        Ok(Ok(())) => true,
+        Ok(Err(gc9d01::Error::Bus(_))) => {
             warn!("startup display flush failed: spi bus");
             false
         }
-        Err(gc9d01::Error::Pin(_)) => {
+        Ok(Err(gc9d01::Error::Pin(_))) => {
             warn!("startup display flush failed: display pin");
+            false
+        }
+        Err(_) => {
+            warn!("startup display flush timed out");
             false
         }
     };
@@ -10548,6 +10636,7 @@ async fn main(_spawner: Spawner) {
             usb_tx_buf,
             &usb_boot_memory_config,
             StatusLightState::Booting,
+            UsbRecoveryPhase::BeforePersistentState,
         )
         .await;
 
@@ -10581,16 +10670,54 @@ async fn main(_spawner: Spawner) {
             Output::new(peripherals.GPIO36, Level::Low, OutputConfig::default());
         _fan_pwm_safe.set_low();
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
-        run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await;
+        match run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await {
+            Err(()) => {
+                #[cfg(feature = "web_serial")]
+                run_usb_recovery_control_loop(
+                    &mut usb_serial,
+                    &mut usb_rx_line,
+                    usb_tx_buf,
+                    &usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    UsbRecoveryPhase::BeforePersistentState,
+                )
+                .await;
+
+                #[cfg(not(feature = "web_serial"))]
+                panic!("key-test display failed");
+            }
+            Ok(()) => unreachable!("key-test runtime only returns for a display fault"),
+        }
     }
     let mut pd_i2c = I2c::new(
         peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_hz(CH224Q_I2C_FREQUENCY_HZ)),
+        I2cConfig::default()
+            .with_frequency(Rate::from_hz(CH224Q_I2C_FREQUENCY_HZ))
+            .with_software_timeout(SoftwareTimeout::Transaction(HalDuration::from_millis(
+                I2C_TRANSACTION_TIMEOUT_MS,
+            ))),
     )
     .expect("failed to create I2C0")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
-    let ch224q_address = request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await;
+    let Some(ch224q_address) =
+        request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await
+    else {
+        warn!("CH224Q fixed-PD request failed; entering recovery before outputs initialize");
+        #[cfg(feature = "web_serial")]
+        run_usb_recovery_control_loop(
+            &mut usb_serial,
+            &mut usb_rx_line,
+            usb_tx_buf,
+            &usb_boot_memory_config,
+            StatusLightState::HeaterInterlocked,
+            UsbRecoveryPhase::BeforePersistentState,
+        )
+        .await;
+
+        #[cfg(not(feature = "web_serial"))]
+        panic!("CH224Q fixed-PD request failed");
+    };
     let mut flash_storage = FlashStorage::new();
     info!(
         "pd request locked addr=0x{=u8:02x} target_mv={=u16} settle_ms={=u64}",
@@ -10609,12 +10736,16 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
         EmbassyTimer::after_millis(10).await;
     }
+    // Keep this allocation owned until Wi-Fi has created its timer objects.
+    // Releasing it earlier lets the C driver reinterpret allocator free-list
+    // bytes as an uninitialized timer `priv_` pointer.
+    let mut boot_memory_io_scratch = try_allocate_memory_io_scratch();
     let (eeprom_memory_record, eeprom_data_incompatible, flash_memory_record) =
-        if let Some(mut scratch) = try_allocate_memory_io_scratch() {
+        if let Some(scratch) = boot_memory_io_scratch.as_deref_mut() {
             let (eeprom_memory_record, eeprom_data_incompatible) =
-                load_eeprom_memory_record(&mut pd_i2c, &mut scratch);
+                load_eeprom_memory_record(&mut pd_i2c, scratch);
             let flash_memory_record =
-                load_flash_memory_record_with_legacy_migration(&mut flash_storage, &mut scratch);
+                load_flash_memory_record_with_legacy_migration(&mut flash_storage, scratch);
             (
                 eeprom_memory_record,
                 eeprom_data_incompatible,
@@ -10639,6 +10770,7 @@ async fn main(_spawner: Spawner) {
             flux_purr_firmware::net::report_startup_failure(error).await;
         }
     }
+    drop(boot_memory_io_scratch);
     let mut preview_heater_curve: Option<HeaterCurvePreview> = None;
     let mut memory_commit_due_ms: Option<u64> = None;
     #[cfg(feature = "web_serial")]
@@ -11093,7 +11225,14 @@ async fn main(_spawner: Spawner) {
         ..StatusLightInputs::default()
     });
     set_status_light_state(initial_status_light_state);
-    let initial_frontpanel_ui_ready = flush_ui(&mut display, canvas, &ui_state).is_ok();
+    let initial_frontpanel_ui_ready = matches!(
+        with_timeout(
+            DISPLAY_IO_TIMEOUT,
+            flush_ui(&mut display, canvas, &ui_state)
+        )
+        .await,
+        Ok(Ok(()))
+    );
     if !initial_frontpanel_ui_ready {
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
@@ -11102,6 +11241,7 @@ async fn main(_spawner: Spawner) {
             usb_tx_buf,
             &memory_config,
             initial_status_light_state,
+            UsbRecoveryPhase::RuntimeFault,
         )
         .await;
 
@@ -12234,9 +12374,60 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(status_light_state);
         ui_refresh_pending |= needs_redraw;
         if ui_refresh_pending && elapsed_ms >= next_ui_refresh_ms {
-            match flush_ui(&mut display, canvas, &ui_state) {
-                Ok(()) => log_ui_state(&ui_state),
-                Err(_) => warn!("frontpanel UI refresh failed"),
+            match with_timeout(
+                DISPLAY_IO_TIMEOUT,
+                flush_ui(&mut display, canvas, &ui_state),
+            )
+            .await
+            {
+                Ok(Ok(())) => log_ui_state(&ui_state),
+                Ok(Err(_)) | Err(_) => {
+                    // A failed or timed-out async SPI transaction must not be
+                    // reused: its chip-select and panel state can be incomplete
+                    // after an interrupted transfer. Stop heat first, force the
+                    // source back toward fixed PD, keep cooling active, then
+                    // remain in the USB-readable terminal recovery path.
+                    warn!("frontpanel UI refresh failed; entering recovery");
+                    manual_pps_state.clear();
+                    calibration_runtime_state.heater_enabled = false;
+                    calibration_runtime_state.mode = CalibrationMode::Off;
+                    calibration_runtime_state.immediate_heater_disarm_pending = true;
+                    ui_state.heater_enabled = false;
+                    ui_state.heater_output_percent = 0;
+                    apply_heater_duty(&mut heater_pwm, 0, &mut last_heater_duty);
+                    let _ = disarm_pending_thermal_plant_output(
+                        &mut calibration_runtime_state,
+                        &mut heater_power_backend,
+                        &mut manual_pps_state,
+                        &mut pd_i2c,
+                        ch224q_address,
+                        &mut heater_pwm,
+                        &mut hold_pps_governor,
+                        &mut ui_state,
+                        &mut last_heater_duty,
+                        latest_vin_mv,
+                    )
+                    .await;
+                    apply_fan_output(
+                        &mut fan_enable,
+                        &mut fan_pwm,
+                        FanHardwareCommand::from_profile(FanVoltageProfile::Full),
+                        &mut last_fan_command,
+                    );
+                    #[cfg(feature = "web_serial")]
+                    run_usb_recovery_control_loop(
+                        &mut usb_serial,
+                        &mut usb_rx_line,
+                        usb_tx_buf,
+                        &memory_config,
+                        StatusLightState::HeaterInterlocked,
+                        UsbRecoveryPhase::RuntimeFault,
+                    )
+                    .await;
+
+                    #[cfg(not(feature = "web_serial"))]
+                    panic!("frontpanel UI refresh timed out");
+                }
             }
             ui_refresh_pending = false;
             next_ui_refresh_ms = elapsed_ms.saturating_add(DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS);
@@ -12254,6 +12445,13 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeroize_bytes_scrubs_reusable_heap_workspace() {
+        let mut bytes = [0xFA, 0x00, 0xF4, 0x01, 0xA5, 0x5A];
+        zeroize_bytes_volatile(&mut bytes);
+        assert_eq!(bytes, [0; 6]);
+    }
 
     #[test]
     fn same_frequency_buzzer_retrigger_does_not_reconfigure_timer() {
@@ -12340,18 +12538,6 @@ mod tests {
             configured_frequency_hz,
             fast_repeat_tone
         ));
-    }
-
-    #[test]
-    fn synchronous_display_delay_runs_before_the_future_is_polled() {
-        let mut observed_us = 0;
-
-        let unpolled = eager_display_delay(120, |microseconds| {
-            observed_us = microseconds;
-        });
-
-        assert_eq!(observed_us, 120_000);
-        drop(unpolled);
     }
 
     struct FakeUsbTx {
@@ -12603,16 +12789,53 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_defers_network_and_status_until_persistent_state_is_ready() {
+        let memory_config = MemoryConfig::default();
+        for (request_id, request) in [
+            (
+                "recovery-net",
+                r#"{"type":"request","requestId":"recovery-net","op":"get_network"}"#,
+            ),
+            (
+                "recovery-status",
+                r#"{"type":"request","requestId":"recovery-status","op":"get_status"}"#,
+            ),
+        ] {
+            let response = usb_recovery_response_for_phase(
+                request,
+                &memory_config,
+                0,
+                UsbRecoveryPhase::BeforePersistentState,
+            );
+
+            match response {
+                UsbFrame::Response {
+                    request_id: actual_request_id,
+                    ok: false,
+                    result: None,
+                    error: Some(error),
+                } => {
+                    assert_eq!(actual_request_id.as_str(), request_id);
+                    assert_eq!(error.code.as_str(), "startup_busy");
+                    assert!(error.retryable);
+                }
+                other => panic!("unexpected startup recovery response: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn recovery_usb_control_reports_fault_status_when_bringup_fails() {
         let mut memory_config = MemoryConfig {
             target_temp_c: 215,
             ..MemoryConfig::default()
         };
         memory_config.wifi_ssid.push_str("bench-net").unwrap();
-        let response = usb_recovery_response(
+        let response = usb_recovery_response_for_phase(
             r#"{"type":"request","requestId":"recovery-status","op":"get_status"}"#,
             &memory_config,
             7_200,
+            UsbRecoveryPhase::RuntimeFault,
         );
 
         match response {
