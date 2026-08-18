@@ -10879,10 +10879,16 @@ async fn main(_spawner: Spawner) {
         .unwrap_or_default();
     #[cfg(feature = "net_http")]
     flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
+    #[cfg(all(feature = "net_http", feature = "web_serial"))]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_ready\n");
     #[cfg(feature = "net_http")]
     {
         if let Err(error) =
-            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config).await
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
+                #[cfg(feature = "web_serial")]
+                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
+            })
+            .await
         {
             warn!("LAN control plane startup failed: {=str}", error.message());
             flux_purr_firmware::net::report_startup_failure(error).await;

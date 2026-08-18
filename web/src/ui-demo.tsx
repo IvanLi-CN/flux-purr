@@ -301,7 +301,7 @@ export function UiDemo() {
     )
   }
 
-  if (demo !== 'lan-pairing') {
+  if (demo !== 'lan-pairing' && demo !== 'true') {
     return null
   }
   return (

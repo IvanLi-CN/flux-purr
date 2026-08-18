@@ -73,6 +73,7 @@ const FLASH_CONFIG_LABEL: &str = "flux_cfg";
 const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
+const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
 // Opening an ESP32-S3 USB Serial/JTAG port can reset the device. Read-only
 // requests are idempotent and must remain alive through USB enumeration,
 // front-panel startup, and PD bring-up so the first native CLI query is usable.
@@ -280,6 +281,52 @@ impl AppState {
         }
         let _ = self.events.send(event);
     }
+
+    pub async fn run_lease_reaper(self) {
+        let mut interval = tokio::time::interval(LEASE_REAPER_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let _ = self.reap_expired_leases().await;
+        }
+    }
+
+    async fn reap_expired_leases(&self) -> Result<usize, HttpError> {
+        let _serial_rpc =
+            acquire_serial_rpc_with_timeout(self.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await?;
+        let expired = {
+            let mut state = self.lock()?;
+            let expired = state.cleanup_leases();
+            let active_device_ids = state
+                .leases
+                .values()
+                .map(|lease| lease.device_id.as_str())
+                .collect::<HashSet<_>>();
+            let mut sessions = lock_serial_sessions(&self.serial_sessions)?;
+            for lease in &expired {
+                if active_device_ids.contains(lease.device_id.as_str()) {
+                    continue;
+                }
+                if let Some(port_path) = state
+                    .devices
+                    .get(&lease.device_id)
+                    .and_then(|device| device.port_path.as_deref())
+                {
+                    sessions.remove(port_path);
+                }
+            }
+            expired
+        };
+        for lease in &expired {
+            self.emit(event(
+                &lease.device_id,
+                "lease",
+                "lease expired",
+                json!({ "leaseId": lease.lease_id }),
+            ));
+        }
+        Ok(expired.len())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -329,9 +376,18 @@ impl DevdState {
         }
     }
 
-    fn cleanup_leases(&mut self) {
+    fn cleanup_leases(&mut self) -> Vec<WebLease> {
         let now = Instant::now();
-        self.leases.retain(|_, lease| lease.expires_at > now);
+        let expired_ids = self
+            .leases
+            .iter()
+            .filter(|(_, lease)| lease.expires_at <= now)
+            .map(|(lease_id, _)| lease_id.clone())
+            .collect::<Vec<_>>();
+        expired_ids
+            .into_iter()
+            .filter_map(|lease_id| self.leases.remove(&lease_id))
+            .collect()
     }
 
     fn create_lease(&mut self, device_id: &str) -> Result<WebLease, HttpError> {

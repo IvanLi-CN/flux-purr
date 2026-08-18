@@ -3429,188 +3429,6 @@ export function ControlPlaneDemo({
     emitEvent('thermal', 'fault attention acknowledged', 'success')
   }
 
-  const handleStartDryRun = async () => {
-    if (
-      visibleDevice.severity === 'offline' ||
-      selectedArtifact?.compatibility === 'blocked' ||
-      !selectedArtifact
-    ) {
-      setFeedback({
-        title: 'Dry-run unavailable',
-        detail:
-          visibleDevice.severity === 'offline'
-            ? `${visibleDevice.alias} is offline.`
-            : `${selectedArtifact?.version ?? 'Artifact'} is not compatible with this target.`,
-        tone: 'warning',
-      })
-      emitEvent('flash', 'dry-check blocked before start', 'warning')
-      return
-    }
-
-    if (
-      visibleDevice.transport === 'devd' &&
-      (!visibleDevice.leaseId ||
-        !devdBaseUrl ||
-        visibleDevice.leaseState === 'conflict' ||
-        visibleDevice.leaseState === 'expired')
-    ) {
-      setFeedback({
-        title: 'Dry-run lease required',
-        detail: 'Firmware recovery requires an active devd lease for the native target.',
-        tone: 'warning',
-      })
-      emitEvent('flash', 'dry-check blocked: missing devd lease', 'warning')
-      return
-    }
-
-    flashCompletionEmittedRef.current = false
-    setFlashRun({ status: 'running', progress: 0 })
-    setFeedback({
-      title: 'Dry-run started',
-      detail: `${selectedArtifact.version} hash and target profile are being checked.`,
-      tone: selectedArtifact.compatibility === 'warning' ? 'warning' : 'info',
-    })
-    emitEvent('flash', `${selectedArtifact.version} dry-check started`, 'info')
-
-    if (mockOnly) {
-      flashCompletionEmittedRef.current = true
-      setFlashRun({ status: 'passed', progress: 100 })
-      setFeedback({
-        title: 'Simulated dry-run passed',
-        detail: `${selectedArtifact.version} was verified against the deterministic public demo fixture.`,
-        tone: 'success',
-      })
-      emitEvent('flash', `${selectedArtifact.version} verified by public demo fixture`, 'success')
-      return
-    }
-
-    if (!devdBaseUrl || !selectedArtifact.files?.length) {
-      return
-    }
-
-    try {
-      const result = await controlClient.verifyArtifact(
-        devdBaseUrl,
-        artifactToManifest(selectedArtifact)
-      )
-      if (!result.verified) {
-        setFlashRun({ status: 'idle', progress: 0 })
-        setFeedback({
-          title: 'Dry-run failed',
-          detail: `${selectedArtifact.version} failed local file verification.`,
-          tone: 'warning',
-        })
-        emitEvent('flash', `${selectedArtifact.version} verification failed`, 'warning')
-        return
-      }
-
-      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId) {
-        const dryRun = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
-          leaseId: visibleDevice.leaseId,
-          artifact: artifactToManifest(selectedArtifact),
-          dryRun: true,
-        })
-        emitEvent('flash', `${dryRun.artifactId} dry-run registered by devd`, 'success')
-      }
-
-      flashCompletionEmittedRef.current = true
-      setFlashRun({ status: 'passed', progress: 100 })
-      setFeedback({
-        title: 'Dry-run passed',
-        detail: `${selectedArtifact.version} verified ${result.files.length} local file${result.files.length === 1 ? '' : 's'}.`,
-        tone: 'success',
-      })
-      emitEvent('flash', `${selectedArtifact.version} verified by devd`, 'success')
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Artifact verification failed.'
-      setFlashRun({ status: 'idle', progress: 0 })
-      setFeedback({
-        title: 'Dry-run failed',
-        detail,
-        tone: 'warning',
-      })
-      emitEvent('flash', 'devd artifact verification failed', 'warning')
-    }
-  }
-
-  const handleStartFlash = async () => {
-    if (
-      !selectedArtifact ||
-      selectedArtifact.compatibility === 'blocked' ||
-      visibleDevice.transport !== 'devd' ||
-      !visibleDevice.leaseId ||
-      !devdBaseUrl ||
-      flashRun.status !== 'passed'
-    ) {
-      setFeedback({
-        title: 'Flash unavailable',
-        detail:
-          'Real flash requires a devd target, active lease, compatible artifact, and passed dry-run.',
-        tone: 'warning',
-      })
-      emitEvent('flash', 'real flash blocked before start', 'warning')
-      return
-    }
-
-    setFlashRun({ status: 'flashing', progress: 8 })
-    setFeedback({
-      title: 'Flash started',
-      detail: `${selectedArtifact.version} is being written by devd.`,
-      tone: 'warning',
-    })
-    emitEvent('flash', `${selectedArtifact.version} flash command submitted`, 'warning')
-
-    try {
-      const result = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
-        leaseId: visibleDevice.leaseId,
-        artifact: artifactToManifest(selectedArtifact),
-        dryRun: false,
-        confirm: 'FLASH',
-      })
-      setFlashRun({ status: 'flashed', progress: 100 })
-      setFeedback({
-        title: 'Flash completed',
-        detail: result.message,
-        tone: 'success',
-      })
-      emitEvent('flash', `${result.artifactId} flashed by devd`, 'success')
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Real flash failed.'
-      setFlashRun({ status: 'passed', progress: 100 })
-      setFeedback({
-        title: 'Flash blocked',
-        detail,
-        tone: 'warning',
-      })
-      emitEvent('flash', 'devd real flash failed or was blocked', 'warning')
-    }
-  }
-
-  const handleArtifactChange = (artifactId: string) => {
-    const nextArtifact = activeScenario.artifacts.find((artifact) => artifact.id === artifactId)
-
-    setArtifactByDevice((current) => ({
-      ...current,
-      [visibleDevice.id]: artifactId,
-    }))
-    setFlashRun({ status: 'idle', progress: 0 })
-    flashCompletionEmittedRef.current = false
-
-    if (!nextArtifact) {
-      return
-    }
-
-    const blocked = nextArtifact.compatibility === 'blocked'
-    setFeedback({
-      title: `${nextArtifact.version} selected`,
-      detail: blocked
-        ? 'This artifact does not match the active target.'
-        : `${nextArtifact.profile} is ready for a dry-check.`,
-      tone: blocked ? 'warning' : 'info',
-    })
-    emitEvent('artifact', `${nextArtifact.version} selected`, blocked ? 'warning' : 'info')
-  }
-
   const setCalibrationReference = (channel: CalibrationChannel, value: number) => {
     setCalibrationRefsByDevice((current) => {
       const existing = current[visibleDevice.id] ?? visibleCalibrationRefs
@@ -4186,50 +4004,52 @@ export function ControlPlaneDemo({
 
           {!isFirmwareWorkspace && !isDeviceAddFlowActive ? (
             <nav className="industrial-view-tabs" aria-label="设备工作区">
-            {deviceConsoleViews.map((view) => {
-              const Icon = view.icon
-              const isActive = view.id === activeView
-              const content = (
-                <>
-                  <Icon size={18} aria-hidden="true" />
-                  <span>
-                    <strong>{view.label}</strong>
-                    <small>{view.caption}</small>
-                  </span>
-                </>
-              )
-              const className = isActive ? 'industrial-view-tab is-selected' : 'industrial-view-tab'
-              if (navigation) {
+              {deviceConsoleViews.map((view) => {
+                const Icon = view.icon
+                const isActive = view.id === activeView
+                const content = (
+                  <>
+                    <Icon size={18} aria-hidden="true" />
+                    <span>
+                      <strong>{view.label}</strong>
+                      <small>{view.caption}</small>
+                    </span>
+                  </>
+                )
+                const className = isActive
+                  ? 'industrial-view-tab is-selected'
+                  : 'industrial-view-tab'
+                if (navigation) {
+                  return (
+                    <ConsoleViewLink
+                      key={view.id}
+                      deviceId={
+                        navigation.state.kind === 'device'
+                          ? navigation.state.deviceId
+                          : deviceIdentityId(visibleDevice)
+                      }
+                      view={view.id}
+                      calibrationTab={visibleCalibrationWorkspaceTab}
+                      active={isActive}
+                      className={className}
+                      search={navigation.search}
+                    >
+                      {content}
+                    </ConsoleViewLink>
+                  )
+                }
                 return (
-                  <ConsoleViewLink
+                  <button
                     key={view.id}
-                    deviceId={
-                      navigation.state.kind === 'device'
-                        ? navigation.state.deviceId
-                        : deviceIdentityId(visibleDevice)
-                    }
-                    view={view.id}
-                    calibrationTab={visibleCalibrationWorkspaceTab}
-                    active={isActive}
+                    type="button"
                     className={className}
-                    search={navigation.search}
+                    aria-pressed={isActive}
+                    onClick={() => handleGuardedViewChange(view.id)}
                   >
                     {content}
-                  </ConsoleViewLink>
+                  </button>
                 )
-              }
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  className={className}
-                  aria-pressed={isActive}
-                  onClick={() => handleGuardedViewChange(view.id)}
-                >
-                  {content}
-                </button>
-              )
-            })}
+              })}
             </nav>
           ) : null}
 

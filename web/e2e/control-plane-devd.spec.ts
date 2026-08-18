@@ -565,7 +565,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
-      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
@@ -606,7 +606,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
-      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
@@ -646,7 +646,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
-      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
@@ -663,14 +663,14 @@ test.describe('control plane live devd bridge', () => {
     await page.waitForTimeout(700)
 
     await page
-      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /总览/i })
       .click()
     await expect(page.getByText('请先关闭校准控制')).toBeVisible()
     await page.getByRole('button', { name: '关闭并继续' }).click({ force: true })
     await page.waitForTimeout(500)
     await page
-      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /总览/i })
       .click()
     const dashboardTarget = page.getByLabel('Dashboard target temperature')
@@ -708,7 +708,7 @@ test.describe('control plane live devd bridge', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await page
-      .getByRole('navigation', { name: 'Console views' })
+      .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /校准/i })
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
@@ -776,10 +776,11 @@ test.describe('control plane live devd bridge', () => {
   test('writes and clears WiFi settings through the active devd lease', async ({ page }) => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
-    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
-      timeout: 10_000,
-    })
-    await page.getByRole('link', { name: /设置/i }).click()
+    await expectActiveDevdDeviceWorkspace(page)
+    await page
+      .getByRole('navigation', { name: '设备工作区' })
+      .getByRole('link', { name: /设置/i })
+      .click()
 
     const wifiSettings = page.getByLabel('WiFi 设置')
     await expect(wifiSettings).toBeVisible()
