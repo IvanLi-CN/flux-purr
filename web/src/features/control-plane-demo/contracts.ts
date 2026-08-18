@@ -98,6 +98,19 @@ export interface AdcDiagnostics {
   vinRawCodeMean: number
 }
 
+export interface InstallStatus {
+  layoutId: string
+  layoutVersion: number
+  partitionTableSha256: string
+  persistenceSource: string
+  recordState: string
+  recordSequence: number
+  commissioningRequired: boolean
+  setupReason?: string | null
+  sensorState: string
+  heaterLocked: boolean
+}
+
 export type CalibrationMode = 'off' | 'vin_adc' | 'rtd_adc' | 'heater_curve' | 'thermal_plant'
 export type CalibrationJobKind = 'vin_adc_auto' | 'thermal_plant_auto'
 export type CalibrationJobStatus = 'idle' | 'running' | 'completed' | 'failed' | 'canceled'
@@ -387,6 +400,7 @@ export interface UsbRequestFrame {
   requestId: string
   op:
     | 'get_identity'
+    | 'get_install_status'
     | 'get_network'
     | 'get_status'
     | 'get_calibration'

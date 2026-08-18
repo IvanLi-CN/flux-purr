@@ -5,6 +5,8 @@ import migrations from '../../../../docs/specs/web-firmware-install-recovery/con
 import type { FirmwareOperation, ValidatedFirmwareBundle } from './types'
 
 export const ESP_GET_SECURITY_INFO = 0x14
+const ESP_SECURITY_INFO_BYTES = 20
+const ESP_ROM_SECURITY_INFO_TRAILER_BYTES = 4
 type BrowserSerialPort = ConstructorParameters<typeof EspTransport>[0]
 
 export interface BrowserSecurityInfo {
@@ -26,37 +28,67 @@ type LoaderPort = Pick<
   | 'chip'
 >
 
-export interface BrowserLayoutPreflight {
-  sourcePartitionTableSha256: string | null
-  configCopy: { sourceAddress: number; targetAddress: number; bytes: Uint8Array } | null
+interface PreparedBrowserLoader {
+  operation: FirmwareOperation
+  layout: BrowserLayoutPreflight
 }
 
-export async function connectBrowserLoader(): Promise<ESPLoader> {
+const preparedBrowserLoaders = new WeakMap<object, PreparedBrowserLoader>()
+
+export interface BrowserLayoutPreflight {
+  sourcePartitionTableSha256: string | null
+  configCopy: {
+    sourceAddress: number
+    targetAddress: number
+    bytes: Uint8Array
+  } | null
+}
+
+export async function connectBrowserLoader(port?: BrowserSerialPort): Promise<ESPLoader> {
   if (!window.isSecureContext || !('serial' in navigator)) {
     throw new Error('Browser USB requires desktop Chrome or Edge on HTTPS or localhost.')
   }
   const { ESPLoader, Transport } = await import('esptool-js')
-  const port = await (
-    navigator as Navigator & { serial: { requestPort(): Promise<BrowserSerialPort> } }
-  ).serial.requestPort()
-  const transport = new Transport(port, false)
+  const selectedPort =
+    port ??
+    (await (
+      navigator as Navigator & {
+        serial: { requestPort(): Promise<BrowserSerialPort> }
+      }
+    ).serial.requestPort())
+  const transport = new Transport(selectedPort, false)
   const loader = new ESPLoader({
     transport,
     baudrate: 115_200,
     debugLogging: false,
     terminal: { clean() {}, write() {}, writeLine() {} },
   })
-  await loader.main('default_reset')
-  return loader
+  try {
+    // Security must be read from the ROM bootloader. `main()` uploads the
+    // flasher stub before returning, and the stub does not preserve the ROM
+    // GET_SECURITY_INFO response contract.
+    await loader.detectChip('default_reset')
+    return loader
+  } catch (error) {
+    await transport.disconnect().catch(() => undefined)
+    throw error
+  }
+}
+
+export async function disconnectBrowserLoader(
+  loader: Pick<ESPLoader, 'transport'> | null | undefined
+) {
+  if (loader) preparedBrowserLoaders.delete(loader)
+  await loader?.transport.disconnect().catch(() => undefined)
 }
 
 export async function getEsp32S3SecurityInfo(loader: LoaderPort): Promise<BrowserSecurityInfo> {
   const [, payload] = await loader.command(ESP_GET_SECURITY_INFO, new Uint8Array(), 0, true, 3_000)
-  return parseEsp32S3SecurityInfo(payload)
+  return parseEsp32S3SecurityInfo(normalizeEsp32S3SecurityInfoPayload(payload))
 }
 
 export function parseEsp32S3SecurityInfo(payload: Uint8Array): BrowserSecurityInfo {
-  if (payload.byteLength !== 20) {
+  if (payload.byteLength !== ESP_SECURITY_INFO_BYTES) {
     return {
       secureBootEnabled: false,
       flashEncryptionEnabled: false,
@@ -86,6 +118,18 @@ export function parseEsp32S3SecurityInfo(payload: Uint8Array): BrowserSecurityIn
   }
 }
 
+function normalizeEsp32S3SecurityInfoPayload(payload: Uint8Array) {
+  // `espflash` removes the four-byte ROM trailer, then parses the leading
+  // SecurityInfo record even when a newer ROM appends more response data.
+  // Only the first 20 bytes are defined by GET_SECURITY_INFO. Accept either
+  // that exact record or a complete ROM response with its four-byte trailer;
+  // partial 21-23 byte responses remain fail-closed.
+  if (payload.byteLength >= ESP_SECURITY_INFO_BYTES + ESP_ROM_SECURITY_INFO_TRAILER_BYTES) {
+    return payload.slice(0, ESP_SECURITY_INFO_BYTES)
+  }
+  return payload
+}
+
 export async function preflightBrowserTarget(loader: LoaderPort) {
   if (loader.chip.CHIP_NAME !== 'ESP32-S3') {
     throw new Error('Only ESP32-S3 targets are supported.')
@@ -108,9 +152,35 @@ export async function preflightBrowserTarget(loader: LoaderPort) {
     security.flashEncryptionEnabled ||
     security.secureDownloadModeEnabled
   ) {
-    throw new Error('Target security state blocks browser firmware installation.')
+    throw new Error(browserSecurityBlockMessage(security))
   }
   return security
+}
+
+export async function preflightBrowserLoader(
+  loader: LoaderPort & Pick<ESPLoader, 'transport' | 'runStub'>,
+  bundle: ValidatedFirmwareBundle,
+  operation: FirmwareOperation
+) {
+  try {
+    await preflightBrowserTarget(loader)
+    await loader.runStub()
+    const layout = await preflightBrowserLayout(loader, bundle, operation)
+    preparedBrowserLoaders.set(loader, { operation, layout })
+    return layout
+  } catch (error) {
+    await disconnectBrowserLoader(loader)
+    throw error
+  }
+}
+
+export function browserSecurityBlockMessage(security: BrowserSecurityInfo) {
+  const restrictions: string[] = []
+  if (!security.responseKnown) restrictions.push('ROM 安全响应未知')
+  if (security.secureBootEnabled) restrictions.push('Secure Boot 已启用')
+  if (security.flashEncryptionEnabled) restrictions.push('Flash Encryption 已启用')
+  if (security.secureDownloadModeEnabled) restrictions.push('Secure Download Mode 已启用')
+  return `芯片安全状态阻止浏览器烧录：${restrictions.join('、')}。`
 }
 
 export async function writeBrowserBundle(
@@ -119,42 +189,48 @@ export async function writeBrowserBundle(
   operation: FirmwareOperation,
   reportProgress?: (fileIndex: number, written: number, total: number) => void
 ) {
-  await preflightBrowserTarget(loader)
-  const layout = await preflightBrowserLayout(loader, bundle, operation)
-  if (operation === 'install_recovery') await loader.eraseFlash()
-  const fileArray = bundle.manifest.segments.map((segment) => {
-    const data = bundle.images.get(segment.path)
-    if (!data) throw new Error(`${segment.kind} image is missing from the validated bundle.`)
-    return { data, address: segment.address }
-  })
-  await loader.writeFlash({
-    fileArray,
-    flashMode: 'dio',
-    flashFreq: '40m',
-    flashSize: '4MB',
-    eraseAll: false,
-    compress: true,
-    reportProgress,
-    calculateMD5Hash: (image) => {
-      const copy = Uint8Array.from(image)
-      return SparkMD5.ArrayBuffer.hash(copy.buffer as ArrayBuffer)
-    },
-  })
-  for (const segment of bundle.manifest.segments) {
-    const actual = await loader.flashMd5sum(segment.address, segment.length)
-    if (actual.toLowerCase() !== segment.md5) throw new Error(`${segment.kind} ROM MD5 differs.`)
+  const prepared = preparedBrowserLoaders.get(loader)
+  if (!prepared || prepared.operation !== operation) {
+    throw new Error('Browser ROM preflight must complete for this operation before writing.')
   }
-  if (layout.configCopy) {
-    await writeConfigCopy(loader, layout.configCopy)
-    const restored = await loader.readFlash(
-      layout.configCopy.targetAddress,
-      layout.configCopy.bytes.byteLength
-    )
-    if (!equalBytes(restored, layout.configCopy.bytes)) {
-      throw new Error('Restored flux_cfg differs from the staged source bytes.')
+  try {
+    if (operation === 'install_recovery') await loader.eraseFlash()
+    const fileArray = bundle.manifest.segments.map((segment) => {
+      const data = bundle.images.get(segment.path)
+      if (!data) throw new Error(`${segment.kind} image is missing from the validated bundle.`)
+      return { data, address: segment.address }
+    })
+    await loader.writeFlash({
+      fileArray,
+      flashMode: 'dio',
+      flashFreq: '40m',
+      flashSize: '4MB',
+      eraseAll: false,
+      compress: true,
+      reportProgress,
+      calculateMD5Hash: (image) => {
+        const copy = Uint8Array.from(image)
+        return SparkMD5.ArrayBuffer.hash(copy.buffer as ArrayBuffer)
+      },
+    })
+    for (const segment of bundle.manifest.segments) {
+      const actual = await loader.flashMd5sum(segment.address, segment.length)
+      if (actual.toLowerCase() !== segment.md5) throw new Error(`${segment.kind} ROM MD5 differs.`)
     }
+    if (prepared.layout.configCopy) {
+      await writeConfigCopy(loader, prepared.layout.configCopy)
+      const restored = await loader.readFlash(
+        prepared.layout.configCopy.targetAddress,
+        prepared.layout.configCopy.bytes.byteLength
+      )
+      if (!equalBytes(restored, prepared.layout.configCopy.bytes)) {
+        throw new Error('Restored flux_cfg differs from the staged source bytes.')
+      }
+    }
+    await loader.after('hard_reset')
+  } finally {
+    preparedBrowserLoaders.delete(loader)
   }
-  await loader.after('hard_reset')
 }
 
 export async function preflightBrowserLayout(
@@ -188,7 +264,11 @@ export async function preflightBrowserLayout(
   }
   return {
     sourcePartitionTableSha256: sourceHash,
-    configCopy: { sourceAddress: copy.sourceAddress, targetAddress: copy.targetAddress, bytes },
+    configCopy: {
+      sourceAddress: copy.sourceAddress,
+      targetAddress: copy.targetAddress,
+      bytes,
+    },
   }
 }
 

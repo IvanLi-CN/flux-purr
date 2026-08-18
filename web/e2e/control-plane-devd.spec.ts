@@ -1,5 +1,5 @@
 import http from 'node:http'
-import { expect, test } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
 import type {
   CalibrationChannel,
   CalibrationFit,
@@ -46,6 +46,11 @@ test.describe('control plane live devd bridge', () => {
 
       if (method === 'OPTIONS') {
         sendJson(response, 204, null)
+        return
+      }
+
+      if (method === 'GET' && url.pathname === '/health') {
+        sendJson(response, 200, { name: 'flux-purr-devd' })
         return
       }
 
@@ -404,6 +409,38 @@ test.describe('control plane live devd bridge', () => {
         return
       }
 
+      if (method === 'POST' && url.pathname === '/api/v1/firmware-bundles') {
+        sendJson(response, 201, {
+          artifactId: 'sha256:e2e-firmware-bundle',
+          source: 'local',
+          channel: 'stable',
+          version: 'v0.16.4-e2e',
+          sourceSha: 'e'.repeat(40),
+          buildId: 'e2e-firmware-build',
+          bundleSha256: 'sha256:e2e-firmware-bundle',
+          size: 1234,
+          layoutId: 'flux-purr/esp32-s3fh4r2/4mib/v1',
+          operations: ['update', 'install_recovery'],
+        })
+        return
+      }
+
+      if (method === 'POST' && url.pathname === `/api/v1/devices/${deviceId}/firmware`) {
+        if (bodyField(body, 'dryRun') === true) {
+          sendJson(response, 200, {
+            outcome: 'preflight_passed',
+            approvalToken: 'approval-e2e',
+            message: 'E2E firmware preflight passed.',
+          })
+          return
+        }
+        sendJson(response, 200, {
+          outcome: 'verified',
+          message: 'E2E firmware transaction verified.',
+        })
+        return
+      }
+
       sendJson(response, 404, {
         error: { code: 'not_found', message: url.pathname, retryable: false },
       })
@@ -442,32 +479,39 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
-    const targetRegion = page.getByRole('region', { name: '当前目标' })
-    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
-    await expect(targetRegion).toContainText('传输')
-    await expect(targetRegion).toContainText('DEVD')
-    await expect(targetRegion).toContainText('租约')
-    await expect(targetRegion).toContainText('有效')
-    await page.waitForTimeout(1800)
+    await expectActiveDevdDeviceWorkspace(page)
     await expect(page.getByText('181.5').first()).toBeVisible()
     await expect(page.getByText('Heater 18%')).toBeVisible()
     await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
 
-    await page.getByRole('link', { name: /更新/i }).click()
-    await expect(page.getByRole('combobox', { name: 'Firmware artifact' })).toContainText(
-      'local-build'
+    await page.getByRole('button', { name: '固件维护' }).click()
+    await expect(page.getByRole('region', { name: '固件工作区' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '安装或恢复' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
     )
-    await expect(page.getByText(`esp32s3 · flux-purr.usb.v1 · ${artifactSha}`)).toBeVisible()
+    await page.getByRole('button', { name: '安装或恢复' }).click()
+    await expect(page.getByRole('button', { name: '安装或恢复' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+    const nativeTargetSelect = page.getByRole('combobox', { name: '本机固件目标' })
+    await expect(nativeTargetSelect).toBeVisible()
+    await nativeTargetSelect.click()
+    await page.getByRole('option', { name: /flux-purr-e2e/ }).click()
+    await expect(page.getByLabel('选择固件包')).not.toContainText('正在读取发布目录')
+    await expect(page.getByLabel('选择固件包')).not.toContainText('发布目录不可用')
+    await expect(page.getByRole('button', { name: '运行预检' })).toBeEnabled()
 
-    await page.getByRole('button', { name: 'Run dry-check' }).click()
+    await page.getByRole('button', { name: '运行预检' }).click()
 
-    await expect(page.getByText('Dry-run passed', { exact: true })).toBeVisible()
-    await expect(page.getByText('local-build verified 1 local file.')).toBeVisible()
+    await expect(page.getByText('预检通过', { exact: true })).toBeVisible()
+    await expect(page.getByText('devd 完整预检已通过；授权令牌五分钟内单次有效。')).toBeVisible()
     await expect
       .poll(
         () =>
           requests.filter(
-            (request) => request.method === 'POST' && request.path === '/api/v1/artifacts/verify'
+            (request) => request.method === 'POST' && request.path === '/api/v1/firmware-bundles'
           ).length
       )
       .toBeGreaterThanOrEqual(1)
@@ -476,16 +520,7 @@ test.describe('control plane live devd bridge', () => {
         () =>
           requests.filter(
             (request) =>
-              request.method === 'POST' && request.path === `/api/v1/devices/${deviceId}/flash`
-          ).length
-      )
-      .toBeGreaterThanOrEqual(1)
-    await expect
-      .poll(
-        () =>
-          requests.filter(
-            (request) =>
-              request.method === 'GET' && request.path === `/api/v1/devices/${deviceId}/events`
+              request.method === 'POST' && request.path === `/api/v1/devices/${deviceId}/firmware`
           ).length
       )
       .toBeGreaterThanOrEqual(1)
@@ -496,15 +531,12 @@ test.describe('control plane live devd bridge', () => {
   }) => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
-    await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
+    await expectActiveDevdDeviceWorkspace(page)
     await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
     await expect(page.getByText('No known devices')).toHaveCount(0)
 
-    await page.waitForTimeout(2500)
     await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
-    await expect(page.getByText('运行时已同步')).toBeVisible()
-    await expect(page.getByText('有效')).toBeVisible()
   })
 
   test('lists discovered USB bridge candidates with an explicit connect action', async ({
@@ -541,10 +573,7 @@ test.describe('control plane live devd bridge', () => {
     const targetAdcInput = page.getByLabel('目标 ADC 输入')
     await expect(targetAdcInput).toBeVisible()
     const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
-    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
-      timeout: 10_000,
-    })
-    await expect(page.getByText('有效')).toBeVisible({ timeout: 10_000 })
+    await expectActiveDevdDeviceWorkspace(page)
     await expect(targetAdcInput).toBeVisible()
     await expect(page.getByRole('heading', { name: '加热曲线' })).toHaveCount(0)
     await expect(calibrationModeToggle).toBeEnabled()
@@ -583,9 +612,7 @@ test.describe('control plane live devd bridge', () => {
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
     const targetAdcInput = page.getByLabel('目标 ADC 输入')
     await expect(targetAdcInput).toBeVisible()
-    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
-      timeout: 10_000,
-    })
+    await expectActiveDevdDeviceWorkspace(page)
 
     const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
     await expect(calibrationModeToggle).toBeEnabled()
@@ -625,9 +652,7 @@ test.describe('control plane live devd bridge', () => {
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
     const targetAdcInput = page.getByLabel('目标 ADC 输入')
     await expect(targetAdcInput).toBeVisible()
-    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
-      timeout: 10_000,
-    })
+    await expectActiveDevdDeviceWorkspace(page)
 
     const calibrationModeToggle = page.getByRole('switch', { name: '标定模式' })
 
@@ -688,9 +713,7 @@ test.describe('control plane live devd bridge', () => {
       .click()
     await page.locator('.industrial-calibration-tabs__list').getByText('温度标定').click()
     await expect(page.getByLabel('目标 ADC 输入')).toBeVisible()
-    await expect(page.getByRole('region', { name: '当前目标' })).toContainText('有效', {
-      timeout: 10_000,
-    })
+    await expectActiveDevdDeviceWorkspace(page)
 
     const summary = page.getByLabel('当前 ADC 标定状态摘要')
     await summary.getByRole('button', { name: '编辑' }).first().click()
@@ -793,22 +816,16 @@ test.describe('control plane live devd bridge', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     for (let reloadIndex = 0; reloadIndex < 3; reloadIndex += 1) {
-      await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
-      await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await expectActiveDevdDeviceWorkspace(page)
       await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
       await expect(page.getByText('No known devices')).toHaveCount(0)
       await expect(page.getByText('Failed to fetch')).toHaveCount(0)
 
       await page.reload()
-      await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
-      await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await expectActiveDevdDeviceWorkspace(page)
       await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
       await expect(page.getByText('No known devices')).toHaveCount(0)
       await expect(page.getByText('Failed to fetch')).toHaveCount(0)
-      await page.waitForTimeout(2500)
-      await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
-      await expect(page.getByText('运行时已同步')).toBeVisible()
-      await expect(page.getByText('有效')).toBeVisible()
       await expect(page.getByText('Lease conflict')).toHaveCount(0)
       await expect(page.getByText('lease_conflict')).toHaveCount(0)
     }
@@ -838,10 +855,8 @@ test.describe('control plane live devd bridge', () => {
 
     const targetRegion = page.getByRole('region', { name: '当前目标' })
     await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
-    await expect(targetRegion).toContainText('传输')
     await expect(targetRegion).toContainText('DEVD')
-    await expect(targetRegion).toContainText('租约')
-    await expect(targetRegion).toContainText('有效')
+    await expect(page.getByRole('navigation', { name: '设备工作区' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Choose target' })).toHaveCount(0)
     await expect(page.getByText('No known devices')).toHaveCount(0)
@@ -888,7 +903,17 @@ async function readJsonBody(request: http.IncomingMessage) {
     return null
   }
 
+  if (!request.headers['content-type']?.includes('application/json')) {
+    return null
+  }
+
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+async function expectActiveDevdDeviceWorkspace(page: Page) {
+  await expect(page.getByRole('button', { name: '目标设备' })).toContainText('DEVD')
+  await expect(page.getByRole('navigation', { name: '设备工作区' })).toBeVisible()
+  await expect(page.getByText('运行时已同步')).toBeVisible()
 }
 
 function bodyField(body: unknown, field: string) {

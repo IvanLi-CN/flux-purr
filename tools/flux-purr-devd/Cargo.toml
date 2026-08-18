@@ -20,6 +20,10 @@ path = "src/bin/flux-purr.rs"
 name = "flux-purr-bundle"
 path = "src/bin/flux-purr-bundle.rs"
 
+[[bin]]
+name = "flux-purr-build-firmware-bundle"
+path = "src/bin/flux-purr-build-firmware-bundle.rs"
+
 [dependencies]
 axum = { version = "0.8.4", features = ["json"] }
 clap = { version = "4.5.53", features = ["derive"] }

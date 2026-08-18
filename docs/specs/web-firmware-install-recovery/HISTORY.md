@@ -10,6 +10,8 @@
 - EEPROM 位于 MCU internal Flash 之外；full erase 只作用于 internal Flash。`flux_cfg` 通过精确 layout migration 在 update 中保全。
 - v1 不引入签名，把来源可信度留给 HTTPS/GitHub Release 和公开 SHA-256。
 - partition-table source binary is padded with `0xff` to its exact 4 KiB flash segment before hashing and packaging, so layout identity always describes written bytes.
+- Browser 直接读取 GitHub API 会受 CORS、重定向和共享限流影响，因此 GitHub 只作为 release build 与 Vite 开发代理的服务器端来源；Browser 只解释统一的同源静态目录。开发时本地产物覆盖相同 build identity 的已发布 artifact，既保留完整发布时间线，也避免本地调试误选旧 bytes。
+- ESP32-S3 软件复位不会清空 NOLOAD heap 区域；运行时在注册该区域前必须显式清零，避免 Wi-Fi C 驱动把残留字节解释为有效 timer 指针。持久化记录必须原地解码到单一配置对象，避免嵌套的大值返回耗尽启动栈；显示与 I2C 启动 I/O 必须有有限超时，使 USB 恢复控制面始终可达。
 
 ## References
 

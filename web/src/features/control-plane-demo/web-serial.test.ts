@@ -1,10 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { BrowserSerial, BrowserSerialPort } from './web-serial'
 import {
   formatWebSerialEventTime,
   isDirectWebSerialDevice,
   normalizeBrowserSerialError,
   selectBrowserSerialPort,
+  WEB_SERIAL_INITIALIZATION_TIMEOUT_MS,
   WebSerialControlPlaneClient,
   webSerialProbeToDeviceTarget,
 } from './web-serial'
@@ -112,6 +113,17 @@ describe('web serial control-plane client', () => {
     })
   })
 
+  it('explains a chooser request made outside the browser user gesture', () => {
+    expect(
+      normalizeBrowserSerialError(
+        new Error("Failed to execute 'requestPort' on 'Serial': Must be handling a user gesture")
+      )
+    ).toMatchObject({
+      code: 'web_serial_user_gesture_required',
+      message: '浏览器 USB 选择器未在用户点击时打开。请重新点击“运行预检”。',
+    })
+  })
+
   it('sends direct runtime_config frames and returns the firmware status payload', async () => {
     const fake = new FakeSerial()
     const client = new WebSerialControlPlaneClient({ serial: fake })
@@ -174,6 +186,27 @@ describe('web serial control-plane client', () => {
 
     await expect(connection).rejects.toMatchObject({ code: 'web_serial_closed' })
     expect(port.closed).toBe(true)
+  })
+
+  it('bounds a non-Flux runtime probe and closes the port', async () => {
+    vi.useFakeTimers()
+    try {
+      const serial = new SilentSerial()
+      const client = new WebSerialControlPlaneClient({ serial })
+      const connection = client.connect()
+      const failure = expect(connection).rejects.toMatchObject({
+        code: 'web_serial_runtime_not_ready',
+        message:
+          'Flux Purr 运行时在 30 秒内未响应；空片、外来固件或 ROM 模式设备请切换“安装或恢复”。',
+      })
+
+      await vi.advanceTimersByTimeAsync(WEB_SERIAL_INITIALIZATION_TIMEOUT_MS + 1_000)
+
+      await failure
+      expect(serial.port.closed).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('sends calibration auto-job frames over USB JSONL', async () => {
@@ -299,6 +332,29 @@ class CancelledChooserSerial implements BrowserSerial {
 class DeferredSerialPort implements BrowserSerialPort {
   readonly readable = null
   readonly writable = null
+  closed = false
+
+  open(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  close(): Promise<void> {
+    this.closed = true
+    return Promise.resolve()
+  }
+}
+
+class SilentSerial implements BrowserSerial {
+  readonly port = new SilentSerialPort()
+
+  requestPort(): Promise<BrowserSerialPort> {
+    return Promise.resolve(this.port)
+  }
+}
+
+class SilentSerialPort implements BrowserSerialPort {
+  readonly readable = new ReadableStream<Uint8Array>()
+  readonly writable = new WritableStream<Uint8Array>()
   closed = false
 
   open(): Promise<void> {

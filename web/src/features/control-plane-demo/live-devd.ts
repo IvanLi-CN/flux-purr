@@ -40,12 +40,18 @@ const DEVD_EVENT_KINDS = [
 export interface LiveDevdOptions {
   enabled?: boolean
   leaseEnabled?: boolean
+  nativeRuntimeProbeEnabled?: boolean
   devdBaseUrl?: string | null
   httpClient?: ControlPlaneHttpClient
   includeMockDevices?: boolean
 }
 
 type DevdRefreshState = 'idle' | 'refreshing' | 'ready'
+
+export interface LiveDevdScenarioResult {
+  scenario: ControlPlaneScenario
+  firmwareDevices: DeviceTarget[]
+}
 
 export function defaultDevdBaseUrl() {
   const env = import.meta.env as ImportMetaEnv & {
@@ -65,11 +71,19 @@ export function shouldHoldDevdLease(selectedDeviceId: string | null, addingDirec
   return !addingDirectLan && !selectedDeviceId?.startsWith('lan-')
 }
 
+export function shouldProbeNativeRuntime(
+  device: DevdDeviceRecord,
+  nativeRuntimeProbeEnabled: boolean
+) {
+  return nativeRuntimeProbeEnabled && !isNativeRecoveryPlaceholder(device)
+}
+
 export function useLiveDevdScenario(
   scenario: ControlPlaneScenario,
   {
     enabled = true,
     leaseEnabled = true,
+    nativeRuntimeProbeEnabled = true,
     devdBaseUrl = defaultDevdBaseUrl(),
     httpClient,
     includeMockDevices = true,
@@ -200,6 +214,23 @@ export function useLiveDevdScenario(
           activeLeaseRef.current = lease
           activeLeaseDeviceIdRef.current = liveRecord.id
 
+          if (!shouldProbeNativeRuntime(liveRecord, nativeRuntimeProbeEnabled)) {
+            const recoveryDevice = devdRecordToDeviceTarget(liveRecord)
+            recoveryDevice.leaseState = 'active'
+            recoveryDevice.leaseId = lease.leaseId
+            if (isNativeRecoveryPlaceholder(liveRecord)) {
+              recoveryDevice.severity = 'warning'
+              recoveryDevice.transportIssue = '运行时身份尚不可读；该已授权端口仅可用于安装或恢复。'
+            }
+            writeStoredLiveDevdTarget(devdBaseUrl, recoveryDevice)
+
+            if (!cancelled) {
+              setDevices(replaceDevice(baseDevices, recoveryDevice))
+              setRefreshState('ready')
+            }
+            return
+          }
+
           const live = await client.probeDevdDevice(devdBaseUrl, liveRecord.id, lease.leaseId)
           const liveDevice = devdRecordToDeviceTarget(mergeDevdProbeRecord(liveRecord, live))
           liveDevice.leaseState = 'active'
@@ -248,7 +279,7 @@ export function useLiveDevdScenario(
       setStreamEvents([])
       void releaseActiveLease()
     }
-  }, [client, devdBaseUrl, enabled, includeMockDevices, leaseEnabled])
+  }, [client, devdBaseUrl, enabled, includeMockDevices, leaseEnabled, nativeRuntimeProbeEnabled])
 
   useEffect(() => {
     if (!enabled || !devdBaseUrl || !liveDevdDeviceId || typeof EventSource === 'undefined') {
@@ -290,7 +321,7 @@ export function useLiveDevdScenario(
     [recordEvents, streamEvents]
   )
 
-  return useMemo(() => {
+  const mergedScenario = useMemo(() => {
     if (devices.length === 0 && refreshState === 'refreshing') {
       return createBootstrappingLiveDevdScenario(scenario)
     }
@@ -355,6 +386,16 @@ export function useLiveDevdScenario(
       events: [...scenario.events, ...devdEvents],
     }
   }, [artifacts, devdEvents, devices, latestTransportIssueByDevice, refreshState, scenario])
+
+  const firmwareDevices = useMemo(
+    () =>
+      devices.filter(
+        (device) => device.transport === 'devd' && device.capabilities.includes('flash')
+      ),
+    [devices]
+  )
+
+  return { scenario: mergedScenario, firmwareDevices }
 }
 
 export function prioritizeLiveDevdDevices(devices: DeviceTarget[]) {
@@ -445,7 +486,12 @@ export function mergeDevdProbeRecord(
   }
 }
 
-function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
+/**
+ * A discovered native serial target without a Flux Purr runtime is still a
+ * valid recovery target. It must obtain a lease, but it must never be treated
+ * as update-capable until the runtime probe verifies its identity.
+ */
+export function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
   return (
     records.find(
       (record) =>
@@ -457,7 +503,21 @@ function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
       (record) =>
         (record.transport === 'native_serial' || record.transport === 'lan') &&
         record.identity.buildId !== 'native-serial-placeholder'
+    ) ??
+    records.find(
+      (record) =>
+        record.transport === 'native_serial' &&
+        record.identity.buildId === 'native-serial-placeholder' &&
+        record.connection !== 'busy'
     )
+  )
+}
+
+export function isNativeRecoveryPlaceholder(record: DevdDeviceRecord) {
+  return (
+    record.transport === 'native_serial' &&
+    record.identity.buildId === 'native-serial-placeholder' &&
+    record.identity.capabilities.includes('flash')
   )
 }
 

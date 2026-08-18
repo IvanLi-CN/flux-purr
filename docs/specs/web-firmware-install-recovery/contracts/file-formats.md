@@ -29,3 +29,10 @@ No bundle segment may include NVS, PHY, or `flux_cfg` bytes.
 
 `migrations.json` is an allowlist. An update either uses the same partition-table SHA-256 or names one registry entry whose source hash exactly matches the device bytes and whose target layout/hash match the bundle. Copy ranges are bounded and byte-preserving. Recovery never applies a migration.
 
+## Same-origin release catalog
+
+- `firmware/releases-manifest.json` MUST validate against `firmware-release-catalog.schema.json` and its `releaseCount` MUST equal the number of entries.
+- Every entry identifies one strictly validated bundle with version, channel, source SHA, build ID, full bundle SHA-256, size, release tag and exact relative `assetPath`.
+- `assetPath` is limited to `firmware/releases/<safe-component>/<safe-component>.fluxpurr-fw`. Browser clients may request only this path after the manifest is validated; they never contact GitHub, follow release redirects, request a directory, or accept arbitrary URLs.
+- Release builds page through all non-draft GitHub Releases on the server, validate each candidate bundle, and copy valid bytes to the static directory. The current release bundle is included before its GitHub Release exists.
+- The Vite development proxy returns the same file contract. `bun run build:firmware:web` writes its current local bundle directly to `firmware/target/flux-purr-web-artifacts/`; Vite watches that directory, reads the exact bytes into its process cache, and never writes a static copy. It overlays bundled release entries, server-fetched GitHub entries, then local `.fluxpurr-fw` builds. Matching `sourceSha + buildId` entries are replaced by the higher-priority source. A GitHub refresh failure leaves bundled and local entries usable.

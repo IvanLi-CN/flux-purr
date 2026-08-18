@@ -38,3 +38,6 @@ Accepts one `.fluxpurr-fw` body with the bundle media type. The daemon streams i
 - `write_complete_unverified`: all segments passed ROM MD5 but runtime verification timed out or disagreed.
 - `verified`: segment verification and target runtime identity/layout/install-status all match.
 
+## Runtime Install Status
+
+`GET /api/v1/devices/{deviceId}/install-status?lease_id={leaseId}` is a read-only native-serial endpoint. It requires the active exact-port lease and proxies only the firmware USB JSONL `get_install_status` response. It never reads or exposes raw persistence bytes.

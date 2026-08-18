@@ -224,6 +224,12 @@ Panels may use subtle corner fasteners to imply mounting, but mechanical details
 - **Focus:** A visible signal-red outline outside the well.
 - **Error / Disabled:** Explain the blocking reason in text; reduce contrast for disabled state without erasing the label.
 
+### Scroll Containers
+
+- **Default:** Any application-owned internal region that can overflow, including a list, log, table, dialog pane, or inspector, uses `ScrollArea` from `@/components/ui/scroll-area`. It wraps the established `simplebar-react` track and thumb so scrolling remains visually consistent with the instrument panel.
+- **Behavior:** Tracks auto-hide until hover, keyboard focus, or scrolling; content retains browser scrolling semantics and uses a visible focus path through its interactive children. Long content scrolls inside a bounded region rather than forcing an unexpected page-level scroll.
+- **Exceptions:** Do not wrap the page or `body`. Browser- or system-owned controls, such as textareas, native selects, file choosers, and third-party popups, retain their platform scrolling. A region that is intentionally clipped or always fits does not need a scroll container.
+
 ### Navigation
 
 Navigation is a set of physical keys rather than a generic sidebar. Each key combines a familiar Lucide icon, a direct label, and compact technical context. The active key is recessed and signal-red; hover lift never changes the layout.
@@ -241,6 +247,7 @@ LEDs use emitted glow, labels use mono typography, and large measurements domina
 - **Do** show transport, lease, capability, and safety boundaries at the point of action.
 - **Do** use mechanical detail selectively to explain mounting, state, or interaction.
 - **Do** preserve responsive target sizes and visible keyboard focus.
+- **Do** use the shared `ScrollArea` for application-owned internal scrolling.
 
 ### Don't:
 
@@ -249,3 +256,4 @@ LEDs use emitted glow, labels use mono typography, and large measurements domina
 - **Don't** use signal red as broad decoration or use status green/yellow for ordinary interaction.
 - **Don't** nest decorative cards or give every region equal elevation.
 - **Don't** introduce glass surfaces, arbitrary gradients, inconsistent lighting, or ornamental mechanical clutter.
+- **Don't** add raw `overflow: auto` scrolling to an application-owned panel or dialog pane when `ScrollArea` is applicable.

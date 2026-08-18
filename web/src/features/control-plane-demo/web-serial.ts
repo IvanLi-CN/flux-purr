@@ -9,6 +9,7 @@ import type {
   HeaterCurvePackage,
   HeaterCurveState,
   Identity,
+  InstallStatus,
   NetworkSummary,
   UsbCalibrationConfigFrame,
   UsbCalibrationJobFrame,
@@ -26,6 +27,7 @@ const WEB_SERIAL_DEVICE_BASE_URL = 'webserial://selected'
 const WEB_SERIAL_LINE_LIMIT = 8 * 1024
 const WEB_SERIAL_INITIALIZATION_RETRY_MS = 500
 const WEB_SERIAL_INITIALIZATION_ATTEMPTS = 50
+export const WEB_SERIAL_INITIALIZATION_TIMEOUT_MS = 30_000
 
 export type WebSerialConnectionState = 'unsupported' | 'idle' | 'connecting' | 'connected' | 'error'
 
@@ -226,7 +228,12 @@ export class WebSerialControlPlaneClient {
     }
     this.port = port
     this.readPump = this.readLoop()
-    return this.probeAfterInitialization()
+    try {
+      return await this.probeAfterInitialization()
+    } catch (error) {
+      await this.disconnect()
+      throw error
+    }
   }
 
   async disconnect() {
@@ -244,34 +251,64 @@ export class WebSerialControlPlaneClient {
   }
 
   async probe(): Promise<WebSerialProbe> {
+    return this.probeWithDeadline()
+  }
+
+  private async probeWithDeadline(deadline?: number): Promise<WebSerialProbe> {
+    const timeout = () => {
+      if (deadline === undefined) return WEB_SERIAL_RPC_TIMEOUT_MS
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw runtimeInitializationTimeoutError()
+      return Math.min(WEB_SERIAL_RPC_TIMEOUT_MS, remaining)
+    }
     const identity = await this.requestPayload<Identity>(
       'identity',
-      createUsbRequestFrame('get_identity')
+      createUsbRequestFrame('get_identity'),
+      timeout()
     )
     const network = await this.requestPayload<NetworkSummary>(
       'network',
-      createUsbRequestFrame('get_network')
+      createUsbRequestFrame('get_network'),
+      timeout()
     )
     const status = await this.requestPayload<ControlPlaneStatus>(
       'status',
-      createUsbRequestFrame('get_status')
+      createUsbRequestFrame('get_status'),
+      timeout()
     )
     return { identity, network, status }
   }
 
+  get connectedPort(): BrowserSerialPort {
+    return this.requireOpenPort()
+  }
+
+  async getInstallStatus(): Promise<InstallStatus> {
+    return this.requestPayload<InstallStatus>(
+      'install_status',
+      createUsbRequestFrame('get_install_status')
+    )
+  }
+
   private async probeAfterInitialization(): Promise<WebSerialProbe> {
+    const deadline = Date.now() + WEB_SERIAL_INITIALIZATION_TIMEOUT_MS
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.probe()
+        return await this.probeWithDeadline(deadline)
       } catch (error) {
+        const remaining = deadline - Date.now()
         if (
           attempt >= WEB_SERIAL_INITIALIZATION_ATTEMPTS ||
-          !isFirmwareInitializationPending(error)
+          !isFirmwareInitializationPending(error) ||
+          remaining <= 0
         ) {
+          if (isFirmwareInitializationPending(error) && remaining <= 0) {
+            throw runtimeInitializationTimeoutError()
+          }
           throw error
         }
         await new Promise<void>((resolve) =>
-          globalThis.setTimeout(resolve, WEB_SERIAL_INITIALIZATION_RETRY_MS)
+          globalThis.setTimeout(resolve, Math.min(WEB_SERIAL_INITIALIZATION_RETRY_MS, remaining))
         )
       }
     }
@@ -360,10 +397,11 @@ export class WebSerialControlPlaneClient {
       | UsbCalibrationJobFrame
       | UsbCalibrationConfigFrame
       | UsbHeaterCurveConfigFrame
-      | UsbHeaterCurveSaveFrame
+      | UsbHeaterCurveSaveFrame,
+    timeoutMs = WEB_SERIAL_RPC_TIMEOUT_MS
   ): Promise<T> {
     const requestId = createWebSerialRequestId()
-    const result = await this.exchange(frameFactory(requestId))
+    const result = await this.exchange(frameFactory(requestId), timeoutMs)
     const payload = result[payloadKey]
 
     if (!payload || typeof payload !== 'object') {
@@ -384,7 +422,8 @@ export class WebSerialControlPlaneClient {
       | UsbCalibrationJobFrame
       | UsbCalibrationConfigFrame
       | UsbHeaterCurveConfigFrame
-      | UsbHeaterCurveSaveFrame
+      | UsbHeaterCurveSaveFrame,
+    timeoutMs = WEB_SERIAL_RPC_TIMEOUT_MS
   ) {
     const port = this.requireOpenPort()
     if (!port.writable) {
@@ -408,7 +447,7 @@ export class WebSerialControlPlaneClient {
             true
           )
         )
-      }, WEB_SERIAL_RPC_TIMEOUT_MS)
+      }, timeoutMs)
       this.pending.set(requestId, { resolve, reject, timeout })
     })
 
@@ -610,9 +649,25 @@ export function normalizeBrowserSerialError(error: unknown) {
     )
   }
 
+  if (error instanceof Error && /must be handling a user gesture/i.test(error.message)) {
+    return new ControlPlaneClientError(
+      '浏览器 USB 选择器未在用户点击时打开。请重新点击“运行预检”。',
+      'web_serial_user_gesture_required',
+      true
+    )
+  }
+
   return new ControlPlaneClientError(
     error instanceof Error ? error.message : 'Web Serial read failed.',
     'web_serial_read_failed',
+    true
+  )
+}
+
+function runtimeInitializationTimeoutError() {
+  return new ControlPlaneClientError(
+    'Flux Purr 运行时在 30 秒内未响应；空片、外来固件或 ROM 模式设备请切换“安装或恢复”。',
+    'web_serial_runtime_not_ready',
     true
   )
 }

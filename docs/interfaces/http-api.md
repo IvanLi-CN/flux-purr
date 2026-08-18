@@ -578,7 +578,7 @@ Core commands:
 
 ## Product Release Manifest
 
-Flux Purr releases use one product tag: `vX.Y.Z` for stable releases and `vX.Y.Z-rc.<sha7>` for RC releases. Web, firmware, and host-tools assets attach to the same GitHub Release.
+Flux Purr releases use one product tag: `vX.Y.Z` for stable releases and `vX.Y.Z-rc.<sha7>` for RC releases. Web, firmware, and host-tools assets attach to the same GitHub Release. The release Web archive contains a same-origin firmware catalog so the Browser never has to call GitHub.
 
 Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
 
@@ -612,6 +612,15 @@ Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
 ```
 
 Update UX and CLI guidance must use `changedSincePrevious`, `contentSha256`, and `updateReason` to avoid asking users to upgrade unchanged components.
+
+## Web Firmware Release Catalog
+
+The Web app exposes firmware releases as static same-origin files, not as a browser GitHub integration:
+
+- `GET /firmware/releases-manifest.json` returns the strict catalog defined by `docs/specs/web-firmware-install-recovery/contracts/firmware-release-catalog.schema.json`.
+- Each entry's `assetPath` resolves to a precise `GET /firmware/releases/<safe-component>/<safe-component>.fluxpurr-fw` resource.
+- Browser code validates the catalog and then validates the full selected bundle before a firmware transaction. The catalog bundle hash, version, channel, source SHA and build ID must all agree with the bundle.
+- In Vite development, the same origin is served by a fixed `/firmware/**` proxy. The proxy, not Browser code, pages GitHub Releases and overlays current local builds over matching published build identities.
 
 ## USB CDC JSONL
 

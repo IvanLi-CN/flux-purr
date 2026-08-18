@@ -28,6 +28,7 @@
 - 默认 MCU 方向是 ESP32-S3，当前硬件基线是 `ESP32-S3FH4R2`。
 - 对引脚、ADC、按键映射、电源控制以及 heater/fan safety 的改动，先查 `docs/hardware/` 与相关 `docs/specs/`。
 - Web UI 变更必须同时考虑 `web/` 运行时、Storybook 入口和必要测试。
+- 应用自有的 Web 内部滚动区域默认使用 `@/components/ui/scroll-area`；不得用裸 `overflow: auto` 取代统一轨道与滑块。页面/`body` 以及浏览器、系统或第三方组件拥有的原生控件不在此约束内，详细视觉与交互规则以 `web/DESIGN.md` 为准。
 - 当前运行时与发布基线以 `README.md` 和相关 `docs/specs/**` 为准；需要改变这些事实时，先更新文档再以实现对齐。
 
 ## Skill 路由
@@ -61,6 +62,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 - `devd` 启动、CLI 调用和 Web live development 要显式使用当前 repo checkout、显式 bind/port 和显式环境变量，不依赖默认端口或全局二进制。
 - `scripts/devd-hardware-smoke.py --device-id mock-fp-lab-01 --allow-mock-device` 只证明 localhost HTTP contract；不得把 mock smoke 报告成硬件验证。
 - Web live development 在需要 leased `devd` 端口时，必须显式设置 `VITE_FLUX_PURR_DEVD_URL` 与 `VITE_FLUX_PURR_ENABLE_DEVD=1`。
+- 固件发布目录由 `tools/firmware-web-catalog/build_catalog.py` 在服务器侧构建；Browser 只能读取同源 `/firmware/releases-manifest.json` 和清单声明的精确 bundle 路径。开发中的当前固件固定通过 `bun run build:firmware:web` 直接生成至 `firmware/target/flux-purr-web-artifacts/`；Vite 监听该目录、只在内存中响应该原文件，绝不向 `web/public` 或其他位置拷贝副本。Vite 开发默认通过服务器端 GitHub proxy 合并发布版本；`FLUX_PURR_FIRMWARE_ARTIFACTS_DIR` 可覆写本地产物根目录，`FLUX_PURR_DEV_FIRMWARE_RELEASES=0` 仅禁用远端刷新，不禁用已打包或本地产物。遇到 GitHub API 限流时，设置仅供该本地 Vite 进程读取的 `GITHUB_TOKEN`；绝不以 `VITE_*` 变量或浏览器请求暴露它。
 
 ## 文档与交付要求
 

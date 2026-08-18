@@ -1,11 +1,16 @@
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { shouldRefreshCalibrationDraft, syncCalibrationDraftText } from './calibration-draft'
 import {
+  ControlPlaneDemo,
   clearStaleWebSerialFailure,
   devicePickerTargets,
   formatRuntimeEventTime,
   shouldShowDeviceControlBlockFeedback,
 } from './components/control-plane-demo'
+import { liveControlPlaneScenario } from './live-scenario'
+import { controlPlaneScenario } from './mock-data'
 
 describe('calibration draft synchronization', () => {
   it('initializes the draft from the first live runtime value', () => {
@@ -113,5 +118,64 @@ describe('live transport feedback boundary', () => {
         connectionAvailable: true,
       })
     ).toBe(true)
+  })
+})
+
+describe('firmware workspace hierarchy', () => {
+  it('keeps the device status strip ordered and removes transport and lease from its normal summary', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: controlPlaneScenario,
+        allowDemoControls: true,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+      })
+    )
+
+    const pickerIndex = markup.indexOf('aria-label="目标设备"')
+    const hotplateIndex = markup.indexOf('热板')
+    const pdIndex = markup.indexOf('PD')
+    const workspaceIndex = markup.indexOf('class="industrial-workspace-switch"')
+
+    expect(pickerIndex).toBeGreaterThan(-1)
+    expect(hotplateIndex).toBeGreaterThan(pickerIndex)
+    expect(pdIndex).toBeGreaterThan(hotplateIndex)
+    expect(workspaceIndex).toBeGreaterThan(pdIndex)
+    expect(markup).not.toContain('>传输<')
+    expect(markup).not.toContain('>租约<')
+  })
+
+  it('treats firmware maintenance as an independent workspace without device navigation', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: controlPlaneScenario,
+        initialView: 'update',
+        allowDemoControls: true,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+      })
+    )
+
+    expect(markup).toContain('aria-label="固件工作区"')
+    expect(markup).toContain('独立烧录任务')
+    expect(markup).not.toContain('aria-label="当前目标"')
+    expect(markup).not.toContain('aria-label="设备工作区"')
+    expect(markup).not.toContain('运行时追踪')
+    expect(markup).toContain('aria-label="固件事务日志"')
+    expect(markup).toContain('等待任务')
+  })
+
+  it('withholds device navigation until a control device is selected', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: liveControlPlaneScenario,
+        allowDemoControls: false,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+      })
+    )
+
+    expect(markup).toContain('Choose target')
+    expect(markup).not.toContain('aria-label="设备工作区"')
   })
 })

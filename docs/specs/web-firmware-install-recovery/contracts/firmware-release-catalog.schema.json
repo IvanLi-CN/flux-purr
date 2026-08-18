@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flux-purr.ivanli.cc/schemas/firmware-release-catalog-v1.json",
+  "title": "Flux Purr same-origin firmware release catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "generatedAt", "releaseCount", "releases"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "minLength": 20, "maxLength": 40 },
+    "releaseCount": { "type": "integer", "minimum": 0 },
+    "releases": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/release" }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "safeComponent": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "channel", "publishedAt", "source", "releaseTag", "sourceSha", "buildId", "bundleSha256", "size", "assetPath", "target"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$", "maxLength": 64 },
+        "channel": { "enum": ["stable", "rc", "local"] },
+        "publishedAt": { "type": "string", "minLength": 20, "maxLength": 40 },
+        "source": { "enum": ["release", "local"] },
+        "releaseTag": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/safeComponent" }] },
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "buildId": { "type": "string", "pattern": "^[0-9a-f]{16,64}$" },
+        "bundleSha256": { "$ref": "#/$defs/sha256" },
+        "size": { "type": "integer", "minimum": 1, "maximum": 8388608 },
+        "assetPath": { "type": "string", "pattern": "^firmware/releases/[A-Za-z0-9][A-Za-z0-9._-]{0,127}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\\.fluxpurr-fw$" },
+        "target": { "const": "ESP32-S3FH4R2" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "release" } } },
+          "then": {
+            "properties": {
+              "channel": { "enum": ["stable", "rc"] },
+              "releaseTag": { "$ref": "#/$defs/safeComponent" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "source": { "const": "local" } } },
+          "then": {
+            "properties": {
+              "channel": { "const": "local" },
+              "releaseTag": { "type": "null" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

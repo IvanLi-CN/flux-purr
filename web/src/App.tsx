@@ -50,6 +50,10 @@ function App() {
   const navigate = useNavigate()
   const location = useRouterState({ select: (state) => state.location })
   const routeState = useMemo(() => parseConsoleRoute(location.pathname), [location.pathname])
+  const requestedInitialView =
+    new URLSearchParams(window.location.search).get('workspace') === 'firmware'
+      ? 'update'
+      : undefined
   const [calibrationGuard, setCalibrationGuard] = useState<CalibrationRouteGuard | null>(null)
   const [blockedNavigation, setBlockedNavigation] =
     useState<ConsoleNavigationAdapter['blockedNavigation']>(null)
@@ -460,6 +464,7 @@ function App() {
     <>
       <ControlPlaneDemo
         scenario={activeScenario}
+        initialView={requestedInitialView}
         navigation={navigation}
         allowDemoControls={!isLive}
         mockOnly={publicDemo}
