@@ -357,6 +357,15 @@ impl RawUsbSerialJtag {
             nb::Error::Other(_) => nb::Error::Other(()),
         })
     }
+
+    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
+        // A control response is only sent after the host has delivered a full
+        // request line, so the USB endpoint is known to have an active reader.
+        // The HAL's blocking writer waits for each 64-byte packet to complete;
+        // this avoids silently losing a larger JSON response when a nonblocking
+        // flush observes a temporarily busy endpoint.
+        self.inner.write(bytes).is_ok()
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -9006,7 +9015,7 @@ fn usb_write_response_frame_to<T: UsbControlTx>(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
 ) {
     if let Ok(line) = write_usb_frame(frame, tx_buf) {
-        let _ = usb_write_bytes_bounded(tx, line.as_bytes());
+        let _ = tx.write_response_bytes(line.as_bytes());
     }
 }
 
@@ -9024,6 +9033,13 @@ trait UsbControlTx {
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
 
     fn wait_for_tx_progress(&mut self) {}
+
+    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool
+    where
+        Self: Sized,
+    {
+        usb_write_bytes_bounded(self, bytes)
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -9047,6 +9063,10 @@ impl UsbControlTx for RawUsbSerialJtag {
         // retry can exhaust its budget before the endpoint observes WR_DONE,
         // which would silently drop host-requested JSONL responses.
         esp_hal::rom::ets_delay_us(USB_CONTROL_TX_BACKOFF_US);
+    }
+
+    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
+        self.write_response_bytes(bytes)
     }
 }
 
@@ -12829,7 +12849,7 @@ mod tests {
     }
 
     #[test]
-    fn usb_response_write_uses_bounded_chunks_for_host_requested_frames() {
+    fn usb_response_write_uses_default_bounded_chunks_for_host_requested_frames() {
         let payload = std::vec![b'x'; 180];
         let mut bounded_tx = FakeUsbTx::new(0);
         assert!(!usb_write_bytes_bounded(&mut bounded_tx, &payload));
@@ -12849,6 +12869,48 @@ mod tests {
         assert!(line.contains(r#""requestId":"response-write""#));
         assert!(line.ends_with('\n'));
         assert!(response_tx.flush_count > 1);
+    }
+
+    #[test]
+    fn usb_response_write_allows_the_runtime_transport_to_confirm_delivery() {
+        struct ConfirmingUsbTx {
+            response: std::vec::Vec<u8>,
+            fallback_write_attempts: usize,
+        }
+
+        impl UsbControlTx for ConfirmingUsbTx {
+            fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+                self.fallback_write_attempts += 1;
+                Err(UsbTxError::Other)
+            }
+
+            fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+                Ok(())
+            }
+
+            fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
+                self.response.extend_from_slice(bytes);
+                true
+            }
+        }
+
+        let mut request_id = heapless::String::new();
+        request_id.push_str("confirmed-response").unwrap();
+        let response = usb_response(
+            request_id,
+            UsbResponsePayload::Identity(Identity::firmware_default()),
+        );
+        let mut tx = ConfirmingUsbTx {
+            response: std::vec::Vec::new(),
+            fallback_write_attempts: 0,
+        };
+        let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+
+        usb_write_response_frame_to(&mut tx, &response, &mut tx_buf);
+
+        let line = core::str::from_utf8(&tx.response).expect("response is utf8");
+        assert!(line.contains(r#""requestId":"confirmed-response""#));
+        assert_eq!(tx.fallback_write_attempts, 0);
     }
 
     #[test]
