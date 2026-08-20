@@ -452,6 +452,8 @@ const USB_CONTROL_TX_BUFFER_LEN: usize = flux_purr_firmware::control_plane::USB_
 const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 const USB_CONTROL_TX_RETRY_LIMIT: usize = 4096;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const USB_CONTROL_TX_BACKOFF_US: u32 = 25;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -9020,6 +9022,8 @@ enum UsbTxError {
 trait UsbControlTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError>;
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
+
+    fn wait_for_tx_progress(&mut self) {}
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -9036,6 +9040,13 @@ impl UsbControlTx for RawUsbSerialJtag {
             nb::Error::WouldBlock => UsbTxError::WouldBlock,
             nb::Error::Other(_) => UsbTxError::Other,
         })
+    }
+
+    fn wait_for_tx_progress(&mut self) {
+        // USB Serial/JTAG advances independently of this polling loop. A tight
+        // retry can exhaust its budget before the endpoint observes WR_DONE,
+        // which would silently drop host-requested JSONL responses.
+        esp_hal::rom::ets_delay_us(USB_CONTROL_TX_BACKOFF_US);
     }
 }
 
@@ -9076,7 +9087,7 @@ fn usb_flush_tx_bounded<T: UsbControlTx>(tx: &mut T) -> bool {
     for _ in 0..USB_CONTROL_TX_RETRY_LIMIT {
         match tx.flush_tx_nb() {
             Ok(()) => return true,
-            Err(UsbTxError::WouldBlock) => {}
+            Err(UsbTxError::WouldBlock) => tx.wait_for_tx_progress(),
             Err(_) => return false,
         }
     }
@@ -12771,6 +12782,50 @@ mod tests {
         }
 
         assert!(!usb_write_bytes_bounded(&mut FailingUsbTx, b"x"));
+    }
+
+    #[test]
+    fn usb_write_bytes_waits_for_a_busy_endpoint_before_replying() {
+        struct DelayedUsbTx {
+            waits_before_ready: usize,
+            waits: usize,
+            pending: std::vec::Vec<u8>,
+            sent: std::vec::Vec<u8>,
+        }
+
+        impl UsbControlTx for DelayedUsbTx {
+            fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+                if self.waits < self.waits_before_ready {
+                    return Err(UsbTxError::WouldBlock);
+                }
+                self.pending.push(byte);
+                Ok(())
+            }
+
+            fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+                if self.waits < self.waits_before_ready {
+                    return Err(UsbTxError::WouldBlock);
+                }
+                self.sent.extend_from_slice(&self.pending);
+                self.pending.clear();
+                Ok(())
+            }
+
+            fn wait_for_tx_progress(&mut self) {
+                self.waits += 1;
+            }
+        }
+
+        let mut tx = DelayedUsbTx {
+            waits_before_ready: 3,
+            waits: 0,
+            pending: std::vec::Vec::new(),
+            sent: std::vec::Vec::new(),
+        };
+
+        assert!(usb_write_bytes_bounded(&mut tx, b"response\\n"));
+        assert_eq!(tx.waits, 3);
+        assert_eq!(tx.sent, b"response\\n");
     }
 
     #[test]

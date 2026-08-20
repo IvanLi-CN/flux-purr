@@ -1454,15 +1454,21 @@ pub enum UsbFrame {
 struct UsbFrameWire {
     #[serde(rename = "type")]
     frame_type: String<24>,
-    #[serde(rename = "protocolVersion")]
+    #[serde(rename = "protocolVersion", skip_serializing_if = "Option::is_none")]
     protocol_version: Option<String<24>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     framing: Option<String<8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<Identity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<Vec<String<CAPABILITY_MAX_LEN>, CAPABILITY_COUNT_MAX>>,
-    #[serde(rename = "requestId")]
+    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     op: Option<String<24>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
     #[serde(
         default,
@@ -1470,40 +1476,77 @@ struct UsbFrameWire {
         skip_serializing_if = "Option::is_none"
     )]
     static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     telemetry_interval_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_temp_c: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     selected_preset_slot: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     active_cooling_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heater_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_ma: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fault_attention_acknowledged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<CalibrationControlCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thermal_profile_mode: Option<ThermalProfileModeWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<ThermalControlProfileCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<CalibrationChannelWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reference_temp_c: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reference_vin_mv: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_adc_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     observed_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     expected_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sample_index: Option<usize>,
-    #[serde(rename = "kind", alias = "jobKind")]
+    #[serde(
+        rename = "kind",
+        alias = "jobKind",
+        skip_serializing_if = "Option::is_none"
+    )]
     job_kind: Option<CalibrationJobKindWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<CalibrationStateWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     slot: Option<CalibrationSlotIdWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fit: Option<CalibrationSlotFitWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heater_curve: Option<HeaterCurvePackageWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     length: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<UsbResponsePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ApiError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<ControlPlaneStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     level: Option<String<8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String<ERROR_MESSAGE_MAX_LEN>>,
 }
 
@@ -2422,6 +2465,29 @@ mod tests {
                     .any(|value| value == "lan_pairing")
             );
         }
+    }
+
+    #[test]
+    fn identity_response_omits_unrelated_wire_fields_for_usb_transport() {
+        let frame = UsbFrame::Response {
+            request_id: string("compact-identity"),
+            ok: true,
+            result: Some(UsbResponsePayload::Identity(Identity::firmware_default())),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).expect("identity response fits");
+
+        assert!(json.contains(r#""requestId":"compact-identity""#));
+        assert!(json.contains(r#""identity""#));
+        assert!(!json.contains(r#""status":null"#));
+        assert!(!json.contains(r#""ssid":null"#));
+        assert!(!json.contains(r#""heaterCurve":null"#));
+        assert!(json.len() < 700);
+        assert_eq!(
+            parse_usb_frame(json).expect("compact response parses"),
+            frame
+        );
     }
 
     #[test]
