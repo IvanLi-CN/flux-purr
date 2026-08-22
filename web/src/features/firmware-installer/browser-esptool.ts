@@ -11,6 +11,13 @@ import type { FirmwareOperation, ValidatedFirmwareBundle } from './types'
 export const ESP_GET_SECURITY_INFO = 0x14
 const ESP_SECURITY_INFO_BYTES = 20
 const ESP_ROM_SECURITY_INFO_TRAILER_BYTES = 4
+const RUNTIME_READY_BOOT_STAGE = 'boot_stage=runtime_ready'
+const MAX_RUNTIME_IDENTITY_REQUEST_ATTEMPTS = 18
+// Native USB Serial/JTAG needs a second, application-directed reset after the
+// generic ROM reset. Keep this sequence aligned with the established
+// ESP32-S3 Web Serial implementation rather than treating UsbJtagSerialReset
+// as the post-flash application reset.
+const ESP32_S3_USB_JTAG_APP_RESET_SEQUENCE = 'D0|R0|W50|D1|R0|W50|D0|R1|W50|D0|R0|W250'
 type BrowserSerialPort = ConstructorParameters<typeof EspTransport>[0]
 
 export interface BrowserSecurityInfo {
@@ -32,6 +39,25 @@ type LoaderPort = Pick<
   | 'chip'
 >
 
+// esptool-js uses a 200 ms timeout when it sends ESP_MEM_END after uploading
+// the flasher stub. ESP32-S3 native USB Serial/JTAG needs the longer handoff
+// used by the established Web Serial implementation, otherwise the target can
+// remain in the download path after a successful ROM write.
+type Esp32S3StubLoader = {
+  ESP_MEM_END: number
+  _appendArray(left: Uint8Array, right: Uint8Array): Uint8Array
+  _intToByteArray(value: number): Uint8Array
+  checkCommand(
+    opDescription: string,
+    op: number,
+    data: Uint8Array,
+    checksum?: number,
+    responseDataLength?: number,
+    timeout?: number
+  ): Promise<unknown>
+  memFinish(entrypoint: number): Promise<void>
+}
+
 interface PreparedBrowserLoader {
   operation: FirmwareOperation
   layout: BrowserLayoutPreflight
@@ -46,6 +72,54 @@ export interface BrowserLayoutPreflight {
     targetAddress: number
     bytes: Uint8Array
   } | null
+}
+
+export type BrowserRuntimeVerificationStage =
+  | 'disconnecting_rom'
+  | 'waiting_for_runtime'
+  | 'opening_runtime'
+  | 'requesting_identity'
+  | 'reading_runtime'
+  | 'closing_runtime'
+
+export interface BrowserRuntimeVerificationEvent {
+  stage: BrowserRuntimeVerificationStage
+  attempt?: number
+}
+
+export interface BrowserRuntimeVerificationOptions {
+  timeoutMs?: number
+  boundaryTimeoutMs?: number
+  reconnectDelayMs?: number
+  reconnectRetryMs?: number
+  requestRetryMs?: number
+  romTransportAlreadyDisconnected?: boolean
+  reportStage?: (event: BrowserRuntimeVerificationEvent) => void
+}
+
+export type BrowserWriteStage =
+  | 'erase_started'
+  | 'erase_completed'
+  | 'write_started'
+  | 'write_progress'
+  | 'rom_md5_started'
+  | 'rom_md5_progress'
+  | 'reset_started'
+  | 'reset_completed'
+
+export interface BrowserWriteProgressEvent {
+  stage: BrowserWriteStage
+  segmentIndex?: number
+  written?: number
+  total?: number
+  totalBytes?: number
+  completedSegments?: number
+  totalSegments?: number
+}
+
+export interface BrowserWriteOptions {
+  reportProgress?: (fileIndex: number, written: number, total: number) => void
+  reportStage?: (event: BrowserWriteProgressEvent) => void
 }
 
 export async function connectBrowserLoader(port?: BrowserSerialPort): Promise<ESPLoader> {
@@ -70,7 +144,7 @@ export async function connectBrowserLoader(port?: BrowserSerialPort): Promise<ES
     // Security must be read from the ROM bootloader. `main()` uploads the
     // flasher stub before returning, and the stub does not preserve the ROM
     // GET_SECURITY_INFO response contract.
-    await loader.detectChip('default_reset')
+    await loader.detectChip('usb_reset')
     return loader
   } catch (error) {
     await transport.disconnect().catch(() => undefined)
@@ -167,6 +241,7 @@ export async function preflightBrowserLoader(
 ) {
   try {
     await preflightBrowserTarget(loader)
+    patchEsp32S3UsbJtagStubStart(loader as unknown as Esp32S3StubLoader)
     await loader.runStub()
     const layout = await preflightBrowserLayout(loader, bundle, operation)
     preparedBrowserLoaders.set(loader, { operation, layout })
@@ -174,6 +249,24 @@ export async function preflightBrowserLoader(
   } catch (error) {
     await disconnectBrowserLoader(loader)
     throw error
+  }
+}
+
+function patchEsp32S3UsbJtagStubStart(loader: Esp32S3StubLoader) {
+  loader.memFinish = async (entrypoint: number) => {
+    const isEntry = entrypoint === 0 ? 1 : 0
+    const packet = loader._appendArray(
+      loader._intToByteArray(isEntry),
+      loader._intToByteArray(entrypoint)
+    )
+    await loader.checkCommand(
+      'leave RAM download mode',
+      loader.ESP_MEM_END,
+      packet,
+      undefined,
+      undefined,
+      2_000
+    )
   }
 }
 
@@ -190,18 +283,27 @@ export async function writeBrowserBundle(
   loader: LoaderPort,
   bundle: ValidatedFirmwareBundle,
   operation: FirmwareOperation,
-  reportProgress?: (fileIndex: number, written: number, total: number) => void
+  optionsOrProgress?: BrowserWriteOptions | BrowserWriteOptions['reportProgress']
 ) {
+  const options = normalizeBrowserWriteOptions(optionsOrProgress)
   const prepared = preparedBrowserLoaders.get(loader)
   if (!prepared || prepared.operation !== operation) {
     throw new Error('Browser ROM preflight must complete for this operation before writing.')
   }
   try {
-    if (operation === 'install_recovery') await loader.eraseFlash()
+    if (operation === 'install_recovery') {
+      options.reportStage?.({ stage: 'erase_started' })
+      await loader.eraseFlash()
+      options.reportStage?.({ stage: 'erase_completed' })
+    }
     const fileArray = bundle.manifest.segments.map((segment) => {
       const data = bundle.images.get(segment.path)
       if (!data) throw new Error(`${segment.kind} image is missing from the validated bundle.`)
       return { data, address: segment.address }
+    })
+    options.reportStage?.({
+      stage: 'write_started',
+      totalBytes: fileArray.reduce((total, file) => total + file.data.byteLength, 0),
     })
     await loader.writeFlash({
       fileArray,
@@ -210,15 +312,33 @@ export async function writeBrowserBundle(
       flashSize: '4MB',
       eraseAll: false,
       compress: true,
-      reportProgress,
+      reportProgress: (fileIndex, written, total) => {
+        options.reportProgress?.(fileIndex, written, total)
+        options.reportStage?.({
+          stage: 'write_progress',
+          segmentIndex: fileIndex,
+          written,
+          total,
+        })
+      },
       calculateMD5Hash: (image) => {
         const copy = Uint8Array.from(image)
         return SparkMD5.ArrayBuffer.hash(copy.buffer as ArrayBuffer)
       },
     })
-    for (const segment of bundle.manifest.segments) {
+    options.reportStage?.({
+      stage: 'rom_md5_started',
+      totalSegments: bundle.manifest.segments.length,
+    })
+    for (const [segmentIndex, segment] of bundle.manifest.segments.entries()) {
       const actual = await loader.flashMd5sum(segment.address, segment.length)
       if (actual.toLowerCase() !== segment.md5) throw new Error(`${segment.kind} ROM MD5 differs.`)
+      options.reportStage?.({
+        stage: 'rom_md5_progress',
+        segmentIndex,
+        completedSegments: segmentIndex + 1,
+        totalSegments: bundle.manifest.segments.length,
+      })
     }
     if (prepared.layout.configCopy) {
       await writeConfigCopy(loader, prepared.layout.configCopy)
@@ -230,10 +350,19 @@ export async function writeBrowserBundle(
         throw new Error('Restored flux_cfg differs from the staged source bytes.')
       }
     }
+    options.reportStage?.({ stage: 'reset_started' })
     await loader.after('hard_reset')
+    await loader.after('custom_reset', undefined, ESP32_S3_USB_JTAG_APP_RESET_SEQUENCE)
+    options.reportStage?.({ stage: 'reset_completed' })
   } finally {
     preparedBrowserLoaders.delete(loader)
   }
+}
+
+function normalizeBrowserWriteOptions(
+  input: BrowserWriteOptions | BrowserWriteOptions['reportProgress'] | undefined
+): BrowserWriteOptions {
+  return typeof input === 'function' ? { reportProgress: input } : (input ?? {})
 }
 
 export async function preflightBrowserLayout(
@@ -294,61 +423,181 @@ async function writeConfigCopy(
 export async function verifyBrowserRuntime(
   loader: ESPLoader,
   bundle: ValidatedFirmwareBundle,
-  timeoutMs = 12_000
+  optionsOrTimeout: BrowserRuntimeVerificationOptions | number = {}
 ) {
-  await loader.transport.disconnect()
-  const port = loader.transport.device
-  await new Promise((resolve) => window.setTimeout(resolve, 1_000))
-  await port.open({ baudRate: 115_200 })
+  const options = normalizeRuntimeVerificationOptions(optionsOrTimeout)
+  const deadline = Date.now() + options.timeoutMs
+  const romPort = loader.transport.device
+  options.reportStage?.({ stage: 'disconnecting_rom' })
+  if (!options.romTransportAlreadyDisconnected) {
+    await runRuntimeBoundary(
+      loader.transport.disconnect(),
+      deadline,
+      options.boundaryTimeoutMs,
+      'disconnecting ROM transport'
+    )
+  }
+  options.reportStage?.({ stage: 'waiting_for_runtime' })
+  await delayWithinRuntimeDeadline(options.reconnectDelayMs, deadline, 'waiting for runtime USB')
+  const port = await refreshGrantedBrowserRuntimePort(romPort, deadline, options.reconnectRetryMs)
+  await openRuntimePort(port, deadline, options)
+
   const writer = port.writable?.getWriter()
   const reader = port.readable?.getReader()
-  if (!writer || !reader) throw new Error('Runtime serial streams are unavailable after reset.')
+  if (!writer || !reader) {
+    await closeRuntimePort(port, options).catch(() => undefined)
+    throw new Error('Runtime serial streams are unavailable after reset.')
+  }
   const encoder = new TextEncoder()
   const decoder = new TextDecoder()
   let buffer = ''
   let identity: Record<string, unknown> | null = null
   let installStatus: Record<string, unknown> | null = null
-  const deadline = Date.now() + timeoutMs
+  let pendingRead: Promise<ReadableStreamReadResult<Uint8Array>> | null = null
+  let requestAttempt = 0
+  let identityRequestAttempts = 0
+  let installStatusRequestAttempts = 0
+  let nextIdentityRequestAt = Date.now()
+  let nextInstallStatusRequestAt = Number.POSITIVE_INFINITY
+  let installStatusWaitingForRuntime = false
+  let verificationError: unknown = null
   try {
-    await writer.write(
-      encoder.encode(
-        '{"type":"request","requestId":"firmware-identity","op":"get_identity"}\n' +
-          '{"type":"request","requestId":"firmware-install-status","op":"get_install_status"}\n'
-      )
-    )
     while (Date.now() < deadline && (!identity || !installStatus)) {
-      const remaining = Math.max(1, deadline - Date.now())
-      const result = await Promise.race([
-        reader.read(),
-        new Promise<never>((_, reject) =>
-          window.setTimeout(() => reject(new Error('Runtime verification timed out.')), remaining)
-        ),
-      ])
+      const now = Date.now()
+      if (
+        !identity &&
+        identityRequestAttempts < MAX_RUNTIME_IDENTITY_REQUEST_ATTEMPTS &&
+        now >= nextIdentityRequestAt
+      ) {
+        requestAttempt += 1
+        identityRequestAttempts += 1
+        options.reportStage?.({ stage: 'requesting_identity', attempt: requestAttempt })
+        await writeRuntimeRequest(
+          writer,
+          runtimeRequestBytes(encoder, 'firmware-identity', 'get_identity'),
+          deadline,
+          options.boundaryTimeoutMs
+        )
+        nextIdentityRequestAt = Date.now() + options.requestRetryMs
+      } else if (
+        identity &&
+        !installStatus &&
+        !installStatusWaitingForRuntime &&
+        installStatusRequestAttempts < 2 &&
+        now >= nextInstallStatusRequestAt
+      ) {
+        requestAttempt += 1
+        installStatusRequestAttempts += 1
+        options.reportStage?.({ stage: 'requesting_identity', attempt: requestAttempt })
+        await writeRuntimeRequest(
+          writer,
+          runtimeRequestBytes(encoder, 'firmware-install-status', 'get_install_status'),
+          deadline,
+          options.boundaryTimeoutMs
+        )
+        nextInstallStatusRequestAt = Date.now() + options.requestRetryMs
+      }
+      options.reportStage?.({ stage: 'reading_runtime', attempt: requestAttempt })
+      const currentRead: Promise<ReadableStreamReadResult<Uint8Array>> =
+        pendingRead ?? reader.read()
+      pendingRead = currentRead
+      const remaining = remainingRuntimeTime(deadline, 'reading runtime responses')
+      const nextRequestAt = Math.min(
+        !identity && identityRequestAttempts < MAX_RUNTIME_IDENTITY_REQUEST_ATTEMPTS
+          ? nextIdentityRequestAt
+          : Number.POSITIVE_INFINITY,
+        identity &&
+          !installStatus &&
+          !installStatusWaitingForRuntime &&
+          installStatusRequestAttempts < 2
+          ? nextInstallStatusRequestAt
+          : Number.POSITIVE_INFINITY
+      )
+      const untilNextRequest = Number.isFinite(nextRequestAt)
+        ? Math.max(1, nextRequestAt - Date.now())
+        : remaining
+      const result = await readOrDelay(currentRead, Math.min(remaining, untilNextRequest))
+      if (!result) continue
+      pendingRead = null
       if (result.done) break
       buffer += decoder.decode(result.value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
       for (const line of lines) {
         if (!line.trim()) continue
-        const frame = JSON.parse(line) as Record<string, unknown>
+        if (line.trim() === RUNTIME_READY_BOOT_STAGE) {
+          // The marker is a useful diagnostic, but it travels through the
+          // best-effort boot log stream. Runtime verification must remain
+          // correct when that line is absent or dropped.
+          if (!identity && identityRequestAttempts < MAX_RUNTIME_IDENTITY_REQUEST_ATTEMPTS) {
+            nextIdentityRequestAt = Date.now()
+          }
+          if (installStatusWaitingForRuntime && installStatusRequestAttempts < 2) {
+            installStatusWaitingForRuntime = false
+            nextInstallStatusRequestAt = Date.now()
+          }
+          continue
+        }
+        let frame: Record<string, unknown>
+        try {
+          frame = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          // Boot diagnostics can share the runtime serial stream with JSONL.
+          continue
+        }
         const resultValue = frame.result as Record<string, unknown> | undefined
         if (frame.requestId === 'firmware-identity') {
           identity = (resultValue?.identity ?? resultValue) as Record<string, unknown>
+          nextInstallStatusRequestAt = Date.now()
         }
         if (frame.requestId === 'firmware-install-status') {
-          installStatus = (resultValue?.install_status ??
-            resultValue?.installStatus ??
-            resultValue) as Record<string, unknown>
+          const error = frame.error as Record<string, unknown> | undefined
+          const errorCode = error?.code ?? frame.code
+          if (errorCode === 'startup_busy') {
+            // The firmware received this request but has not started its control
+            // plane. Wait for its boot marker instead of queueing duplicates.
+            installStatusWaitingForRuntime = true
+          } else {
+            installStatus = (resultValue?.install_status ??
+              resultValue?.installStatus ??
+              resultValue) as Record<string, unknown>
+          }
         }
       }
     }
+    if (!identity || !installStatus) {
+      throw runtimeVerificationTimeout('reading runtime identity and install status')
+    }
+  } catch (error) {
+    verificationError = error
   } finally {
-    reader.releaseLock()
-    writer.releaseLock()
-    await port.close().catch(() => undefined)
+    if (pendingRead) {
+      const cancelError = runtimeVerificationTimeout('cancelling runtime response read')
+      const cancel = reader.cancel(cancelError)
+      await settleRuntimeCleanup(cancel, options.boundaryTimeoutMs)
+      await settleRuntimeCleanup(pendingRead, options.boundaryTimeoutMs)
+    }
+    if (writer.desiredSize === null) {
+      await settleRuntimeCleanup(writer.abort(verificationError), options.boundaryTimeoutMs)
+    }
+    try {
+      reader.releaseLock()
+    } catch (error) {
+      verificationError ??= runtimeStreamReleaseError('readable', error)
+    }
+    try {
+      writer.releaseLock()
+    } catch (error) {
+      verificationError ??= runtimeStreamReleaseError('writable', error)
+    }
+    try {
+      await closeRuntimePort(port, options)
+    } catch (error) {
+      verificationError ??= error
+    }
   }
-  if (!identity || !installStatus)
-    throw new Error('Runtime identity or install status was not returned.')
+  if (verificationError) throw verificationError
+  if (!identity || !installStatus) throw runtimeVerificationTimeout('reading runtime responses')
   if (
     identity.firmwareVersion !== bundle.manifest.identity.version ||
     identity.gitSha !== bundle.manifest.identity.sourceSha ||
@@ -360,6 +609,239 @@ export async function verifyBrowserRuntime(
     throw new Error('Runtime identity or layout does not match the installed bundle.')
   }
   return { identity, installStatus }
+}
+
+async function refreshGrantedBrowserRuntimePort(
+  preferred: BrowserSerialPort,
+  deadline: number,
+  retryMs: number
+): Promise<BrowserSerialPort> {
+  if (typeof navigator === 'undefined') return preferred
+  const serial = (navigator as Navigator & { serial?: BrowserSerial }).serial
+  if (!serial?.getPorts) return preferred
+
+  const preferredInfo = preferred.getInfo?.()
+  for (;;) {
+    const granted = await serial.getPorts()
+    const sameObject = granted.find((port) => port === preferred)
+    if (sameObject) return sameObject as BrowserSerialPort
+
+    const matchingPorts = preferredInfo
+      ? granted.filter((port) => sameBrowserUsbInfo(port.getInfo?.(), preferredInfo))
+      : []
+    if (matchingPorts.length === 1) return matchingPorts[0] as BrowserSerialPort
+    if (matchingPorts.length > 1) {
+      throw new Error(
+        'Browser granted Web USB ports are ambiguous after reset. Re-open Web USB and choose the exact ESP32-S3 target again.'
+      )
+    }
+    if (!preferredInfo && granted.length === 1) return granted[0] as BrowserSerialPort
+    if (granted.length > 1) {
+      throw new Error(
+        'Browser granted Web USB ports are ambiguous after reset. Re-open Web USB and choose the exact ESP32-S3 target again.'
+      )
+    }
+    await delayWithinRuntimeDeadline(
+      retryMs,
+      deadline,
+      'waiting for the selected runtime serial port'
+    )
+  }
+}
+
+function sameBrowserUsbInfo(
+  left: { usbVendorId?: number; usbProductId?: number } | undefined,
+  right: { usbVendorId?: number; usbProductId?: number } | undefined
+) {
+  return (
+    left?.usbVendorId !== undefined &&
+    left?.usbProductId !== undefined &&
+    left.usbVendorId === right?.usbVendorId &&
+    left.usbProductId === right?.usbProductId
+  )
+}
+
+interface NormalizedBrowserRuntimeVerificationOptions {
+  timeoutMs: number
+  boundaryTimeoutMs: number
+  reconnectDelayMs: number
+  reconnectRetryMs: number
+  requestRetryMs: number
+  romTransportAlreadyDisconnected: boolean
+  reportStage?: (event: BrowserRuntimeVerificationEvent) => void
+}
+
+function normalizeRuntimeVerificationOptions(
+  input: BrowserRuntimeVerificationOptions | number
+): NormalizedBrowserRuntimeVerificationOptions {
+  const options = typeof input === 'number' ? { timeoutMs: input } : input
+  return {
+    timeoutMs: positiveDuration(options.timeoutMs, 45_000),
+    boundaryTimeoutMs: positiveDuration(options.boundaryTimeoutMs, 2_500),
+    reconnectDelayMs: nonNegativeDuration(options.reconnectDelayMs, 1_000),
+    reconnectRetryMs: positiveDuration(options.reconnectRetryMs, 400),
+    requestRetryMs: positiveDuration(options.requestRetryMs, 2_500),
+    romTransportAlreadyDisconnected: options.romTransportAlreadyDisconnected ?? false,
+    reportStage: options.reportStage,
+  }
+}
+
+function runtimeRequestBytes(encoder: TextEncoder, requestId: string, op: string) {
+  return encoder.encode(`${JSON.stringify({ type: 'request', requestId, op })}\n`)
+}
+
+async function openRuntimePort(
+  port: BrowserSerialPort,
+  deadline: number,
+  options: NormalizedBrowserRuntimeVerificationOptions
+) {
+  for (let attempt = 1; ; attempt += 1) {
+    options.reportStage?.({ stage: 'opening_runtime', attempt })
+    const openOperation = port.open({ baudRate: 115_200 })
+    try {
+      await runRuntimeBoundary(
+        openOperation,
+        deadline,
+        remainingRuntimeTime(deadline, 'opening runtime serial port'),
+        'opening runtime serial port'
+      )
+      return
+    } catch (error) {
+      if (isRuntimeBoundaryTimeout(error)) {
+        void openOperation.then(() => port.close()).catch(() => undefined)
+        throw error
+      }
+      if (!isRetryableRuntimeOpenError(error)) throw error
+      await delayWithinRuntimeDeadline(
+        options.reconnectRetryMs,
+        deadline,
+        'waiting for the selected runtime serial port to return'
+      )
+    }
+  }
+}
+
+async function writeRuntimeRequest(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  bytes: Uint8Array,
+  deadline: number,
+  boundaryTimeoutMs: number
+) {
+  const operation = writer.write(bytes)
+  try {
+    await runRuntimeBoundary(operation, deadline, boundaryTimeoutMs, 'requesting runtime identity')
+  } catch (error) {
+    await settleRuntimeCleanup(writer.abort(error), boundaryTimeoutMs)
+    await settleRuntimeCleanup(operation, boundaryTimeoutMs)
+    throw error
+  }
+}
+
+async function closeRuntimePort(
+  port: BrowserSerialPort,
+  options: NormalizedBrowserRuntimeVerificationOptions
+) {
+  options.reportStage?.({ stage: 'closing_runtime' })
+  await runRuntimeBoundary(
+    port.close(),
+    Date.now() + options.boundaryTimeoutMs,
+    options.boundaryTimeoutMs,
+    'closing runtime serial port'
+  )
+}
+
+async function runRuntimeBoundary<T>(
+  operation: Promise<T>,
+  deadline: number,
+  boundaryTimeoutMs: number,
+  stage: string
+) {
+  const timeoutMs = Math.min(boundaryTimeoutMs, remainingRuntimeTime(deadline, stage))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = globalThis.setTimeout(() => reject(runtimeVerificationTimeout(stage)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) globalThis.clearTimeout(timer)
+  }
+}
+
+async function delayWithinRuntimeDeadline(timeoutMs: number, deadline: number, stage: string) {
+  if (timeoutMs <= 0) return
+  const duration = Math.min(timeoutMs, remainingRuntimeTime(deadline, stage))
+  await new Promise<void>((resolve) => globalThis.setTimeout(resolve, duration))
+  remainingRuntimeTime(deadline, stage)
+}
+
+async function readOrDelay<T>(operation: Promise<T>, timeoutMs: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<null>((resolve) => {
+        timer = globalThis.setTimeout(() => resolve(null), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) globalThis.clearTimeout(timer)
+  }
+}
+
+async function settleRuntimeCleanup(operation: Promise<unknown>, timeoutMs: number) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      operation.catch(() => undefined),
+      new Promise<void>((resolve) => {
+        timer = globalThis.setTimeout(resolve, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) globalThis.clearTimeout(timer)
+  }
+}
+
+function remainingRuntimeTime(deadline: number, stage: string) {
+  const remaining = deadline - Date.now()
+  if (remaining <= 0) throw runtimeVerificationTimeout(stage)
+  return remaining
+}
+
+function runtimeVerificationTimeout(stage: string) {
+  const error = new Error(`Runtime verification timed out while ${stage}.`)
+  error.name = 'RuntimeVerificationTimeoutError'
+  return error
+}
+
+function runtimeStreamReleaseError(stream: 'readable' | 'writable', cause: unknown) {
+  const detail = cause instanceof Error ? ` ${cause.message}` : ''
+  return new Error(`Runtime ${stream} stream remained locked during cleanup.${detail}`)
+}
+
+function isRuntimeBoundaryTimeout(error: unknown) {
+  return error instanceof Error && error.name === 'RuntimeVerificationTimeoutError'
+}
+
+function isRetryableRuntimeOpenError(error: unknown) {
+  if (error instanceof DOMException) {
+    return error.name === 'NetworkError' || error.name === 'NotFoundError'
+  }
+  return (
+    error instanceof Error &&
+    /disconnected|device unavailable|device has been lost|failed to open/i.test(error.message)
+  )
+}
+
+function positiveDuration(value: number | undefined, fallback: number) {
+  return Number.isFinite(value) && Number(value) > 0 ? Number(value) : fallback
+}
+
+function nonNegativeDuration(value: number | undefined, fallback: number) {
+  return Number.isFinite(value) && Number(value) >= 0 ? Number(value) : fallback
 }
 
 function popcount(value: number) {

@@ -5,8 +5,10 @@ import { shouldRefreshCalibrationDraft, syncCalibrationDraftText } from './calib
 import {
   ControlPlaneDemo,
   clearStaleWebSerialFailure,
+  deviceChoiceMatchesRouteId,
   devicePickerTargets,
   formatRuntimeEventTime,
+  nextFirmwareActivitySequence,
   shouldShowDeviceControlBlockFeedback,
 } from './components/control-plane-demo'
 import { liveControlPlaneScenario } from './live-scenario'
@@ -60,6 +62,19 @@ describe('calibration draft synchronization', () => {
 })
 
 describe('Web Serial feedback settlement', () => {
+  it('keeps firmware activity keys unique after Fast Refresh preserves prior entries', () => {
+    expect(
+      nextFirmwareActivitySequence(
+        [
+          { id: 'firmware-activity-idle' },
+          { id: 'firmware-activity-4' },
+          { id: 'firmware-activity-8' },
+        ],
+        1
+      )
+    ).toBe(9)
+  })
+
   it('gives live operator events a wall-clock time instead of a demo fixture time', () => {
     expect(formatRuntimeEventTime(new Date(2026, 0, 1, 18, 4, 7))).toBe('18:04:07')
   })
@@ -90,6 +105,16 @@ describe('Web Serial feedback settlement', () => {
 })
 
 describe('live transport feedback boundary', () => {
+  it('keeps a pre-flash native serial route valid after runtime identity becomes available', () => {
+    const choice = {
+      identityId: 'd0cf1308a148',
+      connections: [{ target: { id: 'serial-303a-1001-D0:CF:13:08:A1:48' } }],
+    }
+
+    expect(deviceChoiceMatchesRouteId(choice, '303a-1001-D0:CF:13:08:A1:48')).toBe(true)
+    expect(deviceChoiceMatchesRouteId(choice, '303a-1001-AA:BB:CC:DD:EE:FF')).toBe(false)
+  })
+
   it('keeps remembered Web Serial routes but excludes the no-target placeholder from the picker', () => {
     expect(
       devicePickerTargets([
@@ -163,6 +188,58 @@ describe('firmware workspace hierarchy', () => {
     expect(markup).not.toContain('运行时追踪')
     expect(markup).toContain('aria-label="固件事务日志"')
     expect(markup).toContain('等待任务')
+  })
+
+  it('keeps the live firmware workspace available when its routed control device is unavailable', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: liveControlPlaneScenario,
+        allowDemoControls: false,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+        navigation: {
+          state: {
+            kind: 'device',
+            deviceId: 'serial-303a-1001-D0:CF:13:08:A1:48',
+            view: 'update',
+          },
+          variant: 'live',
+          search: { demo: false },
+          navigate: async () => undefined,
+          blockedNavigation: null,
+          onCalibrationGuardChange: () => undefined,
+        },
+      })
+    )
+
+    expect(markup).toContain('aria-label="固件工作区"')
+    expect(markup).not.toContain('目标设备暂不可用')
+  })
+
+  it('keeps the independent firmware workspace rendered when live discovery has no device', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: { ...liveControlPlaneScenario, devices: [], selectedDeviceId: 'missing-device' },
+        allowDemoControls: false,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+        navigation: {
+          state: {
+            kind: 'device',
+            deviceId: 'serial-303a-1001-D0:CF:13:08:A1:48',
+            view: 'update',
+          },
+          variant: 'live',
+          search: { demo: false },
+          navigate: async () => undefined,
+          blockedNavigation: null,
+          onCalibrationGuardChange: () => undefined,
+        },
+      })
+    )
+
+    expect(markup).toContain('aria-label="固件工作区"')
+    expect(markup).toContain('浏览器直接连接 ROM')
   })
 
   it('withholds device navigation until a control device is selected', () => {

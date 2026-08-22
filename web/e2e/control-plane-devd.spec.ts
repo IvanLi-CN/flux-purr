@@ -505,7 +505,8 @@ test.describe('control plane live devd bridge', () => {
 
     await page.getByRole('button', { name: '运行预检' }).click()
 
-    await expect(page.getByText('预检通过', { exact: true })).toBeVisible()
+    await expect(page.locator('.firmware-workbench__status[data-phase="preflight"]')).toBeVisible()
+    await expect(page.getByLabel('预检进度百分比')).toHaveText('100%')
     await expect(page.getByText('devd 完整预检已通过；授权令牌五分钟内单次有效。')).toBeVisible()
     await expect
       .poll(

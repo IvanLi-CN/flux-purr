@@ -21,7 +21,9 @@ else
 fi
 channel="${RELEASE_CHANNEL:-local}"
 elf="${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr"
-output="${artifact_root}/flux-purr-firmware-${version}-${build_id}.fluxpurr-fw"
+# The development proxy exposes only this path as its local build. Replacing
+# it atomically prevents a long-lived Vite process from offering stale builds.
+output="${artifact_root}/flux-purr-current.fluxpurr-fw"
 
 if [[ ! "${source_sha}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "FLUX_PURR_SOURCE_SHA must be a 40-character lowercase commit SHA" >&2

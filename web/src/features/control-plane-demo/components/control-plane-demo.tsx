@@ -140,6 +140,7 @@ import {
   shouldHoldDevdLease,
   useLiveDevdScenario,
 } from '../live-devd'
+import { liveControlPlaneScenario } from '../live-scenario'
 import {
   type LiveWebSerialControls,
   type LiveWebSerialOptions,
@@ -277,6 +278,18 @@ const LOG_FEED_SIZE = 1000
 const FIRMWARE_ACTIVITY_FEED_SIZE = 200
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
+
+export function nextFirmwareActivitySequence(
+  entries: ReadonlyArray<Pick<FirmwareActivityEntry, 'id'>>,
+  previousSequence: number
+) {
+  const persistedSequence = entries.reduce((highest, entry) => {
+    const match = /^firmware-activity-(\d+)$/.exec(entry.id)
+    return match ? Math.max(highest, Number(match[1])) : highest
+  }, 0)
+  return Math.max(previousSequence, persistedSequence) + 1
+}
+
 function parseCalibrationIntegerInput(rawValue: string) {
   if (rawValue.trim() === '') {
     return null
@@ -312,6 +325,24 @@ function isHealthyRouteConnection(connection: DeviceConnectionOption) {
     connection.target.connectionAvailable !== false &&
     (isAvailableMockFixture ||
       (connection.target.severity === 'nominal' && connection.target.leaseState === 'active'))
+  )
+}
+
+export function deviceChoiceMatchesRouteId(
+  choice: { identityId: string; connections: Array<{ target: { id: string } }> },
+  routeId: string
+) {
+  const normalizedRouteId = routeId.trim().toLowerCase()
+  return (
+    choice.identityId.trim().toLowerCase() === normalizedRouteId ||
+    choice.connections.some((connection) => {
+      const targetId = connection.target.id.trim().toLowerCase()
+      return (
+        targetId === normalizedRouteId ||
+        targetId === `serial-${normalizedRouteId}` ||
+        targetId.replace(/^serial-/, '') === normalizedRouteId
+      )
+    })
   )
 }
 const PPS_STEP_MV = 100
@@ -691,6 +722,7 @@ export function ControlPlaneDemo({
     serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
   const liveDevd = useLiveDevdScenario(scenario, {
     ...devd,
+    enabled: mockOnly ? false : devd?.enabled,
     nativeRuntimeProbeEnabled: activeView !== 'update',
     leaseEnabled:
       shouldHoldDevdLease(
@@ -701,7 +733,11 @@ export function ControlPlaneDemo({
   const liveDevdScenario = liveDevd.scenario
   const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario, {
     ...webSerialOptions,
-    persistKnownDevices: !allowDemoControls && webSerialOptions?.persistKnownDevices !== false,
+    // Firmware maintenance owns Browser Web Serial for its full transaction. Keeping
+    // the control-plane client alive here would race its preflight and open the same port.
+    enabled: mockOnly ? false : activeView !== 'update' && webSerialOptions?.enabled,
+    persistKnownDevices:
+      !mockOnly && !allowDemoControls && webSerialOptions?.persistKnownDevices !== false,
   })
   const controlClient = useMemo(
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
@@ -845,7 +881,9 @@ export function ControlPlaneDemo({
   const routedConsoleState = navigation?.state
   const routeDeviceChoice =
     routedConsoleState?.kind === 'device'
-      ? routeDeviceChoices.find((choice) => choice.identityId === routedConsoleState.deviceId)
+      ? routeDeviceChoices.find((choice) =>
+          deviceChoiceMatchesRouteId(choice, routedConsoleState.deviceId)
+        )
       : undefined
   const preferredRouteDeviceConnection = routeDeviceChoice
     ? preferredDeviceConnection(
@@ -867,24 +905,6 @@ export function ControlPlaneDemo({
     healthyRouteFallback
       ? healthyRouteFallback
       : preferredRouteDeviceConnection
-  const firmwareNativeTargets = useMemo<FirmwareNativeTarget[]>(
-    () =>
-      liveDevd.firmwareDevices
-        .filter((device) => device.transport === 'devd' && device.capabilities.includes('flash'))
-        .map((device) => ({
-          id: device.id,
-          label: device.alias,
-          detail: `${device.location} · ${device.leaseState === 'active' ? '租约就绪' : '需要租约'}`,
-          leaseId: device.leaseId ?? null,
-          updateEligible:
-            device.firmware !== 'unknown' &&
-            device.severity !== 'offline' &&
-            device.capabilities.includes('install_status'),
-          currentTemperatureC: device.currentTempC,
-          heaterEnabled: device.heaterEnabled,
-        })),
-    [liveDevd.firmwareDevices]
-  )
   const preferredSelectedDeviceId = useMemo(() => {
     if (navigation?.state.kind === 'device' && routeDeviceConnection) {
       return routeDeviceConnection.target.id
@@ -1084,6 +1104,19 @@ export function ControlPlaneDemo({
   )
 
   const routeDeviceId = navigation?.state.kind === 'device' ? navigation.state.deviceId : null
+  const independentFirmwareFallbackDevice = useMemo(() => {
+    if (selectedDevice || activeView !== 'update' || !routeDeviceId) return null
+    const baseDevice = liveControlPlaneScenario.devices[0]
+    if (!baseDevice) return null
+    return {
+      ...baseDevice,
+      id: `firmware-maintenance-${routeDeviceId}`,
+      identityId: routeDeviceId,
+      alias: routeDeviceId,
+      location: 'Browser USB firmware maintenance',
+      transportIssue: '浏览器 USB 授权端口将在固件预检中验证。',
+    }
+  }, [activeView, routeDeviceId, selectedDevice])
 
   useEffect(() => {
     if (previousRouteDeviceIdRef.current === routeDeviceId) return
@@ -1406,7 +1439,7 @@ export function ControlPlaneDemo({
 
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
-      return activeScenario.devices[0]
+      return independentFirmwareFallbackDevice ?? activeScenario.devices[0]
     }
 
     const liveRuntimeDevice = isLiveRuntimeDevice(selectedDevice)
@@ -1478,6 +1511,7 @@ export function ControlPlaneDemo({
     currentTempByDevice,
     fanPolicyByDevice,
     heaterHeldByDevice,
+    independentFirmwareFallbackDevice,
     manualPpsByDevice,
     lanLeasesByDevice,
     selectedDevice,
@@ -1485,6 +1519,34 @@ export function ControlPlaneDemo({
     wifiSnapshotsByDevice,
   ])
   const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
+  const firmwareNativeTargets = useMemo<FirmwareNativeTarget[]>(() => {
+    const discoveredTargets = liveDevd.firmwareDevices
+    const routedTarget =
+      visibleDevice.transport === 'devd' && visibleDevice.connectionCandidate === true
+        ? [visibleDevice]
+        : []
+    const targets = [...discoveredTargets, ...routedTarget].filter(
+      (device, index, all) => all.findIndex((candidate) => candidate.id === device.id) === index
+    )
+    return targets
+      .filter(
+        (device) =>
+          device.transport === 'devd' &&
+          (device.capabilities.includes('flash') || device.connectionCandidate === true)
+      )
+      .map((device) => ({
+        id: device.id,
+        label: device.alias,
+        detail: `${device.location} · ${device.leaseState === 'active' ? '租约就绪' : '需要租约'}`,
+        leaseId: device.leaseId ?? null,
+        updateEligible:
+          device.firmware !== 'unknown' &&
+          device.severity !== 'offline' &&
+          device.capabilities.includes('install_status'),
+        currentTemperatureC: device.currentTempC,
+        heaterEnabled: device.heaterEnabled,
+      }))
+  }, [liveDevd.firmwareDevices, visibleDevice])
   const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
   const lanDeviceBaseUrl = isDirectLanDevice(visibleDevice) ? visibleDevice.baseUrl : undefined
   const lanLease = lanDeviceId ? lanLeasesByDevice[lanDeviceId] : undefined
@@ -1845,6 +1907,8 @@ export function ControlPlaneDemo({
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
   const routeHasKnownBridgeTransportIssue =
     routeDeviceConnection?.kind === 'bridge' && Boolean(routeDeviceConnection.target.transportIssue)
+  const routeAllowsIndependentFirmwareMaintenance =
+    navigation?.state.kind === 'device' && navigation.state.view === 'update'
 
   useEffect(() => {
     if (routeHasRecoverableTransportCandidate && routeResumeFailed && !routeHasFailedLanResume) {
@@ -1854,6 +1918,9 @@ export function ControlPlaneDemo({
 
   useEffect(() => {
     if (!routeRecoveryIdentityId || !routeRecoveryVariant) {
+      return
+    }
+    if (routeAllowsIndependentFirmwareMaintenance) {
       return
     }
     if (allowDemoControls) {
@@ -1961,6 +2028,7 @@ export function ControlPlaneDemo({
     routeHasRecoverableTransportCandidate,
     routeRecoveryIdentityId,
     routeRecoveryVariant,
+    routeAllowsIndependentFirmwareMaintenance,
     pendingLanResumeIdentityIds,
     activeLanLeaseIdentityIds,
     webSerial.deviceIdentityId,
@@ -2362,17 +2430,18 @@ export function ControlPlaneDemo({
   )
 
   const appendFirmwareActivity = useCallback((entry: FirmwareActivityInput) => {
-    firmwareActivitySequence.current += 1
-    setFirmwareActivity((current) =>
-      [
+    setFirmwareActivity((current) => {
+      const nextSequence = nextFirmwareActivitySequence(current, firmwareActivitySequence.current)
+      firmwareActivitySequence.current = nextSequence
+      return [
         ...current,
         {
           ...entry,
-          id: `firmware-activity-${firmwareActivitySequence.current}`,
+          id: `firmware-activity-${nextSequence}`,
           time: formatRuntimeEventTime(new Date()),
         },
       ].slice(-FIRMWARE_ACTIVITY_FEED_SIZE)
-    )
+    })
   }, [])
 
   const handleLanPaired = useCallback(
@@ -3933,6 +4002,7 @@ export function ControlPlaneDemo({
     navigation &&
     unavailableRouteState &&
     !routeHasInvalidLanCredential &&
+    !routeAllowsIndependentFirmwareMaintenance &&
     (!routeDeviceChoice ||
       routeHasFailedLanResume ||
       (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
@@ -4070,6 +4140,7 @@ export function ControlPlaneDemo({
                 showDeviceSelection={showDeviceSelection}
                 knownDevices={knownDevices}
                 allowDemoControls={allowDemoControls}
+                mockOnly={mockOnly}
                 webSerial={webSerial}
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={visiblePresetTemps}
@@ -4084,6 +4155,7 @@ export function ControlPlaneDemo({
                 calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
                 firmwareNativeTargets={firmwareNativeTargets}
                 firmwareArtifacts={firmwareArtifacts}
+                artifactBlocked={selectedArtifact?.compatibility === 'blocked'}
                 onTargetTempChange={handleTargetTempChange}
                 onPresetSlotChange={handlePresetSlotChange}
                 onPresetTempChange={handlePresetTempChange}
@@ -5145,6 +5217,7 @@ function ViewPanel({
   showDeviceSelection,
   knownDevices,
   allowDemoControls,
+  mockOnly,
   webSerial,
   selectedPresetIndex,
   presetTemps,
@@ -5159,6 +5232,7 @@ function ViewPanel({
   calibrationWorkspaceTab,
   firmwareNativeTargets,
   firmwareArtifacts,
+  artifactBlocked,
   onTargetTempChange,
   onPresetSlotChange,
   onPresetTempChange,
@@ -5204,6 +5278,7 @@ function ViewPanel({
   showDeviceSelection: boolean
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
+  mockOnly: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   selectedPresetIndex: number
   presetTemps: number[]
@@ -5218,6 +5293,7 @@ function ViewPanel({
   calibrationWorkspaceTab: CalibrationWorkspaceTab
   firmwareNativeTargets: FirmwareNativeTarget[]
   firmwareArtifacts?: OfficialFirmwareArtifact[]
+  artifactBlocked: boolean
   onTargetTempChange: (nextTargetTemp: number) => void
   onPresetSlotChange: (presetIndex: number) => void | Promise<void>
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
@@ -5283,11 +5359,14 @@ function ViewPanel({
     return (
       <UpdateView
         browserAvailable={
-          typeof navigator !== 'undefined' && 'serial' in navigator && window.isSecureContext
+          mockOnly ||
+          (typeof navigator !== 'undefined' && 'serial' in navigator && window.isSecureContext)
         }
         nativeTargets={firmwareNativeTargets}
         devdBaseUrl={devdBaseUrl}
         officialArtifacts={firmwareArtifacts}
+        artifactBlocked={artifactBlocked}
+        mockOnly={mockOnly}
         onActivity={onFirmwareActivity}
       />
     )
@@ -8876,12 +8955,16 @@ function UpdateView({
   nativeTargets,
   devdBaseUrl,
   officialArtifacts,
+  artifactBlocked,
+  mockOnly,
   onActivity,
 }: {
   browserAvailable: boolean
   nativeTargets: FirmwareNativeTarget[]
   devdBaseUrl: string | null
   officialArtifacts?: OfficialFirmwareArtifact[]
+  artifactBlocked: boolean
+  mockOnly: boolean
   onActivity: (entry: FirmwareActivityInput) => void
 }) {
   return (
@@ -8891,6 +8974,8 @@ function UpdateView({
         nativeTargets={nativeTargets}
         devdBaseUrl={devdBaseUrl}
         officialArtifacts={officialArtifacts}
+        artifactBlocked={artifactBlocked}
+        executionMode={mockOnly ? 'mock' : 'live'}
         onActivity={onActivity}
       />
     </div>

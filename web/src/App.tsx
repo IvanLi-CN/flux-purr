@@ -19,7 +19,7 @@ import { isPublicDemoBuild } from '@/public-demo'
 import { Route as RootRoute } from '@/routes/__root'
 import { consoleRoutePath, parseConsoleRoute, routeLabel } from '@/routing/console-route'
 import { appVariantFromSearch } from '@/routing/search'
-import { UiDemo } from '@/ui-demo'
+import { firmwareDemoActivity, firmwareDemoArtifacts, UiDemo } from '@/ui-demo'
 
 function inspectorNavigationTargetKey(
   pathname: string,
@@ -79,6 +79,7 @@ function App() {
     inspectorPathnameRef.current = location.pathname
   }, [inspectorState, location.pathname, search])
   const isLive = variant === 'live'
+  const mockOnly = publicDemo || !isLive
   const activeScenario = useMemo(
     () => (isLive ? liveControlPlaneScenario : deriveDemoScenario(inspectorState, inspectorEvents)),
     [inspectorEvents, inspectorState, isLive]
@@ -467,13 +468,15 @@ function App() {
         initialView={requestedInitialView}
         navigation={navigation}
         allowDemoControls={!isLive}
-        mockOnly={publicDemo}
+        mockOnly={mockOnly}
+        firmwareArtifacts={mockOnly ? firmwareDemoArtifacts : undefined}
+        initialFirmwareActivity={mockOnly ? firmwareDemoActivity : undefined}
         devd={{
-          enabled: isLive && !publicDemo,
+          enabled: isLive && !mockOnly,
           includeMockDevices: false,
         }}
         webSerial={{
-          enabled: isLive && !publicDemo,
+          enabled: isLive && !mockOnly,
         }}
       />
       {!isLive && !search.uiDemo ? (

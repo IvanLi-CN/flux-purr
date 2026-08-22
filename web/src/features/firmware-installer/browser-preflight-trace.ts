@@ -2,6 +2,7 @@ import {
   type BrowserSerial,
   type BrowserSerialPort,
   getBrowserSerial,
+  isFluxPurrUsbSerialPort,
   normalizeBrowserSerialError,
   selectBrowserSerialPort,
 } from '../control-plane-demo/web-serial'
@@ -15,10 +16,12 @@ export interface BrowserPreflightTraceEvent {
 
 export function beginBrowserUsbPreflight({
   serial = getBrowserSerial(),
+  preauthorizedPorts,
   now = () => new Date(),
   onTrace,
 }: {
   serial?: BrowserSerial | null
+  preauthorizedPorts?: readonly BrowserSerialPort[]
   now?: () => Date
   onTrace: (entry: BrowserPreflightTraceEvent) => void
 }): Promise<BrowserSerialPort> {
@@ -31,11 +34,28 @@ export function beginBrowserUsbPreflight({
     return Promise.reject(error)
   }
 
+  const reusablePorts = (preauthorizedPorts ?? []).filter(isFluxPurrUsbSerialPort)
+  const reusedPort = reusablePorts.length === 1 ? reusablePorts[0] : null
+  if (reusedPort) {
+    onTrace(
+      createTraceEvent(
+        now,
+        '浏览器 USB 已复用授权端口',
+        '已复用本站点唯一已授权的 ESP32-S3 USB JTAG/serial 端口；未调用 requestPort()。',
+        'success'
+      )
+    )
+    return Promise.resolve(reusedPort)
+  }
+
   let selection: Promise<BrowserSerialPort>
   try {
     // This call must stay in the click stack. Any await before it removes the
-    // transient activation required for Chrome to display the chooser.
-    selection = selectBrowserSerialPort(serial, undefined, true)
+    // transient activation required for Chrome to display the chooser. The
+    // authorization cache above was obtained before this click through
+    // navigator.serial.getPorts(), so an absent or ambiguous port must fall
+    // back to the native chooser here.
+    selection = selectBrowserSerialPort(serial)
   } catch (error) {
     const normalized = normalizeBrowserSerialError(error)
     onTrace(createTraceEvent(now, '浏览器 USB 选择器被拒绝', normalized.message, 'error'))

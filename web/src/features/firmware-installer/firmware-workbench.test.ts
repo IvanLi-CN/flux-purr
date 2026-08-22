@@ -6,6 +6,7 @@ import {
   devdFirmwareResponseMessage,
   FirmwareTransactionLog,
   FirmwareWorkbench,
+  resolveCatalogSelection,
 } from './firmware-workbench'
 
 describe('devd firmware error contracts', () => {
@@ -150,5 +151,33 @@ describe('FirmwareWorkbench task and target scope', () => {
     expect(markup).toContain('data-slot="scroll-area"')
     expect(markup).toContain('aria-label="固件事务日志条目"')
     expect(markup).toContain('浏览器 USB 端口已选择')
+  })
+})
+
+describe('FirmwareWorkbench catalog selection', () => {
+  const artifact = (id: string, publishedAt: string) => ({
+    id,
+    version: `0.18.3-dev.${id}`,
+    channel: 'local' as const,
+    source: 'local' as const,
+    releaseTag: null,
+    sourceSha: id.padEnd(40, 'a').slice(0, 40),
+    buildId: id.padEnd(16, 'a').slice(0, 16),
+    assetPath: `/firmware/releases/${id}/flux-purr-current.fluxpurr-fw`,
+    bundleSha256: `sha256:${id.padEnd(64, 'a').slice(0, 64)}`,
+    target: 'ESP32-S3FH4R2' as const,
+    publishedAt,
+  })
+
+  it('adopts the newest local build after a catalog refresh until an operator chooses a version', () => {
+    const oldBuild = artifact('old', '2026-08-20T07:00:00Z')
+    const currentBuild = artifact('current', '2026-08-20T08:00:00Z')
+
+    expect(resolveCatalogSelection([oldBuild, currentBuild], oldBuild.id, false)?.id).toBe(
+      currentBuild.id
+    )
+    expect(resolveCatalogSelection([oldBuild, currentBuild], oldBuild.id, true)?.id).toBe(
+      oldBuild.id
+    )
   })
 })

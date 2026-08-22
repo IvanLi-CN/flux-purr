@@ -2,8 +2,7 @@
 
 // https://vite.dev/config/
 import { createHash } from 'node:crypto'
-import type { Dirent } from 'node:fs'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { storybookTest } from '@storybook/addon-vitest/vitest-plugin'
@@ -25,7 +24,9 @@ const firmwareReleaseRepository =
   process.env.FLUX_PURR_FIRMWARE_RELEASE_REPOSITORY ?? 'IvanLi-CN/flux-purr'
 const firmwareReleaseApi = process.env.FLUX_PURR_FIRMWARE_RELEASE_API ?? 'https://api.github.com'
 const firmwareReleaseProxyTtlMs = 5 * 60 * 1000
+const firmwareReleaseRequestTimeoutMs = 5_000
 const maxFirmwareBundleBytes = 8 * 1024 * 1024
+const currentLocalFirmwareFile = 'flux-purr-current.fluxpurr-fw'
 const firmwareAssetPath =
   /^firmware\/releases\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.fluxpurr-fw$/
 
@@ -106,7 +107,12 @@ function parseFirmwareBundleIdentity(bytes: Uint8Array): FirmwareBundleIdentity 
   const manifest = JSON.parse(
     new TextDecoder('utf-8', { fatal: true }).decode(archive['manifest.json'])
   ) as {
-    identity?: { version?: unknown; channel?: unknown; sourceSha?: unknown; buildId?: unknown }
+    identity?: {
+      version?: unknown
+      channel?: unknown
+      sourceSha?: unknown
+      buildId?: unknown
+    }
     target?: { chip?: unknown; package?: unknown }
   }
   const identity = manifest.identity
@@ -152,6 +158,7 @@ function hasExactKeys(value: Record<string, unknown>, keys: string[]) {
 async function requestGitHubJson<T>(url: string): Promise<T> {
   const token = process.env.GITHUB_TOKEN
   const response = await fetch(url, {
+    signal: AbortSignal.timeout(firmwareReleaseRequestTimeoutMs),
     headers: {
       Accept: 'application/vnd.github+json',
       'User-Agent': 'flux-purr-vite-firmware-proxy',
@@ -199,6 +206,7 @@ function isGitHubRelease(value: unknown): value is GitHubRelease {
 async function downloadGitHubAsset(assetApiUrl: string): Promise<Uint8Array> {
   const token = process.env.GITHUB_TOKEN
   const response = await fetch(assetApiUrl, {
+    signal: AbortSignal.timeout(firmwareReleaseRequestTimeoutMs),
     headers: {
       Accept: 'application/octet-stream',
       'User-Agent': 'flux-purr-vite-firmware-proxy',
@@ -215,39 +223,34 @@ async function downloadGitHubAsset(assetApiUrl: string): Promise<Uint8Array> {
 async function localFirmwareArtifacts(): Promise<
   Array<{ entry: DevFirmwareArtifact; bytes: Uint8Array }>
 > {
-  let directoryEntries: Dirent<string>[]
   try {
-    directoryEntries = await readdir(firmwareLocalRoot, { withFileTypes: true })
-  } catch {
-    return []
-  }
-  const entries: Array<{ entry: DevFirmwareArtifact; bytes: Uint8Array }> = []
-  for (const directoryEntry of directoryEntries) {
-    if (!directoryEntry.isFile() || !directoryEntry.name.endsWith('.fluxpurr-fw')) continue
-    const fileName = routeComponent(directoryEntry.name)
-    const filePath = path.join(firmwareLocalRoot, fileName)
+    const filePath = path.join(firmwareLocalRoot, currentLocalFirmwareFile)
     const [bytes, fileStat] = await Promise.all([readFile(filePath), stat(filePath)])
     const identity = parseFirmwareBundleIdentity(bytes)
     const bundleSha256 = firmwareHash(bytes)
-    entries.push({
-      entry: {
-        id: `local:${bundleSha256.slice('sha256:'.length, 16 + 'sha256:'.length)}`,
-        version: identity.version,
-        channel: identity.channel,
-        source: 'local',
-        releaseTag: null,
-        publishedAt: fileStat.mtime.toISOString(),
-        sourceSha: identity.sourceSha,
-        buildId: identity.buildId,
-        bundleSha256,
-        size: bytes.byteLength,
-        assetPath: releaseAssetPath('local', bundleSha256, fileName),
-        target: 'ESP32-S3FH4R2',
+    return [
+      {
+        entry: {
+          id: `local:${bundleSha256.slice('sha256:'.length, 16 + 'sha256:'.length)}`,
+          version: identity.version,
+          channel: identity.channel,
+          source: 'local',
+          releaseTag: null,
+          publishedAt: fileStat.mtime.toISOString(),
+          sourceSha: identity.sourceSha,
+          buildId: identity.buildId,
+          bundleSha256,
+          size: bytes.byteLength,
+          assetPath: releaseAssetPath('local', bundleSha256, currentLocalFirmwareFile),
+          target: 'ESP32-S3FH4R2',
+        },
+        bytes,
       },
-      bytes,
-    })
+    ]
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
   }
-  return entries
 }
 
 function isStaticFirmwareArtifact(value: unknown): value is DevFirmwareArtifact {
@@ -395,25 +398,17 @@ async function githubFirmwareArtifacts(): Promise<
 
 function devFirmwarePlugin(): Plugin {
   let cache: { expiresAt: number; index: DevFirmwareProxyIndex } | null = null
+  let released: Array<{ entry: DevFirmwareArtifact; bytes: Uint8Array }> = []
+  let releaseRefresh: Promise<void> | null = null
 
-  const buildIndex = async (): Promise<DevFirmwareProxyIndex> => {
+  const buildIndex = async (releaseArtifacts = released): Promise<DevFirmwareProxyIndex> => {
     const [bundled, local] = await Promise.all([
       staticFirmwareArtifacts(),
       localFirmwareArtifacts(),
     ])
-    let released: Array<{ entry: DevFirmwareArtifact; bytes: Uint8Array }> = []
-    try {
-      released = await githubFirmwareArtifacts()
-    } catch (error) {
-      console.warn(
-        `flux-purr dev firmware proxy: GitHub release refresh unavailable; using bundled and local artifacts. ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      )
-    }
     const byBundle = new Map<string, { entry: DevFirmwareArtifact; bytes: Uint8Array }>()
     for (const candidate of bundled) byBundle.set(bundleKey(candidate.entry), candidate)
-    for (const candidate of released) byBundle.set(bundleKey(candidate.entry), candidate)
+    for (const candidate of releaseArtifacts) byBundle.set(bundleKey(candidate.entry), candidate)
     for (const candidate of local) byBundle.set(bundleKey(candidate.entry), candidate)
     const selected = [...byBundle.values()].sort((left, right) =>
       right.entry.publishedAt.localeCompare(left.entry.publishedAt)
@@ -427,6 +422,28 @@ function devFirmwarePlugin(): Plugin {
       },
       bundles: new Map(selected.map((candidate) => [candidate.entry.assetPath, candidate.bytes])),
     }
+  }
+
+  const refreshReleasedArtifacts = () => {
+    if (releaseRefresh) return
+    releaseRefresh = githubFirmwareArtifacts()
+      .then(async (nextReleased) => {
+        released = nextReleased
+        cache = {
+          expiresAt: Date.now() + firmwareReleaseProxyTtlMs,
+          index: await buildIndex(),
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `flux-purr dev firmware proxy: GitHub release refresh unavailable; using bundled and local artifacts. ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      })
+      .finally(() => {
+        releaseRefresh = null
+      })
   }
 
   return {
@@ -455,7 +472,13 @@ function devFirmwarePlugin(): Plugin {
         try {
           const now = Date.now()
           if (!cache || cache.expiresAt <= now) {
-            cache = { expiresAt: now + firmwareReleaseProxyTtlMs, index: await buildIndex() }
+            cache = {
+              expiresAt: now + firmwareReleaseProxyTtlMs,
+              index: await buildIndex(),
+            }
+            // Never make a local development bundle wait on a GitHub request.
+            // The browser only ever consumes this same-origin cache.
+            refreshReleasedArtifacts()
           }
           if (requestPath === '/firmware/releases-manifest.json') {
             response.statusCode = 200

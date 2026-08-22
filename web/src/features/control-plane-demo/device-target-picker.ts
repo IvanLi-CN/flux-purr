@@ -29,7 +29,8 @@ export function deviceConnectionOptions(
   device: DeviceTarget,
   { allowDemoControls = true }: { allowDemoControls?: boolean } = {}
 ) {
-  if (!isDeviceConnectionAvailable(device)) {
+  const isRecoveryCandidate = device.transport === 'devd' && device.connectionCandidate === true
+  if (!isDeviceConnectionAvailable(device) && !isRecoveryCandidate) {
     return []
   }
 

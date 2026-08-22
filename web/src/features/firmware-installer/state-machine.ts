@@ -1,27 +1,103 @@
 import type { FirmwareOperation, FirmwareRunState, FirmwareStage, FirmwareTransport } from './types'
 
-const BASE_STAGES: FirmwareStage[] = [
+export const PREFLIGHT_STAGES = [
   'artifact',
   'transport',
   'rom_reset',
   'chip_flash_security',
   'layout_config',
   'preflight',
-]
-const WRITE_STAGES: FirmwareStage[] = [
+] as const satisfies readonly FirmwareStage[]
+
+const UPDATE_EXECUTION_STAGES = [
+  'authorization',
   'write_segments',
   'rom_md5',
   'reset',
   'runtime_reconnect',
   'runtime_verify',
-]
+] as const satisfies readonly FirmwareStage[]
+
+const RECOVERY_EXECUTION_STAGES = [
+  'authorization',
+  'erase',
+  ...UPDATE_EXECUTION_STAGES.slice(1),
+] as const satisfies readonly FirmwareStage[]
+
+export type FirmwarePreflightStage = (typeof PREFLIGHT_STAGES)[number]
+export type FirmwareExecutionStage = (typeof RECOVERY_EXECUTION_STAGES)[number]
+
+export function preflightStages(): FirmwarePreflightStage[] {
+  return [...PREFLIGHT_STAGES]
+}
+
+export function executionStages(operation: FirmwareOperation): FirmwareExecutionStage[] {
+  return [
+    ...(operation === 'install_recovery' ? RECOVERY_EXECUTION_STAGES : UPDATE_EXECUTION_STAGES),
+  ]
+}
 
 export function firmwareStages(operation: FirmwareOperation): FirmwareStage[] {
+  return [...preflightStages(), ...executionStages(operation)]
+}
+
+export function preflightProgress(stage: FirmwarePreflightStage, stageProgress = 0): number {
+  const index = PREFLIGHT_STAGES.indexOf(stage)
+  return phaseProgress(index, PREFLIGHT_STAGES.length, stageProgress, false)
+}
+
+export function executionProgress(
+  operation: FirmwareOperation,
+  stage: FirmwareExecutionStage,
+  stageProgress = 0
+): number {
+  const weights = executionStageWeights(operation)
+  const index = weights.findIndex(([candidate]) => candidate === stage)
+  if (index < 0) return 0
+  const completedWeight = weights.slice(0, index).reduce((total, [, weight]) => total + weight, 0)
+  const currentWeight = weights[index][1]
+  const progress = completedWeight + currentWeight * clampUnit(stageProgress)
+  // 100% is reserved for the terminal `verified` outcome.
+  return Math.min(99, Math.round(progress * 100))
+}
+
+function executionStageWeights(
+  operation: FirmwareOperation
+): Array<readonly [FirmwareExecutionStage, number]> {
+  if (operation === 'install_recovery') {
+    return [
+      ['authorization', 0.04],
+      ['erase', 0.12],
+      ['write_segments', 0.46],
+      ['rom_md5', 0.12],
+      ['reset', 0.06],
+      ['runtime_reconnect', 0.08],
+      ['runtime_verify', 0.12],
+    ]
+  }
   return [
-    ...BASE_STAGES,
-    ...(operation === 'install_recovery' ? (['erase'] as const) : []),
-    ...WRITE_STAGES,
+    ['authorization', 0.04],
+    ['write_segments', 0.58],
+    ['rom_md5', 0.14],
+    ['reset', 0.06],
+    ['runtime_reconnect', 0.08],
+    ['runtime_verify', 0.1],
   ]
+}
+
+function phaseProgress(
+  stageIndex: number,
+  stageCount: number,
+  stageProgress: number,
+  reserveTerminal: boolean
+) {
+  if (stageIndex < 0 || stageCount <= 0) return 0
+  const progress = ((stageIndex + clampUnit(stageProgress)) / stageCount) * 100
+  return Math.min(reserveTerminal ? 99 : 100, Math.round(progress))
+}
+
+function clampUnit(value: number) {
+  return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0))
 }
 
 export function initialFirmwareRun(

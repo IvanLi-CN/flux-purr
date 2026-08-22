@@ -7,6 +7,26 @@ import {
 } from './browser-preflight-trace'
 
 describe('Browser USB preflight trace', () => {
+  it('reuses one previously authorized Flux Purr port without reopening the chooser', async () => {
+    const port = {
+      getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 0x1001 }),
+    } as unknown as BrowserSerialPort
+    const serial = { requestPort: vi.fn() } as BrowserSerial
+    const trace: BrowserPreflightTraceEvent[] = []
+
+    await expect(
+      beginBrowserUsbPreflight({
+        serial,
+        preauthorizedPorts: [port],
+        now: () => new Date('2026-08-21T08:00:00.000Z'),
+        onTrace: (entry) => trace.push(entry),
+      })
+    ).resolves.toBe(port)
+
+    expect(serial.requestPort).not.toHaveBeenCalled()
+    expect(trace.map((entry) => entry.event)).toEqual(['预检已点击', '浏览器 USB 已复用授权端口'])
+  })
+
   it('requests the chooser synchronously before any later async preflight work', async () => {
     const port = {} as BrowserSerialPort
     const serial = { requestPort: vi.fn(() => Promise.resolve(port)) } as BrowserSerial

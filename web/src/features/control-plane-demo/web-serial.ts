@@ -58,8 +58,14 @@ export interface BrowserSerial {
 export interface BrowserSerialPort {
   readable: ReadableStream<Uint8Array> | null
   writable: WritableStream<Uint8Array> | null
+  getInfo?(): { usbVendorId?: number; usbProductId?: number }
   open(options: { baudRate: number; bufferSize?: number }): Promise<void>
   close(): Promise<void>
+}
+
+export function isFluxPurrUsbSerialPort(port: BrowserSerialPort) {
+  const info = port.getInfo?.()
+  return info?.usbVendorId === 0x303a && info.usbProductId === 0x1001
 }
 
 /**

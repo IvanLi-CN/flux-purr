@@ -15,7 +15,7 @@ function demoHex(value: string, length: number) {
   return encoded.padEnd(length, '0').slice(0, length)
 }
 
-const firmwareDemoArtifacts: OfficialFirmwareArtifact[] = (
+export const firmwareDemoArtifacts: OfficialFirmwareArtifact[] = (
   [
     {
       id: 'rc-1.5.0-rc.3',
@@ -123,10 +123,10 @@ const firmwareDemoArtifacts: OfficialFirmwareArtifact[] = (
   sourceSha: demoHex(`${artifact.id}:source`, 40),
   buildId: demoHex(`${artifact.id}:build`, 16),
   bundleSha256: `sha256:${demoHex(`${artifact.id}:bundle`, 64)}`,
-  assetPath: `firmware/releases/demo-${artifact.id}/flux-purr-${artifact.version}.fluxpurr-fw`,
+  assetPath: `mock://firmware/releases/demo-${artifact.id}/flux-purr-${artifact.version}.fluxpurr-fw`,
 }))
 
-const firmwareDemoActivity: FirmwareActivityEntry[] = [
+export const firmwareDemoActivity: FirmwareActivityEntry[] = [
   {
     id: 'firmware-demo-1',
     time: '20:19:03',
@@ -152,7 +152,7 @@ const firmwareDemoActivity: FirmwareActivityEntry[] = [
     id: 'firmware-demo-4',
     time: '20:19:15',
     event: '传输引擎',
-    detail: '浏览器 USB ROM 为当前演示路径；本机 devd 未启用。',
+    detail: '模拟 Browser USB ROM 为当前演示路径；本机 devd 未启用。',
     tone: 'warning',
   },
   {
@@ -293,6 +293,7 @@ export function UiDemo() {
         scenario={noDeviceSelected ? liveControlPlaneScenario : controlPlaneScenario}
         initialView={params.get('workspace') === 'firmware' ? 'update' : 'dashboard'}
         allowDemoControls={!noDeviceSelected}
+        mockOnly
         devd={{ enabled: false }}
         firmwareArtifacts={firmwareDemoArtifacts}
         initialFirmwareActivity={firmwareDemoActivity}

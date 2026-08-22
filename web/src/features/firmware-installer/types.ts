@@ -9,6 +9,7 @@ export type FirmwareStage =
   | 'chip_flash_security'
   | 'layout_config'
   | 'preflight'
+  | 'authorization'
   | 'erase'
   | 'write_segments'
   | 'rom_md5'
