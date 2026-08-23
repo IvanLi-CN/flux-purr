@@ -747,7 +747,9 @@ export function ControlPlaneDemo({
     mockOnly || devd?.enabled === false ? null : (devd?.devdBaseUrl ?? defaultDevdBaseUrl())
   // Automatic native discovery can be disabled while an explicitly configured
   // DEVD endpoint remains available to the user-initiated bridge workflow.
-  const bridgeDevdBaseUrl = mockOnly ? null : (devd?.devdBaseUrl ?? null)
+  const bridgeDevdBaseUrl = mockOnly
+    ? null
+    : (devd?.devdBaseUrl ?? (devd?.enabled === false ? null : defaultDevdBaseUrl()))
   const lanRuntime = useMemo(() => {
     if (mockOnly) return mockOnlyLanRuntime
     return {

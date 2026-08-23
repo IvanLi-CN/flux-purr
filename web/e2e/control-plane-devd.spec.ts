@@ -651,7 +651,7 @@ test.describe('control plane live devd bridge', () => {
     await expect(page.getByLabel('Transport capabilities').getByText('connected')).toBeVisible()
   })
 
-  test('lists discovered USB bridge candidates with an explicit connect action', async ({
+  test('connects a discovered USB bridge candidate through the configured devd endpoint', async ({
     page,
   }) => {
     await page.goto('/devices/new?demo=false')
@@ -669,6 +669,13 @@ test.describe('control plane live devd bridge', () => {
     await expect(bridge.getByText('/dev/cu.usbmodem-e2e')).toBeVisible()
     await expect(bridge.getByRole('button', { name: '连接' })).toBeEnabled()
     await expect(bridge.getByText('设备 ID ·')).toHaveCount(0)
+
+    await bridge.getByRole('button', { name: '连接' }).click()
+    const dialog = page.getByRole('dialog', { name: '设备已连接' })
+    await expect(dialog.getByText(/已通过身份验证/)).toBeVisible()
+    await dialog.getByRole('button', { name: '完成' }).click()
+    await expect(page.getByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '目标设备' })).toHaveText(/flux-purr-e2e/)
   })
 
   test('preserves the chosen calibration tab and blocks calibration controls while devd is still reacquiring the lease', async ({
@@ -1081,7 +1088,7 @@ function identity(capabilities: string[]) {
     buildId: 'e2e-build',
     gitSha: 'e2e',
     board: 'esp32-s3',
-    apiVersion: '2026-05-23',
+    apiVersion: '2026-05-29',
     protocolVersion: 'flux-purr.usb.v1',
     hostname: 'flux-purr-e2e',
     capabilities,
