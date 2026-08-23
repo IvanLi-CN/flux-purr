@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "0fbe7a6fc4d2045312da12590b26ab9f1abb3a69",
+  "pr_number": 72,
+  "pr_title": "feat(web): add firmware install and recovery",
+  "product": {
+    "effective_version": "0.19.0",
+    "tag": "v0.19.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "cb81e3698cb248046a097c81c5c4d5b678d97cf5",
+  "type_label": "type:minor"
+}
