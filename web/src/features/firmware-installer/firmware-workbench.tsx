@@ -222,9 +222,6 @@ export function FirmwareWorkbench({
       null,
     [pendingOfficialArtifactId, visibleOfficialArtifacts]
   )
-  const updateEligible = nativeTarget?.updateEligible === true
-  const currentTemperatureC = nativeTarget?.currentTemperatureC
-  const heaterEnabled = nativeTarget?.heaterEnabled
   const preflightOutcome = browserOutcome ?? 'idle'
   const busy = preflightOutcome === 'running' || executionOutcome === 'running'
   const showingExecution = executionOutcome !== 'idle'
@@ -630,23 +627,6 @@ export function FirmwareWorkbench({
     })
 
     if (transport === 'devd') {
-      if (
-        operation === 'update' &&
-        (!updateEligible ||
-          heaterEnabled !== false ||
-          typeof currentTemperatureC !== 'number' ||
-          !Number.isFinite(currentTemperatureC) ||
-          currentTemperatureC > 40)
-      ) {
-        setBrowserOutcome('blocked')
-        setBrowserMessage('更新要求已验证 Flux Purr 运行时、加热关闭且有效温度不高于 40 C。')
-        onActivity?.({
-          event: '预检被阻止',
-          detail: '更新目标未通过运行时、停热或 40 C 温度门禁。',
-          tone: 'warning',
-        })
-        return
-      }
       if (!devdBaseUrl || !nativeTarget?.leaseId) {
         setBrowserOutcome('blocked')
         setBrowserMessage('请选择具有有效租约的本机固件目标。')

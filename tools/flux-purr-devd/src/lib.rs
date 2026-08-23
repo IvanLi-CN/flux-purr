@@ -5261,6 +5261,38 @@ fn validate_update_runtime_facts(
     Ok(())
 }
 
+async fn refresh_native_update_runtime_facts(
+    state: &AppState,
+    target: &DeviceRecord,
+    lease_id: &str,
+) -> Result<(Identity, ControlPlaneStatus), HttpError> {
+    let identity =
+        serial_request_payload::<Identity>(state, target, "get_identity", "identity").await?;
+    let _stopped = serial_runtime_config(
+        state,
+        target,
+        &RuntimeConfigRequest {
+            lease_id: lease_id.to_string(),
+            target_temp_c: None,
+            selected_preset_slot: None,
+            presets_c: None,
+            active_cooling_enabled: None,
+            heater_enabled: Some(false),
+            manual_pps_enabled: None,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
+            fault_attention_acknowledged: None,
+            calibration: None,
+            thermal_profile_mode: None,
+            thermal_control_profile: None,
+        },
+    )
+    .await?;
+    let status =
+        serial_request_payload::<ControlPlaneStatus>(state, target, "get_status", "status").await?;
+    Ok((identity, status))
+}
+
 async fn firmware_operation(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -5330,30 +5362,46 @@ async fn firmware_operation(
     let mut current_version = target.identity.firmware_version.clone();
     let mut status = target.status.clone();
 
-    // An update preserves an existing Flux Purr installation, so it must use
-    // fresh runtime facts from this exact serial target before it enters ROM
-    // mode. Discovery state can be stale while a heater is running.
-    if payload.operation == FirmwareOperation::Update && transport == DeviceTransport::NativeSerial
-    {
-        let identity = progress.require(
-            serial_request_payload::<Identity>(&state, &target, "get_identity", "identity").await,
-        )?;
-        let live_status = progress.require(
-            serial_request_payload::<ControlPlaneStatus>(&state, &target, "get_status", "status")
-                .await,
-        )?;
-        current_version = identity.firmware_version.clone();
-        status = live_status.clone();
+    // An update preserves an existing Flux Purr installation, so it must stop
+    // heat and use fresh runtime facts from this exact serial target before it
+    // enters ROM mode. Discovery state can be stale while a heater is running.
+    if payload.operation == FirmwareOperation::Update {
+        let identity = match transport {
+            DeviceTransport::NativeSerial => {
+                let (identity, live_status) = progress.require(
+                    refresh_native_update_runtime_facts(&state, &target, &payload.lease_id).await,
+                )?;
+                status = live_status;
+                Some(identity)
+            }
+            DeviceTransport::Mock => {
+                status.heater_enabled = false;
+                status.heater_output_percent = 0;
+                status.heater_physical_output_percent = 0;
+                None
+            }
+            DeviceTransport::Lan => unreachable!(),
+        };
+        if let Some(identity) = identity.as_ref() {
+            current_version = identity.firmware_version.clone();
+        }
         if let Ok(mut inner) = state.lock() {
             if let Some(device) = inner.devices.get_mut(&device_id) {
                 if device.port_path.as_deref() == target.port_path.as_deref() {
-                    device.identity = identity;
-                    device.network = live_status.network.clone();
-                    device.status = live_status;
+                    if let Some(identity) = identity {
+                        device.identity = identity;
+                    }
+                    device.network = status.network.clone();
+                    device.status = status.clone();
                     device.connection = ConnectionState::Connected;
                 }
             }
         }
+        progress.require(validate_update_runtime_facts(
+            transport,
+            &current_version,
+            &status,
+        ))?;
     }
     if payload.dry_run {
         progress.stage_completed("transport", json!({}));
@@ -5392,7 +5440,6 @@ async fn firmware_operation(
         async {
             let mut source_partition_hash = None;
             if payload.operation == FirmwareOperation::Update {
-                validate_update_runtime_facts(transport, &current_version, &status)?;
                 if transport == DeviceTransport::NativeSerial {
                     let source_hash = probe_native_partition_hash(&state, &port_path).await?;
                     if !firmware_bundle::source_partition_hash_supported(
@@ -12677,17 +12724,27 @@ mod tests {
             .filter(|event| event.kind == "firmware_operation")
             .cloned()
             .collect::<Vec<_>>();
-        assert_eq!(events[events.len() - 2].payload["event"], "stage_failed");
-        assert_eq!(events[events.len() - 2].payload["stage"], "layout_config");
-        assert_eq!(
-            events[events.len() - 2].payload["code"],
-            "update_temperature_gate"
-        );
+        let blocked_stage = events
+            .iter()
+            .rev()
+            .find(|event| event.payload["event"] == "stage_failed")
+            .expect("update temperature gate must report a failed preflight stage");
+        assert_eq!(blocked_stage.payload["stage"], "transport");
+        assert_eq!(blocked_stage.payload["code"], "update_temperature_gate");
         assert_eq!(
             events.last().unwrap().payload["event"],
             "operation_completed"
         );
         assert_eq!(events.last().unwrap().payload["outcome"], "blocked");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.payload["stage"] != "rom_reset")
+        );
+        let state_lock = state.lock().unwrap();
+        let status = &state_lock.devices.get("mock-fp-lab-01").unwrap().status;
+        assert!(!status.heater_enabled);
+        assert_eq!(status.heater_output_percent, 0);
     }
 
     #[test]

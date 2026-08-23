@@ -1,5 +1,11 @@
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 import http from 'node:http'
+import { resolve } from 'node:path'
+
 import { expect, type Page, test } from '@playwright/test'
+import { zipSync } from 'fflate'
+
 import type {
   CalibrationChannel,
   CalibrationFit,
@@ -18,6 +24,98 @@ const devdBaseUrl = `http://127.0.0.1:${devdPort}`
 const artifactPath = 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr'
 const artifactSha = 'sha256:e2e'
 const deviceId = 'serial-e2e'
+const e2eFirmwareAssetPath = 'firmware/releases/e2e/flux-purr-e2e.fluxpurr-fw'
+
+interface E2eFirmwareCatalog {
+  schemaVersion: 1
+  generatedAt: string
+  releaseCount: number
+  releases: Array<{
+    id: string
+    version: string
+    channel: 'local'
+    source: 'local'
+    releaseTag: null
+    sourceSha: string
+    buildId: string
+    bundleSha256: string
+    size: number
+    assetPath: string
+    target: 'ESP32-S3FH4R2'
+    publishedAt: string
+  }>
+}
+
+async function createE2eFirmwareBundle() {
+  const bootloader = new Uint8Array(0x4000).fill(0x11)
+  const sourcePartition = new Uint8Array(
+    await readFile(resolve(import.meta.dirname, '../../firmware/partitions.bin'))
+  )
+  const partitionTable = new Uint8Array(0x1000).fill(0xff)
+  partitionTable.set(sourcePartition)
+  const app = new Uint8Array(0x5000).fill(0x33)
+  const images = [bootloader, partitionTable, app]
+  const manifestFixture = JSON.parse(
+    await readFile(
+      resolve(
+        import.meta.dirname,
+        '../../docs/specs/web-firmware-install-recovery/contracts/fixtures/valid-manifest.json'
+      ),
+      'utf8'
+    )
+  ) as {
+    identity: {
+      version: string
+      sourceSha: string
+      buildId: string
+      channel: 'local'
+    }
+    segments: Array<{ length: number; sha256: string; md5: string }>
+  }
+  const manifest = structuredClone(manifestFixture) as typeof manifestFixture & {
+    segments: Array<{ length: number; sha256: string; md5: string }>
+  }
+  manifest.identity = {
+    version: '0.16.4',
+    sourceSha: 'e'.repeat(40),
+    buildId: 'e'.repeat(16),
+    channel: 'local',
+  }
+  for (const [index, image] of images.entries()) {
+    manifest.segments[index].length = image.byteLength
+    manifest.segments[index].sha256 = `sha256:${createHash('sha256').update(image).digest('hex')}`
+    manifest.segments[index].md5 = createHash('md5').update(image).digest('hex')
+  }
+  const bytes = zipSync({
+    'manifest.json': new TextEncoder().encode(`${JSON.stringify(manifest)}\n`),
+    'images/bootloader.bin': bootloader,
+    'images/partition-table.bin': partitionTable,
+    'images/factory-app.bin': app,
+  })
+  const bundleSha256 = `sha256:${createHash('sha256').update(bytes).digest('hex')}`
+  const catalog: E2eFirmwareCatalog = {
+    schemaVersion: 1,
+    generatedAt: '2026-08-23T00:00:00Z',
+    releaseCount: 1,
+    releases: [
+      {
+        id: 'local:e2e',
+        version: manifest.identity.version,
+        channel: 'local',
+        source: 'local',
+        releaseTag: null,
+        sourceSha: manifest.identity.sourceSha,
+        buildId: manifest.identity.buildId,
+        bundleSha256,
+        size: bytes.byteLength,
+        assetPath: e2eFirmwareAssetPath,
+        target: 'ESP32-S3FH4R2',
+        publishedAt: '2026-08-23T00:00:00Z',
+      },
+    ],
+  }
+  return { bytes, catalog }
+}
 
 test.describe('control plane live devd bridge', () => {
   let server: http.Server
@@ -477,6 +575,19 @@ test.describe('control plane live devd bridge', () => {
   test('discovers live devd target and completes artifact dry-check through HTTP bridge', async ({
     page,
   }) => {
+    const firmware = await createE2eFirmwareBundle()
+    await page.route('**/firmware/releases-manifest.json', async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify(firmware.catalog),
+      })
+    })
+    await page.route(`**/${e2eFirmwareAssetPath}`, async (route) => {
+      await route.fulfill({
+        contentType: 'application/vnd.flux-purr.firmware-bundle+zip',
+        body: Buffer.from(firmware.bytes),
+      })
+    })
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await expectActiveDevdDeviceWorkspace(page)
