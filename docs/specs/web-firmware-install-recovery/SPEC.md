@@ -176,34 +176,34 @@
 非 Demo 入口支持 `?workspace=firmware` 直达固件维护工作区；本地构建包由同源目录提供，页面不会请求或操作浏览器串口直到用户明确运行预检。
 
 PR: none
-![设备控制工作区](assets/firmware-workspace-device.png)
+![设备控制工作区](./assets/firmware-workspace-device.png)
 
 PR: none
-![固件维护发布版本选择器](assets/firmware-workspace-firmware-release-picker.png)
+![固件维护发布版本选择器](./assets/firmware-workspace-firmware-release-picker.png)
 
 PR: none
-![固件维护统一滚动版本列表](assets/firmware-workspace-firmware-scroll-area.png)
+![固件维护统一滚动版本列表](./assets/firmware-workspace-firmware-scroll-area.png)
 
 PR: none
-![固件维护本地文件选择器](assets/firmware-workspace-firmware-local-picker.png)
+![固件维护本地文件选择器](./assets/firmware-workspace-firmware-local-picker.png)
 
 PR: none
-![同源发布目录选择器](assets/firmware-release-catalog-same-origin-desktop.png)
+![同源发布目录选择器](./assets/firmware-release-catalog-same-origin-desktop.png)
 
 PR: none
-![固件维护预检等待态](assets/firmware-workspace-browser-preflight-ui-demo.png)
+![固件维护预检等待态](./assets/firmware-workspace-browser-preflight-ui-demo.png)
 
 PR: none
-![固件维护预检通过态](assets/firmware-workspace-browser-preflight-passed-ui-demo.png)
+![固件维护预检通过态](./assets/firmware-workspace-browser-preflight-passed-ui-demo.png)
 
 PR: none
-![固件维护执行完成态](assets/firmware-workspace-browser-execution-verified-ui-demo.png)
+![固件维护执行完成态](./assets/firmware-workspace-browser-execution-verified-ui-demo.png)
 
 PR: none
-![固件事务日志跟随最新记录](assets/firmware-transaction-log-scroll.png)
+![固件事务日志跟随最新记录](./assets/firmware-transaction-log-scroll.png)
 
 PR: none
-![固件事务日志历史滚动与返回最新入口](assets/firmware-transaction-log-history.png)
+![固件事务日志历史滚动与返回最新入口](./assets/firmware-transaction-log-history.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
