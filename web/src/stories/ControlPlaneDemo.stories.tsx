@@ -1268,6 +1268,12 @@ export const LiveQuickAddDevice: Story = {
 
 export const LiveQuickAddBridgeDevice: Story = {
   name: 'Live / Quick Add Bridge Device',
+  args: {
+    devd: {
+      enabled: false,
+      devdBaseUrl: 'http://127.0.0.1:4170',
+    },
+  },
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
 
@@ -1616,11 +1622,7 @@ export const LiveBridgeUsbTargetSelection: Story = {
       await expect(canvas.getByRole('button', { name: '目标设备' })).toHaveTextContent(
         'Authorized USB target'
       )
-      await expect(
-        canvas.getByText('DEVD', {
-          selector: '.industrial-status-datum strong',
-        })
-      ).toBeVisible()
+      await expect(canvas.getByRole('button', { name: '目标设备' })).toHaveTextContent('DEVD')
     })
   },
 }
