@@ -60,8 +60,14 @@ import {
 } from './browser-preflight-trace'
 import { validateFirmwareBundle } from './bundle'
 import {
+  type DevdFirmwareErrorEnvelope,
+  type DevdFirmwareProgressMonitor,
+  devdFirmwareResponseMessage,
+  resolveCatalogSelection,
+  startDevdFirmwareProgressMonitor,
+} from './firmware-workbench-logic'
+import {
   type FirmwareOperationProgressEvent,
-  parseFirmwareOperationProgressEvent,
   progressForFirmwareEvent,
   stageIndexForFirmwareEvent,
 } from './operation-progress'
@@ -120,28 +126,6 @@ export interface FirmwareNativeTarget {
   heaterEnabled?: boolean
 }
 
-interface DevdFirmwareErrorEnvelope {
-  error?: {
-    code?: string
-    message?: string
-    retryable?: boolean
-  }
-  message?: string
-}
-
-export function devdFirmwareResponseMessage(
-  response: Pick<Response, 'status'>,
-  payload: DevdFirmwareErrorEnvelope,
-  fallback: string
-) {
-  return (
-    payload.message?.trim() ||
-    payload.error?.message?.trim() ||
-    payload.error?.code?.trim() ||
-    `${fallback} (${response.status}).`
-  )
-}
-
 function sortArtifactsByPublishedAt(
   artifacts: OfficialFirmwareArtifact[]
 ): OfficialFirmwareArtifact[] {
@@ -151,17 +135,6 @@ function sortArtifactsByPublishedAt(
 function preferredArtifactId(artifacts: OfficialFirmwareArtifact[]): string | null {
   const sorted = sortArtifactsByPublishedAt(artifacts)
   return sorted.find((artifact) => artifact.channel === 'stable')?.id ?? sorted[0]?.id ?? null
-}
-
-export function resolveCatalogSelection(
-  artifacts: OfficialFirmwareArtifact[],
-  selectedArtifactId: string | null,
-  selectionIsExplicit: boolean
-): OfficialFirmwareArtifact | null {
-  const selected = artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null
-  if (selectionIsExplicit && selected) return selected
-  const preferredId = preferredArtifactId(artifacts)
-  return artifacts.find((artifact) => artifact.id === preferredId) ?? null
 }
 
 export function FirmwareWorkbench({
@@ -209,6 +182,8 @@ export function FirmwareWorkbench({
   const [browserProgress, setBrowserProgress] = useState(0)
   const [browserPreflightStageIndex, setBrowserPreflightStageIndex] = useState(0)
   const browserPreflightTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
+  const browserPortSelectionTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
+  const [browserSelectedPort, setBrowserSelectedPort] = useState<BrowserSerialPort | null>(null)
   const [browserMessage, setBrowserMessage] = useState<string | null>(null)
   const [executionOutcome, setExecutionOutcome] = useState<FirmwareOutcome>('idle')
   const [executionProgressValue, setExecutionProgressValue] = useState(0)
@@ -413,6 +388,17 @@ export function FirmwareWorkbench({
 
   const appendBrowserPreflightTrace = (entry: BrowserPreflightTraceEvent) => {
     browserPreflightTraceRef.current = [...browserPreflightTraceRef.current, entry].slice(-32)
+    onActivity?.({
+      event: entry.event,
+      detail: entry.detail,
+      tone: entry.tone,
+    })
+  }
+
+  const appendBrowserPortSelectionTrace = (entry: BrowserPreflightTraceEvent) => {
+    browserPortSelectionTraceRef.current = [...browserPortSelectionTraceRef.current, entry].slice(
+      -8
+    )
     onActivity?.({
       event: entry.event,
       detail: entry.detail,
@@ -630,7 +616,9 @@ export function FirmwareWorkbench({
       transport === 'browser'
         ? beginBrowserUsbPreflight({
             serial: browserSerial,
-            preauthorizedPorts: browserPreauthorizedPortsRef.current,
+            preauthorizedPorts: browserSelectedPort
+              ? [browserSelectedPort]
+              : browserPreauthorizedPortsRef.current,
             onTrace: appendBrowserPreflightTrace,
           })
         : null
@@ -777,6 +765,35 @@ export function FirmwareWorkbench({
         })
         const runtimeClient = new WebSerialControlPlaneClient({
           preauthorizedPorts: [selectedPort],
+          onDiagnostic: (diagnostic) => {
+            const detail =
+              diagnostic.kind === 'boot_stage'
+                ? `设备已报告 boot_stage=${diagnostic.reason}。`
+                : diagnostic.kind === 'reset'
+                  ? `设备报告 reset_reason=${diagnostic.reason}。`
+                  : `设备报告 panic=${diagnostic.reason}。`
+            appendBrowserPreflightTrace({
+              at: new Date().toISOString(),
+              event:
+                diagnostic.kind === 'boot_stage'
+                  ? '固件启动阶段'
+                  : diagnostic.kind === 'reset'
+                    ? '固件已复位'
+                    : '固件 panic',
+              detail,
+              tone: diagnostic.kind === 'boot_stage' ? 'info' : 'warning',
+            })
+          },
+          onInitializationRetry: ({ remainingMs }) => {
+            const remainingSeconds = Math.max(1, Math.ceil(remainingMs / 1_000))
+            setBrowserMessage(`正在等待 Flux Purr 启动就绪（最多还有 ${remainingSeconds} 秒）。`)
+            appendBrowserPreflightTrace({
+              at: new Date().toISOString(),
+              event: '等待运行时就绪',
+              detail: `尚未收到匹配的 USB JSONL 响应；仅等待 boot_stage=runtime_ready 后重发一次，最多还有 ${remainingSeconds} 秒。`,
+              tone: 'warning',
+            })
+          },
         })
         try {
           const runtime = await runtimeClient.connect()
@@ -815,7 +832,7 @@ export function FirmwareWorkbench({
             tone: 'success',
           })
         } finally {
-          await runtimeClient.disconnect().catch(() => undefined)
+          await runtimeClient.disconnect()
         }
       }
 
@@ -1077,6 +1094,33 @@ export function FirmwareWorkbench({
     })
   }
 
+  const chooseBrowserUsbPort = () => {
+    if (mockExecution || !browserSerial || busy) return
+
+    // `requestPort()` must remain in this synchronous click path. Resetting the
+    // old transaction only changes local state and never selects a new device.
+    resetAuthorization()
+    browserPortSelectionTraceRef.current = []
+    const selection = beginBrowserUsbPreflight({
+      serial: browserSerial,
+      forcePortSelection: true,
+      selectionReason: 'change_port',
+      onTrace: appendBrowserPortSelectionTrace,
+    })
+    void selection.then(
+      (port) => {
+        browserPreauthorizedPortsRef.current = [port]
+        setBrowserSelectedPort(port)
+        onActivity?.({
+          event: '浏览器 USB 端口已固定',
+          detail: '后续预检仅使用刚刚在浏览器选择器中确认的设备。',
+          tone: 'success',
+        })
+      },
+      () => undefined
+    )
+  }
+
   const chooseOfficialArtifact = (artifactId: string) => {
     const artifact = catalogArtifacts.find((candidate) => candidate.id === artifactId)
     if (!artifact) return
@@ -1180,7 +1224,10 @@ export function FirmwareWorkbench({
         message: executionMessage,
       },
       bundleSha256: localBundle?.bundleSha256 ?? null,
-      browserPreflightTrace: browserPreflightTraceRef.current,
+      browserPreflightTrace: [
+        ...browserPortSelectionTraceRef.current,
+        ...browserPreflightTraceRef.current,
+      ],
       generatedAt: new Date().toISOString(),
     }
     const url = URL.createObjectURL(
@@ -1320,6 +1367,33 @@ export function FirmwareWorkbench({
                 </SelectGroup>
               </SelectContent>
             </Select>
+          </section>
+        ) : null}
+
+        {transport === 'browser' && !mockExecution ? (
+          <section
+            className="firmware-workbench__browser-target"
+            aria-labelledby="browser-target-label"
+          >
+            <span id="browser-target-label">浏览器 USB 目标</span>
+            <Button
+              type="button"
+              variant="outline"
+              className="firmware-workbench__browser-target-trigger h-10 justify-start px-3"
+              disabled={!browserAvailable || busy}
+              onClick={chooseBrowserUsbPort}
+            >
+              <Usb data-icon="inline-start" aria-hidden="true" />
+              <span className="grid min-w-0 flex-1 gap-0.5 text-left">
+                <strong>选择 / 更换浏览器 USB 端口</strong>
+                <small>
+                  {browserSelectedPort
+                    ? '已固定为本次在浏览器选择器中确认的设备'
+                    : '打开 Chrome 选择器，仅显示 ESP32-S3 USB JTAG/serial 设备'}
+                </small>
+              </span>
+              <ChevronRight data-icon="inline-end" aria-hidden="true" />
+            </Button>
           </section>
         ) : null}
 
@@ -1740,8 +1814,12 @@ export function FirmwareTransactionLog({ entries }: { entries: FirmwareActivityE
     const scrollableNode = scrollableNodeRef.current
     if (!scrollableNode) return
     scrollableNode.scrollTo({ top: scrollableNode.scrollHeight, behavior })
-    setFollowTail(true)
   }, [])
+
+  const handleFollowTail = useCallback(() => {
+    scrollToTail('smooth')
+    setFollowTail(true)
+  }, [scrollToTail])
 
   useLayoutEffect(() => {
     if (followTail && latestEntryId) scrollToTail()
@@ -1769,7 +1847,7 @@ export function FirmwareTransactionLog({ entries }: { entries: FirmwareActivityE
               className="firmware-transaction-log__tail"
               aria-label="查看最新日志"
               title="查看最新日志"
-              onClick={() => scrollToTail('smooth')}
+              onClick={handleFollowTail}
             >
               <ArrowDownToLine size={15} aria-hidden="true" />
             </button>
@@ -1802,105 +1880,6 @@ export function FirmwareTransactionLog({ entries }: { entries: FirmwareActivityE
       </ScrollArea>
     </aside>
   )
-}
-
-export interface DevdFirmwareProgressMonitor {
-  ready: Promise<void>
-  arm: () => void
-  bindOperationId: (operationId: string) => void
-  close: () => void
-}
-
-export function startDevdFirmwareProgressMonitor({
-  devdBaseUrl,
-  deviceId,
-  phase,
-  operation,
-  artifactId,
-  onEvent,
-}: {
-  devdBaseUrl: string
-  deviceId: string
-  phase: 'preflight' | 'execution'
-  operation: FirmwareOperation
-  artifactId: string
-  onEvent: (event: FirmwareOperationProgressEvent) => void
-}): DevdFirmwareProgressMonitor {
-  if (typeof EventSource === 'undefined') {
-    return {
-      ready: Promise.resolve(),
-      arm() {},
-      bindOperationId() {},
-      close() {},
-    }
-  }
-
-  const source = new EventSource(
-    `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/events`
-  )
-  let armedAt = Number.POSITIVE_INFINITY
-  let capturedOperationId: string | null = null
-  let boundOperationId: string | null = null
-  const seen = new Set<string>()
-  let settleReady: (() => void) | null = null
-  const ready = new Promise<void>((resolve) => {
-    settleReady = resolve
-  })
-  const readyTimeout = window.setTimeout(() => settleReady?.(), 1_500)
-  const settle = () => {
-    window.clearTimeout(readyTimeout)
-    settleReady?.()
-    settleReady = null
-  }
-  source.onopen = settle
-  source.onerror = settle
-
-  const handleEvent = (message: MessageEvent<string>) => {
-    const event = parseFirmwareOperationProgressEvent(message.data)
-    if (
-      !event ||
-      event.phase !== phase ||
-      event.operation !== operation ||
-      event.artifactId !== artifactId
-    ) {
-      return
-    }
-    const eventAt = parseFirmwareEventTimestamp(event.timestamp)
-    if (Number.isFinite(eventAt) && eventAt < armedAt) return
-    if (boundOperationId && event.operationId !== boundOperationId) return
-    if (!capturedOperationId) {
-      if (event.event !== 'operation_started') return
-      capturedOperationId = event.operationId
-    }
-    if (event.operationId !== capturedOperationId) return
-    const key = `${event.operationId}:${event.sequence}`
-    if (seen.has(key)) return
-    seen.add(key)
-    onEvent(event)
-  }
-  source.addEventListener('firmware_operation', handleEvent)
-
-  return {
-    ready,
-    arm() {
-      armedAt = Date.now()
-    },
-    bindOperationId(operationId) {
-      boundOperationId = operationId
-    },
-    close() {
-      settle()
-      source.removeEventListener('firmware_operation', handleEvent)
-      source.close()
-    },
-  }
-}
-
-function parseFirmwareEventTimestamp(timestamp: string | undefined) {
-  if (!timestamp) return Number.NaN
-  const numeric = Number(timestamp)
-  if (Number.isFinite(numeric)) return numeric
-  return Date.parse(timestamp)
 }
 
 async function firmwareStagePresentationDelay() {

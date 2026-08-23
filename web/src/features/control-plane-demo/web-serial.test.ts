@@ -62,6 +62,60 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
+  it('recovers a matching USB JSONL response that follows diagnostic bytes', async () => {
+    const noisy = new FakeSerial('boot_stage=runtime_ready ')
+    const client = new WebSerialControlPlaneClient({ serial: noisy })
+
+    await expect(client.connect()).resolves.toMatchObject({
+      identity: { deviceId: 'flux-purr-s3-001' },
+    })
+
+    await client.disconnect()
+  })
+
+  it('retries USB startup exactly once after firmware reports runtime_ready', async () => {
+    const diagnostics: string[] = []
+    const retries: number[] = []
+    const serial = new StartupGatedSerial()
+    const client = new WebSerialControlPlaneClient({
+      serial,
+      onDiagnostic: (diagnostic) => diagnostics.push(`${diagnostic.kind}:${diagnostic.reason}`),
+      onInitializationRetry: ({ attempt }) => retries.push(attempt),
+    })
+
+    await expect(client.connect()).resolves.toMatchObject({
+      identity: { deviceId: 'flux-purr-s3-001' },
+    })
+
+    expect(serial.requests.map((request) => request.op)).toEqual([
+      'get_identity',
+      'get_identity',
+      'get_network',
+      'get_status',
+    ])
+    expect(retries).toEqual([1])
+    expect(diagnostics).toContain('boot_stage:runtime_ready')
+    await client.disconnect()
+  })
+
+  it('retries a transient close before handing the same authorized port to the next client', async () => {
+    const serial = new RetriableCloseSerial()
+    const firstClient = new WebSerialControlPlaneClient({
+      serial,
+      preauthorizedPorts: [serial.authorizedPort],
+    })
+    await firstClient.connect()
+    await firstClient.disconnect()
+
+    const nextClient = new WebSerialControlPlaneClient({
+      serial,
+      preauthorizedPorts: [serial.authorizedPort],
+    })
+    await expect(nextClient.connect()).resolves.toBeDefined()
+    expect(serial.authorizedPort.closeCalls).toBe(2)
+    await nextClient.disconnect()
+  })
+
   it('opens the chooser when Add device explicitly requests another port', async () => {
     const serial = new AuthorizedSerial()
 
@@ -157,7 +211,7 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
-  it('reports firmware reset markers without treating arbitrary serial output as device state', async () => {
+  it('reports firmware boot and reset markers without treating arbitrary serial output as device state', async () => {
     const fake = new FakeSerial()
     const diagnostics: string[] = []
     const client = new WebSerialControlPlaneClient({
@@ -167,11 +221,16 @@ describe('web serial control-plane client', () => {
     await client.connect()
 
     fake.emitLine('boot chatter that is not part of the control-plane contract')
+    fake.emitLine('boot_stage=runtime_ready')
     fake.emitLine('reset_reason=system_brownout')
     fake.emitLine('panic=firmware_fault')
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
 
-    expect(diagnostics).toEqual(['reset:system_brownout', 'panic:firmware_fault'])
+    expect(diagnostics).toEqual([
+      'boot_stage:runtime_ready',
+      'reset:system_brownout',
+      'panic:firmware_fault',
+    ])
     await client.disconnect()
   })
 
@@ -191,13 +250,14 @@ describe('web serial control-plane client', () => {
   it('bounds a non-Flux runtime probe and closes the port', async () => {
     vi.useFakeTimers()
     try {
+      expect(WEB_SERIAL_INITIALIZATION_TIMEOUT_MS).toBe(8_000)
       const serial = new SilentSerial()
       const client = new WebSerialControlPlaneClient({ serial })
       const connection = client.connect()
       const failure = expect(connection).rejects.toMatchObject({
         code: 'web_serial_runtime_not_ready',
         message:
-          'Flux Purr 运行时在 30 秒内未响应；空片、外来固件或 ROM 模式设备请切换“安装或恢复”。',
+          'Flux Purr 运行时在 8 秒内未响应；空片、外来固件或 ROM 模式设备请切换“安装或恢复”。',
       })
 
       await vi.advanceTimersByTimeAsync(WEB_SERIAL_INITIALIZATION_TIMEOUT_MS + 1_000)
@@ -265,7 +325,11 @@ describe('web serial control-plane client', () => {
 
 class FakeSerial implements BrowserSerial {
   readonly requests: Array<Record<string, unknown>> = []
-  private readonly port = new FakeSerialPort(this.requests)
+  private readonly port: FakeSerialPort
+
+  constructor(responsePrefix = '') {
+    this.port = new FakeSerialPort(this.requests, undefined, responsePrefix)
+  }
 
   requestPort(): Promise<BrowserSerialPort> {
     return Promise.resolve(this.port)
@@ -273,6 +337,15 @@ class FakeSerial implements BrowserSerial {
 
   emitLine(line: string) {
     this.port.emitLine(line)
+  }
+}
+
+class StartupGatedSerial implements BrowserSerial {
+  readonly requests: Array<Record<string, unknown>> = []
+  private readonly port = new StartupGatedSerialPort(this.requests)
+
+  requestPort(): Promise<BrowserSerialPort> {
+    return Promise.resolve(this.port)
   }
 }
 
@@ -375,12 +448,14 @@ class FakeSerialPort implements BrowserSerialPort {
   private readonly encoder = new TextEncoder()
   private readonly requests: Array<Record<string, unknown>>
   private readonly onOpen?: () => void
+  private readonly responsePrefix: string
   private writeBuffer = ''
   signalHistory: Array<{ dataTerminalReady?: boolean; requestToSend?: boolean }> = []
 
-  constructor(requests: Array<Record<string, unknown>>, onOpen?: () => void) {
+  constructor(requests: Array<Record<string, unknown>>, onOpen?: () => void, responsePrefix = '') {
     this.requests = requests
     this.onOpen = onOpen
+    this.responsePrefix = responsePrefix
     this.readable = new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.controller = controller
@@ -419,9 +494,143 @@ class FakeSerialPort implements BrowserSerialPort {
       this.writeBuffer = this.writeBuffer.slice(newlineIndex + 1)
       const request = JSON.parse(line) as Record<string, unknown>
       this.requests.push(request)
-      this.controller?.enqueue(this.encoder.encode(`${JSON.stringify(responseFor(request))}\n`))
+      this.controller?.enqueue(
+        this.encoder.encode(`${this.responsePrefix}${JSON.stringify(responseFor(request))}\n`)
+      )
       newlineIndex = this.writeBuffer.indexOf('\n')
     }
+  }
+}
+
+class StartupGatedSerialPort implements BrowserSerialPort {
+  readonly readable: ReadableStream<Uint8Array>
+  readonly writable: WritableStream<Uint8Array>
+  private readonly decoder = new TextDecoder()
+  private readonly encoder = new TextEncoder()
+  private readonly requests: Array<Record<string, unknown>>
+  private controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  private writeBuffer = ''
+  private firstIdentity = true
+
+  constructor(requests: Array<Record<string, unknown>>) {
+    this.requests = requests
+    this.readable = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        this.controller = controller
+      },
+    })
+    this.writable = new WritableStream<Uint8Array>({
+      write: (chunk) => {
+        this.writeBuffer += this.decoder.decode(chunk, { stream: true })
+        this.flushRequests()
+      },
+    })
+  }
+
+  open(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  close(): Promise<void> {
+    return Promise.resolve()
+  }
+
+  private flushRequests() {
+    let newlineIndex = this.writeBuffer.indexOf('\n')
+    while (newlineIndex >= 0) {
+      const line = this.writeBuffer.slice(0, newlineIndex)
+      this.writeBuffer = this.writeBuffer.slice(newlineIndex + 1)
+      const request = JSON.parse(line) as Record<string, unknown>
+      this.requests.push(request)
+      if (request.op === 'get_identity' && this.firstIdentity) {
+        this.firstIdentity = false
+        this.emit({
+          type: 'response',
+          requestId: request.requestId,
+          ok: false,
+          error: {
+            code: 'startup_busy',
+            message: 'Runtime is not available until memory and WiFi initialization completes.',
+            retryable: true,
+          },
+        })
+        this.emit('boot_stage=runtime_ready')
+      } else {
+        this.emit(responseFor(request))
+      }
+      newlineIndex = this.writeBuffer.indexOf('\n')
+    }
+  }
+
+  private emit(message: Record<string, unknown> | string) {
+    const line = typeof message === 'string' ? message : JSON.stringify(message)
+    this.controller?.enqueue(this.encoder.encode(`${line}\n`))
+  }
+}
+
+class RetriableCloseSerial implements BrowserSerial {
+  readonly authorizedPort = new RetriableCloseSerialPort()
+
+  getPorts(): Promise<BrowserSerialPort[]> {
+    return Promise.resolve([this.authorizedPort])
+  }
+
+  requestPort(): Promise<BrowserSerialPort> {
+    return Promise.resolve(this.authorizedPort)
+  }
+}
+
+class RetriableCloseSerialPort implements BrowserSerialPort {
+  closeCalls = 0
+  private openState = false
+  private controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  private readonly decoder = new TextDecoder()
+  private readonly encoder = new TextEncoder()
+  private writeBuffer = ''
+  readable: ReadableStream<Uint8Array> | null = null
+  writable: WritableStream<Uint8Array> | null = null
+
+  constructor() {
+    this.createStreams()
+  }
+
+  open(): Promise<void> {
+    if (this.openState)
+      return Promise.reject(new DOMException('Failed to open serial port.', 'InvalidStateError'))
+    this.openState = true
+    this.createStreams()
+    return Promise.resolve()
+  }
+
+  close(): Promise<void> {
+    this.closeCalls += 1
+    if (this.closeCalls === 1) {
+      return Promise.reject(new DOMException('Port is still closing.', 'NetworkError'))
+    }
+    this.openState = false
+    return Promise.resolve()
+  }
+
+  private createStreams() {
+    this.writeBuffer = ''
+    this.readable = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        this.controller = controller
+      },
+    })
+    this.writable = new WritableStream<Uint8Array>({
+      write: (chunk) => {
+        this.writeBuffer += this.decoder.decode(chunk, { stream: true })
+        let newlineIndex = this.writeBuffer.indexOf('\n')
+        while (newlineIndex >= 0) {
+          const line = this.writeBuffer.slice(0, newlineIndex)
+          this.writeBuffer = this.writeBuffer.slice(newlineIndex + 1)
+          const request = JSON.parse(line) as Record<string, unknown>
+          this.controller?.enqueue(this.encoder.encode(`${JSON.stringify(responseFor(request))}\n`))
+          newlineIndex = this.writeBuffer.indexOf('\n')
+        }
+      },
+    })
   }
 }
 

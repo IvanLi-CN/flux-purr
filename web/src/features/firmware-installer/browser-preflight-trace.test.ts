@@ -47,6 +47,32 @@ describe('Browser USB preflight trace', () => {
     expect(trace.at(-1)).toMatchObject({ event: '浏览器 USB 端口已选择', tone: 'success' })
   })
 
+  it('opens the chooser to replace an already authorized port', async () => {
+    const previous = {
+      getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 0x1001 }),
+    } as unknown as BrowserSerialPort
+    const replacement = {} as BrowserSerialPort
+    const serial = { requestPort: vi.fn(() => Promise.resolve(replacement)) } as BrowserSerial
+    const trace: BrowserPreflightTraceEvent[] = []
+
+    await expect(
+      beginBrowserUsbPreflight({
+        serial,
+        preauthorizedPorts: [previous],
+        forcePortSelection: true,
+        selectionReason: 'change_port',
+        onTrace: (entry) => trace.push(entry),
+      })
+    ).resolves.toBe(replacement)
+
+    expect(serial.requestPort).toHaveBeenCalledOnce()
+    expect(trace.map((entry) => entry.event)).toEqual([
+      '浏览器 USB 端口更换已点击',
+      '浏览器 USB 选择器已请求更换端口',
+      '浏览器 USB 端口已更换',
+    ])
+  })
+
   it('records a rejected chooser with the normalized local error', async () => {
     const serial = {
       requestPort: vi.fn(() => Promise.reject(new Error('No port selected by the user.'))),

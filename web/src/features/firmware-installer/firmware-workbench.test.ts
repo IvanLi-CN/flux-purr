@@ -2,12 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import {
-  devdFirmwareResponseMessage,
-  FirmwareTransactionLog,
-  FirmwareWorkbench,
-  resolveCatalogSelection,
-} from './firmware-workbench'
+import { FirmwareTransactionLog, FirmwareWorkbench } from './firmware-workbench'
+import { devdFirmwareResponseMessage, resolveCatalogSelection } from './firmware-workbench-logic'
 
 describe('devd firmware error contracts', () => {
   it('preserves the structured service error for the firmware trace', () => {
@@ -92,6 +88,7 @@ describe('FirmwareWorkbench task and target scope', () => {
     expect(markup).toContain('固件包')
     expect(markup).toContain('选择固件包')
     expect(markup).toContain('Browser USB ROM 引导')
+    expect(markup).toContain('选择 / 更换浏览器 USB 端口')
   })
 
   it('explains an empty published catalog instead of rendering a blank firmware entry', () => {

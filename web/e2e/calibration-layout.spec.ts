@@ -58,6 +58,8 @@ test.describe('calibration layout', () => {
   })
 
   test('places ADC calibration commands under the status card', async ({ page }) => {
+    await expect(page.getByLabel('ADC 标定操作')).toBeVisible()
+
     const metrics = await page.evaluate(() => {
       const statusCard = [...document.querySelectorAll('.industrial-calibration-live-card')].find(
         (element) =>

@@ -17,16 +17,30 @@ export interface BrowserPreflightTraceEvent {
 export function beginBrowserUsbPreflight({
   serial = getBrowserSerial(),
   preauthorizedPorts,
+  forcePortSelection = false,
+  selectionReason = 'preflight',
   now = () => new Date(),
   onTrace,
 }: {
   serial?: BrowserSerial | null
   preauthorizedPorts?: readonly BrowserSerialPort[]
+  /** Always use Chrome's chooser, even when this origin already has one port. */
+  forcePortSelection?: boolean
+  selectionReason?: 'preflight' | 'change_port'
   now?: () => Date
   onTrace: (entry: BrowserPreflightTraceEvent) => void
 }): Promise<BrowserSerialPort> {
   const userActivation = navigator.userActivation?.isActive === true
-  onTrace(createTraceEvent(now, '预检已点击', '浏览器 USB 预检由用户操作触发。', 'info'))
+  onTrace(
+    createTraceEvent(
+      now,
+      selectionReason === 'change_port' ? '浏览器 USB 端口更换已点击' : '预检已点击',
+      selectionReason === 'change_port'
+        ? '将打开浏览器选择器；不会自动选取已授权的其他设备。'
+        : '浏览器 USB 预检由用户操作触发。',
+      'info'
+    )
+  )
 
   if (!serial) {
     const error = new Error('Browser USB requires desktop Chrome or Edge on HTTPS or localhost.')
@@ -35,7 +49,11 @@ export function beginBrowserUsbPreflight({
   }
 
   const reusablePorts = (preauthorizedPorts ?? []).filter(isFluxPurrUsbSerialPort)
-  const reusedPort = reusablePorts.length === 1 ? reusablePorts[0] : null
+  const reusedPort = forcePortSelection
+    ? null
+    : reusablePorts.length === 1
+      ? reusablePorts[0]
+      : null
   if (reusedPort) {
     onTrace(
       createTraceEvent(
@@ -67,7 +85,7 @@ export function beginBrowserUsbPreflight({
       onTrace(
         createTraceEvent(
           now,
-          '浏览器 USB 端口已选择',
+          selectionReason === 'change_port' ? '浏览器 USB 端口已更换' : '浏览器 USB 端口已选择',
           `选择器已确认串口设备；requestPort() 调用时 userActivation=${userActivation ? 'active' : 'inactive'}。`,
           'success'
         )
@@ -84,7 +102,9 @@ export function beginBrowserUsbPreflight({
   onTrace(
     createTraceEvent(
       now,
-      '浏览器 USB 选择器已请求',
+      selectionReason === 'change_port'
+        ? '浏览器 USB 选择器已请求更换端口'
+        : '浏览器 USB 选择器已请求',
       `requestPort() 已在点击同步栈内发起；userActivation=${userActivation ? 'active' : 'inactive'}。`,
       'info'
     )

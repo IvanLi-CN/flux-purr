@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { startDevdFirmwareProgressMonitor } from './firmware-workbench'
+import { startDevdFirmwareProgressMonitor } from './firmware-workbench-logic'
 
 class FakeEventSource {
   static instances: FakeEventSource[] = []
