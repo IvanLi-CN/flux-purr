@@ -575,6 +575,43 @@ describe('Browser runtime verification', () => {
     }
   })
 
+  it('fails closed when re-enumeration loses the selected port USB identity', async () => {
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+    const stalePort = {
+      readable: null,
+      writable: null,
+      open: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+    const unrelatedPort = {
+      readable: null,
+      writable: null,
+      getInfo: () => ({ usbVendorId: 0x303a, usbProductId: 0x1001 }),
+      open: vi.fn(),
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { serial: { getPorts: vi.fn().mockResolvedValue([unrelatedPort]) } },
+    })
+
+    try {
+      await expect(
+        verifyBrowserRuntime(
+          {
+            transport: { device: stalePort, disconnect: vi.fn().mockResolvedValue(undefined) },
+          } as never,
+          bundle,
+          { timeoutMs: 500, reconnectDelayMs: 0 }
+        )
+      ).rejects.toThrow('cannot prove the selected Web USB target after reset')
+      expect(unrelatedPort.open).not.toHaveBeenCalled()
+    } finally {
+      if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor)
+      else Reflect.deleteProperty(globalThis, 'navigator')
+    }
+  })
+
   it('refuses ambiguous same-model ports after reset instead of choosing one', async () => {
     const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
     const stalePort = {

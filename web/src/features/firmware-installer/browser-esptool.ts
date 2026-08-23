@@ -626,17 +626,17 @@ async function refreshGrantedBrowserRuntimePort(
     const sameObject = granted.find((port) => port === preferred)
     if (sameObject) return sameObject as BrowserSerialPort
 
-    const matchingPorts = preferredInfo
-      ? granted.filter((port) => sameBrowserUsbInfo(port.getInfo?.(), preferredInfo))
-      : []
-    if (matchingPorts.length === 1) return matchingPorts[0] as BrowserSerialPort
-    if (matchingPorts.length > 1) {
+    if (!preferredInfo) {
       throw new Error(
-        'Browser granted Web USB ports are ambiguous after reset. Re-open Web USB and choose the exact ESP32-S3 target again.'
+        'Browser cannot prove the selected Web USB target after reset. Re-open Web USB and choose the exact ESP32-S3 target again.'
       )
     }
-    if (!preferredInfo && granted.length === 1) return granted[0] as BrowserSerialPort
-    if (granted.length > 1) {
+
+    const matchingPorts = granted.filter((port) =>
+      sameBrowserUsbInfo(port.getInfo?.(), preferredInfo)
+    )
+    if (matchingPorts.length === 1) return matchingPorts[0] as BrowserSerialPort
+    if (matchingPorts.length > 1) {
       throw new Error(
         'Browser granted Web USB ports are ambiguous after reset. Re-open Web USB and choose the exact ESP32-S3 target again.'
       )

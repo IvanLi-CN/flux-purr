@@ -5239,6 +5239,28 @@ fn bundle_http_error(error: firmware_bundle::BundleError) -> HttpError {
     HttpError::bad_request("firmware_bundle_invalid", &error.to_string())
 }
 
+fn validate_update_runtime_facts(
+    transport: DeviceTransport,
+    current_version: &str,
+    status: &ControlPlaneStatus,
+) -> Result<(), HttpError> {
+    if transport == DeviceTransport::NativeSerial
+        && (current_version == "unknown" || current_version.trim().is_empty())
+    {
+        return Err(HttpError::forbidden(
+            "update_identity_required",
+            "Update requires a verified Flux Purr runtime identity.",
+        ));
+    }
+    if status.heater_enabled || !status.current_temp_c.is_finite() || status.current_temp_c > 40.0 {
+        return Err(HttpError::forbidden(
+            "update_temperature_gate",
+            "Update requires heater off and a valid temperature at or below 40 C.",
+        ));
+    }
+    Ok(())
+}
+
 async fn firmware_operation(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -5295,20 +5317,44 @@ async fn firmware_operation(
                         "Firmware flashing is unavailable through the DEVD LAN bridge.",
                     ));
                 }
-                Ok((
-                    device
-                        .port_path
-                        .clone()
-                        .unwrap_or_else(|| "mock://esp32s3".into()),
-                    device.identity.device_id.clone(),
-                    device.transport,
-                    device.identity.firmware_version.clone(),
-                    device.status.clone(),
-                ))
+                Ok(device.clone())
             })
     };
     let target = progress.require(target_result)?;
-    let (port_path, mock_identity, transport, current_version, status) = target;
+    let port_path = target
+        .port_path
+        .clone()
+        .unwrap_or_else(|| "mock://esp32s3".into());
+    let mock_identity = target.identity.device_id.clone();
+    let transport = target.transport;
+    let mut current_version = target.identity.firmware_version.clone();
+    let mut status = target.status.clone();
+
+    // An update preserves an existing Flux Purr installation, so it must use
+    // fresh runtime facts from this exact serial target before it enters ROM
+    // mode. Discovery state can be stale while a heater is running.
+    if payload.operation == FirmwareOperation::Update && transport == DeviceTransport::NativeSerial
+    {
+        let identity = progress.require(
+            serial_request_payload::<Identity>(&state, &target, "get_identity", "identity").await,
+        )?;
+        let live_status = progress.require(
+            serial_request_payload::<ControlPlaneStatus>(&state, &target, "get_status", "status")
+                .await,
+        )?;
+        current_version = identity.firmware_version.clone();
+        status = live_status.clone();
+        if let Ok(mut inner) = state.lock() {
+            if let Some(device) = inner.devices.get_mut(&device_id) {
+                if device.port_path.as_deref() == target.port_path.as_deref() {
+                    device.identity = identity;
+                    device.network = live_status.network.clone();
+                    device.status = live_status;
+                    device.connection = ConnectionState::Connected;
+                }
+            }
+        }
+    }
     if payload.dry_run {
         progress.stage_completed("transport", json!({}));
         progress.stage_started("rom_reset", json!({}));
@@ -5346,23 +5392,7 @@ async fn firmware_operation(
         async {
             let mut source_partition_hash = None;
             if payload.operation == FirmwareOperation::Update {
-                if transport == DeviceTransport::NativeSerial
-                    && (current_version == "unknown" || current_version.trim().is_empty())
-                {
-                    return Err(HttpError::forbidden(
-                        "update_identity_required",
-                        "Update requires a verified Flux Purr runtime identity.",
-                    ));
-                }
-                if status.heater_enabled
-                    || !status.current_temp_c.is_finite()
-                    || status.current_temp_c > 40.0
-                {
-                    return Err(HttpError::forbidden(
-                        "update_temperature_gate",
-                        "Update requires heater off and a valid temperature at or below 40 C.",
-                    ));
-                }
+                validate_update_runtime_facts(transport, &current_version, &status)?;
                 if transport == DeviceTransport::NativeSerial {
                     let source_hash = probe_native_partition_hash(&state, &port_path).await?;
                     if !firmware_bundle::source_partition_hash_supported(
@@ -12658,6 +12688,27 @@ mod tests {
             "operation_completed"
         );
         assert_eq!(events.last().unwrap().payload["outcome"], "blocked");
+    }
+
+    #[test]
+    fn update_runtime_gate_uses_live_identity_and_thermal_facts() {
+        let cached = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
+        let mut live_status = cached.status.clone();
+        live_status.heater_enabled = true;
+        live_status.current_temp_c = 31.0;
+
+        let error = validate_update_runtime_facts(
+            DeviceTransport::NativeSerial,
+            "fw/v0.18.3",
+            &live_status,
+        )
+        .unwrap_err();
+        assert_eq!(error.error.code, "update_temperature_gate");
+
+        let error =
+            validate_update_runtime_facts(DeviceTransport::NativeSerial, "unknown", &cached.status)
+                .unwrap_err();
+        assert_eq!(error.error.code, "update_identity_required");
     }
 
     #[test]

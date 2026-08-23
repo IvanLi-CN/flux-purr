@@ -194,6 +194,12 @@ PR: none
 ![固件维护预检等待态](assets/firmware-workspace-browser-preflight-ui-demo.png)
 
 PR: none
+![固件维护预检通过态](assets/firmware-workspace-browser-preflight-passed-ui-demo.png)
+
+PR: none
+![固件维护执行完成态](assets/firmware-workspace-browser-execution-verified-ui-demo.png)
+
+PR: none
 ![固件事务日志跟随最新记录](assets/firmware-transaction-log-scroll.png)
 
 PR: none
