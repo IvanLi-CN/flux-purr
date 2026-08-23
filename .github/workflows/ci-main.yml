@@ -88,9 +88,10 @@ jobs:
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py
+          python3 -m py_compile .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
           bash .github/scripts/test-release-labels.sh
           bash .github/scripts/test-version-scripts.sh
+          python3 -m unittest tools/firmware-web-catalog/test_build_catalog.py
 
       - name: Biome check + typecheck
         run: bash scripts/check-web-check.sh
@@ -99,7 +100,11 @@ jobs:
         run: bun run --cwd web test:unit
 
       - name: Web build
-        run: bash scripts/check-web-build.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/firmware-web-catalog/build_catalog.py --output-root web/public/firmware
+          bash scripts/check-web-build.sh
 
       - name: Storybook build
         run: bash scripts/check-storybook-build.sh

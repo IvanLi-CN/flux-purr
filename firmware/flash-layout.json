@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "flux-purr.esp32s3fh4r2.factory",
+  "version": 1,
+  "target": {
+    "chip": "esp32s3",
+    "package": "ESP32-S3FH4R2",
+    "flashSize": 4194304,
+    "psramSize": 2097152,
+    "flashMode": "dio",
+    "flashFrequency": "40m"
+  },
+  "segments": [
+    { "kind": "bootloader", "address": 0, "maxLength": 32768 },
+    { "kind": "partition-table", "address": 32768, "length": 4096 },
+    { "kind": "factory-app", "address": 65536, "maxLength": 2097152 }
+  ],
+  "partitions": {
+    "nvs": { "address": 36864, "length": 24576 },
+    "phy_init": { "address": 61440, "length": 4096 },
+    "factory": { "address": 65536, "length": 2097152 },
+    "flux_cfg": { "address": 2162688, "length": 8192 }
+  },
+  "partitionTableSha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e"
+}

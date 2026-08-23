@@ -13,6 +13,6 @@ export default defineConfig({
     command: `bun run build:demo && bunx vite preview --outDir dist-demo --host 127.0.0.1 --port ${webPort} --strictPort`,
     url: `http://127.0.0.1:${webPort}`,
     reuseExistingServer: canReuseExistingServer,
-    timeout: 120_000,
+    timeout: 240_000,
   },
 })

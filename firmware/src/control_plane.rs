@@ -24,7 +24,7 @@ pub const BUILD_ID_MAX_LEN: usize = 48;
 pub const GIT_SHA_MAX_LEN: usize = 40;
 pub const HOSTNAME_MAX_LEN: usize = 64;
 pub const CAPABILITY_MAX_LEN: usize = 24;
-pub const CAPABILITY_COUNT_MAX: usize = 10;
+pub const CAPABILITY_COUNT_MAX: usize = 12;
 // A fully materialized 9-point thermal profile save request is about 5 KiB.
 // Keep one shared bound for firmware and devd JSONL frames so it can persist.
 pub const USB_LINE_MAX_LEN: usize = 8 * 1024;
@@ -125,6 +125,7 @@ impl Identity {
         push_str(&mut capabilities, "status");
         push_str(&mut capabilities, "network");
         push_str(&mut capabilities, "calibration");
+        push_str(&mut capabilities, "install_status");
         #[cfg(feature = "web_serial")]
         {
             push_str(&mut capabilities, "usb_jsonl");
@@ -139,9 +140,9 @@ impl Identity {
         }
         Self {
             device_id: string("flux-purr-s3-001"),
-            firmware_version: string(env!("CARGO_PKG_VERSION")),
-            build_id: string(option_env!("VERGEN_BUILD_TIMESTAMP").unwrap_or("host-build")),
-            git_sha: string(option_env!("GIT_SHA").unwrap_or("unknown")),
+            firmware_version: string(env!("FLUX_PURR_FW_VERSION")),
+            build_id: string(env!("FLUX_PURR_BUILD_ID")),
+            git_sha: string(env!("FLUX_PURR_SOURCE_SHA")),
             board: string("esp32-s3"),
             api_version: string(CONTROL_PLANE_API_VERSION),
             protocol_version: string(USB_PROTOCOL_VERSION),
@@ -1453,15 +1454,21 @@ pub enum UsbFrame {
 struct UsbFrameWire {
     #[serde(rename = "type")]
     frame_type: String<24>,
-    #[serde(rename = "protocolVersion")]
+    #[serde(rename = "protocolVersion", skip_serializing_if = "Option::is_none")]
     protocol_version: Option<String<24>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     framing: Option<String<8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<Identity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     capabilities: Option<Vec<String<CAPABILITY_MAX_LEN>, CAPABILITY_COUNT_MAX>>,
-    #[serde(rename = "requestId")]
+    #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     op: Option<String<24>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
     #[serde(
         default,
@@ -1469,40 +1476,77 @@ struct UsbFrameWire {
         skip_serializing_if = "Option::is_none"
     )]
     static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     telemetry_interval_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_temp_c: Option<i16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     selected_preset_slot: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     presets_c: Option<[Option<i16>; FRONTPANEL_PRESET_COUNT]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     active_cooling_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heater_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     manual_pps_ma: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fault_attention_acknowledged: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     calibration: Option<CalibrationControlCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thermal_profile_mode: Option<ThermalProfileModeWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<ThermalControlProfileCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<CalibrationChannelWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reference_temp_c: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reference_vin_mv: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     target_adc_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     observed_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     expected_mv: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sample_index: Option<usize>,
-    #[serde(rename = "kind", alias = "jobKind")]
+    #[serde(
+        rename = "kind",
+        alias = "jobKind",
+        skip_serializing_if = "Option::is_none"
+    )]
     job_kind: Option<CalibrationJobKindWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<CalibrationStateWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     slot: Option<CalibrationSlotIdWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     fit: Option<CalibrationSlotFitWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     heater_curve: Option<HeaterCurvePackageWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     length: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bytes: Option<Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<UsbResponsePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ApiError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<ControlPlaneStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     level: Option<String<8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String<ERROR_MESSAGE_MAX_LEN>>,
 }
 
@@ -1929,6 +1973,9 @@ impl From<&UsbFrame> for UsbFrameWire {
 #[serde(rename_all = "snake_case")]
 pub enum UsbRequestOp {
     GetIdentity,
+    GetInstallStatus,
+    CompleteSetup,
+    ResetPersistence,
     GetNetwork,
     GetStatus,
     GetLanPairingCode,
@@ -1945,6 +1992,9 @@ impl UsbRequestOp {
     const fn as_str(self) -> &'static str {
         match self {
             Self::GetIdentity => "get_identity",
+            Self::GetInstallStatus => "get_install_status",
+            Self::CompleteSetup => "complete_setup",
+            Self::ResetPersistence => "reset_persistence",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
             Self::GetLanPairingCode => "get_lan_pairing_code",
@@ -2004,6 +2054,7 @@ impl WifiConfigOp {
 #[serde(rename_all = "snake_case")]
 pub enum UsbResponsePayload {
     Identity(Identity),
+    InstallStatus(InstallStatus),
     Network(NetworkSummary),
     Status(ControlPlaneStatus),
     LanPairingCode(LanPairingCode),
@@ -2013,6 +2064,55 @@ pub enum UsbResponsePayload {
     HeaterCurve(HeaterCurveStateWire),
     EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
     Ack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallStatus {
+    pub layout_id: String<48>,
+    pub layout_version: u32,
+    pub partition_table_sha256: String<72>,
+    pub persistence_source: String<32>,
+    pub record_state: String<24>,
+    pub record_sequence: u32,
+    pub commissioning_required: bool,
+    pub setup_reason: Option<String<32>>,
+    pub sensor_state: String<24>,
+    pub heater_locked: bool,
+}
+
+impl InstallStatus {
+    pub fn from_runtime(
+        config: &crate::memory::MemoryConfig,
+        persistence_source: &str,
+        record_state: &str,
+        record_sequence: u32,
+        sensor_ready: bool,
+        heater_fault_latched: bool,
+    ) -> Self {
+        Self {
+            layout_id: string("flux-purr.esp32s3fh4r2.factory"),
+            layout_version: 1,
+            partition_table_sha256: string(
+                "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e",
+            ),
+            persistence_source: string(persistence_source),
+            record_state: string(record_state),
+            record_sequence,
+            commissioning_required: config.commissioning_required,
+            setup_reason: if config.commissioning_required {
+                Some(string(if record_sequence == 0 {
+                    "blank_persistence"
+                } else {
+                    "explicit_reset"
+                }))
+            } else {
+                None
+            },
+            sensor_state: string(if sensor_ready { "ready" } else { "unavailable" }),
+            heater_locked: config.commissioning_required || !sensor_ready || heater_fault_latched,
+        }
+    }
 }
 
 /// A transient code is intentionally available through the already-authorized
@@ -2260,6 +2360,9 @@ fn push_str<const N: usize, const C: usize>(values: &mut Vec<String<N>, C>, valu
 fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameError> {
     match value {
         Some("get_identity") => Ok(UsbRequestOp::GetIdentity),
+        Some("get_install_status") => Ok(UsbRequestOp::GetInstallStatus),
+        Some("complete_setup") => Ok(UsbRequestOp::CompleteSetup),
+        Some("reset_persistence") => Ok(UsbRequestOp::ResetPersistence),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
@@ -2362,6 +2465,29 @@ mod tests {
                     .any(|value| value == "lan_pairing")
             );
         }
+    }
+
+    #[test]
+    fn identity_response_omits_unrelated_wire_fields_for_usb_transport() {
+        let frame = UsbFrame::Response {
+            request_id: string("compact-identity"),
+            ok: true,
+            result: Some(UsbResponsePayload::Identity(Identity::firmware_default())),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).expect("identity response fits");
+
+        assert!(json.contains(r#""requestId":"compact-identity""#));
+        assert!(json.contains(r#""identity""#));
+        assert!(!json.contains(r#""status":null"#));
+        assert!(!json.contains(r#""ssid":null"#));
+        assert!(!json.contains(r#""heaterCurve":null"#));
+        assert!(json.len() < 700);
+        assert_eq!(
+            parse_usb_frame(json).expect("compact response parses"),
+            frame
+        );
     }
 
     #[test]
@@ -3027,6 +3153,24 @@ mod tests {
                 op: UsbRequestOp::GetStatus,
             }
         );
+    }
+
+    #[test]
+    fn parses_commissioning_persistence_requests() {
+        for (op, expected) in [
+            ("complete_setup", UsbRequestOp::CompleteSetup),
+            ("reset_persistence", UsbRequestOp::ResetPersistence),
+        ] {
+            let line =
+                std::format!(r#"{{"type":"request","requestId":"commissioning","op":"{op}"}}"#);
+            assert_eq!(
+                parse_usb_frame(&line).unwrap(),
+                UsbFrame::Request {
+                    request_id: string("commissioning"),
+                    op: expected,
+                }
+            );
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@ import type {
   HeaterCurvePackage,
   HeaterCurveState,
   Identity,
+  InstallStatus,
   NetworkSummary,
   UsbCalibrationConfigFrame,
   UsbCalibrationJobFrame,
@@ -24,26 +25,53 @@ const WEB_SERIAL_BAUD_RATE = 115_200
 const WEB_SERIAL_RPC_TIMEOUT_MS = 12_000
 const WEB_SERIAL_DEVICE_BASE_URL = 'webserial://selected'
 const WEB_SERIAL_LINE_LIMIT = 8 * 1024
-const WEB_SERIAL_INITIALIZATION_RETRY_MS = 500
-const WEB_SERIAL_INITIALIZATION_ATTEMPTS = 50
+export const WEB_SERIAL_INITIALIZATION_TIMEOUT_MS = 8_000
+const WEB_SERIAL_INITIAL_REQUEST_TIMEOUT_MS = 2_000
+const WEB_SERIAL_CLOSE_TIMEOUT_MS = 4_000
+const WEB_SERIAL_CLOSE_RETRY_MS = 100
+
+export interface BrowserSerialPortFilter {
+  readonly usbVendorId: number
+  readonly usbProductId?: number
+}
+
+export interface BrowserSerialRequestOptions {
+  readonly filters?: readonly BrowserSerialPortFilter[]
+}
+
+// ESP32-S3's native USB Serial/JTAG controller identifies as Espressif 303A:1001.
+export const FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS: BrowserSerialRequestOptions = {
+  filters: [{ usbVendorId: 0x303a, usbProductId: 0x1001 }],
+}
 
 export type WebSerialConnectionState = 'unsupported' | 'idle' | 'connecting' | 'connected' | 'error'
 
 export interface WebSerialDiagnostic {
-  kind: 'reset' | 'panic'
+  kind: 'boot_stage' | 'reset' | 'panic'
   reason: string
 }
 
+export interface WebSerialInitializationRetry {
+  attempt: number
+  remainingMs: number
+}
+
 export interface BrowserSerial {
-  requestPort(options?: unknown): Promise<BrowserSerialPort>
+  requestPort(options?: BrowserSerialRequestOptions): Promise<BrowserSerialPort>
   getPorts?(): Promise<BrowserSerialPort[]>
 }
 
 export interface BrowserSerialPort {
   readable: ReadableStream<Uint8Array> | null
   writable: WritableStream<Uint8Array> | null
+  getInfo?(): { usbVendorId?: number; usbProductId?: number }
   open(options: { baudRate: number; bufferSize?: number }): Promise<void>
   close(): Promise<void>
+}
+
+export function isFluxPurrUsbSerialPort(port: BrowserSerialPort) {
+  const info = port.getInfo?.()
+  return info?.usbVendorId === 0x303a && info.usbProductId === 0x1001
 }
 
 /**
@@ -58,11 +86,13 @@ export function selectBrowserSerialPort(
   requestPortWhenUnavailable = true
 ): Promise<BrowserSerialPort> {
   if (forcePortSelection) {
-    return serial.requestPort()
+    return serial.requestPort(FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS)
   }
   const preauthorizedPort = preauthorizedPorts?.length === 1 ? preauthorizedPorts[0] : null
   if (preauthorizedPort) return Promise.resolve(preauthorizedPort)
-  if (requestPortWhenUnavailable) return serial.requestPort()
+  if (requestPortWhenUnavailable) {
+    return serial.requestPort(FLUX_PURR_USB_SERIAL_REQUEST_OPTIONS)
+  }
   return Promise.reject(
     new ControlPlaneClientError(
       '没有唯一的已授权 Web Serial 端口，请手动选择设备。',
@@ -91,6 +121,22 @@ interface PendingRequest {
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
 }
+
+interface RuntimeReadyWaiter {
+  resolve: () => void
+  reject: (error: Error) => void
+  timeout?: ReturnType<typeof setTimeout>
+}
+
+type UsbFrameFactory = (
+  requestId: string
+) =>
+  | UsbRequestFrame
+  | UsbRuntimeConfigFrame
+  | UsbCalibrationJobFrame
+  | UsbCalibrationConfigFrame
+  | UsbHeaterCurveConfigFrame
+  | UsbHeaterCurveSaveFrame
 
 export function getBrowserSerial(): BrowserSerial | null {
   if (typeof navigator === 'undefined') {
@@ -167,6 +213,7 @@ export class WebSerialControlPlaneClient {
   private readonly pending = new Map<string, PendingRequest>()
   private readonly preauthorizedPorts?: readonly BrowserSerialPort[]
   private readonly onDiagnostic?: (diagnostic: WebSerialDiagnostic) => void
+  private readonly onInitializationRetry?: (retry: WebSerialInitializationRetry) => void
   private readonly requestPortWhenUnavailable: boolean
   private port: BrowserSerialPort | null = null
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null
@@ -174,18 +221,22 @@ export class WebSerialControlPlaneClient {
   private readPump: Promise<void> | null = null
   private writeChain = Promise.resolve()
   private connectionAttempt = 0
+  private runtimeReadyObserved = false
+  private readonly runtimeReadyWaiters = new Set<RuntimeReadyWaiter>()
 
   constructor({
     serial = getBrowserSerial(),
     baudRate = WEB_SERIAL_BAUD_RATE,
     preauthorizedPorts,
     onDiagnostic,
+    onInitializationRetry,
     requestPortWhenUnavailable = true,
   }: {
     serial?: BrowserSerial | null
     baudRate?: number
     preauthorizedPorts?: readonly BrowserSerialPort[]
     onDiagnostic?: (diagnostic: WebSerialDiagnostic) => void
+    onInitializationRetry?: (retry: WebSerialInitializationRetry) => void
     requestPortWhenUnavailable?: boolean
   } = {}) {
     if (!serial) {
@@ -199,11 +250,14 @@ export class WebSerialControlPlaneClient {
     this.baudRate = baudRate
     this.preauthorizedPorts = preauthorizedPorts
     this.onDiagnostic = onDiagnostic
+    this.onInitializationRetry = onInitializationRetry
     this.requestPortWhenUnavailable = requestPortWhenUnavailable
   }
 
   async connect() {
     const attempt = ++this.connectionAttempt
+    this.runtimeReadyObserved = false
+    this.lineBuffer = ''
     let port: BrowserSerialPort
     try {
       port = await selectBrowserSerialPort(
@@ -226,55 +280,90 @@ export class WebSerialControlPlaneClient {
     }
     this.port = port
     this.readPump = this.readLoop()
-    return this.probeAfterInitialization()
+    try {
+      return await this.probeAfterInitialization()
+    } catch (error) {
+      await this.disconnect()
+      throw error
+    }
   }
 
   async disconnect() {
     this.connectionAttempt += 1
     const port = this.port
     this.port = null
-    this.rejectAll(
-      new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
+    const closed = new ControlPlaneClientError(
+      'Web Serial connection closed.',
+      'web_serial_closed',
+      true
     )
+    this.rejectAll(closed)
+    this.rejectRuntimeReadyWaiters(closed)
     await withCleanupTimeout(this.reader?.cancel().catch(() => undefined))
     await withCleanupTimeout(this.readPump?.catch(() => undefined))
     if (port) {
-      await port.close().catch(() => undefined)
+      await closeBrowserSerialPort(port)
     }
   }
 
   async probe(): Promise<WebSerialProbe> {
+    return this.probeWithDeadline()
+  }
+
+  private async probeWithDeadline(deadline?: number): Promise<WebSerialProbe> {
+    const timeout = () => {
+      if (deadline === undefined) return WEB_SERIAL_RPC_TIMEOUT_MS
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) throw runtimeInitializationTimeoutError()
+      return Math.min(WEB_SERIAL_RPC_TIMEOUT_MS, remaining)
+    }
     const identity = await this.requestPayload<Identity>(
       'identity',
-      createUsbRequestFrame('get_identity')
+      createUsbRequestFrame('get_identity'),
+      timeout()
     )
     const network = await this.requestPayload<NetworkSummary>(
       'network',
-      createUsbRequestFrame('get_network')
+      createUsbRequestFrame('get_network'),
+      timeout()
     )
     const status = await this.requestPayload<ControlPlaneStatus>(
       'status',
-      createUsbRequestFrame('get_status')
+      createUsbRequestFrame('get_status'),
+      timeout()
     )
     return { identity, network, status }
   }
 
+  get connectedPort(): BrowserSerialPort {
+    return this.requireOpenPort()
+  }
+
+  async getInstallStatus(): Promise<InstallStatus> {
+    return this.requestPayload<InstallStatus>(
+      'install_status',
+      createUsbRequestFrame('get_install_status')
+    )
+  }
+
   private async probeAfterInitialization(): Promise<WebSerialProbe> {
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        return await this.probe()
-      } catch (error) {
-        if (
-          attempt >= WEB_SERIAL_INITIALIZATION_ATTEMPTS ||
-          !isFirmwareInitializationPending(error)
-        ) {
-          throw error
-        }
-        await new Promise<void>((resolve) =>
-          globalThis.setTimeout(resolve, WEB_SERIAL_INITIALIZATION_RETRY_MS)
-        )
-      }
-    }
+    const deadline = Date.now() + WEB_SERIAL_INITIALIZATION_TIMEOUT_MS
+    const identity = await this.requestPayloadAfterRuntimeReady<Identity>(
+      'identity',
+      createUsbRequestFrame('get_identity'),
+      deadline
+    )
+    const network = await this.requestPayloadAfterRuntimeReady<NetworkSummary>(
+      'network',
+      createUsbRequestFrame('get_network'),
+      deadline
+    )
+    const status = await this.requestPayloadAfterRuntimeReady<ControlPlaneStatus>(
+      'status',
+      createUsbRequestFrame('get_status'),
+      deadline
+    )
+    return { identity, network, status }
   }
 
   async configureRuntime(request: DirectRuntimeConfigRequest): Promise<ControlPlaneStatus> {
@@ -352,18 +441,11 @@ export class WebSerialControlPlaneClient {
 
   private async requestPayload<T>(
     payloadKey: string,
-    frameFactory: (
-      requestId: string
-    ) =>
-      | UsbRequestFrame
-      | UsbRuntimeConfigFrame
-      | UsbCalibrationJobFrame
-      | UsbCalibrationConfigFrame
-      | UsbHeaterCurveConfigFrame
-      | UsbHeaterCurveSaveFrame
+    frameFactory: UsbFrameFactory,
+    timeoutMs = WEB_SERIAL_RPC_TIMEOUT_MS
   ): Promise<T> {
     const requestId = createWebSerialRequestId()
-    const result = await this.exchange(frameFactory(requestId))
+    const result = await this.exchange(frameFactory(requestId), timeoutMs)
     const payload = result[payloadKey]
 
     if (!payload || typeof payload !== 'object') {
@@ -377,15 +459,40 @@ export class WebSerialControlPlaneClient {
     return payload as T
   }
 
-  private exchange(
-    frame:
-      | UsbRequestFrame
-      | UsbRuntimeConfigFrame
-      | UsbCalibrationJobFrame
-      | UsbCalibrationConfigFrame
-      | UsbHeaterCurveConfigFrame
-      | UsbHeaterCurveSaveFrame
-  ) {
+  /**
+   * Opening ESP32-S3 USB Serial/JTAG can reset the target. The first request
+   * is allowed to observe that startup state, but it is never retried on a
+   * timer: firmware's `boot_stage=runtime_ready` is the sole retry boundary.
+   */
+  private async requestPayloadAfterRuntimeReady<T>(
+    payloadKey: string,
+    frameFactory: UsbFrameFactory,
+    deadline: number
+  ): Promise<T> {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw runtimeInitializationTimeoutError()
+
+    try {
+      return await this.requestPayload<T>(
+        payloadKey,
+        frameFactory,
+        Math.min(WEB_SERIAL_INITIAL_REQUEST_TIMEOUT_MS, remaining)
+      )
+    } catch (error) {
+      if (!isFirmwareInitializationPending(error)) throw error
+    }
+
+    const retryRemaining = deadline - Date.now()
+    if (retryRemaining <= 0) throw runtimeInitializationTimeoutError()
+    this.onInitializationRetry?.({ attempt: 1, remainingMs: retryRemaining })
+    await this.waitForRuntimeReady(deadline)
+
+    const finalRemaining = deadline - Date.now()
+    if (finalRemaining <= 0) throw runtimeInitializationTimeoutError()
+    return this.requestPayload<T>(payloadKey, frameFactory, finalRemaining)
+  }
+
+  private exchange(frame: ReturnType<UsbFrameFactory>, timeoutMs = WEB_SERIAL_RPC_TIMEOUT_MS) {
     const port = this.requireOpenPort()
     if (!port.writable) {
       throw new ControlPlaneClientError(
@@ -408,7 +515,7 @@ export class WebSerialControlPlaneClient {
             true
           )
         )
-      }, WEB_SERIAL_RPC_TIMEOUT_MS)
+      }, timeoutMs)
       this.pending.set(requestId, { resolve, reject, timeout })
     })
 
@@ -475,6 +582,13 @@ export class WebSerialControlPlaneClient {
       while (this.port === port) {
         const { value, done } = await reader.read()
         if (done) {
+          this.rejectAll(
+            new ControlPlaneClientError(
+              'Web Serial stream closed before a USB JSONL response.',
+              'web_serial_stream_closed',
+              true
+            )
+          )
           break
         }
         if (value) {
@@ -511,13 +625,11 @@ export class WebSerialControlPlaneClient {
       return
     }
 
-    let frame: UsbResponseWire
-    try {
-      frame = JSON.parse(line) as UsbResponseWire
-    } catch {
+    const frame = parseUsbResponseWire(line)
+    if (!frame) {
       const diagnostic = parseWebSerialDiagnostic(line)
       if (diagnostic) {
-        this.onDiagnostic?.(diagnostic)
+        this.observeDiagnostic(diagnostic)
       }
       return
     }
@@ -556,9 +668,83 @@ export class WebSerialControlPlaneClient {
       this.pending.delete(requestId)
     }
   }
+
+  private observeDiagnostic(diagnostic: WebSerialDiagnostic) {
+    if (diagnostic.kind === 'boot_stage' && diagnostic.reason === 'runtime_ready') {
+      this.runtimeReadyObserved = true
+      for (const waiter of this.runtimeReadyWaiters) {
+        globalThis.clearTimeout(waiter.timeout)
+        waiter.resolve()
+      }
+      this.runtimeReadyWaiters.clear()
+    }
+    this.onDiagnostic?.(diagnostic)
+  }
+
+  private waitForRuntimeReady(deadline: number) {
+    if (this.runtimeReadyObserved) return Promise.resolve()
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return Promise.reject(runtimeInitializationTimeoutError())
+
+    return new Promise<void>((resolve, reject) => {
+      const waiter: RuntimeReadyWaiter = {
+        resolve: () => {
+          globalThis.clearTimeout(waiter.timeout)
+          this.runtimeReadyWaiters.delete(waiter)
+          resolve()
+        },
+        reject: (error) => {
+          globalThis.clearTimeout(waiter.timeout)
+          this.runtimeReadyWaiters.delete(waiter)
+          reject(error)
+        },
+        timeout: undefined,
+      }
+      waiter.timeout = globalThis.setTimeout(
+        () => waiter.reject(runtimeInitializationTimeoutError()),
+        remaining
+      )
+      this.runtimeReadyWaiters.add(waiter)
+    })
+  }
+
+  private rejectRuntimeReadyWaiters(error: Error) {
+    for (const waiter of this.runtimeReadyWaiters) {
+      waiter.reject(error)
+    }
+    this.runtimeReadyWaiters.clear()
+  }
+}
+
+function parseUsbResponseWire(line: string): UsbResponseWire | null {
+  const trimmed = line.trim()
+  if (!trimmed) return null
+
+  const tryParse = (candidate: string): UsbResponseWire | null => {
+    try {
+      return JSON.parse(candidate) as UsbResponseWire
+    } catch {
+      return null
+    }
+  }
+
+  const direct = tryParse(trimmed)
+  if (direct) return direct
+
+  // USB Serial/JTAG multiplexes diagnostic bytes with the JSONL control
+  // channel. Match the established Web Serial transport by recovering the
+  // bounded JSON object while still requiring its requestId below.
+  const firstBrace = trimmed.indexOf('{')
+  const lastBrace = trimmed.lastIndexOf('}')
+  if (firstBrace < 0 || lastBrace <= firstBrace) return null
+  return tryParse(trimmed.slice(firstBrace, lastBrace + 1))
 }
 
 export function parseWebSerialDiagnostic(line: string): WebSerialDiagnostic | null {
+  const bootStage = line.match(/^boot_stage=([a-z0-9_]+)$/)?.[1]
+  if (bootStage) {
+    return { kind: 'boot_stage', reason: bootStage }
+  }
   const resetReason = line.match(/^reset_reason=([a-z0-9_]+)$/)?.[1]
   if (resetReason) {
     return { kind: 'reset', reason: resetReason }
@@ -582,6 +768,21 @@ async function withCleanupTimeout(operation: Promise<unknown> | undefined) {
     operation,
     new Promise<void>((resolve) => globalThis.setTimeout(resolve, 500)),
   ])
+}
+
+async function closeBrowserSerialPort(port: BrowserSerialPort) {
+  const deadline = Date.now() + WEB_SERIAL_CLOSE_TIMEOUT_MS
+  for (;;) {
+    try {
+      await port.close()
+      return
+    } catch (error) {
+      if (Date.now() >= deadline) throw normalizeBrowserSerialError(error)
+      await new Promise<void>((resolve) =>
+        globalThis.setTimeout(resolve, Math.min(WEB_SERIAL_CLOSE_RETRY_MS, deadline - Date.now()))
+      )
+    }
+  }
 }
 
 function createUsbRequestFrame(op: UsbRequestFrame['op']) {
@@ -610,6 +811,14 @@ export function normalizeBrowserSerialError(error: unknown) {
     )
   }
 
+  if (error instanceof Error && /must be handling a user gesture/i.test(error.message)) {
+    return new ControlPlaneClientError(
+      '浏览器 USB 选择器未在用户点击时打开。请重新点击“运行预检”。',
+      'web_serial_user_gesture_required',
+      true
+    )
+  }
+
   return new ControlPlaneClientError(
     error instanceof Error ? error.message : 'Web Serial read failed.',
     'web_serial_read_failed',
@@ -617,9 +826,18 @@ export function normalizeBrowserSerialError(error: unknown) {
   )
 }
 
+function runtimeInitializationTimeoutError() {
+  return new ControlPlaneClientError(
+    'Flux Purr 运行时在 8 秒内未响应；空片、外来固件或 ROM 模式设备请切换“安装或恢复”。',
+    'web_serial_runtime_not_ready',
+    true
+  )
+}
+
 function isFirmwareInitializationPending(error: unknown) {
   return (
-    (error instanceof ControlPlaneClientError && error.code === 'usb_response_timeout') ||
+    (error instanceof ControlPlaneClientError &&
+      (error.code === 'usb_response_timeout' || error.code === 'startup_busy')) ||
     (error instanceof Error &&
       /not available until memory and WiFi initialization completes/i.test(error.message))
   )

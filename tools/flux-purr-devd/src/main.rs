@@ -58,6 +58,7 @@ async fn main() {
         .await
         .expect("failed to bind flux-purr-devd listener");
     let state = AppState::new(config);
+    tokio::spawn(state.clone().run_lease_reaper());
 
     eprintln!(
         "flux-purr-devd listening on {}",

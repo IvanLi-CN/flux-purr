@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "mediaType": "application/vnd.flux-purr.firmware-bundle+zip",
+  "identity": { "version": "0.1.0", "sourceSha": "e9754917ee23481dd30571fb7a78cb2c486b82a3", "buildId": "0123456789abcdef", "channel": "local" },
+  "target": { "chip": "esp32s3", "package": "ESP32-S3FH4R2", "flashSize": 4194304, "psramSize": 2097152, "flashMode": "dio", "flashFrequency": "40m" },
+  "layout": { "id": "flux-purr.esp32s3fh4r2.factory", "version": 1, "partitionTableSha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e" },
+  "segments": [
+    { "kind": "bootloader", "path": "images/bootloader.bin", "address": 0, "length": 32768, "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "md5": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { "kind": "partition-table", "path": "images/partition-table.bin", "address": 32768, "length": 4096, "sha256": "sha256:fec3c8b36e60ece8780cf75b4125a7171d3a3def71d5ca6ac706f4e431391f1e", "md5": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    { "kind": "factory-app", "path": "images/factory-app.bin", "address": 65536, "length": 1048576, "sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "md5": "cccccccccccccccccccccccccccccccc" }
+  ],
+  "migrations": ["legacy-raw-v1-to-flux-cfg-v1"]
+}

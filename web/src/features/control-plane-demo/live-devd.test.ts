@@ -5,15 +5,18 @@ import {
   degradeDevicesForRefreshError,
   devdEventsToLogEntries,
   devdRecordToReconnectingTarget,
+  isNativeRecoveryPlaceholder,
   preserveLastLiveDevdTarget,
   prioritizeLiveDevdDevices,
   readStoredDevdLeaseId,
   readStoredLiveDevdTarget,
   releaseDevdLeaseOnPageHide,
   resolveDevdLease,
+  selectLiveDevdRecord,
   selectPreferredLiveDevdDeviceId,
   selectRetainedLiveDevdDeviceId,
   shouldHoldDevdLease,
+  shouldProbeNativeRuntime,
   writeStoredDevdLeaseId,
   writeStoredLiveDevdTarget,
 } from './live-devd'
@@ -22,6 +25,40 @@ import type { ControlPlaneHttpClient } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('live devd selection', () => {
+  it('retains an authorized native placeholder as a recovery-only target', () => {
+    const placeholder: DevdDeviceRecord = {
+      id: 'serial-recovery',
+      displayName: 'Authorized serial device',
+      portPath: '/dev/cu.usbmodem-authorized',
+      transport: 'native_serial',
+      connection: 'disconnected',
+      identity: {
+        deviceId: '',
+        firmwareVersion: 'unknown',
+        buildId: 'native-serial-placeholder',
+        gitSha: 'unknown',
+        board: 'unknown',
+        apiVersion: 'unknown',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: '',
+        capabilities: ['flash'],
+      },
+      network: {
+        state: 'idle',
+        ssid: null,
+        ip: null,
+        gateway: null,
+        dns: [],
+        wifiRssi: null,
+      },
+      status: makeDevice('placeholder', 'devd', 'none') as unknown as DevdDeviceRecord['status'],
+      events: [],
+    }
+
+    expect(selectLiveDevdRecord([placeholder])?.id).toBe('serial-recovery')
+    expect(isNativeRecoveryPlaceholder(placeholder)).toBe(true)
+  })
+
   it('keeps runtime trace entries in chronological order for tail following', () => {
     const events: DevdEvent[] = [
       {
@@ -53,6 +90,40 @@ describe('live devd selection', () => {
     expect(shouldHoldDevdLease('serial-303a-1001-A0:F2:62:F2:0D:6C', true)).toBe(false)
     expect(shouldHoldDevdLease('serial-303a-1001-A0:F2:62:F2:0D:6C')).toBe(true)
     expect(shouldHoldDevdLease(null)).toBe(true)
+  })
+
+  it('suppresses native runtime probes while firmware maintenance owns the port', () => {
+    const liveNative: DevdDeviceRecord = {
+      id: 'serial-live',
+      displayName: 'Authorized serial device',
+      portPath: '/dev/cu.usbmodem-authorized',
+      transport: 'native_serial',
+      connection: 'disconnected',
+      identity: {
+        deviceId: 'a0f262f20d6c',
+        firmwareVersion: '0.16.4',
+        buildId: 'build',
+        gitSha: 'sha',
+        board: 'esp32-s3',
+        apiVersion: '2026-05-29',
+        protocolVersion: 'flux-purr.usb.v1',
+        hostname: 'flux-purr-a0f262f20d6c',
+        capabilities: ['flash'],
+      },
+      network: {
+        state: 'idle',
+        ssid: null,
+        ip: null,
+        gateway: null,
+        dns: [],
+        wifiRssi: null,
+      },
+      status: makeDevice('live', 'devd', 'none') as unknown as DevdDeviceRecord['status'],
+      events: [],
+    }
+
+    expect(shouldProbeNativeRuntime(liveNative, false)).toBe(false)
+    expect(shouldProbeNativeRuntime(liveNative, true)).toBe(true)
   })
 
   it('prefers active devd targets before fixtures', () => {

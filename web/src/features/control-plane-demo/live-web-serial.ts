@@ -633,6 +633,9 @@ export function useLiveWebSerialScenario(
 }
 
 function webSerialDiagnosticMessage(diagnostic: WebSerialDiagnostic) {
+  if (diagnostic.kind === 'boot_stage') {
+    return `固件启动阶段：${diagnostic.reason}`
+  }
   if (diagnostic.kind === 'panic') {
     return `固件故障后复位：${diagnostic.reason}`
   }

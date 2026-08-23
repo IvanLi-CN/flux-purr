@@ -120,6 +120,27 @@ describe('device target picker', () => {
     expect(choices).toEqual([])
   })
 
+  it('keeps a native serial recovery candidate available without a verified identity', () => {
+    const recoveryTarget = target({
+      id: 'serial-recovery-target',
+      identityId: 'recovery-target',
+      alias: 'USB JTAG/serial debug unit',
+      location: '/dev/cu.usbmodem2111401',
+      severity: 'warning',
+      connectionAvailable: false,
+      connectionCandidate: true,
+      leaseState: 'active',
+      buildId: 'native-serial-placeholder',
+      capabilities: ['flash'],
+    })
+
+    const choices = mergeDeviceChoices([recoveryTarget], { allowDemoControls: false })
+
+    expect(choices).toHaveLength(1)
+    expect(choices[0].connections[0].kind).toBe('bridge')
+    expect(choices[0].connections[0].target.id).toBe('serial-recovery-target')
+  })
+
   it('keeps the healthiest target when a transport publishes duplicate records', () => {
     const choices = mergeDeviceChoices([
       target({

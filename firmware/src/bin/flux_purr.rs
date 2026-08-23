@@ -82,7 +82,7 @@ use flux_purr_firmware::control_plane::hello_frame;
 use flux_purr_firmware::control_plane::{
     AdcCalibrationSourceWire, AdcDiagnosticsWire, ApiError, CalibrationControlCommand,
     CalibrationJobKindWire, CalibrationJobStateWire, CalibrationJobStatusWire, CalibrationModeWire,
-    CalibrationRuntimeStateWire, ControlPlaneStatus, Identity, RuntimeConfigCommand,
+    CalibrationRuntimeStateWire, ControlPlaneStatus, Identity, InstallStatus, RuntimeConfigCommand,
     ThermalControlProfileOp, ThermalControlProfilePointWire, ThermalControlProfileSettingsWire,
     ThermalControlProfileWire, ThermalControlRuntimeWire, ThermalPlantRuntimeWire, UsbFrame,
     UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
@@ -357,6 +357,15 @@ impl RawUsbSerialJtag {
             nb::Error::Other(_) => nb::Error::Other(()),
         })
     }
+
+    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
+        // A control response is only sent after the host has delivered a full
+        // request line, so the USB endpoint is known to have an active reader.
+        // The HAL's blocking writer waits for each 64-byte packet to complete;
+        // this avoids silently losing a larger JSON response when a nonblocking
+        // flush observes a temporarily busy endpoint.
+        self.inner.write(bytes).is_ok()
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -452,6 +461,8 @@ const USB_CONTROL_TX_BUFFER_LEN: usize = flux_purr_firmware::control_plane::USB_
 const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 const USB_CONTROL_TX_RETRY_LIMIT: usize = 4096;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const USB_CONTROL_TX_BACKOFF_US: u32 = 25;
 #[cfg(any(target_arch = "xtensa", test))]
 const FAN_FULL_SPEED_PWM_PERMILLE: u16 = 0;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4059,6 +4070,9 @@ fn thermal_model_heater_allowed(
     if calibration.mode != CalibrationMode::Off {
         return true;
     }
+    if memory_config.commissioning_required {
+        return false;
+    }
     let plant_is_available =
         memory_config
             .thermal_plant_transient_active
@@ -5507,6 +5521,7 @@ fn apply_memory_config_to_ui(state: &mut FrontPanelUiState, config: &MemoryConfi
 #[cfg(any(target_arch = "xtensa", test))]
 fn memory_config_from_ui(state: &FrontPanelUiState, previous: &MemoryConfig) -> MemoryConfig {
     MemoryConfig {
+        commissioning_required: previous.commissioning_required,
         target_temp_c: state.target_temp_c,
         selected_preset_slot: state.selected_preset_slot,
         presets_c: state.presets_c,
@@ -9000,7 +9015,7 @@ fn usb_write_response_frame_to<T: UsbControlTx>(
     tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
 ) {
     if let Ok(line) = write_usb_frame(frame, tx_buf) {
-        let _ = usb_write_bytes_bounded(tx, line.as_bytes());
+        let _ = tx.write_response_bytes(line.as_bytes());
     }
 }
 
@@ -9016,6 +9031,15 @@ enum UsbTxError {
 trait UsbControlTx {
     fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError>;
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError>;
+
+    fn wait_for_tx_progress(&mut self) {}
+
+    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool
+    where
+        Self: Sized,
+    {
+        usb_write_bytes_bounded(self, bytes)
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -9032,6 +9056,17 @@ impl UsbControlTx for RawUsbSerialJtag {
             nb::Error::WouldBlock => UsbTxError::WouldBlock,
             nb::Error::Other(_) => UsbTxError::Other,
         })
+    }
+
+    fn wait_for_tx_progress(&mut self) {
+        // USB Serial/JTAG advances independently of this polling loop. A tight
+        // retry can exhaust its budget before the endpoint observes WR_DONE,
+        // which would silently drop host-requested JSONL responses.
+        esp_hal::rom::ets_delay_us(USB_CONTROL_TX_BACKOFF_US);
+    }
+
+    fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
+        self.write_response_bytes(bytes)
     }
 }
 
@@ -9072,7 +9107,7 @@ fn usb_flush_tx_bounded<T: UsbControlTx>(tx: &mut T) -> bool {
     for _ in 0..USB_CONTROL_TX_RETRY_LIMIT {
         match tx.flush_tx_nb() {
             Ok(()) => return true,
-            Err(UsbTxError::WouldBlock) => {}
+            Err(UsbTxError::WouldBlock) => tx.wait_for_tx_progress(),
             Err(_) => return false,
         }
     }
@@ -9136,6 +9171,20 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
             ),
+            UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "Install status is unavailable until persistence restoration completes.",
+                true,
+            ),
+            UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => {
+                usb_error_response_with_retryable(
+                    request_id,
+                    "startup_busy",
+                    "Persistence changes are unavailable until restoration completes.",
+                    true,
+                )
+            }
             // The boot-time memory argument is still the zero-value placeholder
             // until the main loop has completed EEPROM/flash restoration. Never
             // expose it as a network snapshot: a configured device would appear
@@ -9347,6 +9396,22 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
             ),
+            UsbRequestOp::GetInstallStatus => usb_response(
+                request_id,
+                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                    memory_config,
+                    "defaults",
+                    "incompatible",
+                    0,
+                    false,
+                    true,
+                )),
+            ),
+            UsbRequestOp::CompleteSetup | UsbRequestOp::ResetPersistence => usb_error_response(
+                request_id,
+                "hardware_bringup_failed",
+                "Persistence changes are unavailable because hardware bring-up failed.",
+            ),
             UsbRequestOp::GetNetwork => usb_response(
                 request_id,
                 UsbResponsePayload::Network(network_from_memory(memory_config)),
@@ -9433,6 +9498,8 @@ async fn process_control_line(
     preview_heater_curve: &mut Option<HeaterCurvePreview>,
     memory_commit_due_ms: &mut Option<u64>,
     memory_sequence: &mut u32,
+    persistence_source: &'static str,
+    persistence_record_state: &'static str,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
     ch224q_address: Address,
     flash_storage: &mut FlashStorage,
@@ -9505,6 +9572,67 @@ async fn process_control_line(
                 request_id,
                 UsbResponsePayload::Identity(hardware_identity()),
             ),
+            UsbRequestOp::GetInstallStatus => usb_response(
+                request_id,
+                UsbResponsePayload::InstallStatus(InstallStatus::from_runtime(
+                    memory_config,
+                    persistence_source,
+                    persistence_record_state,
+                    *memory_sequence,
+                    current_rtd_fault.is_none() && latest_status_temp_c.is_finite(),
+                    heater_controller.fault_latched().is_some(),
+                )),
+            ),
+            UsbRequestOp::CompleteSetup => {
+                let sensor_ready = current_rtd_fault.is_none() && latest_status_temp_c.is_finite();
+                let calibration_ready = flux_purr_firmware::memory::adc_calibration_fit(
+                    &memory_config.adc_calibration,
+                    flux_purr_firmware::memory::AdcCalibrationChannel::Rtd,
+                )
+                .sample_count
+                    >= 2
+                    && flux_purr_firmware::memory::adc_calibration_fit(
+                        &memory_config.adc_calibration,
+                        flux_purr_firmware::memory::AdcCalibrationChannel::Vin,
+                    )
+                    .sample_count
+                        >= 2
+                    && memory_config
+                        .active_heater_curve
+                        .points
+                        .iter()
+                        .flatten()
+                        .count()
+                        >= 2;
+                match memory_config.complete_setup(sensor_ready, calibration_ready) {
+                    Ok(()) => {
+                        *memory_commit_due_ms =
+                            Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                        usb_response(request_id, UsbResponsePayload::Ack)
+                    }
+                    Err(flux_purr_firmware::memory::SetupCompletionError::SensorNotReady) => {
+                        usb_error_response(
+                            request_id,
+                            "sensor_unready",
+                            "Sensor readiness is required before setup completion.",
+                        )
+                    }
+                    Err(flux_purr_firmware::memory::SetupCompletionError::CalibrationRequired) => {
+                        usb_error_response(
+                            request_id,
+                            "calibration_required",
+                            "Calibration is required before setup completion.",
+                        )
+                    }
+                }
+            }
+            UsbRequestOp::ResetPersistence => {
+                memory_config.reset_for_commissioning();
+                apply_memory_config_to_ui(ui_state, memory_config);
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                needs_redraw = true;
+                usb_response(request_id, UsbResponsePayload::Ack)
+            }
             UsbRequestOp::GetNetwork => {
                 #[cfg(feature = "net_http")]
                 let network = flux_purr_firmware::net::lan_network_summary().await;
@@ -10052,6 +10180,13 @@ fn lan_frame_response(
             ..
         } => match result {
             UsbResponsePayload::Identity(value) => lan_json_response(value),
+            UsbResponsePayload::InstallStatus(_) => (
+                404,
+                lan_error_json(
+                    "unsupported_operation",
+                    "Install status is available only through USB/devd.",
+                ),
+            ),
             UsbResponsePayload::Network(value) => lan_json_response(value),
             UsbResponsePayload::Status(value) => {
                 let mut status = value.clone();
@@ -10754,6 +10889,20 @@ async fn main(_spawner: Spawner) {
         } else {
             (None, false, None)
         };
+    let persistence_source = match (&eeprom_memory_record, &flash_memory_record) {
+        (Some(eeprom), Some(flash)) if eeprom.sequence >= flash.sequence => "eeprom",
+        (Some(_), Some(_)) | (None, Some(_)) => "flux_cfg",
+        (Some(_), None) => "eeprom",
+        (None, None) => "defaults",
+    };
+    let persistence_record_state =
+        if eeprom_memory_record.is_some() || flash_memory_record.is_some() {
+            "valid"
+        } else if eeprom_data_incompatible {
+            "incompatible"
+        } else {
+            "blank"
+        };
     let restored_memory_record =
         select_latest_optional_memory_record(eeprom_memory_record, flash_memory_record);
     let (mut memory_config, mut memory_sequence) = restored_memory_record
@@ -10761,10 +10910,16 @@ async fn main(_spawner: Spawner) {
         .unwrap_or_default();
     #[cfg(feature = "net_http")]
     flux_purr_firmware::net::initialize_control_state(memory_config.lan_pairing_token).await;
+    #[cfg(all(feature = "net_http", feature = "web_serial"))]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=lan_control_state_ready\n");
     #[cfg(feature = "net_http")]
     {
         if let Err(error) =
-            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config).await
+            flux_purr_firmware::net::spawn(&_spawner, peripherals.WIFI, &memory_config, |stage| {
+                #[cfg(feature = "web_serial")]
+                let _ = usb_write_bytes_bounded(&mut usb_serial, stage);
+            })
+            .await
         {
             warn!("LAN control plane startup failed: {=str}", error.message());
             flux_purr_firmware::net::report_startup_failure(error).await;
@@ -11291,6 +11446,8 @@ async fn main(_spawner: Spawner) {
                         &mut preview_heater_curve,
                         &mut memory_commit_due_ms,
                         &mut memory_sequence,
+                        persistence_source,
+                        persistence_record_state,
                         &mut pd_i2c,
                         ch224q_address,
                         &mut flash_storage,
@@ -11436,6 +11593,8 @@ async fn main(_spawner: Spawner) {
                 &mut preview_heater_curve,
                 &mut memory_commit_due_ms,
                 &mut memory_sequence,
+                persistence_source,
+                persistence_record_state,
                 &mut pd_i2c,
                 ch224q_address,
                 &mut flash_storage,
@@ -12646,7 +12805,51 @@ mod tests {
     }
 
     #[test]
-    fn usb_response_write_uses_bounded_chunks_for_host_requested_frames() {
+    fn usb_write_bytes_waits_for_a_busy_endpoint_before_replying() {
+        struct DelayedUsbTx {
+            waits_before_ready: usize,
+            waits: usize,
+            pending: std::vec::Vec<u8>,
+            sent: std::vec::Vec<u8>,
+        }
+
+        impl UsbControlTx for DelayedUsbTx {
+            fn write_byte_nb(&mut self, byte: u8) -> Result<(), UsbTxError> {
+                if self.waits < self.waits_before_ready {
+                    return Err(UsbTxError::WouldBlock);
+                }
+                self.pending.push(byte);
+                Ok(())
+            }
+
+            fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+                if self.waits < self.waits_before_ready {
+                    return Err(UsbTxError::WouldBlock);
+                }
+                self.sent.extend_from_slice(&self.pending);
+                self.pending.clear();
+                Ok(())
+            }
+
+            fn wait_for_tx_progress(&mut self) {
+                self.waits += 1;
+            }
+        }
+
+        let mut tx = DelayedUsbTx {
+            waits_before_ready: 3,
+            waits: 0,
+            pending: std::vec::Vec::new(),
+            sent: std::vec::Vec::new(),
+        };
+
+        assert!(usb_write_bytes_bounded(&mut tx, b"response\\n"));
+        assert_eq!(tx.waits, 3);
+        assert_eq!(tx.sent, b"response\\n");
+    }
+
+    #[test]
+    fn usb_response_write_uses_default_bounded_chunks_for_host_requested_frames() {
         let payload = std::vec![b'x'; 180];
         let mut bounded_tx = FakeUsbTx::new(0);
         assert!(!usb_write_bytes_bounded(&mut bounded_tx, &payload));
@@ -12666,6 +12869,48 @@ mod tests {
         assert!(line.contains(r#""requestId":"response-write""#));
         assert!(line.ends_with('\n'));
         assert!(response_tx.flush_count > 1);
+    }
+
+    #[test]
+    fn usb_response_write_allows_the_runtime_transport_to_confirm_delivery() {
+        struct ConfirmingUsbTx {
+            response: std::vec::Vec<u8>,
+            fallback_write_attempts: usize,
+        }
+
+        impl UsbControlTx for ConfirmingUsbTx {
+            fn write_byte_nb(&mut self, _byte: u8) -> Result<(), UsbTxError> {
+                self.fallback_write_attempts += 1;
+                Err(UsbTxError::Other)
+            }
+
+            fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
+                Ok(())
+            }
+
+            fn write_response_bytes(&mut self, bytes: &[u8]) -> bool {
+                self.response.extend_from_slice(bytes);
+                true
+            }
+        }
+
+        let mut request_id = heapless::String::new();
+        request_id.push_str("confirmed-response").unwrap();
+        let response = usb_response(
+            request_id,
+            UsbResponsePayload::Identity(Identity::firmware_default()),
+        );
+        let mut tx = ConfirmingUsbTx {
+            response: std::vec::Vec::new(),
+            fallback_write_attempts: 0,
+        };
+        let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
+
+        usb_write_response_frame_to(&mut tx, &response, &mut tx_buf);
+
+        let line = core::str::from_utf8(&tx.response).expect("response is utf8");
+        assert!(line.contains(r#""requestId":"confirmed-response""#));
+        assert_eq!(tx.fallback_write_attempts, 0);
     }
 
     #[test]
@@ -14424,7 +14669,10 @@ mod tests {
                 .round() as u16
         }
 
-        let mut memory_config = MemoryConfig::default();
+        let mut memory_config = MemoryConfig {
+            commissioning_required: false,
+            ..MemoryConfig::default()
+        };
         memory_config.active_heater_curve.points[0] = Some(HeaterCurvePoint {
             temp_centi_c: 2_500,
             resistance_milliohms: 4_000,

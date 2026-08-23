@@ -292,7 +292,7 @@ test.describe('public demo build', () => {
     await expect(page.getByText('-54 dBm')).toHaveCount(0)
 
     await page.goto('/devices/fp-lab-01/update?demo=true&demoScene=blocked-artifact')
-    await expect(page.getByText('Not compatible')).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Run dry-check' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: '选择固件包' })).toBeVisible()
+    await expect(page.getByRole('button', { name: '运行预检' })).toBeDisabled()
   })
 })

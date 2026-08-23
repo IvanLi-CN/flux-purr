@@ -3,13 +3,12 @@ import { expect, test } from '@playwright/test'
 test.describe('calibration layout', () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1000 })
-    await page.goto('/')
-
-    await page.locator('.industrial-view-tab').filter({ hasText: '校准' }).click()
-    await page.getByText('温度标定', { exact: true }).click()
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
   })
 
   test('keeps the temperature status summary rows away from list edges', async ({ page }) => {
+    await expect(page.getByLabel('当前 ADC 标定状态摘要')).toBeVisible()
+
     const metrics = await page.evaluate(() => {
       const statusCard = [...document.querySelectorAll('.industrial-calibration-live-card')].find(
         (element) =>
@@ -59,6 +58,8 @@ test.describe('calibration layout', () => {
   })
 
   test('places ADC calibration commands under the status card', async ({ page }) => {
+    await expect(page.getByLabel('ADC 标定操作')).toBeVisible()
+
     const metrics = await page.evaluate(() => {
       const statusCard = [...document.querySelectorAll('.industrial-calibration-live-card')].find(
         (element) =>

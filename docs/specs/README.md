@@ -81,3 +81,4 @@
 | hhwq8 | Flux Purr 热控 Bench Web Demo | active | `hhwq8-web-control-plane-demo/SPEC.md` | 2026-05-23 | Industrial mock thermal bench tool for the #27 control-plane architecture |
 | m8r4q | Flux Purr 真实控制平面运行时 | active | `m8r4q-real-control-plane-runtime/SPEC.md` | 2026-05-29 | Web + firmware + native devd real transport contract |
 | jt8r2 | Flux Purr ADC 校准控制面 | 已完成 | `jt8r2-adc-calibration-control-plane/SPEC.md` | 2026-06-02 | RTD/VIN ADC calibration with persisted draft/active packages |
+| web-firmware-install-recovery | Flux Purr Web 固件安装与恢复 | 待实现 | `web-firmware-install-recovery/SPEC.md` | 2026-08-15 | Unified devd and Browser Web Serial firmware workbench |

@@ -448,15 +448,23 @@ async fn await_control_response(
 /// Starts the DHCP/static-IP capable station, TCP server, and mDNS/DNS-SD
 /// responder. WiFi setup remains USB-only because this function receives its
 /// credentials from EEPROM-loaded `MemoryConfig`.
-pub async fn spawn(
+pub async fn spawn<F>(
     spawner: &Spawner,
     wifi_peripheral: WIFI<'static>,
     memory: &MemoryConfig,
-) -> Result<(), LanStartupError> {
+    mut report_stage: F,
+) -> Result<(), LanStartupError>
+where
+    F: FnMut(&'static [u8]),
+{
+    report_stage(b"boot_stage=wifi_radio_init_start\n");
     let radio = radio_init().map_err(|_| LanStartupError::WifiInitialization)?;
+    report_stage(b"boot_stage=wifi_radio_init_complete\n");
     let radio = RADIO_CONTROLLER.init(radio);
+    report_stage(b"boot_stage=wifi_interface_init_start\n");
     let (controller, interfaces) = wifi::new(radio, wifi_peripheral, wifi_driver_config())
         .map_err(|_| LanStartupError::WifiInitialization)?;
+    report_stage(b"boot_stage=wifi_interface_init_complete\n");
     let station = interfaces.sta;
     let names = device_names_from_mac(station.mac_address());
     // Boot restoration is initialization, not a live reconfiguration. Do not
@@ -466,12 +474,14 @@ pub async fn spawn(
     let mut initial_config = WifiRuntimeConfig::from_memory(memory);
     initial_config.hostname = Some(names.hostname.clone());
     *WIFI_CONFIG.lock().await = initial_config.clone();
+    report_stage(b"boot_stage=wifi_config_ready\n");
     let initial_event = if initial_config.is_configured() {
         ProvisioningEvent::ApplyConfig
     } else {
         ProvisioningEvent::ClearConfig
     };
     let _ = publish_wifi_event(&initial_config, initial_event, None).await;
+    report_stage(b"boot_stage=wifi_state_published\n");
     CONTROL_STATE
         .lock()
         .await
@@ -482,6 +492,7 @@ pub async fn spawn(
     let resources = NET_RESOURCES.init(StackResources::<8>::new());
     let seed = random_u64();
     let (stack, runner) = embassy_net::new(station, net_config(&initial_config), resources, seed);
+    report_stage(b"boot_stage=wifi_network_stack_ready\n");
     let runner = NET_RUNNER.init(runner);
     let controller = WIFI_CONTROLLER.init(controller);
 
@@ -491,6 +502,7 @@ pub async fn spawn(
     spawner
         .spawn(network_task(runner))
         .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
+    report_stage(b"boot_stage=wifi_core_tasks_spawned\n");
     let sockets = [
         TcpSocket::new(
             stack,
@@ -524,6 +536,7 @@ pub async fn spawn(
     spawner
         .spawn(mdns_task(stack, names))
         .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
+    report_stage(b"boot_stage=wifi_all_tasks_spawned\n");
     Ok(())
 }
 

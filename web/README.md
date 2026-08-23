@@ -16,6 +16,7 @@ React control console for Flux Purr firmware.
 
 ```bash
 bun install --cwd web
+bun run build:firmware:web
 bun run --cwd web dev
 bun run --cwd web check
 bun run --cwd web typecheck
@@ -26,6 +27,12 @@ bun run --cwd web test:unit
 bun run --cwd web test:storybook
 bun run check:e2e
 ```
+
+`bun run build:firmware:web` builds the current ESP32-S3 release firmware and writes one
+strictly validated `.fluxpurr-fw` package directly to
+`firmware/target/flux-purr-web-artifacts/`. The Vite development server watches that
+directory and serves the exact bytes through the same-origin firmware catalog without
+creating a copy under `web/public`.
 
 ## Stories included
 

@@ -63,6 +63,7 @@ bun run worktree:setup
 bun run check:firmware:fmt
 bun run check:firmware:clippy
 bun run check:firmware:build
+bun run build:firmware:web
 bun run check:web
 bun run check:web:build
 bun run check:storybook

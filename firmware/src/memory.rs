@@ -145,6 +145,7 @@ const TLV_LAN_PAIRING_TOKEN: u8 = 0x38;
 const TLV_WIFI_STATIC_IPV4: u8 = 0x39;
 const TLV_THERMAL_PLANT_TRANSIENT_ACTIVE: u8 = 0x3a;
 const TLV_HEATER_CURVE_TRANSACTION_ID: u8 = 0x3b;
+const TLV_COMMISSIONING_REQUIRED: u8 = 0x3c;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WifiStaticIpv4Config {
@@ -170,6 +171,9 @@ fn is_unicast_ipv4(address: [u8; 4]) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MemoryConfig {
+    /// New blank/default persistence remains heater-locked until high-level setup
+    /// completes. Legacy valid records without this TLV decode as commissioned.
+    pub commissioning_required: bool,
     pub target_temp_c: i16,
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
@@ -213,6 +217,12 @@ pub enum ThermalProfileMode {
 pub enum ThermalProfileBank {
     Pps3a,
     Pps5a,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupCompletionError {
+    SensorNotReady,
+    CalibrationRequired,
 }
 
 impl ThermalProfileMode {
@@ -583,6 +593,7 @@ impl AdcCalibrationChannelConfig {
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
+            commissioning_required: true,
             target_temp_c: 100,
             selected_preset_slot: 1,
             presets_c: [
@@ -618,6 +629,25 @@ impl Default for MemoryConfig {
 }
 
 impl MemoryConfig {
+    pub fn complete_setup(
+        &mut self,
+        sensor_ready: bool,
+        calibration_ready: bool,
+    ) -> Result<(), SetupCompletionError> {
+        if !sensor_ready {
+            return Err(SetupCompletionError::SensorNotReady);
+        }
+        if !calibration_ready {
+            return Err(SetupCompletionError::CalibrationRequired);
+        }
+        self.commissioning_required = false;
+        Ok(())
+    }
+
+    pub fn reset_for_commissioning(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn sanitize(&mut self) {
         self.target_temp_c = clamp_temp_c(self.target_temp_c);
         // Automatic WiFi recovery is a device safety policy, not user configuration.
@@ -1420,7 +1450,13 @@ pub fn decode_memory_record(bytes: &[u8]) -> Result<MemoryRecord, MemoryDecodeEr
     }
 
     let sequence = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    let mut config = MemoryConfig::default();
+    // A valid record predating the commissioning TLV represents an already
+    // commissioned device. Only blank, corrupt, or explicitly reset state
+    // remains setup-required by default.
+    let mut config = MemoryConfig {
+        commissioning_required: false,
+        ..MemoryConfig::default()
+    };
     decode_config_payload(
         &bytes[MEMORY_RECORD_HEADER_LEN..payload_end],
         bytes[4] >= 3,
@@ -1459,6 +1495,12 @@ fn encode_config_payload(
     out: &mut [u8],
 ) -> Result<usize, MemoryEncodeError> {
     let mut cursor = 0;
+    push_tlv(
+        TLV_COMMISSIONING_REQUIRED,
+        &[u8::from(config.commissioning_required)],
+        out,
+        &mut cursor,
+    )?;
     push_tlv(
         TLV_TARGET_TEMP_C,
         &config.target_temp_c.to_le_bytes(),
@@ -1658,6 +1700,9 @@ fn decode_config_payload(
         cursor += len;
 
         match tag {
+            TLV_COMMISSIONING_REQUIRED if len == 1 => {
+                config.commissioning_required = value[0] != 0;
+            }
             TLV_TARGET_TEMP_C if len == 2 => {
                 config.target_temp_c = i16::from_le_bytes([value[0], value[1]]);
             }
@@ -4140,6 +4185,66 @@ mod tests {
         assert_eq!(active_vin.reference_temp_deci_c, None);
         assert_eq!(active_vin.target_adc_mv, None);
         assert_eq!(active_vin.reference_vin_mv, None);
+    }
+
+    #[test]
+    fn commissioning_tlv_preserves_blank_defaults_and_legacy_valid_records() {
+        assert!(MemoryConfig::default().commissioning_required);
+        let mut setup = MemoryConfig::default();
+        assert_eq!(
+            setup.complete_setup(false, true),
+            Err(SetupCompletionError::SensorNotReady)
+        );
+        assert_eq!(
+            setup.complete_setup(true, false),
+            Err(SetupCompletionError::CalibrationRequired)
+        );
+        setup.complete_setup(true, true).unwrap();
+        assert!(!setup.commissioning_required);
+        setup.reset_for_commissioning();
+        assert!(setup.commissioning_required);
+        let mut config = sample_config();
+        config.commissioning_required = false;
+        let record = MemoryRecord {
+            sequence: 44,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).unwrap();
+        assert!(
+            !decode_memory_record(&bytes[..len])
+                .unwrap()
+                .config
+                .commissioning_required
+        );
+
+        let payload_len = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+        let payload_start = MEMORY_RECORD_HEADER_LEN;
+        let payload = bytes[payload_start..payload_start + payload_len].to_vec();
+        let mut filtered = [0u8; MEMORY_RECORD_PAYLOAD_MAX];
+        let mut input = 0usize;
+        let mut output = 0usize;
+        while input < payload.len() {
+            let tag = payload[input];
+            let value_len = u16::from_le_bytes([payload[input + 1], payload[input + 2]]) as usize;
+            let tlv_len = 3 + value_len;
+            if tag != TLV_COMMISSIONING_REQUIRED {
+                filtered[output..output + tlv_len]
+                    .copy_from_slice(&payload[input..input + tlv_len]);
+                output += tlv_len;
+            }
+            input += tlv_len;
+        }
+        bytes[6..8].copy_from_slice(&(output as u16).to_le_bytes());
+        bytes[payload_start..payload_start + output].copy_from_slice(&filtered[..output]);
+        let crc = crc32_update(
+            crc32(&bytes[0..12]),
+            &bytes[payload_start..payload_start + output],
+        ) ^ 0xffff_ffff;
+        bytes[12..16].copy_from_slice(&crc.to_le_bytes());
+
+        let legacy = decode_memory_record(&bytes[..payload_start + output]).unwrap();
+        assert!(!legacy.config.commissioning_required);
     }
 
     #[test]

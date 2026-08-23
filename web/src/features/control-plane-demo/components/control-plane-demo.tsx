@@ -24,7 +24,6 @@ import {
   Wifi,
   Wrench,
   X,
-  Zap,
 } from 'lucide-react'
 import type { CSSProperties, Dispatch, ReactNode, SetStateAction } from 'react'
 import {
@@ -38,19 +37,12 @@ import {
   useState,
 } from 'react'
 import { createPortal } from 'react-dom'
-import SimpleBar from 'simplebar-react'
 import type { AppVariant } from '@/app-mode'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
@@ -59,6 +51,14 @@ import { cn } from '@/lib/utils'
 import type { ConsoleRouteState } from '@/routing/console-route'
 import { readRoutePreferences, rememberSuccessfulRoute } from '@/routing/route-preferences'
 import type { AppSearch } from '@/routing/search'
+import {
+  type FirmwareActivityEntry,
+  type FirmwareActivityInput,
+  type FirmwareNativeTarget,
+  FirmwareTransactionLog,
+  FirmwareWorkbench,
+  type OfficialFirmwareArtifact,
+} from '../../firmware-installer'
 import {
   bridgeCandidatesForTransport,
   bridgeProbeToDeviceTarget,
@@ -140,6 +140,7 @@ import {
   shouldHoldDevdLease,
   useLiveDevdScenario,
 } from '../live-devd'
+import { liveControlPlaneScenario } from '../live-scenario'
 import {
   type LiveWebSerialControls,
   type LiveWebSerialOptions,
@@ -161,7 +162,6 @@ import {
   shouldReplacePassiveFeedbackWithHeaterLock,
 } from '../runtime-status'
 import {
-  artifactToManifest,
   ControlPlaneClientError,
   type ControlPlaneHttpClient,
   createControlPlaneHttpClient,
@@ -174,7 +174,6 @@ import type {
   EventLogEntry,
   FirmwareArtifact,
   TransportKind,
-  WorkflowPhase,
 } from '../types'
 import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
@@ -232,11 +231,12 @@ interface ControlPlaneDemoProps {
   webSerial?: LiveWebSerialOptions
   allowDemoControls?: boolean
   mockOnly?: boolean
+  firmwareArtifacts?: OfficialFirmwareArtifact[]
+  initialFirmwareActivity?: FirmwareActivityEntry[]
   lanPairing?: LanPairingOverrides
   lanRuntime?: LanRuntimeDependencies
 }
 type CalibrationWorkbenchMode = 'vin_adc' | 'rtd_adc' | 'heater_curve'
-type FlashRunStatus = 'idle' | 'running' | 'passed' | 'flashing' | 'flashed'
 type AddDeviceKind = 'wifi' | 'web-serial' | 'bridge'
 type LogFilter = 'all' | EventLogEntry['tone']
 
@@ -272,9 +272,24 @@ interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
   anchorId?: string
 }
 
+type ConsoleWorkspace = 'device' | 'firmware'
+
 const LOG_FEED_SIZE = 1000
+const FIRMWARE_ACTIVITY_FEED_SIZE = 200
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
+
+export function nextFirmwareActivitySequence(
+  entries: ReadonlyArray<Pick<FirmwareActivityEntry, 'id'>>,
+  previousSequence: number
+) {
+  const persistedSequence = entries.reduce((highest, entry) => {
+    const match = /^firmware-activity-(\d+)$/.exec(entry.id)
+    return match ? Math.max(highest, Number(match[1])) : highest
+  }, 0)
+  return Math.max(previousSequence, persistedSequence) + 1
+}
+
 function parseCalibrationIntegerInput(rawValue: string) {
   if (rawValue.trim() === '') {
     return null
@@ -312,6 +327,24 @@ function isHealthyRouteConnection(connection: DeviceConnectionOption) {
       (connection.target.severity === 'nominal' && connection.target.leaseState === 'active'))
   )
 }
+
+export function deviceChoiceMatchesRouteId(
+  choice: { identityId: string; connections: Array<{ target: { id: string } }> },
+  routeId: string
+) {
+  const normalizedRouteId = routeId.trim().toLowerCase()
+  return (
+    choice.identityId.trim().toLowerCase() === normalizedRouteId ||
+    choice.connections.some((connection) => {
+      const targetId = connection.target.id.trim().toLowerCase()
+      return (
+        targetId === normalizedRouteId ||
+        targetId === `serial-${normalizedRouteId}` ||
+        targetId.replace(/^serial-/, '') === normalizedRouteId
+      )
+    })
+  )
+}
 const PPS_STEP_MV = 100
 const PPS_HARDWARE_MIN_MV = 5_000
 const PPS_HARDWARE_MAX_MV = 28_000
@@ -340,13 +373,6 @@ const transportLabels: Record<TransportKind, string> = {
   mock: '模拟',
   wifi: 'WiFi',
   bridge: '桥接',
-}
-
-const leaseStateLabels: Record<NonNullable<DeviceTarget['leaseState']>, string> = {
-  none: '无',
-  active: '有效',
-  conflict: '冲突',
-  expired: '过期',
 }
 
 const eventSourceLabels: Record<string, string> = {
@@ -388,8 +414,8 @@ const addDeviceOptions: Array<{
 
 const NO_LIVE_TARGET_ID = 'live-no-target'
 
-const consoleViews: Array<{
-  id: Exclude<ConsoleView, 'add-device'>
+const deviceConsoleViews: Array<{
+  id: Exclude<ConsoleView, 'add-device' | 'update'>
   label: string
   caption: string
   icon: typeof Gauge
@@ -411,12 +437,6 @@ const consoleViews: Array<{
     label: '校准',
     caption: '标定工作台',
     icon: Wrench,
-  },
-  {
-    id: 'update',
-    label: '更新',
-    caption: '固件检查',
-    icon: Upload,
   },
 ]
 
@@ -638,6 +658,8 @@ export function ControlPlaneDemo({
   webSerial: webSerialOptions,
   allowDemoControls = true,
   mockOnly = false,
+  firmwareArtifacts,
+  initialFirmwareActivity,
   lanPairing,
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
@@ -698,23 +720,36 @@ export function ControlPlaneDemo({
     allowDemoControls ||
     routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
     serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
-  const liveDevdScenario = useLiveDevdScenario(scenario, {
+  const liveDevd = useLiveDevdScenario(scenario, {
     ...devd,
+    enabled: mockOnly ? false : devd?.enabled,
+    nativeRuntimeProbeEnabled: activeView !== 'update',
     leaseEnabled:
       shouldHoldDevdLease(
         selectedDeviceId,
         activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
       ) && devdLeaseAllowedForRoute,
   })
+  const liveDevdScenario = liveDevd.scenario
   const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario, {
     ...webSerialOptions,
-    persistKnownDevices: !allowDemoControls && webSerialOptions?.persistKnownDevices !== false,
+    // Firmware maintenance owns Browser Web Serial for its full transaction. Keeping
+    // the control-plane client alive here would race its preflight and open the same port.
+    enabled: mockOnly ? false : activeView !== 'update' && webSerialOptions?.enabled,
+    persistKnownDevices:
+      !mockOnly && !allowDemoControls && webSerialOptions?.persistKnownDevices !== false,
   })
   const controlClient = useMemo(
     () => devd?.httpClient ?? createControlPlaneHttpClient(),
     [devd?.httpClient]
   )
-  const devdBaseUrl = mockOnly ? null : (devd?.devdBaseUrl ?? defaultDevdBaseUrl())
+  const devdBaseUrl =
+    mockOnly || devd?.enabled === false ? null : (devd?.devdBaseUrl ?? defaultDevdBaseUrl())
+  // Automatic native discovery can be disabled while an explicitly configured
+  // DEVD endpoint remains available to the user-initiated bridge workflow.
+  const bridgeDevdBaseUrl = mockOnly
+    ? null
+    : (devd?.devdBaseUrl ?? (devd?.enabled === false ? null : defaultDevdBaseUrl()))
   const lanRuntime = useMemo(() => {
     if (mockOnly) return mockOnlyLanRuntime
     return {
@@ -780,7 +815,6 @@ export function ControlPlaneDemo({
   const [calibrationRefsByDevice, setCalibrationRefsByDevice] = useState<
     Record<string, { rtdTempC: number; vinMv: number }>
   >({})
-  const [artifactByDevice, setArtifactByDevice] = useState<Record<string, string>>({})
   const persistKnownWebSerialDevices =
     !allowDemoControls && webSerialOptions?.persistKnownDevices !== false
   const [pendingDevices, setPendingDevices] = useState<DeviceTarget[]>(() => [
@@ -799,18 +833,23 @@ export function ControlPlaneDemo({
   >({})
   const [lanLeasesByDevice, setLanLeasesByDevice] = useState<Record<string, LanLease>>({})
   const pendingDeviceModeRef = useRef(allowDemoControls)
-  const [flashRun, setFlashRun] = useState<{
-    status: FlashRunStatus
-    progress: number
-  }>({
-    status: 'idle',
-    progress: 0,
-  })
-  const flashCompletionEmittedRef = useRef(false)
   const actionClockRef = useRef(LOG_FEED_START_SECONDS + 60)
   const targetTempCommitTimersRef = useRef<Record<string, number>>({})
   const targetTempCommitVersionRef = useRef<Record<string, number>>({})
   const [actionEvents, setActionEvents] = useState<EventLogEntry[]>([])
+  const firmwareActivitySequence = useRef(1)
+  const [firmwareActivity, setFirmwareActivity] = useState<FirmwareActivityEntry[]>(
+    () =>
+      initialFirmwareActivity ?? [
+        {
+          id: 'firmware-activity-idle',
+          time: '待命',
+          event: '等待任务',
+          detail: '选择任务、连接引擎与固件来源后运行完整预检。',
+          tone: 'info',
+        },
+      ]
+  )
   const [pendingHeaterConfirmation, setPendingHeaterConfirmation] =
     useState<PendingHeaterConfirmation | null>(null)
   const [heaterConfirmationNow, setHeaterConfirmationNow] = useState(0)
@@ -847,7 +886,9 @@ export function ControlPlaneDemo({
   const routedConsoleState = navigation?.state
   const routeDeviceChoice =
     routedConsoleState?.kind === 'device'
-      ? routeDeviceChoices.find((choice) => choice.identityId === routedConsoleState.deviceId)
+      ? routeDeviceChoices.find((choice) =>
+          deviceChoiceMatchesRouteId(choice, routedConsoleState.deviceId)
+        )
       : undefined
   const preferredRouteDeviceConnection = routeDeviceChoice
     ? preferredDeviceConnection(
@@ -1068,6 +1109,19 @@ export function ControlPlaneDemo({
   )
 
   const routeDeviceId = navigation?.state.kind === 'device' ? navigation.state.deviceId : null
+  const independentFirmwareFallbackDevice = useMemo(() => {
+    if (selectedDevice || activeView !== 'update' || !routeDeviceId) return null
+    const baseDevice = liveControlPlaneScenario.devices[0]
+    if (!baseDevice) return null
+    return {
+      ...baseDevice,
+      id: `firmware-maintenance-${routeDeviceId}`,
+      identityId: routeDeviceId,
+      alias: routeDeviceId,
+      location: 'Browser USB firmware maintenance',
+      transportIssue: '浏览器 USB 授权端口将在固件预检中验证。',
+    }
+  }, [activeView, routeDeviceId, selectedDevice])
 
   useEffect(() => {
     if (previousRouteDeviceIdRef.current === routeDeviceId) return
@@ -1271,7 +1325,6 @@ export function ControlPlaneDemo({
     }))
     migrateRecord(setCalibrationWorkspaceTabByDevice)
     migrateRecord(setCalibrationRefsByDevice, (value) => ({ ...value }))
-    migrateRecord(setArtifactByDevice)
 
     if (selectedDeviceId && LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(selectedDeviceId)) {
       setSelectedDeviceId(nextDeviceId)
@@ -1391,7 +1444,7 @@ export function ControlPlaneDemo({
 
   const visibleDevice = useMemo(() => {
     if (!selectedDevice) {
-      return activeScenario.devices[0]
+      return independentFirmwareFallbackDevice ?? activeScenario.devices[0]
     }
 
     const liveRuntimeDevice = isLiveRuntimeDevice(selectedDevice)
@@ -1463,6 +1516,7 @@ export function ControlPlaneDemo({
     currentTempByDevice,
     fanPolicyByDevice,
     heaterHeldByDevice,
+    independentFirmwareFallbackDevice,
     manualPpsByDevice,
     lanLeasesByDevice,
     selectedDevice,
@@ -1470,6 +1524,34 @@ export function ControlPlaneDemo({
     wifiSnapshotsByDevice,
   ])
   const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
+  const firmwareNativeTargets = useMemo<FirmwareNativeTarget[]>(() => {
+    const discoveredTargets = liveDevd.firmwareDevices
+    const routedTarget =
+      visibleDevice.transport === 'devd' && visibleDevice.connectionCandidate === true
+        ? [visibleDevice]
+        : []
+    const targets = [...discoveredTargets, ...routedTarget].filter(
+      (device, index, all) => all.findIndex((candidate) => candidate.id === device.id) === index
+    )
+    return targets
+      .filter(
+        (device) =>
+          device.transport === 'devd' &&
+          (device.capabilities.includes('flash') || device.connectionCandidate === true)
+      )
+      .map((device) => ({
+        id: device.id,
+        label: device.alias,
+        detail: `${device.location} · ${device.leaseState === 'active' ? '租约就绪' : '需要租约'}`,
+        leaseId: device.leaseId ?? null,
+        updateEligible:
+          device.firmware !== 'unknown' &&
+          device.severity !== 'offline' &&
+          device.capabilities.includes('install_status'),
+        currentTemperatureC: device.currentTempC,
+        heaterEnabled: device.heaterEnabled,
+      }))
+  }, [liveDevd.firmwareDevices, visibleDevice])
   const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
   const lanDeviceBaseUrl = isDirectLanDevice(visibleDevice) ? visibleDevice.baseUrl : undefined
   const lanLease = lanDeviceId ? lanLeasesByDevice[lanDeviceId] : undefined
@@ -1830,6 +1912,8 @@ export function ControlPlaneDemo({
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
   const routeHasKnownBridgeTransportIssue =
     routeDeviceConnection?.kind === 'bridge' && Boolean(routeDeviceConnection.target.transportIssue)
+  const routeAllowsIndependentFirmwareMaintenance =
+    navigation?.state.kind === 'device' && navigation.state.view === 'update'
 
   useEffect(() => {
     if (routeHasRecoverableTransportCandidate && routeResumeFailed && !routeHasFailedLanResume) {
@@ -1839,6 +1923,9 @@ export function ControlPlaneDemo({
 
   useEffect(() => {
     if (!routeRecoveryIdentityId || !routeRecoveryVariant) {
+      return
+    }
+    if (routeAllowsIndependentFirmwareMaintenance) {
       return
     }
     if (allowDemoControls) {
@@ -1946,6 +2033,7 @@ export function ControlPlaneDemo({
     routeHasRecoverableTransportCandidate,
     routeRecoveryIdentityId,
     routeRecoveryVariant,
+    routeAllowsIndependentFirmwareMaintenance,
     pendingLanResumeIdentityIds,
     activeLanLeaseIdentityIds,
     webSerial.deviceIdentityId,
@@ -2126,24 +2214,17 @@ export function ControlPlaneDemo({
       }
     })
   }, [visibleDevice, visibleDeviceIsLive])
-  const selectedArtifact = useMemo(
-    () =>
-      activeScenario.artifacts.find(
-        (artifact) => artifact.id === artifactByDevice[visibleDevice.id]
-      ) ?? activeScenario.artifacts[0],
-    [activeScenario.artifacts, artifactByDevice, visibleDevice.id]
-  )
-  const visibleFlashPhases = useMemo(
-    () => createFlashPhases(activeScenario.flashPhases, selectedArtifact, visibleDevice, flashRun),
-    [activeScenario.flashPhases, flashRun, selectedArtifact, visibleDevice]
-  )
+  const selectedArtifact = activeScenario.artifacts[0]
   const knownDevices = useMemo(
     () => deviceOptions.filter((device) => isKnownDeviceChoice(device)),
     [deviceOptions]
   )
   const isDeviceSelectionRequired = isNoLiveTargetDevice(visibleDevice)
-  const showDeviceSelection = isDeviceSelectionRequired && activeView !== 'add-device'
-  const isDeviceAddFlowActive = isDeviceSelectionRequired || activeView === 'add-device'
+  const isFirmwareWorkspace = activeView === 'update'
+  const showDeviceSelection =
+    isDeviceSelectionRequired && activeView !== 'add-device' && !isFirmwareWorkspace
+  const isDeviceAddFlowActive =
+    !isFirmwareWorkspace && (isDeviceSelectionRequired || activeView === 'add-device')
   const visibleDeviceId = visibleDevice.id
   const visibleDeviceTransport = visibleDevice.transport
   const visibleDeviceLeaseId = visibleDevice.leaseId
@@ -2352,6 +2433,21 @@ export function ControlPlaneDemo({
     },
     [allowDemoControls]
   )
+
+  const appendFirmwareActivity = useCallback((entry: FirmwareActivityInput) => {
+    setFirmwareActivity((current) => {
+      const nextSequence = nextFirmwareActivitySequence(current, firmwareActivitySequence.current)
+      firmwareActivitySequence.current = nextSequence
+      return [
+        ...current,
+        {
+          ...entry,
+          id: `firmware-activity-${nextSequence}`,
+          time: formatRuntimeEventTime(new Date()),
+        },
+      ].slice(-FIRMWARE_ACTIVITY_FEED_SIZE)
+    })
+  }, [])
 
   const handleLanPaired = useCallback(
     async (session: LanDeviceSession, probe: LanProbe) => {
@@ -2724,46 +2820,6 @@ export function ControlPlaneDemo({
     visibleDevice.severity,
   ])
 
-  useEffect(() => {
-    if (flashRun.status !== 'running' && flashRun.status !== 'flashing') {
-      return
-    }
-
-    const timer = window.setInterval(() => {
-      setFlashRun((current) => {
-        if (current.status !== 'running' && current.status !== 'flashing') {
-          return current
-        }
-
-        return {
-          ...current,
-          progress: Math.min(current.status === 'flashing' ? 92 : 100, current.progress + 14),
-        }
-      })
-    }, 420)
-
-    return () => window.clearInterval(timer)
-  }, [flashRun.status])
-
-  useEffect(() => {
-    if (
-      flashRun.status !== 'running' ||
-      flashRun.progress < 100 ||
-      flashCompletionEmittedRef.current
-    ) {
-      return
-    }
-
-    flashCompletionEmittedRef.current = true
-    setFeedback({
-      title: 'Dry-run passed',
-      detail: 'Artifact hash and target profile match this device.',
-      tone: 'success',
-    })
-    emitEvent('flash', `${selectedArtifact?.version ?? 'artifact'} dry-check passed`, 'success')
-    setFlashRun({ status: 'passed', progress: 100 })
-  }, [emitEvent, flashRun.progress, flashRun.status, selectedArtifact?.version])
-
   const dismissCalibrationLeaveGuard = useCallback(() => {
     setCalibrationLeaveGuard(null)
   }, [])
@@ -2880,8 +2936,6 @@ export function ControlPlaneDemo({
         () => {
           void setConsoleView('add-device')
           setSelectedAddDeviceKind(defaultAddDeviceKind)
-          setFlashRun({ status: 'idle', progress: 0 })
-          flashCompletionEmittedRef.current = false
           setFeedback({
             title: 'Add device',
             detail: 'Choose WiFi, Web Serial, or Bridge from the add device page.',
@@ -2930,8 +2984,6 @@ export function ControlPlaneDemo({
           )
         }
         setSelectedDeviceId(deviceId)
-        setFlashRun({ status: 'idle', progress: 0 })
-        flashCompletionEmittedRef.current = false
 
         if (!nextDevice) {
           return
@@ -2955,9 +3007,6 @@ export function ControlPlaneDemo({
     kind: AddDeviceKind,
     { showPendingDashboard = true }: { showPendingDashboard?: boolean } = {}
   ) => {
-    setFlashRun({ status: 'idle', progress: 0 })
-    flashCompletionEmittedRef.current = false
-
     if (kind === 'web-serial' && !allowDemoControls) {
       setFeedback({
         title: '正在连接 Web Serial',
@@ -3064,6 +3113,26 @@ export function ControlPlaneDemo({
       )
     },
     [activeView, dismissCalibrationLeaveGuard, navigation, requestCalibrationLeave, setConsoleView]
+  )
+
+  const handleWorkspaceChange = useCallback(
+    (nextWorkspace: ConsoleWorkspace) => {
+      if (nextWorkspace === 'firmware') {
+        if (isFirmwareWorkspace) {
+          dismissCalibrationLeaveGuard()
+          return
+        }
+        handleGuardedViewChange('update')
+        return
+      }
+
+      if (!isFirmwareWorkspace) {
+        dismissCalibrationLeaveGuard()
+        return
+      }
+      handleGuardedViewChange('dashboard')
+    },
+    [dismissCalibrationLeaveGuard, handleGuardedViewChange, isFirmwareWorkspace]
   )
 
   const handleGuardedWorkspaceTabChange = useCallback(
@@ -3432,188 +3501,6 @@ export function ControlPlaneDemo({
       tone: 'success',
     })
     emitEvent('thermal', 'fault attention acknowledged', 'success')
-  }
-
-  const handleStartDryRun = async () => {
-    if (
-      visibleDevice.severity === 'offline' ||
-      selectedArtifact?.compatibility === 'blocked' ||
-      !selectedArtifact
-    ) {
-      setFeedback({
-        title: 'Dry-run unavailable',
-        detail:
-          visibleDevice.severity === 'offline'
-            ? `${visibleDevice.alias} is offline.`
-            : `${selectedArtifact?.version ?? 'Artifact'} is not compatible with this target.`,
-        tone: 'warning',
-      })
-      emitEvent('flash', 'dry-check blocked before start', 'warning')
-      return
-    }
-
-    if (
-      visibleDevice.transport === 'devd' &&
-      (!visibleDevice.leaseId ||
-        !devdBaseUrl ||
-        visibleDevice.leaseState === 'conflict' ||
-        visibleDevice.leaseState === 'expired')
-    ) {
-      setFeedback({
-        title: 'Dry-run lease required',
-        detail: 'Firmware recovery requires an active devd lease for the native target.',
-        tone: 'warning',
-      })
-      emitEvent('flash', 'dry-check blocked: missing devd lease', 'warning')
-      return
-    }
-
-    flashCompletionEmittedRef.current = false
-    setFlashRun({ status: 'running', progress: 0 })
-    setFeedback({
-      title: 'Dry-run started',
-      detail: `${selectedArtifact.version} hash and target profile are being checked.`,
-      tone: selectedArtifact.compatibility === 'warning' ? 'warning' : 'info',
-    })
-    emitEvent('flash', `${selectedArtifact.version} dry-check started`, 'info')
-
-    if (mockOnly) {
-      flashCompletionEmittedRef.current = true
-      setFlashRun({ status: 'passed', progress: 100 })
-      setFeedback({
-        title: 'Simulated dry-run passed',
-        detail: `${selectedArtifact.version} was verified against the deterministic public demo fixture.`,
-        tone: 'success',
-      })
-      emitEvent('flash', `${selectedArtifact.version} verified by public demo fixture`, 'success')
-      return
-    }
-
-    if (!devdBaseUrl || !selectedArtifact.files?.length) {
-      return
-    }
-
-    try {
-      const result = await controlClient.verifyArtifact(
-        devdBaseUrl,
-        artifactToManifest(selectedArtifact)
-      )
-      if (!result.verified) {
-        setFlashRun({ status: 'idle', progress: 0 })
-        setFeedback({
-          title: 'Dry-run failed',
-          detail: `${selectedArtifact.version} failed local file verification.`,
-          tone: 'warning',
-        })
-        emitEvent('flash', `${selectedArtifact.version} verification failed`, 'warning')
-        return
-      }
-
-      if (visibleDevice.transport === 'devd' && visibleDevice.leaseId) {
-        const dryRun = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
-          leaseId: visibleDevice.leaseId,
-          artifact: artifactToManifest(selectedArtifact),
-          dryRun: true,
-        })
-        emitEvent('flash', `${dryRun.artifactId} dry-run registered by devd`, 'success')
-      }
-
-      flashCompletionEmittedRef.current = true
-      setFlashRun({ status: 'passed', progress: 100 })
-      setFeedback({
-        title: 'Dry-run passed',
-        detail: `${selectedArtifact.version} verified ${result.files.length} local file${result.files.length === 1 ? '' : 's'}.`,
-        tone: 'success',
-      })
-      emitEvent('flash', `${selectedArtifact.version} verified by devd`, 'success')
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Artifact verification failed.'
-      setFlashRun({ status: 'idle', progress: 0 })
-      setFeedback({
-        title: 'Dry-run failed',
-        detail,
-        tone: 'warning',
-      })
-      emitEvent('flash', 'devd artifact verification failed', 'warning')
-    }
-  }
-
-  const handleStartFlash = async () => {
-    if (
-      !selectedArtifact ||
-      selectedArtifact.compatibility === 'blocked' ||
-      visibleDevice.transport !== 'devd' ||
-      !visibleDevice.leaseId ||
-      !devdBaseUrl ||
-      flashRun.status !== 'passed'
-    ) {
-      setFeedback({
-        title: 'Flash unavailable',
-        detail:
-          'Real flash requires a devd target, active lease, compatible artifact, and passed dry-run.',
-        tone: 'warning',
-      })
-      emitEvent('flash', 'real flash blocked before start', 'warning')
-      return
-    }
-
-    setFlashRun({ status: 'flashing', progress: 8 })
-    setFeedback({
-      title: 'Flash started',
-      detail: `${selectedArtifact.version} is being written by devd.`,
-      tone: 'warning',
-    })
-    emitEvent('flash', `${selectedArtifact.version} flash command submitted`, 'warning')
-
-    try {
-      const result = await controlClient.flashDevice(devdBaseUrl, visibleDevice.id, {
-        leaseId: visibleDevice.leaseId,
-        artifact: artifactToManifest(selectedArtifact),
-        dryRun: false,
-        confirm: 'FLASH',
-      })
-      setFlashRun({ status: 'flashed', progress: 100 })
-      setFeedback({
-        title: 'Flash completed',
-        detail: result.message,
-        tone: 'success',
-      })
-      emitEvent('flash', `${result.artifactId} flashed by devd`, 'success')
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : 'Real flash failed.'
-      setFlashRun({ status: 'passed', progress: 100 })
-      setFeedback({
-        title: 'Flash blocked',
-        detail,
-        tone: 'warning',
-      })
-      emitEvent('flash', 'devd real flash failed or was blocked', 'warning')
-    }
-  }
-
-  const handleArtifactChange = (artifactId: string) => {
-    const nextArtifact = activeScenario.artifacts.find((artifact) => artifact.id === artifactId)
-
-    setArtifactByDevice((current) => ({
-      ...current,
-      [visibleDevice.id]: artifactId,
-    }))
-    setFlashRun({ status: 'idle', progress: 0 })
-    flashCompletionEmittedRef.current = false
-
-    if (!nextArtifact) {
-      return
-    }
-
-    const blocked = nextArtifact.compatibility === 'blocked'
-    setFeedback({
-      title: `${nextArtifact.version} selected`,
-      detail: blocked
-        ? 'This artifact does not match the active target.'
-        : `${nextArtifact.profile} is ready for a dry-check.`,
-      tone: blocked ? 'warning' : 'info',
-    })
-    emitEvent('artifact', `${nextArtifact.version} selected`, blocked ? 'warning' : 'info')
   }
 
   const setCalibrationReference = (channel: CalibrationChannel, value: number) => {
@@ -4120,6 +4007,7 @@ export function ControlPlaneDemo({
     navigation &&
     unavailableRouteState &&
     !routeHasInvalidLanCredential &&
+    !routeAllowsIndependentFirmwareMaintenance &&
     (!routeDeviceChoice ||
       routeHasFailedLanResume ||
       (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
@@ -4162,75 +4050,91 @@ export function ControlPlaneDemo({
       <div className="industrial-noise" aria-hidden="true" />
       <div className="industrial-console-wrap">
         <section className="industrial-console">
-          <header className="industrial-console__top">
+          <header
+            className={cn(
+              'industrial-console__top',
+              isFirmwareWorkspace && 'industrial-console__top--firmware'
+            )}
+          >
             <div className="industrial-console__identity">
               <div className="industrial-app-mark">
                 <span className="industrial-led industrial-led--green" aria-hidden="true" />
                 <strong>Flux Purr Link</strong>
-                <StatusPill severity={visibleDevice.severity} />
+                {!isFirmwareWorkspace ? <StatusPill severity={visibleDevice.severity} /> : null}
               </div>
               <h1>热控工作台</h1>
             </div>
 
-            <DeviceToolbar
-              devices={deviceOptions}
-              device={visibleDevice}
-              onDeviceChange={handleDeviceChange}
-            />
+            {isFirmwareWorkspace ? (
+              <FirmwareWorkspaceContext onWorkspaceChange={handleWorkspaceChange} />
+            ) : (
+              <DeviceToolbar
+                devices={deviceOptions}
+                device={visibleDevice}
+                onDeviceChange={handleDeviceChange}
+                onWorkspaceChange={handleWorkspaceChange}
+              />
+            )}
           </header>
 
-          <nav className="industrial-view-tabs" aria-label="Console views">
-            {consoleViews.map((view) => {
-              const Icon = view.icon
-              const isActive = view.id === activeView
-              const content = (
-                <>
-                  <Icon size={18} aria-hidden="true" />
-                  <span>
-                    <strong>{view.label}</strong>
-                    <small>{view.caption}</small>
-                  </span>
-                </>
-              )
-              const className = isActive ? 'industrial-view-tab is-selected' : 'industrial-view-tab'
-              if (navigation) {
+          {!isFirmwareWorkspace && !isDeviceAddFlowActive ? (
+            <nav className="industrial-view-tabs" aria-label="设备工作区">
+              {deviceConsoleViews.map((view) => {
+                const Icon = view.icon
+                const isActive = view.id === activeView
+                const content = (
+                  <>
+                    <Icon size={18} aria-hidden="true" />
+                    <span>
+                      <strong>{view.label}</strong>
+                      <small>{view.caption}</small>
+                    </span>
+                  </>
+                )
+                const className = isActive
+                  ? 'industrial-view-tab is-selected'
+                  : 'industrial-view-tab'
+                if (navigation) {
+                  return (
+                    <ConsoleViewLink
+                      key={view.id}
+                      deviceId={
+                        navigation.state.kind === 'device'
+                          ? navigation.state.deviceId
+                          : deviceIdentityId(visibleDevice)
+                      }
+                      view={view.id}
+                      calibrationTab={visibleCalibrationWorkspaceTab}
+                      active={isActive}
+                      className={className}
+                      search={navigation.search}
+                    >
+                      {content}
+                    </ConsoleViewLink>
+                  )
+                }
                 return (
-                  <ConsoleViewLink
+                  <button
                     key={view.id}
-                    deviceId={
-                      navigation.state.kind === 'device'
-                        ? navigation.state.deviceId
-                        : deviceIdentityId(visibleDevice)
-                    }
-                    view={view.id}
-                    calibrationTab={visibleCalibrationWorkspaceTab}
-                    active={isActive}
+                    type="button"
                     className={className}
-                    search={navigation.search}
+                    aria-pressed={isActive}
+                    onClick={() => handleGuardedViewChange(view.id)}
                   >
                     {content}
-                  </ConsoleViewLink>
+                  </button>
                 )
-              }
-              return (
-                <button
-                  key={view.id}
-                  type="button"
-                  className={className}
-                  aria-pressed={isActive}
-                  onClick={() => handleGuardedViewChange(view.id)}
-                >
-                  {content}
-                </button>
-              )
-            })}
-          </nav>
+              })}
+            </nav>
+          ) : null}
 
           <div
             className={
               isDeviceAddFlowActive
                 ? 'industrial-console__workspace industrial-console__workspace--selection'
-                : 'industrial-console__workspace'
+                : isFirmwareWorkspace
+                  ? 'industrial-console__workspace industrial-console__workspace--firmware'
+                  : 'industrial-console__workspace'
             }
           >
             <section className="industrial-panel industrial-console__main">
@@ -4241,13 +4145,12 @@ export function ControlPlaneDemo({
                 showDeviceSelection={showDeviceSelection}
                 knownDevices={knownDevices}
                 allowDemoControls={allowDemoControls}
+                mockOnly={mockOnly}
                 webSerial={webSerial}
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
                 fanPolicyValue={visibleFanPolicy}
-                flashPhases={visibleFlashPhases}
-                artifacts={activeScenario.artifacts}
                 artifact={selectedArtifact}
                 feedback={feedback}
                 calibration={visibleCalibration}
@@ -4255,7 +4158,9 @@ export function ControlPlaneDemo({
                 runtimeCalibration={visibleRuntimeCalibration}
                 calibrationRefs={visibleCalibrationRefs}
                 calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
-                flashRun={flashRun}
+                firmwareNativeTargets={firmwareNativeTargets}
+                firmwareArtifacts={firmwareArtifacts}
+                artifactBlocked={selectedArtifact?.compatibility === 'blocked'}
                 onTargetTempChange={handleTargetTempChange}
                 onPresetSlotChange={handlePresetSlotChange}
                 onPresetTempChange={handlePresetTempChange}
@@ -4267,7 +4172,6 @@ export function ControlPlaneDemo({
                 onManualPpsClear={handleManualPpsClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
                 onFaultAttentionAcknowledge={handleFaultAttentionAcknowledge}
-                onArtifactChange={handleArtifactChange}
                 onCalibrationReferenceChange={setCalibrationReference}
                 onCalibrationCapture={handleCalibrationCapture}
                 onCalibrationDelete={handleCalibrationDelete}
@@ -4293,17 +4197,21 @@ export function ControlPlaneDemo({
                 onBridgeTargetSelect={handleBridgeTargetSelect}
                 controlClient={controlClient}
                 devdBaseUrl={devdBaseUrl}
+                bridgeDevdBaseUrl={bridgeDevdBaseUrl}
                 onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDeviceChoice}
                 selectedAddDeviceKind={selectedAddDeviceKind}
                 onLanPaired={handleLanPaired}
                 lanPairing={lanPairing}
-                onStartDryRun={handleStartDryRun}
-                onStartFlash={handleStartFlash}
+                onFirmwareActivity={appendFirmwareActivity}
               />
             </section>
 
-            {isDeviceAddFlowActive ? null : <GlobalLogPanel events={visibleEvents} />}
+            {isFirmwareWorkspace ? (
+              <FirmwareTransactionLog entries={firmwareActivity} />
+            ) : isDeviceAddFlowActive ? null : (
+              <GlobalLogPanel events={visibleEvents} />
+            )}
           </div>
         </section>
       </div>
@@ -4418,80 +4326,6 @@ export function formatRuntimeEventTime(date: Date) {
   return [date.getHours(), date.getMinutes(), date.getSeconds()]
     .map((value) => String(value).padStart(2, '0'))
     .join(':')
-}
-
-function createFlashPhases(
-  basePhases: WorkflowPhase[],
-  artifact: FirmwareArtifact | undefined,
-  device: DeviceTarget,
-  flashRun: { status: FlashRunStatus; progress: number }
-) {
-  const missingFlashCapability = !device.capabilities.includes('flash')
-  const leaseBlocked = device.leaseState === 'conflict' || device.leaseState === 'expired'
-  const blocked =
-    !artifact ||
-    artifact.compatibility === 'blocked' ||
-    device.severity === 'offline' ||
-    missingFlashCapability ||
-    leaseBlocked
-  const warning = artifact?.compatibility === 'warning' || device.severity === 'warning'
-
-  if (blocked) {
-    return basePhases.map((phase, index) => ({
-      ...phase,
-      state:
-        index < 2 ? ('done' as const) : index === 2 ? ('blocked' as const) : ('pending' as const),
-      detail:
-        index === 2
-          ? device.severity === 'offline'
-            ? 'Target is offline.'
-            : leaseBlocked
-              ? 'USB lease is not available for this target.'
-              : missingFlashCapability
-                ? 'Active transport does not expose flash capability.'
-                : 'Selected artifact does not match this device.'
-          : phase.detail,
-    }))
-  }
-
-  if (flashRun.status === 'passed') {
-    return basePhases.map((phase) => ({ ...phase, state: 'done' as const }))
-  }
-
-  if (flashRun.status === 'running') {
-    return basePhases.map((phase, index) => ({
-      ...phase,
-      state: dryRunPhaseState(index, flashRun.progress),
-    }))
-  }
-
-  return basePhases.map((phase, index) => ({
-    ...phase,
-    state:
-      index < 2
-        ? ('done' as const)
-        : index === 2
-          ? warning
-            ? ('active' as const)
-            : ('pending' as const)
-          : ('pending' as const),
-  }))
-}
-
-function dryRunPhaseState(index: number, progress: number): WorkflowPhase['state'] {
-  if (index === 0) {
-    return 'done'
-  }
-
-  if (progress < 35) {
-    return index === 1 ? 'active' : 'pending'
-  }
-
-  if (progress < 70) {
-    return index < 2 ? 'done' : index === 2 ? 'active' : 'pending'
-  }
-
-  return index < 3 ? 'done' : 'active'
 }
 
 export function createDefaultCalibrationState(): CalibrationState {
@@ -5161,10 +4995,12 @@ export function DeviceToolbar({
   devices,
   device,
   onDeviceChange,
+  onWorkspaceChange = () => undefined,
 }: {
   devices: DeviceTarget[]
   device: DeviceTarget
   onDeviceChange: (deviceId: string) => void
+  onWorkspaceChange?: (workspace: ConsoleWorkspace) => void
 }) {
   return (
     <section className="industrial-status-strip" aria-label="当前目标">
@@ -5172,14 +5008,62 @@ export function DeviceToolbar({
         <DeviceTargetPicker devices={devices} device={device} onDeviceChange={onDeviceChange} />
       </div>
 
-      <StatusDatum label="传输" value={transportLabels[device.transport]} />
-      <StatusDatum
-        label="租约"
-        value={device.leaseState ? leaseStateLabels[device.leaseState] : '无'}
-      />
       <StatusDatum label="热板" value={formatTemp(device.currentTempC)} />
       <StatusDatum label="PD" value={formatVolts(device.pdContractMv)} />
+      <WorkspaceSwitcher workspace="device" onWorkspaceChange={onWorkspaceChange} />
     </section>
+  )
+}
+
+function FirmwareWorkspaceContext({
+  onWorkspaceChange,
+}: {
+  onWorkspaceChange: (workspace: ConsoleWorkspace) => void
+}) {
+  return (
+    <section
+      className="industrial-status-strip industrial-status-strip--firmware"
+      aria-label="固件工作区"
+    >
+      <div className="industrial-firmware-context">
+        <Upload size={18} aria-hidden="true" />
+        <span>
+          <strong>固件维护</strong>
+          <small>独立烧录任务</small>
+        </span>
+      </div>
+      <WorkspaceSwitcher workspace="firmware" onWorkspaceChange={onWorkspaceChange} />
+    </section>
+  )
+}
+
+function WorkspaceSwitcher({
+  workspace,
+  onWorkspaceChange,
+}: {
+  workspace: ConsoleWorkspace
+  onWorkspaceChange: (workspace: ConsoleWorkspace) => void
+}) {
+  return (
+    <fieldset className="industrial-workspace-switch">
+      <legend className="sr-only">主工作区</legend>
+      <button
+        type="button"
+        className={workspace === 'device' ? 'is-selected' : undefined}
+        aria-pressed={workspace === 'device'}
+        onClick={() => onWorkspaceChange('device')}
+      >
+        设备控制
+      </button>
+      <button
+        type="button"
+        className={workspace === 'firmware' ? 'is-selected' : undefined}
+        aria-pressed={workspace === 'firmware'}
+        onClick={() => onWorkspaceChange('firmware')}
+      >
+        固件维护
+      </button>
+    </fieldset>
   )
 }
 
@@ -5339,13 +5223,12 @@ function ViewPanel({
   showDeviceSelection,
   knownDevices,
   allowDemoControls,
+  mockOnly,
   webSerial,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
   fanPolicyValue,
-  flashPhases,
-  artifacts,
   artifact,
   feedback,
   calibration,
@@ -5353,7 +5236,9 @@ function ViewPanel({
   runtimeCalibration,
   calibrationRefs,
   calibrationWorkspaceTab,
-  flashRun,
+  firmwareNativeTargets,
+  firmwareArtifacts,
+  artifactBlocked,
   onTargetTempChange,
   onPresetSlotChange,
   onPresetTempChange,
@@ -5365,18 +5250,17 @@ function ViewPanel({
   onManualPpsClear,
   onHeaterHoldToggle,
   onFaultAttentionAcknowledge,
-  onArtifactChange,
   onDeviceSelect,
   onBridgeTargetSelect,
   controlClient,
   devdBaseUrl,
+  bridgeDevdBaseUrl,
   onQuickAddDevice,
   onAddDevice,
   selectedAddDeviceKind,
   onLanPaired,
   lanPairing,
-  onStartDryRun,
-  onStartFlash,
+  onFirmwareActivity,
   onCalibrationReferenceChange,
   onCalibrationCapture,
   onCalibrationDelete,
@@ -5401,13 +5285,12 @@ function ViewPanel({
   showDeviceSelection: boolean
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
+  mockOnly: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
   fanPolicyValue: DeviceTarget['fanState']
-  flashPhases: WorkflowPhase[]
-  artifacts: FirmwareArtifact[]
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
   calibration: CalibrationState
@@ -5415,7 +5298,9 @@ function ViewPanel({
   runtimeCalibration: CalibrationRuntimeState
   calibrationRefs: { rtdTempC: number; vinMv: number }
   calibrationWorkspaceTab: CalibrationWorkspaceTab
-  flashRun: { status: FlashRunStatus; progress: number }
+  firmwareNativeTargets: FirmwareNativeTarget[]
+  firmwareArtifacts?: OfficialFirmwareArtifact[]
+  artifactBlocked: boolean
   onTargetTempChange: (nextTargetTemp: number) => void
   onPresetSlotChange: (presetIndex: number) => void | Promise<void>
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
@@ -5427,18 +5312,17 @@ function ViewPanel({
   onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
   onFaultAttentionAcknowledge: () => void | Promise<void>
-  onArtifactChange: (artifactId: string) => void
   onDeviceSelect: (deviceId: string) => void
   onBridgeTargetSelect: (device: DeviceTarget) => void
   controlClient: ControlPlaneHttpClient
   devdBaseUrl: string | null
+  bridgeDevdBaseUrl: string | null
   onQuickAddDevice: (kind: AddDeviceKind) => void
   onAddDevice: (kind: AddDeviceKind) => void
   selectedAddDeviceKind: AddDeviceKind
   onLanPaired: (session: LanDeviceSession, probe: LanProbe) => void | Promise<void>
   lanPairing?: LanPairingOverrides
-  onStartDryRun: () => void
-  onStartFlash: () => void
+  onFirmwareActivity: (entry: FirmwareActivityInput) => void
   onCalibrationReferenceChange: (channel: CalibrationChannel, value: number) => void
   onCalibrationCapture: (
     channel: CalibrationChannel,
@@ -5479,6 +5363,23 @@ function ViewPanel({
   onCalibrationLeaveGuardDismiss: () => void
   onCalibrationLeaveGuardClear: () => void
 }) {
+  if (view === 'update') {
+    return (
+      <UpdateView
+        browserAvailable={
+          mockOnly ||
+          (typeof navigator !== 'undefined' && 'serial' in navigator && window.isSecureContext)
+        }
+        nativeTargets={firmwareNativeTargets}
+        devdBaseUrl={devdBaseUrl}
+        officialArtifacts={firmwareArtifacts}
+        artifactBlocked={artifactBlocked}
+        mockOnly={mockOnly}
+        onActivity={onFirmwareActivity}
+      />
+    )
+  }
+
   if (showDeviceSelection) {
     return (
       <DeviceSelectionView
@@ -5505,7 +5406,7 @@ function ViewPanel({
         knownDevices={knownDevices}
         onBridgeTargetSelect={onBridgeTargetSelect}
         controlClient={controlClient}
-        devdBaseUrl={devdBaseUrl}
+        devdBaseUrl={bridgeDevdBaseUrl}
       />
     )
   }
@@ -5525,22 +5426,6 @@ function ViewPanel({
         onFanPolicyChange={onFanPolicyChange}
         onWifiSave={onWifiSave}
         onWifiClear={onWifiClear}
-      />
-    )
-  }
-
-  if (view === 'update') {
-    return (
-      <UpdateView
-        device={device}
-        artifacts={artifacts}
-        artifact={artifact}
-        flashPhases={flashPhases}
-        feedback={feedback}
-        flashRun={flashRun}
-        onArtifactChange={onArtifactChange}
-        onStartDryRun={onStartDryRun}
-        onStartFlash={onStartFlash}
       />
     )
   }
@@ -9074,168 +8959,33 @@ function PresetTemperatureEditor({
 }
 
 function UpdateView({
-  device,
-  artifacts,
-  artifact,
-  flashPhases,
-  feedback,
-  flashRun,
-  onArtifactChange,
-  onStartDryRun,
-  onStartFlash,
+  browserAvailable,
+  nativeTargets,
+  devdBaseUrl,
+  officialArtifacts,
+  artifactBlocked,
+  mockOnly,
+  onActivity,
 }: {
-  device: DeviceTarget
-  artifacts: FirmwareArtifact[]
-  artifact?: FirmwareArtifact
-  flashPhases: WorkflowPhase[]
-  feedback: ActionFeedback
-  flashRun: { status: FlashRunStatus; progress: number }
-  onArtifactChange: (artifactId: string) => void
-  onStartDryRun: () => void
-  onStartFlash: () => void
+  browserAvailable: boolean
+  nativeTargets: FirmwareNativeTarget[]
+  devdBaseUrl: string | null
+  officialArtifacts?: OfficialFirmwareArtifact[]
+  artifactBlocked: boolean
+  mockOnly: boolean
+  onActivity: (entry: FirmwareActivityInput) => void
 }) {
-  const blockedPhase = flashPhases.find((phase) => phase.state === 'blocked')
-  const activePhase = flashPhases.find((phase) => phase.state === 'active') ?? flashPhases[0]
-  const currentProgress =
-    flashRun.status === 'idle' ? (artifact?.progressPercent ?? 0) : flashRun.progress
-  const isBlocked =
-    device.severity === 'offline' ||
-    artifact?.compatibility === 'blocked' ||
-    Boolean(blockedPhase) ||
-    !device.capabilities.includes('flash') ||
-    device.leaseState === 'conflict' ||
-    device.leaseState === 'expired'
-  const isBusy = flashRun.status === 'running' || flashRun.status === 'flashing'
-  const canFlash =
-    flashRun.status === 'passed' &&
-    device.transport === 'devd' &&
-    !isBlocked &&
-    Boolean(device.leaseId)
-  const verdict = isBlocked
-    ? {
-        tone: 'danger',
-        title: 'Not compatible',
-        detail:
-          device.severity === 'offline'
-            ? 'Target is offline.'
-            : device.leaseState === 'conflict'
-              ? 'Another client owns the USB lease.'
-              : !device.capabilities.includes('flash')
-                ? 'This transport does not expose flash capability.'
-                : (blockedPhase?.detail ?? 'Selected firmware does not match this target.'),
-      }
-    : flashRun.status === 'flashed'
-      ? {
-          tone: 'safe',
-          title: 'Flash complete',
-          detail: `${artifact?.version ?? 'Artifact'} was written by devd.`,
-        }
-      : flashRun.status === 'flashing'
-        ? {
-            tone: 'warning',
-            title: 'Writing firmware',
-            detail: `${artifact?.version ?? 'Artifact'} is being written by devd.`,
-          }
-        : flashRun.status === 'passed'
-          ? {
-              tone: 'safe',
-              title: 'Check passed',
-              detail: `${artifact?.version ?? 'Artifact'} is verified and ready for guarded flash.`,
-            }
-          : artifact?.compatibility === 'warning'
-            ? {
-                tone: 'warning',
-                title: 'Check recommended',
-                detail: `${artifact.version} can be checked, but the profile differs from the active runtime.`,
-              }
-            : {
-                tone: 'safe',
-                title: 'Ready to check',
-                detail: `${activePhase?.label ?? 'Dry-run'} can run without changing firmware.`,
-              }
-
-  const recoveryNote =
-    deviceControlBlockReason(device) && !isBlocked
-      ? 'Serial control is degraded; firmware recovery remains available through devd flash.'
-      : null
-
   return (
     <div className="industrial-view-panel">
-      <PanelHeader kicker="Update" title="Firmware check" />
-      <div className={`industrial-gate-verdict is-${verdict.tone}`}>
-        <div>
-          <p className="industrial-label">Compatibility</p>
-          <strong>{verdict.title}</strong>
-          <span>{verdict.detail}</span>
-        </div>
-        <CheckCircle2 size={22} aria-hidden="true" />
-      </div>
-      <div className="industrial-update-grid">
-        <div className="industrial-artifact industrial-artifact--compact">
-          <p className="industrial-label">Artifact</p>
-          <Select value={artifact?.id} onValueChange={onArtifactChange}>
-            <SelectTrigger
-              aria-label="Firmware artifact"
-              className="industrial-artifact-select industrial-radix-select"
-              disabled={isBusy || artifacts.length === 0}
-            >
-              <SelectValue placeholder="No firmware artifact" />
-            </SelectTrigger>
-            <SelectContent className="industrial-select-content">
-              {artifacts.map((item) => (
-                <SelectItem key={item.id} value={item.id} className="industrial-select-item">
-                  {item.version} · {item.profile}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="industrial-mono text-xs">
-            {artifact?.target ?? 'target unknown'} · {artifact?.protocol ?? 'protocol unknown'} ·{' '}
-            {artifact?.hash ?? 'hash unavailable'}
-          </p>
-          <div
-            className="industrial-progress"
-            role="progressbar"
-            aria-label={`${artifact?.id ?? 'artifact'} flash progress`}
-            aria-valuenow={currentProgress}
-            aria-valuemin={0}
-            aria-valuemax={100}
-          >
-            <span
-              style={{
-                width: `${currentProgress}%`,
-              }}
-            />
-          </div>
-        </div>
-        <CompactPhase label="Dry-run" phases={flashPhases} />
-      </div>
-      {recoveryNote ? <p className="industrial-mono text-xs">{recoveryNote}</p> : null}
-      <div className="industrial-command-row">
-        <button
-          type="button"
-          className="industrial-button industrial-button--primary"
-          disabled={isBusy || isBlocked}
-          onClick={onStartDryRun}
-        >
-          <Upload size={16} aria-hidden="true" />
-          {flashRun.status === 'running' ? 'Checking' : 'Run dry-check'}
-        </button>
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary"
-          disabled={!canFlash || isBusy}
-          onClick={onStartFlash}
-        >
-          <Zap size={16} aria-hidden="true" />
-          {flashRun.status === 'flashing'
-            ? 'Flashing'
-            : flashRun.status === 'flashed'
-              ? 'Flashed'
-              : 'Flash'}
-        </button>
-      </div>
-      <ActionFeedbackPanel feedback={feedback} />
+      <FirmwareWorkbench
+        browserAvailable={browserAvailable}
+        nativeTargets={nativeTargets}
+        devdBaseUrl={devdBaseUrl}
+        officialArtifacts={officialArtifacts}
+        artifactBlocked={artifactBlocked}
+        executionMode={mockOnly ? 'mock' : 'live'}
+        onActivity={onActivity}
+      />
     </div>
   )
 }
@@ -9328,7 +9078,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
         <strong>{latestSourceLabel}</strong>
         <p>{latestEvent?.message ?? '暂无追踪帧'}</p>
       </div>
-      <SimpleBar
+      <ScrollArea
         autoHide
         className="industrial-log-panel__rows"
         scrollbarMinSize={64}
@@ -9382,24 +9132,8 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
             )
           })}
         </div>
-      </SimpleBar>
+      </ScrollArea>
     </aside>
-  )
-}
-
-function CompactPhase({ label, phases }: { label: string; phases: WorkflowPhase[] }) {
-  return (
-    <div className="industrial-compact-phase">
-      <p className="industrial-label">{label}</p>
-      <div className="industrial-phase-dots">
-        {phases.slice(0, 4).map((phase) => (
-          <span key={phase.label} className={`is-${phase.state}`} title={phase.label}>
-            {phase.state === 'done' ? <CheckCircle2 size={14} /> : null}
-          </span>
-        ))}
-      </div>
-      <strong>{phases.find((phase) => phase.state === 'active')?.label ?? phases[0]?.label}</strong>
-    </div>
   )
 }
 
