@@ -58,8 +58,12 @@ test.describe('control plane Web Serial route recovery', () => {
 
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
     await expect(page).toHaveURL(new RegExp(`/devices/${deviceId}/overview\\?demo=false$`))
-    await expect(page.getByRole('button', { name: '添加连接' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
+    await expect(page.getByRole('status').getByText('连接恢复')).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
+    expect(await page.getByRole('button', { name: /Web Serial/ }).count()).toBeGreaterThan(0)
     await expect(page.getByText('Web Serial unavailable')).toBeVisible()
+    expect(await page.getByText('目标设备暂不可用', { exact: true }).count()).toBe(0)
     await page.waitForTimeout(1_000)
 
     expect(devdRequests).toEqual([])

@@ -272,6 +272,36 @@ describe('firmware workspace hierarchy', () => {
     expect(markup).not.toContain('目标设备暂不可用')
   })
 
+  it('uses the standard target-selection shell for an unavailable live route', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: liveControlPlaneScenario,
+        allowDemoControls: false,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+        navigation: {
+          state: {
+            kind: 'device',
+            deviceId: 'remembered-web-serial-device',
+            view: 'dashboard',
+          },
+          variant: 'live',
+          search: { demo: false },
+          navigate: async () => undefined,
+          blockedNavigation: null,
+          onCalibrationGuardChange: () => undefined,
+        },
+      })
+    )
+
+    expect(markup).toContain('class="industrial-console"')
+    expect(markup).toContain('Choose target')
+    expect(markup).toContain('连接恢复')
+    expect(markup).toContain('重试恢复')
+    expect(markup).not.toContain('目标设备暂不可用')
+    expect(markup).not.toContain('industrial-route-message')
+  })
+
   it('keeps the independent firmware workspace rendered when live discovery has no device', () => {
     const markup = renderToStaticMarkup(
       createElement(ControlPlaneDemo, {

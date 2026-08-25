@@ -4062,7 +4062,6 @@ export function ControlPlaneDemo({
       routeHasFailedLanResume ||
       (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
   ) {
-    const routeNavigation = navigation
     const recoveryLeaveGuard = calibrationLeaveGuard
       ? {
           nextLabel: calibrationLeaveGuard.nextLabel,
@@ -4079,12 +4078,13 @@ export function ControlPlaneDemo({
     return (
       <RouteDeviceRecovery
         identityId={unavailableRouteState.deviceId}
-        choices={routeDeviceChoices}
+        knownDevices={deviceOptions}
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        transport={routeConnectionKind}
         retry={() => window.location.reload()}
-        chooseDevice={(identityId) =>
-          routeNavigation.navigate({ ...unavailableRouteState, deviceId: identityId })
-        }
-        addDevice={() => routeNavigation.navigate({ kind: 'add-device' })}
+        onDeviceSelect={handleDeviceChange}
+        onAddDevice={handleQuickAddDevice}
         feedback={feedback}
         leaveGuard={recoveryLeaveGuard}
       />
@@ -4271,18 +4271,24 @@ export function ControlPlaneDemo({
 
 function RouteDeviceRecovery({
   identityId,
-  choices,
+  knownDevices,
+  allowDemoControls,
+  webSerial,
+  transport,
   retry,
-  chooseDevice,
-  addDevice,
+  onDeviceSelect,
+  onAddDevice,
   feedback,
   leaveGuard,
 }: {
   identityId: string
-  choices: DeviceChoice[]
+  knownDevices: DeviceTarget[]
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  transport?: DeviceConnectionKind
   retry: () => void
-  chooseDevice: (identityId: string) => void | Promise<void>
-  addDevice: () => void | Promise<void>
+  onDeviceSelect: (deviceId: string) => void
+  onAddDevice: (kind: AddDeviceKind) => void | Promise<void>
   feedback: ActionFeedback
   leaveGuard: {
     nextLabel: string
@@ -4290,55 +4296,67 @@ function RouteDeviceRecovery({
     onContinue: () => void
   } | null
 }) {
+  const RouteIcon =
+    transport === 'wifi'
+      ? Wifi
+      : transport === 'bridge'
+        ? Router
+        : transport === 'web-serial'
+          ? Cable
+          : CircleHelp
+
   return (
     <main className="industrial-shell industrial-shell--fixed text-[var(--industrial-text)]">
       <div className="industrial-noise" aria-hidden="true" />
-      <section className="industrial-route-message" aria-labelledby="route-device-title">
-        <Cable aria-hidden="true" />
-        <div>
-          <h1 id="route-device-title">目标设备暂不可用</h1>
-          <p>
-            无法恢复身份 <strong>{identityId}</strong>{' '}
-            的已知连接。地址已保留，可重试发现或明确选择其他目标。
-          </p>
-        </div>
-        <div className="industrial-route-message__actions">
-          {leaveGuard ? (
-            <span id="route-recovery-calibration-anchor">
-              <Button type="button" variant="outline">
-                <AlertTriangle aria-hidden="true" />
-                处理校准退出
-              </Button>
-              <CalibrationLeaveGuardBubble
-                anchorId="route-recovery-calibration-anchor"
-                nextLabel={leaveGuard.nextLabel}
-                onDismiss={leaveGuard.onDismiss}
-                onContinue={leaveGuard.onContinue}
+      <div className="industrial-console-wrap">
+        <section className="industrial-console">
+          <header className="industrial-console__top">
+            <div className="industrial-console__identity">
+              <div className="industrial-app-mark">
+                <span className="industrial-led industrial-led--green" aria-hidden="true" />
+                <strong>Flux Purr Link</strong>
+                <StatusPill severity="offline" />
+              </div>
+              <h1>热控工作台</h1>
+            </div>
+            <div className="industrial-firmware-context">
+              <RouteIcon aria-hidden="true" />
+              <span>
+                <strong>连接恢复</strong>
+                <small>设备 ID · {identityId}</small>
+              </span>
+            </div>
+          </header>
+
+          <div className="industrial-console__workspace industrial-console__workspace--selection">
+            <section className="industrial-panel industrial-console__main">
+              {leaveGuard ? (
+                <span id="route-recovery-calibration-anchor">
+                  <Button type="button" variant="outline">
+                    <AlertTriangle aria-hidden="true" />
+                    处理校准退出
+                  </Button>
+                  <CalibrationLeaveGuardBubble
+                    anchorId="route-recovery-calibration-anchor"
+                    nextLabel={leaveGuard.nextLabel}
+                    onDismiss={leaveGuard.onDismiss}
+                    onContinue={leaveGuard.onContinue}
+                  />
+                </span>
+              ) : null}
+              <DeviceSelectionView
+                knownDevices={knownDevices}
+                allowDemoControls={allowDemoControls}
+                webSerial={webSerial}
+                feedback={feedback}
+                recovery={{ identityId, retry, transport }}
+                onDeviceSelect={onDeviceSelect}
+                onAddDevice={onAddDevice}
               />
-            </span>
-          ) : null}
-          <Button type="button" variant="outline" onClick={retry}>
-            <RefreshCw aria-hidden="true" />
-            重试发现
-          </Button>
-          {choices.map((choice) => (
-            <Button
-              key={choice.identityId}
-              type="button"
-              variant="outline"
-              onClick={() => chooseDevice(choice.identityId)}
-            >
-              <Router aria-hidden="true" />
-              选择 {choice.name}
-            </Button>
-          ))}
-          <Button type="button" onClick={() => addDevice()}>
-            <Plus aria-hidden="true" />
-            添加连接
-          </Button>
-        </div>
-        {feedback.tone === 'warning' ? <ActionFeedbackPanel feedback={feedback} /> : null}
-      </section>
+            </section>
+          </div>
+        </section>
+      </div>
     </main>
   )
 }
@@ -5562,6 +5580,7 @@ function DeviceSelectionView({
   allowDemoControls,
   webSerial,
   feedback,
+  recovery,
   onDeviceSelect,
   onAddDevice,
 }: {
@@ -5569,6 +5588,11 @@ function DeviceSelectionView({
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   feedback: ActionFeedback
+  recovery?: {
+    identityId: string
+    retry: () => void
+    transport?: DeviceConnectionKind
+  }
   onDeviceSelect: (deviceId: string) => void
   onAddDevice: (kind: AddDeviceKind) => void
 }) {
@@ -5580,6 +5604,7 @@ function DeviceSelectionView({
   return (
     <div className="industrial-view-panel industrial-device-select-view">
       <PanelHeader kicker="Device" title="Choose target" />
+      {recovery ? <RouteRecoveryNotice {...recovery} /> : null}
       <section className="industrial-device-select-section" aria-label="Known devices">
         {choices.length > 0 ? (
           <div className="industrial-known-device-grid">
@@ -5607,6 +5632,48 @@ function DeviceSelectionView({
 
       <ActionFeedbackPanel feedback={feedback} />
     </div>
+  )
+}
+
+function RouteRecoveryNotice({
+  identityId,
+  retry,
+  transport,
+}: {
+  identityId: string
+  retry: () => void
+  transport?: DeviceConnectionKind
+}) {
+  const RouteIcon =
+    transport === 'wifi'
+      ? Wifi
+      : transport === 'bridge'
+        ? Router
+        : transport === 'web-serial'
+          ? Cable
+          : CircleHelp
+  const transportLabel =
+    transport === 'wifi'
+      ? 'WiFi / LAN'
+      : transport === 'bridge'
+        ? '桥接'
+        : transport === 'web-serial'
+          ? 'Web Serial'
+          : '当前连接'
+
+  return (
+    <output className="industrial-route-recovery-notice" aria-live="polite">
+      <RouteIcon aria-hidden="true" />
+      <span>
+        <p className="industrial-label">连接恢复</p>
+        <strong>{transportLabel} 路由已保留</strong>
+        <small>设备 ID · {identityId}</small>
+      </span>
+      <Button type="button" variant="outline" onClick={retry}>
+        <RefreshCw aria-hidden="true" />
+        重试恢复
+      </Button>
+    </output>
   )
 }
 
