@@ -5218,11 +5218,13 @@ impl Fusb302bRuntime {
             .last_request_at_ms
             .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
         {
-            // Keep a confirmed fixed-PD contract alive while dropping only the
-            // stalled request. A later control turn retries from cached caps.
-            self.policy.cancel_pending_request();
+            // Reset the PHY and discard every contract before retrying. This
+            // flushes delayed Accept/PS_RDY frames so an expired transaction
+            // can never install a newer pending contract.
+            self.policy.timeout_pending_request();
             self.last_request_at_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+            return self.restart_after_reset(i2c);
         }
 
         if self.source_capabilities_refresh_pending

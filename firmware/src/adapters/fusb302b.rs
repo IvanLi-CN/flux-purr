@@ -248,6 +248,18 @@ impl SinkPolicy {
         };
     }
 
+    /// Disarm after a request timeout. The runtime resets the PHY before it
+    /// resumes negotiation, so delayed frames from this transaction cannot
+    /// install a contract after the timeout.
+    pub fn timeout_pending_request(&mut self) {
+        if matches!(
+            self.phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) {
+            self.mark_fault();
+        }
+    }
+
     /// Handles the control messages relevant to a sink request.  `Accept`
     /// alone never arms heating; only `PS_RDY` installs the active contract.
     pub fn on_control_message(&mut self, message_type: u8, now_ms: u64) {
@@ -1078,6 +1090,31 @@ mod tests {
         assert_eq!(policy.phase(), SinkPhase::Ready);
         assert_eq!(policy.active_contract().kind, ContractKind::Pps);
         assert_eq!(policy.active_contract().voltage_mv, 20_000);
+    }
+
+    #[test]
+    fn policy_timeout_disarms_and_discards_both_contracts() {
+        let fixed_20v_5a = ((20_000_u32 / 50) << 10) | (5_000 / 10);
+        let pps_5v_to_21v_5a =
+            (0b11 << 30) | ((5_000_u32 / 100) << 8) | ((21_000_u32 / 100) << 17) | (5_000 / 50);
+        let mut policy = SinkPolicy::new(20_000, 5_000);
+
+        assert!(
+            policy
+                .on_source_capabilities(&[fixed_20v_5a, pps_5v_to_21v_5a])
+                .is_some()
+        );
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+
+        assert!(policy.request_fixed_voltage(20_000).is_some());
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        policy.timeout_pending_request();
+
+        assert_eq!(policy.phase(), SinkPhase::Fault);
+        assert_eq!(policy.active_contract(), Contract::none());
+        assert_eq!(policy.pending_contract, Contract::none());
     }
 
     #[test]
