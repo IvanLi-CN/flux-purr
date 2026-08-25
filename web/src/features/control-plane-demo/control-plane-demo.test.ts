@@ -161,6 +161,20 @@ describe('live transport feedback boundary', () => {
     ).toBe('bridge')
   })
 
+  it('isolates devd discovery after Web Serial is explicitly selected on Add device', () => {
+    expect(
+      preferredLiveTransportForRoute({
+        routePreferences: {
+          lastDeviceByVariant: { live: undefined },
+          transportByIdentity: {},
+        },
+        routedRecoveryIdentityId: null,
+        requestedConnectionByIdentity: {},
+        selectedAddDeviceKind: 'web-serial',
+      })
+    ).toBe('web-serial')
+  })
+
   it('keeps a pre-flash native serial route valid after runtime identity becomes available', () => {
     const choice = {
       identityId: 'd0cf1308a148',

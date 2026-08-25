@@ -265,10 +265,12 @@ export function preferredLiveTransportForRoute({
   routePreferences,
   routedRecoveryIdentityId,
   requestedConnectionByIdentity,
+  selectedAddDeviceKind,
 }: {
   routePreferences: RoutePreferences
   routedRecoveryIdentityId: string | null
   requestedConnectionByIdentity: Record<string, { kind: DeviceConnectionKind }>
+  selectedAddDeviceKind?: DeviceConnectionKind
 }) {
   const routePreferenceIdentity =
     routedRecoveryIdentityId && !LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(routedRecoveryIdentityId)
@@ -276,6 +278,7 @@ export function preferredLiveTransportForRoute({
       : routePreferences.lastDeviceByVariant.live
 
   return (
+    (selectedAddDeviceKind === 'web-serial' ? selectedAddDeviceKind : undefined) ??
     (routedRecoveryIdentityId
       ? requestedConnectionByIdentity[routedRecoveryIdentityId]?.kind
       : undefined) ??
@@ -765,6 +768,7 @@ export function ControlPlaneDemo({
     routePreferences,
     routedRecoveryIdentityId,
     requestedConnectionByIdentity,
+    selectedAddDeviceKind: activeView === 'add-device' ? selectedAddDeviceKind : undefined,
   })
   const liveDevd = useLiveDevdScenario(scenario, {
     ...devd,
