@@ -259,6 +259,13 @@ export function shouldEnableAutomaticLiveDevdDiscovery({
   return !mockOnly && devdEnabled !== false && preferredTransport !== 'web-serial'
 }
 
+export function shouldRecoverWebSerialControl(
+  device: Pick<DeviceTarget, 'transport' | 'baseUrl'>,
+  serialState: LiveWebSerialControls['state']
+) {
+  return isDirectWebSerialDevice(device) && serialState !== 'connected'
+}
+
 const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
 
 export function preferredLiveTransportForRoute({
@@ -1944,6 +1951,18 @@ export function ControlPlaneDemo({
     [webSerial.connect]
   )
 
+  const recoverWebSerialControl = useCallback(async () => {
+    if (!shouldRecoverWebSerialControl(visibleDevice, webSerial.state)) {
+      return true
+    }
+
+    return webSerial.connect({
+      replaceExisting: true,
+      preauthorizedOnly: true,
+      expectedIdentityId: deviceIdentityId(visibleDevice),
+    })
+  }, [visibleDevice, webSerial.connect, webSerial.state])
+
   const routeRecoveryIdentityId =
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const routeRecoveryVariant = navigation?.variant
@@ -2657,6 +2676,16 @@ export function ControlPlaneDemo({
       }
 
       if (isDirectWebSerialDevice(visibleDevice)) {
+        const recovered = await recoverWebSerialControl()
+        if (!recovered) {
+          setFeedback({
+            title: 'Web Serial unavailable',
+            detail: '没有唯一的已授权 Web Serial 端口，请重新选择设备。',
+            tone: 'warning',
+          })
+          emitEvent('webserial', 'browser Web Serial recovery requires port selection', 'warning')
+          return false
+        }
         const updated = await webSerial.configureRuntime(patch)
         if (!updated) {
           setFeedback({
@@ -2757,6 +2786,7 @@ export function ControlPlaneDemo({
       lanRuntime.probeDevice,
       lanRuntime.readStatus,
       lanRuntime.writeRuntime,
+      recoverWebSerialControl,
       reconcileDirectLanStaleWrite,
       visibleDevice,
       webSerial,

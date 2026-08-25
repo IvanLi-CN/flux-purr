@@ -11,6 +11,7 @@ import {
   nextFirmwareActivitySequence,
   preferredLiveTransportForRoute,
   shouldEnableAutomaticLiveDevdDiscovery,
+  shouldRecoverWebSerialControl,
   shouldShowDeviceControlBlockFeedback,
   vinAutoCalibrationActionDisabled,
 } from './components/control-plane-demo'
@@ -108,6 +109,17 @@ describe('Web Serial feedback settlement', () => {
 })
 
 describe('live transport feedback boundary', () => {
+  it('recognizes a stale direct Web Serial target before runtime control', () => {
+    const target = {
+      transport: 'serial' as const,
+      baseUrl: 'webserial://selected',
+    }
+
+    expect(shouldRecoverWebSerialControl(target, 'idle')).toBe(true)
+    expect(shouldRecoverWebSerialControl(target, 'error')).toBe(true)
+    expect(shouldRecoverWebSerialControl(target, 'connected')).toBe(false)
+  })
+
   it.each([
     { preferredTransport: undefined, expected: true },
     { preferredTransport: 'bridge' as const, expected: true },

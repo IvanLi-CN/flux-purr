@@ -76,6 +76,7 @@ export function useLiveWebSerialScenario(
   const browserSerial = getBrowserSerial()
   const supported = enabled && isWebSerialSupported(browserSerial)
   const clientRef = useRef<WebSerialControlPlaneClient | null>(null)
+  const recoveryPromiseRef = useRef<Promise<boolean> | null>(null)
   const connectAttemptRef = useRef(0)
   const preauthorizedPortsRef = useRef<BrowserSerialPort[] | undefined>(undefined)
   const [preauthorizedPortsReady, setPreauthorizedPortsReady] = useState(
@@ -302,6 +303,32 @@ export function useLiveWebSerialScenario(
     ]
   )
 
+  const recoverAuthorizedClient = useCallback(async () => {
+    const currentClient = clientRef.current
+    if (currentClient) return currentClient
+    if (!enabled || !supported) return null
+
+    const inFlight = recoveryPromiseRef.current
+    if (inFlight) {
+      await inFlight
+      return clientRef.current
+    }
+
+    const recovery = connect({
+      replaceExisting: true,
+      preauthorizedOnly: true,
+    })
+    recoveryPromiseRef.current = recovery
+    try {
+      await recovery
+      return clientRef.current
+    } finally {
+      if (recoveryPromiseRef.current === recovery) {
+        recoveryPromiseRef.current = null
+      }
+    }
+  }, [connect, enabled, supported])
+
   const disconnect = useCallback(async () => {
     connectAttemptRef.current += 1
     const client = clientRef.current
@@ -335,7 +362,7 @@ export function useLiveWebSerialScenario(
 
   const configureRuntime = useCallback(
     async (request: DirectRuntimeConfigRequest) => {
-      const client = clientRef.current
+      const client = await recoverAuthorizedClient()
       if (!client) {
         setError('Web Serial port is not connected.')
         return false
@@ -383,18 +410,18 @@ export function useLiveWebSerialScenario(
         return false
       }
     },
-    [appendEvent]
+    [appendEvent, recoverAuthorizedClient]
   )
 
-  const requireClient = useCallback(() => {
-    const client = clientRef.current
+  const requireClient = useCallback(async () => {
+    const client = await recoverAuthorizedClient()
     if (!client) {
       const message = 'Web Serial port is not connected.'
       setError(message)
       throw new Error(message)
     }
     return client
-  }, [])
+  }, [recoverAuthorizedClient])
 
   const requireCurrentClient = useCallback((client: WebSerialControlPlaneClient) => {
     if (clientRef.current !== client) {
@@ -403,7 +430,7 @@ export function useLiveWebSerialScenario(
   }, [])
 
   const getCalibration = useCallback(async () => {
-    const client = requireClient()
+    const client = await requireClient()
     try {
       const calibration = await client.getCalibration()
       requireCurrentClient(client)
@@ -420,7 +447,7 @@ export function useLiveWebSerialScenario(
 
   const configureCalibration = useCallback(
     async (request: Omit<CalibrationConfigRequest, 'leaseId'>) => {
-      const client = requireClient()
+      const client = await requireClient()
       try {
         const calibration = await client.configureCalibration(request)
         requireCurrentClient(client)
@@ -438,7 +465,7 @@ export function useLiveWebSerialScenario(
   )
 
   const getHeaterCurve = useCallback(async () => {
-    const client = requireClient()
+    const client = await requireClient()
     try {
       const heaterCurve = await client.getHeaterCurve()
       requireCurrentClient(client)
@@ -454,7 +481,7 @@ export function useLiveWebSerialScenario(
   }, [appendEvent, requireClient, requireCurrentClient])
 
   const getCalibrationJob = useCallback(async () => {
-    const client = requireClient()
+    const client = await requireClient()
     try {
       const job = await client.getCalibrationJob()
       requireCurrentClient(client)
@@ -471,7 +498,7 @@ export function useLiveWebSerialScenario(
 
   const configureCalibrationJob = useCallback(
     async (request: Omit<CalibrationJobRequest, 'leaseId'>) => {
-      const client = requireClient()
+      const client = await requireClient()
       try {
         const job = await client.configureCalibrationJob(request)
         requireCurrentClient(client)
@@ -492,7 +519,7 @@ export function useLiveWebSerialScenario(
 
   const previewHeaterCurve = useCallback(
     async (heaterCurve: HeaterCurvePackage) => {
-      const client = requireClient()
+      const client = await requireClient()
       try {
         const next = await client.previewHeaterCurve(heaterCurve)
         requireCurrentClient(client)
@@ -510,7 +537,7 @@ export function useLiveWebSerialScenario(
   )
 
   const clearHeaterCurvePreview = useCallback(async () => {
-    const client = requireClient()
+    const client = await requireClient()
     try {
       const next = await client.clearHeaterCurvePreview()
       requireCurrentClient(client)
@@ -526,7 +553,7 @@ export function useLiveWebSerialScenario(
   }, [appendEvent, requireClient, requireCurrentClient])
 
   const saveHeaterCurve = useCallback(async () => {
-    const client = requireClient()
+    const client = await requireClient()
     try {
       const next = await client.saveHeaterCurve()
       requireCurrentClient(client)

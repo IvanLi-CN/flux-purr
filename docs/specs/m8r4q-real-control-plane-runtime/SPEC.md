@@ -202,6 +202,7 @@
 - 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
 - Direct Web Serial 控制项只包括 runtime control、manual PPS debug override 与 status polling；status polling 必须回读 target、preset、cooling、heater、`faultAttentionPending`、manual PPS/capability/error 与 power/network summary，并允许通过 `faultAttentionAcknowledged=true` 确认热失控告警，供 Web 与前面板设置界面双向回显。firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
 - Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration samples/A-B slots/active-slot 与 heater curve preview/save，以保证 calibration workbench 的 transport parity。
+- Given direct Web Serial target remains selected but its in-memory browser client is no longer connected, When a calibration or runtime read/write is requested, Then Web may silently reuse the single already-authorized browser port with an identity check, but must not open the chooser or switch transport; when no unique authorized port exists it must stop with an actionable reconnect state.
 
 ## 验收标准（Acceptance Criteria）
 
