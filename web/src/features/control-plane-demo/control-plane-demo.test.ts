@@ -10,6 +10,7 @@ import {
   formatRuntimeEventTime,
   nextFirmwareActivitySequence,
   shouldShowDeviceControlBlockFeedback,
+  vinAutoCalibrationActionDisabled,
 } from './components/control-plane-demo'
 import { liveControlPlaneScenario } from './live-scenario'
 import { controlPlaneScenario } from './mock-data'
@@ -254,5 +255,57 @@ describe('firmware workspace hierarchy', () => {
 
     expect(markup).toContain('Choose target')
     expect(markup).not.toContain('aria-label="设备工作区"')
+  })
+})
+
+describe('voltage auto-calibration power gate', () => {
+  const readyAction = {
+    controlsBlocked: false,
+    calibrationActionPending: false,
+    jobRunning: false,
+    modeArmed: true,
+    validPpsInput: true,
+  }
+
+  it('holds automatic voltage calibration until FUSB302B confirms a performance PPS contract', () => {
+    expect(
+      vinAutoCalibrationActionDisabled(
+        {
+          pdController: 'fusb302b',
+          pdContractKind: 'fixed',
+          pdPerformanceGuaranteed: true,
+        },
+        readyAction
+      )
+    ).toBe(true)
+    expect(
+      vinAutoCalibrationActionDisabled(
+        {
+          pdController: 'fusb302b',
+          pdContractKind: 'pps',
+          pdPerformanceGuaranteed: false,
+        },
+        readyAction
+      )
+    ).toBe(true)
+    expect(
+      vinAutoCalibrationActionDisabled(
+        {
+          pdController: 'fusb302b',
+          pdContractKind: 'pps',
+          pdPerformanceGuaranteed: true,
+        },
+        readyAction
+      )
+    ).toBe(false)
+  })
+
+  it('preserves the established CH224Q voltage-calibration path', () => {
+    expect(
+      vinAutoCalibrationActionDisabled(
+        { pdController: 'ch224q', pdContractKind: null, pdPerformanceGuaranteed: null },
+        readyAction
+      )
+    ).toBe(false)
   })
 })

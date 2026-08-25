@@ -102,9 +102,12 @@ Current hardware baseline assumes `ESP32-S3FH4R2`; keep API contracts stable if 
 
 Current firmware runtime baseline also assumes:
 
-- CH224Q default PD request is `20 V`
+- the archived CH224Q board defaults to a `20 V` PD request and retains its existing high-voltage behavior
+- the FUSB302BMPX board uses read-only `0x9x` identity selection at its colliding `0x22` address, has `GPIO7` PD interrupt wiring, and selects PPS APDOs from `5V` through `21V`, with fixed PDO fallback
+- `>=20 V @ >=3 A` is the performance-guaranteed PD tier; lower accepted contracts are degraded operation and cannot run calibration
+- contractual `3 A`/`5 A` limits bound software heater power (`60 W`/`100 W` at `20 V`) but are not measured VBUS current or physical OCP
 - optional firmware variants can switch the boot PD request to `12 V` or `28 V` via Cargo features
-- heater control prefers `PPS/AVS + MOS static switching` only when CH224Q power data proves PPS covers `20 V`; otherwise it falls back to the original fixed-PD `GPIO47` PWM backend
+- heater control uses the selected controller's supported path: CH224Q can use PPS/AVS, while FUSB302BMPX uses `5V..21V` PPS with fixed-PDO fallback and the `GPIO47` PWM backend
 - Dashboard center double toggles the active-cooling policy
 - Dashboard fan line renders `OFF / AUTO / RUN`, while the real output contract remains `fanEnabled + fanPwmPermille`
 

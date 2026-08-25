@@ -7,6 +7,7 @@ pub const PIN_HEATER_PWM: u8 = 47;
 
 pub const PIN_I2C_SDA: u8 = 8;
 pub const PIN_I2C_SCL: u8 = 9;
+pub const PIN_PD_INTERRUPT: u8 = 7;
 
 pub const PIN_LCD_DC: u8 = 10;
 pub const PIN_LCD_MOSI: u8 = 11;
@@ -31,11 +32,12 @@ pub const PIN_RGB_G_PWM: u8 = 38;
 pub const PIN_RGB_R_PWM: u8 = 39;
 pub const PIN_BUZZER_PWM: u8 = 48;
 
-pub const ACTIVE_GPIO: [u8; 24] = [
+pub const ACTIVE_GPIO: [u8; 25] = [
     PIN_CENTER_KEY_BOOT,
     PIN_VIN_ADC,
     PIN_RTD_ADC,
     PIN_HEATER_PWM,
+    PIN_PD_INTERRUPT,
     PIN_I2C_SDA,
     PIN_I2C_SCL,
     PIN_LCD_DC,
@@ -65,7 +67,7 @@ pub const VIN_DIVIDER_MAX_ADC_MV: u32 = (VIN_DIVIDER_MAX_INPUT_MV * VIN_DIVIDER_
     / (VIN_DIVIDER_R_HIGH_OHMS + VIN_DIVIDER_R_LOW_OHMS);
 
 pub fn gpio_map_is_valid() -> bool {
-    if ACTIVE_GPIO.len() != 24 {
+    if ACTIVE_GPIO.len() != 25 {
         return false;
     }
 
@@ -84,6 +86,7 @@ pub fn gpio_map_is_valid() -> bool {
         && PIN_RGB_B_PWM == 37
         && PIN_RGB_G_PWM == 38
         && PIN_RGB_R_PWM == 39
+        && PIN_PD_INTERRUPT == 7
 }
 
 #[cfg(test)]
@@ -95,6 +98,7 @@ mod tests {
         assert!(gpio_map_is_valid());
         assert_eq!(PIN_CENTER_KEY_BOOT, 0);
         assert_eq!(PIN_RTD_ADC, 2);
+        assert_eq!(PIN_PD_INTERRUPT, 7);
         assert_eq!(PIN_LCD_DC, 10);
         assert_eq!(PIN_LCD_BLK, 13);
         // Keep in sync with docs/hardware/netlists/main-controller-board.enet:

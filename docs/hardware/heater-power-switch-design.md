@@ -4,8 +4,9 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 
 ## 1) Scope
 
-- Heater supply bus: `VBUS`, expected adjustable operating range `12 V ~ 28 V` when the connected source exposes PPS that covers `20 V`; lower-voltage operation is allowed only when the source exposes it and firmware uses it for heater current limiting
-- Sources that do not expose PPS covering `20 V` remain compatibility/fallback-only and use the original fixed-PD PWM firmware backend
+- Heater supply bus: `VBUS`; CH224Q retains its legacy adjustable range, while FUSB302BMPX selects PPS APDOs within `5V..21V` and falls back to fixed PDOs when necessary
+- FUSB302BMPX treats a negotiated PPS `>=20V` and `>=3A` contract as performance-guaranteed. A lower-voltage PPS or fixed contract may run the heater in degraded mode but cannot run performance or calibration procedures.
+- Contract current is a source-negotiated upper bound used to cap PWM-derived heater power: `20V @ 3A = 60W`, `20V @ 5A = 100W`. It is not a live VBUS-current measurement or physical over-current protection.
 - Load type: resistive hotplate heater
 - Heater plate baseline: [heater-plate-design.md](heater-plate-design.md)
 - Switch topology: low-side N-channel MOSFET
@@ -83,7 +84,7 @@ The direct gate-drive topology is retained for both approved MOSFETs:
 
 - the target `ESP32-S3FH4R2` drives `GPIO47` from the `3.3 V` I/O domain; the `1.8 V` GPIO47/48 exception for the `ESP32-S3R8V` and `ESP32-S3R16V` variants does not apply
 - the GPIO47 MCPWM path uses the pin's default approximately `20 mA` drive strength
-- `PSMN1R4-40YLDX` has more gate charge than the primary part, but the GPIO47 MCPWM path is limited to `100 Hz` in both PPS and fixed-PD fallback modes
+- `PSMN1R4-40YLDX` has more gate charge than the primary part, but the GPIO47 MCPWM path is limited to `100 Hz` in all fixed-PD modes
 - the `PSMN1R4-40YLD` typical output curves at `VGS = 3.0 V` show drain-current capability well above the heater branch's source-limited `5 A` operating envelope
 
 An external gate driver, a stronger GPIO drive setting, or a lower gate resistance is not required for the frozen operating envelope. Do not make any of those changes without oscilloscope evidence: faster edges can increase drain overshoot and EMI. Reconsider the gate-drive topology if the heater current contract or PWM frequency increases, if measured switching temperature is unacceptable, or if production requires a guaranteed `RDS(on)` specification at the actual gate voltage.
@@ -99,18 +100,18 @@ Do not leave the gate floating at reset or during boot.
 
 Preferred runtime mode:
 
-- CH224Q adjustable-PD request provides coarse heater-power control across `12 V ~ 28 V`
-- `GPIO47` drives the low-side MOSFET through MCPWM at `100 Hz`; PPS above its effective floor normally uses `100%` PWM, while the floor and bounded down-ramp use PWM for continuous power control
-- firmware may enable this mode only after CH224Q power data proves that PPS covers `20 V`
+- CH224Q keeps its legacy adjustable-PD path; FUSB302BMPX uses PPS APDOs within `5V..21V` and fixed PDO fallback
+- `GPIO47` drives the low-side MOSFET through MCPWM at `100 Hz`; fixed-PD operation uses PWM for continuous power control
+- firmware enables heating only after the selected controller confirms a contract. The FUSB302B policy requires SourceCaps selection followed by `Accept` and `PS_RDY`; reset, detach, I2C fault, reject, or wait clears heater authority. `PdPort` dispatch prevents the FUSB302B path from receiving CH224Q register writes.
 - with the `3.2 ohm` heater plate, PD 65 W cold start is not valid at static `12 V`; firmware must request a lower available voltage or use a validated current-limit fallback until the estimated heater resistance keeps full-on current inside the negotiated contract
 
 Fallback mode:
 
-- if PPS does not cover `20 V`, capability data cannot be read, or adjustable-voltage writes fail, firmware falls back to fixed-PD `GPIO47` PWM at the same `100 Hz`
+- if no selected-controller path can produce a usable contract or a contract is lost, firmware either selects a safe fixed PDO or shuts heater output off; it never treats a requested voltage as proof of a contract
 
 Reasoning:
 
-- PPS/AVS modulation provides coarse power control without relying exclusively on a high-frequency input-bus load pulse
+- CH224Q PPS/AVS modulation and FUSB302BMPX PPS modulation provide coarse power control without relying exclusively on a high-frequency input-bus load pulse; FUSB302BMPX retains fixed-PDO PWM as a fallback
 - the unified `100 Hz` PWM contract keeps the gate waveform and thermal-control behavior consistent across power backends
 - the fallback keeps the existing hardware usable with fixed-voltage PD sources
 
@@ -201,9 +202,9 @@ This footprint is optional and should not be populated by default without oscill
 - verify drain overshoot at `5 / 9 / 12 / 15 / 20 / 28 V`
 - verify the gate waveform with the real `3.3 V` MCU drive and populated `68 Ohm` gate resistor
 - verify that the GPIO47 high level reaches its steady `3.3 V` gate-drive level with each approved MOSFET
-- verify switching loss and MOSFET temperature at `100 Hz` with both PPS and fixed-PD fallback paths before increasing GPIO drive strength or reducing `R_GATE`
+- verify switching loss and MOSFET temperature at `100 Hz` with the active controller's supported PD path before increasing GPIO drive strength or reducing `R_GATE`
 - confirm that worst-case on-state heater current stays inside the PD contract
-- confirm that VIN and RTD sampling remain stable in both `pps-mos` and fallback PWM modes
+- confirm that VIN and RTD sampling remain stable in the selected power backend
 
 ## References
 

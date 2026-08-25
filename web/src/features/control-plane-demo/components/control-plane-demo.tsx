@@ -4328,6 +4328,30 @@ export function formatRuntimeEventTime(date: Date) {
     .join(':')
 }
 
+export function vinAutoCalibrationActionDisabled(
+  device: Pick<DeviceTarget, 'pdController' | 'pdContractKind' | 'pdPerformanceGuaranteed'>,
+  state: {
+    controlsBlocked: boolean
+    calibrationActionPending: boolean
+    jobRunning: boolean
+    modeArmed: boolean
+    validPpsInput: boolean
+  }
+) {
+  if (state.controlsBlocked || state.calibrationActionPending) {
+    return true
+  }
+  if (state.jobRunning) {
+    return false
+  }
+
+  const fusbPpsReady = device.pdContractKind === 'pps' && device.pdPerformanceGuaranteed === true
+  const contractReady =
+    device.pdController === 'fusb302b' ? fusbPpsReady : device.pdController !== 'unknown'
+
+  return !state.modeArmed || !state.validPpsInput || !contractReady
+}
+
 export function createDefaultCalibrationState(): CalibrationState {
   return {
     rtdAdc: createDefaultCalibrationChannelState(),
@@ -4749,6 +4773,12 @@ function applyLanStatus(device: DeviceTarget, status: ControlPlaneStatus): Devic
     pdRequestMv: status.pdRequestMv,
     pdContractMv: status.pdContractMv,
     pdState: status.pdState,
+    pdController: status.pdController ?? null,
+    pdContractKind: status.pdContractKind ?? null,
+    pdContractCurrentMa: status.pdContractCurrentMa ?? null,
+    pdContractPowerMw: status.pdContractPowerMw ?? null,
+    pdPerformanceGuaranteed: status.pdPerformanceGuaranteed ?? null,
+    pdDegradedReason: status.pdDegradedReason ?? null,
     manualPpsEnabled: status.manualPpsEnabled ?? false,
     manualPpsMv: status.manualPpsMv ?? null,
     manualPpsMa: status.manualPpsMa ?? null,
@@ -4862,7 +4892,10 @@ function defaultManualPpsMv(device: DeviceTarget) {
 }
 
 function effectivePpsCurrentCapabilityMa(device: DeviceTarget) {
-  return device.currentMa > 0 ? device.currentMa : (device.ppsCapabilityMaxMa ?? null)
+  return (
+    device.pdContractCurrentMa ??
+    (device.currentMa > 0 ? device.currentMa : (device.ppsCapabilityMaxMa ?? null))
+  )
 }
 
 function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
@@ -4955,20 +4988,17 @@ function formatAmps(milliamps: number) {
   return `${(milliamps / 1000).toFixed(2)}A`
 }
 
-function formatPdCapability(milliamps: number) {
-  const amps = formatAmps(milliamps)
-  return amps === 'N/A' ? '能力未知' : `电流能力 ${amps}`
-}
+function formatPdContractDetail(device: DeviceTarget, fallbackCurrentMa: number) {
+  const controller = device.pdController ?? 'unknown'
+  const contractKind = device.pdContractKind ?? 'none'
+  const contractCurrentMa = device.pdContractCurrentMa ?? fallbackCurrentMa
+  const contractPowerMw = device.pdContractPowerMw ?? 0
+  const power = contractPowerMw > 0 ? `${(contractPowerMw / 1000).toFixed(0)}W` : '功率未知'
+  const quality = device.pdPerformanceGuaranteed
+    ? '性能保证'
+    : (device.pdDegradedReason ?? '降级运行')
 
-function pdStateLabel(state: DeviceTarget['pdState']) {
-  const labels: Record<DeviceTarget['pdState'], string> = {
-    negotiating: '协商中',
-    ready: '已就绪',
-    fallback_5v: '回落',
-    fault: '故障',
-  }
-
-  return labels[state]
+  return `${formatVolts(device.pdRequestMv)} requested / ${controller} ${contractKind} / 合同 ${formatAmps(contractCurrentMa)} ${power} / ${quality}`
 }
 
 function temperatureBand(tempC: number) {
@@ -6054,7 +6084,7 @@ function DashboardView({
           <StatusCard
             label="PD contract"
             value={formatVolts(device.pdContractMv)}
-            detail={`${formatVolts(device.pdRequestMv)} requested / ${formatPdCapability(powerCapabilityMa)} / ${pdStateLabel(device.pdState)}`}
+            detail={formatPdContractDetail(device, powerCapabilityMa)}
           />
           <StatusCard
             label="Cooling"
@@ -7472,11 +7502,13 @@ function CalibrationView({
                           <button
                             type="button"
                             className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked ||
-                              pendingCalibrationAction != null ||
-                              (!jobRunning && (!modeArmed || !vinCanSubmitPps))
-                            }
+                            disabled={vinAutoCalibrationActionDisabled(device, {
+                              controlsBlocked,
+                              calibrationActionPending: pendingCalibrationAction != null,
+                              jobRunning,
+                              modeArmed,
+                              validPpsInput: vinCanSubmitPps,
+                            })}
                             onClick={() =>
                               void runCalibrationAction('vin-job-toggle', () =>
                                 onCalibrationJobChange(

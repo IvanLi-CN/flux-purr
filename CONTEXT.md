@@ -150,6 +150,18 @@ _Avoid_: PD Contract, VIN Reading
 The USB-C power agreement reported by the Device.
 _Avoid_: PD Request, VIN Reading
 
+**PD Controller Variant**:
+The uniquely read-only-identified USB-C PD controller on a Device board: `CH224Q`, `FUSB302B`, or `unknown` when it is unsafe to select either driver.
+_Avoid_: I2C address, PD Contract
+
+**Contractual Current Limit**:
+The maximum current granted by the active USB-C PD contract and used to bound heater power. It is not a measured VBUS load current.
+_Avoid_: Current Reading, hardware over-current protection
+
+**Performance-Guaranteed PD Contract**:
+A ready PD contract of at least `20V` and `3A`. Contracts below this threshold may operate in degraded mode but are not valid for calibration or performance claims.
+_Avoid_: PD Request, nominal source rating
+
 **IsolaPurr**:
 The external USB-C power source and link controller used during Device validation. It is not part of the Flux Purr Device.
 _Avoid_: Device, MCU, calibration reference

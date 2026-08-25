@@ -139,6 +139,21 @@ describe('live devd selection', () => {
     expect(selectPreferredLiveDevdDeviceId(sorted)).toBe('native-2')
   })
 
+  it('probes a connected native serial placeholder to resolve its identity', () => {
+    const placeholder = makeBusyRecord('serial-1')
+    placeholder.connection = 'connected'
+    placeholder.identity.buildId = 'native-serial-placeholder'
+
+    expect(selectLiveDevdRecord([placeholder])).toBe(placeholder)
+  })
+
+  it('does not probe an unavailable native serial placeholder', () => {
+    const placeholder = makeBusyRecord('serial-1')
+    placeholder.identity.buildId = 'native-serial-placeholder'
+
+    expect(selectLiveDevdRecord([placeholder])).toBeUndefined()
+  })
+
   it('reuses a stored lease before creating a new one', async () => {
     const storage = createMemoryStorage()
     const lease: DevdLease = { leaseId: 'lease-1', deviceId: 'native-2', ttlMs: 8000 }

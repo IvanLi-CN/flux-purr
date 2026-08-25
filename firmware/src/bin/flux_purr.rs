@@ -62,6 +62,17 @@ use flux_purr_firmware::DEFAULT_PD_VOLTAGE_REQUEST;
 use flux_purr_firmware::adapters::ch224q;
 #[cfg(test)]
 use flux_purr_firmware::adapters::ch224q::Status;
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::adapters::pd::SourceCapabilities;
+#[cfg(any(target_arch = "xtensa", test))]
+use flux_purr_firmware::adapters::pd::{
+    Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
+};
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::adapters::pd::{
+    FUSB302B_FIXED_MAX_MV, FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA,
+    MIN_HEATER_CONTRACT_MA,
+};
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -164,7 +175,10 @@ use flux_purr_firmware::{
 use flux_purr_firmware::{DeviceMode, DeviceStatus, PdState};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::{
-    adapters::ch224q::{self, Address, Status},
+    adapters::{
+        ch224q::{self, Address, Status},
+        fusb302b::{self, DetectedController, ReceiveEvent, ReceiveFault, RegisterIo, SinkPhase},
+    },
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
         FRONTPANEL_DEBOUNCE_MS, FRONTPANEL_DOUBLE_CLICK_MS, FrontPanelInputController,
@@ -582,8 +596,6 @@ const I2C_TRANSACTION_TIMEOUT_MS: u64 = 500;
 const CH224Q_RETRY_ATTEMPTS: u8 = 3;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_RETRY_DELAY_MS: u64 = 50;
-#[cfg(target_arch = "xtensa")]
-const CH224Q_PD_SETTLE_MS: u64 = 150;
 #[cfg(target_arch = "xtensa")]
 const CH224Q_STATUS_POLL_ATTEMPTS: u8 = 40;
 #[cfg(target_arch = "xtensa")]
@@ -3248,6 +3260,81 @@ static RTD_RAW_CODE_MAX: AtomicU16 = AtomicU16::new(0);
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 static VIN_RAW_CODE_MEAN: AtomicU16 = AtomicU16::new(0);
 
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_IDLE: u8 = 0;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_WAITING_CC_ATTACH: u8 = 1;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_WAITING_SOURCE_CAPS: u8 = 2;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_SOURCE_CAPS_REQUESTED: u8 = 3;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_WAITING_ACCEPT: u8 = 4;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_WAITING_PS_RDY: u8 = 5;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_RECOVERING: u8 = 6;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_FAULT: u8 = 7;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED: u8 = 8;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN: u8 = 9;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_PROTECTION: u8 = 10;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_MISSING_CRC: u8 = 11;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_MISSING_SOP: u8 = 12;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_UNSUPPORTED_SOP: u8 = 13;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_RX_I2C_ERROR: u8 = 14;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_TX_I2C_ERROR: u8 = 15;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_NO_USABLE_CONTRACT: u8 = 16;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_RX_PARTIAL: u8 = 17;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT: u8 = 18;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_DIAG_REQUEST_TIMEOUT: u8 = 19;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_MAX_RX_MESSAGES_PER_POLL: u8 = 4;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS: u64 = 1_500;
+#[cfg(any(target_arch = "xtensa", test))]
+static FUSB302B_DIAGNOSTIC: AtomicU8 = AtomicU8::new(FUSB302B_DIAG_IDLE);
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+fn fusb302b_degraded_reason() -> &'static str {
+    match FUSB302B_DIAGNOSTIC.load(Ordering::Relaxed) {
+        FUSB302B_DIAG_WAITING_CC_ATTACH => "pd_fusb_cc_attach_pending",
+        FUSB302B_DIAG_WAITING_SOURCE_CAPS => "pd_fusb_source_caps_waiting",
+        FUSB302B_DIAG_SOURCE_CAPS_REQUESTED => "pd_fusb_source_caps_requested",
+        FUSB302B_DIAG_WAITING_ACCEPT => "pd_fusb_accept_pending",
+        FUSB302B_DIAG_WAITING_PS_RDY => "pd_fusb_ps_rdy_pending",
+        FUSB302B_DIAG_RECOVERING => "pd_fusb_phy_recovering",
+        FUSB302B_DIAG_FAULT => "pd_fusb_phy_fault",
+        FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED => "pd_fusb_source_caps_tx_confirmed",
+        FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN => "pd_fusb_source_caps_gcrc_seen",
+        FUSB302B_DIAG_PROTECTION => "pd_fusb_phy_protection",
+        FUSB302B_DIAG_MISSING_CRC => "pd_fusb_rx_crc_missing",
+        FUSB302B_DIAG_MISSING_SOP => "pd_fusb_rx_sop_missing",
+        FUSB302B_DIAG_UNSUPPORTED_SOP => "pd_fusb_rx_sop_unsupported",
+        FUSB302B_DIAG_RX_I2C_ERROR => "pd_fusb_rx_i2c_error",
+        FUSB302B_DIAG_TX_I2C_ERROR => "pd_fusb_tx_i2c_error",
+        FUSB302B_DIAG_NO_USABLE_CONTRACT => "pd_fusb_no_usable_contract",
+        FUSB302B_DIAG_RX_PARTIAL => "pd_fusb_rx_partial",
+        FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT => "pd_fusb_source_caps_hard_reset_sent",
+        FUSB302B_DIAG_REQUEST_TIMEOUT => "pd_fusb_contract_request_timeout",
+        _ => "pd_contract_unavailable",
+    }
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
     let optional_code = |value: u16| (value != u16::MAX).then_some(value);
@@ -3289,6 +3376,8 @@ struct PdStatusObservation {
     status: Status,
     current_raw: u8,
     current_ma: u16,
+    contract_voltage_mv: Option<u16>,
+    contract: Contract,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3308,6 +3397,22 @@ fn pd_status_log_key(observation: Option<PdStatusObservation>) -> Option<PdStatu
         epr_active: observation.status.epr_active,
         epr_exist: observation.status.epr_exist,
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn pd_contract_allows_calibration(
+    controller: ControllerKind,
+    observation: Option<PdStatusObservation>,
+) -> bool {
+    match controller {
+        ControllerKind::Fusb302b => observation.is_some_and(|observation| {
+            observation.contract.kind == ContractKind::Pps
+                && observation.contract.performance_guaranteed()
+        }),
+        // CH224Q retains its established PPS/AVS calibration policy.
+        ControllerKind::Ch224q => true,
+        ControllerKind::Unknown => false,
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4317,6 +4422,23 @@ impl HeaterPowerBackend {
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn effective_pd_contract_mv(
+    manual_pps: &ManualPpsState,
+    observation: Option<PdStatusObservation>,
+    backend: HeaterPowerBackend,
+) -> u16 {
+    manual_pps
+        .target_mv
+        .filter(|_| manual_pps.enabled)
+        .or_else(|| {
+            observation
+                .filter(|observation| observation.status.pd_active)
+                .and_then(|observation| observation.contract_voltage_mv)
+        })
+        .unwrap_or_else(|| backend.pd_contract_mv())
+}
+
 #[cfg(target_arch = "xtensa")]
 fn log_ui_state(state: &FrontPanelUiState) {
     info!(
@@ -4842,7 +4964,549 @@ fn read_ch224q_status(
         status: Status::from_register(status_raw),
         current_raw,
         current_ma: ch224q::current_ma_from_register(current_raw),
+        contract_voltage_mv: None,
+        contract: Contract::none(),
     })
+}
+
+#[cfg(target_arch = "xtensa")]
+struct PdRegisterIo<'i, 'd> {
+    i2c: &'i mut I2c<'d, esp_hal::Blocking>,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl RegisterIo for PdRegisterIo<'_, '_> {
+    type Error = esp_hal::i2c::master::Error;
+
+    fn read_register(&mut self, address: u8, register: u8) -> Result<u8, Self::Error> {
+        let mut value = [0_u8; 1];
+        self.i2c.write_read(address, &[register], &mut value)?;
+        Ok(value[0])
+    }
+
+    fn write_register(&mut self, address: u8, register: u8, value: u8) -> Result<(), Self::Error> {
+        self.i2c.write(address, &[register, value])
+    }
+
+    fn read_fifo(&mut self, address: u8, bytes: &mut [u8]) -> Result<(), Self::Error> {
+        self.i2c
+            .write_read(address, &[fusb302b::FIFO_REGISTER], bytes)
+    }
+
+    fn write_fifo(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
+        let mut payload = [0_u8; 41];
+        let length = bytes.len().min(payload.len() - 1);
+        payload[0] = fusb302b::FIFO_REGISTER;
+        payload[1..=length].copy_from_slice(&bytes[..length]);
+        self.i2c.write(address, &payload[..=length])
+    }
+
+    fn read_status_snapshot(&mut self, address: u8) -> Result<[u8; 7], Self::Error> {
+        let mut snapshot = [0_u8; 7];
+        self.i2c
+            .write_read(address, &[fusb302b::STATUS0A_REGISTER], &mut snapshot)?;
+        Ok(snapshot)
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+struct Fusb302bRuntime {
+    policy: fusb302b::SinkPolicy,
+    polarity: Option<fusb302b::SinkPolarity>,
+    next_message_id: u8,
+    attached_at_ms: Option<u64>,
+    last_source_capabilities_request_at_ms: Option<u64>,
+    source_capabilities_refresh_pending: bool,
+    source_capabilities_refresh_requested_at_ms: Option<u64>,
+    last_request_at_ms: Option<u64>,
+    source_capabilities_tx_confirmed: bool,
+    source_capabilities_gcrc_seen: bool,
+    partial_rx_started_at_ms: Option<u64>,
+    source_caps_hard_reset_sent: bool,
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PdContractRequestState {
+    Confirmed,
+    Pending,
+    Failed,
+}
+
+#[cfg(target_arch = "xtensa")]
+impl Fusb302bRuntime {
+    const fn new() -> Self {
+        Self {
+            policy: fusb302b::SinkPolicy::new(FUSB302B_FIXED_MAX_MV, MAX_HEATER_CONTRACT_MA),
+            polarity: None,
+            next_message_id: 0,
+            attached_at_ms: None,
+            last_source_capabilities_request_at_ms: None,
+            source_capabilities_refresh_pending: false,
+            source_capabilities_refresh_requested_at_ms: None,
+            last_request_at_ms: None,
+            source_capabilities_tx_confirmed: false,
+            source_capabilities_gcrc_seen: false,
+            partial_rx_started_at_ms: None,
+            source_caps_hard_reset_sent: false,
+        }
+    }
+
+    fn initialize(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+        let mut io = PdRegisterIo { i2c };
+        let initialized = fusb302b::Fusb302b::initialize_sink(&mut io).is_ok();
+        FUSB302B_DIAGNOSTIC.store(
+            if initialized {
+                FUSB302B_DIAG_WAITING_CC_ATTACH
+            } else {
+                FUSB302B_DIAG_FAULT
+            },
+            Ordering::Relaxed,
+        );
+        initialized
+    }
+
+    fn restart_after_reset(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+        self.policy.on_detach_or_reset();
+        self.polarity = None;
+        self.next_message_id = 0;
+        self.attached_at_ms = None;
+        self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_refresh_pending = false;
+        self.source_capabilities_refresh_requested_at_ms = None;
+        self.last_request_at_ms = None;
+        self.source_capabilities_tx_confirmed = false;
+        self.source_capabilities_gcrc_seen = false;
+        self.partial_rx_started_at_ms = None;
+        self.source_caps_hard_reset_sent = false;
+        if self.initialize(i2c) {
+            self.policy = fusb302b::SinkPolicy::new(FUSB302B_FIXED_MAX_MV, MAX_HEATER_CONTRACT_MA);
+            true
+        } else {
+            self.policy.mark_fault();
+            false
+        }
+    }
+
+    fn active_contract(&self) -> Contract {
+        self.policy.active_contract()
+    }
+
+    fn source_capabilities(&self) -> Option<SourceCapabilities> {
+        self.policy.source_capabilities()
+    }
+
+    fn request_pps_voltage(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        requested_mv: u16,
+        now_ms: u64,
+    ) -> PdContractRequestState {
+        let active = self.policy.active_contract();
+        if active.kind == ContractKind::Pps && active.voltage_mv == requested_mv {
+            return PdContractRequestState::Confirmed;
+        }
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) {
+            return PdContractRequestState::Pending;
+        }
+        if active.kind == ContractKind::Fixed {
+            if self.source_capabilities_refresh_pending {
+                return PdContractRequestState::Pending;
+            }
+            if !self.policy.prepare_pps_request(requested_mv) {
+                return PdContractRequestState::Failed;
+            }
+            let header = fusb302b::Fusb302b::get_source_capabilities_header(self.next_message_id);
+            if !self.transmit(i2c, header, &[]) {
+                return PdContractRequestState::Failed;
+            }
+            self.source_capabilities_refresh_pending = true;
+            self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
+            return PdContractRequestState::Pending;
+        }
+        let Some(rdo) = self.policy.request_pps_voltage(requested_mv) else {
+            return PdContractRequestState::Failed;
+        };
+        let header = fusb302b::Fusb302b::request_header(self.next_message_id);
+        if !self.transmit(i2c, header, &rdo) {
+            return PdContractRequestState::Failed;
+        }
+        self.last_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        PdContractRequestState::Pending
+    }
+
+    fn request_fixed_voltage(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        requested_mv: u16,
+        now_ms: u64,
+    ) -> bool {
+        let active = self.policy.active_contract();
+        if active.kind == ContractKind::Fixed && active.voltage_mv == requested_mv {
+            return true;
+        }
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) {
+            return true;
+        }
+        let Some(rdo) = self.policy.request_fixed_voltage(requested_mv) else {
+            return false;
+        };
+        let header = fusb302b::Fusb302b::request_header(self.next_message_id);
+        if !self.transmit(i2c, header, &rdo) {
+            return false;
+        }
+        self.last_request_at_ms = Some(now_ms);
+        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+        true
+    }
+
+    fn transmit(
+        &mut self,
+        i2c: &mut I2c<'_, esp_hal::Blocking>,
+        header: [u8; 2],
+        data: &[u8],
+    ) -> bool {
+        let mut io = PdRegisterIo { i2c };
+        if fusb302b::Fusb302b::transmit_data_message(&mut io, header, data).is_err() {
+            self.policy.mark_fault();
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
+            return false;
+        }
+        self.next_message_id = (self.next_message_id + 1) & 0x07;
+        true
+    }
+
+    /// Drain a bounded number of completed PD frames in one service turn. No
+    /// call awaits while I2C is borrowed, so EEPROM traffic remains independent
+    /// of the controller's PD timing.
+    fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
+        if self.policy.phase() == SinkPhase::Fault {
+            return false;
+        }
+
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
+        ) {
+            let vbus_present = {
+                let mut io = PdRegisterIo { i2c };
+                fusb302b::Fusb302b::vbus_present(&mut io)
+            };
+            match vbus_present {
+                Ok(true) => {}
+                Ok(false) => return self.restart_after_reset(i2c),
+                Err(_) => {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
+                    return false;
+                }
+            }
+        }
+
+        if matches!(
+            self.policy.phase(),
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        ) && self
+            .last_request_at_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS)
+        {
+            // Reset the PHY and discard every contract before retrying. This
+            // flushes delayed Accept/PS_RDY frames so an expired transaction
+            // can never install a newer pending contract.
+            self.policy.timeout_pending_request();
+            self.last_request_at_ms = None;
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+            return self.restart_after_reset(i2c);
+        }
+
+        if self.source_capabilities_refresh_pending
+            && self
+                .source_capabilities_refresh_requested_at_ms
+                .is_some_and(|last| {
+                    now_ms.saturating_sub(last) >= FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS
+                })
+        {
+            // Preserve the active fixed contract and retry the Source Caps
+            // refresh on a later control turn.
+            self.source_capabilities_refresh_pending = false;
+            self.source_capabilities_refresh_requested_at_ms = None;
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
+        }
+
+        if self.polarity.is_none() {
+            let polarity = {
+                let mut io = PdRegisterIo { i2c };
+                match fusb302b::Fusb302b::read_sink_polarity(&mut io) {
+                    Ok(polarity) => polarity,
+                    Err(_) => {
+                        self.policy.mark_fault();
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+                        return false;
+                    }
+                }
+            };
+            if let Some(polarity) = polarity {
+                let selected = {
+                    let mut io = PdRegisterIo { i2c };
+                    fusb302b::Fusb302b::select_sink_polarity(&mut io, polarity).is_ok()
+                };
+                if !selected {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+                    return false;
+                }
+                self.polarity = Some(polarity);
+                self.attached_at_ms = Some(now_ms);
+                self.partial_rx_started_at_ms = None;
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_SOURCE_CAPS, Ordering::Relaxed);
+            } else {
+                FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_WAITING_CC_ATTACH, Ordering::Relaxed);
+                return true;
+            }
+        }
+
+        for _ in 0..FUSB302B_MAX_RX_MESSAGES_PER_POLL {
+            let event = {
+                let mut io = PdRegisterIo { i2c };
+                match fusb302b::Fusb302b::receive_message(&mut io) {
+                    Ok(event) => event,
+                    Err(_) => {
+                        self.policy.mark_fault();
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+                        return false;
+                    }
+                }
+            };
+            match event {
+                ReceiveEvent::Empty(activity) => {
+                    self.partial_rx_started_at_ms = None;
+                    if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
+                        self.source_capabilities_tx_confirmed |= activity.tx_sent;
+                        self.source_capabilities_gcrc_seen |= activity.gcrc_sent;
+                        let query_due = match self.last_source_capabilities_request_at_ms {
+                            Some(last) => {
+                                fusb302b::Fusb302b::source_capabilities_retry_due(last, now_ms)
+                            }
+                            None => self.attached_at_ms.is_some_and(|attached_at_ms| {
+                                now_ms.saturating_sub(attached_at_ms)
+                                    >= fusb302b::SOURCE_CAPS_INITIAL_WAIT_MS
+                            }),
+                        };
+                        let hard_reset_due = !self.source_caps_hard_reset_sent
+                            && self
+                                .last_source_capabilities_request_at_ms
+                                .is_some_and(|last| {
+                                    fusb302b::Fusb302b::source_capabilities_hard_reset_due(
+                                        last, now_ms,
+                                    )
+                                });
+                        if hard_reset_due {
+                            let mut io = PdRegisterIo { i2c };
+                            if fusb302b::Fusb302b::transmit_hard_reset(&mut io).is_err() {
+                                self.policy.mark_fault();
+                                FUSB302B_DIAGNOSTIC
+                                    .store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
+                                return false;
+                            }
+                            self.source_caps_hard_reset_sent = true;
+                            FUSB302B_DIAGNOSTIC.store(
+                                FUSB302B_DIAG_SOURCE_CAPS_HARD_RESET_SENT,
+                                Ordering::Relaxed,
+                            );
+                            return true;
+                        }
+                        if !query_due {
+                            let diagnostic = if self.source_capabilities_gcrc_seen {
+                                FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN
+                            } else if self.source_capabilities_tx_confirmed {
+                                FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED
+                            } else if self.last_source_capabilities_request_at_ms.is_some() {
+                                FUSB302B_DIAG_SOURCE_CAPS_REQUESTED
+                            } else {
+                                FUSB302B_DIAG_WAITING_SOURCE_CAPS
+                            };
+                            FUSB302B_DIAGNOSTIC.store(diagnostic, Ordering::Relaxed);
+                            return true;
+                        }
+                        let header = fusb302b::Fusb302b::get_source_capabilities_header(
+                            self.next_message_id,
+                        );
+                        if !self.transmit(i2c, header, &[]) {
+                            return false;
+                        }
+                        self.source_capabilities_tx_confirmed = false;
+                        self.source_capabilities_gcrc_seen = false;
+                        self.last_source_capabilities_request_at_ms = Some(now_ms);
+                        FUSB302B_DIAGNOSTIC
+                            .store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
+                    } else if self.policy.phase() == SinkPhase::Ready
+                        && self.active_contract().kind == ContractKind::Pps
+                        && self
+                            .last_request_at_ms
+                            .is_some_and(|last| fusb302b::Fusb302b::pps_keepalive_due(last, now_ms))
+                    {
+                        let Some(rdo) = self.policy.refresh_active_pps() else {
+                            self.policy.mark_fault();
+                            return false;
+                        };
+                        let header = fusb302b::Fusb302b::request_header(self.next_message_id);
+                        if !self.transmit(i2c, header, &rdo) {
+                            return false;
+                        }
+                        self.last_request_at_ms = Some(now_ms);
+                    }
+                    return true;
+                }
+                ReceiveEvent::Partial(activity) => {
+                    if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
+                        self.source_capabilities_tx_confirmed |= activity.tx_sent;
+                        self.source_capabilities_gcrc_seen |= activity.gcrc_sent;
+                    }
+                    let partial_started_at_ms = self.partial_rx_started_at_ms.get_or_insert(now_ms);
+                    if now_ms.saturating_sub(*partial_started_at_ms)
+                        >= FUSB302B_PARTIAL_RX_TIMEOUT_MS
+                    {
+                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                        return self.restart_after_reset(i2c);
+                    }
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_PARTIAL, Ordering::Relaxed);
+                    return true;
+                }
+                ReceiveEvent::Message(message) => {
+                    self.partial_rx_started_at_ms = None;
+                    if let Some((pdos, count)) = message.source_capabilities() {
+                        self.last_source_capabilities_request_at_ms = None;
+                        self.source_capabilities_refresh_pending = false;
+                        self.source_capabilities_refresh_requested_at_ms = None;
+                        self.source_capabilities_tx_confirmed = false;
+                        self.source_capabilities_gcrc_seen = false;
+                        if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count]) {
+                            let header = fusb302b::Fusb302b::request_header(self.next_message_id);
+                            if !self.transmit(i2c, header, &rdo) {
+                                return false;
+                            }
+                            self.last_request_at_ms = Some(now_ms);
+                            FUSB302B_DIAGNOSTIC
+                                .store(FUSB302B_DIAG_WAITING_ACCEPT, Ordering::Relaxed);
+                        } else {
+                            self.policy.mark_fault();
+                            FUSB302B_DIAGNOSTIC
+                                .store(FUSB302B_DIAG_NO_USABLE_CONTRACT, Ordering::Relaxed);
+                            return false;
+                        }
+                    } else if message.data_object_count() == 0 {
+                        self.policy
+                            .on_control_message(message.message_type(), now_ms);
+                        FUSB302B_DIAGNOSTIC.store(
+                            if self.policy.phase() == SinkPhase::Ready {
+                                FUSB302B_DIAG_IDLE
+                            } else {
+                                FUSB302B_DIAG_WAITING_PS_RDY
+                            },
+                            Ordering::Relaxed,
+                        );
+                    }
+                }
+                ReceiveEvent::Reset => {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                    return self.restart_after_reset(i2c);
+                }
+                ReceiveEvent::RetryFailed => {
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
+                    return self.restart_after_reset(i2c);
+                }
+                ReceiveEvent::Fault(fault) => {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(
+                        match fault {
+                            ReceiveFault::PhyProtection => FUSB302B_DIAG_PROTECTION,
+                            ReceiveFault::MissingCrc => FUSB302B_DIAG_MISSING_CRC,
+                            ReceiveFault::MissingSop => FUSB302B_DIAG_MISSING_SOP,
+                            ReceiveFault::UnsupportedSop => FUSB302B_DIAG_UNSUPPORTED_SOP,
+                        },
+                        Ordering::Relaxed,
+                    );
+                    return false;
+                }
+            }
+        }
+
+        self.policy.phase() != SinkPhase::Fault
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn fusb302b_adjustable_power_capabilities(
+    source_capabilities: SourceCapabilities,
+) -> Option<ch224q::AdjustablePowerCapabilities> {
+    let apdo = source_capabilities.fusb302b_pps_capability()?;
+    let pps_min_mv = apdo.min_mv.max(FUSB302B_PPS_MIN_MV);
+    let pps_max_mv = apdo.max_mv.min(FUSB302B_PPS_MAX_MV);
+    let pps_max_ma = apdo.max_ma.min(MAX_HEATER_CONTRACT_MA);
+    if pps_min_mv > GUARANTEED_HEATER_MIN_MV
+        || pps_max_mv < GUARANTEED_HEATER_MIN_MV
+        || pps_max_ma < MIN_HEATER_CONTRACT_MA
+    {
+        return None;
+    }
+
+    let mut capabilities = ch224q::AdjustablePowerCapabilities {
+        pps_covers_20v: true,
+        pps_min_mv: Some(pps_min_mv),
+        pps_max_mv: Some(pps_max_mv),
+        pps_max_ma: Some(pps_max_ma),
+        ..ch224q::AdjustablePowerCapabilities::default()
+    };
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: pps_min_mv,
+        max_mv: pps_max_mv,
+        max_ma: pps_max_ma,
+    });
+    Some(capabilities)
+}
+
+#[cfg(target_arch = "xtensa")]
+enum PdPort {
+    Ch224q(Address),
+    Fusb302b(Fusb302bRuntime),
+}
+
+#[cfg(target_arch = "xtensa")]
+impl PdPort {
+    const fn controller_kind(&self) -> ControllerKind {
+        match self {
+            Self::Ch224q(_) => ControllerKind::Ch224q,
+            Self::Fusb302b(_) => ControllerKind::Fusb302b,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn detect_pd_controller(i2c: &mut I2c<'_, esp_hal::Blocking>) -> DetectedController {
+    let mut io = PdRegisterIo { i2c };
+    fusb302b::detect_controller(&mut io)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn detect_ch224q_secondary(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let Some(status) = read_ch224q_register(i2c, Address::Secondary, ch224q::STATUS_REGISTER)
+    else {
+        return false;
+    };
+    let Some(current) =
+        read_ch224q_register(i2c, Address::Secondary, ch224q::CURRENT_DATA_REGISTER)
+    else {
+        return false;
+    };
+    status & 0x80 == 0 && current != 0xff
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6023,6 +6687,74 @@ fn select_heater_power_backend(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn constrain_heater_backend_to_controller(
+    controller: ControllerKind,
+    backend: HeaterPowerBackend,
+) -> HeaterPowerBackend {
+    match (controller, backend) {
+        (
+            ControllerKind::Fusb302b,
+            HeaterPowerBackend::PpsMos {
+                pps_min_mv,
+                idle_request_mv,
+                pps_max_mv,
+                adjustable_max_mv,
+                capability_max_ma,
+                current_request_mv,
+                settle_until_ms,
+                next_request_at_ms,
+                current_limit_fixed_pwm_active,
+                current_limit_fixed_request_confirmed,
+                terminal_fixed_pd_disarmed,
+                ..
+            },
+        ) if pps_min_mv <= FUSB302B_PPS_MAX_MV => {
+            let pps_max_mv = pps_max_mv.min(FUSB302B_PPS_MAX_MV);
+            HeaterPowerBackend::PpsMos {
+                pps_min_mv,
+                idle_request_mv: idle_request_mv.clamp(pps_min_mv, pps_max_mv),
+                pps_max_mv,
+                adjustable_max_mv: adjustable_max_mv.min(pps_max_mv),
+                capability_max_ma,
+                current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+                current_request_mv: current_request_mv.clamp(pps_min_mv, pps_max_mv),
+                settle_until_ms,
+                next_request_at_ms,
+                current_limit_fixed_pwm_active,
+                current_limit_fixed_request_confirmed,
+                terminal_fixed_pd_disarmed,
+            }
+        }
+        (ControllerKind::Fusb302b, HeaterPowerBackend::PpsMos { .. }) => {
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason: HeaterPowerBackendReason::NoPps20vCapability,
+                fixed_request_confirmed: false,
+                fixed_request: ch224q::VoltageRequest::V20,
+            }
+        }
+        (ControllerKind::Fusb302b, HeaterPowerBackend::FixedPdPwmFallback { reason, .. }) => {
+            HeaterPowerBackend::FixedPdPwmFallback {
+                reason,
+                fixed_request_confirmed: false,
+                fixed_request: ch224q::VoltageRequest::V20,
+            }
+        }
+        (_, backend) => backend,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn fusb302b_pps_backend_from_capabilities(
+    capabilities: ch224q::AdjustablePowerCapabilities,
+) -> Option<HeaterPowerBackend> {
+    let backend = constrain_heater_backend_to_controller(
+        ControllerKind::Fusb302b,
+        select_heater_power_backend(Some(capabilities), None),
+    );
+    matches!(backend, HeaterPowerBackend::PpsMos { .. }).then_some(backend)
+}
+
 #[cfg(target_arch = "xtensa")]
 fn apply_heater_duty<PWM>(heater_pwm: &mut PWM, duty_percent: u8, last_duty_percent: &mut u8)
 where
@@ -6046,7 +6778,7 @@ async fn disarm_pending_thermal_plant_output<PWM>(
     backend: &mut HeaterPowerBackend,
     manual_pps: &mut ManualPpsState,
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-    ch224q_address: Address,
+    pd_port: &mut PdPort,
     heater_pwm: &mut PWM,
     hold_pps_governor: &mut HoldPpsGovernor,
     ui_state: &mut FrontPanelUiState,
@@ -6065,8 +6797,7 @@ where
     ui_state.heater_enabled = false;
     ui_state.heater_output_percent = 0;
 
-    let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
-    if !write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
+    if !request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await {
         // Keep both the disarm latch and the PPS backend lock so the next
         // control period retries fixed PD without re-applying a PPS request.
         return true;
@@ -6106,10 +6837,68 @@ fn latch_terminal_fixed_pd_disarm(
     true
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+fn release_terminal_fixed_pd_disarm_for_manual_pps(
+    backend: &mut HeaterPowerBackend,
+    manual_pps_active: bool,
+) -> bool {
+    let HeaterPowerBackend::PpsMos {
+        terminal_fixed_pd_disarmed,
+        current_mode,
+        current_request_mv,
+        settle_until_ms,
+        next_request_at_ms,
+        current_limit_fixed_pwm_active,
+        current_limit_fixed_request_confirmed,
+        idle_request_mv,
+        ..
+    } = backend
+    else {
+        return false;
+    };
+    if !manual_pps_active || !*terminal_fixed_pd_disarmed {
+        return false;
+    }
+
+    // A new manual PPS request is an explicit, non-heating re-arm. It may
+    // renegotiate the source while the heater output remains at zero.
+    *terminal_fixed_pd_disarmed = false;
+    *current_mode = None;
+    *current_request_mv = *idle_request_mv;
+    *settle_until_ms = None;
+    *next_request_at_ms = 0;
+    *current_limit_fixed_pwm_active = false;
+    *current_limit_fixed_request_confirmed = false;
+    true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn manual_pps_request_required(
+    manual_pps: ManualPpsState,
+    controller: ControllerKind,
+    observation: Option<PdStatusObservation>,
+) -> bool {
+    let Some(target_mv) = manual_pps.target_mv else {
+        return false;
+    };
+    if manual_pps.applied_mv != Some(target_mv) {
+        return true;
+    }
+    if controller != ControllerKind::Fusb302b {
+        return false;
+    }
+    let target_ma = manual_pps.target_ma.unwrap_or(0);
+    !observation.is_some_and(|observation| {
+        observation.contract.kind == ContractKind::Pps
+            && observation.contract.voltage_mv == target_mv
+            && observation.contract.current_ma >= target_ma
+    })
+}
+
 #[cfg(target_arch = "xtensa")]
 async fn apply_heater_power_output<PWM>(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
-    ch224q_address: Address,
+    pd_port: &mut PdPort,
     heater_pwm: &mut PWM,
     backend: &mut HeaterPowerBackend,
     hold_pps_governor: &mut HoldPpsGovernor,
@@ -6132,37 +6921,20 @@ async fn apply_heater_power_output<PWM>(
 where
     PWM: SetDutyCycle,
 {
-    if let HeaterPowerBackend::PpsMos {
-        terminal_fixed_pd_disarmed,
-        current_mode,
-        current_request_mv,
-        settle_until_ms,
-        next_request_at_ms,
-        current_limit_fixed_pwm_active,
-        current_limit_fixed_request_confirmed,
-        idle_request_mv,
-        ..
-    } = backend
-        && *terminal_fixed_pd_disarmed
-    {
-        if !heater_enabled || duty_percent == 0 {
-            apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-            return false;
-        }
-
-        // A subsequent explicit arm may re-enter PPS only after the terminal
-        // fixed-PD disarm completed. Calibration invalidation clears its arm
-        // request before setting this latch.
-        *terminal_fixed_pd_disarmed = false;
-        *current_mode = None;
-        *current_request_mv = *idle_request_mv;
-        *settle_until_ms = None;
-        *next_request_at_ms = 0;
-        *current_limit_fixed_pwm_active = false;
-        *current_limit_fixed_request_confirmed = false;
+    let manual_pps_active = manual_pps.enabled;
+    let _ = release_terminal_fixed_pd_disarm_for_manual_pps(backend, manual_pps_active);
+    let terminal_fixed_pd_disarmed = match backend {
+        HeaterPowerBackend::PpsMos {
+            terminal_fixed_pd_disarmed,
+            ..
+        } => *terminal_fixed_pd_disarmed,
+        HeaterPowerBackend::FixedPdPwmFallback { .. } => false,
+    };
+    if terminal_fixed_pd_disarmed {
+        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+        return false;
     }
 
-    let manual_pps_active = manual_pps.enabled;
     let mut manual_pps_request_changed = false;
     if manual_pps_active {
         hold_pps_governor.reset();
@@ -6180,36 +6952,44 @@ where
         if !pd_observation.is_some_and(|observation| observation.status.pd_active) {
             manual_pps.fail(ManualPpsError::PdNotReady);
             apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-            let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
-            let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
+            let _ = request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await;
             return true;
         }
-        if manual_pps.applied_mv != Some(target_mv) {
-            if request_ch224q_adjustable_voltage(
+        if manual_pps_request_required(*manual_pps, pd_port.controller_kind(), pd_observation) {
+            match request_pd_adjustable_voltage(
                 i2c,
-                ch224q_address,
+                pd_port,
                 target_mv,
                 ch224q::AdjustableVoltageMode::Pps,
                 true,
             )
             .await
             {
-                manual_pps.applied_mv = Some(target_mv);
-                manual_pps_request_changed = true;
-                info!(
-                    "manual pps override applied mv={=u16} ma={=u16}",
-                    target_mv, target_ma
-                );
-            } else {
-                manual_pps.fail(ManualPpsError::WriteFailed);
-                apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
-                let _ = write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
-                info!(
-                    "manual pps override cleared reason={=str}",
-                    ManualPpsError::WriteFailed.code()
-                );
-                return true;
+                PdContractRequestState::Confirmed => {
+                    manual_pps.applied_mv = Some(target_mv);
+                    manual_pps_request_changed = true;
+                    info!(
+                        "manual pps override applied mv={=u16} ma={=u16}",
+                        target_mv, target_ma
+                    );
+                }
+                PdContractRequestState::Pending => {
+                    // An RDO on FUSB302B is not a completed contract. Keep the
+                    // source transition and heater output separate until PS_RDY.
+                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                    return false;
+                }
+                PdContractRequestState::Failed => {
+                    manual_pps.fail(ManualPpsError::WriteFailed);
+                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                    let _ =
+                        request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await;
+                    info!(
+                        "manual pps override cleared reason={=str}",
+                        ManualPpsError::WriteFailed.code()
+                    );
+                    return true;
+                }
             }
         }
     }
@@ -6275,8 +7055,7 @@ where
             fixed_request,
         } => {
             if !fixed_request_confirmed && !manual_pps_active {
-                let fixed_payload = ch224q::voltage_request_payload(fixed_request);
-                if write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
+                if request_pd_fixed_voltage(i2c, pd_port, fixed_request).await {
                     *backend = HeaterPowerBackend::FixedPdPwmFallback {
                         reason,
                         fixed_request_confirmed: true,
@@ -6299,7 +7078,9 @@ where
             let safe_duty_percent = fixed_pd_pwm_duty_percent(
                 duty_percent,
                 current_temp_c,
-                fixed_request.millivolts(),
+                pd_observation
+                    .and_then(|observation| observation.contract_voltage_mv)
+                    .unwrap_or_else(|| fixed_request.millivolts()),
                 negotiated_current_ma,
                 active_thermal_settings.heater_current_reserve_ma,
                 preview_heater_curve,
@@ -6379,9 +7160,13 @@ where
                             terminal_fixed_pd_disarmed: false,
                         };
                     } else {
-                        let fixed_payload =
-                            ch224q::voltage_request_payload(HEATER_CURRENT_LIMIT_FALLBACK_REQUEST);
-                        if !write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await {
+                        if !request_pd_fixed_voltage(
+                            i2c,
+                            pd_port,
+                            HEATER_CURRENT_LIMIT_FALLBACK_REQUEST,
+                        )
+                        .await
+                        {
                             info!(
                                 "heater current-limit fallback waiting fixed_mv={=u16} safe_max_mv={=u16} control_floor_mv={=u16} current_limit_ma={=u16}",
                                 HEATER_CURRENT_LIMIT_FALLBACK_REQUEST.millivolts(),
@@ -6519,50 +7304,62 @@ where
             }
 
             if (voltage_changed || mode_changed) && !request_transition_pending {
-                if !request_ch224q_adjustable_voltage(
+                match request_pd_adjustable_voltage(
                     i2c,
-                    ch224q_address,
+                    pd_port,
                     request_mv,
                     request_mode,
                     mode_changed,
                 )
                 .await
                 {
-                    apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
-                    let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
-                    let fixed_request_confirmed =
-                        write_ch224q_payload(i2c, ch224q_address, &fixed_payload).await;
-                    *backend = HeaterPowerBackend::FixedPdPwmFallback {
-                        reason: HeaterPowerBackendReason::AdjustableRequestFailed,
-                        fixed_request_confirmed,
-                        fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
-                    };
-                    if fixed_request_confirmed {
-                        let negotiated_current_ma = pd_observation
-                            .filter(|observation| observation.status.pd_active)
-                            .map(|observation| observation.current_ma)
-                            .unwrap_or(0);
-                        let safe_duty_percent = fixed_pd_pwm_duty_percent(
-                            duty_percent,
-                            current_temp_c,
-                            DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-                            negotiated_current_ma,
-                            active_thermal_settings.heater_current_reserve_ma,
-                            preview_heater_curve,
-                            memory_config,
-                        );
-                        apply_heater_duty(
-                            heater_pwm,
-                            apply_warmup_soft_start(safe_duty_percent, warmup_soft_start_percent),
-                            last_physical_duty_percent,
-                        );
+                    PdContractRequestState::Confirmed => {}
+                    PdContractRequestState::Pending => {
+                        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                        return false;
                     }
-                    info!(
-                        "heater backend fallback -> reason={=str} fixed_request_confirmed={=bool}",
-                        HeaterPowerBackendReason::AdjustableRequestFailed.label(),
-                        fixed_request_confirmed,
-                    );
-                    return true;
+                    PdContractRequestState::Failed => {
+                        apply_heater_duty(heater_pwm, 0, last_physical_duty_percent);
+                        let fixed_request_confirmed =
+                            request_pd_fixed_voltage(i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST)
+                                .await;
+                        *backend = HeaterPowerBackend::FixedPdPwmFallback {
+                            reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+                            fixed_request_confirmed,
+                            fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
+                        };
+                        if fixed_request_confirmed {
+                            let negotiated_current_ma = pd_observation
+                                .filter(|observation| observation.status.pd_active)
+                                .map(|observation| observation.current_ma)
+                                .unwrap_or(0);
+                            let safe_duty_percent = fixed_pd_pwm_duty_percent(
+                                duty_percent,
+                                current_temp_c,
+                                pd_observation
+                                    .and_then(|observation| observation.contract_voltage_mv)
+                                    .unwrap_or_else(|| DEFAULT_PD_VOLTAGE_REQUEST.millivolts()),
+                                negotiated_current_ma,
+                                active_thermal_settings.heater_current_reserve_ma,
+                                preview_heater_curve,
+                                memory_config,
+                            );
+                            apply_heater_duty(
+                                heater_pwm,
+                                apply_warmup_soft_start(
+                                    safe_duty_percent,
+                                    warmup_soft_start_percent,
+                                ),
+                                last_physical_duty_percent,
+                            );
+                        }
+                        info!(
+                            "heater backend fallback -> reason={=str} fixed_request_confirmed={=bool}",
+                            HeaterPowerBackendReason::AdjustableRequestFailed.label(),
+                            fixed_request_confirmed,
+                        );
+                        return true;
+                    }
                 }
 
                 if should_restore_gate_after_adjustable_request(blank_heater, gate_duty_percent) {
@@ -6830,6 +7627,7 @@ fn sync_frontpanel_runtime_state(
 #[derive(Clone, Copy)]
 struct UsbRuntimeStatusContext {
     elapsed_ms: u64,
+    pd_controller: ControllerKind,
     last_pd_observation: Option<PdStatusObservation>,
     heater_power_backend: HeaterPowerBackend,
     pid_snapshot: HeaterPidSnapshot,
@@ -6862,11 +7660,11 @@ fn usb_runtime_status_with_calibration(
     calibration: &CalibrationRuntimeState,
     context: UsbRuntimeStatusContext,
 ) -> ControlPlaneStatus {
-    let pd_contract_mv = context
-        .manual_pps
-        .target_mv
-        .filter(|_| context.manual_pps.enabled)
-        .unwrap_or_else(|| context.heater_power_backend.pd_contract_mv());
+    let pd_contract_mv = effective_pd_contract_mv(
+        &context.manual_pps,
+        context.last_pd_observation,
+        context.heater_power_backend,
+    );
     let pd_state = if context.current_rtd_fault.is_some() {
         PdState::Fault
     } else if context
@@ -6936,6 +7734,78 @@ fn usb_runtime_status_with_calibration(
     status.pps_capability_max_mv = context.manual_pps.capability_max_mv;
     status.pps_capability_max_ma = context.manual_pps.capability_max_ma;
     status.manual_pps_error = context.manual_pps.error.map(manual_pps_error_code);
+    // This is contract metadata, not a VBUS current measurement. The legacy
+    // `currentMa` field remains CH224Q telemetry. FUSB302B reports only its
+    // negotiated PDO current through the explicit contract field below.
+    status.pd_controller = error_code_string(context.pd_controller.as_str());
+    let observed_contract = context
+        .last_pd_observation
+        .map(|observation| observation.contract)
+        .filter(|contract| *contract != Contract::none());
+    // The FUSB302B policy only gains a contract at PS_RDY. Its cached source
+    // capabilities and a pending RDO must never appear as an active contract.
+    let fusb_contract_pending =
+        context.pd_controller == ControllerKind::Fusb302b && observed_contract.is_none();
+    let fallback_contract_kind = if matches!(
+        context.heater_power_backend,
+        HeaterPowerBackend::PpsMos { .. }
+    ) {
+        ContractKind::Pps
+    } else {
+        ContractKind::Fixed
+    };
+    let contract_kind =
+        observed_contract
+            .map(|contract| contract.kind)
+            .unwrap_or(if fusb_contract_pending {
+                ContractKind::None
+            } else {
+                fallback_contract_kind
+            });
+    status.pd_contract_kind = error_code_string(contract_kind.as_str());
+    status.pd_contract_current_ma = if fusb_contract_pending {
+        0
+    } else {
+        observed_contract
+            .map(|contract| contract.current_ma)
+            .or(context.manual_pps.target_ma)
+            .or(context.manual_pps.capability_max_ma)
+            .unwrap_or(0)
+    };
+    let contract_voltage_mv = observed_contract
+        .map(|contract| contract.voltage_mv)
+        .unwrap_or(if fusb_contract_pending {
+            0
+        } else {
+            pd_contract_mv
+        });
+    status.pd_contract_power_mw =
+        (u32::from(contract_voltage_mv) * u32::from(status.pd_contract_current_ma)) / 1_000;
+    status.pd_performance_guaranteed = if fusb_contract_pending {
+        false
+    } else {
+        observed_contract
+            .map(Contract::performance_guaranteed)
+            .unwrap_or(
+                matches!(pd_state, PdState::Ready)
+                    && pd_contract_mv >= 20_000
+                    && status.pd_contract_current_ma >= 3_000,
+            )
+    };
+    status.pd_degraded_reason =
+        if matches!(pd_state, PdState::Ready) && !status.pd_performance_guaranteed {
+            Some(error_code_string("pd_contract_below_20v"))
+        } else if !matches!(pd_state, PdState::Ready) {
+            Some(error_code_string(
+                if context.pd_controller == ControllerKind::Fusb302b {
+                    fusb302b_degraded_reason()
+                } else {
+                    "pd_contract_unavailable"
+                },
+            ))
+        } else {
+            None
+        };
     status.heater_fault_reason = context.heater_fault_latched.map(|reason| {
         let mut value = heapless::String::new();
         let _ = value.push_str(reason.label());
@@ -9501,7 +10371,8 @@ async fn process_control_line(
     persistence_source: &'static str,
     persistence_record_state: &'static str,
     pd_i2c: &mut I2c<'_, esp_hal::Blocking>,
-    ch224q_address: Address,
+    pd_controller: ControllerKind,
+    pd_port: &mut PdPort,
     flash_storage: &mut FlashStorage,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     thermal_plant_workspace: &mut CalibrationThermalPlantWorkspace,
@@ -9538,6 +10409,7 @@ async fn process_control_line(
         |heater_fault_latched: Option<HeaterFaultReason>,
          attention_pending_after_fault_clear_value: bool| UsbRuntimeStatusContext {
             elapsed_ms,
+            pd_controller,
             last_pd_observation,
             heater_power_backend: *heater_power_backend,
             pid_snapshot,
@@ -9902,6 +10774,14 @@ async fn process_control_line(
                     "eeprom_data_incompatible",
                     "EEPROM data is incompatible; heating and calibration are locked.",
                 )
+            } else if matches!(command.op, CalibrationJobOpWire::Start)
+                && !pd_contract_allows_calibration(pd_controller, last_pd_observation)
+            {
+                let (code, message) = (
+                    "pd_performance_not_guaranteed",
+                    "Calibration requires a performance-guaranteed PPS contract.",
+                );
+                usb_error_response(request_id, code, message)
             } else {
                 usb_calibration_job_response(
                     request_id,
@@ -10013,8 +10893,7 @@ async fn process_control_line(
                     manual_pps,
                     memory_commit_due_ms,
                 );
-                let fixed_payload = ch224q::voltage_request_payload(DEFAULT_PD_VOLTAGE_REQUEST);
-                if !write_ch224q_payload(pd_i2c, ch224q_address, &fixed_payload).await {
+                if !request_pd_fixed_voltage(pd_i2c, pd_port, DEFAULT_PD_VOLTAGE_REQUEST).await {
                     return (
                         needs_redraw,
                         usb_error_response(
@@ -10500,6 +11379,131 @@ async fn await_ch224q_pd_ready(
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn request_pd_fixed_voltage(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    port: &mut PdPort,
+    request: ch224q::VoltageRequest,
+) -> bool {
+    match port {
+        PdPort::Ch224q(address) => {
+            let payload = ch224q::voltage_request_payload(request);
+            write_ch224q_payload(i2c, *address, &payload).await
+        }
+        PdPort::Fusb302b(runtime) => {
+            runtime.request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn request_pd_adjustable_voltage(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    port: &mut PdPort,
+    request_mv: u16,
+    mode: ch224q::AdjustableVoltageMode,
+    mode_changed: bool,
+) -> PdContractRequestState {
+    match port {
+        PdPort::Ch224q(address) => {
+            if request_ch224q_adjustable_voltage(i2c, *address, request_mv, mode, mode_changed)
+                .await
+            {
+                PdContractRequestState::Confirmed
+            } else {
+                PdContractRequestState::Failed
+            }
+        }
+        PdPort::Fusb302b(runtime) => {
+            let _ = mode_changed;
+            if mode == ch224q::AdjustableVoltageMode::Pps {
+                runtime.request_pps_voltage(i2c, request_mv, Instant::now().as_millis())
+            } else {
+                PdContractRequestState::Failed
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn read_pd_status(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    port: &mut PdPort,
+    now_ms: u64,
+) -> Option<PdStatusObservation> {
+    match port {
+        PdPort::Ch224q(address) => read_ch224q_status(i2c, *address),
+        PdPort::Fusb302b(runtime) => {
+            if !runtime.poll(i2c, now_ms) {
+                return None;
+            }
+            let contract = runtime.active_contract();
+            let status_raw = if contract == Contract::none() {
+                0
+            } else {
+                1 << 3
+            };
+            Some(PdStatusObservation {
+                status_raw,
+                status: Status::from_register(status_raw),
+                current_raw: 0,
+                current_ma: contract.current_ma,
+                contract_voltage_mv: (contract != Contract::none()).then_some(contract.voltage_mv),
+                contract,
+            })
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn read_pd_power_capabilities(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    port: &mut PdPort,
+) -> Option<ch224q::AdjustablePowerCapabilities> {
+    match port {
+        PdPort::Ch224q(address) => read_ch224q_power_data(i2c, *address)
+            .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes)),
+        PdPort::Fusb302b(runtime) => runtime
+            .source_capabilities()
+            .and_then(fusb302b_adjustable_power_capabilities),
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn await_pd_ready(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    port: &mut PdPort,
+    mut refresh_boot_light: impl FnMut(),
+) -> Option<PdStatusObservation> {
+    match port {
+        PdPort::Ch224q(address) => {
+            let (status_raw, status, current_raw, current_ma) =
+                await_ch224q_pd_ready(i2c, *address, refresh_boot_light).await?;
+            Some(PdStatusObservation {
+                status_raw,
+                status,
+                current_raw,
+                current_ma,
+                contract_voltage_mv: None,
+                contract: Contract::none(),
+            })
+        }
+        PdPort::Fusb302b(_) => {
+            for _ in 0..150 {
+                refresh_boot_light();
+                let now_ms = Instant::now().as_millis();
+                if let Some(observation) = read_pd_status(i2c, port, now_ms)
+                    && observation.status.pd_active
+                {
+                    return Some(observation);
+                }
+                EmbassyTimer::after_millis(20).await;
+            }
+            None
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 async fn wait_for_ch224q_status_poll(refresh_boot_light: &mut impl FnMut()) {
     for _ in 0..(CH224Q_STATUS_POLL_DELAY_MS / STATUS_LIGHT_BOOT_REFRESH_MS) {
         refresh_boot_light();
@@ -10639,6 +11643,8 @@ async fn main(_spawner: Spawner) {
         usb_tx_buf,
         &usb_boot_memory_config,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_setup_start\n");
     info!(
         "boot display_dc={=u8} mosi={=u8} sclk={=u8} blk={=u8} res={=u8} cs={=u8}",
         s3_frontpanel::PIN_LCD_DC,
@@ -10721,11 +11727,15 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.dx,
         DISPLAY_PANEL_CONFIG.dy,
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_start\n");
     let display_ready = matches!(
         with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await,
         Ok(Ok(()))
     );
     if !display_ready {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_failed\n");
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
             &mut usb_serial,
@@ -10740,6 +11750,8 @@ async fn main(_spawner: Spawner) {
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to initialize GC9D01 display");
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_complete\n");
     render_scene(SceneId::StartupCalibration, canvas);
     display.write_area(
         0,
@@ -10748,6 +11760,8 @@ async fn main(_spawner: Spawner) {
         DISPLAY_PANEL_CONFIG.height,
         canvas.pixels(),
     );
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_start\n");
     let startup_flush_ready = match with_timeout(DISPLAY_IO_TIMEOUT, display.flush()).await {
         Ok(Ok(())) => true,
         Ok(Err(gc9d01::Error::Bus(_))) => {
@@ -10765,6 +11779,8 @@ async fn main(_spawner: Spawner) {
     };
     if !startup_flush_ready {
         #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_failed\n");
+        #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
             &mut usb_serial,
             &mut usb_rx_line,
@@ -10778,6 +11794,8 @@ async fn main(_spawner: Spawner) {
         #[cfg(not(feature = "web_serial"))]
         panic!("failed to draw startup calibration screen");
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
     info!("scene={=str}", SceneId::StartupCalibration.label());
     for _ in 0..45 {
         #[cfg(feature = "web_serial")]
@@ -10824,6 +11842,8 @@ async fn main(_spawner: Spawner) {
             Ok(()) => unreachable!("key-test runtime only returns for a display fault"),
         }
     }
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_detect_start\n");
     let mut pd_i2c = I2c::new(
         peripherals.I2C0,
         I2cConfig::default()
@@ -10835,10 +11855,106 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create I2C0")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
-    let Some(ch224q_address) =
-        request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await
-    else {
-        warn!("CH224Q fixed-PD request failed; entering recovery before outputs initialize");
+    let detected_pd_controller = match detect_pd_controller(&mut pd_i2c) {
+        DetectedController::Unknown if detect_ch224q_secondary(&mut pd_i2c) => {
+            DetectedController::Ch224q
+        }
+        detected => detected,
+    };
+    let mut pd_port = match detected_pd_controller {
+        DetectedController::Fusb302b(device_id) => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
+            let mut runtime = Fusb302bRuntime::new();
+            if !runtime.initialize(&mut pd_i2c) {
+                #[cfg(feature = "web_serial")]
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
+                warn!(
+                    "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
+                    device_id.0,
+                );
+                #[cfg(feature = "web_serial")]
+                run_usb_recovery_control_loop(
+                    &mut usb_serial,
+                    &mut usb_rx_line,
+                    usb_tx_buf,
+                    &usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    UsbRecoveryPhase::BeforePersistentState,
+                )
+                .await;
+
+                #[cfg(not(feature = "web_serial"))]
+                panic!("FUSB302B PHY initialization failed");
+            }
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
+            info!(
+                "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
+                device_id.0,
+                DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                MAX_HEATER_CONTRACT_MA,
+            );
+            PdPort::Fusb302b(runtime)
+        }
+        DetectedController::Ch224q => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_ch224q_detected\n");
+            let Some(address) =
+                request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await
+            else {
+                warn!(
+                    "CH224Q fixed-PD request failed; entering recovery before outputs initialize"
+                );
+                #[cfg(feature = "web_serial")]
+                run_usb_recovery_control_loop(
+                    &mut usb_serial,
+                    &mut usb_rx_line,
+                    usb_tx_buf,
+                    &usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    UsbRecoveryPhase::BeforePersistentState,
+                )
+                .await;
+
+                #[cfg(not(feature = "web_serial"))]
+                panic!("CH224Q fixed-PD request failed");
+            };
+            PdPort::Ch224q(address)
+        }
+        DetectedController::Unknown => {
+            #[cfg(feature = "web_serial")]
+            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
+            warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
+            #[cfg(feature = "web_serial")]
+            run_usb_recovery_control_loop(
+                &mut usb_serial,
+                &mut usb_rx_line,
+                usb_tx_buf,
+                &usb_boot_memory_config,
+                StatusLightState::HeaterInterlocked,
+                UsbRecoveryPhase::BeforePersistentState,
+            )
+            .await;
+
+            #[cfg(not(feature = "web_serial"))]
+            panic!("PD controller identity is ambiguous or unreadable");
+        }
+    };
+    let mut flash_storage = FlashStorage::new();
+    #[cfg(feature = "web_serial")]
+    let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_wait_start\n");
+    let initial_pd_observation = await_pd_ready(&mut pd_i2c, &mut pd_port, || {
+        set_status_light_state(StatusLightState::Booting);
+    })
+    .await;
+    let fusb302b_contract_pending =
+        initial_pd_observation.is_none() && matches!(&pd_port, PdPort::Fusb302b(_));
+    if initial_pd_observation.is_none() && !fusb302b_contract_pending {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
+        warn!("PD contract was not ready before outputs initialize; holding heater interlocked");
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
             &mut usb_serial,
@@ -10851,25 +11967,21 @@ async fn main(_spawner: Spawner) {
         .await;
 
         #[cfg(not(feature = "web_serial"))]
-        panic!("CH224Q fixed-PD request failed");
-    };
-    let mut flash_storage = FlashStorage::new();
-    info!(
-        "pd request locked addr=0x{=u8:02x} target_mv={=u16} settle_ms={=u64}",
-        ch224q_address.as_u8(),
-        DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-        CH224Q_PD_SETTLE_MS,
-    );
-    for _ in 0..(CH224Q_PD_SETTLE_MS / 10) {
+        panic!("PD contract was not ready");
+    }
+    if fusb302b_contract_pending {
         #[cfg(feature = "web_serial")]
-        poll_usb_early_control(
+        let _ = usb_write_bytes_bounded(
             &mut usb_serial,
-            &mut usb_rx_line,
-            usb_tx_buf,
-            &usb_boot_memory_config,
+            b"boot_stage=pd_contract_pending_interlocked\n",
         );
-        set_status_light_state(StatusLightState::Booting);
-        EmbassyTimer::after_millis(10).await;
+        warn!(
+            "fusb302b PD contract is pending; continuing with heater interlocked while runtime polling retries"
+        );
+    }
+    if !fusb302b_contract_pending {
+        #[cfg(feature = "web_serial")]
+        let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
     }
     // Keep this allocation owned until Wi-Fi has created its timer objects.
     // Releasing it earlier lets the C driver reinterpret allocator free-list
@@ -11011,11 +12123,14 @@ async fn main(_spawner: Spawner) {
         "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
         BUZZER_PWM_PERIOD_TICKS,
     );
-    let mut last_pd_observation = if let Some((status_raw, status, current_raw, current_ma)) =
-        await_ch224q_pd_ready(&mut pd_i2c, ch224q_address, || {
-            set_status_light_state(StatusLightState::Booting);
-        })
-        .await
+    let mut last_pd_observation = initial_pd_observation;
+    if let Some(PdStatusObservation {
+        status_raw,
+        status,
+        current_raw,
+        current_ma,
+        ..
+    }) = last_pd_observation
     {
         info!(
             "heater runtime ready: gpio47 freq={=u32}Hz target={=i16}~{=i16}C cooling_lock>{=i16}C hard_cutoff={=i16}C pd_status=0x{=u8:02x} pd={=bool} epr={=bool} epr_exist={=bool} current_raw=0x{=u8:02x} current_ma={=u16}",
@@ -11031,19 +12146,7 @@ async fn main(_spawner: Spawner) {
             current_raw,
             current_ma,
         );
-        Some(PdStatusObservation {
-            status_raw,
-            status,
-            current_raw,
-            current_ma,
-        })
-    } else {
-        info!(
-            "heater runtime continuing: CH224Q PD status not ready after request_mv={=u16}; status will be observed only",
-            DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-        );
-        read_ch224q_status(&mut pd_i2c, ch224q_address)
-    };
+    }
     let mut last_pd_status_log_key = pd_status_log_key(last_pd_observation);
     let active_thermal_settings =
         ThermalControlProfileSettings::from(memory_config.active_thermal_control_profile.settings);
@@ -11059,17 +12162,16 @@ async fn main(_spawner: Spawner) {
         active_thermal_settings.auto_adjustable_working_floor_mv,
         active_thermal_settings.heater_current_reserve_ma,
     );
-    let power_data_capabilities = read_ch224q_power_data(&mut pd_i2c, ch224q_address)
-        .map(|bytes| ch224q::AdjustablePowerCapabilities::from_pd_power_data(&bytes));
+    let power_data_capabilities = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port);
     match power_data_capabilities {
         Some(capabilities) => info!(
-            "ch224q power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16} pps_max_ma={=u16}",
+            "pd power data pps20={=bool} pps_min_mv={=u16} pps_max_mv={=u16} pps_max_ma={=u16}",
             capabilities.pps_covers_20v,
             capabilities.pps_min_mv.unwrap_or(0),
             capabilities.pps_max_mv.unwrap_or(0),
             capabilities.pps_max_ma.unwrap_or(0),
         ),
-        None => info!("ch224q power data read failed"),
+        None => info!("pd power data read failed"),
     }
     let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
     let mut calibration_runtime_state = CalibrationRuntimeState::default();
@@ -11078,9 +12180,12 @@ async fn main(_spawner: Spawner) {
     let thermal_plant_workspace =
         THERMAL_PLANT_WORKSPACE.init_with(CalibrationThermalPlantWorkspace::default);
     let mut thermal_control_profile_preview: Option<ThermalControlProfile> = None;
-    let mut heater_power_backend = select_heater_power_backend(
-        power_data_capabilities,
-        last_pd_observation.map(|status| status.status),
+    let mut heater_power_backend = constrain_heater_backend_to_controller(
+        pd_port.controller_kind(),
+        select_heater_power_backend(
+            power_data_capabilities,
+            last_pd_observation.map(|status| status.status),
+        ),
     );
     let mut hold_pps_governor = HoldPpsGovernor::new();
     let mut last_heater_duty = 0_u8;
@@ -11115,7 +12220,7 @@ async fn main(_spawner: Spawner) {
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pre_adc_heater_sync_start\n");
     let _ = apply_heater_power_output(
         &mut pd_i2c,
-        ch224q_address,
+        &mut pd_port,
         &mut heater_pwm,
         &mut heater_power_backend,
         &mut hold_pps_governor,
@@ -11141,7 +12246,7 @@ async fn main(_spawner: Spawner) {
     EmbassyTimer::after_millis(HEATER_PPS_SMALL_TRANSITION_MS).await;
     let _ = apply_heater_power_output(
         &mut pd_i2c,
-        ch224q_address,
+        &mut pd_port,
         &mut heater_pwm,
         &mut heater_power_backend,
         &mut hold_pps_governor,
@@ -11200,7 +12305,8 @@ async fn main(_spawner: Spawner) {
     );
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
     ui_state.eeprom_data_incompatible = eeprom_data_incompatible;
-    ui_state.pd_contract_mv = heater_power_backend.pd_contract_mv();
+    ui_state.pd_contract_mv =
+        effective_pd_contract_mv(&manual_pps_state, last_pd_observation, heater_power_backend);
     apply_memory_config_to_ui(&mut ui_state, &memory_config);
     let mut heater_controller = HeaterController::new();
     let mut current_rtd_fault: Option<HeaterFaultReason> = None;
@@ -11449,7 +12555,8 @@ async fn main(_spawner: Spawner) {
                         persistence_source,
                         persistence_record_state,
                         &mut pd_i2c,
-                        ch224q_address,
+                        pd_port.controller_kind(),
+                        &mut pd_port,
                         &mut flash_storage,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
@@ -11486,7 +12593,7 @@ async fn main(_spawner: Spawner) {
                         &mut heater_power_backend,
                         &mut manual_pps_state,
                         &mut pd_i2c,
-                        ch224q_address,
+                        &mut pd_port,
                         &mut heater_pwm,
                         &mut hold_pps_governor,
                         &mut ui_state,
@@ -11596,7 +12703,8 @@ async fn main(_spawner: Spawner) {
                 persistence_source,
                 persistence_record_state,
                 &mut pd_i2c,
-                ch224q_address,
+                pd_port.controller_kind(),
+                &mut pd_port,
                 &mut flash_storage,
                 &mut calibration_runtime_state,
                 thermal_plant_workspace,
@@ -11633,7 +12741,7 @@ async fn main(_spawner: Spawner) {
                 &mut heater_power_backend,
                 &mut manual_pps_state,
                 &mut pd_i2c,
-                ch224q_address,
+                &mut pd_port,
                 &mut heater_pwm,
                 &mut hold_pps_governor,
                 &mut ui_state,
@@ -11664,7 +12772,7 @@ async fn main(_spawner: Spawner) {
             &mut heater_power_backend,
             &mut manual_pps_state,
             &mut pd_i2c,
-            ch224q_address,
+            &mut pd_port,
             &mut heater_pwm,
             &mut hold_pps_governor,
             &mut ui_state,
@@ -12067,7 +13175,7 @@ async fn main(_spawner: Spawner) {
                 );
             }
 
-            let current_pd_observation = read_ch224q_status(&mut pd_i2c, ch224q_address);
+            let current_pd_observation = read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms);
             if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
                 match current_pd_observation {
                     Some(observation) => info!(
@@ -12084,6 +13192,22 @@ async fn main(_spawner: Spawner) {
                 last_pd_status_log_key = pd_status_log_key(current_pd_observation);
             }
             last_pd_observation = current_pd_observation;
+            if pd_port.controller_kind() == ControllerKind::Fusb302b
+                && matches!(
+                    heater_power_backend,
+                    HeaterPowerBackend::FixedPdPwmFallback { .. }
+                )
+                && let Some(capabilities) = read_pd_power_capabilities(&mut pd_i2c, &mut pd_port)
+                && let Some(next_backend) = fusb302b_pps_backend_from_capabilities(capabilities)
+            {
+                heater_power_backend = next_backend;
+                manual_pps_state = ManualPpsState::from_capabilities(Some(capabilities));
+                hold_pps_governor = HoldPpsGovernor::new();
+                needs_redraw = true;
+                info!(
+                    "fusb302b source capabilities became available; promoted heater backend to pps-mos"
+                );
+            }
             update_calibration_runtime_state(
                 &mut calibration_runtime_state,
                 &manual_pps_state,
@@ -12173,7 +13297,7 @@ async fn main(_spawner: Spawner) {
                 &mut heater_power_backend,
                 &mut manual_pps_state,
                 &mut pd_i2c,
-                ch224q_address,
+                &mut pd_port,
                 &mut heater_pwm,
                 &mut hold_pps_governor,
                 &mut ui_state,
@@ -12276,7 +13400,7 @@ async fn main(_spawner: Spawner) {
             }
             if apply_heater_power_output(
                 &mut pd_i2c,
-                ch224q_address,
+                &mut pd_port,
                 &mut heater_pwm,
                 &mut heater_power_backend,
                 &mut hold_pps_governor,
@@ -12315,10 +13439,11 @@ async fn main(_spawner: Spawner) {
                 ui_state.manual_pps_enabled = manual_pps_state.enabled;
                 needs_redraw = true;
             }
-            let next_pd_contract_mv = manual_pps_state
-                .target_mv
-                .filter(|_| manual_pps_state.enabled)
-                .unwrap_or_else(|| heater_power_backend.pd_contract_mv());
+            let next_pd_contract_mv = effective_pd_contract_mv(
+                &manual_pps_state,
+                current_pd_observation,
+                heater_power_backend,
+            );
             if ui_state.pd_contract_mv != next_pd_contract_mv {
                 ui_state.pd_contract_mv = next_pd_contract_mv;
                 needs_redraw = true;
@@ -12398,7 +13523,7 @@ async fn main(_spawner: Spawner) {
             ui_state.heater_output_percent = 0;
             let _ = apply_heater_power_output(
                 &mut pd_i2c,
-                ch224q_address,
+                &mut pd_port,
                 &mut heater_pwm,
                 &mut heater_power_backend,
                 &mut hold_pps_governor,
@@ -12419,7 +13544,11 @@ async fn main(_spawner: Spawner) {
                 elapsed_ms,
             )
             .await;
-            let next_pd_contract_mv = heater_power_backend.pd_contract_mv();
+            let next_pd_contract_mv = effective_pd_contract_mv(
+                &manual_pps_state,
+                last_pd_observation,
+                heater_power_backend,
+            );
             if ui_state.pd_contract_mv != next_pd_contract_mv {
                 ui_state.pd_contract_mv = next_pd_contract_mv;
             }
@@ -12559,7 +13688,7 @@ async fn main(_spawner: Spawner) {
                         &mut heater_power_backend,
                         &mut manual_pps_state,
                         &mut pd_i2c,
-                        ch224q_address,
+                        &mut pd_port,
                         &mut heater_pwm,
                         &mut hold_pps_governor,
                         &mut ui_state,
@@ -12737,6 +13866,7 @@ mod tests {
     fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
         UsbRuntimeStatusContext {
             elapsed_ms: 0,
+            pd_controller: ControllerKind::Ch224q,
             last_pd_observation: None,
             heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                 reason: HeaterPowerBackendReason::NoPps20vCapability,
@@ -18639,6 +19769,8 @@ mod tests {
                 },
                 current_raw: 40,
                 current_ma: 2_000,
+                contract_voltage_mv: None,
+                contract: Contract::none(),
             }),
         );
         assert_eq!(status_limit, 5_000);
@@ -18653,6 +19785,8 @@ mod tests {
                 },
                 current_raw: 0,
                 current_ma: 0,
+                contract_voltage_mv: None,
+                contract: Contract::none(),
             }),
         );
         assert_eq!(zero_draw_keeps_contract, 5_000);
@@ -19938,6 +21072,8 @@ mod tests {
             },
             current_raw: 0x10,
             current_ma: 800,
+            contract_voltage_mv: None,
+            contract: Contract::none(),
         };
         let second = PdStatusObservation {
             current_raw: 0x2a,
@@ -19949,6 +21085,222 @@ mod tests {
             pd_status_log_key(Some(first)),
             pd_status_log_key(Some(second))
         );
+    }
+
+    #[test]
+    fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
+        let contract = Contract {
+            kind: ContractKind::Fixed,
+            object_position: 3,
+            voltage_mv: 20_000,
+            current_ma: 5_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let status = usb_runtime_status(
+            &ui_state,
+            &MemoryConfig::default(),
+            UsbRuntimeStatusContext {
+                pd_controller: ControllerKind::Fusb302b,
+                last_pd_observation: Some(observation),
+                vin_mv: 20_000,
+                ..test_usb_runtime_status_context()
+            },
+        );
+
+        assert_eq!(status.pd_controller.as_str(), "fusb302b");
+        assert_eq!(status.pd_contract_kind.as_str(), "fixed");
+        assert_eq!(status.pd_contract_current_ma, 5_000);
+        assert_eq!(status.pd_contract_power_mw, 100_000);
+        assert!(status.pd_performance_guaranteed);
+        assert_eq!(status.pd_degraded_reason, None);
+        assert!(!pd_contract_allows_calibration(
+            ControllerKind::Fusb302b,
+            Some(observation)
+        ));
+
+        let low_voltage = PdStatusObservation {
+            contract: Contract {
+                voltage_mv: 15_000,
+                current_ma: 3_000,
+                ..contract
+            },
+            contract_voltage_mv: Some(15_000),
+            current_ma: 3_000,
+            ..observation
+        };
+        assert!(!pd_contract_allows_calibration(
+            ControllerKind::Fusb302b,
+            Some(low_voltage)
+        ));
+
+        let fallback = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::CapabilityReadFailed,
+            fixed_request_confirmed: true,
+            fixed_request: ch224q::VoltageRequest::V20,
+        };
+        assert_eq!(
+            effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
+            15_000
+        );
+    }
+
+    #[test]
+    fn fusb302b_pps_contract_enables_calibration_and_caps_backend_to_21v() {
+        let contract = Contract {
+            kind: ContractKind::Pps,
+            object_position: 2,
+            voltage_mv: 20_000,
+            current_ma: 5_000,
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: contract.current_ma,
+            contract_voltage_mv: Some(contract.voltage_mv),
+            contract,
+        };
+        let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let status = usb_runtime_status(
+            &ui_state,
+            &MemoryConfig::default(),
+            UsbRuntimeStatusContext {
+                pd_controller: ControllerKind::Fusb302b,
+                last_pd_observation: Some(observation),
+                vin_mv: 20_000,
+                ..test_usb_runtime_status_context()
+            },
+        );
+
+        assert_eq!(status.pd_contract_kind.as_str(), "pps");
+        assert_eq!(status.pd_contract_power_mw, 100_000);
+        assert!(status.pd_performance_guaranteed);
+        assert!(pd_contract_allows_calibration(
+            ControllerKind::Fusb302b,
+            Some(observation)
+        ));
+
+        let backend = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_000,
+            idle_request_mv: 12_000,
+            pps_max_mv: 28_000,
+            adjustable_max_mv: 28_000,
+            capability_max_ma: 5_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Avs),
+            current_request_mv: 24_000,
+            settle_until_ms: None,
+            next_request_at_ms: 0,
+            current_limit_fixed_pwm_active: false,
+            current_limit_fixed_request_confirmed: false,
+            terminal_fixed_pd_disarmed: false,
+        };
+        let constrained = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, backend);
+        let HeaterPowerBackend::PpsMos {
+            pps_max_mv,
+            adjustable_max_mv,
+            current_mode,
+            current_request_mv,
+            ..
+        } = constrained
+        else {
+            panic!("FUSB302B must retain a PPS backend when a PPS APDO is present");
+        };
+        assert_eq!(pps_max_mv, 21_000);
+        assert_eq!(adjustable_max_mv, 21_000);
+        assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
+        assert_eq!(current_request_mv, 21_000);
+    }
+
+    #[test]
+    fn fusb302b_deferred_source_capabilities_promote_the_pps_backend() {
+        let mut capabilities = ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_000),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..ch224q::AdjustablePowerCapabilities::default()
+        };
+        capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+            min_mv: 5_000,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        });
+
+        let backend = fusb302b_pps_backend_from_capabilities(capabilities)
+            .expect("FUSB302B PPS source capabilities must enable the PPS backend");
+        let HeaterPowerBackend::PpsMos {
+            pps_min_mv,
+            pps_max_mv,
+            capability_max_ma,
+            current_mode,
+            ..
+        } = backend
+        else {
+            panic!("FUSB302B must promote from fixed fallback to PPS");
+        };
+        assert_eq!(pps_min_mv, 5_000);
+        assert_eq!(pps_max_mv, 21_000);
+        assert_eq!(capability_max_ma, 3_000);
+        assert_eq!(current_mode, Some(ch224q::AdjustableVoltageMode::Pps));
+    }
+
+    #[test]
+    fn fusb302b_pending_contract_is_not_reported_as_ready() {
+        let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        let status = usb_runtime_status(
+            &ui_state,
+            &MemoryConfig::default(),
+            UsbRuntimeStatusContext {
+                pd_controller: ControllerKind::Fusb302b,
+                heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
+                    reason: HeaterPowerBackendReason::NoPps20vCapability,
+                    fixed_request_confirmed: false,
+                    fixed_request: ch224q::VoltageRequest::V20,
+                },
+                vin_mv: 20_000,
+                ..test_usb_runtime_status_context()
+            },
+        );
+
+        assert_eq!(status.pd_contract_kind.as_str(), "none");
+        assert_eq!(status.pd_contract_current_ma, 0);
+        assert_eq!(status.pd_contract_power_mw, 0);
+        assert!(!status.pd_performance_guaranteed);
+        assert_eq!(
+            status.pd_degraded_reason.as_deref(),
+            Some("pd_contract_unavailable")
+        );
+    }
+
+    #[test]
+    fn fusb302b_backend_never_inherits_a_ch224q_28v_default() {
+        let legacy = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::CapabilityReadFailed,
+            fixed_request_confirmed: true,
+            fixed_request: ch224q::VoltageRequest::V28,
+        };
+
+        let fusb = constrain_heater_backend_to_controller(ControllerKind::Fusb302b, legacy);
+        assert_eq!(fusb.pd_request_mv(), 20_000);
+        let HeaterPowerBackend::FixedPdPwmFallback {
+            fixed_request_confirmed,
+            ..
+        } = fusb
+        else {
+            panic!("FUSB302B must use fixed-PDO PWM fallback");
+        };
+        assert!(!fixed_request_confirmed);
+
+        let ch224q = constrain_heater_backend_to_controller(ControllerKind::Ch224q, legacy);
+        assert_eq!(ch224q.pd_request_mv(), 28_000);
     }
 
     #[test]
@@ -20489,6 +21841,90 @@ mod tests {
                 terminal_fixed_pd_disarmed: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater() {
+        let mut backend = HeaterPowerBackend::PpsMos {
+            pps_min_mv: 5_000,
+            idle_request_mv: 12_000,
+            pps_max_mv: 21_000,
+            adjustable_max_mv: 21_000,
+            capability_max_ma: 5_000,
+            current_mode: Some(ch224q::AdjustableVoltageMode::Pps),
+            current_request_mv: 20_000,
+            settle_until_ms: Some(100),
+            next_request_at_ms: 100,
+            current_limit_fixed_pwm_active: true,
+            current_limit_fixed_request_confirmed: true,
+            terminal_fixed_pd_disarmed: true,
+        };
+
+        assert!(release_terminal_fixed_pd_disarm_for_manual_pps(
+            &mut backend,
+            true
+        ));
+        assert!(matches!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                terminal_fixed_pd_disarmed: false,
+                current_mode: None,
+                current_request_mv: 12_000,
+                settle_until_ms: None,
+                next_request_at_ms: 0,
+                current_limit_fixed_pwm_active: false,
+                current_limit_fixed_request_confirmed: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fusb302b_retries_manual_pps_when_the_active_contract_is_fixed() {
+        let manual_pps = ManualPpsState {
+            enabled: true,
+            owner: ManualPpsOwner::Calibration,
+            target_mv: Some(20_000),
+            target_ma: Some(5_000),
+            applied_mv: Some(20_000),
+            ..ManualPpsState::default()
+        };
+        let fixed = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: 5_000,
+            contract_voltage_mv: Some(20_000),
+            contract: Contract {
+                kind: ContractKind::Fixed,
+                object_position: 1,
+                voltage_mv: 20_000,
+                current_ma: 5_000,
+            },
+        };
+        let pps = PdStatusObservation {
+            contract: Contract {
+                kind: ContractKind::Pps,
+                ..fixed.contract
+            },
+            ..fixed
+        };
+
+        assert!(manual_pps_request_required(
+            manual_pps,
+            ControllerKind::Fusb302b,
+            Some(fixed)
+        ));
+        assert!(!manual_pps_request_required(
+            manual_pps,
+            ControllerKind::Fusb302b,
+            Some(pps)
+        ));
+        assert!(!manual_pps_request_required(
+            manual_pps,
+            ControllerKind::Ch224q,
+            Some(fixed)
         ));
     }
 

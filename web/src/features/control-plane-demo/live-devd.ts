@@ -504,11 +504,13 @@ export function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
         (record.transport === 'native_serial' || record.transport === 'lan') &&
         record.identity.buildId !== 'native-serial-placeholder'
     ) ??
+    // Keep an authorized recovery target visible until a regular runtime
+    // record is available. Busy targets remain owned by another workflow.
     records.find(
       (record) =>
         record.transport === 'native_serial' &&
-        record.identity.buildId === 'native-serial-placeholder' &&
-        record.connection !== 'busy'
+        record.connection !== 'busy' &&
+        record.identity.buildId === 'native-serial-placeholder'
     )
   )
 }
