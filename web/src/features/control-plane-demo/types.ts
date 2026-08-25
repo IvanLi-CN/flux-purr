@@ -38,6 +38,12 @@ export interface DeviceTarget {
   pdRequestMv: number
   pdContractMv: number
   pdState: 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
+  pdController?: 'ch224q' | 'fusb302b' | 'unknown' | null
+  pdContractKind?: 'fixed' | 'pps' | 'none' | null
+  pdContractCurrentMa?: number | null
+  pdContractPowerMw?: number | null
+  pdPerformanceGuaranteed?: boolean | null
+  pdDegradedReason?: string | null
   manualPpsEnabled?: boolean
   manualPpsMv?: number | null
   manualPpsMa?: number | null

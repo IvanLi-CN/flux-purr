@@ -88,12 +88,18 @@ During firmware boot, before EEPROM/flash restoration and WiFi task startup comp
   "pdRequestMv": 20000,
   "pdContractMv": 20000,
   "pdState": "ready",
+  "pdController": "fusb302b",
+  "pdContractKind": "pps",
+  "pdContractCurrentMa": 3000,
+  "pdContractPowerMw": 60000,
+  "pdPerformanceGuaranteed": true,
+  "pdDegradedReason": null,
   "manualPpsEnabled": false,
   "manualPpsMv": null,
   "manualPpsMa": null,
   "ppsCapabilityMinMv": 5000,
   "ppsCapabilityMaxMv": 21000,
-  "ppsCapabilityMaxMa": 3000,
+  "ppsCapabilityMaxMa": 5000,
   "manualPpsError": null,
   "thermalControlProfilePreview": false,
   "frontpanelKey": null,
@@ -104,7 +110,7 @@ During firmware boot, before EEPROM/flash restoration and WiFi task startup comp
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
-`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` remains the PD contract or negotiated target concept. `currentMa` is the current PD/CH224Q capability value surfaced by firmware today; it is not a verified live load-current measurement, and is used as a CC-loop proxy when tooling evaluates the heater temperature/resistance curve.
+`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. New `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper-bound fields; neither is a physical current measurement or hardware over-current guarantee. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot be used for performance or calibration claims. FUSB302BMPX selects a `5V..21V` PPS APDO when available and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` leaves heating interlocked.
 `rtdRawAdcMv` and `vinRawAdcMv` retain their existing contract names but expose eFuse curve-calibrated millivolt readings before the project-level A/B calibration fit. They are not hardware ADC codes. `adcDiagnostics` is a read-only, optional diagnostic object so hosts remain compatible with older firmware. Its RTD mean/min/max/spread and VIN mean are 12-bit codes obtained through `AdcCalBasic` from the same conversions used for curve-calibrated mV; firmware always masks off upper SAR status bits before diagnostics and curve conversion. `calibrationSource=runtime_fallback` means required eFuse calibration data is missing; temperature-accuracy validation must stop, and firmware does not substitute the assumed 1100 mV gain reference. VBUS, VIN, ambient temperature, uptime, and an initial reading are never calibration references for this object.
 `faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
 `manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the persistent saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation, legacy-profile inflate when importing old data, and safety clamps are applied. On a PPS/AVS backend, the selected APDO's voltage and current contract bounds production power; `R(T)` is used for heater-watt estimation but neither it nor `heaterCurrentReserveMa` lowers the adjustable-voltage request ceiling. The current-reserve field remains relevant only to the fixed-PD PWM fallback.
@@ -164,7 +170,7 @@ Owner-facing calibration modes are fixed as:
 fourth owner-facing calibration mode and cannot be selected through the
 manual calibration control.
 
-Calibration live control is PPS-only. Any requested PPS value must stay within the hardware `5V~28V` safety range and the device's real-time PPS capability. The effective request window is therefore `max(5V, ppsCapabilityMinMv)` through `min(28V, ppsCapabilityMaxMv)`.
+Calibration live control requires an active adjustable PPS contract. FUSB302BMPX exposes calibration only while its selected `5V..21V` PPS contract meets the `>=20V @ >=3A` performance tier; its fixed-PDO fallback remains heat-only. This path remains subject to the authorized HIL interoperability gate.
 
 ### `HeaterCurveState`
 
@@ -398,7 +404,7 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 }
 ```
 
-All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the hardware `5V~28V` range, within the advertised PPS capability, and on a `100mV` step; `manualPpsMa` must be within the advertised APDO current capability and on a `50mA` step. `runtime_config.calibration` controls the owner-facing calibration modes and follows the same PPS legality rules. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. Calibration control only accepts PPS voltage requests; current remains read-only and is surfaced as the PPS current capability / CC-loop proxy used by firmware and tooling. CH224Q applies the PPS voltage request through its voltage register; `manualPpsMa` is a requested contract value for validation and status, not a direct chip current-register write.
+All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the selected controller's advertised PPS capability, on a `100mV` step; `manualPpsMa` must be within its advertised APDO current capability and on a `50mA` step. FUSB302BMPX accepts manual PPS within its advertised `5V..21V` capability and rejects AVS requests. `runtime_config.calibration` controls the owner-facing calibration modes and requires FUSB302BMPX to hold a qualifying PPS contract. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. Current remains read-only contract metadata. `manualPpsMa` does not operate a direct VBUS-current register.
 
 `PUT /api/v1/devices/:id/calibration` body:
 
@@ -756,7 +762,7 @@ The response returns the updated status:
 }
 ```
 
-`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. Both paths must reject any PPS request outside the hardware `5V~28V` range, outside the advertised capability, or off the required `100mV / 50mA` steps. `thermalControlProfile` supports `preview` / `clear_preview` for RAM-only preview state and `save` / `clear_saved` for persistent active thermal profile state.
+`manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. CH224Q rejects PPS requests outside its advertised capability or off the required `100mV / 50mA` steps. FUSB302BMPX accepts manual PPS within its advertised `5V..21V` APDO and requires a qualifying PPS contract for calibration. `thermalControlProfile` supports `preview` / `clear_preview` for RAM-only preview state and `save` / `clear_saved` for persistent active thermal profile state.
 
 ### `calibration_config`
 

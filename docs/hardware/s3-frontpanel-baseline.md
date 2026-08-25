@@ -5,7 +5,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 ## 1) SoC and major chips
 
 - MCU: `ESP32-S3FH4R2`
-- PD sink: `CH224Q` (I2C dynamic voltage request)
+- PD sink variants: `CH224Q` (legacy dynamic-voltage controller) and `FUSB302BMPX` (PD-message PHY)
 - 3.3 V rail: `TPS62933DRLR` (fixed `3.3 V`)
 - Fan rail: `TPS62933DRLR` adjustable sibling variants
   - `fan-5v`: `3.0 V ~ 5.0 V`
@@ -13,10 +13,11 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
 - Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet` (`fan-5v` baseline)
+- FUSB302B controller-board netlist: `docs/hardware/netlists/main-controller-board-fusb302b-rev-5-2.enet` (revision `5.2`)
 - Variant overlay reference: `docs/hardware/fan-pcb-variants.md`
 - Archived front-panel-board netlist: `docs/hardware/netlists/front-panel-board.enet`
 
-## 2) Direct MCU GPIO allocation (24 active)
+## 2) Direct MCU GPIO allocation (25 active)
 
 | Function | GPIO | Notes |
 | --- | ---: | --- |
@@ -24,8 +25,9 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 | VIN ADC | 1 | `ADC1_CH0`, main input voltage sense |
 | RTD ADC | 2 | `ADC1_CH1`, reserved for `PT1000` sensing |
 | HEATER PWM | 47 | Chip pin 37, main heating PWM |
-| I2C SDA | 8 | Shared by `CH224Q` and `M24C64` EEPROM |
-| I2C SCL | 9 | Shared by `CH224Q` and `M24C64` EEPROM |
+| PD INT | 7 | `FUSB302B` interrupt net reservation; unused by the archived CH224Q board and polled by the current policy |
+| I2C SDA | 8 | Shared by the selected PD controller and `M24C64` EEPROM |
+| I2C SCL | 9 | Shared by the selected PD controller and `M24C64` EEPROM |
 | LCD DC | 10 | Matches `mains-aegis` LCD control cluster |
 | LCD MOSI | 11 | SPI MOSI |
 | LCD SCLK | 12 | SPI clock |
@@ -48,12 +50,16 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 
 Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally mirrors the `mains-aegis` `GPIO10/11/12/13` LCD cluster, keeps the fan rail on `GPIO34/35/36`, and uses `GPIO37/38/39` as a contiguous RGB status-LED PWM group while still avoiding `GPIO3`, `GPIO45`, `GPIO46`, and the flash/PSRAM GPIO block.
 
-## 3) CH224Q control baseline
+## 3) Dual PD-controller baseline
 
-- Use I2C dynamic mode with 7-bit address `0x22` (fallback compatible `0x23`).
-- Support requests for `5/9/12/15/20/28 V`.
-- Keep PD state visible in firmware status model (`request` vs `contract` voltage).
-- The archived USB1 Type-C receptacle has no board-side eMarker simulation. A `20V/5A` contract therefore requires a compliant eMarked 5A USB-C cable and source negotiation; confirm it from CH224Q live-current readback instead of inferring it from the requested voltage.
+- `CH224Q` keeps its legacy I2C dynamic mode at 7-bit `0x22` (and legacy fallback `0x23`) and its existing high-voltage behavior.
+- `FUSB302BMPX` is a PD sink PHY at 7-bit `0x22`, with its `GPIO7` interrupt net reserved for a later event-driven path. The polling policy selects PPS APDOs within `5V..21V` and retains fixed-PDO fallback; source interoperability remains an HIL gate.
+- The two variants collide at `0x22`. Startup reads multiple controller-specific registers twice and makes no PD write until exactly one signature matches. A failed, ambiguous, or conflicting read produces `unknown`, holds heater output interlocked, and does not select a controller.
+- I2C transactions are serialized with EEPROM accesses. PD waits occur outside an I2C transaction so EEPROM persistence remains available.
+- The FUSB302BMPX policy module chooses the best PPS APDO covering the requested voltage within `5V..21V`, emits PPS RDOs, and renews an active PPS contract every five seconds. It uses a fixed PDO only when no suitable APDO is advertised. `Accept` followed by `PS_RDY` is required before the contract authorizes heating; detach, reset, reject, wait, or I2C fault clears that authority. The product main loop dispatches the selected policy through `PdPort` and blocks CH224Q register writes on a FUSB302B board.
+- A PPS contract at `20V` with at least `3A` is the performance-guaranteed tier. A lower-voltage PPS or fixed contract may heat in degraded mode but is not valid for performance claims, temperature-rise claims, or calibration.
+- `3 A` and `5 A` are contractual limits only: `20 V @ 3 A` limits available electrical power to `60 W`; `20 V @ 5 A` limits it to `100 W`. Firmware clamps PWM-derived heater power to that contract. There is no VBUS shunt, real current measurement, or hardware VBUS over-current cutoff in this revision.
+- A `20V/5A` contract requires a compliant eMarked 5A cable and source. `pdContractCurrentMa` and `pdContractPowerMw` describe the negotiated limit, not an observed load current.
 - The same MCU I2C bus also carries one `M24C64` EEPROM with `E0/E1/E2` strapped low.
 - The shared `SDA/SCL` bus uses `4.7 kOhm` pullups to `3V3`.
 
@@ -139,7 +145,7 @@ The supported fixed-PD fallback is not an LED fault. It preserves the selected r
   - `R_GATE = 68 Ohm`
   - `R_GPD = 100 kOhm`
   - retain direct `3.3 V` GPIO47 drive at the default approximately `20 mA` pin drive strength; do not add a gate driver or increase edge strength without gate-waveform and drain-overshoot evidence
-  - PWM baseline `100 Hz` for PPS and fixed-PD fallback paths
+- PWM baseline `100 Hz` for all PD power paths
 - `FAN_EN` is directly driven by MCU `GPIO35`; add a weak pulldown such as `100 kOhm` so the fan rail stays disabled before firmware init.
 - In the implemented netlist, `GPIO35` first drives `FAN_EN_RAW`, then passes through a `2.2 kOhm` series resistor into the TPS62933 `EN` pin. The weak `100 kOhm` pulldown remains on the actual `FAN_EN` node.
 - `FAN_PWM` is directly driven by MCU `GPIO36`, but it is not used as a raw fan-wire PWM. It feeds the `TPS62933DRLR` fan-rail FB injection network.
@@ -175,11 +181,11 @@ The supported fixed-PD fallback is not an LED fault. It preserves the selected r
 
 ```text
 USB-C PD input
-  -> CH224Q negotiates source
+  -> selected CH224Q or FUSB302B sink negotiates source
   -> USB connector raw power net `VBUS_RAW`
   -> one-time SMD fuse to protected board bus `VBUS`
   -> `TVS_VBUS` from `VBUS` to `GND`
-  -> main high-voltage board bus (up to 28V request)
+  -> main high-voltage board bus (CH224Q legacy range; FUSB302BMPX PPS maximum 21V with fixed-PDO fallback)
   -> 56k / 5.1k divider to GPIO1 VIN sense
   -> PT1000 divider to GPIO2 RTD sense
   -> heater element switched by low-side NMOS from GPIO47 PWM
@@ -214,3 +220,4 @@ Reference:
 - VIN sense and RTD sense accuracy both depend on ADC calibration, resistor tolerance, and board-level noise.
 - Heater-power control depends on direct `3.3 V` MCU gate drive, so MOSFET temperature and drain overshoot still require bench validation.
 - Fan-voltage control depends on a filtered PWM-to-FB injection path, so final startup behavior, output-cap selection, and low-speed acoustics still require bench validation.
+- C20 is directly `VBUS`-to-`GND` and marked `Add into BOM=yes`. The imported FUSB302B netlist explicitly records `LCSC Part Name: 100uF ±20% 50V`, `Voltage Rating: 50V`, and `DeviceName: C1210_100UF_50V_20%`; these source markings are preserved without substitution. Any physical component marking, followed by traceable assembly BOM/AOI or rework evidence, remains authoritative for a populated board. C42 and C43 are separately recorded as `100uF`, `35V` polymer capacitors across `VBUS`.

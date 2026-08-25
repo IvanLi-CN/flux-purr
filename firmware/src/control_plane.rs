@@ -235,6 +235,18 @@ pub struct ControlPlaneStatus {
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: PdStateWire,
+    #[serde(default = "default_pd_controller_wire")]
+    pub pd_controller: String<ERROR_CODE_MAX_LEN>,
+    #[serde(default = "default_pd_contract_kind_wire")]
+    pub pd_contract_kind: String<ERROR_CODE_MAX_LEN>,
+    #[serde(default)]
+    pub pd_contract_current_ma: u16,
+    #[serde(default)]
+    pub pd_contract_power_mw: u32,
+    #[serde(default)]
+    pub pd_performance_guaranteed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_degraded_reason: Option<String<ERROR_CODE_MAX_LEN>>,
     pub manual_pps_enabled: bool,
     pub manual_pps_mv: Option<u16>,
     pub manual_pps_ma: Option<u16>,
@@ -372,6 +384,12 @@ impl ControlPlaneStatus {
             pd_request_mv: status.pd_request_mv,
             pd_contract_mv: status.pd_contract_mv,
             pd_state: status.pd_state.into(),
+            pd_controller: default_pd_controller_wire(),
+            pd_contract_kind: default_pd_contract_kind_wire(),
+            pd_contract_current_ma: 0,
+            pd_contract_power_mw: 0,
+            pd_performance_guaranteed: false,
+            pd_degraded_reason: Some(default_pd_degraded_reason_wire()),
             manual_pps_enabled: false,
             manual_pps_mv: None,
             manual_pps_ma: None,
@@ -901,6 +919,18 @@ pub struct ThermalControlProfileCommand {
     #[serde(default)]
     pub bank: Option<ThermalProfileBankWire>,
     pub profile: Option<ThermalControlProfileWire>,
+}
+
+fn default_pd_controller_wire() -> String<ERROR_CODE_MAX_LEN> {
+    string("unknown")
+}
+
+fn default_pd_contract_kind_wire() -> String<ERROR_CODE_MAX_LEN> {
+    string("none")
+}
+
+fn default_pd_degraded_reason_wire() -> String<ERROR_CODE_MAX_LEN> {
+    string("pd_contract_unavailable")
 }
 
 fn default_thermal_profile_mode_wire() -> String<ERROR_CODE_MAX_LEN> {
@@ -2520,6 +2550,15 @@ mod tests {
         assert_eq!(status.network.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(status.frontpanel_key, Some(FrontPanelKeyWire::Center));
         assert_eq!(status.heater_lock_reason, None);
+        assert_eq!(status.pd_controller.as_str(), "unknown");
+        assert_eq!(status.pd_contract_kind.as_str(), "none");
+        assert_eq!(status.pd_contract_current_ma, 0);
+        assert_eq!(status.pd_contract_power_mw, 0);
+        assert!(!status.pd_performance_guaranteed);
+        assert_eq!(
+            status.pd_degraded_reason.as_deref(),
+            Some("pd_contract_unavailable")
+        );
     }
 
     #[test]

@@ -67,6 +67,28 @@ const mockDemoStoryArgs = {
   webSerial: { enabled: false },
 }
 
+// This fixture keeps the legacy CH224Q calibration path visible alongside the
+// FUSB302BMPX 5V..21V PPS control path.
+const calibrationScenario: ControlPlaneScenario = {
+  ...controlPlaneScenario,
+  devices: controlPlaneScenario.devices.map((device) =>
+    device.id === controlPlaneScenario.selectedDeviceId
+      ? {
+          ...device,
+          pdController: 'ch224q',
+          pdContractKind: 'pps',
+          pdContractCurrentMa: 3000,
+          pdContractPowerMw: 60000,
+          pdPerformanceGuaranteed: true,
+          pdDegradedReason: null,
+          ppsCapabilityMinMv: 5000,
+          ppsCapabilityMaxMv: 21000,
+          ppsCapabilityMaxMa: 3000,
+        }
+      : device
+  ),
+}
+
 export const Default: Story = {
   args: mockDemoStoryArgs,
 }
@@ -91,8 +113,8 @@ export const Gallery: Story = {
 export const MobileReview: Story = {
   name: 'Mobile review',
   args: mockDemoStoryArgs,
-  parameters: {
-    viewport: { defaultViewport: 'mobile1' },
+  globals: {
+    viewport: { value: 'mobile1', isRotated: false },
   },
 }
 
@@ -279,7 +301,7 @@ export const DemoCalibrationIdle: Story = {
 export const DemoCalibrationTab: Story = {
   name: 'Demo / Calibration workbench',
   args: {
-    scenario: controlPlaneScenario,
+    scenario: calibrationScenario,
     initialView: 'calibration',
     allowDemoControls: true,
     devd: {

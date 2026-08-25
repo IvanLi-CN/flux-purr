@@ -547,6 +547,15 @@ impl DeviceRecord {
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: DEFAULT_PD_REQUEST_MV,
             pd_state: "ready".to_string(),
+            // The default devd fixture exercises legacy PPS calibration. The
+            // console's FUSB302B fixture separately models its bounded PPS
+            // path and fixed-PDO fallback.
+            pd_controller: Some("ch224q".to_string()),
+            pd_contract_kind: Some("pps".to_string()),
+            pd_contract_current_ma: Some(3_000),
+            pd_contract_power_mw: Some(60_000),
+            pd_performance_guaranteed: Some(true),
+            pd_degraded_reason: None,
             manual_pps_enabled: false,
             manual_pps_mv: None,
             manual_pps_ma: None,
@@ -643,6 +652,12 @@ impl DeviceRecord {
             pd_request_mv: DEFAULT_PD_REQUEST_MV,
             pd_contract_mv: 0,
             pd_state: "unknown".to_string(),
+            pd_controller: Some("unknown".to_string()),
+            pd_contract_kind: Some("none".to_string()),
+            pd_contract_current_ma: None,
+            pd_contract_power_mw: None,
+            pd_performance_guaranteed: Some(false),
+            pd_degraded_reason: Some("pd_contract_unavailable".to_string()),
             manual_pps_enabled: false,
             manual_pps_mv: None,
             manual_pps_ma: None,
@@ -884,6 +899,18 @@ pub struct ControlPlaneStatus {
     pub pd_request_mv: u16,
     pub pd_contract_mv: u16,
     pub pd_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_controller: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_contract_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_contract_current_ma: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_contract_power_mw: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_performance_guaranteed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_degraded_reason: Option<String>,
     #[serde(default)]
     pub manual_pps_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11850,9 +11877,15 @@ mod tests {
             pd_request_mv: 12_000,
             pd_contract_mv: 12_000,
             pd_state: "ready".to_string(),
-            manual_pps_enabled: true,
-            manual_pps_mv: Some(12_000),
-            manual_pps_ma: Some(3_000),
+            pd_controller: Some("fusb302b".to_string()),
+            pd_contract_kind: Some("pps".to_string()),
+            pd_contract_current_ma: Some(3_000),
+            pd_contract_power_mw: Some(36_000),
+            pd_performance_guaranteed: Some(false),
+            pd_degraded_reason: Some("pd_contract_below_20v".to_string()),
+            manual_pps_enabled: false,
+            manual_pps_mv: None,
+            manual_pps_ma: None,
             pps_capability_min_mv: Some(5_000),
             pps_capability_max_mv: Some(21_000),
             pps_capability_max_ma: Some(3_000),

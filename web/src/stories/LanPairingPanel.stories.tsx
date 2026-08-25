@@ -537,8 +537,8 @@ export const MobileRequiredPairing: Story = {
     getPairingMetadata: async () => requiredActive.pairing,
     pairDevice: mockPairing,
   },
-  parameters: {
-    viewport: { defaultViewport: 'mobile1' },
+  globals: {
+    viewport: { value: 'mobile1', isRotated: false },
   },
   decorators: [
     (Story) => (
@@ -559,8 +559,8 @@ export const MobilePairingUnavailable: Story = {
   args: {
     connectDevice: async () => unavailablePairing,
   },
-  parameters: {
-    viewport: { defaultViewport: 'mobile1' },
+  globals: {
+    viewport: { value: 'mobile1', isRotated: false },
   },
   decorators: [
     (Story) => (
