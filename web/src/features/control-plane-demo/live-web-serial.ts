@@ -77,6 +77,7 @@ export function useLiveWebSerialScenario(
   const supported = enabled && isWebSerialSupported(browserSerial)
   const clientRef = useRef<WebSerialControlPlaneClient | null>(null)
   const recoveryPromiseRef = useRef<Promise<boolean> | null>(null)
+  const lastConfirmedIdentityIdRef = useRef<string | null>(null)
   const connectAttemptRef = useRef(0)
   const preauthorizedPortsRef = useRef<BrowserSerialPort[] | undefined>(undefined)
   const [preauthorizedPortsReady, setPreauthorizedPortsReady] = useState(
@@ -253,6 +254,7 @@ export function useLiveWebSerialScenario(
           appendEvent('browser Web Serial identity did not match the routed device', 'warning')
           return false
         }
+        lastConfirmedIdentityIdRef.current = probe.identity.deviceId
         if (persistKnownDevices) {
           rememberKnownWebSerialDevice({
             deviceId: probe.identity.deviceId,
@@ -317,6 +319,7 @@ export function useLiveWebSerialScenario(
     const recovery = connect({
       replaceExisting: true,
       preauthorizedOnly: true,
+      expectedIdentityId: lastConfirmedIdentityIdRef.current ?? undefined,
     })
     recoveryPromiseRef.current = recovery
     try {
