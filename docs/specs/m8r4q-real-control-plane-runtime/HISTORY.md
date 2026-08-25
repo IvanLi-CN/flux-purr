@@ -6,6 +6,7 @@
 
 - Live Web Serial 恢复曾沿用全局 `devd` 自动轮询；daemon 不可达时，这条直连路由会被错误带入 `live-devd-unavailable` 诊断上下文。路由现在先依据当前请求或已记住的 transport 隔离 discovery：Web Serial 保留原身份路由并等待 operator 的显式连接动作，未指定 transport 与 Bridge 继续使用既有 devd 行为。这样未完成 Web Serial identity probe 的浏览器状态不会升级为另一种传输，也不会把 daemon 占位伪装成目标设备。
 - Web Serial 恢复失败页曾渲染独立的居中目标错误卡，与 live 模式全宽目标选择工作台的页面合同不一致。恢复现在复用 `Choose target` 工作台，保留 known devices、三种添加连接方式和页内重试提示；错误反馈仍显示在最近操作区域，不再改变工作台层级或制造额外的错误面板。
+- Web Serial `open()` 失败时客户端曾只清理已完成 probe 的连接；打开阶段的端口尚未保存到 client state，导致 Chrome 保留失败句柄，后续重新选择同一端口持续报 `Failed to open serial port`。打开失败现在立即关闭刚选择的端口，并由回归测试锁定同一端口可再次连接。
 
 ## 2026-08-05
 

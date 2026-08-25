@@ -247,6 +247,23 @@ describe('web serial control-plane client', () => {
     expect(port.closed).toBe(true)
   })
 
+  it('closes a port when opening fails so the next attempt can retry it', async () => {
+    const serial = new OpenFailureSerial()
+    const firstClient = new WebSerialControlPlaneClient({ serial })
+
+    await expect(firstClient.connect()).rejects.toMatchObject({
+      code: 'web_serial_read_failed',
+      message: 'Failed to open serial port.',
+    })
+    expect(serial.port.closeCalls).toBe(1)
+
+    const nextClient = new WebSerialControlPlaneClient({ serial })
+    await expect(nextClient.connect()).resolves.toMatchObject({
+      identity: { deviceId: 'flux-purr-s3-001' },
+    })
+    await nextClient.disconnect()
+  })
+
   it('bounds a non-Flux runtime probe and closes the port', async () => {
     vi.useFakeTimers()
     try {
@@ -499,6 +516,32 @@ class FakeSerialPort implements BrowserSerialPort {
       )
       newlineIndex = this.writeBuffer.indexOf('\n')
     }
+  }
+}
+
+class OpenFailureSerial implements BrowserSerial {
+  readonly port = new OpenFailureSerialPort([])
+
+  requestPort(): Promise<BrowserSerialPort> {
+    return Promise.resolve(this.port)
+  }
+}
+
+class OpenFailureSerialPort extends FakeSerialPort {
+  closeCalls = 0
+  private failNextOpen = true
+
+  open(): Promise<void> {
+    if (this.failNextOpen) {
+      this.failNextOpen = false
+      return Promise.reject(new Error('Failed to open serial port.'))
+    }
+    return super.open()
+  }
+
+  close(): Promise<void> {
+    this.closeCalls += 1
+    return super.close()
   }
 }
 

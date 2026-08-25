@@ -279,7 +279,12 @@ export class WebSerialControlPlaneClient {
       await port.close().catch(() => undefined)
       throw new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
     }
-    await port.open({ baudRate: this.baudRate })
+    try {
+      await port.open({ baudRate: this.baudRate })
+    } catch (error) {
+      await closeBrowserSerialPort(port).catch(() => undefined)
+      throw normalizeBrowserSerialError(error)
+    }
     if (attempt !== this.connectionAttempt) {
       await port.close().catch(() => undefined)
       throw new ControlPlaneClientError('Web Serial connection closed.', 'web_serial_closed', true)
