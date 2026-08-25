@@ -84,6 +84,7 @@
 - Browser Web Serial 必须识别 firmware 明确定义的 `reset_reason=<reason>` 与 `panic=<reason>` 诊断行。已连接设备报告复位时，Web 必须清除复位前的目标状态并显示设备报告的原因；不得从普通串口文本、请求超时或 transport 断开自行推断复位原因。
 - Web app 的 live Settings preset UI 必须以 firmware/devd/Web Serial status 回读为事实源；当 firmware 前面板在 preset 设置界面修改 slot、温度或禁用状态时，Web 必须通过 live status polling 更新回显；当 Web 修改同一数据时，firmware 必须应用到前面板 UI state 并触发重绘。
 - Web Serial 连接成功后，如果当前选中的是无目标或 WiFi/Web Serial/Bridge pending target，Web app 必须切换到真实 Web Serial target，不得继续显示 pending Bridge/WiFi runtime。
+- Given live 路由当前请求或已记住的 transport 为 `web-serial`，When 已授权端口恢复失败、没有可用串口或 Web Serial probe 尚未确认稳定身份，Then Web 必须停留在原 Web Serial 身份路由，保留显式 `Add device` 入口，不得启动自动 `devd` discovery、请求 `devd` API、注册或导航到 `live-devd-unavailable` 占位，也不得自动切换为 Bridge；只有 operator 明确选择 `Bridge` 时才允许启用 `devd`。未指定 direct transport 的 live 路由与显式 Bridge 路由继续允许既有自动 discovery。
 - Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
 - devd 必须以 `serve` 子命令启动，默认 bind `127.0.0.1:30080`；flags 必须能配置 bind、显式 serial port、artifact root、dev CORS 和 real flash。

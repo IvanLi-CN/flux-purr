@@ -2,6 +2,10 @@
 
 - 热模型校准曾采用 source-independent 的双锚点流程。该历史记录保留用于解释 `0x36/0x37`；当前实现改用单次瞬态轨迹，旧记录仅可解码，不迁移为 active，也不解锁加热。
 
+## 2026-08-25
+
+- Live Web Serial 恢复曾沿用全局 `devd` 自动轮询；daemon 不可达时，这条直连路由会被错误带入 `live-devd-unavailable` 诊断上下文。路由现在先依据当前请求或已记住的 transport 隔离 discovery：Web Serial 保留原身份路由并等待 operator 的显式连接动作，未指定 transport 与 Bridge 继续使用既有 devd 行为。这样未完成 Web Serial identity probe 的浏览器状态不会升级为另一种传输，也不会把 daemon 占位伪装成目标设备。
+
 ## 2026-08-05
 
 - Direct-LAN 写入曾在 `stale_write` 后只显示失败或只更新 runtime snapshot，导致 calibration 与 heater-curve 工作区保留过时事实；各类写入现在只回读一次对应资源并替换其 state map，拒绝原写入且禁止自动重放。DEVD LAN bridge 曾把设备 HTTP 错误改写为本地 bridge error；adapter 现在保留远端 status 与完整 error envelope，包括 unauthorized。CI 在 Storybook interaction 前准备 Chromium，EdgeOne 只消费成功 push 运行生成的 verified artifact。

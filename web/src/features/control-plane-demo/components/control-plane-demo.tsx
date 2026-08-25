@@ -49,7 +49,11 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import type { ConsoleRouteState } from '@/routing/console-route'
-import { readRoutePreferences, rememberSuccessfulRoute } from '@/routing/route-preferences'
+import {
+  type RoutePreferences,
+  readRoutePreferences,
+  rememberSuccessfulRoute,
+} from '@/routing/route-preferences'
 import type { AppSearch } from '@/routing/search'
 import {
   type FirmwareActivityEntry,
@@ -243,6 +247,44 @@ type LogFilter = 'all' | EventLogEntry['tone']
 const defaultAddDeviceKind: AddDeviceKind = 'wifi'
 const mockOnlyTransportMessage = 'Public demo is mock-only and cannot connect to LAN devices.'
 
+export function shouldEnableAutomaticLiveDevdDiscovery({
+  devdEnabled,
+  mockOnly,
+  preferredTransport,
+}: {
+  devdEnabled?: boolean
+  mockOnly: boolean
+  preferredTransport?: DeviceConnectionKind
+}) {
+  return !mockOnly && devdEnabled !== false && preferredTransport !== 'web-serial'
+}
+
+const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
+
+export function preferredLiveTransportForRoute({
+  routePreferences,
+  routedRecoveryIdentityId,
+  requestedConnectionByIdentity,
+}: {
+  routePreferences: RoutePreferences
+  routedRecoveryIdentityId: string | null
+  requestedConnectionByIdentity: Record<string, { kind: DeviceConnectionKind }>
+}) {
+  const routePreferenceIdentity =
+    routedRecoveryIdentityId && !LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(routedRecoveryIdentityId)
+      ? routedRecoveryIdentityId
+      : routePreferences.lastDeviceByVariant.live
+
+  return (
+    (routedRecoveryIdentityId
+      ? requestedConnectionByIdentity[routedRecoveryIdentityId]?.kind
+      : undefined) ??
+    (routePreferenceIdentity
+      ? routePreferences.transportByIdentity[routePreferenceIdentity]
+      : undefined)
+  )
+}
+
 const mockOnlyLanRuntime: Required<LanRuntimeDependencies> = {
   createLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
   releaseLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
@@ -353,7 +395,6 @@ const RTD_TARGET_MAX_MV = 2_800
 const RTD_TARGET_STEP_MV = 10
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const CALIBRATION_ACTION_LOCK_MS = 800
-const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
 const PRESET_ENABLED = PRESETS_C.map((preset) => preset != null)
@@ -720,9 +761,18 @@ export function ControlPlaneDemo({
     allowDemoControls ||
     routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
     serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
+  const preferredLiveTransport = preferredLiveTransportForRoute({
+    routePreferences,
+    routedRecoveryIdentityId,
+    requestedConnectionByIdentity,
+  })
   const liveDevd = useLiveDevdScenario(scenario, {
     ...devd,
-    enabled: mockOnly ? false : devd?.enabled,
+    enabled: shouldEnableAutomaticLiveDevdDiscovery({
+      devdEnabled: devd?.enabled,
+      mockOnly,
+      preferredTransport: preferredLiveTransport,
+    }),
     nativeRuntimeProbeEnabled: activeView !== 'update',
     leaseEnabled:
       shouldHoldDevdLease(

@@ -9,6 +9,8 @@ import {
   devicePickerTargets,
   formatRuntimeEventTime,
   nextFirmwareActivitySequence,
+  preferredLiveTransportForRoute,
+  shouldEnableAutomaticLiveDevdDiscovery,
   shouldShowDeviceControlBlockFeedback,
   vinAutoCalibrationActionDisabled,
 } from './components/control-plane-demo'
@@ -106,6 +108,59 @@ describe('Web Serial feedback settlement', () => {
 })
 
 describe('live transport feedback boundary', () => {
+  it.each([
+    { preferredTransport: undefined, expected: true },
+    { preferredTransport: 'bridge' as const, expected: true },
+    { preferredTransport: 'web-serial' as const, expected: false },
+  ])('uses the explicit live transport preference to gate automatic devd discovery', ({
+    preferredTransport,
+    expected,
+  }) => {
+    expect(
+      shouldEnableAutomaticLiveDevdDiscovery({
+        devdEnabled: true,
+        mockOnly: false,
+        preferredTransport,
+      })
+    ).toBe(expected)
+  })
+
+  it('keeps devd discovery disabled for Web Serial even when the mock flag is false', () => {
+    expect(
+      shouldEnableAutomaticLiveDevdDiscovery({
+        devdEnabled: false,
+        mockOnly: false,
+        preferredTransport: 'web-serial',
+      })
+    ).toBe(false)
+  })
+
+  it('uses the remembered Web Serial route when no current route selection overrides it', () => {
+    expect(
+      preferredLiveTransportForRoute({
+        routePreferences: {
+          lastDeviceByVariant: { live: 'remembered-device' },
+          transportByIdentity: { 'remembered-device': 'web-serial' },
+        },
+        routedRecoveryIdentityId: 'remembered-device',
+        requestedConnectionByIdentity: {},
+      })
+    ).toBe('web-serial')
+  })
+
+  it('uses the current route selection before the remembered transport', () => {
+    expect(
+      preferredLiveTransportForRoute({
+        routePreferences: {
+          lastDeviceByVariant: { live: 'remembered-device' },
+          transportByIdentity: { 'remembered-device': 'web-serial', 'current-device': 'bridge' },
+        },
+        routedRecoveryIdentityId: 'current-device',
+        requestedConnectionByIdentity: { 'current-device': { kind: 'bridge' } },
+      })
+    ).toBe('bridge')
+  })
+
   it('keeps a pre-flash native serial route valid after runtime identity becomes available', () => {
     const choice = {
       identityId: 'd0cf1308a148',
