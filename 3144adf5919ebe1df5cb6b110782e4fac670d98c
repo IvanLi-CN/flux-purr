@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "4e4c78d43e2c2b80c47702c069e96a3ac964de33",
+  "pr_number": 73,
+  "pr_title": "feat(pd): add FUSB302B sink support",
+  "product": {
+    "effective_version": "0.20.0",
+    "tag": "v0.20.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "3144adf5919ebe1df5cb6b110782e4fac670d98c",
+  "type_label": "type:minor"
+}
