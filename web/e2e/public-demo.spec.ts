@@ -270,7 +270,7 @@ test.describe('public demo build', () => {
       },
       {
         url: '/devices/fp-demo-03/overview?demo=true&demoScene=offline',
-        visibleHeading: '目标设备暂不可用',
+        visibleHeading: 'Choose target',
       },
       {
         url: '/devices/fp-lab-01/overview?demo=true&demoScene=blocked-artifact',
@@ -288,7 +288,7 @@ test.describe('public demo build', () => {
     }
 
     await page.goto('/devices/fp-demo-03/overview?demo=true&demoScene=offline')
-    await expect(page.getByText('Offline Mock Device')).toBeVisible()
+    await expect(page.getByText('Offline Mock Device', { exact: true })).toBeVisible()
     await expect(page.getByText('-54 dBm')).toHaveCount(0)
 
     await page.goto('/devices/fp-lab-01/update?demo=true&demoScene=blocked-artifact')

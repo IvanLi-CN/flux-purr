@@ -642,6 +642,10 @@
     font-weight: 750;
   }
 
+  .industrial-route-recovery-notice > button {
+    min-height: 48px;
+  }
+
   @media (max-width: 640px) {
     .industrial-route-recovery-notice {
       grid-template-columns: auto minmax(0, 1fr);
