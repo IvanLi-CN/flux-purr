@@ -960,9 +960,12 @@ test.describe('control plane live devd bridge', () => {
     await page.goto(`/devices/${deviceId}/overview?demo=false`)
 
     await expect(page).toHaveURL(new RegExp(`/devices/${deviceId}/overview\\?demo=false$`))
-    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '添加连接' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
+    await expect(page.getByRole('status').getByText('连接恢复')).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'Add device' }).getByRole('button', { name: /Web Serial/ })
+    ).toBeVisible()
     injectStatusTimeoutEvent = false
   })
 

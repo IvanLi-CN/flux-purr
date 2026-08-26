@@ -102,6 +102,26 @@ describe('device target picker', () => {
     expect(choices).toEqual([])
   })
 
+  it('does not expose live discovery placeholders as device cards', () => {
+    const choices = mergeDeviceChoices([
+      target({
+        id: 'live-no-target',
+        identityId: undefined,
+        alias: 'No live target',
+        transport: 'serial',
+        baseUrl: 'webserial://pending',
+      }),
+      target({
+        id: 'live-devd-unavailable',
+        identityId: undefined,
+        alias: 'Native devd target unavailable',
+        connectionAvailable: false,
+      }),
+    ])
+
+    expect(choices).toEqual([])
+  })
+
   it('does not expose a missing authorized serial placeholder as a connection', () => {
     const missingTarget = target({
       id: 'serial-_dev_cu.usbmodem21221401',

@@ -42,11 +42,14 @@ test.describe('device-scoped routing', () => {
     await page.setViewportSize({ width: 375, height: 812 })
     await page.goto('/devices/missing-device/settings?demo=true')
     await expect(page).toHaveURL(/\/devices\/missing-device\/settings\?demo=true$/)
-    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '添加连接' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
+    await expect(page.getByRole('status').getByText('连接恢复')).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
+    await expect(
+      page.getByRole('region', { name: 'Add device' }).getByRole('button', { name: /Web Serial/ })
+    ).toBeVisible()
     const actionHeights = await page
-      .getByRole('region', { name: '目标设备暂不可用' })
+      .getByRole('status')
       .getByRole('button')
       .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().height))
     expect(actionHeights.every((height) => height >= 48)).toBe(true)
@@ -56,8 +59,9 @@ test.describe('device-scoped routing', () => {
     await page.goto('/devices/fp-demo-03/overview?demo=true')
 
     await expect(page).toHaveURL(/\/devices\/fp-demo-03\/overview\?demo=true$/)
-    await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toBeVisible()
-    await expect(page.getByRole('button', { name: '重试发现' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
+    await expect(page.getByRole('status').getByText('连接恢复')).toBeVisible()
+    await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
   })
 
   test('pushes one history entry for a calibration tab mouse click', async ({ page }) => {

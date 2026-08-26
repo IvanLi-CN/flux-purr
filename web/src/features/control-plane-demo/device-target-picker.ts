@@ -17,6 +17,12 @@ export interface DeviceChoice {
   primary: DeviceTarget
 }
 
+const DEVICE_SELECTION_PLACEHOLDER_IDS = new Set([
+  'live-no-target',
+  'live-devd-bootstrapping',
+  'live-devd-unavailable',
+])
+
 export function deviceIdentityId(device: Pick<DeviceTarget, 'id' | 'identityId'>) {
   return device.identityId?.trim() || stripTransportId(device.id)
 }
@@ -76,6 +82,7 @@ export function mergeDeviceChoices(
   const choices = new Map<string, DeviceChoice>()
 
   for (const device of devices) {
+    if (DEVICE_SELECTION_PLACEHOLDER_IDS.has(device.id)) continue
     const connections = deviceConnectionOptions(device, { allowDemoControls })
     if (connections.length === 0) continue
 

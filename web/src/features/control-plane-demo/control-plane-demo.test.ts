@@ -9,6 +9,9 @@ import {
   devicePickerTargets,
   formatRuntimeEventTime,
   nextFirmwareActivitySequence,
+  preferredLiveTransportForRoute,
+  shouldEnableAutomaticLiveDevdDiscovery,
+  shouldRecoverWebSerialControl,
   shouldShowDeviceControlBlockFeedback,
   vinAutoCalibrationActionDisabled,
 } from './components/control-plane-demo'
@@ -106,6 +109,84 @@ describe('Web Serial feedback settlement', () => {
 })
 
 describe('live transport feedback boundary', () => {
+  it('recognizes a stale direct Web Serial target before runtime control', () => {
+    const target = {
+      transport: 'serial' as const,
+      baseUrl: 'webserial://selected',
+    }
+
+    expect(shouldRecoverWebSerialControl(target, 'idle')).toBe(true)
+    expect(shouldRecoverWebSerialControl(target, 'error')).toBe(true)
+    expect(shouldRecoverWebSerialControl(target, 'connected')).toBe(false)
+  })
+
+  it.each([
+    { preferredTransport: undefined, expected: true },
+    { preferredTransport: 'bridge' as const, expected: true },
+    { preferredTransport: 'web-serial' as const, expected: false },
+  ])('uses the explicit live transport preference to gate automatic devd discovery', ({
+    preferredTransport,
+    expected,
+  }) => {
+    expect(
+      shouldEnableAutomaticLiveDevdDiscovery({
+        devdEnabled: true,
+        mockOnly: false,
+        preferredTransport,
+      })
+    ).toBe(expected)
+  })
+
+  it('keeps devd discovery disabled for Web Serial even when the mock flag is false', () => {
+    expect(
+      shouldEnableAutomaticLiveDevdDiscovery({
+        devdEnabled: false,
+        mockOnly: false,
+        preferredTransport: 'web-serial',
+      })
+    ).toBe(false)
+  })
+
+  it('uses the remembered Web Serial route when no current route selection overrides it', () => {
+    expect(
+      preferredLiveTransportForRoute({
+        routePreferences: {
+          lastDeviceByVariant: { live: 'remembered-device' },
+          transportByIdentity: { 'remembered-device': 'web-serial' },
+        },
+        routedRecoveryIdentityId: 'remembered-device',
+        requestedConnectionByIdentity: {},
+      })
+    ).toBe('web-serial')
+  })
+
+  it('uses the current route selection before the remembered transport', () => {
+    expect(
+      preferredLiveTransportForRoute({
+        routePreferences: {
+          lastDeviceByVariant: { live: 'remembered-device' },
+          transportByIdentity: { 'remembered-device': 'web-serial', 'current-device': 'bridge' },
+        },
+        routedRecoveryIdentityId: 'current-device',
+        requestedConnectionByIdentity: { 'current-device': { kind: 'bridge' } },
+      })
+    ).toBe('bridge')
+  })
+
+  it('isolates devd discovery after Web Serial is explicitly selected on Add device', () => {
+    expect(
+      preferredLiveTransportForRoute({
+        routePreferences: {
+          lastDeviceByVariant: { live: undefined },
+          transportByIdentity: {},
+        },
+        routedRecoveryIdentityId: null,
+        requestedConnectionByIdentity: {},
+        selectedAddDeviceKind: 'web-serial',
+      })
+    ).toBe('web-serial')
+  })
+
   it('keeps a pre-flash native serial route valid after runtime identity becomes available', () => {
     const choice = {
       identityId: 'd0cf1308a148',
@@ -215,6 +296,36 @@ describe('firmware workspace hierarchy', () => {
 
     expect(markup).toContain('aria-label="固件工作区"')
     expect(markup).not.toContain('目标设备暂不可用')
+  })
+
+  it('uses the standard target-selection shell for an unavailable live route', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: liveControlPlaneScenario,
+        allowDemoControls: false,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+        navigation: {
+          state: {
+            kind: 'device',
+            deviceId: 'remembered-web-serial-device',
+            view: 'dashboard',
+          },
+          variant: 'live',
+          search: { demo: false },
+          navigate: async () => undefined,
+          blockedNavigation: null,
+          onCalibrationGuardChange: () => undefined,
+        },
+      })
+    )
+
+    expect(markup).toContain('class="industrial-console"')
+    expect(markup).toContain('Choose target')
+    expect(markup).toContain('连接恢复')
+    expect(markup).toContain('重试恢复')
+    expect(markup).not.toContain('目标设备暂不可用')
+    expect(markup).not.toContain('industrial-route-message')
   })
 
   it('keeps the independent firmware workspace rendered when live discovery has no device', () => {

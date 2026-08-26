@@ -84,6 +84,7 @@
 - Browser Web Serial 必须识别 firmware 明确定义的 `reset_reason=<reason>` 与 `panic=<reason>` 诊断行。已连接设备报告复位时，Web 必须清除复位前的目标状态并显示设备报告的原因；不得从普通串口文本、请求超时或 transport 断开自行推断复位原因。
 - Web app 的 live Settings preset UI 必须以 firmware/devd/Web Serial status 回读为事实源；当 firmware 前面板在 preset 设置界面修改 slot、温度或禁用状态时，Web 必须通过 live status polling 更新回显；当 Web 修改同一数据时，firmware 必须应用到前面板 UI state 并触发重绘。
 - Web Serial 连接成功后，如果当前选中的是无目标或 WiFi/Web Serial/Bridge pending target，Web app 必须切换到真实 Web Serial target，不得继续显示 pending Bridge/WiFi runtime。
+- Given live 路由当前请求、已记住的 transport 或 Add device 当前明确选择的 transport 为 `web-serial`，When 已授权端口恢复失败、没有可用串口或 Web Serial probe 尚未确认稳定身份，Then Web 必须停留在原 Web Serial 身份路由，保留显式 `Add device` 入口，不得启动自动 `devd` discovery、请求 `devd` API、注册或导航到 `live-devd-unavailable` 占位，也不得自动切换为 Bridge；只有 operator 明确选择 `Bridge` 时才允许启用 `devd`。未指定 direct transport 的 live 路由与显式 Bridge 路由继续允许既有自动 discovery。恢复状态必须复用全宽 `Choose target` 工作台，保留 known devices 网格、Web Serial/WiFi/Bridge 添加卡片与可操作的页内重试提示，不得渲染独立的居中目标错误卡。
 - Browser Web Serial 直连不得声明 firmware artifact verify、dry-run 或 real flash 能力；这些操作仍必须走 `devd` capability gate。
 - devd 默认只监听 `127.0.0.1`，mutating endpoint 必须携带有效 lease。
 - devd 必须以 `serve` 子命令启动，默认 bind `127.0.0.1:30080`；flags 必须能配置 bind、显式 serial port、artifact root、dev CORS 和 real flash。
@@ -196,11 +197,12 @@
 
 - Web app 使用 Add device 页面里的 Web Serial 类型调用浏览器 `navigator.serial.requestPort()`；未支持 Web Serial 的浏览器必须保持 mock/devd 路径可用并禁用 Web Serial 类型。
 - Web Serial port 使用 `115200` baud 打开，按 USB JSONL 一行一帧写入 `request` / `runtime_config`，并只消费匹配 `requestId` 的 `response`。
-- Web Serial 连接事务必须有界：从点击连接开始，最多等待 `60s` 完成浏览器端口选择、端口打开和首次 identity/network/status probe。客户端不得主动写 DTR/RTS，不得以固定延迟等待或接受设备复位作为连接步骤；打开、关闭或重新连接 USB Serial/JTAG 不得改变设备运行状态。只读 probe 可在总预算内重试，但只有设备明确发布 `reset_reason=` 或 `panic=` 时才显示复位诊断。超时发布明确的连接错误，按钮恢复可重试，迟到的端口必须关闭且不得在页面上偷偷变成已连接。连接开始时必须立即显示等待浏览器选择串口的反馈，不得继续显示旧的 devd/LAN transport 错误。Browser Web Serial 必须接受完整 `8 KiB` USB JSONL 单帧；不得以更小的浏览器缓冲上限丢弃合法 status 回包。
+- Web Serial 连接事务必须有界：从点击连接开始，最多等待 `60s` 完成浏览器端口选择、端口打开和首次 identity/network/status probe。客户端不得主动写 DTR/RTS，不得以固定延迟等待或接受设备复位作为连接步骤；打开、关闭或重新连接 USB Serial/JTAG 不得改变设备运行状态。只读 probe 可在总预算内重试，但只有设备明确发布 `reset_reason=` 或 `panic=` 时才显示复位诊断。超时发布明确的连接错误，按钮恢复可重试，迟到的端口必须关闭且不得在页面上偷偷变成已连接；`SerialPort.open()` 失败也必须关闭刚选择的端口，不能把浏览器端口句柄留在失败连接中，下一次显式连接必须能够重新尝试同一端口。连接开始时必须立即显示等待浏览器选择串口的反馈，不得继续显示旧的 devd/LAN transport 错误。Browser Web Serial 必须接受完整 `8 KiB` USB JSONL 单帧；不得以更小的浏览器缓冲上限丢弃合法 status 回包。
 - 设备选择器中的连接方式按钮表示明确的 operator intent。用户选择 WiFi/LAN、Web Serial 或桥接后，当前 target 必须保持为该连接方式；其它已连接 transport 的 probe、轮询、恢复或迟到状态不得覆盖这次选择。自动采用 Web Serial 只允许发生在 Web Serial 连接事务自身，事务完成后必须释放该自动选择意图。
 - 直连 target 在 Web app 内标记为 `transport=serial`、`baseUrl=webserial://selected`、`leaseState=active`；该 active 表示浏览器持有当前 port，不等价于 `devd` lease。
 - Direct Web Serial 控制项只包括 runtime control、manual PPS debug override 与 status polling；status polling 必须回读 target、preset、cooling、heater、`faultAttentionPending`、manual PPS/capability/error 与 power/network summary，并允许通过 `faultAttentionAcknowledged=true` 确认热失控告警，供 Web 与前面板设置界面双向回显。firmware recovery、artifact catalog、dry-run、real flash、daemon-local bind/connect/disconnect 不属于该直连通道。
 - Direct Web Serial 还必须支持 calibration live control、calibration auto-job read/write、ADC calibration samples/A-B slots/active-slot 与 heater curve preview/save，以保证 calibration workbench 的 transport parity。
+- Given direct Web Serial target remains selected but its in-memory browser client is no longer connected, When a calibration or runtime read/write is requested, Then Web may silently reuse the single already-authorized browser port with an identity check against the last confirmed device, but must not open the chooser or switch transport; when no unique authorized port exists it must stop with an actionable reconnect state.
 
 ## 验收标准（Acceptance Criteria）
 

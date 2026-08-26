@@ -49,7 +49,11 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import type { ConsoleRouteState } from '@/routing/console-route'
-import { readRoutePreferences, rememberSuccessfulRoute } from '@/routing/route-preferences'
+import {
+  type RoutePreferences,
+  readRoutePreferences,
+  rememberSuccessfulRoute,
+} from '@/routing/route-preferences'
 import type { AppSearch } from '@/routing/search'
 import {
   type FirmwareActivityEntry,
@@ -243,6 +247,54 @@ type LogFilter = 'all' | EventLogEntry['tone']
 const defaultAddDeviceKind: AddDeviceKind = 'wifi'
 const mockOnlyTransportMessage = 'Public demo is mock-only and cannot connect to LAN devices.'
 
+export function shouldEnableAutomaticLiveDevdDiscovery({
+  devdEnabled,
+  mockOnly,
+  preferredTransport,
+}: {
+  devdEnabled?: boolean
+  mockOnly: boolean
+  preferredTransport?: DeviceConnectionKind
+}) {
+  return !mockOnly && devdEnabled !== false && preferredTransport !== 'web-serial'
+}
+
+export function shouldRecoverWebSerialControl(
+  device: Pick<DeviceTarget, 'transport' | 'baseUrl'>,
+  serialState: LiveWebSerialControls['state']
+) {
+  return isDirectWebSerialDevice(device) && serialState !== 'connected'
+}
+
+const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
+
+export function preferredLiveTransportForRoute({
+  routePreferences,
+  routedRecoveryIdentityId,
+  requestedConnectionByIdentity,
+  selectedAddDeviceKind,
+}: {
+  routePreferences: RoutePreferences
+  routedRecoveryIdentityId: string | null
+  requestedConnectionByIdentity: Record<string, { kind: DeviceConnectionKind }>
+  selectedAddDeviceKind?: DeviceConnectionKind
+}) {
+  const routePreferenceIdentity =
+    routedRecoveryIdentityId && !LIVE_DEVD_TRANSIENT_DEVICE_IDS.has(routedRecoveryIdentityId)
+      ? routedRecoveryIdentityId
+      : routePreferences.lastDeviceByVariant.live
+
+  return (
+    (selectedAddDeviceKind === 'web-serial' ? selectedAddDeviceKind : undefined) ??
+    (routedRecoveryIdentityId
+      ? requestedConnectionByIdentity[routedRecoveryIdentityId]?.kind
+      : undefined) ??
+    (routePreferenceIdentity
+      ? routePreferences.transportByIdentity[routePreferenceIdentity]
+      : undefined)
+  )
+}
+
 const mockOnlyLanRuntime: Required<LanRuntimeDependencies> = {
   createLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
   releaseLease: async () => Promise.reject(new Error(mockOnlyTransportMessage)),
@@ -353,7 +405,6 @@ const RTD_TARGET_MAX_MV = 2_800
 const RTD_TARGET_STEP_MV = 10
 const PRESET_COMMIT_DEBOUNCE_MS = 650
 const CALIBRATION_ACTION_LOCK_MS = 800
-const LIVE_DEVD_TRANSIENT_DEVICE_IDS = new Set(['live-devd-bootstrapping', 'live-devd-unavailable'])
 const PRESET_TEMPS_C = [50, 100, 120, 150, 180, 200, 210, 220, 250, 300]
 const PRESETS_C = PRESET_TEMPS_C.map((tempC) => tempC as number | null)
 const PRESET_ENABLED = PRESETS_C.map((preset) => preset != null)
@@ -720,9 +771,19 @@ export function ControlPlaneDemo({
     allowDemoControls ||
     routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
     serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
+  const preferredLiveTransport = preferredLiveTransportForRoute({
+    routePreferences,
+    routedRecoveryIdentityId,
+    requestedConnectionByIdentity,
+    selectedAddDeviceKind: activeView === 'add-device' ? selectedAddDeviceKind : undefined,
+  })
   const liveDevd = useLiveDevdScenario(scenario, {
     ...devd,
-    enabled: mockOnly ? false : devd?.enabled,
+    enabled: shouldEnableAutomaticLiveDevdDiscovery({
+      devdEnabled: devd?.enabled,
+      mockOnly,
+      preferredTransport: preferredLiveTransport,
+    }),
     nativeRuntimeProbeEnabled: activeView !== 'update',
     leaseEnabled:
       shouldHoldDevdLease(
@@ -1890,6 +1951,18 @@ export function ControlPlaneDemo({
     [webSerial.connect]
   )
 
+  const recoverWebSerialControl = useCallback(async () => {
+    if (!shouldRecoverWebSerialControl(visibleDevice, webSerial.state)) {
+      return true
+    }
+
+    return webSerial.connect({
+      replaceExisting: true,
+      preauthorizedOnly: true,
+      expectedIdentityId: deviceIdentityId(visibleDevice),
+    })
+  }, [visibleDevice, webSerial.connect, webSerial.state])
+
   const routeRecoveryIdentityId =
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const routeRecoveryVariant = navigation?.variant
@@ -2603,6 +2676,16 @@ export function ControlPlaneDemo({
       }
 
       if (isDirectWebSerialDevice(visibleDevice)) {
+        const recovered = await recoverWebSerialControl()
+        if (!recovered) {
+          setFeedback({
+            title: 'Web Serial unavailable',
+            detail: '没有唯一的已授权 Web Serial 端口，请重新选择设备。',
+            tone: 'warning',
+          })
+          emitEvent('webserial', 'browser Web Serial recovery requires port selection', 'warning')
+          return false
+        }
         const updated = await webSerial.configureRuntime(patch)
         if (!updated) {
           setFeedback({
@@ -2703,6 +2786,7 @@ export function ControlPlaneDemo({
       lanRuntime.probeDevice,
       lanRuntime.readStatus,
       lanRuntime.writeRuntime,
+      recoverWebSerialControl,
       reconcileDirectLanStaleWrite,
       visibleDevice,
       webSerial,
@@ -4012,7 +4096,6 @@ export function ControlPlaneDemo({
       routeHasFailedLanResume ||
       (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
   ) {
-    const routeNavigation = navigation
     const recoveryLeaveGuard = calibrationLeaveGuard
       ? {
           nextLabel: calibrationLeaveGuard.nextLabel,
@@ -4029,12 +4112,13 @@ export function ControlPlaneDemo({
     return (
       <RouteDeviceRecovery
         identityId={unavailableRouteState.deviceId}
-        choices={routeDeviceChoices}
+        knownDevices={deviceOptions}
+        allowDemoControls={allowDemoControls}
+        webSerial={webSerial}
+        transport={routeConnectionKind}
         retry={() => window.location.reload()}
-        chooseDevice={(identityId) =>
-          routeNavigation.navigate({ ...unavailableRouteState, deviceId: identityId })
-        }
-        addDevice={() => routeNavigation.navigate({ kind: 'add-device' })}
+        onDeviceSelect={handleDeviceChange}
+        onAddDevice={handleQuickAddDevice}
         feedback={feedback}
         leaveGuard={recoveryLeaveGuard}
       />
@@ -4221,18 +4305,24 @@ export function ControlPlaneDemo({
 
 function RouteDeviceRecovery({
   identityId,
-  choices,
+  knownDevices,
+  allowDemoControls,
+  webSerial,
+  transport,
   retry,
-  chooseDevice,
-  addDevice,
+  onDeviceSelect,
+  onAddDevice,
   feedback,
   leaveGuard,
 }: {
   identityId: string
-  choices: DeviceChoice[]
+  knownDevices: DeviceTarget[]
+  allowDemoControls: boolean
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  transport?: DeviceConnectionKind
   retry: () => void
-  chooseDevice: (identityId: string) => void | Promise<void>
-  addDevice: () => void | Promise<void>
+  onDeviceSelect: (deviceId: string) => void
+  onAddDevice: (kind: AddDeviceKind) => void | Promise<void>
   feedback: ActionFeedback
   leaveGuard: {
     nextLabel: string
@@ -4240,55 +4330,67 @@ function RouteDeviceRecovery({
     onContinue: () => void
   } | null
 }) {
+  const RouteIcon =
+    transport === 'wifi'
+      ? Wifi
+      : transport === 'bridge'
+        ? Router
+        : transport === 'web-serial'
+          ? Cable
+          : CircleHelp
+
   return (
     <main className="industrial-shell industrial-shell--fixed text-[var(--industrial-text)]">
       <div className="industrial-noise" aria-hidden="true" />
-      <section className="industrial-route-message" aria-labelledby="route-device-title">
-        <Cable aria-hidden="true" />
-        <div>
-          <h1 id="route-device-title">目标设备暂不可用</h1>
-          <p>
-            无法恢复身份 <strong>{identityId}</strong>{' '}
-            的已知连接。地址已保留，可重试发现或明确选择其他目标。
-          </p>
-        </div>
-        <div className="industrial-route-message__actions">
-          {leaveGuard ? (
-            <span id="route-recovery-calibration-anchor">
-              <Button type="button" variant="outline">
-                <AlertTriangle aria-hidden="true" />
-                处理校准退出
-              </Button>
-              <CalibrationLeaveGuardBubble
-                anchorId="route-recovery-calibration-anchor"
-                nextLabel={leaveGuard.nextLabel}
-                onDismiss={leaveGuard.onDismiss}
-                onContinue={leaveGuard.onContinue}
+      <div className="industrial-console-wrap">
+        <section className="industrial-console">
+          <header className="industrial-console__top">
+            <div className="industrial-console__identity">
+              <div className="industrial-app-mark">
+                <span className="industrial-led industrial-led--green" aria-hidden="true" />
+                <strong>Flux Purr Link</strong>
+                <StatusPill severity="offline" />
+              </div>
+              <h1>热控工作台</h1>
+            </div>
+            <div className="industrial-firmware-context">
+              <RouteIcon aria-hidden="true" />
+              <span>
+                <strong>连接恢复</strong>
+                <small>设备 ID · {identityId}</small>
+              </span>
+            </div>
+          </header>
+
+          <div className="industrial-console__workspace industrial-console__workspace--selection">
+            <section className="industrial-panel industrial-console__main">
+              {leaveGuard ? (
+                <span id="route-recovery-calibration-anchor">
+                  <Button type="button" variant="outline">
+                    <AlertTriangle aria-hidden="true" />
+                    处理校准退出
+                  </Button>
+                  <CalibrationLeaveGuardBubble
+                    anchorId="route-recovery-calibration-anchor"
+                    nextLabel={leaveGuard.nextLabel}
+                    onDismiss={leaveGuard.onDismiss}
+                    onContinue={leaveGuard.onContinue}
+                  />
+                </span>
+              ) : null}
+              <DeviceSelectionView
+                knownDevices={knownDevices}
+                allowDemoControls={allowDemoControls}
+                webSerial={webSerial}
+                feedback={feedback}
+                recovery={{ identityId, retry, transport }}
+                onDeviceSelect={onDeviceSelect}
+                onAddDevice={onAddDevice}
               />
-            </span>
-          ) : null}
-          <Button type="button" variant="outline" onClick={retry}>
-            <RefreshCw aria-hidden="true" />
-            重试发现
-          </Button>
-          {choices.map((choice) => (
-            <Button
-              key={choice.identityId}
-              type="button"
-              variant="outline"
-              onClick={() => chooseDevice(choice.identityId)}
-            >
-              <Router aria-hidden="true" />
-              选择 {choice.name}
-            </Button>
-          ))}
-          <Button type="button" onClick={() => addDevice()}>
-            <Plus aria-hidden="true" />
-            添加连接
-          </Button>
-        </div>
-        {feedback.tone === 'warning' ? <ActionFeedbackPanel feedback={feedback} /> : null}
-      </section>
+            </section>
+          </div>
+        </section>
+      </div>
     </main>
   )
 }
@@ -5512,6 +5614,7 @@ function DeviceSelectionView({
   allowDemoControls,
   webSerial,
   feedback,
+  recovery,
   onDeviceSelect,
   onAddDevice,
 }: {
@@ -5519,6 +5622,11 @@ function DeviceSelectionView({
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   feedback: ActionFeedback
+  recovery?: {
+    identityId: string
+    retry: () => void
+    transport?: DeviceConnectionKind
+  }
   onDeviceSelect: (deviceId: string) => void
   onAddDevice: (kind: AddDeviceKind) => void
 }) {
@@ -5530,6 +5638,7 @@ function DeviceSelectionView({
   return (
     <div className="industrial-view-panel industrial-device-select-view">
       <PanelHeader kicker="Device" title="Choose target" />
+      {recovery ? <RouteRecoveryNotice {...recovery} /> : null}
       <section className="industrial-device-select-section" aria-label="Known devices">
         {choices.length > 0 ? (
           <div className="industrial-known-device-grid">
@@ -5557,6 +5666,48 @@ function DeviceSelectionView({
 
       <ActionFeedbackPanel feedback={feedback} />
     </div>
+  )
+}
+
+function RouteRecoveryNotice({
+  identityId,
+  retry,
+  transport,
+}: {
+  identityId: string
+  retry: () => void
+  transport?: DeviceConnectionKind
+}) {
+  const RouteIcon =
+    transport === 'wifi'
+      ? Wifi
+      : transport === 'bridge'
+        ? Router
+        : transport === 'web-serial'
+          ? Cable
+          : CircleHelp
+  const transportLabel =
+    transport === 'wifi'
+      ? 'WiFi / LAN'
+      : transport === 'bridge'
+        ? '桥接'
+        : transport === 'web-serial'
+          ? 'Web Serial'
+          : '当前连接'
+
+  return (
+    <output className="industrial-route-recovery-notice" aria-live="polite">
+      <RouteIcon aria-hidden="true" />
+      <span>
+        <p className="industrial-label">连接恢复</p>
+        <strong>{transportLabel} 路由已保留</strong>
+        <small>设备 ID · {identityId}</small>
+      </span>
+      <Button type="button" variant="outline" onClick={retry}>
+        <RefreshCw aria-hidden="true" />
+        重试恢复
+      </Button>
+    </output>
   )
 }
 
