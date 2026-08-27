@@ -12381,6 +12381,7 @@ mod tests {
 
         let network = extract_usb_payload::<NetworkSummary>(payload, "network").unwrap();
         assert_eq!(network.state, NetworkState::Disabled);
+
     }
 
     #[test]
