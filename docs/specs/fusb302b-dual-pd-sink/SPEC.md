@@ -1,5 +1,9 @@
 # FUSB302B Dual PD Sink
 
+## Related ADRs
+
+- None
+
 ## Goal
 
 Flux Purr supports two mutually exclusive USB-C PD sink board variants without changing the legacy CH224Q board behavior:
@@ -51,8 +55,8 @@ C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly re
 
 ## Driver Boundary
 
-- The firmware uses a repository-owned, register-level FUSB302B PHY driver. Its PHY and controller-neutral policy boundary follow the established `mains-aegis` implementation shape and are intended for future crate extraction.
-- The driver emits PPS and fixed RDOs directly through the project's ESP32-S3 transport boundary. Source-only validation proves framing and policy, not real-source interoperability.
+- The firmware uses the public `fusb302` crate for FUSB302B physical-layer configuration, status, FIFO handling, packet transport, and read-only device identification. Flux Purr adapts its existing blocking ESP32-S3 I2C transport to the crate's async API at the transaction boundary.
+- Flux Purr owns controller selection, PPS/fixed contract policy, RDO selection, `Accept`/`PS_RDY` contract commit, recovery timing, and heater interlock. The FUSB302BMPX PD 3.0 GoodCRC encoding is an explicit target-hardware opt-in. Source-only validation proves framing and policy, not real-source interoperability.
 
 ## Milestones
 

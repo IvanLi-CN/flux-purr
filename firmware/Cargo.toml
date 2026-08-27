@@ -61,6 +61,7 @@ serde-json-core = "0.6.0"
 [target.'cfg(target_arch = "xtensa")'.dependencies]
 defmt = "1.0.1"
 embassy-executor = "0.9.0"
+embassy-embedded-hal = "0.5.0"
 embassy-time = "0.5.0"
 embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
@@ -70,6 +71,7 @@ esp-hal = { version = "1.0.0", features = ["esp32s3", "unstable"] }
 esp-rtos = { version = "0.2.0", features = ["embassy", "esp32s3", "esp-alloc"] }
 esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32s3"] }
 esp-storage = { version = "0.7.0", features = ["esp32s3"] }
+fusb302 = { git = "ssh://git@github.com/IvanLi-CN/fusb302-rs.git", rev = "50a702fb7ba25f7db8a6923150663bf2aa57eadb", features = ["async"] }
 embassy-net = { version = "0.7.1", default-features = false, features = ["dhcpv4", "dhcpv4-hostname", "medium-ethernet", "multicast", "tcp", "udp"], optional = true }
 embassy-sync = { version = "0.7.0", optional = true }
 esp-alloc = "0.9.0"

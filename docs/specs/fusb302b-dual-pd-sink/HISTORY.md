@@ -8,4 +8,4 @@
 - `3A` and `5A` describe PD contracts and software power limiting only. They do not imply current sensing or physical over-current protection.
 - C20 is directly across `VBUS` and is recorded as `100uF ±20% 50V`, with `Voltage Rating: 50V` and `DeviceName: C1210_100UF_50V_20%`. The source markings are preserved without substitution; a physical component marking, then traceable assembly BOM/AOI or rework evidence, determines the populated board's as-built status before `20V` acceptance.
 - The FUSB302BMPX product path uses PPS RDO framing and contract tracking derived from the established `mains-aegis` PHY/policy/contract-tracker architecture. It selects PPS APDOs within `5V..21V`, retains fixed-PDO fallback, and renews active PPS requests.
-- The repository-owned FUSB302B PHY driver is intentional and preserves a future crate-extraction boundary.
+- The FUSB302B PHY is supplied by the public `fusb302` crate. Flux Purr retains the product-specific sink policy and keeps the contract commit boundary at `PS_RDY`.

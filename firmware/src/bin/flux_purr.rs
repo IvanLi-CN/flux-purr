@@ -17,6 +17,8 @@ use core::{mem::MaybeUninit, panic::PanicInfo};
 #[cfg(target_arch = "xtensa")]
 use defmt::{info, warn};
 #[cfg(target_arch = "xtensa")]
+use embassy_embedded_hal::adapter::BlockingAsync;
+#[cfg(target_arch = "xtensa")]
 use embassy_executor::Spawner;
 #[cfg(target_arch = "xtensa")]
 use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
@@ -180,7 +182,7 @@ use flux_purr_firmware::{DeviceMode, DeviceStatus, PdState};
 use flux_purr_firmware::{
     adapters::{
         ch224q::{self, Address, Status},
-        fusb302b::{self, DetectedController, ReceiveEvent, ReceiveFault, RegisterIo, SinkPhase},
+        fusb302b::{self, SinkPhase},
     },
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
@@ -188,6 +190,11 @@ use flux_purr_firmware::{
         FrontPanelInputTimings, FrontPanelRoute, KeyGesture, RawFrontPanelKey,
         render::render_frontpanel_ui,
     },
+};
+#[cfg(target_arch = "xtensa")]
+use fusb302::{
+    CcPin, CcPull, DataRole, Fusb302, PdPacket, PdRevision, PhyConfig, PowerRole, RetryCount,
+    SopType, ToggleMode,
 };
 #[cfg(target_arch = "xtensa")]
 use gc9d01::{GC9D01, Timer as Gc9d01Timer};
@@ -5121,49 +5128,64 @@ fn read_ch224q_status(
 }
 
 #[cfg(target_arch = "xtensa")]
-struct PdRegisterIo<'i, 'd> {
-    i2c: &'i mut I2c<'d, esp_hal::Blocking>,
+const FUSB302B_STATUS0_VBUS_OK: u8 = 1 << 7;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_STATUS0_CRC_CHECK: u8 = 1 << 4;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_STATUS0A_RETRY_FAIL: u8 = 1 << 4;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_STATUS1_RX_EMPTY: u8 = 1 << 5;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_STATUS1_OVERTEMP: u8 = 1 << 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_STATUS1_VCONN_OCP: u8 = 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_STATUS1A_RXSOP: u8 = 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_TOGSS_MASK: u8 = 0b0011_1000;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_TOGSS_SNK_CC1: u8 = 0b0010_1000;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_TOGSS_SNK_CC2: u8 = 0b0011_0000;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_INTERRUPTA_TX_SENT: u8 = 1 << 2;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_INTERRUPTA_HARD_RESET: u8 = 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_INTERRUPTB_GCRC_SENT: u8 = 1;
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fusb302bReceiveEvent {
+    Empty { tx_sent: bool, gcrc_sent: bool },
+    Partial { tx_sent: bool, gcrc_sent: bool },
+    Message(PdPacket),
+    Reset,
+    RetryFailed,
+    Protection,
+    UnsupportedSop,
 }
 
 #[cfg(target_arch = "xtensa")]
-impl RegisterIo for PdRegisterIo<'_, '_> {
-    type Error = esp_hal::i2c::master::Error;
-
-    fn read_register(&mut self, address: u8, register: u8) -> Result<u8, Self::Error> {
-        let mut value = [0_u8; 1];
-        self.i2c.write_read(address, &[register], &mut value)?;
-        Ok(value[0])
-    }
-
-    fn write_register(&mut self, address: u8, register: u8, value: u8) -> Result<(), Self::Error> {
-        self.i2c.write(address, &[register, value])
-    }
-
-    fn read_fifo(&mut self, address: u8, bytes: &mut [u8]) -> Result<(), Self::Error> {
-        self.i2c
-            .write_read(address, &[fusb302b::FIFO_REGISTER], bytes)
-    }
-
-    fn write_fifo(&mut self, address: u8, bytes: &[u8]) -> Result<(), Self::Error> {
-        let mut payload = [0_u8; 41];
-        let length = bytes.len().min(payload.len() - 1);
-        payload[0] = fusb302b::FIFO_REGISTER;
-        payload[1..=length].copy_from_slice(&bytes[..length]);
-        self.i2c.write(address, &payload[..=length])
-    }
-
-    fn read_status_snapshot(&mut self, address: u8) -> Result<[u8; 7], Self::Error> {
-        let mut snapshot = [0_u8; 7];
-        self.i2c
-            .write_read(address, &[fusb302b::STATUS0A_REGISTER], &mut snapshot)?;
-        Ok(snapshot)
+const fn fusb302b_phy_config(auto_goodcrc: bool) -> PhyConfig {
+    PhyConfig {
+        pd_revision: PdRevision::Rev30,
+        power_role: PowerRole::Sink,
+        data_role: DataRole::Ufp,
+        auto_goodcrc,
+        retry_count: RetryCount::Three,
+        auto_soft_reset: false,
+        auto_hard_reset: false,
+        receive_sop: fusb302::ReceiveSopMask::NONE,
     }
 }
 
 #[cfg(target_arch = "xtensa")]
 struct Fusb302bRuntime {
     policy: fusb302b::SinkPolicy,
-    polarity: Option<fusb302b::SinkPolarity>,
+    polarity: Option<CcPin>,
     next_message_id: u8,
     attached_at_ms: Option<u64>,
     last_source_capabilities_request_at_ms: Option<u64>,
@@ -5203,9 +5225,15 @@ impl Fusb302bRuntime {
         }
     }
 
-    fn initialize(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
-        let mut io = PdRegisterIo { i2c };
-        let initialized = fusb302b::Fusb302b::initialize_sink(&mut io).is_ok();
+    async fn initialize(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+        let mut phy = Fusb302::new(BlockingAsync::new(i2c));
+        let initialized = phy.init().await.is_ok()
+            && phy.pd_reset().await.is_ok()
+            && phy.configure_phy(fusb302b_phy_config(false)).await.is_ok()
+            && phy.set_cc_pull(CcPin::Cc1, CcPull::Down).await.is_ok()
+            && phy.set_cc_pull(CcPin::Cc2, CcPull::Down).await.is_ok()
+            && phy.read_interrupts().await.is_ok()
+            && phy.start_toggle(ToggleMode::Sink).await.is_ok();
         FUSB302B_DIAGNOSTIC.store(
             if initialized {
                 FUSB302B_DIAG_WAITING_CC_ATTACH
@@ -5217,7 +5245,7 @@ impl Fusb302bRuntime {
         initialized
     }
 
-    fn restart_after_reset(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    async fn restart_after_reset(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
         self.policy.on_detach_or_reset();
         self.polarity = None;
         self.next_message_id = 0;
@@ -5230,7 +5258,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_gcrc_seen = false;
         self.partial_rx_started_at_ms = None;
         self.source_caps_hard_reset_sent = false;
-        if self.initialize(i2c) {
+        if self.initialize(i2c).await {
             self.policy = fusb302b::SinkPolicy::new(FUSB302B_FIXED_MAX_MV, MAX_HEATER_CONTRACT_MA);
             true
         } else {
@@ -5247,7 +5275,7 @@ impl Fusb302bRuntime {
         self.policy.source_capabilities()
     }
 
-    fn request_pps_voltage(
+    async fn request_pps_voltage(
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         requested_mv: u16,
@@ -5270,8 +5298,8 @@ impl Fusb302bRuntime {
             if !self.policy.prepare_pps_request(requested_mv) {
                 return PdContractRequestState::Failed;
             }
-            let header = fusb302b::Fusb302b::get_source_capabilities_header(self.next_message_id);
-            if !self.transmit(i2c, header, &[]) {
+            let header = fusb302b::get_source_capabilities_header(self.next_message_id);
+            if !self.transmit(i2c, header, &[]).await {
                 return PdContractRequestState::Failed;
             }
             self.source_capabilities_refresh_pending = true;
@@ -5282,8 +5310,8 @@ impl Fusb302bRuntime {
         let Some(rdo) = self.policy.request_pps_voltage(requested_mv) else {
             return PdContractRequestState::Failed;
         };
-        let header = fusb302b::Fusb302b::request_header(self.next_message_id);
-        if !self.transmit(i2c, header, &rdo) {
+        let header = fusb302b::request_header(self.next_message_id);
+        if !self.transmit(i2c, header, &rdo).await {
             return PdContractRequestState::Failed;
         }
         self.last_request_at_ms = Some(now_ms);
@@ -5291,7 +5319,7 @@ impl Fusb302bRuntime {
         PdContractRequestState::Pending
     }
 
-    fn request_fixed_voltage(
+    async fn request_fixed_voltage(
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
         requested_mv: u16,
@@ -5310,8 +5338,8 @@ impl Fusb302bRuntime {
         let Some(rdo) = self.policy.request_fixed_voltage(requested_mv) else {
             return false;
         };
-        let header = fusb302b::Fusb302b::request_header(self.next_message_id);
-        if !self.transmit(i2c, header, &rdo) {
+        let header = fusb302b::request_header(self.next_message_id);
+        if !self.transmit(i2c, header, &rdo).await {
             return false;
         }
         self.last_request_at_ms = Some(now_ms);
@@ -5319,14 +5347,19 @@ impl Fusb302bRuntime {
         true
     }
 
-    fn transmit(
+    async fn transmit(
         &mut self,
         i2c: &mut I2c<'_, esp_hal::Blocking>,
-        header: [u8; 2],
+        header: u16,
         data: &[u8],
     ) -> bool {
-        let mut io = PdRegisterIo { i2c };
-        if fusb302b::Fusb302b::transmit_data_message(&mut io, header, data).is_err() {
+        let Ok(packet) = PdPacket::new(SopType::Sop, header, data) else {
+            self.policy.mark_fault();
+            FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
+            return false;
+        };
+        let mut phy = Fusb302::new(BlockingAsync::new(i2c));
+        if phy.transmit(&packet).await.is_err() {
             self.policy.mark_fault();
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
             return false;
@@ -5338,7 +5371,7 @@ impl Fusb302bRuntime {
     /// Drain a bounded number of completed PD frames in one service turn. No
     /// call awaits while I2C is borrowed, so EEPROM traffic remains independent
     /// of the controller's PD timing.
-    fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
+    async fn poll(&mut self, i2c: &mut I2c<'_, esp_hal::Blocking>, now_ms: u64) -> bool {
         if self.policy.phase() == SinkPhase::Fault {
             return false;
         }
@@ -5348,12 +5381,14 @@ impl Fusb302bRuntime {
             SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
         ) {
             let vbus_present = {
-                let mut io = PdRegisterIo { i2c };
-                fusb302b::Fusb302b::vbus_present(&mut io)
+                let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+                phy.read_status()
+                    .await
+                    .map(|status| status.status0 & FUSB302B_STATUS0_VBUS_OK != 0)
             };
             match vbus_present {
                 Ok(true) => {}
-                Ok(false) => return self.restart_after_reset(i2c),
+                Ok(false) => return self.restart_after_reset(i2c).await,
                 Err(_) => {
                     self.policy.mark_fault();
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_I2C_ERROR, Ordering::Relaxed);
@@ -5375,7 +5410,7 @@ impl Fusb302bRuntime {
             self.policy.timeout_pending_request();
             self.last_request_at_ms = None;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_REQUEST_TIMEOUT, Ordering::Relaxed);
-            return self.restart_after_reset(i2c);
+            return self.restart_after_reset(i2c).await;
         }
 
         if self.source_capabilities_refresh_pending
@@ -5394,9 +5429,13 @@ impl Fusb302bRuntime {
 
         if self.polarity.is_none() {
             let polarity = {
-                let mut io = PdRegisterIo { i2c };
-                match fusb302b::Fusb302b::read_sink_polarity(&mut io) {
-                    Ok(polarity) => polarity,
+                let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+                match phy.read_status().await {
+                    Ok(status) => match status.status1a & FUSB302B_TOGSS_MASK {
+                        FUSB302B_TOGSS_SNK_CC1 => Some(CcPin::Cc1),
+                        FUSB302B_TOGSS_SNK_CC2 => Some(CcPin::Cc2),
+                        _ => None,
+                    },
                     Err(_) => {
                         self.policy.mark_fault();
                         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
@@ -5406,8 +5445,13 @@ impl Fusb302bRuntime {
             };
             if let Some(polarity) = polarity {
                 let selected = {
-                    let mut io = PdRegisterIo { i2c };
-                    fusb302b::Fusb302b::select_sink_polarity(&mut io, polarity).is_ok()
+                    let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+                    phy.flush_fifos().await.is_ok()
+                        && phy.stop_toggle().await.is_ok()
+                        && phy.set_cc_pull(CcPin::Cc1, CcPull::Down).await.is_ok()
+                        && phy.set_cc_pull(CcPin::Cc2, CcPull::Down).await.is_ok()
+                        && phy.set_tx_cc(polarity).await.is_ok()
+                        && phy.configure_phy(fusb302b_phy_config(true)).await.is_ok()
                 };
                 if !selected {
                     self.policy.mark_fault();
@@ -5425,27 +5469,22 @@ impl Fusb302bRuntime {
         }
 
         for _ in 0..FUSB302B_MAX_RX_MESSAGES_PER_POLL {
-            let event = {
-                let mut io = PdRegisterIo { i2c };
-                match fusb302b::Fusb302b::receive_message(&mut io) {
-                    Ok(event) => event,
-                    Err(_) => {
-                        self.policy.mark_fault();
-                        FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
-                        return false;
-                    }
+            let event = match fusb302b_receive_event(i2c).await {
+                Ok(event) => event,
+                Err(()) => {
+                    self.policy.mark_fault();
+                    FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_FAULT, Ordering::Relaxed);
+                    return false;
                 }
             };
             match event {
-                ReceiveEvent::Empty(activity) => {
+                Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent } => {
                     self.partial_rx_started_at_ms = None;
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
-                        self.source_capabilities_tx_confirmed |= activity.tx_sent;
-                        self.source_capabilities_gcrc_seen |= activity.gcrc_sent;
+                        self.source_capabilities_tx_confirmed |= tx_sent;
+                        self.source_capabilities_gcrc_seen |= gcrc_sent;
                         let query_due = match self.last_source_capabilities_request_at_ms {
-                            Some(last) => {
-                                fusb302b::Fusb302b::source_capabilities_retry_due(last, now_ms)
-                            }
+                            Some(last) => fusb302b::source_capabilities_retry_due(last, now_ms),
                             None => self.attached_at_ms.is_some_and(|attached_at_ms| {
                                 now_ms.saturating_sub(attached_at_ms)
                                     >= fusb302b::SOURCE_CAPS_INITIAL_WAIT_MS
@@ -5455,13 +5494,11 @@ impl Fusb302bRuntime {
                             && self
                                 .last_source_capabilities_request_at_ms
                                 .is_some_and(|last| {
-                                    fusb302b::Fusb302b::source_capabilities_hard_reset_due(
-                                        last, now_ms,
-                                    )
+                                    fusb302b::source_capabilities_hard_reset_due(last, now_ms)
                                 });
                         if hard_reset_due {
-                            let mut io = PdRegisterIo { i2c };
-                            if fusb302b::Fusb302b::transmit_hard_reset(&mut io).is_err() {
+                            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+                            if phy.transmit_hard_reset().await.is_err() {
                                 self.policy.mark_fault();
                                 FUSB302B_DIAGNOSTIC
                                     .store(FUSB302B_DIAG_TX_I2C_ERROR, Ordering::Relaxed);
@@ -5487,10 +5524,8 @@ impl Fusb302bRuntime {
                             FUSB302B_DIAGNOSTIC.store(diagnostic, Ordering::Relaxed);
                             return true;
                         }
-                        let header = fusb302b::Fusb302b::get_source_capabilities_header(
-                            self.next_message_id,
-                        );
-                        if !self.transmit(i2c, header, &[]) {
+                        let header = fusb302b::get_source_capabilities_header(self.next_message_id);
+                        if !self.transmit(i2c, header, &[]).await {
                             return false;
                         }
                         self.source_capabilities_tx_confirmed = false;
@@ -5502,46 +5537,49 @@ impl Fusb302bRuntime {
                         && self.active_contract().kind == ContractKind::Pps
                         && self
                             .last_request_at_ms
-                            .is_some_and(|last| fusb302b::Fusb302b::pps_keepalive_due(last, now_ms))
+                            .is_some_and(|last| fusb302b::pps_keepalive_due(last, now_ms))
                     {
                         let Some(rdo) = self.policy.refresh_active_pps() else {
                             self.policy.mark_fault();
                             return false;
                         };
-                        let header = fusb302b::Fusb302b::request_header(self.next_message_id);
-                        if !self.transmit(i2c, header, &rdo) {
+                        let header = fusb302b::request_header(self.next_message_id);
+                        if !self.transmit(i2c, header, &rdo).await {
                             return false;
                         }
                         self.last_request_at_ms = Some(now_ms);
                     }
                     return true;
                 }
-                ReceiveEvent::Partial(activity) => {
+                Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent } => {
                     if self.policy.phase() == SinkPhase::WaitingForSourceCapabilities {
-                        self.source_capabilities_tx_confirmed |= activity.tx_sent;
-                        self.source_capabilities_gcrc_seen |= activity.gcrc_sent;
+                        self.source_capabilities_tx_confirmed |= tx_sent;
+                        self.source_capabilities_gcrc_seen |= gcrc_sent;
                     }
                     let partial_started_at_ms = self.partial_rx_started_at_ms.get_or_insert(now_ms);
                     if now_ms.saturating_sub(*partial_started_at_ms)
                         >= FUSB302B_PARTIAL_RX_TIMEOUT_MS
                     {
                         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                        return self.restart_after_reset(i2c);
+                        return self.restart_after_reset(i2c).await;
                     }
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RX_PARTIAL, Ordering::Relaxed);
                     return true;
                 }
-                ReceiveEvent::Message(message) => {
+                Fusb302bReceiveEvent::Message(message) => {
                     self.partial_rx_started_at_ms = None;
-                    if let Some((pdos, count)) = message.source_capabilities() {
+                    if let Some((pdos, count)) = fusb302b::source_capabilities_from_message(
+                        message.header(),
+                        message.payload(),
+                    ) {
                         self.last_source_capabilities_request_at_ms = None;
                         self.source_capabilities_refresh_pending = false;
                         self.source_capabilities_refresh_requested_at_ms = None;
                         self.source_capabilities_tx_confirmed = false;
                         self.source_capabilities_gcrc_seen = false;
                         if let Some(rdo) = self.policy.on_source_capabilities(&pdos[..count]) {
-                            let header = fusb302b::Fusb302b::request_header(self.next_message_id);
-                            if !self.transmit(i2c, header, &rdo) {
+                            let header = fusb302b::request_header(self.next_message_id);
+                            if !self.transmit(i2c, header, &rdo).await {
                                 return false;
                             }
                             self.last_request_at_ms = Some(now_ms);
@@ -5553,9 +5591,9 @@ impl Fusb302bRuntime {
                                 .store(FUSB302B_DIAG_NO_USABLE_CONTRACT, Ordering::Relaxed);
                             return false;
                         }
-                    } else if message.data_object_count() == 0 {
+                    } else if message.payload().is_empty() {
                         self.policy
-                            .on_control_message(message.message_type(), now_ms);
+                            .on_control_message((message.header() & 0x1f) as u8, now_ms);
                         FUSB302B_DIAGNOSTIC.store(
                             if self.policy.phase() == SinkPhase::Ready {
                                 FUSB302B_DIAG_IDLE
@@ -5566,22 +5604,21 @@ impl Fusb302bRuntime {
                         );
                     }
                 }
-                ReceiveEvent::Reset => {
+                Fusb302bReceiveEvent::Reset => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c);
+                    return self.restart_after_reset(i2c).await;
                 }
-                ReceiveEvent::RetryFailed => {
+                Fusb302bReceiveEvent::RetryFailed => {
                     FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_RECOVERING, Ordering::Relaxed);
-                    return self.restart_after_reset(i2c);
+                    return self.restart_after_reset(i2c).await;
                 }
-                ReceiveEvent::Fault(fault) => {
+                Fusb302bReceiveEvent::Protection | Fusb302bReceiveEvent::UnsupportedSop => {
                     self.policy.mark_fault();
                     FUSB302B_DIAGNOSTIC.store(
-                        match fault {
-                            ReceiveFault::PhyProtection => FUSB302B_DIAG_PROTECTION,
-                            ReceiveFault::MissingCrc => FUSB302B_DIAG_MISSING_CRC,
-                            ReceiveFault::MissingSop => FUSB302B_DIAG_MISSING_SOP,
-                            ReceiveFault::UnsupportedSop => FUSB302B_DIAG_UNSUPPORTED_SOP,
+                        match event {
+                            Fusb302bReceiveEvent::Protection => FUSB302B_DIAG_PROTECTION,
+                            Fusb302bReceiveEvent::UnsupportedSop => FUSB302B_DIAG_UNSUPPORTED_SOP,
+                            _ => unreachable!(),
                         },
                         Ordering::Relaxed,
                     );
@@ -5591,6 +5628,45 @@ impl Fusb302bRuntime {
         }
 
         self.policy.phase() != SinkPhase::Fault
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn fusb302b_receive_event(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+) -> Result<Fusb302bReceiveEvent, ()> {
+    let mut phy = Fusb302::new(BlockingAsync::new(i2c));
+    let interrupts = phy.read_interrupts().await.map_err(|_| ())?;
+    let status = phy.read_status().await.map_err(|_| ())?;
+    let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
+    let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
+
+    if interrupts.interrupt_a & (FUSB302B_INTERRUPTA_SOFT_RESET | FUSB302B_INTERRUPTA_HARD_RESET)
+        != 0
+    {
+        return Ok(Fusb302bReceiveEvent::Reset);
+    }
+    if status.status0a & FUSB302B_STATUS0A_RETRY_FAIL != 0
+        && status.status1 & FUSB302B_STATUS1_RX_EMPTY != 0
+    {
+        return Ok(Fusb302bReceiveEvent::RetryFailed);
+    }
+    if status.status1 & (FUSB302B_STATUS1_OVERTEMP | FUSB302B_STATUS1_VCONN_OCP) != 0 {
+        return Ok(Fusb302bReceiveEvent::Protection);
+    }
+    if status.status1 & FUSB302B_STATUS1_RX_EMPTY != 0 {
+        return Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent });
+    }
+    if status.status0 & FUSB302B_STATUS0_CRC_CHECK == 0
+        || status.status1a & FUSB302B_STATUS1A_RXSOP == 0
+    {
+        return Ok(Fusb302bReceiveEvent::Partial { tx_sent, gcrc_sent });
+    }
+
+    match phy.receive().await.map_err(|_| ())? {
+        None => Ok(Fusb302bReceiveEvent::Empty { tx_sent, gcrc_sent }),
+        Some(packet) if packet.sop() == SopType::Sop => Ok(Fusb302bReceiveEvent::Message(packet)),
+        Some(_) => Ok(Fusb302bReceiveEvent::UnsupportedSop),
     }
 }
 
@@ -5641,9 +5717,58 @@ impl PdPort {
 }
 
 #[cfg(target_arch = "xtensa")]
-fn detect_pd_controller(i2c: &mut I2c<'_, esp_hal::Blocking>) -> DetectedController {
-    let mut io = PdRegisterIo { i2c };
-    fusb302b::detect_controller(&mut io)
+enum DetectedPdController {
+    Fusb302b(u8),
+    Ch224q,
+    Unknown,
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn detect_pd_controller(i2c: &mut I2c<'_, esp_hal::Blocking>) -> DetectedPdController {
+    let first = {
+        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+        phy.device_id().await.ok()
+    };
+    let second = {
+        let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+        phy.device_id().await.ok()
+    };
+    let (Some(first), Some(second)) = (first, second) else {
+        return DetectedPdController::Unknown;
+    };
+    if first != second {
+        return DetectedPdController::Unknown;
+    }
+    if first.is_fusb302b_family() {
+        let status = {
+            let mut phy = Fusb302::new(BlockingAsync::new(&mut *i2c));
+            phy.read_status().await
+        };
+        return match status {
+            Ok(status) if status.status0 != u8::MAX && status.status1 != u8::MAX => {
+                DetectedPdController::Fusb302b(first.bits())
+            }
+            _ => DetectedPdController::Unknown,
+        };
+    }
+
+    if detect_ch224q_primary(i2c) {
+        DetectedPdController::Ch224q
+    } else {
+        DetectedPdController::Unknown
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn detect_ch224q_primary(i2c: &mut I2c<'_, esp_hal::Blocking>) -> bool {
+    let Some(status) = read_ch224q_register(i2c, Address::Primary, ch224q::STATUS_REGISTER) else {
+        return false;
+    };
+    let Some(current) = read_ch224q_register(i2c, Address::Primary, ch224q::CURRENT_DATA_REGISTER)
+    else {
+        return false;
+    };
+    status & 0x80 == 0 && current != u8::MAX
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -11593,7 +11718,9 @@ async fn request_pd_fixed_voltage(
             write_ch224q_payload(i2c, *address, &payload).await
         }
         PdPort::Fusb302b(runtime) => {
-            runtime.request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
+            runtime
+                .request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
+                .await
         }
     }
 }
@@ -11619,7 +11746,9 @@ async fn request_pd_adjustable_voltage(
         PdPort::Fusb302b(runtime) => {
             let _ = mode_changed;
             if mode == ch224q::AdjustableVoltageMode::Pps {
-                runtime.request_pps_voltage(i2c, request_mv, Instant::now().as_millis())
+                runtime
+                    .request_pps_voltage(i2c, request_mv, Instant::now().as_millis())
+                    .await
             } else {
                 PdContractRequestState::Failed
             }
@@ -11628,7 +11757,7 @@ async fn request_pd_adjustable_voltage(
 }
 
 #[cfg(target_arch = "xtensa")]
-fn read_pd_status(
+async fn read_pd_status(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
     port: &mut PdPort,
     now_ms: u64,
@@ -11636,7 +11765,7 @@ fn read_pd_status(
     match port {
         PdPort::Ch224q(address) => read_ch224q_status(i2c, *address),
         PdPort::Fusb302b(runtime) => {
-            if !runtime.poll(i2c, now_ms) {
+            if !runtime.poll(i2c, now_ms).await {
                 return None;
             }
             let contract = runtime.active_contract();
@@ -11694,7 +11823,7 @@ async fn await_pd_ready(
             for _ in 0..150 {
                 refresh_boot_light();
                 let now_ms = Instant::now().as_millis();
-                if let Some(observation) = read_pd_status(i2c, port, now_ms)
+                if let Some(observation) = read_pd_status(i2c, port, now_ms).await
                     && observation.status.pd_active
                 {
                     return Some(observation);
@@ -12058,24 +12187,24 @@ async fn main(_spawner: Spawner) {
     .expect("failed to create I2C0")
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9);
-    let detected_pd_controller = match detect_pd_controller(&mut pd_i2c) {
-        DetectedController::Unknown if detect_ch224q_secondary(&mut pd_i2c) => {
-            DetectedController::Ch224q
+    let detected_pd_controller = match detect_pd_controller(&mut pd_i2c).await {
+        DetectedPdController::Unknown if detect_ch224q_secondary(&mut pd_i2c) => {
+            DetectedPdController::Ch224q
         }
         detected => detected,
     };
     let mut pd_port = match detected_pd_controller {
-        DetectedController::Fusb302b(device_id) => {
+        DetectedPdController::Fusb302b(device_id) => {
             #[cfg(feature = "web_serial")]
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_fusb302b_detected\n");
             let mut runtime = Fusb302bRuntime::new();
-            if !runtime.initialize(&mut pd_i2c) {
+            if !runtime.initialize(&mut pd_i2c).await {
                 #[cfg(feature = "web_serial")]
                 let _ =
                     usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_failed\n");
                 warn!(
                     "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
-                    device_id.0,
+                    device_id,
                 );
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
@@ -12095,13 +12224,13 @@ async fn main(_spawner: Spawner) {
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
             info!(
                 "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
-                device_id.0,
+                device_id,
                 DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
                 MAX_HEATER_CONTRACT_MA,
             );
             PdPort::Fusb302b(runtime)
         }
-        DetectedController::Ch224q => {
+        DetectedPdController::Ch224q => {
             #[cfg(feature = "web_serial")]
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_ch224q_detected\n");
             let Some(address) =
@@ -12126,7 +12255,7 @@ async fn main(_spawner: Spawner) {
             };
             PdPort::Ch224q(address)
         }
-        DetectedController::Unknown => {
+        DetectedPdController::Unknown => {
             #[cfg(feature = "web_serial")]
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
             warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
@@ -13378,7 +13507,8 @@ async fn main(_spawner: Spawner) {
                 );
             }
 
-            let current_pd_observation = read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms);
+            let current_pd_observation =
+                read_pd_status(&mut pd_i2c, &mut pd_port, elapsed_ms).await;
             if pd_status_log_key(current_pd_observation) != last_pd_status_log_key {
                 match current_pd_observation {
                     Some(observation) => info!(
