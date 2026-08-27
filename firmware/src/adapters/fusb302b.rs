@@ -313,6 +313,22 @@ mod tests {
     }
 
     #[test]
+    fn policy_arms_an_idle_twelve_volt_pps_contract_after_accept_then_ps_rdy() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        assert!(
+            policy
+                .on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A])
+                .is_some()
+        );
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().kind, ContractKind::Pps);
+        assert_eq!(policy.active_contract().voltage_mv, 12_000);
+    }
+
+    #[test]
     fn reset_clears_the_active_contract() {
         let mut policy = SinkPolicy::new(20_000, 5_000);
         let _ = policy.on_source_capabilities(&[PPS_APDO_5V_TO_21V_5A]);

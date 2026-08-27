@@ -72,8 +72,7 @@ use flux_purr_firmware::adapters::pd::{
 };
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::adapters::pd::{
-    FUSB302B_FIXED_MAX_MV, FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA,
-    MIN_HEATER_CONTRACT_MA,
+    FUSB302B_PPS_MIN_MV, GUARANTEED_HEATER_MIN_MV, MAX_HEATER_CONTRACT_MA, MIN_HEATER_CONTRACT_MA,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
@@ -442,6 +441,8 @@ const HEATER_HOLD_PHASE_HYSTERESIS_C: f32 = 0.10;
 const DASHBOARD_WARNING_BLINK_HALF_PERIOD_MS: u64 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_ADJUSTABLE_MIN_MV: u16 = 12_000;
+#[cfg(any(target_arch = "xtensa", test))]
+const FUSB302B_INITIAL_PPS_REQUEST_MV: u16 = HEATER_ADJUSTABLE_MIN_MV;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_ADJUSTABLE_MAX_MV: u16 = 28_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -5214,7 +5215,10 @@ enum PdContractRequestState {
 impl Fusb302bRuntime {
     const fn new() -> Self {
         Self {
-            policy: fusb302b::SinkPolicy::new(FUSB302B_FIXED_MAX_MV, MAX_HEATER_CONTRACT_MA),
+            policy: fusb302b::SinkPolicy::new(
+                FUSB302B_INITIAL_PPS_REQUEST_MV,
+                MAX_HEATER_CONTRACT_MA,
+            ),
             polarity: None,
             next_message_id: 0,
             attached_at_ms: None,
@@ -5269,7 +5273,8 @@ impl Fusb302bRuntime {
         self.partial_rx_started_at_ms = None;
         self.source_caps_hard_reset_sent = false;
         if self.initialize(i2c).await {
-            self.policy = fusb302b::SinkPolicy::new(FUSB302B_FIXED_MAX_MV, MAX_HEATER_CONTRACT_MA);
+            self.policy =
+                fusb302b::SinkPolicy::new(FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA);
             true
         } else {
             self.policy.mark_fault();
@@ -14082,6 +14087,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fusb302b_initial_pps_request_matches_the_idle_voltage() {
+        assert_eq!(FUSB302B_INITIAL_PPS_REQUEST_MV, HEATER_ADJUSTABLE_MIN_MV);
+        assert_eq!(FUSB302B_INITIAL_PPS_REQUEST_MV, 12_000);
+    }
 
     #[test]
     fn zeroize_bytes_scrubs_reusable_heap_workspace() {

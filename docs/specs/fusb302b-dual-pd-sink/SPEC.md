@@ -21,6 +21,7 @@ Flux Purr supports two mutually exclusive USB-C PD sink board variants without c
 ## Contract Policy
 
 - FUSB302BMPX selects the best usable PPS APDO covering the requested voltage within `5V..21V`; it selects the highest usable fixed PDO at or below `20V` only when no suitable APDO is present.
+- Automatic idle operation requests `12V` from a usable PPS APDO. The APDO must still cover `20V @ 3A` before it qualifies for the performance tier; heater control raises the request only when its power policy requires it.
 - Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, detach, reset, reject, wait, and I2C faults are explicit policy states.
 - Heating is authorized only after `Accept` then `PS_RDY`. Contract loss clears the authorization and heater output.
 - Contract selection rejects source capabilities below `3A`. FUSB302BMPX clamps contractual current to `3A..5A`, PPS voltage to `5V..21V`, and fixed-PDO voltage to `5V..20V`.
