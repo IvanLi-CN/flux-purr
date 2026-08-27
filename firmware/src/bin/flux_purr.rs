@@ -5636,8 +5636,9 @@ async fn fusb302b_receive_event(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
 ) -> Result<Fusb302bReceiveEvent, ()> {
     let mut phy = Fusb302::new(BlockingAsync::new(i2c));
-    let interrupts = phy.read_interrupts().await.map_err(|_| ())?;
+    // Preserve the receiver's CRC/SOP state before clearing its interrupt latches.
     let status = phy.read_status().await.map_err(|_| ())?;
+    let interrupts = phy.read_interrupts().await.map_err(|_| ())?;
     let tx_sent = interrupts.interrupt_a & FUSB302B_INTERRUPTA_TX_SENT != 0;
     let gcrc_sent = interrupts.interrupt_b & FUSB302B_INTERRUPTB_GCRC_SENT != 0;
 
