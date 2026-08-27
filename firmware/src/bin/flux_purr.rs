@@ -193,8 +193,8 @@ use flux_purr_firmware::{
 };
 #[cfg(target_arch = "xtensa")]
 use fusb302::{
-    CcPin, CcPull, DataRole, Fusb302, PdPacket, PdRevision, PhyConfig, PowerRole, RetryCount,
-    SopType, ToggleMode,
+    CcPin, CcPull, DataRole, Fusb302, InterruptMasks, PdPacket, PdRevision, PhyConfig, PowerRole,
+    RetryCount, SopType, ToggleMode,
 };
 #[cfg(target_arch = "xtensa")]
 use gc9d01::{GC9D01, Timer as Gc9d01Timer};
@@ -5155,6 +5155,10 @@ const FUSB302B_INTERRUPTA_SOFT_RESET: u8 = 1 << 1;
 const FUSB302B_INTERRUPTA_HARD_RESET: u8 = 1;
 #[cfg(target_arch = "xtensa")]
 const FUSB302B_INTERRUPTB_GCRC_SENT: u8 = 1;
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_TOGGLE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7f, 0xbf, 0xff);
+#[cfg(target_arch = "xtensa")]
+const FUSB302B_RECEIVE_INTERRUPT_MASKS: InterruptMasks = InterruptMasks::new(0x7d, 0xe0, 0x00);
 
 #[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5229,9 +5233,15 @@ impl Fusb302bRuntime {
         let mut phy = Fusb302::new(BlockingAsync::new(i2c));
         let initialized = phy.init().await.is_ok()
             && phy.pd_reset().await.is_ok()
+            && phy.set_host_current_default().await.is_ok()
             && phy.configure_phy(fusb302b_phy_config(false)).await.is_ok()
             && phy.set_cc_pull(CcPin::Cc1, CcPull::Down).await.is_ok()
             && phy.set_cc_pull(CcPin::Cc2, CcPull::Down).await.is_ok()
+            && phy.set_measure_cc(None).await.is_ok()
+            && phy
+                .set_interrupt_masks(FUSB302B_TOGGLE_INTERRUPT_MASKS)
+                .await
+                .is_ok()
             && phy.read_interrupts().await.is_ok()
             && phy.start_toggle(ToggleMode::Sink).await.is_ok();
         FUSB302B_DIAGNOSTIC.store(
@@ -5450,8 +5460,13 @@ impl Fusb302bRuntime {
                         && phy.stop_toggle().await.is_ok()
                         && phy.set_cc_pull(CcPin::Cc1, CcPull::Down).await.is_ok()
                         && phy.set_cc_pull(CcPin::Cc2, CcPull::Down).await.is_ok()
+                        && phy.set_measure_cc(Some(polarity)).await.is_ok()
                         && phy.set_tx_cc(polarity).await.is_ok()
                         && phy.configure_phy(fusb302b_phy_config(true)).await.is_ok()
+                        && phy
+                            .set_interrupt_masks(FUSB302B_RECEIVE_INTERRUPT_MASKS)
+                            .await
+                            .is_ok()
                 };
                 if !selected {
                     self.policy.mark_fault();
