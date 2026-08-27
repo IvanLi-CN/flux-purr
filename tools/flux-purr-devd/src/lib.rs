@@ -461,6 +461,8 @@ pub struct DeviceRecord {
     pub saved_thermal_control_profile_pps5a: Option<ThermalControlProfilePackage>,
     pub calibration: CalibrationState,
     pub heater_curve: HeaterCurveState,
+    #[serde(default)]
+    pub thermal_plant_run: ThermalPlantRunSnapshot,
     pub selected_artifact_id: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
@@ -472,6 +474,82 @@ struct MockPpsApdo {
     min_mv: u16,
     max_mv: u16,
     max_ma: u16,
+}
+
+fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
+    let curve_points = [
+        (25, 5_674),
+        (61, 6_089),
+        (102, 6_583),
+        (162, 7_307),
+        (220, 8_011),
+    ]
+    .into_iter()
+    .map(|(temp_c, resistance_ohms)| {
+        Some(HeaterCurvePoint {
+            temp_centi_c: temp_c * 100,
+            resistance_milliohms: resistance_ohms,
+        })
+    })
+    .chain(std::iter::repeat(None))
+    .take(HEATER_CURVE_MAX_POINTS)
+    .collect::<Vec<_>>();
+    let curve = HeaterCurvePackage {
+        points: curve_points,
+        raw_observations: None,
+    };
+    let temperatures = [
+        25, 35, 52, 78, 112, 148, 182, 207, 220, 205, 174, 138, 102, 80,
+    ];
+    let points = temperatures
+        .into_iter()
+        .enumerate()
+        .map(|(index, temperature)| ThermalPlantTracePoint {
+            sample_index: index as u8,
+            elapsed_ms: index as u32 * 30_000,
+            temperature_centi_c: temperature * 100,
+            heater_voltage_mv: if index < 9 { 21_000 } else { 0 },
+            duty_percent: if index < 9 { 100 } else { 0 },
+            phase: if index == 0 {
+                ThermalPlantRunPhase::Ambient
+            } else if index < 9 {
+                ThermalPlantRunPhase::Heating
+            } else {
+                ThermalPlantRunPhase::Cooling
+            },
+        })
+        .collect();
+    ThermalPlantRunSnapshot {
+        version: 1,
+        attempt: Some(ThermalPlantRunAttempt {
+            run_id: 7,
+            status: CalibrationJobStatus::Completed,
+            phase: Some(ThermalPlantRunPhase::Cooling),
+            progress_percent: 100,
+            elapsed_ms: 420_000,
+            current_temp_centi_c: 8000,
+            heater_voltage_mv: 0,
+            duty_percent: 0,
+            sample_count: 14,
+            restart_allowed: true,
+            error: None,
+        }),
+        trace_page: ThermalPlantTracePage {
+            start_sample: 0,
+            next_sample: None,
+            total_samples: 14,
+            points,
+        },
+        provisional_curve: None,
+        active_result: Some(ThermalPlantActiveResult {
+            transaction_id: 7,
+            curve,
+            convection_mw_per_c: Some(120.0),
+            radiation_mw_per_k4: Some(0.0002),
+            thermal_capacity_mj_per_c: Some(42_000.0),
+            transport_delay_ms: Some(500),
+        }),
+    }
 }
 
 impl DeviceRecord {
@@ -490,6 +568,7 @@ impl DeviceRecord {
                 "status".to_string(),
                 "network".to_string(),
                 "calibration".to_string(),
+                "thermal_plant_run".to_string(),
                 "wifi_config".to_string(),
                 "wifi_state_v2".to_string(),
                 "monitor".to_string(),
@@ -605,6 +684,7 @@ impl DeviceRecord {
             saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
+            thermal_plant_run: mock_thermal_plant_snapshot(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -707,6 +787,7 @@ impl DeviceRecord {
                     "identity".to_string(),
                     "status".to_string(),
                     "network".to_string(),
+                    "thermal_plant_run".to_string(),
                     "wifi_config".to_string(),
                     "monitor".to_string(),
                     "firmware_check".to_string(),
@@ -721,6 +802,7 @@ impl DeviceRecord {
             saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
+            thermal_plant_run: ThermalPlantRunSnapshot::default(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -1251,6 +1333,81 @@ pub struct HeaterCurveState {
     pub eeprom_probe: Option<HeaterCurveEepromProbe>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalPlantRunPhase {
+    #[default]
+    Ambient,
+    Heating,
+    Cooling,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantTracePoint {
+    pub sample_index: u8,
+    pub elapsed_ms: u32,
+    pub temperature_centi_c: i16,
+    pub heater_voltage_mv: u16,
+    pub duty_percent: u8,
+    pub phase: ThermalPlantRunPhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantTracePage {
+    pub start_sample: u8,
+    pub next_sample: Option<u8>,
+    pub total_samples: u8,
+    #[serde(default)]
+    pub points: Vec<ThermalPlantTracePoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantProvisionalCurve {
+    pub state: String,
+    pub coverage_percent: u8,
+    pub curve: HeaterCurvePackage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRunAttempt {
+    pub run_id: u32,
+    pub status: CalibrationJobStatus,
+    pub phase: Option<ThermalPlantRunPhase>,
+    pub progress_percent: u8,
+    pub elapsed_ms: u32,
+    pub current_temp_centi_c: i16,
+    pub heater_voltage_mv: u16,
+    pub duty_percent: u8,
+    pub sample_count: u8,
+    pub restart_allowed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantActiveResult {
+    pub transaction_id: u32,
+    pub curve: HeaterCurvePackage,
+    pub convection_mw_per_c: Option<f32>,
+    pub radiation_mw_per_k4: Option<f32>,
+    pub thermal_capacity_mj_per_c: Option<f32>,
+    pub transport_delay_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRunSnapshot {
+    pub version: u8,
+    pub attempt: Option<ThermalPlantRunAttempt>,
+    pub trace_page: ThermalPlantTracePage,
+    pub provisional_curve: Option<ThermalPlantProvisionalCurve>,
+    pub active_result: Option<ThermalPlantActiveResult>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurveEepromProbe {
@@ -1776,6 +1933,15 @@ struct UsbRequestWire<'a> {
     frame_type: &'static str,
     request_id: &'a str,
     op: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbThermalPlantRunWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    after_sample: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -2349,6 +2515,12 @@ pub struct LeaseQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ThermalPlantRunQuery {
+    pub lease_id: Option<String>,
+    pub after_sample: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct BindRequest {
     pub alias: Option<String>,
 }
@@ -2406,6 +2578,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/calibration/job",
             get(device_calibration_job).post(configure_calibration_job),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/calibration/thermal-plant/run",
+            get(device_thermal_plant_run),
         )
         .route(
             "/api/v1/devices/{device_id}/eeprom",
@@ -3295,6 +3471,67 @@ async fn device_calibration_job(
     Ok(Json(target.status.calibration.job))
 }
 
+fn thermal_plant_trace_page(
+    snapshot: &ThermalPlantRunSnapshot,
+    after_sample: u8,
+) -> ThermalPlantRunSnapshot {
+    let start = after_sample.min(snapshot.trace_page.total_samples);
+    let mut page = snapshot.clone();
+    page.trace_page.start_sample = start;
+    page.trace_page.points = snapshot
+        .trace_page
+        .points
+        .iter()
+        .filter(|point| point.sample_index >= start)
+        .take(16)
+        .cloned()
+        .collect();
+    page.trace_page.next_sample = page
+        .trace_page
+        .points
+        .last()
+        .map(|point| point.sample_index.saturating_add(1))
+        .filter(|next| *next < snapshot.trace_page.total_samples);
+    page
+}
+
+async fn device_thermal_plant_run(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<ThermalPlantRunQuery>,
+) -> Result<Json<ThermalPlantRunSnapshot>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    let after_sample = query.after_sample.unwrap_or(0);
+    if target.transport == DeviceTransport::NativeSerial {
+        let snapshot = serial_thermal_plant_run_get(&state, &target, after_sample).await?;
+        return Ok(Json(snapshot));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let path = if after_sample == 0 {
+            "calibration/thermal-plant/run".to_string()
+        } else {
+            format!("calibration/thermal-plant/run?after_sample={after_sample}")
+        };
+        let snapshot = lan_bridge_read::<ThermalPlantRunSnapshot>(&configured, &path).await?;
+        return Ok(Json(snapshot));
+    }
+    Ok(Json(thermal_plant_trace_page(
+        &target.thermal_plant_run,
+        after_sample,
+    )))
+}
+
 async fn configure_calibration_job(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -3359,6 +3596,14 @@ async fn configure_calibration_job(
             };
             disarm_mock_thermal_plant(&mut device.status);
             device.status.calibration.mode = CalibrationMode::Off;
+            if let Some(attempt) = device.thermal_plant_run.attempt.as_mut() {
+                attempt.status = CalibrationJobStatus::Canceled;
+                attempt.phase = Some(ThermalPlantRunPhase::Cooling);
+                attempt.restart_allowed = true;
+                attempt.duty_percent = 0;
+                attempt.heater_voltage_mv = 0;
+                attempt.error = None;
+            }
         }
         CalibrationJobOp::Start => {
             if device.status.calibration.job.status == CalibrationJobStatus::Running {
@@ -3374,8 +3619,14 @@ async fn configure_calibration_job(
                 )
             })?;
             let mut next_request_mv = device.status.calibration.pps_mv;
+            let mut thermal_request_mv = device
+                .status
+                .calibration
+                .pps_mv
+                .unwrap_or(DEFAULT_PD_REQUEST_MV);
             if kind == CalibrationJobKind::ThermalPlantAuto {
                 let (source, request_mv) = thermal_plant_start_request_for_device(device)?;
+                thermal_request_mv = request_mv;
                 device.status.calibration.mode = CalibrationMode::ThermalPlant;
                 disarm_mock_thermal_plant(&mut device.status);
                 device.status.manual_pps_enabled = true;
@@ -3397,6 +3648,29 @@ async fn configure_calibration_job(
                 next_request_mv,
                 message: None,
             };
+            if kind == CalibrationJobKind::ThermalPlantAuto {
+                let next_run_id = device
+                    .thermal_plant_run
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.run_id.saturating_add(1))
+                    .unwrap_or(1);
+                device.thermal_plant_run.attempt = Some(ThermalPlantRunAttempt {
+                    run_id: next_run_id,
+                    status: CalibrationJobStatus::Running,
+                    phase: Some(ThermalPlantRunPhase::Ambient),
+                    progress_percent: 0,
+                    elapsed_ms: 0,
+                    current_temp_centi_c: 2500,
+                    heater_voltage_mv: thermal_request_mv,
+                    duty_percent: 0,
+                    sample_count: 0,
+                    restart_allowed: false,
+                    error: None,
+                });
+                device.thermal_plant_run.trace_page = ThermalPlantTracePage::default();
+                device.thermal_plant_run.provisional_curve = None;
+            }
         }
     }
     Ok(Json(device.status.calibration.job.clone()))
@@ -6428,6 +6702,31 @@ async fn serial_calibration_job_get(
         "calibration_job",
     )
     .await
+}
+
+async fn serial_thermal_plant_run_get(
+    state: &AppState,
+    target: &DeviceRecord,
+    after_sample: u8,
+) -> Result<ThermalPlantRunSnapshot, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-thermal-plant-run", now_millis());
+    let request = serde_json::to_string(&UsbThermalPlantRunWire {
+        frame_type: "thermal_plant_run",
+        request_id: &request_id,
+        after_sample,
+    })
+    .map_err(|_| HttpError::internal("failed to encode thermal plant run request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::ReadOnly,
+    )
+    .await?;
+    extract_usb_payload(result, "thermal_plant_run")
 }
 
 async fn serial_calibration_job_config(
@@ -11360,6 +11659,51 @@ mod tests {
 
         assert_eq!(started.status, CalibrationJobStatus::Running);
         assert_eq!(started.next_request_mv, Some(21_000));
+    }
+
+    #[tokio::test]
+    async fn thermal_plant_run_reader_pages_cooling_trace_without_raw_adc() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+
+        let first = device_thermal_plant_run(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(ThermalPlantRunQuery {
+                lease_id: Some(lease.lease_id.clone()),
+                after_sample: Some(0),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(first.trace_page.points.len(), 14);
+        assert_eq!(first.trace_page.next_sample, None);
+        assert!(
+            first
+                .trace_page
+                .points
+                .iter()
+                .any(|point| point.phase == ThermalPlantRunPhase::Cooling)
+        );
+        let serialized = serde_json::to_string(&first).unwrap();
+        assert!(!serialized.contains("rawAdc"));
+        assert!(serialized.len() < 8 * 1024);
+
+        let tail = device_thermal_plant_run(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(ThermalPlantRunQuery {
+                lease_id: Some(lease.lease_id),
+                after_sample: Some(8),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(tail.trace_page.start_sample, 8);
+        assert_eq!(tail.trace_page.points.len(), 6);
+        assert_eq!(tail.trace_page.points[0].sample_index, 8);
     }
 
     #[test]

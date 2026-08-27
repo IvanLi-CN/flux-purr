@@ -64,7 +64,277 @@
     inset -1px -1px 2px color-mix(in oklch, var(--industrial-light) 72%, transparent);
 }
 
+/* Production automatic thermal-model result card. The grid stays within the
+   desktop calibration panel; trace and curve are fixed-format SVGs, while the
+   representative-point table keeps its natural row height. */
+.thermal-plant-run-card {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.45rem;
+  border: 1px solid rgba(113, 130, 149, 0.22);
+  border-radius: 0.8rem;
+  background: linear-gradient(145deg, rgba(249, 252, 255, 0.96), rgba(226, 235, 245, 0.92));
+  box-shadow: 0 12px 28px rgba(43, 61, 82, 0.12);
+  min-width: 0;
+}
+.thermal-plant-run-card__header,
+.thermal-plant-run-card__section-heading,
+.thermal-plant-run-card__legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.thermal-plant-run-card__header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  min-width: 0;
+}
+.thermal-plant-run-card__eyebrow,
+.thermal-plant-run-card__meta,
+.thermal-plant-run-card__section-heading p {
+  margin: 0;
+}
+.thermal-plant-run-card__eyebrow {
+  color: #223246;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+.thermal-plant-run-card__meta,
+.thermal-plant-run-card__section-heading p {
+  color: #637387;
+  font-size: 0.68rem;
+}
+.thermal-plant-run-card__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 1px solid rgba(39, 174, 111, 0.36);
+  border-radius: 999px;
+  padding: 0.2rem 0.42rem;
+  color: #168b5b;
+  background: rgba(224, 250, 236, 0.75);
+  font-size: 0.72rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.thermal-plant-run-card__status--running {
+  color: #b97709;
+  border-color: rgba(206, 148, 38, 0.4);
+  background: #fff4d9;
+}
+.thermal-plant-run-card__status--failed {
+  color: #c42d36;
+  border-color: rgba(196, 45, 54, 0.35);
+  background: #fff0f0;
+}
+.thermal-plant-run-card__status--unsupported {
+  color: #6a7380;
+  border-color: rgba(106, 115, 128, 0.32);
+  background: rgba(238, 242, 246, 0.9);
+}
+.thermal-plant-run-card__compatibility {
+  margin: -0.15rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border-left: 3px solid #7c8997;
+  color: #5e6d7e;
+  background: rgba(225, 232, 240, 0.62);
+  font-size: 0.76rem;
+}
+.thermal-plant-run-card__metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.32rem;
+}
+.thermal-plant-run-card__metric {
+  display: flex;
+  align-items: center;
+  gap: 0.36rem;
+  min-width: 0;
+  padding: 0.28rem 0.42rem;
+  border-top: 1px solid rgba(108, 126, 147, 0.22);
+  border-bottom: 1px solid rgba(108, 126, 147, 0.12);
+  color: #3c526c;
+}
+.thermal-plant-run-card__metric span {
+  display: grid;
+  min-width: 0;
+}
+.thermal-plant-run-card__metric small {
+  color: #718196;
+  font-size: 0.62rem;
+}
+.thermal-plant-run-card__metric strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #263b55;
+  font-size: 0.74rem;
+}
+.thermal-plant-run-card__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(14rem, 0.95fr);
+  gap: 0.38rem;
+}
+.thermal-plant-run-card__chart,
+.thermal-plant-run-card__table-wrap {
+  min-width: 0;
+  border-radius: 0.65rem;
+  background: rgba(219, 229, 240, 0.63);
+  padding: 0.4rem;
+}
+.thermal-plant-run-card__section-heading h3 {
+  margin: 0;
+  color: #26384d;
+  font-size: 0.78rem;
+}
+.thermal-plant-run-card__section-heading > span {
+  color: #61738a;
+  font:
+    700 0.6rem / 1.2 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  white-space: nowrap;
+}
+.thermal-plant-run-card__svg {
+  display: block;
+  width: 100%;
+  height: clamp(7rem, 18vh, 10rem);
+  margin-top: 0.18rem;
+  overflow: visible;
+}
+.thermal-plant-run-card__axis {
+  stroke: rgba(82, 103, 125, 0.35);
+  stroke-width: 1;
+}
+.thermal-plant-run-card__trace {
+  fill: none;
+  stroke: #2f6f9f;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.thermal-plant-run-card__curve {
+  fill: none;
+  stroke: #d92e3c;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.thermal-plant-run-card__point {
+  fill: #f5fbff;
+  stroke: #2f6f9f;
+  stroke-width: 2;
+}
+.thermal-plant-run-card__point--cooling {
+  stroke: #27384d;
+}
+.thermal-plant-run-card__point--curve {
+  stroke: #d92e3c;
+}
+.thermal-plant-run-card__legend {
+  justify-content: flex-start;
+  margin-top: 0.12rem;
+  color: #60738a;
+  font-size: 0.62rem;
+}
+.thermal-plant-run-card__legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.thermal-plant-run-card__legend-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: #2f6f9f;
+}
+.thermal-plant-run-card__legend-dot--cooling {
+  background: #27384d;
+}
+.thermal-plant-run-card__table-wrap {
+  grid-column: 2;
+}
+.thermal-plant-run-card__table-wrap table {
+  width: 100%;
+  margin-top: 0.1rem;
+  border-collapse: collapse;
+  color: #30455d;
+  font-size: 0.66rem;
+}
+.thermal-plant-run-card__table-wrap th {
+  padding: 0.2rem 0.18rem;
+  border-bottom: 1px solid rgba(91, 111, 133, 0.28);
+  color: #718196;
+  font-size: 0.58rem;
+  font-weight: 700;
+  text-align: left;
+}
+.thermal-plant-run-card__table-wrap td {
+  padding: 0.22rem 0.18rem;
+  border-bottom: 1px solid rgba(91, 111, 133, 0.16);
+}
+.thermal-plant-run-card__valid {
+  color: #198b5a;
+  font-weight: 800;
+}
+.thermal-plant-run-card__empty,
+.thermal-plant-run-card__chart-empty {
+  color: #728398;
+  font-size: 0.74rem;
+  text-align: center;
+}
+.thermal-plant-run-card__chart-empty {
+  display: grid;
+  place-items: center;
+  height: clamp(7rem, 18vh, 10rem);
+}
+@media (max-height: 799px) {
+  .thermal-plant-run-card__svg,
+  .thermal-plant-run-card__chart-empty {
+    height: 3.75rem;
+  }
+}
+.thermal-plant-run-card__command {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 1.85rem;
+  border: 0;
+  border-radius: 0.6rem;
+  padding: 0.32rem 0.6rem;
+  color: #fff;
+  background: #d92e3c;
+  box-shadow: 0 7px 14px rgba(217, 46, 60, 0.22);
+  font-size: 0.66rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.thermal-plant-run-card__command:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.thermal-plant-run-card__command--stop {
+  background: #394b60;
+  box-shadow: 0 7px 14px rgba(57, 75, 96, 0.2);
+}
+@media (max-width: 1100px) {
+  .thermal-plant-run-card__body {
+    grid-template-columns: minmax(0, 1.2fr) minmax(12rem, 1fr);
+  }
+}
+
 @layer components {
+  .industrial-calibration-tabs__content:has(.thermal-plant-run-card) {
+    overflow: hidden;
+    padding-right: 0;
+    scrollbar-gutter: auto;
+  }
+
   .industrial-runtime-surface {
     display: grid;
     gap: 0.75rem;
@@ -449,6 +719,903 @@
 
     .industrial-action-feedback span {
       display: none;
+    }
+  }
+}
+
+/* PROTOTYPE ONLY: balanced desktop instrument layouts for automatic heater-curve calibration. */
+@layer components {
+  .industrial-calibration-tabs__content:has(.thermal-model-results-prototype) {
+    display: block;
+    height: 100%;
+    min-height: 0;
+    margin-top: 0;
+    overflow: hidden;
+    padding-right: 0;
+    scrollbar-gutter: auto;
+  }
+
+  .industrial-calibration-mode-panel:has(.thermal-model-results-prototype),
+  .thermal-model-results-prototype {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .industrial-calibration-mode-panel:has(.thermal-model-results-prototype) {
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .industrial-calibration-mode-panel:has(.thermal-model-results-prototype)
+    > .industrial-calibration-live-grid {
+    height: 100%;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+    overflow: hidden;
+  }
+
+  .industrial-calibration-live-grid:has(.thermal-model-results-prototype)
+    > .industrial-calibration-live-stack {
+    display: none;
+  }
+
+  .thermal-calibration-prototype {
+    position: relative;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .thermal-calibration-card {
+    display: grid;
+    min-width: 0;
+    height: 100%;
+    min-height: 0;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 0.56rem;
+    border-radius: 18px;
+    background: var(--industrial-panel);
+    overflow: hidden;
+    box-shadow:
+      7px 8px 15px color-mix(in oklch, var(--industrial-shadow) 72%, transparent),
+      -5px -5px 12px color-mix(in oklch, var(--industrial-light) 86%, transparent);
+    padding: 0.78rem;
+  }
+
+  .thermal-calibration-card__header,
+  .thermal-calibration-card__footer,
+  .thermal-calibration-section-heading,
+  .thermal-calibration-metric-rail__heading {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+  }
+
+  .thermal-calibration-card__header h3,
+  .thermal-calibration-section-heading h4,
+  .thermal-calibration-metric-rail__heading h4 {
+    margin: 0;
+    color: var(--industrial-text);
+    font-size: 0.83rem;
+    font-weight: 850;
+    line-height: 1.15;
+  }
+
+  .thermal-calibration-card__header p,
+  .thermal-calibration-section-heading p,
+  .thermal-calibration-metric-rail__heading p {
+    margin: 0.12rem 0 0;
+    color: var(--industrial-muted-text);
+    font-size: 0.64rem;
+    font-weight: 680;
+    line-height: 1.25;
+  }
+
+  .thermal-calibration-card__body,
+  .thermal-calibration-layout,
+  .thermal-calibration-ledger__core {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .thermal-calibration-layout {
+    display: grid;
+    height: 100%;
+    gap: 0.56rem;
+  }
+
+  .thermal-calibration-layout--trace {
+    grid-template-columns: minmax(0, 1.34fr) minmax(12rem, 0.86fr);
+  }
+
+  .thermal-calibration-layout--rack {
+    grid-template-columns: minmax(8.8rem, 0.74fr) minmax(0, 1.14fr) minmax(10.8rem, 0.9fr);
+  }
+
+  .thermal-calibration-layout--ledger {
+    grid-template-rows: minmax(4rem, auto) minmax(0, 1fr);
+    gap: 0.52rem;
+  }
+
+  .thermal-calibration-ledger__core {
+    display: grid;
+    grid-template-columns: minmax(0, 1.16fr) minmax(13.2rem, 0.84fr);
+    gap: 0.56rem;
+  }
+
+  .thermal-calibration-ledger__evidence {
+    display: grid;
+    min-width: 0;
+    min-height: 0;
+    grid-template-rows: minmax(8.4rem, 1fr) auto;
+    align-content: start;
+    gap: 0.56rem;
+  }
+
+  .thermal-calibration-curve,
+  .thermal-calibration-metric-rail,
+  .thermal-calibration-phase-rail,
+  .thermal-calibration-register,
+  .thermal-calibration-transient,
+  .thermal-calibration-metric-band {
+    min-width: 0;
+    min-height: 0;
+    border-radius: 12px;
+    background: var(--industrial-bg);
+    box-shadow:
+      inset 3px 3px 7px color-mix(in oklch, var(--industrial-shadow) 50%, transparent),
+      inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
+  }
+
+  .thermal-calibration-curve {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 0.3rem;
+    padding: 0.65rem 0.68rem 0.56rem;
+  }
+
+  .thermal-calibration-section-heading {
+    align-items: flex-start;
+  }
+
+  .thermal-calibration-section-heading > span {
+    flex: 0 0 auto;
+    margin-top: 0.08rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.56rem;
+    font-weight: 800;
+    line-height: 1.2;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-curve__chart {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 5.7rem;
+    shape-rendering: geometricPrecision;
+  }
+
+  .thermal-calibration-curve__chart line {
+    stroke: color-mix(in oklch, var(--industrial-muted-text) 38%, transparent);
+    stroke-width: 1;
+  }
+
+  .thermal-calibration-curve__chart .thermal-calibration-curve__guide {
+    stroke-dasharray: 3 5;
+  }
+
+  .thermal-calibration-curve__chart polyline {
+    fill: none;
+    stroke: var(--industrial-accent);
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 3;
+  }
+
+  .thermal-calibration-curve__chart circle:not(.thermal-calibration-curve__live-point) {
+    fill: var(--industrial-panel);
+    stroke: var(--industrial-accent);
+    stroke-width: 2.6;
+  }
+
+  .thermal-calibration-curve__chart .thermal-calibration-curve__live-point {
+    fill: color-mix(in oklch, var(--industrial-accent) 24%, transparent);
+    stroke: color-mix(in oklch, var(--industrial-accent) 34%, transparent);
+    stroke-width: 1;
+  }
+
+  .thermal-calibration-curve__chart text {
+    fill: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px;
+    font-weight: 750;
+  }
+
+  .thermal-calibration-curve__samples {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 0.18rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .thermal-calibration-curve__samples li {
+    display: grid;
+    min-width: 0;
+    gap: 0.08rem;
+    border-left: 1px solid color-mix(in oklch, var(--industrial-muted-text) 20%, transparent);
+    padding-left: 0.26rem;
+  }
+
+  .thermal-calibration-curve__samples li:first-child {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .thermal-calibration-curve__samples span,
+  .thermal-calibration-curve__samples strong {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-curve__samples span {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.55rem;
+    font-weight: 750;
+    line-height: 1.1;
+  }
+
+  .thermal-calibration-curve__samples strong {
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.61rem;
+    font-weight: 850;
+    line-height: 1.15;
+  }
+
+  .thermal-calibration-metric-rail {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 0.54rem;
+    padding: 0.66rem;
+  }
+
+  .thermal-calibration-metric-rail__heading {
+    justify-content: flex-start;
+    gap: 0.38rem;
+  }
+
+  .thermal-calibration-metric-rail__heading > svg {
+    flex: 0 0 auto;
+    color: var(--industrial-green);
+  }
+
+  .thermal-calibration-metrics {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: center;
+    gap: 0.44rem 0.5rem;
+    margin: 0;
+  }
+
+  .thermal-calibration-metrics > div {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 0.3rem;
+    align-items: start;
+    border-top: 1px solid color-mix(in oklch, var(--industrial-muted-text) 20%, transparent);
+    padding-top: 0.36rem;
+  }
+
+  .thermal-calibration-metrics svg {
+    grid-row: span 2;
+    color: var(--industrial-muted-text);
+  }
+
+  .thermal-calibration-metrics dt,
+  .thermal-calibration-metrics dd {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-metrics dt {
+    color: var(--industrial-muted-text);
+    font-size: 0.56rem;
+    font-weight: 720;
+    line-height: 1.15;
+  }
+
+  .thermal-calibration-metrics dd {
+    margin: 0.08rem 0 0;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.65rem;
+    font-weight: 850;
+    line-height: 1.18;
+  }
+
+  .thermal-calibration-metric-rail__note {
+    margin: 0;
+    border-top: 1px solid color-mix(in oklch, var(--industrial-muted-text) 20%, transparent);
+    padding-top: 0.44rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.58rem;
+    font-weight: 700;
+    line-height: 1.32;
+  }
+
+  .thermal-calibration-phase-rail {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 0.42rem;
+    padding: 0.62rem;
+  }
+
+  .thermal-calibration-phase-rail ol {
+    display: grid;
+    min-height: 0;
+    align-content: space-between;
+    gap: 0.24rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .thermal-calibration-phase-rail li {
+    position: relative;
+    display: grid;
+    min-width: 0;
+    grid-template-columns: 0.72rem minmax(0, 1fr);
+    align-items: center;
+    gap: 0.36rem;
+  }
+
+  .thermal-calibration-phase-rail li:not(:last-child)::after {
+    position: absolute;
+    top: calc(50% + 0.4rem);
+    bottom: calc(-50% + 0.4rem);
+    left: 0.31rem;
+    width: 1px;
+    background: color-mix(in oklch, var(--industrial-muted-text) 30%, transparent);
+    content: "";
+  }
+
+  .thermal-calibration-phase-rail li > span {
+    position: relative;
+    z-index: 1;
+    width: 0.66rem;
+    height: 0.66rem;
+    border: 2px solid var(--industrial-muted-text);
+    border-radius: 999px;
+    background: var(--industrial-bg);
+  }
+
+  .thermal-calibration-phase-rail li[data-state="done"] > span {
+    border-color: var(--industrial-green);
+    background: var(--industrial-green);
+  }
+
+  .thermal-calibration-phase-rail li[data-state="active"] > span {
+    border-color: var(--industrial-accent);
+    background: var(--industrial-accent);
+    box-shadow: 0 0 0.45rem color-mix(in oklch, var(--industrial-accent) 48%, transparent);
+  }
+
+  .thermal-calibration-phase-rail li[data-state="done"]::after {
+    background: color-mix(in oklch, var(--industrial-green) 66%, var(--industrial-muted-text));
+  }
+
+  .thermal-calibration-phase-rail li > div {
+    display: grid;
+    min-width: 0;
+    gap: 0.06rem;
+  }
+
+  .thermal-calibration-phase-rail strong,
+  .thermal-calibration-phase-rail small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-phase-rail strong {
+    color: var(--industrial-text);
+    font-size: 0.64rem;
+    font-weight: 800;
+    line-height: 1.1;
+  }
+
+  .thermal-calibration-phase-rail small {
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.53rem;
+    font-weight: 750;
+    line-height: 1.1;
+  }
+
+  .thermal-calibration-metric-band {
+    display: flex;
+    align-items: center;
+    padding: 0.42rem 0.66rem;
+  }
+
+  .thermal-calibration-metric-band .thermal-calibration-metrics {
+    width: 100%;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0.6rem;
+  }
+
+  .thermal-calibration-metric-band .thermal-calibration-metrics > div {
+    border-top: 0;
+    grid-template-columns: 0.875rem minmax(0, 1fr);
+    column-gap: 0.4rem;
+    padding-top: 0;
+    padding-inline: 0.3rem;
+  }
+
+  .thermal-calibration-metric-band .thermal-calibration-metrics svg {
+    width: 0.875rem;
+    height: 0.875rem;
+    align-self: center;
+    stroke-width: 1.8;
+  }
+
+  .thermal-calibration-metric-band .thermal-calibration-metrics dt {
+    font-size: 0.66rem;
+    line-height: 1.18;
+  }
+
+  .thermal-calibration-metric-band .thermal-calibration-metrics dd {
+    margin-top: 0.08rem;
+    font-size: 0.78rem;
+    line-height: 1.18;
+  }
+
+  .thermal-calibration-metric-band .thermal-calibration-metrics > div:first-child {
+    padding-left: 0;
+  }
+
+  .thermal-calibration-register {
+    display: grid;
+    grid-template-rows: auto auto;
+    align-content: start;
+    gap: 0.36rem;
+    padding: 0.65rem;
+  }
+
+  .thermal-calibration-transient {
+    display: grid;
+    grid-template-rows: auto minmax(5.6rem, 1fr) auto;
+    gap: 0.3rem;
+    padding: 0.65rem;
+  }
+
+  .thermal-calibration-transient .thermal-calibration-section-heading h4 {
+    font-size: 0.82rem;
+  }
+
+  .thermal-calibration-transient .thermal-calibration-section-heading > span {
+    font-size: 0.58rem;
+  }
+
+  .thermal-calibration-transient__chart {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    min-height: 5.6rem;
+    shape-rendering: geometricPrecision;
+  }
+
+  .thermal-calibration-transient__chart text {
+    fill: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px;
+    font-weight: 750;
+  }
+
+  .thermal-calibration-transient__axis,
+  .thermal-calibration-transient__guide {
+    stroke: color-mix(in oklch, var(--industrial-muted-text) 38%, transparent);
+    stroke-width: 1;
+  }
+
+  .thermal-calibration-transient__guide {
+    stroke-dasharray: 3 5;
+  }
+
+  .thermal-calibration-transient__cutoff {
+    stroke: var(--industrial-accent);
+    stroke-dasharray: 3 3;
+    stroke-width: 1.4;
+  }
+
+  .thermal-calibration-transient__chart .thermal-calibration-transient__cutoff-label {
+    fill: var(--industrial-accent);
+    font-size: 8.5px;
+    font-weight: 850;
+  }
+
+  .thermal-calibration-transient__heating-line,
+  .thermal-calibration-transient__cooling-line,
+  .thermal-calibration-transient__ambient-line {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 2.6;
+  }
+
+  .thermal-calibration-transient__heating-line {
+    stroke: var(--industrial-accent);
+  }
+
+  .thermal-calibration-transient__ambient-line {
+    stroke: color-mix(in oklch, var(--industrial-muted-text) 76%, transparent);
+    stroke-dasharray: 2 3;
+    stroke-width: 2.1;
+  }
+
+  .thermal-calibration-transient__cooling-line {
+    stroke: var(--industrial-text);
+  }
+
+  .thermal-calibration-transient__live-point,
+  .thermal-calibration-transient__completion-point {
+    fill: var(--industrial-panel);
+    stroke-width: 2.1;
+  }
+
+  .thermal-calibration-transient__live-point {
+    stroke: var(--industrial-accent);
+  }
+
+  .thermal-calibration-transient__completion-point {
+    stroke: var(--industrial-text);
+  }
+
+  .thermal-calibration-transient__legend {
+    display: flex;
+    min-inline-size: 0;
+    flex-wrap: wrap;
+    gap: 0.44rem 0.7rem;
+    margin: 0;
+    border: 0;
+    padding: 0;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.56rem;
+    font-weight: 780;
+    line-height: 1.1;
+  }
+
+  .thermal-calibration-transient__legend span {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.24rem;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-transient__legend i {
+    width: 0.42rem;
+    height: 0.42rem;
+    border-radius: 999px;
+    background: var(--industrial-accent);
+  }
+
+  .thermal-calibration-transient__legend span[data-phase="ambient"] i {
+    background: var(--industrial-muted-text);
+  }
+
+  .thermal-calibration-transient__legend span[data-phase="cooling"] i {
+    background: var(--industrial-text);
+  }
+
+  .thermal-calibration-register .thermal-calibration-section-heading h4 {
+    font-size: 0.9rem;
+  }
+
+  .thermal-calibration-register .thermal-calibration-section-heading > span {
+    font-size: 0.62rem;
+  }
+
+  .thermal-calibration-register__table {
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    align-self: start;
+    border-collapse: collapse;
+    border-spacing: 0;
+    border-top: 1px solid color-mix(in oklch, var(--industrial-muted-text) 26%, transparent);
+    table-layout: fixed;
+  }
+
+  .thermal-calibration-register__table th,
+  .thermal-calibration-register__table td {
+    overflow: hidden;
+    border-bottom: 1px solid color-mix(in oklch, var(--industrial-muted-text) 16%, transparent);
+    padding: 0.36rem 0.26rem;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.64rem;
+    font-weight: 780;
+    line-height: 1.2;
+    text-align: left;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-register__table th:nth-child(1),
+  .thermal-calibration-register__table td:nth-child(1) {
+    width: 31%;
+  }
+
+  .thermal-calibration-register__table th:nth-child(2),
+  .thermal-calibration-register__table td:nth-child(2) {
+    width: 42%;
+  }
+
+  .thermal-calibration-register__table th:nth-child(3),
+  .thermal-calibration-register__table td:nth-child(3) {
+    width: 27%;
+  }
+
+  .thermal-calibration-register__table thead th {
+    color: var(--industrial-muted-text);
+    font-size: 0.58rem;
+    font-weight: 840;
+  }
+
+  .thermal-calibration-register__table tbody td:last-child {
+    color: var(--industrial-green);
+  }
+
+  .thermal-calibration-card__footer {
+    gap: 0.7rem;
+  }
+
+  .thermal-calibration-run-evidence {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.38rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.6rem;
+    font-weight: 780;
+    line-height: 1.2;
+  }
+
+  .thermal-calibration-run-evidence svg {
+    flex: 0 0 auto;
+    color: var(--industrial-green);
+  }
+
+  .thermal-calibration-status {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.34rem;
+    border: 1px solid color-mix(in oklch, var(--industrial-green) 42%, var(--industrial-panel));
+    border-radius: 999px;
+    padding: 0.34rem 0.5rem;
+    color: var(--industrial-green);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.58rem;
+    font-weight: 850;
+    line-height: 1;
+  }
+
+  .thermal-calibration-status > span {
+    width: 0.42rem;
+    height: 0.42rem;
+    border-radius: 999px;
+    background: var(--industrial-green);
+    box-shadow: 0 0 0.4rem color-mix(in oklch, var(--industrial-green) 60%, transparent);
+  }
+
+  .thermal-calibration-status--running {
+    border-color: color-mix(in oklch, var(--industrial-accent) 48%, var(--industrial-panel));
+    color: var(--industrial-accent);
+  }
+
+  .thermal-calibration-status--running > span {
+    background: var(--industrial-accent);
+    box-shadow: 0 0 0.46rem color-mix(in oklch, var(--industrial-accent) 68%, transparent);
+    animation: thermal-calibration-status-pulse 1.3s ease-in-out infinite;
+  }
+
+  .thermal-calibration-command {
+    display: inline-flex;
+    flex: 0 0 auto;
+    min-height: 2.55rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.42rem;
+    border: 0;
+    border-radius: 11px;
+    background: var(--industrial-accent);
+    box-shadow:
+      4px 4px 8px color-mix(in oklch, var(--industrial-accent) 38%, transparent),
+      -3px -3px 6px color-mix(in oklch, var(--industrial-accent-glow) 34%, transparent);
+    padding: 0.55rem 0.78rem;
+    color: var(--industrial-light);
+    cursor: pointer;
+    font-size: 0.64rem;
+    font-weight: 850;
+    line-height: 1;
+    transition:
+      box-shadow 160ms ease,
+      transform 160ms ease;
+    white-space: nowrap;
+  }
+
+  .thermal-calibration-command:hover {
+    box-shadow:
+      5px 5px 10px color-mix(in oklch, var(--industrial-accent) 44%, transparent),
+      -3px -3px 7px color-mix(in oklch, var(--industrial-accent-glow) 42%, transparent);
+    transform: translateY(-1px);
+  }
+
+  .thermal-calibration-command:active {
+    box-shadow:
+      inset 3px 3px 6px color-mix(in oklch, var(--industrial-accent) 46%, black 10%),
+      inset -2px -2px 5px color-mix(in oklch, var(--industrial-accent-glow) 32%, transparent);
+    transform: translateY(0);
+  }
+
+  .thermal-calibration-command:focus-visible,
+  .thermal-model-variant-switcher button:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 3px;
+  }
+
+  .thermal-model-variant-switcher {
+    position: fixed;
+    z-index: 40;
+    bottom: 0.2rem;
+    left: 50%;
+    display: flex;
+    min-width: max-content;
+    align-items: center;
+    gap: 0.34rem;
+    border: 1px solid color-mix(in oklch, var(--industrial-light) 22%, var(--industrial-slate) 78%);
+    border-radius: 14px;
+    background: var(--industrial-charcoal);
+    box-shadow:
+      8px 10px 20px color-mix(in oklch, var(--industrial-shadow-deep) 44%, transparent),
+      -2px -2px 6px color-mix(in oklch, var(--industrial-light) 25%, transparent);
+    padding: 0.34rem;
+    color: var(--industrial-light);
+    transform: translateX(-50%);
+  }
+
+  .thermal-model-variant-switcher > button {
+    display: inline-flex;
+    width: 2.2rem;
+    height: 2.2rem;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: color-mix(in oklch, var(--industrial-light) 80%, var(--industrial-green));
+    cursor: pointer;
+  }
+
+  .thermal-model-variant-switcher > button:hover {
+    background: color-mix(in oklch, var(--industrial-light) 12%, transparent);
+  }
+
+  .thermal-model-variant-switcher [role="tablist"] {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.15rem;
+    border-radius: 9px;
+    background: color-mix(in oklch, black 20%, transparent);
+    padding: 0.13rem;
+  }
+
+  .thermal-model-variant-switcher [role="tab"] {
+    min-height: 2.05rem;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    padding-inline: 0.58rem;
+    color: color-mix(in oklch, var(--industrial-light) 64%, var(--industrial-green));
+    cursor: pointer;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.61rem;
+    font-weight: 800;
+    line-height: 1;
+    transition:
+      background-color 160ms ease,
+      color 160ms ease;
+  }
+
+  .thermal-model-variant-switcher [role="tab"][data-state="active"] {
+    background: color-mix(in oklch, var(--industrial-accent) 86%, var(--industrial-charcoal));
+    color: var(--industrial-light);
+  }
+
+  .thermal-model-variant-switcher > span {
+    padding-inline: 0.28rem 0.18rem;
+    color: color-mix(in oklch, var(--industrial-light) 52%, var(--industrial-green));
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.56rem;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  @media (min-width: 64rem) and (max-height: 54rem) {
+    .thermal-calibration-card {
+      gap: 0.42rem;
+      padding: 0.62rem;
+    }
+
+    .thermal-calibration-layout--ledger {
+      grid-template-rows: minmax(2.5rem, auto) minmax(0, 1fr);
+      gap: 0.4rem;
+    }
+
+    .thermal-calibration-metric-band {
+      padding: 0.3rem 0.56rem;
+    }
+
+    .thermal-calibration-ledger__evidence {
+      gap: 0.4rem;
+    }
+
+    .thermal-calibration-register {
+      gap: 0.28rem;
+      padding: 0.56rem;
+    }
+
+    .thermal-calibration-register__table th,
+    .thermal-calibration-register__table td {
+      padding-block: 0.25rem;
+    }
+
+    .thermal-calibration-command {
+      min-height: 2.2rem;
+      padding: 0.46rem 0.72rem;
+    }
+  }
+
+  @keyframes thermal-calibration-status-pulse {
+    0%,
+    100% {
+      opacity: 0.56;
+      transform: scale(0.82);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .thermal-calibration-status--running > span,
+    .thermal-calibration-command {
+      animation: none;
+      transition: none;
     }
   }
 }

@@ -125,6 +125,7 @@ impl Identity {
         push_str(&mut capabilities, "status");
         push_str(&mut capabilities, "network");
         push_str(&mut capabilities, "calibration");
+        push_str(&mut capabilities, "thermal_plant_run");
         push_str(&mut capabilities, "install_status");
         #[cfg(feature = "web_serial")]
         {
@@ -340,6 +341,81 @@ pub struct ThermalPlantRuntimeWire {
     pub radiation_mw_per_k4: Option<f32>,
     pub thermal_capacity_mj_per_c: Option<f32>,
     pub transport_delay_ms: Option<u32>,
+}
+
+pub const THERMAL_PLANT_TRACE_PAGE_MAX: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalPlantRunPhaseWire {
+    Ambient,
+    Heating,
+    Cooling,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantTracePointWire {
+    pub sample_index: u8,
+    pub elapsed_ms: u32,
+    pub temperature_centi_c: i16,
+    pub heater_voltage_mv: u16,
+    pub duty_percent: u8,
+    pub phase: ThermalPlantRunPhaseWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantTracePageWire {
+    pub start_sample: u8,
+    pub next_sample: Option<u8>,
+    pub total_samples: u8,
+    pub points: Vec<ThermalPlantTracePointWire, THERMAL_PLANT_TRACE_PAGE_MAX>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantProvisionalCurveWire {
+    pub state: String<16>,
+    pub coverage_percent: u8,
+    pub curve: HeaterCurvePackageWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRunAttemptWire {
+    pub run_id: u32,
+    pub status: CalibrationJobStatusWire,
+    pub phase: Option<ThermalPlantRunPhaseWire>,
+    pub progress_percent: u8,
+    pub elapsed_ms: u32,
+    pub current_temp_centi_c: i16,
+    pub heater_voltage_mv: u16,
+    pub duty_percent: u8,
+    pub sample_count: u8,
+    pub restart_allowed: bool,
+    pub error: Option<String<ERROR_CODE_MAX_LEN>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantActiveResultWire {
+    pub transaction_id: u32,
+    pub curve: HeaterCurvePackageWire,
+    pub convection_mw_per_c: Option<f32>,
+    pub radiation_mw_per_k4: Option<f32>,
+    pub thermal_capacity_mj_per_c: Option<f32>,
+    pub transport_delay_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRunSnapshotWire {
+    pub version: u8,
+    pub attempt: Option<ThermalPlantRunAttemptWire>,
+    pub trace_page: ThermalPlantTracePageWire,
+    pub provisional_curve: Option<ThermalPlantProvisionalCurveWire>,
+    pub active_result: Option<ThermalPlantActiveResultWire>,
 }
 
 impl ControlPlaneStatus {
@@ -1449,6 +1525,10 @@ pub enum UsbFrame {
         request_id: String<REQUEST_ID_MAX_LEN>,
         command: CalibrationJobCommandWire,
     },
+    ThermalPlantRun {
+        request_id: String<REQUEST_ID_MAX_LEN>,
+        after_sample: u8,
+    },
     HeaterCurveConfig {
         request_id: String<REQUEST_ID_MAX_LEN>,
         config: HeaterCurveConfigCommand,
@@ -1552,6 +1632,8 @@ struct UsbFrameWire {
         skip_serializing_if = "Option::is_none"
     )]
     job_kind: Option<CalibrationJobKindWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after_sample: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<CalibrationStateWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1661,6 +1743,13 @@ struct UsbCalibrationJobInboundWire {
     op: Option<String<24>>,
     #[serde(rename = "kind", alias = "jobKind")]
     kind: Option<CalibrationJobKindWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbThermalPlantRunInboundWire {
+    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
+    after_sample: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -1795,6 +1884,10 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     kind: value.job_kind,
                 },
             }),
+            "thermal_plant_run" => Ok(UsbFrame::ThermalPlantRun {
+                request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                after_sample: value.after_sample.unwrap_or(0),
+            }),
             "heater_curve_config" => Ok(UsbFrame::HeaterCurveConfig {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 config: HeaterCurveConfigCommand {
@@ -1861,6 +1954,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             expected_mv: None,
             sample_index: None,
             job_kind: None,
+            after_sample: None,
             state: None,
             slot: None,
             fit: None,
@@ -1941,6 +2035,14 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.request_id = Some(request_id.clone());
                 wire.op = Some(string(command.op.as_str()));
                 wire.job_kind = command.kind;
+            }
+            UsbFrame::ThermalPlantRun {
+                request_id,
+                after_sample,
+            } => {
+                wire.frame_type = string("thermal_plant_run");
+                wire.request_id = Some(request_id.clone());
+                wire.after_sample = Some(*after_sample);
             }
             UsbFrame::HeaterCurveConfig { request_id, config } => {
                 wire.frame_type = string("heater_curve_config");
@@ -2091,6 +2193,7 @@ pub enum UsbResponsePayload {
     Wifi(WifiConfigReceipt),
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
+    ThermalPlantRun(ThermalPlantRunSnapshotWire),
     HeaterCurve(HeaterCurveStateWire),
     EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
     Ack,
@@ -2274,6 +2377,13 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
                     op: parse_calibration_job_op(frame.op.as_deref())?,
                     kind: frame.kind,
                 },
+            })
+        }
+        "thermal_plant_run" => {
+            let frame = parse_usb_wire::<UsbThermalPlantRunInboundWire>(trimmed)?;
+            Ok(UsbFrame::ThermalPlantRun {
+                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                after_sample: frame.after_sample.unwrap_or(0),
             })
         }
         "heater_curve_config" => {
@@ -3558,6 +3668,52 @@ mod tests {
         let json = write_usb_frame(&frame, &mut out).unwrap();
         assert!(json.contains(r#""type":"calibration_job""#));
         assert!(json.contains(r#""kind":"thermal_plant_auto""#));
+    }
+
+    #[test]
+    fn thermal_plant_run_frame_round_trips_cursor_and_cooling_phase() {
+        let request =
+            parse_usb_frame(r#"{"type":"thermal_plant_run","requestId":"run-1","afterSample":32}"#)
+                .unwrap();
+        assert_eq!(
+            request,
+            UsbFrame::ThermalPlantRun {
+                request_id: string("run-1"),
+                after_sample: 32,
+            }
+        );
+
+        let snapshot = ThermalPlantRunSnapshotWire {
+            version: 1,
+            attempt: None,
+            trace_page: ThermalPlantTracePageWire {
+                start_sample: 32,
+                next_sample: None,
+                total_samples: 33,
+                points: heapless::Vec::from_slice(&[ThermalPlantTracePointWire {
+                    sample_index: 32,
+                    elapsed_ms: 1_600,
+                    temperature_centi_c: 8_000,
+                    heater_voltage_mv: 0,
+                    duty_percent: 0,
+                    phase: ThermalPlantRunPhaseWire::Cooling,
+                }])
+                .unwrap(),
+            },
+            provisional_curve: None,
+            active_result: None,
+        };
+        let response = UsbFrame::Response {
+            request_id: string("run-1"),
+            ok: true,
+            result: Some(UsbResponsePayload::ThermalPlantRun(snapshot.clone())),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&response, &mut out).unwrap();
+        assert!(json.len() < USB_LINE_MAX_LEN);
+        assert!(json.contains(r#""phase":"cooling""#));
+        assert_eq!(parse_usb_frame(json).unwrap(), response);
     }
 
     #[test]

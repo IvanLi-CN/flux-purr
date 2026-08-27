@@ -334,6 +334,7 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/lan-pairing/code?lease_id=...`
 - `GET /api/v1/devices/:id/calibration?lease_id=...`
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...`
+- `GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>`
 - `GET /api/v1/devices/:id/events`
 - `PUT /api/v1/devices/:id/wifi`: WiFi provisioning is USB/devd-only. The live Web Settings form remains visible for a selected native `devd` device with `wifi_config`; without `wifi_state_v2` it locks every configuration control and reports that a protocol update is required. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. Its response is a redacted WiFi receipt with the device-published `NetworkSummary`; `devd` must reject an unversioned or malformed receipt. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. It never sends credentials over direct LAN or Web Serial.
 - `PUT /api/v1/devices/:id/runtime`
@@ -443,6 +444,8 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 ```
 
 `op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+
+`GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>` returns the v1 `ThermalPlantRunSnapshot`. `after_sample` defaults to `0`; the response starts at that sample index, returns at most 16 trace points, and includes `nextSample` when more points remain. The response exposes projected temperature, measured heater voltage, duty, elapsed time, and phase only; raw ADC values are excluded. The payload is bounded below 8 KiB. `attempt` reports the live or terminal run and `activeResult` is populated only after the persisted transaction commits. Clients should stop polling after terminal `restartAllowed=true`. A missing `thermal_plant_run` identity capability is an explicit compatibility state, not a retryable endpoint error.
 
 `POST /api/v1/devices/:id/eeprom` is the USB/devd-only advanced raw EEPROM maintenance endpoint. It requires an active lease and native USB serial transport; it is not exposed through the device LAN API or Web console. Physical heater output must already be `0%`.
 
@@ -790,6 +793,18 @@ Supported operations are `capture`, `delete`, `clear`, `import`, `set_active_slo
 ```
 
 Supported operations are `start` and `cancel`. `start` accepts `vin_adc_auto` and `thermal_plant_auto`. The response returns `CalibrationJobState`.
+
+### `thermal_plant_run`
+
+```json
+{
+  "type": "thermal_plant_run",
+  "requestId": "req-008",
+  "afterSample": 48
+}
+```
+
+The response payload is the same `ThermalPlantRunSnapshot` returned by the native and direct-LAN endpoint. `runId` is stable for one attempt, `sampleIndex` is the merge key, and `phase=cooling` identifies passive natural-cooling samples. The generic `get_calibration_job` request remains available for older firmware and clients.
 
 ### `heater_curve_config`
 

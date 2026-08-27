@@ -146,6 +146,7 @@ struct ParsedHttpHeader {
     authorization: Option<String<96>>,
     lease_id: Option<String<32>>,
     expected_revision: Option<u32>,
+    after_sample: Option<u8>,
     private_network: bool,
     content_length: usize,
 }
@@ -159,6 +160,7 @@ impl ParsedHttpHeader {
             authorization: self.authorization.as_ref().map(String::as_str),
             lease_id: self.lease_id.as_ref().map(String::as_str),
             expected_revision: self.expected_revision,
+            after_sample: self.after_sample,
             request_private_network: self.private_network,
             body,
             entropy: random_entropy(),
@@ -961,6 +963,7 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
         authorization: None,
         lease_id: None,
         expected_revision: None,
+        after_sample: None,
         private_network: false,
         content_length: 0,
     };
@@ -975,14 +978,17 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
         "OPTIONS" => Some(HttpMethod::Options),
         _ => None,
     };
-    let _ = parsed.path.push_str(
-        request_line
-            .next()
-            .unwrap_or("")
-            .split('?')
-            .next()
-            .unwrap_or(""),
-    );
+    let target = request_line.next().unwrap_or("");
+    let mut target_parts = target.splitn(2, '?');
+    let _ = parsed.path.push_str(target_parts.next().unwrap_or(""));
+    parsed.after_sample = target_parts.next().and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            (key == "after_sample")
+                .then(|| value.parse().ok())
+                .flatten()
+        })
+    });
     for line in lines {
         let Some((key, value)) = line.trim_end_matches('\r').split_once(':') else {
             continue;
@@ -1499,6 +1505,7 @@ fn random_u32() -> u32 {
 mod tests {
     use super::{
         complete_http_body, complete_http_header, decode_pairing_code, encode_pairing_code,
+        parse_http_header,
     };
 
     #[test]
@@ -1537,6 +1544,18 @@ mod tests {
     #[test]
     fn pairing_code_mirror_reserves_zero_for_inactive() {
         assert_eq!(decode_pairing_code(0), None);
+    }
+
+    #[test]
+    fn thermal_plant_http_query_preserves_the_paging_cursor() {
+        let request = b"GET /api/v1/calibration/thermal-plant/run?lease_id=lease-1&after_sample=16 HTTP/1.1\r\nHost: device\r\n\r\n";
+        let parsed = parse_http_header(request);
+
+        assert_eq!(
+            parsed.path.as_str(),
+            "/api/v1/calibration/thermal-plant/run"
+        );
+        assert_eq!(parsed.after_sample, Some(16));
     }
 
     #[test]

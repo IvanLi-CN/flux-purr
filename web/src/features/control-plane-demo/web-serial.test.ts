@@ -338,6 +338,25 @@ describe('web serial control-plane client', () => {
 
     await client.disconnect()
   })
+
+  it('reads the thermal plant run with its paging cursor and cooling trace', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const snapshot = await client.getThermalPlantRun(16)
+
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'thermal_plant_run',
+      afterSample: 16,
+    })
+    expect(snapshot.tracePage).toMatchObject({
+      startSample: 16,
+      points: [{ sampleIndex: 16, phase: 'cooling' }],
+    })
+
+    await client.disconnect()
+  })
 })
 
 class FakeSerial implements BrowserSerial {
@@ -701,6 +720,48 @@ function responseFor(request: Record<string, unknown>) {
           samplesCollected: 0,
           nextRequestMv: null,
           message: null,
+        },
+      },
+    }
+  }
+  if (request.type === 'thermal_plant_run') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        thermal_plant_run: {
+          version: 1,
+          attempt: {
+            runId: 9,
+            status: 'running',
+            phase: 'cooling',
+            progressPercent: 72,
+            elapsedMs: 120_000,
+            currentTempCentiC: 8000,
+            heaterVoltageMv: 0,
+            dutyPercent: 0,
+            sampleCount: 17,
+            restartAllowed: false,
+            error: null,
+          },
+          tracePage: {
+            startSample: request.afterSample ?? 0,
+            nextSample: null,
+            totalSamples: 17,
+            points: [
+              {
+                sampleIndex: request.afterSample ?? 0,
+                elapsedMs: 120_000,
+                temperatureCentiC: 8000,
+                heaterVoltageMv: 0,
+                dutyPercent: 0,
+                phase: 'cooling',
+              },
+            ],
+          },
+          provisionalCurve: null,
+          activeResult: null,
         },
       },
     }

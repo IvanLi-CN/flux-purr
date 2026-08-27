@@ -7,6 +7,7 @@ import type {
   DirectRuntimeConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
+  ThermalPlantRunSnapshot,
 } from './contracts'
 import { rememberKnownWebSerialDevice } from './known-web-serial-devices'
 import { ControlPlaneClientError } from './transport-client'
@@ -52,6 +53,7 @@ export interface LiveWebSerialControls {
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
   getCalibration: () => Promise<CalibrationState>
   getCalibrationJob: () => Promise<CalibrationJobState>
+  getThermalPlantRun: (afterSample?: number) => Promise<ThermalPlantRunSnapshot>
   configureCalibration: (
     request: Omit<CalibrationConfigRequest, 'leaseId'>
   ) => Promise<CalibrationState>
@@ -499,6 +501,27 @@ export function useLiveWebSerialScenario(
     }
   }, [appendEvent, requireClient, requireCurrentClient])
 
+  const getThermalPlantRun = useCallback(
+    async (afterSample = 0) => {
+      const client = requireClient()
+      try {
+        const snapshot = await client.getThermalPlantRun(afterSample)
+        requireCurrentClient(client)
+        appendEvent('thermal-model run snapshot read over browser Web Serial', 'success')
+        return snapshot
+      } catch (error) {
+        if (clientRef.current !== client) throw error
+        setError(
+          error instanceof Error ? error.message : 'Web Serial thermal-model snapshot read failed.'
+        )
+        setState('error')
+        appendEvent('browser Web Serial thermal-model snapshot read failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient, requireCurrentClient]
+  )
+
   const configureCalibrationJob = useCallback(
     async (request: Omit<CalibrationJobRequest, 'leaseId'>) => {
       const client = await requireClient()
@@ -628,6 +651,7 @@ export function useLiveWebSerialScenario(
       configureRuntime,
       getCalibration,
       getCalibrationJob,
+      getThermalPlantRun,
       configureCalibration,
       configureCalibrationJob,
       getHeaterCurve,
@@ -647,6 +671,7 @@ export function useLiveWebSerialScenario(
       error,
       getCalibration,
       getCalibrationJob,
+      getThermalPlantRun,
       getHeaterCurve,
       preauthorizedPortsReady,
       previewHeaterCurve,

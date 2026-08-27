@@ -93,11 +93,14 @@ use flux_purr_firmware::control_plane::hello_frame;
 use flux_purr_firmware::control_plane::{
     AdcCalibrationSourceWire, AdcDiagnosticsWire, ApiError, CalibrationControlCommand,
     CalibrationJobKindWire, CalibrationJobStateWire, CalibrationJobStatusWire, CalibrationModeWire,
-    CalibrationRuntimeStateWire, ControlPlaneStatus, Identity, InstallStatus, RuntimeConfigCommand,
-    ThermalControlProfileOp, ThermalControlProfilePointWire, ThermalControlProfileSettingsWire,
-    ThermalControlProfileWire, ThermalControlRuntimeWire, ThermalPlantRuntimeWire, UsbFrame,
-    UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
-    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
+    CalibrationRuntimeStateWire, ControlPlaneStatus, HeaterCurvePackageWire, Identity,
+    InstallStatus, RuntimeConfigCommand, ThermalControlProfileOp, ThermalControlProfilePointWire,
+    ThermalControlProfileSettingsWire, ThermalControlProfileWire, ThermalControlRuntimeWire,
+    ThermalPlantActiveResultWire, ThermalPlantProvisionalCurveWire, ThermalPlantRunAttemptWire,
+    ThermalPlantRunPhaseWire, ThermalPlantRunSnapshotWire, ThermalPlantRuntimeWire,
+    ThermalPlantTracePageWire, ThermalPlantTracePointWire, UsbFrame, UsbFrameError, UsbRequestOp,
+    UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
+    network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -3943,7 +3946,9 @@ enum ThermalPlantAutoPhase {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Debug)]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 struct CalibrationThermalPlantAutoJob {
+    run_id: u32,
     phase: ThermalPlantAutoPhase,
     source_max_mv: u16,
     source_current_ma: u16,
@@ -3965,6 +3970,7 @@ struct CalibrationThermalPlantAutoJob {
 #[derive(Debug, Default)]
 struct CalibrationThermalPlantWorkspace {
     job: Option<CalibrationThermalPlantAutoJob>,
+    next_run_id: u32,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -4572,6 +4578,145 @@ fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> ThermalPlantRunti
         thermal_capacity_mj_per_c: active_projection
             .map(|projection| projection.thermal_capacity_mj_per_c),
         transport_delay_ms: active_projection.map(|projection| projection.transport_delay_ms),
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn thermal_plant_run_snapshot_wire(
+    calibration: &CalibrationRuntimeState,
+    memory_config: &MemoryConfig,
+    workspace: &CalibrationThermalPlantWorkspace,
+    after_sample: u8,
+    current_temp_c: f32,
+    heater_voltage_mv: u32,
+    duty_percent: u8,
+) -> ThermalPlantRunSnapshotWire {
+    let current_temp_centi_c = round_to_i16(current_temp_c * 100.0);
+    let current_voltage_mv = heater_voltage_mv.min(u32::from(u16::MAX)) as u16;
+    let job = workspace.job.as_ref();
+    let persisted = memory_config.thermal_plant_transient_active.as_ref();
+    let (samples, sample_count) = if let Some(job) = job {
+        (&job.samples[..], job.sample_count)
+    } else if let Some(transaction) = persisted {
+        (&transaction.samples[..], transaction.sample_count)
+    } else {
+        (&[][..], 0)
+    };
+    let run_id = job
+        .map(|value| value.run_id)
+        .or_else(|| (workspace.next_run_id != 0).then_some(workspace.next_run_id))
+        .or_else(|| persisted.map(|transaction| transaction.transaction_id))
+        .unwrap_or(0);
+
+    let start = after_sample.min(sample_count);
+    let mut points = heapless::Vec::new();
+    let mut saw_heating = samples
+        .iter()
+        .take(usize::from(start))
+        .any(|sample| sample.duty_percent > 0);
+    for (offset, sample) in samples
+        .iter()
+        .take(usize::from(sample_count))
+        .enumerate()
+        .skip(usize::from(start))
+        .take(flux_purr_firmware::control_plane::THERMAL_PLANT_TRACE_PAGE_MAX)
+    {
+        let phase = if sample.duty_percent > 0 {
+            saw_heating = true;
+            ThermalPlantRunPhaseWire::Heating
+        } else if saw_heating {
+            ThermalPlantRunPhaseWire::Cooling
+        } else {
+            ThermalPlantRunPhaseWire::Ambient
+        };
+        let temperature_centi_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)
+            .map(|value| round_to_i16(value * 100.0))
+            .unwrap_or(current_temp_centi_c);
+        let _ = points.push(ThermalPlantTracePointWire {
+            sample_index: offset as u8,
+            elapsed_ms: u32::from(sample.elapsed_ticks)
+                .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
+            temperature_centi_c,
+            heater_voltage_mv: u16::from(sample.heater_voltage_100mv).saturating_mul(100),
+            duty_percent: sample.duty_percent.min(100),
+            phase,
+        });
+    }
+    let next_sample = if start.saturating_add(points.len() as u8) < sample_count {
+        Some(start.saturating_add(points.len() as u8))
+    } else {
+        None
+    };
+
+    let trace_page = ThermalPlantTracePageWire {
+        start_sample: start,
+        next_sample,
+        total_samples: sample_count,
+        points,
+    };
+    let provisional_curve = job.and_then(|job| {
+        heater_curve_from_transient_bins(&job.heater_curve.bins).map(|curve| {
+            let covered = job
+                .heater_curve
+                .bins
+                .iter()
+                .filter(|bin| bin.samples > 0)
+                .count() as u8;
+            ThermalPlantProvisionalCurveWire {
+                state: {
+                    let mut state = heapless::String::new();
+                    let _ = state.push_str("preview");
+                    state
+                },
+                coverage_percent: covered.saturating_mul(25),
+                curve: HeaterCurvePackageWire::from_memory(&curve, None),
+            }
+        })
+    });
+    let active_result = persisted.and_then(|transaction| {
+        thermal_plant_projection_from_transient(transaction).map(|projection| {
+            ThermalPlantActiveResultWire {
+                transaction_id: transaction.transaction_id,
+                curve: HeaterCurvePackageWire::from_memory(
+                    &memory_config.active_heater_curve,
+                    Some(&memory_config.heater_curve_raw_observations),
+                ),
+                convection_mw_per_c: Some(projection.convection_mw_per_c),
+                radiation_mw_per_k4: Some(projection.radiation_mw_per_k4),
+                thermal_capacity_mj_per_c: Some(projection.thermal_capacity_mj_per_c),
+                transport_delay_ms: Some(projection.transport_delay_ms),
+            }
+        })
+    });
+    let attempt = job.map(|job| ThermalPlantRunAttemptWire {
+        run_id,
+        status: calibration.job.status.to_wire(),
+        phase: Some(match job.phase {
+            ThermalPlantAutoPhase::Ambient => ThermalPlantRunPhaseWire::Ambient,
+            ThermalPlantAutoPhase::Heating => ThermalPlantRunPhaseWire::Heating,
+            ThermalPlantAutoPhase::Cooling => ThermalPlantRunPhaseWire::Cooling,
+        }),
+        progress_percent: calibration.job.progress_percent,
+        elapsed_ms: job
+            .elapsed_ticks
+            .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
+        current_temp_centi_c,
+        heater_voltage_mv: current_voltage_mv,
+        duty_percent: duty_percent.min(100),
+        sample_count: job.sample_count,
+        restart_allowed: calibration.job.status != CalibrationJobStatus::Running
+            && !calibration.immediate_heater_disarm_pending
+            && !calibration.thermal_plant_completion_disarm_pending,
+        error: calibration.job.message.map(manual_pps_error_code),
+    });
+
+    ThermalPlantRunSnapshotWire {
+        version: 1,
+        attempt,
+        trace_page,
+        provisional_curve,
+        active_result,
     }
 }
 
@@ -8414,7 +8559,10 @@ fn calibration_job_start_with_workspace(
                 next_request_mv: Some(request_mv),
                 message: None,
             };
+            thermal_plant_workspace.next_run_id =
+                thermal_plant_workspace.next_run_id.wrapping_add(1).max(1);
             thermal_plant_workspace.job = Some(CalibrationThermalPlantAutoJob {
+                run_id: thermal_plant_workspace.next_run_id,
                 phase: ThermalPlantAutoPhase::Ambient,
                 source_max_mv,
                 source_current_ma,
@@ -10119,6 +10267,12 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
             "Configuration writes are not available until hardware initialization completes.",
             true,
         ),
+        Ok(UsbFrame::ThermalPlantRun { request_id, .. }) => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Thermal-model run snapshots are not available until hardware initialization completes.",
+            true,
+        ),
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
             request_id,
             "unsupported_frame",
@@ -10333,6 +10487,12 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
             request_id,
             "hardware_bringup_failed",
             "Runtime writes are unavailable because hardware bring-up did not complete.",
+            true,
+        ),
+        Ok(UsbFrame::ThermalPlantRun { request_id, .. }) => usb_error_response_with_retryable(
+            request_id,
+            "hardware_bringup_failed",
+            "Thermal-model run snapshots are unavailable because hardware bring-up did not complete.",
             true,
         ),
         Ok(UsbFrame::Response { request_id, .. }) => usb_error_response(
@@ -10793,6 +10953,21 @@ async fn process_control_line(
                 )
             }
         }
+        Ok(UsbFrame::ThermalPlantRun {
+            request_id,
+            after_sample,
+        }) => usb_response(
+            request_id,
+            UsbResponsePayload::ThermalPlantRun(thermal_plant_run_snapshot_wire(
+                calibration_runtime_state,
+                memory_config,
+                thermal_plant_workspace,
+                after_sample,
+                latest_status_temp_c,
+                latest_vin_mv,
+                last_heater_duty,
+            )),
+        ),
         Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
             if ui_state.eeprom_data_incompatible {
                 usb_error_response(
@@ -10987,6 +11162,16 @@ fn lan_command_to_control_line(
         return Ok(line);
     }
 
+    if command.endpoint == LanEndpoint::ThermalPlantRun && command.method == HttpMethod::Get {
+        write!(
+            line,
+            r#"{{"type":"thermal_plant_run","requestId":"lan","afterSample":{}}}"#,
+            command.after_sample.unwrap_or(0)
+        )
+        .map_err(|_| "LAN request is too large")?;
+        return Ok(line);
+    }
+
     // Saving the current heater-curve preview has no payload in the shared
     // USB JSONL contract. Do not force it through the JSON-object adapter.
     if command.endpoint == LanEndpoint::HeaterCurveSave {
@@ -11076,6 +11261,7 @@ fn lan_frame_response(
             UsbResponsePayload::Wifi(value) => lan_json_response(value),
             UsbResponsePayload::Calibration(value) => lan_json_response(value),
             UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),
+            UsbResponsePayload::ThermalPlantRun(value) => lan_json_response(value),
             UsbResponsePayload::HeaterCurve(value) => lan_json_response(value),
             UsbResponsePayload::EepromBytes(_) => (
                 404,
@@ -16248,6 +16434,7 @@ mod tests {
             ..CalibrationRuntimeState::default()
         };
         test_install_thermal_plant_job(CalibrationThermalPlantAutoJob {
+            run_id: 1,
             phase: ThermalPlantAutoPhase::Heating,
             source_max_mv: 20_000,
             source_current_ma: 3_000,

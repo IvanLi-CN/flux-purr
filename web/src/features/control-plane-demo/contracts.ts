@@ -144,6 +144,61 @@ export interface CalibrationRuntimeState {
   job: CalibrationJobState
 }
 
+export type ThermalPlantRunPhase = 'ambient' | 'heating' | 'cooling'
+
+export interface ThermalPlantTracePoint {
+  sampleIndex: number
+  elapsedMs: number
+  temperatureCentiC: number
+  heaterVoltageMv: number
+  dutyPercent: number
+  phase: ThermalPlantRunPhase
+}
+
+export interface ThermalPlantTracePage {
+  startSample: number
+  nextSample?: number | null
+  totalSamples: number
+  points: ThermalPlantTracePoint[]
+}
+
+export interface ThermalPlantProvisionalCurve {
+  state: string
+  coveragePercent: number
+  curve: HeaterCurvePackage
+}
+
+export interface ThermalPlantRunAttempt {
+  runId: number
+  status: CalibrationJobStatus
+  phase?: ThermalPlantRunPhase | null
+  progressPercent: number
+  elapsedMs: number
+  currentTempCentiC: number
+  heaterVoltageMv: number
+  dutyPercent: number
+  sampleCount: number
+  restartAllowed: boolean
+  error?: string | null
+}
+
+export interface ThermalPlantActiveResult {
+  transactionId: number
+  curve: HeaterCurvePackage
+  convectionMwPerC?: number | null
+  radiationMwPerK4?: number | null
+  thermalCapacityMjPerC?: number | null
+  transportDelayMs?: number | null
+}
+
+export interface ThermalPlantRunSnapshot {
+  version: number
+  attempt?: ThermalPlantRunAttempt | null
+  tracePage: ThermalPlantTracePage
+  provisionalCurve?: ThermalPlantProvisionalCurve | null
+  activeResult?: ThermalPlantActiveResult | null
+}
+
 export interface ApiErrorEnvelope {
   error: {
     code: string
@@ -164,6 +219,7 @@ export interface DevdDeviceRecord {
   status: ControlPlaneStatus
   calibration?: CalibrationState
   heaterCurve?: HeaterCurveState
+  thermalPlantRun?: ThermalPlantRunSnapshot
   logs?: DevdLogEntry[]
   trace?: DevdTraceEntry[]
   events?: DevdEvent[]
@@ -443,6 +499,12 @@ export interface UsbCalibrationJobFrame {
   requestId: string
   op: CalibrationJobOp
   kind?: CalibrationJobKind
+}
+
+export interface UsbThermalPlantRunFrame {
+  type: 'thermal_plant_run'
+  requestId: string
+  afterSample?: number
 }
 
 export interface UsbCalibrationConfigFrame {

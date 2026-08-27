@@ -2,6 +2,10 @@
 
 > 当前有效规范以本文为准；实现覆盖与当前状态见 `./IMPLEMENTATION.md`，关键演进原因见 `./HISTORY.md`。
 
+## Related ADRs
+
+- [`0001-thermal-plant-run-snapshot`](../../adr/0001-thermal-plant-run-snapshot.md)
+
 ## 背景 / 问题陈述
 
 - Flux Purr S3 硬件把 `VIN_ADC` 接到 `GPIO1 / ADC1_CH0`，把 `RTD_ADC` 接到 `GPIO2 / ADC1_CH1`。
@@ -167,6 +171,52 @@ Arrays normalize to length `8`; empty slots are `null`.
 - `flux-purr calibration-mode voltage ...` enters `电压读数标定`, supports manual PPS, `+1V/-1V`, and `auto`.
 - `flux-purr calibration-mode temperature ...` enters `温度标定`, supports PPS + ADC hold target + heater on/off.
 - `flux-purr calibration-mode heater-curve ...` enters `加热曲线标定`, supports manual PPS/heater control plus `auto`.
+
+### `ThermalPlantRunSnapshot`
+
+The protected `thermal_plant_auto` job publishes a read-only run projection for the Web console. This projection is separate from `CalibrationJobState` so existing job readers remain compatible and the transient trace never becomes a persistence format.
+
+```json
+{
+  "version": 1,
+  "attempt": {
+    "runId": 7,
+    "status": "running",
+    "phase": "heating",
+    "progressPercent": 54,
+    "elapsedMs": 156000,
+    "currentTempCentiC": 13800,
+    "heaterVoltageMv": 21000,
+    "dutyPercent": 100,
+    "sampleCount": 64,
+    "restartAllowed": false,
+    "error": null
+  },
+  "tracePage": {
+    "startSample": 48,
+    "nextSample": 64,
+    "totalSamples": 128,
+    "points": [
+      {
+        "sampleIndex": 48,
+        "elapsedMs": 2400,
+        "temperatureCentiC": 13800,
+        "heaterVoltageMv": 21000,
+        "dutyPercent": 100,
+        "phase": "heating"
+      }
+    ]
+  },
+  "provisionalCurve": null,
+  "activeResult": null
+}
+```
+
+`runId` increments for each automatic attempt and is independent of the persisted `transactionId`. `attempt` describes the live or terminal run; `activeResult` is populated only from a valid EEPROM/flash transaction after the commit succeeds. A provisional curve may be shown while sampling, but it is never labeled or returned as active. `phase` is one of `ambient`, `heating`, or `cooling`; cooling points remain in the trace after the same-run `220C` heater cutoff and through the passive `80C` endpoint.
+
+`tracePage` is cursor based: the request supplies `afterSample`, the response starts at that sample index (the initial cursor is `0`), and each page contains at most `16` points. The `nextSample` value is the next cursor and is absent at the end. A page is an ordered projection of `sampleIndex`, `elapsedMs`, `temperatureCentiC`, `heaterVoltageMv`, `dutyPercent`, and `phase`; raw ADC values and internal transaction records are never exposed. Each response is bounded to `8 KiB`. Clients merge by `runId` and `sampleIndex`, drain the final pages, and stop polling when the terminal attempt has `restartAllowed=true`.
+
+When a device does not advertise the `thermal_plant_run` capability, clients display an explicit compatibility state and retain the existing `get_calibration_job` behavior without repeatedly requesting the unsupported endpoint. USB, direct LAN, and native `devd` expose this same v1 projection and cursor contract.
 
 ## 验收标准（Acceptance Criteria）
 

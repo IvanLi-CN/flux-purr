@@ -140,6 +140,22 @@ _Avoid_: Active Calibration Slot
 A diagnostic state in which required eFuse calibration data is unavailable and temperature-accuracy validation must stop.
 _Avoid_: Default calibration, valid calibration
 
+**Automatic Thermal-Model Result**:
+The last Device-confirmed, persisted result of a successful automatic thermal-model calibration. It is available for later review and identifies the active heater-resistance curve together with its thermal-model summary.
+_Avoid_: Temporary progress, preview, candidate
+
+**Calibration Outcome**:
+The terminal state of the most recent automatic calibration attempt. A failed or canceled Calibration Outcome does not erase the Automatic Thermal-Model Result from an earlier successful attempt.
+_Avoid_: Active thermal-model result
+
+**Active Thermal Model**:
+An Automatic Thermal-Model Result whose heater-resistance curve and thermal-model summary are confirmed by the Device as mutually valid and currently applied.
+_Avoid_: Cached result, historical result, preview
+
+**Advanced Manual Curve Tool**:
+The optional operator workflow for importing, previewing, or saving a heater-resistance curve. It is separate from an Automatic Thermal-Model Result.
+_Avoid_: Automatic thermal-model calibration
+
 ## Power And Communication
 
 **PD Request**:
