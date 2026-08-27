@@ -6176,7 +6176,7 @@ async fn run_bundle_flash_transaction(
     progress.stage_started("reset", json!({}));
     let mut reset = vec!["reset".into()];
     reset.extend(common);
-    progress.require(require_espflash_success(&program, &reset).await)?;
+    progress.require(require_bundle_espflash_success(&program, &reset, port_path).await)?;
     progress.stage_completed("reset", json!({}));
     Ok(())
 }
@@ -10493,6 +10493,43 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn bundle_flash_retries_a_transient_connection_failure() {
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("retrying-bundle-espflash.sh");
+        let attempts = dir.path().join("attempts.log");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"{}\"\nattempts=$(wc -l < \"{}\")\nif [ \"$attempts\" -eq 1 ]; then\n  printf '%s\\n' 'Broken pipe' >&2\n  exit 1\nfi\n",
+                attempts.display(),
+                attempts.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        require_bundle_espflash_success(
+            &program,
+            &[
+                "write-bin".to_string(),
+                "--before".to_string(),
+                "no-reset".to_string(),
+            ],
+            "/dev/cu.usbmodem2111401",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(attempts).unwrap(),
+            "write-bin --before no-reset\nwrite-bin --before usb-reset\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -12381,7 +12418,6 @@ mod tests {
 
         let network = extract_usb_payload::<NetworkSummary>(payload, "network").unwrap();
         assert_eq!(network.state, NetworkState::Disabled);
-
     }
 
     #[test]
