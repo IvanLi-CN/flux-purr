@@ -107,6 +107,8 @@ daemon endpoint 在更新 registry 后再发布 bounded event 时，必须先释
 
 对 ESP32-S3 USB Serial/JTAG 这类 host open 可能触发 reset 的设备，daemon 不应在每个 HTTP polling request 中反复 open/close 串口。更稳的模型是 per-port 持久 serial session：process lock 与 fd 同生命周期，正常 identity/network/status/runtime RPC 复用同一个 fd；启动日志中的 USB reset marker 只表示保持当前 fd 并等待启动响应，不能主动触发 reopen；只有 recoverable I/O error 才丢弃 session 并等待 port 重新出现。
 
+烧录在释放这个持久 session 后独占该端口。ESP32-S3 USB Serial/JTAG 的 `usb-reset` 连接失败时，只能在同一精确端口上等待有限窗口后重试一次完整事务，再 fallback 到 `default-reset`；不得把暂态断线当作切换到另一串口的理由，也不得把部分写入报告为成功。
+
 ### USB Lease 模型
 
 Mains Aegis 用短生命周期 Web lease 保护 USB 控制权：

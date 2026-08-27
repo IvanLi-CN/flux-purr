@@ -9164,7 +9164,7 @@ fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, 
 
 fn espflash_reset_modes(artifact: &FirmwareArtifact, port_path: &str) -> Vec<&'static str> {
     if artifact.target_chip == "esp32s3" && port_path.contains("usbmodem") {
-        vec!["usb-reset", "usb-reset"]
+        vec!["usb-reset", "usb-reset", "default-reset"]
     } else {
         vec!["default-reset"]
     }
@@ -10424,7 +10424,7 @@ mod tests {
     }
 
     #[test]
-    fn usbmodem_flash_retries_usb_reset_without_manual_boot_mode() {
+    fn usbmodem_flash_retries_usb_reset_before_default_reset_without_manual_boot_mode() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -10440,7 +10440,7 @@ mod tests {
 
         assert_eq!(
             espflash_reset_modes(&artifact, "/dev/cu.usbmodem2111401"),
-            ["usb-reset", "usb-reset"]
+            ["usb-reset", "usb-reset", "default-reset"]
         );
     }
 
@@ -10449,9 +10449,46 @@ mod tests {
         assert!(espflash_connection_failure_text(
             "IO error while using serial port: Broken pipe"
         ));
+        assert!(espflash_connection_failure_text(
+            "Error while connecting to device: No such file or directory (os error 2)"
+        ));
         assert!(!espflash_connection_failure_text(
             "Image verification failed after flash"
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn usbmodem_connection_failure_retries_usb_reset_before_default_reset() {
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("retrying-espflash.sh");
+        let attempts = dir.path().join("attempts.log");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\nattempts=$(wc -l < \"{}\")\nif [ \"$1\" = \"usb-reset\" ] && [ \"$attempts\" -eq 2 ]; then\n  exit 0\nfi\nprintf '%s\\n' 'Broken pipe' >&2\nexit 1\n",
+                attempts.display(),
+                attempts.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        run_espflash_with_reset_fallback_with_program(
+            &program,
+            &test_flash_artifact(),
+            "/dev/cu.usbmodem2111401",
+            |before_reset| Ok(vec![vec![before_reset.to_string()]]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(attempts).unwrap(),
+            "usb-reset\nusb-reset\n"
+        );
     }
 
     #[cfg(unix)]
