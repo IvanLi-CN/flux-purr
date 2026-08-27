@@ -10444,6 +10444,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn broken_pipe_is_an_espflash_connection_failure() {
+        assert!(espflash_connection_failure_text(
+            "IO error while using serial port: Broken pipe"
+        ));
+        assert!(!espflash_connection_failure_text(
+            "Image verification failed after flash"
+        ));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn espflash_subprocess_timeout_is_reported_without_hanging_the_request() {
