@@ -194,7 +194,7 @@ export function ThermalPlantRunCard({
               <h3>R(T) 代表点</h3>
               <span>{curve.length} / 5</span>
             </div>
-            <table>
+            <table aria-label="R(T) 代表点">
               <thead>
                 <tr>
                   <th>温度</th>
