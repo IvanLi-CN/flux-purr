@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "15a3f55c0826d8dfb4f950da296cdc71956dbb35",
+  "pr_number": 76,
+  "pr_title": "feat(control-plane): add thermal plant run snapshot",
+  "product": {
+    "effective_version": "0.21.0",
+    "tag": "v0.21.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "888c07e1c6b0f4566c4ad07517063c1f96d4bc8f",
+  "type_label": "type:minor"
+}
