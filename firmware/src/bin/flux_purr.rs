@@ -4135,6 +4135,12 @@ fn thermal_plant_calibration_temperature_c(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_cooling_complete(live_temp_c: f32, recorded_temp_c: f32) -> bool {
+    live_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
+        && recorded_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn thermal_plant_output_must_be_off(
     calibration: CalibrationRuntimeState,
     was_running: bool,
@@ -9401,6 +9407,17 @@ fn update_calibration_job_state_with_workspace(
                 );
                 return;
             }
+            let Some(recorded_temp_c) =
+                projected_rtd_temperature_c(memory_config, latest_rtd_raw_adc_mv)
+            else {
+                calibration_job_fail(
+                    calibration,
+                    ManualPpsError::ThermalPlantProjectionInvalid,
+                    true,
+                    manual_pps,
+                );
+                return;
+            };
             job.elapsed_ticks = job.elapsed_ticks.saturating_add(1);
             match job.phase {
                 ThermalPlantAutoPhase::Ambient => {
@@ -9418,7 +9435,7 @@ fn update_calibration_job_state_with_workspace(
                         if !record_thermal_plant_transient_sample(
                             job,
                             latest_rtd_raw_adc_mv,
-                            latest_temp_c,
+                            recorded_temp_c,
                             latest_vin_mv,
                             0,
                             true,
@@ -9486,7 +9503,7 @@ fn update_calibration_job_state_with_workspace(
                         || !record_thermal_plant_transient_sample(
                             job,
                             latest_rtd_raw_adc_mv,
-                            latest_temp_c,
+                            recorded_temp_c,
                             latest_vin_mv,
                             heater_duty_percent,
                             latest_temp_c >= THERMAL_PLANT_TARGET_TEMP_C,
@@ -9519,10 +9536,10 @@ fn update_calibration_job_state_with_workspace(
                         || !record_thermal_plant_transient_sample(
                             job,
                             latest_rtd_raw_adc_mv,
-                            latest_temp_c,
+                            recorded_temp_c,
                             latest_vin_mv,
                             heater_duty_percent,
-                            latest_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C,
+                            thermal_plant_cooling_complete(latest_temp_c, recorded_temp_c),
                         )
                     {
                         calibration_job_fail(
@@ -9538,7 +9555,7 @@ fn update_calibration_job_state_with_workspace(
                             / (THERMAL_PLANT_TARGET_TEMP_C - THERMAL_PLANT_COOL_COMPLETE_TEMP_C))
                             .clamp(0.0, 1.0)
                             * 39.0) as u8;
-                    if latest_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C {
+                    if thermal_plant_cooling_complete(latest_temp_c, recorded_temp_c) {
                         if !thermal_plant_curve_samples_ready(&job.heater_curve) {
                             calibration_job_fail(
                                 calibration,
@@ -16307,6 +16324,206 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
+        fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
+            let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
+            (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
+                / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+                .round() as u16
+        }
+
+        let memory_config = MemoryConfig {
+            commissioning_required: false,
+            ..MemoryConfig::default()
+        };
+        let mut preview_curve = HeaterCurveConfig::default();
+        for (index, (temp_centi_c, resistance_milliohms)) in [
+            (0, 2_948),
+            (2_000, 3_200),
+            (10_051, 4_213),
+            (14_075, 4_719),
+            (17_570, 5_158),
+            (20_615, 5_541),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            preview_curve.points[index] = Some(HeaterCurvePoint {
+                temp_centi_c,
+                resistance_milliohms,
+            });
+        }
+
+        // This is the public temperature trace from the physical device run:
+        // 50 ms startup samples, a 220C cutoff, and passive cooling to 80C.
+        let trace = [
+            (40, 32.67, 0),
+            (41, 32.67, 100),
+            (42, 32.67, 100),
+            (43, 32.67, 100),
+            (44, 32.67, 100),
+            (45, 32.67, 100),
+            (46, 32.67, 100),
+            (47, 32.67, 100),
+            (48, 33.08, 100),
+            (49, 32.67, 100),
+            (50, 32.67, 100),
+            (51, 32.67, 100),
+            (52, 33.08, 100),
+            (53, 33.08, 100),
+            (54, 33.08, 100),
+            (55, 33.08, 100),
+            (56, 33.08, 100),
+            (57, 33.49, 100),
+            (58, 33.08, 100),
+            (59, 33.49, 100),
+            (60, 33.49, 100),
+            (61, 33.90, 100),
+            (62, 33.90, 100),
+            (63, 33.90, 100),
+            (104, 38.01, 100),
+            (126, 41.75, 100),
+            (149, 45.94, 100),
+            (175, 50.17, 100),
+            (192, 54.02, 100),
+            (213, 58.33, 100),
+            (236, 62.26, 100),
+            (255, 66.66, 100),
+            (274, 70.66, 100),
+            (296, 74.70, 100),
+            (315, 78.77, 100),
+            (335, 82.43, 100),
+            (356, 86.58, 100),
+            (375, 90.77, 100),
+            (397, 95.00, 100),
+            (420, 99.27, 100),
+            (442, 103.59, 100),
+            (465, 107.46, 100),
+            (489, 111.85, 100),
+            (513, 115.79, 100),
+            (534, 119.77, 100),
+            (558, 123.78, 100),
+            (585, 128.34, 100),
+            (605, 131.92, 100),
+            (633, 136.04, 100),
+            (660, 140.20, 100),
+            (688, 144.40, 100),
+            (711, 148.63, 100),
+            (741, 152.37, 100),
+            (771, 156.68, 100),
+            (799, 161.03, 100),
+            (830, 165.42, 100),
+            (865, 169.29, 100),
+            (900, 173.76, 100),
+            (928, 177.70, 100),
+            (971, 181.68, 100),
+            (1004, 186.26, 100),
+            (1042, 189.73, 100),
+            (1082, 194.39, 100),
+            (1122, 198.51, 100),
+            (1165, 202.66, 100),
+            (1220, 206.85, 100),
+            (1251, 210.46, 100),
+            (1304, 214.72, 100),
+            (1358, 219.01, 100),
+            (1379, 220.24, 100),
+            (1380, 224.58, 0),
+            (1559, 220.24, 0),
+            (1643, 215.94, 0),
+            (1713, 211.68, 0),
+            (1754, 208.05, 0),
+            (1811, 203.85, 0),
+            (1871, 199.69, 0),
+            (1930, 195.56, 0),
+            (1984, 191.47, 0),
+            (2030, 187.42, 0),
+            (2082, 183.39, 0),
+            (2146, 179.40, 0),
+            (2193, 175.44, 0),
+            (2252, 170.96, 0),
+            (2329, 167.07, 0),
+            (2414, 163.22, 0),
+            (2474, 158.85, 0),
+            (2562, 155.06, 0),
+            (2672, 150.76, 0),
+            (2765, 147.04, 0),
+            (2852, 142.82, 0),
+            (2976, 138.63, 0),
+            (3093, 134.49, 0),
+            (3206, 130.38, 0),
+            (3313, 126.31, 0),
+            (3448, 122.28, 0),
+            (3608, 118.28, 0),
+            (3733, 114.31, 0),
+            (3939, 109.89, 0),
+            (4131, 106.00, 0),
+            (4306, 102.14, 0),
+            (4472, 97.84, 0),
+            (4692, 93.59, 0),
+            (4926, 89.84, 0),
+            (5131, 85.65, 0),
+            (5488, 81.51, 0),
+            (5647, 80.14, 0),
+        ];
+        assert!(trace.len() <= THERMAL_PLANT_TRANSIENT_MAX_SAMPLES);
+
+        let mut samples = [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_100mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+        for (index, (elapsed_ticks, temp_c, duty_percent)) in trace.into_iter().enumerate() {
+            samples[index] = ThermalPlantTransientSample {
+                elapsed_ticks,
+                raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temp_c),
+                heater_voltage_100mv: 200,
+                duty_percent,
+            };
+        }
+
+        let recorded_terminal_temp_c =
+            projected_rtd_temperature_c(&memory_config, samples[trace.len() - 1].raw_rtd_adc_mv)
+                .expect("fixture terminal temperature projects");
+        assert!(recorded_terminal_temp_c > THERMAL_PLANT_COOL_COMPLETE_TEMP_C);
+        assert!(!thermal_plant_cooling_complete(
+            79.99,
+            recorded_terminal_temp_c
+        ));
+        assert!(
+            fit_thermal_plant_transient(
+                0x4c49_5645,
+                raw_rtd_adc_mv_for_temp(32.67),
+                &samples,
+                trace.len() as u8,
+                Some(&preview_curve),
+                &memory_config,
+            )
+            .is_none(),
+            "a nonterminal recorded trace must not fit"
+        );
+
+        let mut terminal_samples = samples;
+        terminal_samples[trace.len() - 1].raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(79.73);
+        let terminal_temp_c = projected_rtd_temperature_c(
+            &memory_config,
+            terminal_samples[trace.len() - 1].raw_rtd_adc_mv,
+        )
+        .expect("terminal fixture temperature projects");
+        assert!(thermal_plant_cooling_complete(79.73, terminal_temp_c));
+        let (_, residual) = fit_thermal_plant_transient(
+            0x4c49_5645,
+            raw_rtd_adc_mv_for_temp(32.67),
+            &terminal_samples,
+            trace.len() as u8,
+            Some(&preview_curve),
+            &memory_config,
+        )
+        .expect("live device-shaped trace must produce a physical model");
+        assert!(residual <= 0.20);
     }
 
     #[test]

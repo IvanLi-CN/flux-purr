@@ -65,6 +65,33 @@ describe('bridge device identity validation', () => {
     ).toEqual(['lan-a0f262f20d6c'])
   })
 
+  it('merges repeated DEVD discovery records before rendering bridge candidates', () => {
+    const stale = {
+      id: 'serial-303a-1001-A0:F2:62:F2:0D:6C',
+      transport: 'devd',
+      bridgeTransport: 'usb',
+      connectionAvailable: false,
+      connectionCandidate: true,
+      leaseState: 'none',
+      location: '/dev/cu.usbmodem2111401',
+    } as DeviceTarget
+    const ready = {
+      ...stale,
+      connectionAvailable: true,
+      connectionCandidate: false,
+      leaseState: 'active',
+    } as DeviceTarget
+
+    const candidates = bridgeCandidatesForTransport({
+      transport: 'usb',
+      devices: [stale, ready],
+      lanDevices: [],
+    })
+
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]).toBe(ready)
+  })
+
   it('marks a registered DEVD LAN summary as a connectable candidate', () => {
     expect(
       devdLanSummaryToBridgeTarget({

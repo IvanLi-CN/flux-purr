@@ -285,6 +285,19 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 
 ![VIN ADC calibration layout](./assets/adc-calibration-vin-layout.png)
 
+### 自动热模型结果卡
+
+- source_type: `ui_demo`
+- target_program: `mock-only`
+- capture_scope: `page`
+- requested_viewport: `1440x900`
+- viewport_strategy: `devtools-emulate`
+- sensitive_exclusion: `N/A`
+
+`assets/thermal-plant-run-card-1440x900.png` shows the completed desktop thermal-model result card: the fitted R(T) curve is the primary view, while the same run's heating-to-natural-cooling trace and natural-height representative-point register remain visible in the evidence column.
+
+![Thermal plant run result card](./assets/thermal-plant-run-card-1440x900.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。

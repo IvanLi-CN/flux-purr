@@ -775,6 +775,7 @@ export function ControlPlaneDemo({
   const devdLeaseAllowedForRoute =
     !routedRecoveryIdentityId ||
     allowDemoControls ||
+    requestedConnectionByIdentity[routedRecoveryIdentityId]?.kind === 'bridge' ||
     routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
     serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
   const preferredLiveTransport = preferredLiveTransportForRoute({
@@ -792,10 +793,9 @@ export function ControlPlaneDemo({
     }),
     nativeRuntimeProbeEnabled: activeView !== 'update',
     leaseEnabled:
-      shouldHoldDevdLease(
-        selectedDeviceId,
-        activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
-      ) && devdLeaseAllowedForRoute,
+      activeView !== 'add-device' &&
+      shouldHoldDevdLease(selectedDeviceId) &&
+      devdLeaseAllowedForRoute,
   })
   const liveDevdScenario = liveDevd.scenario
   const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario, {
@@ -3278,11 +3278,31 @@ export function ControlPlaneDemo({
 
   const handleBridgeTargetSelect = (device: DeviceTarget) => {
     setPendingDevices((current) => upsertLanDeviceTarget(current, device))
-    handleDeviceChange(device.id, device)
+    const identityId = deviceIdentityId(device)
+    setRequestedConnectionByIdentity((current) => ({
+      ...current,
+      [identityId]: { kind: 'bridge', targetId: device.id },
+    }))
+    setRouteFallbackKind(undefined)
+
+    void requestCalibrationLeave(
+      {
+        reason: 'device-change',
+        nextLabel: device.alias,
+      },
+      () => {
+        if (navigation) {
+          return navigation.navigate({
+            kind: 'device',
+            deviceId: identityId,
+            view: 'dashboard',
+          })
+        }
+        setSelectedDeviceId(device.id)
+        return setConsoleView('dashboard')
+      }
+    )
     setSelectedAddDeviceKind(defaultAddDeviceKind)
-    if (!navigation) {
-      void setConsoleView('dashboard')
-    }
   }
 
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {

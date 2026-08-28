@@ -70,7 +70,8 @@ const FLASH_CONFIG_MIN_SIZE: u64 = 0x2000;
 const LEGACY_FLASH_CONFIG_OFFSET: u64 = 0x110000;
 const LEGACY_FLASH_CONFIG_SIZE: u64 = 0x2000;
 const FLASH_CONFIG_LABEL: &str = "flux_cfg";
-const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
@@ -6033,6 +6034,11 @@ async fn run_bundle_flash_transaction(
         port_path.into(),
         "--non-interactive".into(),
     ];
+    let initial_reset = if is_esp_usb_serial_jtag_port(port_path) {
+        "usb-reset"
+    } else {
+        "default-reset"
+    };
     let preserved_config = if operation == FirmwareOperation::Update {
         progress.stage_started("write_segments", json!({
             "completedUnits": 0,
@@ -6047,14 +6053,14 @@ async fn run_bundle_flash_transaction(
                 .map_err(bundle_http_error),
         )?;
         let path = workspace.path().join("preserved-flux-cfg.bin");
-        let mut args = vec!["read-flash".into()];
-        args.extend(common.clone());
-        args.extend([
-            format!("0x{:x}", copy.source_address),
-            format!("0x{:x}", copy.length),
-            path.to_string_lossy().into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &args).await)?;
+        let args = build_bundle_read_flash_args(
+            &common,
+            initial_reset,
+            copy.source_address,
+            copy.length,
+            &path,
+        );
+        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         let bytes =
             progress.require(fs::read(&path).map_err(|error| {
                 HttpError::internal(&format!("failed to stage flux_cfg: {error}"))
@@ -6076,7 +6082,7 @@ async fn run_bundle_flash_transaction(
             "--after".into(),
             "no-reset".into(),
         ]);
-        progress.require(require_espflash_success(&program, &args).await)?;
+        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         progress.stage_completed("erase", json!({}));
         progress.stage_started("write_segments", json!({
             "completedUnits": 0,
@@ -6092,21 +6098,9 @@ async fn run_bundle_flash_transaction(
         .sum::<u64>();
     let mut completed_bytes = 0_u64;
     for segment in &bundle.manifest.segments {
-        let mut args = vec!["write-bin".into()];
-        args.extend(common.clone());
-        args.extend([
-            "--before".into(),
-            "default-reset".into(),
-            "--after".into(),
-            "no-reset".into(),
-            format!("0x{:x}", segment.address),
-            workspace
-                .path()
-                .join(format!("{:?}.bin", segment.kind))
-                .to_string_lossy()
-                .into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &args).await)?;
+        let path = workspace.path().join(format!("{:?}.bin", segment.kind));
+        let args = build_bundle_write_bin_args(&common, "no-reset", segment.address, &path);
+        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         completed_bytes = completed_bytes.saturating_add(segment.length);
         progress.stage_progress(
             "write_segments",
@@ -6135,7 +6129,8 @@ async fn run_bundle_flash_transaction(
     );
     for (index, segment) in bundle.manifest.segments.iter().enumerate() {
         let checksum = build_checksum_md5_args(&common, segment.address, segment.length);
-        let output = progress.require(require_espflash_success(&program, &checksum).await)?;
+        let output = progress
+            .require(require_bundle_espflash_success(&program, &checksum, port_path).await)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
         if !stdout.contains(&segment.md5) {
             return Err(progress.fail(HttpError::internal(
@@ -6152,26 +6147,17 @@ async fn run_bundle_flash_transaction(
         );
     }
     if let Some((path, expected, copy)) = preserved_config {
-        let mut write = vec!["write-bin".into()];
-        write.extend(common.clone());
-        write.extend([
-            "--before".into(),
-            "default-reset".into(),
-            "--after".into(),
-            "no-reset".into(),
-            format!("0x{:x}", copy.target_address),
-            path.to_string_lossy().into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &write).await)?;
+        let write = build_bundle_write_bin_args(&common, "no-reset", copy.target_address, &path);
+        progress.require(require_bundle_espflash_success(&program, &write, port_path).await)?;
         let verified_path = workspace.path().join("verified-flux-cfg.bin");
-        let mut read = vec!["read-flash".into()];
-        read.extend(common.clone());
-        read.extend([
-            format!("0x{:x}", copy.target_address),
-            format!("0x{:x}", copy.length),
-            verified_path.to_string_lossy().into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &read).await)?;
+        let read = build_bundle_read_flash_args(
+            &common,
+            "no-reset",
+            copy.target_address,
+            copy.length,
+            &verified_path,
+        );
+        progress.require(require_bundle_espflash_success(&program, &read, port_path).await)?;
         let actual = progress.require(fs::read(verified_path).map_err(|error| {
             HttpError::internal(&format!("failed to verify preserved flux_cfg: {error}"))
         }))?;
@@ -6214,12 +6200,68 @@ async fn require_espflash_success(program: &Path, args: &[String]) -> Result<Out
     if output.status.success() {
         Ok(output)
     } else {
-        Err(HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "espflash_failed",
-            "Protected espflash transaction failed.",
-            true,
-        ))
+        Err(espflash_command_error(program, args, &output))
+    }
+}
+
+async fn require_bundle_espflash_success(
+    program: &Path,
+    args: &[String],
+    port_path: &str,
+) -> Result<Output, HttpError> {
+    let output = run_espflash_command_with_timeout(program, args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    let Some(retry_args) = is_esp_usb_serial_jtag_port(port_path)
+        .then(|| replace_espflash_before_reset(args, "usb-reset"))
+        .flatten()
+    else {
+        return Err(espflash_command_error(program, args, &output));
+    };
+    if !espflash_connection_failed(&output) {
+        return Err(espflash_command_error(program, args, &output));
+    }
+
+    tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+    let retry_output =
+        run_espflash_command_with_timeout(program, &retry_args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    if retry_output.status.success() {
+        return Ok(retry_output);
+    }
+    Err(HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: ApiError {
+            code: "espflash_failed".to_string(),
+            message: "Protected espflash transaction failed after USB recovery retry.".to_string(),
+            retryable: true,
+            details: Some(json!({
+                "initialAttempt": espflash_failure_details(program, args, &output),
+                "recoveryAttempt": espflash_failure_details(program, &retry_args, &retry_output),
+            })),
+        },
+    })
+}
+
+fn replace_espflash_before_reset(args: &[String], before_reset: &str) -> Option<Vec<String>> {
+    let index = args.iter().position(|argument| argument == "--before")?;
+    if args.get(index + 1).map(String::as_str) != Some("no-reset") {
+        return None;
+    }
+    let mut replaced = args.to_vec();
+    replaced[index + 1] = before_reset.to_string();
+    Some(replaced)
+}
+
+fn espflash_command_error(program: &Path, args: &[String], output: &Output) -> HttpError {
+    HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: ApiError {
+            code: "espflash_failed".to_string(),
+            message: "Protected espflash transaction failed.".to_string(),
+            retryable: true,
+            details: Some(espflash_failure_details(program, args, output)),
+        },
     }
 }
 
@@ -7825,12 +7867,27 @@ fn runtime_config_matches_status(
 }
 
 fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Value>, HttpError> {
-    let Ok(text) = std::str::from_utf8(line) else {
-        return Ok(None);
-    };
-    let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
-        return Ok(None);
-    };
+    const FRAME_PREFIX: &[u8] = br#"{"type":"#;
+    for (offset, candidate) in line.windows(FRAME_PREFIX.len()).enumerate() {
+        if candidate != FRAME_PREFIX {
+            continue;
+        }
+        let mut frames =
+            serde_json::Deserializer::from_slice(&line[offset..]).into_iter::<UsbResponseWire>();
+        let Some(Ok(frame)) = frames.next() else {
+            continue;
+        };
+        if let Some(payload) = decode_usb_response_frame(frame, request_id)? {
+            return Ok(Some(payload));
+        }
+    }
+    Ok(None)
+}
+
+fn decode_usb_response_frame(
+    frame: UsbResponseWire,
+    request_id: &str,
+) -> Result<Option<Value>, HttpError> {
     if frame.frame_type == "error" && frame.request_id.as_deref() == Some(request_id) {
         return Err(HttpError {
             status: StatusCode::BAD_GATEWAY,
@@ -8364,9 +8421,37 @@ where
                 run_espflash_command_with_timeout(program, &args, ESPFLASH_COMMAND_TIMEOUT).await?;
 
             if !output.status.success() {
+                if espflash_flash_end_requires_reset(&args, &output) {
+                    let reset_args = build_espflash_reset_args(artifact, port_path, before_reset)?;
+                    let reset_output = run_espflash_command_with_timeout(
+                        program,
+                        &reset_args,
+                        ESPFLASH_COMMAND_TIMEOUT,
+                    )
+                    .await?;
+
+                    if reset_output.status.success() {
+                        // The ROM accepted the image data but rejected the final
+                        // run-user-code transition. Reset once, then let the caller
+                        // require the normal runtime-ready verification.
+                        return Ok(());
+                    }
+
+                    return Err(HttpError::internal_with_details(
+                        "flash_recovery_reset_failed",
+                        "espflash reached FlashEnd but the recovery reset failed.",
+                        json!({
+                            "flashAttempt": espflash_failure_details(program, &args, &output),
+                            "resetAttempt": espflash_failure_details(program, &reset_args, &reset_output),
+                        }),
+                    ));
+                }
                 retry_with_next_reset =
                     mode_index + 1 < reset_modes.len() && espflash_connection_failed(&output);
                 if retry_with_next_reset {
+                    if is_esp_usb_serial_jtag_port(port_path) {
+                        tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+                    }
                     break;
                 }
                 return Err(HttpError::internal_with_details(
@@ -8436,6 +8521,10 @@ struct FlashConfigStaging {
     _workspace: tempfile::TempDir,
     plan: FlashConfigMigrationPlan,
     source_path: PathBuf,
+}
+
+fn flash_config_restore_required(plan: &FlashConfigMigrationPlan) -> bool {
+    plan.source.offset != plan.destination.offset || plan.source.size != plan.destination.size
 }
 
 fn flash_partition_ranges(table: &esp_idf_part::PartitionTable) -> Vec<FlashPartitionRange> {
@@ -8596,8 +8685,9 @@ fn build_espflash_read_flash_args(
         "--before".to_string(),
         before_reset.to_string(),
         "--non-interactive".to_string(),
+        "--no-stub".to_string(),
         "--after".to_string(),
-        "hard-reset".to_string(),
+        "no-reset".to_string(),
         format!("0x{address:x}"),
         format!("0x{size:x}"),
         output_path.to_string_lossy().into_owned(),
@@ -8627,10 +8717,76 @@ fn build_espflash_write_bin_args(
         before_reset.to_string(),
         "--non-interactive".to_string(),
         "--after".to_string(),
-        "hard-reset".to_string(),
+        "no-reset".to_string(),
         format!("0x{address:x}"),
         input_path.to_string_lossy().into_owned(),
     ])
+}
+
+fn build_espflash_reset_args(
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    before_reset: &str,
+) -> Result<Vec<String>, HttpError> {
+    if port_path.is_empty() {
+        return Err(HttpError::bad_request(
+            "missing_port",
+            "Real flash requires an explicit serial port.",
+        ));
+    }
+    Ok(vec![
+        "reset".to_string(),
+        "--chip".to_string(),
+        artifact.target_chip.clone(),
+        "--port".to_string(),
+        port_path.to_string(),
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--after".to_string(),
+        "hard-reset".to_string(),
+        "--non-interactive".to_string(),
+    ])
+}
+
+fn build_bundle_read_flash_args(
+    common: &[String],
+    before_reset: &str,
+    address: u64,
+    size: u64,
+    output_path: &Path,
+) -> Vec<String> {
+    let mut args = vec!["read-flash".to_string()];
+    args.extend(common.iter().cloned());
+    args.extend([
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--no-stub".to_string(),
+        "--after".to_string(),
+        "no-reset".to_string(),
+        format!("0x{address:x}"),
+        format!("0x{size:x}"),
+        output_path.to_string_lossy().into_owned(),
+    ]);
+    args
+}
+
+fn build_bundle_write_bin_args(
+    common: &[String],
+    before_reset: &str,
+    address: u64,
+    input_path: &Path,
+) -> Vec<String> {
+    let mut args = vec!["write-bin".to_string()];
+    args.extend(common.iter().cloned());
+    args.extend([
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--after".to_string(),
+        "no-reset".to_string(),
+        format!("0x{address:x}"),
+        input_path.to_string_lossy().into_owned(),
+    ]);
+    args
 }
 
 async fn stage_flash_config_before_app_flash_with_program(
@@ -8700,42 +8856,6 @@ async fn stage_flash_config_before_app_flash_with_program(
         ));
     }
 
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_write_bin_args(
-            artifact,
-            port_path,
-            before_reset,
-            plan.destination.offset,
-            &source_path,
-        )?])
-    })
-    .await?;
-
-    let verification_path = flash_config_staging_path(workspace.path(), "flux_cfg-verify.bin");
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_read_flash_args(
-            artifact,
-            port_path,
-            before_reset,
-            plan.destination.offset,
-            plan.source.size,
-            &verification_path,
-        )?])
-    })
-    .await?;
-    let verification = fs::read(&verification_path).map_err(|_| {
-        HttpError::internal_with_details(
-            "flash_config_verify_unreadable",
-            "Unable to verify the preserved device configuration; refusing to flash.",
-            json!({}),
-        )
-    })?;
-    if verification != source {
-        return Err(HttpError::bad_request(
-            "flash_config_verify_failed",
-            "Device configuration preservation could not be verified; refusing to flash.",
-        ));
-    }
     Ok(Some(FlashConfigStaging {
         _workspace: workspace,
         plan,
@@ -8749,6 +8869,10 @@ async fn restore_flash_config_after_app_flash_with_program(
     port_path: &str,
     staging: &FlashConfigStaging,
 ) -> Result<(), HttpError> {
+    // The app image does not overlap flux_cfg when the partition range is unchanged.
+    if !flash_config_restore_required(&staging.plan) {
+        return Ok(());
+    }
     run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
         Ok(vec![build_espflash_write_bin_args(
             artifact,
@@ -8794,6 +8918,14 @@ async fn restore_flash_config_after_app_flash_with_program(
             "Device configuration restoration could not be verified.",
         ));
     }
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_reset_args(
+            artifact,
+            port_path,
+            before_reset,
+        )?])
+    })
+    .await?;
     Ok(())
 }
 
@@ -8847,8 +8979,21 @@ fn espflash_failure_details(program: &Path, args: &[String], output: &Output) ->
 }
 
 fn espflash_connection_failed(output: &Output) -> bool {
-    bounded_espflash_output(&output.stderr).contains("Failed to connect to the device")
-        || bounded_espflash_output(&output.stdout).contains("Failed to connect to the device")
+    espflash_connection_failure_text(&bounded_espflash_output(&output.stderr))
+        || espflash_connection_failure_text(&bounded_espflash_output(&output.stdout))
+}
+
+fn espflash_flash_end_requires_reset(args: &[String], output: &Output) -> bool {
+    args.first().map(String::as_str) == Some("flash")
+        && bounded_espflash_output(&output.stderr).contains("Error while running FlashEnd command")
+}
+
+fn espflash_connection_failure_text(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("failed to connect to the device")
+        || output.contains("error while connecting to device")
+        || output.contains("no such device or address")
+        || output.contains("broken pipe")
 }
 
 fn bounded_espflash_output(bytes: &[u8]) -> String {
@@ -8926,6 +9071,7 @@ fn build_espflash_args_with_reset_mode(
             "--before".to_string(),
             before_reset.to_string(),
             "--non-interactive".to_string(),
+            "--no-stub".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
         ];
@@ -9018,7 +9164,7 @@ fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, 
 
 fn espflash_reset_modes(artifact: &FirmwareArtifact, port_path: &str) -> Vec<&'static str> {
     if artifact.target_chip == "esp32s3" && port_path.contains("usbmodem") {
-        vec!["usb-reset", "default-reset"]
+        vec!["usb-reset", "usb-reset"]
     } else {
         vec!["default-reset"]
     }
@@ -9280,10 +9426,13 @@ fn sanitize_io_error(error: io::Error) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::ExitStatus;
     use tempfile::tempdir;
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
 
     fn flash_partition_layout(entries: &[(&str, u64, u64)]) -> Vec<FlashPartitionRange> {
         entries
@@ -9359,7 +9508,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\naction=\"$1\"\nlast=\"\"\naddress=\"\"\nfor arg in \"$@\"; do\n  last=\"$arg\"\n  case \"$arg\" in\n    0x8000|0x110000|0x210000) address=\"$arg\" ;;\n  esac\ndone\nif [ \"$action\" = \"read-flash\" ]; then\n  case \"$address\" in\n    0x8000) cp \"{}\" \"$last\" ;;\n    0x110000) cp \"{}\" \"$last\" ;;\n    0x210000) cp \"{}\" \"$last\" ;;\n    *) exit 43 ;;\n  esac\n  exit 0\nfi\nif [ \"$action\" = \"write-bin\" ]; then\n  if [ \"$address\" = \"0x210000\" ]; then\n    {}\n  else\n    exit 44\n  fi\n  exit 0\nfi\nif [ \"$action\" = \"flash\" ]; then\n  exit 0\nfi\nexit 45\n",
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\naction=\"$1\"\nlast=\"\"\naddress=\"\"\nfor arg in \"$@\"; do\n  last=\"$arg\"\n  case \"$arg\" in\n    0x8000|0x110000|0x210000) address=\"$arg\" ;;\n  esac\ndone\nif [ \"$action\" = \"read-flash\" ]; then\n  case \"$address\" in\n    0x8000) cp \"{}\" \"$last\" ;;\n    0x110000) cp \"{}\" \"$last\" ;;\n    0x210000) cp \"{}\" \"$last\" ;;\n    *) exit 43 ;;\n  esac\n  exit 0\nfi\nif [ \"$action\" = \"write-bin\" ]; then\n  if [ \"$address\" = \"0x210000\" ]; then\n    {}\n  else\n    exit 44\n  fi\n  exit 0\nfi\nif [ \"$action\" = \"flash\" ] || [ \"$action\" = \"reset\" ]; then\n  exit 0\nfi\nexit 45\n",
                 log_path.display(),
                 table_path.display(),
                 source_path.display(),
@@ -10175,6 +10324,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
+        assert!(args.iter().any(|argument| argument == "--no-stub"));
         assert!(!args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
         assert!(args.windows(2).any(|pair| {
@@ -10274,7 +10424,7 @@ mod tests {
     }
 
     #[test]
-    fn usbmodem_flash_retries_default_reset_without_manual_boot_mode() {
+    fn usbmodem_flash_retries_usb_reset_without_manual_boot_mode() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -10290,7 +10440,7 @@ mod tests {
 
         assert_eq!(
             espflash_reset_modes(&artifact, "/dev/cu.usbmodem2111401"),
-            ["usb-reset", "default-reset"]
+            ["usb-reset", "usb-reset"]
         );
     }
 
@@ -10481,7 +10631,7 @@ mod tests {
     }
 
     #[test]
-    fn flash_config_staging_commands_read_and_verify_before_app_flash() {
+    fn flash_config_transport_commands_use_rom_reads_without_intermediate_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -10514,21 +10664,165 @@ mod tests {
         .unwrap();
 
         assert_eq!(read[0], "read-flash");
-        assert!(
-            read.windows(2)
-                .any(|pair| pair == ["--after", "hard-reset"])
-        );
+        assert!(read.windows(2).any(|pair| pair == ["--after", "no-reset"]));
+        assert!(read.iter().any(|argument| argument == "--no-stub"));
         assert!(read.windows(2).any(|pair| pair == ["0x110000", "0x2000"]));
         assert_eq!(write[0], "write-bin");
-        assert!(
-            write
-                .windows(2)
-                .any(|pair| pair == ["--after", "hard-reset"])
-        );
+        assert!(write.windows(2).any(|pair| pair == ["--after", "no-reset"]));
         assert!(
             write
                 .windows(2)
                 .any(|pair| pair == ["0x210000", source.to_str().unwrap()])
+        );
+    }
+
+    #[test]
+    fn transient_usb_jtag_connection_errors_are_retryable() {
+        assert!(espflash_connection_failure_text(
+            "Error while connecting to device: No such device or address"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flash_end_error_is_recoverable_only_for_a_complete_flash_command() {
+        let flash_args = vec!["flash".to_string()];
+        let write_args = vec!["write-bin".to_string()];
+        let output = Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"Error: Error while running FlashEnd command".to_vec(),
+        };
+
+        assert!(espflash_flash_end_requires_reset(&flash_args, &output));
+        assert!(!espflash_flash_end_requires_reset(&write_args, &output));
+    }
+
+    #[test]
+    fn flash_end_recovery_reset_is_explicit_and_uses_the_authorized_usb_port() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec![],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![],
+        };
+
+        let args =
+            build_espflash_reset_args(&artifact, "/dev/cu.usbmodem2111401", "usb-reset").unwrap();
+
+        assert_eq!(args[0], "reset");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--port", "/dev/cu.usbmodem2111401"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--before", "usb-reset"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--after", "hard-reset"])
+        );
+    }
+
+    #[test]
+    fn unchanged_config_range_does_not_need_post_flash_restore() {
+        let unchanged = FlashConfigMigrationPlan {
+            source: FlashPartitionRange {
+                label: "flux_cfg".to_string(),
+                offset: 0x210000,
+                size: 0x2000,
+            },
+            destination: FlashPartitionRange {
+                label: "flux_cfg".to_string(),
+                offset: 0x210000,
+                size: 0x2000,
+            },
+        };
+        let moved = FlashConfigMigrationPlan {
+            source: FlashPartitionRange {
+                label: "legacy_raw".to_string(),
+                offset: 0x110000,
+                size: 0x2000,
+            },
+            destination: unchanged.destination.clone(),
+        };
+
+        assert!(!flash_config_restore_required(&unchanged));
+        assert!(flash_config_restore_required(&moved));
+    }
+
+    #[test]
+    fn bundle_flash_commands_keep_usb_serial_jtag_in_loader_until_final_reset() {
+        let common = vec![
+            "--chip".to_string(),
+            "esp32s3".to_string(),
+            "--port".to_string(),
+            "/dev/cu.usbmodem2111401".to_string(),
+            "--non-interactive".to_string(),
+        ];
+        let config_read = build_bundle_read_flash_args(
+            &common,
+            "usb-reset",
+            LEGACY_FLASH_CONFIG_OFFSET,
+            LEGACY_FLASH_CONFIG_SIZE,
+            Path::new("/private/tmp/flux_cfg.bin"),
+        );
+        let segment_write = build_bundle_write_bin_args(
+            &common,
+            "no-reset",
+            0x10_000,
+            Path::new("/private/tmp/app.bin"),
+        );
+
+        assert!(config_read.iter().any(|argument| argument == "--no-stub"));
+        assert!(
+            config_read
+                .windows(2)
+                .any(|pair| pair == ["--before", "usb-reset"])
+        );
+        assert!(
+            config_read
+                .windows(2)
+                .any(|pair| pair == ["--after", "no-reset"])
+        );
+        assert!(
+            segment_write
+                .windows(2)
+                .any(|pair| pair == ["--before", "no-reset"])
+        );
+        assert!(
+            segment_write
+                .windows(2)
+                .any(|pair| pair == ["--after", "no-reset"])
+        );
+    }
+
+    #[test]
+    fn bundle_retry_replaces_only_the_recoverable_no_reset_mode() {
+        let command = vec![
+            "write-bin".to_string(),
+            "--before".to_string(),
+            "no-reset".to_string(),
+            "--after".to_string(),
+            "no-reset".to_string(),
+        ];
+
+        assert_eq!(
+            replace_espflash_before_reset(&command, "usb-reset"),
+            Some(vec![
+                "write-bin".to_string(),
+                "--before".to_string(),
+                "usb-reset".to_string(),
+                "--after".to_string(),
+                "no-reset".to_string(),
+            ])
         );
     }
 
@@ -10556,18 +10850,17 @@ mod tests {
             vec![
                 "read-flash",
                 "read-flash",
-                "write-bin",
-                "read-flash",
                 "flash",
                 "write-bin",
-                "read-flash"
+                "read-flash",
+                "reset"
             ]
         );
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn flash_transaction_never_writes_the_app_when_config_staging_fails() {
+    async fn flash_transaction_reports_restore_failure_after_writing_the_app() {
         let root = tempdir().unwrap();
         let (program, source, destination) = write_flash_transaction_fixture(root.path(), true);
 
@@ -10587,7 +10880,33 @@ mod tests {
                 .unwrap()
                 .lines()
                 .collect::<Vec<_>>(),
-            vec!["read-flash", "read-flash", "write-bin"]
+            vec!["read-flash", "read-flash", "flash", "write-bin"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn flash_transaction_never_writes_the_app_before_config_backup_is_complete() {
+        let root = tempdir().unwrap();
+        let (program, source, _) = write_flash_transaction_fixture(root.path(), false);
+        fs::remove_file(&source).unwrap();
+
+        let error = run_flash_transaction_with_program(
+            &test_flash_artifact(),
+            Some(root.path()),
+            "/dev/cu.usbmodem2111401",
+            &program,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "flash_tool_failed");
+        assert_eq!(
+            fs::read_to_string(root.path().join("espflash-actions.log"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["read-flash", "read-flash"]
         );
     }
 
@@ -12008,6 +12327,19 @@ mod tests {
 
         let payload = decode_usb_response_line(
             br#"{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#,
+            "req-1",
+        )
+        .unwrap()
+        .unwrap();
+
+        let network = extract_usb_payload::<NetworkSummary>(payload, "network").unwrap();
+        assert_eq!(network.state, NetworkState::Disabled);
+    }
+
+    #[test]
+    fn usb_response_decoder_extracts_a_matching_frame_appended_to_a_boot_log() {
+        let payload = decode_usb_response_line(
+            br#"I (181) esp_image: segment 1: paddr=00061018 vaddr=3fc91988 size{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#,
             "req-1",
         )
         .unwrap()

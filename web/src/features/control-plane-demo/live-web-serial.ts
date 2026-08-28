@@ -503,7 +503,7 @@ export function useLiveWebSerialScenario(
 
   const getThermalPlantRun = useCallback(
     async (afterSample = 0) => {
-      const client = requireClient()
+      const client = await requireClient()
       try {
         const snapshot = await client.getThermalPlantRun(afterSample)
         requireCurrentClient(client)
