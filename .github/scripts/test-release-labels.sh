@@ -369,6 +369,8 @@ assert "type: choice" in release_workflow
 assert "--operation \"${OPERATION}\"" in release_workflow
 assert "--promotions-ref \"refs/notes/release-promotions\"" in release_workflow
 assert "./.github/actions/setup-linux-serial-deps" in release_workflow
+assert "Verify existing release identity" in release_workflow
+assert "Existing release manifest asset mismatch" in release_workflow
 for workflow_path in (".github/workflows/ci.yml", ".github/workflows/ci-main.yml"):
     workflow = Path(workflow_path).read_text(encoding="utf-8")
     assert "./.github/actions/setup-linux-serial-deps" in workflow

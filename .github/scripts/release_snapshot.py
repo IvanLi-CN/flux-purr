@@ -591,6 +591,15 @@ def resolve_release(
     if snapshot is None:
         raise SnapshotError(f"No release snapshot found for {target_sha}")
     if operation in {"automatic", "recover"}:
+        product = snapshot.get("product")
+        if snapshot["release_enabled"] and isinstance(product, dict):
+            tag = product.get("tag")
+            if isinstance(tag, str) and STABLE_TAG_RE.fullmatch(tag):
+                existing_commit = stable_tag_commit(tag)
+                if existing_commit is not None and existing_commit != target_sha:
+                    raise SnapshotError(
+                        f"Stable tag {tag} already points at {existing_commit}, not {target_sha}"
+                    )
         write_outputs(snapshot, github_output)
         return snapshot
 

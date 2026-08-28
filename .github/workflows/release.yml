@@ -370,15 +370,104 @@ jobs:
             --component "${host_tools_component}" \
             --output "release-assets/${manifest_name}"
 
+      - name: Verify existing release identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCT_TAG: ${{ needs.release-meta.outputs.tag }}
+          PRODUCT_EFFECTIVE_VERSION: ${{ needs.release-meta.outputs.effective_version }}
+          TARGET_SHA: ${{ needs.release-meta.outputs.target_sha }}
+          RELEASE_CHANNEL: ${{ needs.release-meta.outputs.channel }}
+          CURRENT_MANIFEST: release-assets/${{ format('flux-purr-release-manifest-{0}.json', needs.release-meta.outputs.tag) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/${PRODUCT_TAG}" >/dev/null; then
+            exit 0
+          fi
+          existing_sha="$(git rev-list -n 1 "refs/tags/${PRODUCT_TAG}")"
+          if [ "${existing_sha}" != "${TARGET_SHA}" ]; then
+            echo "Existing tag ${PRODUCT_TAG} points at ${existing_sha}, not ${TARGET_SHA}" >&2
+            exit 1
+          fi
+          if ! gh release view "${PRODUCT_TAG}" --json assets >/dev/null 2>&1; then
+            echo "Existing tag ${PRODUCT_TAG} has no GitHub Release yet; continue recovery"
+            exit 0
+          fi
+          mkdir -p existing-release-manifest
+          if ! gh release download "${PRODUCT_TAG}" \
+            --pattern "flux-purr-release-manifest-*.json" \
+            --dir existing-release-manifest --clobber; then
+            echo "Existing Release ${PRODUCT_TAG} has no manifest; continue asset recovery"
+            exit 0
+          fi
+          mapfile -t existing_manifests < <(find existing-release-manifest -type f -name 'flux-purr-release-manifest-*.json' -print)
+          if [ "${#existing_manifests[@]}" -ne 1 ]; then
+            echo "Expected exactly one existing release manifest for ${PRODUCT_TAG}" >&2
+            exit 1
+          fi
+          python3 - "${existing_manifests[0]}" "${CURRENT_MANIFEST}" "${PRODUCT_TAG}" "${PRODUCT_EFFECTIVE_VERSION}" "${TARGET_SHA}" "${RELEASE_CHANNEL}" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          existing_path, current_path, tag, version, source_sha, channel = sys.argv[1:]
+          existing = json.loads(Path(existing_path).read_text(encoding="utf-8"))
+          current = json.loads(Path(current_path).read_text(encoding="utf-8"))
+          for key, expected in {
+              "product": "flux-purr",
+              "version": version,
+              "tag": tag,
+              "sourceSha": source_sha,
+              "channel": channel,
+          }.items():
+              if existing.get(key) != expected or current.get(key) != expected:
+                  raise SystemExit(f"Existing release manifest identity mismatch: {key}")
+
+          def asset_identity(component):
+              return {
+                  asset["name"]: {
+                      key: asset.get(key)
+                      for key in ("name", "size", "sha256", "mediaType", "channel")
+                  }
+                  for asset in component.get("assets", [])
+              }
+
+          existing_components = {
+              component.get("id"): component
+              for component in existing.get("components", [])
+              if isinstance(component, dict)
+          }
+          current_components = {
+              component.get("id"): component
+              for component in current.get("components", [])
+              if isinstance(component, dict)
+          }
+          if set(existing_components) != set(current_components):
+              raise SystemExit("Existing release manifest component set mismatch")
+          for component_id, current_component in current_components.items():
+              existing_component = existing_components[component_id]
+              for key in ("id", "version", "sourceSha", "protocolVersions"):
+                  if existing_component.get(key) != current_component.get(key):
+                      raise SystemExit(f"Existing release manifest mismatch: {component_id}.{key}")
+              if asset_identity(existing_component) != asset_identity(current_component):
+                  raise SystemExit(f"Existing release manifest asset mismatch: {component_id}")
+          PY
+
       - name: Create and push product tag
         env:
           PRODUCT_TAG: ${{ needs.release-meta.outputs.tag }}
+          TARGET_SHA: ${{ needs.release-meta.outputs.target_sha }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if git rev-parse -q --verify "refs/tags/${PRODUCT_TAG}" >/dev/null; then
-            echo "Tag ${PRODUCT_TAG} already exists; skip"
+            existing_sha="$(git rev-list -n 1 "refs/tags/${PRODUCT_TAG}")"
+            if [ "${existing_sha}" != "${TARGET_SHA}" ]; then
+              echo "Tag ${PRODUCT_TAG} already points at ${existing_sha}, not ${TARGET_SHA}" >&2
+              exit 1
+            fi
+            echo "Tag ${PRODUCT_TAG} already exists at ${TARGET_SHA}; skip"
           else
             git tag -a "${PRODUCT_TAG}" -m "${PRODUCT_TAG}"
             git push origin "${PRODUCT_TAG}"
