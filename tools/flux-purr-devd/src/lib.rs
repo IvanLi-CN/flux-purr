@@ -6078,7 +6078,7 @@ async fn run_bundle_flash_transaction(
         args.extend(common.clone());
         args.extend([
             "--before".into(),
-            "default-reset".into(),
+            initial_reset.into(),
             "--after".into(),
             "no-reset".into(),
         ]);
@@ -6213,43 +6213,57 @@ async fn require_bundle_espflash_success(
     if output.status.success() {
         return Ok(output);
     }
-    let Some(retry_args) = is_esp_usb_serial_jtag_port(port_path)
-        .then(|| replace_espflash_before_reset(args, "usb-reset"))
-        .flatten()
-    else {
+    if !is_esp_usb_serial_jtag_port(port_path) || !espflash_connection_failed(&output) {
+        return Err(espflash_command_error(program, args, &output));
+    }
+    let Some(before_index) = args.iter().position(|argument| argument == "--before") else {
         return Err(espflash_command_error(program, args, &output));
     };
-    if !espflash_connection_failed(&output) {
+    let Some(before_reset) = args.get(before_index + 1).map(String::as_str) else {
         return Err(espflash_command_error(program, args, &output));
+    };
+    let recovery_modes: &[&str] = match before_reset {
+        "no-reset" | "usb-reset" => &["usb-reset", "default-reset"],
+        _ => return Err(espflash_command_error(program, args, &output)),
+    };
+
+    let mut attempts = vec![espflash_failure_details(program, args, &output)];
+    for reset_mode in recovery_modes {
+        let retry_args = replace_espflash_before_reset(args, reset_mode)
+            .expect("bundle recovery modes require an espflash --before argument");
+        tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+        let retry_output =
+            run_espflash_command_with_timeout(program, &retry_args, ESPFLASH_COMMAND_TIMEOUT)
+                .await?;
+        if retry_output.status.success() {
+            return Ok(retry_output);
+        }
+        attempts.push(espflash_failure_details(
+            program,
+            &retry_args,
+            &retry_output,
+        ));
+        if !espflash_connection_failed(&retry_output) {
+            break;
+        }
     }
 
-    tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
-    let retry_output =
-        run_espflash_command_with_timeout(program, &retry_args, ESPFLASH_COMMAND_TIMEOUT).await?;
-    if retry_output.status.success() {
-        return Ok(retry_output);
-    }
     Err(HttpError {
         status: StatusCode::BAD_GATEWAY,
         error: ApiError {
             code: "espflash_failed".to_string(),
-            message: "Protected espflash transaction failed after USB recovery retry.".to_string(),
+            message: "Protected espflash transaction failed after USB recovery attempts."
+                .to_string(),
             retryable: true,
-            details: Some(json!({
-                "initialAttempt": espflash_failure_details(program, args, &output),
-                "recoveryAttempt": espflash_failure_details(program, &retry_args, &retry_output),
-            })),
+            details: Some(json!({ "attempts": attempts })),
         },
     })
 }
 
 fn replace_espflash_before_reset(args: &[String], before_reset: &str) -> Option<Vec<String>> {
     let index = args.iter().position(|argument| argument == "--before")?;
-    if args.get(index + 1).map(String::as_str) != Some("no-reset") {
-        return None;
-    }
     let mut replaced = args.to_vec();
-    replaced[index + 1] = before_reset.to_string();
+    *replaced.get_mut(index + 1)? = before_reset.to_string();
     Some(replaced)
 }
 
@@ -10525,6 +10539,42 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(attempts).unwrap(),
             "write-bin --before no-reset\nwrite-bin --before usb-reset\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bundle_recovery_retries_initial_usb_reset_before_default_reset() {
+        let dir = tempdir().unwrap();
+        let program = dir.path().join("retrying-recovery-espflash.sh");
+        let attempts = dir.path().join("attempts.log");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"{}\"\ncase \"$*\" in\n  *'--before default-reset'*) exit 0 ;;\nesac\nprintf '%s\\n' 'Broken pipe' >&2\nexit 1\n",
+                attempts.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&program, permissions).unwrap();
+
+        require_bundle_espflash_success(
+            &program,
+            &[
+                "erase-flash".to_string(),
+                "--before".to_string(),
+                "usb-reset".to_string(),
+            ],
+            "/dev/cu.usbmodem2111401",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(attempts).unwrap(),
+            "erase-flash --before usb-reset\nerase-flash --before usb-reset\nerase-flash --before default-reset\n"
         );
     }
 
