@@ -10,8 +10,16 @@ on:
       - main
   workflow_dispatch:
     inputs:
+      operation:
+        description: "Release operation: recover a frozen snapshot or promote an RC"
+        required: true
+        type: choice
+        options:
+          - recover
+          - promote
+        default: recover
       commit_sha:
-        description: "Commit SHA on main to release or backfill"
+        description: "Commit SHA on main to recover or promote"
         required: true
         type: string
 
@@ -35,6 +43,7 @@ jobs:
       channel: ${{ steps.snapshot.outputs.release_channel }}
       effective_version: ${{ steps.snapshot.outputs.product_effective_version }}
       tag: ${{ steps.snapshot.outputs.product_tag }}
+      operation: ${{ steps.operation.outputs.operation }}
     steps:
       - name: Checkout full history
         uses: actions/checkout@v4
@@ -43,21 +52,27 @@ jobs:
 
       - name: Resolve target commit
         id: target
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_COMMIT_SHA: ${{ inputs.commit_sha }}
+          WORKFLOW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WORKFLOW_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            target_sha="${{ inputs.commit_sha }}"
+          if [ "${RELEASE_EVENT_NAME}" = "workflow_dispatch" ]; then
+            target_sha="${DISPATCH_COMMIT_SHA}"
           else
-            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+            if [ "${WORKFLOW_RUN_CONCLUSION}" != "success" ]; then
               echo "target_sha=" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            if [ "${{ github.event.workflow_run.event }}" != "push" ]; then
+            if [ "${WORKFLOW_RUN_EVENT}" != "push" ]; then
               echo "target_sha=" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            target_sha="${{ github.event.workflow_run.head_sha }}"
+            target_sha="${WORKFLOW_RUN_SHA}"
           fi
           if [[ ! "${target_sha}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Invalid target SHA: ${target_sha}" >&2
@@ -71,15 +86,37 @@ jobs:
           fi
           echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve release operation
+        id: operation
+        env:
+          RELEASE_EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_OPERATION: ${{ inputs.operation }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${RELEASE_EVENT_NAME}" = "workflow_dispatch" ]; then
+            operation="${DISPATCH_OPERATION}"
+          else
+            operation="automatic"
+          fi
+          case "${operation}" in
+            automatic|recover|promote) ;;
+            *) echo "Unsupported release operation: ${operation}" >&2; exit 1 ;;
+          esac
+          echo "operation=${operation}" >> "$GITHUB_OUTPUT"
+
       - name: Load release snapshot
         if: steps.target.outputs.target_sha != ''
         id: snapshot
         env:
           TARGET_SHA: ${{ steps.target.outputs.target_sha }}
+          OPERATION: ${{ steps.operation.outputs.operation }}
         run: |
-          python3 .github/scripts/release_snapshot.py export \
+          python3 .github/scripts/release_snapshot.py resolve \
+            --operation "${OPERATION}" \
             --target-sha "${TARGET_SHA}" \
             --notes-ref "${RELEASE_SNAPSHOT_NOTES_REF}" \
+            --promotions-ref "refs/notes/release-promotions" \
             --github-output "$GITHUB_OUTPUT"
 
   web:
@@ -154,6 +191,9 @@ jobs:
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.91.0
+
+      - name: Setup Linux serial build dependencies
+        uses: ./.github/actions/setup-linux-serial-deps
 
       - name: Setup Xtensa toolchain
         uses: ./.github/actions/setup-xtensa
@@ -230,9 +270,8 @@ jobs:
         with:
           toolchain: 1.91.0
 
-      - name: Install Linux host dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install --yes pkg-config libudev-dev
+      - name: Setup Linux serial build dependencies
+        uses: ./.github/actions/setup-linux-serial-deps
 
       - name: Build host tools
         run: cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bins

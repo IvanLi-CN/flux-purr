@@ -7,3 +7,4 @@
 - 使用 `.github/quality-gates.json` 记录 GitHub required checks 与主分支保护契约，避免只依赖 UI 状态。
 - 远端 ruleset 不要求仓库 owner 创建的 PR 取得额外 reviewer approval；PR、签名提交和 required checks 仍保持强制。
 - `Label Gate` 的冻结 marker 写入依赖 `pull-requests: write`，否则 GitHub 会拒绝 PR comment 写入并阻断 required check。
+- Release recovery reuses an immutable snapshot, while RC promotion writes a separate immutable promotion record and projects the same source SHA to stable.

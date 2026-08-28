@@ -69,6 +69,92 @@ assert module.release_fields("type:minor", "channel:rc") == (True, "minor", "pr_
 assert module.release_fields("type:docs", "channel:stable") == (False, "", "skip_type_label")
 assert module.release_fields("type:skip", "channel:rc") == (False, "", "skip_type_label")
 
+rc_target = "c" * 40
+rc_snapshot = {
+    "schema_version": 1,
+    "target_sha": rc_target,
+    "snapshot_source": "frozen_pr_marker",
+    "pr_number": 7,
+    "pr_title": "candidate",
+    "pr_head_sha": "d" * 40,
+    "type_label": "type:minor",
+    "channel_label": "channel:rc",
+    "release_enabled": True,
+    "release_level": "minor",
+    "release_channel": "rc",
+    "release_reason": "frozen_pr_labels",
+    "product": {"effective_version": "0.21.0", "tag": "v0.21.0-rc.ccccccc"},
+}
+promotion = module.build_promotion_record(rc_target, rc_snapshot)
+assert promotion["candidate_snapshot_digest"] == module.snapshot_digest(rc_snapshot)
+assert promotion["tag"] == "v0.21.0"
+assert module.validate_promotion(promotion, rc_target, rc_snapshot) == promotion
+promoted = module.promoted_snapshot(rc_snapshot, promotion)
+assert promoted["release_channel"] == "stable"
+assert promoted["channel_label"] == "channel:stable"
+assert promoted["product"] == {"effective_version": "0.21.0", "tag": "v0.21.0"}
+assert rc_snapshot["release_channel"] == "rc"
+try:
+    module.validate_promotion(dict(promotion, tag="v0.21.1"), rc_target, rc_snapshot)
+except module.SnapshotError:
+    pass
+else:
+    raise AssertionError("promotion record with a changed stable tag must fail")
+try:
+    module.build_promotion_record(rc_target, dict(rc_snapshot, release_channel="stable", channel_label="channel:stable"))
+except module.SnapshotError:
+    pass
+else:
+    raise AssertionError("stable snapshots must not be promoted")
+
+originals = {
+    "run_git": module.run_git,
+    "fetch_notes": module.fetch_notes,
+    "read_snapshot": module.read_snapshot,
+    "read_promotion": module.read_promotion,
+    "stable_tag_commit": module.stable_tag_commit,
+    "add_note": module.add_note,
+    "push_promotion_with_retry": module.push_promotion_with_retry,
+}
+try:
+    writes = []
+    module.run_git = lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr="")
+    module.fetch_notes = lambda notes_ref: None
+    module.read_snapshot = lambda notes_ref, target_sha: rc_snapshot
+    module.read_promotion = lambda promotions_ref, target_sha, snapshot: None
+    module.stable_tag_commit = lambda tag: None
+    module.add_note = lambda notes_ref, target_sha, record: writes.append((notes_ref, target_sha, record))
+    module.push_promotion_with_retry = lambda *args, **kwargs: None
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8") as output:
+        resolved = module.resolve_release(
+            "promote",
+            rc_target,
+            "refs/notes/test-snapshots",
+            "refs/notes/test-promotions",
+            output.name,
+        )
+        assert resolved["release_channel"] == "stable"
+        assert resolved["product"]["tag"] == "v0.21.0"
+        assert writes[0][0] == "refs/notes/test-promotions"
+        assert "release_channel=stable" in Path(output.name).read_text(encoding="utf-8")
+
+    module.stable_tag_commit = lambda tag: "e" * 40
+    try:
+        module.resolve_release(
+            "promote",
+            rc_target,
+            "refs/notes/test-snapshots",
+            "refs/notes/test-promotions",
+            "",
+        )
+    except module.SnapshotError:
+        pass
+    else:
+        raise AssertionError("conflicting stable tag must fail before promotion")
+finally:
+    for name, original in originals.items():
+        setattr(module, name, original)
+
 legacy_target = "b" * 40
 legacy_snapshot = {
     "schema_version": 1,
@@ -273,6 +359,18 @@ with tempfile.TemporaryDirectory() as td:
     args.previous_manifest = str(previous)
     unchanged = manifest_module.build_manifest(args)
     assert unchanged["components"][0]["changedSincePrevious"] is False
+
+release_workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+assert "      operation:" in release_workflow
+assert "          - recover" in release_workflow
+assert "          - promote" in release_workflow
+assert "type: choice" in release_workflow
+assert "--operation \"${OPERATION}\"" in release_workflow
+assert "--promotions-ref \"refs/notes/release-promotions\"" in release_workflow
+assert "./.github/actions/setup-linux-serial-deps" in release_workflow
+for workflow_path in (".github/workflows/ci.yml", ".github/workflows/ci-main.yml"):
+    workflow = Path(workflow_path).read_text(encoding="utf-8")
+    assert "./.github/actions/setup-linux-serial-deps" in workflow
 PY
 
 echo "Release label tests passed."
