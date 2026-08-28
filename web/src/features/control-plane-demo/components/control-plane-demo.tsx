@@ -100,6 +100,7 @@ import type {
   HeaterCurveState,
   NetworkSummary,
   RtdCalibrationSample,
+  ThermalPlantRunSnapshot,
   VinCalibrationSample,
 } from '../contracts'
 import {
@@ -182,6 +183,11 @@ import type {
 import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
 import { LanPairingPanel, type LanPairingPanelProps } from './lan-pairing-panel'
+import {
+  createDefaultThermalPlantSnapshot,
+  createEmptyThermalPlantSnapshot,
+  ThermalPlantRunCard,
+} from './thermal-plant-run-card'
 import {
   resolveWifiSettingsUnavailableReason,
   WifiNetworkSettings,
@@ -769,6 +775,7 @@ export function ControlPlaneDemo({
   const devdLeaseAllowedForRoute =
     !routedRecoveryIdentityId ||
     allowDemoControls ||
+    requestedConnectionByIdentity[routedRecoveryIdentityId]?.kind === 'bridge' ||
     routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
     serialRecoveryExhaustedIdentityIds.has(routedRecoveryIdentityId)
   const preferredLiveTransport = preferredLiveTransportForRoute({
@@ -786,10 +793,9 @@ export function ControlPlaneDemo({
     }),
     nativeRuntimeProbeEnabled: activeView !== 'update',
     leaseEnabled:
-      shouldHoldDevdLease(
-        selectedDeviceId,
-        activeView === 'add-device' && selectedAddDeviceKind === 'wifi'
-      ) && devdLeaseAllowedForRoute,
+      activeView !== 'add-device' &&
+      shouldHoldDevdLease(selectedDeviceId) &&
+      devdLeaseAllowedForRoute,
   })
   const liveDevdScenario = liveDevd.scenario
   const { scenario: liveScenario, serial: webSerial } = useLiveWebSerialScenario(liveDevdScenario, {
@@ -870,6 +876,9 @@ export function ControlPlaneDemo({
   const [heaterCurveByDevice, setHeaterCurveByDevice] = useState<Record<string, HeaterCurveState>>(
     {}
   )
+  const [thermalPlantRunByDevice, setThermalPlantRunByDevice] = useState<
+    Record<string, ThermalPlantRunSnapshot>
+  >({})
   const [calibrationWorkspaceTabByDevice, setCalibrationWorkspaceTabByDevice] = useState<
     Record<string, CalibrationWorkspaceTab>
   >({})
@@ -1832,6 +1841,13 @@ export function ControlPlaneDemo({
     heaterCurveByDevice[visibleDevice.id] ??
     activeScenario.devices.find((device) => device.id === visibleDevice.id)?.heaterCurve ??
     createDefaultHeaterCurveState()
+  const visibleThermalPlantRun =
+    thermalPlantRunByDevice[visibleDevice.id] ??
+    (visibleDevice.transport === 'mock'
+      ? createDefaultThermalPlantSnapshot()
+      : createEmptyThermalPlantSnapshot())
+  const thermalPlantRunUnsupported =
+    visibleDevice.transport !== 'mock' && !visibleDevice.capabilities.includes('thermal_plant_run')
   const visibleCalibrationWorkspaceTab =
     navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
       ? (navigation.state.calibrationTab ?? 'heater_curve')
@@ -2473,6 +2489,117 @@ export function ControlPlaneDemo({
     visibleDeviceNetworkState,
     visibleDeviceTransport,
     lanDeviceBaseUrl,
+    webSerial,
+  ])
+  useEffect(() => {
+    if (activeView !== 'calibration' || visibleDeviceTransport === 'mock') {
+      return
+    }
+    if (!visibleDevice.capabilities.includes('thermal_plant_run')) {
+      return
+    }
+    let cancelled = false
+    let inFlight = false
+    let timer: number | null = null
+    const readPage = async (afterSample: number) => {
+      if (visibleDeviceIsDirectWebSerial) {
+        return webSerial.getThermalPlantRun(afterSample)
+      }
+      if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+        const session = loadLanDeviceSession(lanDeviceBaseUrl)
+        if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+        const suffix = afterSample > 0 ? `?after_sample=${afterSample}` : ''
+        return authorizedLanRequest<ThermalPlantRunSnapshot>(
+          session,
+          `calibration/thermal-plant/run${suffix}`,
+          'GET',
+          undefined,
+          visibleDeviceLeaseId
+        )
+      }
+      if (
+        visibleDeviceTransport === 'devd' &&
+        visibleDeviceLeaseId &&
+        devdBaseUrl &&
+        visibleDeviceNetworkState !== 'error' &&
+        visibleDeviceNetworkState !== 'timeout'
+      ) {
+        return controlClient.getThermalPlantRun(
+          devdBaseUrl,
+          visibleDeviceId,
+          visibleDeviceLeaseId,
+          afterSample
+        )
+      }
+      return null
+    }
+    const poll = async () => {
+      if (cancelled || inFlight) return
+      inFlight = true
+      let stopAfterThisRead = false
+      try {
+        const firstSnapshot = await readPage(0)
+        if (!firstSnapshot) return
+        let snapshot = firstSnapshot
+        let nextSample = snapshot.tracePage.nextSample
+        const seenCursors = new Set<number>()
+        while (nextSample != null && !seenCursors.has(nextSample)) {
+          seenCursors.add(nextSample)
+          const next = await readPage(nextSample)
+          if (!next) break
+          if (next.attempt?.runId !== snapshot.attempt?.runId) {
+            snapshot = next
+            nextSample = next.tracePage.nextSample
+            seenCursors.clear()
+            continue
+          }
+          const pointsByIndex = new Map(
+            snapshot.tracePage.points.map((point) => [point.sampleIndex, point])
+          )
+          for (const point of next.tracePage.points) {
+            pointsByIndex.set(point.sampleIndex, point)
+          }
+          snapshot = {
+            ...next,
+            tracePage: {
+              ...next.tracePage,
+              points: [...pointsByIndex.values()].sort(
+                (left, right) => left.sampleIndex - right.sampleIndex
+              ),
+            },
+          }
+          nextSample = next.tracePage.nextSample
+        }
+        stopAfterThisRead =
+          snapshot.attempt?.restartAllowed === true &&
+          visibleRuntimeCalibration.job.status !== 'running'
+        if (!cancelled) {
+          setThermalPlantRunByDevice((current) => ({ ...current, [visibleDeviceId]: snapshot }))
+        }
+      } catch {
+        // Transport diagnostics already surface through the existing status panel.
+      } finally {
+        inFlight = false
+        if (!cancelled && !stopAfterThisRead) timer = window.setTimeout(() => void poll(), 500)
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer != null) window.clearTimeout(timer)
+    }
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    lanDeviceBaseUrl,
+    visibleDevice.capabilities,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceNetworkState,
+    visibleDeviceTransport,
+    visibleRuntimeCalibration.job.status,
     webSerial,
   ])
   const scenarioEvents = useMemo(
@@ -3151,11 +3278,31 @@ export function ControlPlaneDemo({
 
   const handleBridgeTargetSelect = (device: DeviceTarget) => {
     setPendingDevices((current) => upsertLanDeviceTarget(current, device))
-    handleDeviceChange(device.id, device)
+    const identityId = deviceIdentityId(device)
+    setRequestedConnectionByIdentity((current) => ({
+      ...current,
+      [identityId]: { kind: 'bridge', targetId: device.id },
+    }))
+    setRouteFallbackKind(undefined)
+
+    void requestCalibrationLeave(
+      {
+        reason: 'device-change',
+        nextLabel: device.alias,
+      },
+      () => {
+        if (navigation) {
+          return navigation.navigate({
+            kind: 'device',
+            deviceId: identityId,
+            view: 'dashboard',
+          })
+        }
+        setSelectedDeviceId(device.id)
+        return setConsoleView('dashboard')
+      }
+    )
     setSelectedAddDeviceKind(defaultAddDeviceKind)
-    if (!navigation) {
-      void setConsoleView('dashboard')
-    }
   }
 
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {
@@ -3977,6 +4124,71 @@ export function ControlPlaneDemo({
         return false
       }
 
+      if (
+        visibleDevice.transport === 'mock' &&
+        (request.kind === 'thermal_plant_auto' || request.op === 'cancel')
+      ) {
+        setThermalPlantRunByDevice((current) => {
+          const snapshot = current[visibleDevice.id] ?? createDefaultThermalPlantSnapshot()
+          const previousRunId = snapshot.attempt?.runId ?? 0
+          const runId = request.op === 'start' ? previousRunId + 1 : previousRunId
+          const starting = request.op === 'start'
+          return {
+            ...current,
+            [visibleDevice.id]: {
+              ...snapshot,
+              attempt: {
+                ...(snapshot.attempt ?? {
+                  runId: 0,
+                  status: 'idle' as const,
+                  phase: 'ambient' as const,
+                  progressPercent: 0,
+                  elapsedMs: 0,
+                  currentTempCentiC: 0,
+                  heaterVoltageMv: 0,
+                  dutyPercent: 0,
+                  sampleCount: 0,
+                  restartAllowed: true,
+                  error: null,
+                }),
+                runId,
+                status: request.op === 'start' ? 'running' : 'canceled',
+                phase: request.op === 'start' ? 'ambient' : 'cooling',
+                progressPercent:
+                  request.op === 'start' ? 0 : (snapshot.attempt?.progressPercent ?? 0),
+                restartAllowed: request.op === 'cancel',
+                error: null,
+              },
+              tracePage: starting
+                ? {
+                    startSample: 0,
+                    nextSample: null,
+                    totalSamples: 0,
+                    points: [],
+                  }
+                : snapshot.tracePage,
+              provisionalCurve: starting ? null : snapshot.provisionalCurve,
+              activeResult: starting ? null : snapshot.activeResult,
+            },
+          }
+        })
+        setCalibrationRuntimeByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: {
+            ...visibleDevice.calibration,
+            mode: request.op === 'start' ? 'thermal_plant' : 'off',
+            job: {
+              ...visibleDevice.calibration.job,
+              kind: 'thermal_plant_auto',
+              status: request.op === 'start' ? 'running' : 'canceled',
+              progressPercent:
+                request.op === 'start' ? 0 : visibleDevice.calibration.job.progressPercent,
+            },
+          },
+        }))
+        return true
+      }
+
       try {
         if (isDirectWebSerialDevice(visibleDevice)) {
           await webSerial.configureCalibrationJob(request)
@@ -4239,6 +4451,8 @@ export function ControlPlaneDemo({
                 feedback={feedback}
                 calibration={visibleCalibration}
                 heaterCurve={visibleHeaterCurve}
+                thermalPlantRun={visibleThermalPlantRun}
+                thermalPlantRunUnsupported={thermalPlantRunUnsupported}
                 runtimeCalibration={visibleRuntimeCalibration}
                 calibrationRefs={visibleCalibrationRefs}
                 calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
@@ -5365,6 +5579,8 @@ function ViewPanel({
   feedback,
   calibration,
   heaterCurve,
+  thermalPlantRun,
+  thermalPlantRunUnsupported,
   runtimeCalibration,
   calibrationRefs,
   calibrationWorkspaceTab,
@@ -5427,6 +5643,8 @@ function ViewPanel({
   feedback: ActionFeedback
   calibration: CalibrationState
   heaterCurve: HeaterCurveState
+  thermalPlantRun: ThermalPlantRunSnapshot
+  thermalPlantRunUnsupported: boolean
   runtimeCalibration: CalibrationRuntimeState
   calibrationRefs: { rtdTempC: number; vinMv: number }
   calibrationWorkspaceTab: CalibrationWorkspaceTab
@@ -5569,6 +5787,8 @@ function ViewPanel({
         device={device}
         calibration={calibration}
         heaterCurve={heaterCurve}
+        thermalPlantRun={thermalPlantRun}
+        thermalPlantRunUnsupported={thermalPlantRunUnsupported}
         runtimeCalibration={runtimeCalibration}
         refs={calibrationRefs}
         feedback={feedback}
@@ -6803,6 +7023,8 @@ function CalibrationView({
   device,
   calibration,
   heaterCurve,
+  thermalPlantRun,
+  thermalPlantRunUnsupported,
   runtimeCalibration,
   refs,
   feedback,
@@ -6830,6 +7052,8 @@ function CalibrationView({
   device: DeviceTarget
   calibration: CalibrationState
   heaterCurve: HeaterCurveState
+  thermalPlantRun: ThermalPlantRunSnapshot
+  thermalPlantRunUnsupported: boolean
   runtimeCalibration: CalibrationRuntimeState
   refs: { rtdTempC: number; vinMv: number }
   feedback: ActionFeedback
@@ -6875,8 +7099,12 @@ function CalibrationView({
   onCalibrationLeaveGuardDismiss: () => void
   onCalibrationLeaveGuardClear: () => void
 }) {
+  void onTargetTempChange
+  void onHeaterCurvePreview
+  void onHeaterCurveClearPreview
+  void onHeaterCurveSave
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const [heaterCurveDraftText, setHeaterCurveDraftText] = useState('')
+  const [_heaterCurveDraftText, setHeaterCurveDraftText] = useState('')
   const [vinPpsMvText, setVinPpsMvText] = useState('')
   const [rtdPpsMvText, setRtdPpsMvText] = useState('')
   const [rtdTargetAdcText, setRtdTargetAdcText] = useState('')
@@ -7327,151 +7555,27 @@ function CalibrationView({
 
           <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="加热曲线标定">
-              <div className="industrial-calibration-live-grid industrial-calibration-live-grid--staggered">
-                <div className="industrial-calibration-live-stack">
-                  <CalibrationModeControlPanel
-                    title="校准控制"
-                    modeToggle={
-                      <CalibrationModeToggle
-                        active={modeArmed}
-                        disabled={controlsBlocked || jobRunning}
-                        onEnable={() =>
-                          void onModeEnter('heater_curve', {
-                            mode: 'heater_curve',
-                            ppsEnabled: true,
-                            ppsMv: heaterPpsMv ?? basePpsDraft.millivolts,
-                            heaterEnabled: false,
-                          })
-                        }
-                        onDisable={() => onModeExit()}
-                      />
+              <ThermalPlantRunCard
+                snapshot={thermalPlantRun}
+                unsupported={thermalPlantRunUnsupported}
+                disabled={
+                  controlsBlocked ||
+                  pendingCalibrationAction != null ||
+                  (!jobRunning && !hasPpsCapability) ||
+                  (jobRunning && currentJob.kind !== 'thermal_plant_auto')
+                }
+                onStartStop={() =>
+                  void runCalibrationAction('thermal-plant-job-toggle', async () => {
+                    if (jobRunning) {
+                      await onCalibrationJobChange({ op: 'cancel' }, '自动热模型标定停止失败。')
+                    } else {
+                      await onCalibrationJobChange(
+                        { op: 'start', kind: 'thermal_plant_auto' },
+                        '自动热模型标定启动失败。'
+                      )
                     }
-                    leaveGuard={leaveGuardForTab('heater_curve')}
-                    capability={powerCapability}
-                    voltageText={heaterPpsMvText}
-                    onVoltageChange={setHeaterPpsMvText}
-                    range={ppsRange}
-                    hasPpsCapability={hasPpsCapability}
-                    errors={
-                      heaterPpsError ? (
-                        <p className="industrial-calibration-inline-error">{heaterPpsError}</p>
-                      ) : null
-                    }
-                    actionSlots={[
-                      {
-                        id: 'thermal-plant-job-toggle',
-                        node: (
-                          <button
-                            type="button"
-                            className="industrial-button industrial-button--secondary"
-                            disabled={
-                              controlsBlocked ||
-                              pendingCalibrationAction != null ||
-                              (!jobRunning && !hasPpsCapability) ||
-                              (jobRunning && currentJob.kind !== 'thermal_plant_auto')
-                            }
-                            onClick={() =>
-                              void runCalibrationAction('thermal-plant-job-toggle', async () => {
-                                if (jobRunning) {
-                                  await onCalibrationJobChange(
-                                    { op: 'cancel' },
-                                    '自动热模型标定停止失败。'
-                                  )
-                                  return
-                                }
-                                await onCalibrationJobChange(
-                                  { op: 'start', kind: 'thermal_plant_auto' },
-                                  '自动热模型标定启动失败。'
-                                )
-                              })
-                            }
-                          >
-                            {calibrationActionPending('thermal-plant-job-toggle')
-                              ? '处理中...'
-                              : jobRunning
-                                ? '停止自动热模型'
-                                : '自动热模型'}
-                          </button>
-                        ),
-                      },
-                      {
-                        id: 'heater-heater-toggle',
-                        node: (
-                          <CalibrationActionToggle
-                            label="加热"
-                            active={runtimeCalibration.heaterEnabled}
-                            disabled={
-                              controlsBlocked ||
-                              jobRunning ||
-                              !modeArmed ||
-                              pendingCalibrationAction != null
-                            }
-                            onCheckedChange={() =>
-                              void runCalibrationAction('heater-heater-toggle', () =>
-                                onCalibrationRuntimeChange(
-                                  {
-                                    mode: 'heater_curve',
-                                    heaterEnabled: !runtimeCalibration.heaterEnabled,
-                                    ppsEnabled: true,
-                                    ppsMv: heaterPpsMv ?? basePpsDraft.millivolts,
-                                  },
-                                  '加热切换失败。'
-                                )
-                              )
-                            }
-                          />
-                        ),
-                      },
-                    ]}
-                  >
-                    <CalibrationSliderInputField
-                      label="目标温度"
-                      valueText={String(Math.round(device.targetTempC))}
-                      unit="℃"
-                      min={TARGET_TEMP_MIN}
-                      max={TARGET_TEMP_MAX}
-                      step={TARGET_TEMP_STEP}
-                      disabled={
-                        controlsBlocked ||
-                        jobRunning ||
-                        !modeArmed ||
-                        pendingCalibrationAction != null
-                      }
-                      inputAriaLabel="加热曲线标定目标温度输入"
-                      sliderAriaLabel="加热曲线标定目标温度滑块"
-                      onChange={(value) => {
-                        const nextValue = Number(value)
-                        if (Number.isFinite(nextValue)) {
-                          onTargetTempChange(nextValue)
-                        }
-                      }}
-                      formatBound={(value) => `${value}℃`}
-                    />
-                  </CalibrationModeControlPanel>
-                </div>
-                <div className="industrial-calibration-side-stack">
-                  <HeaterCurveWorkbenchCard
-                    device={device}
-                    heaterCurve={heaterCurve}
-                    draftText={heaterCurveDraftText}
-                    disabled={controlsBlocked}
-                    currentModeError={currentModeError}
-                    currentJobMessage={currentJob.message}
-                    runtimeCalibration={runtimeCalibration}
-                    onDraftTextChange={setHeaterCurveDraftText}
-                    onPreview={onHeaterCurvePreview}
-                    onClearPreview={onHeaterCurveClearPreview}
-                    onSave={onHeaterCurveSave}
-                  />
-                  {adcToolbar}
-                </div>
-              </div>
-              <HeaterCurvePanel
-                device={device}
-                heaterCurve={heaterCurve}
-                draftText={heaterCurveDraftText}
-                disabled={controlsBlocked}
-                onDraftTextChange={setHeaterCurveDraftText}
+                  })
+                }
               />
             </section>
           </TabsContent>
@@ -8169,7 +8273,7 @@ function AdcCalibrationToolbar({
   )
 }
 
-function HeaterCurvePanel({
+export function HeaterCurvePanel({
   device,
   heaterCurve,
   draftText,
@@ -8273,7 +8377,7 @@ function HeaterCurvePanel({
   )
 }
 
-function HeaterCurveWorkbenchCard({
+export function HeaterCurveWorkbenchCard({
   device,
   heaterCurve,
   draftText,

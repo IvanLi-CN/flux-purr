@@ -1261,6 +1261,46 @@ describe('control-plane transport client', () => {
     })
   })
 
+  it('reads a paged thermal plant run snapshot through the devd route', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse({
+        version: 1,
+        attempt: null,
+        tracePage: {
+          startSample: 16,
+          nextSample: null,
+          totalSamples: 17,
+          points: [
+            {
+              sampleIndex: 16,
+              elapsedMs: 120000,
+              temperatureCentiC: 8000,
+              heaterVoltageMv: 0,
+              dutyPercent: 0,
+              phase: 'cooling',
+            },
+          ],
+        },
+        provisionalCurve: null,
+        activeResult: null,
+      })
+    )
+    const client = createControlPlaneHttpClient(fetcher)
+
+    const snapshot = await client.getThermalPlantRun(
+      'http://127.0.0.1:30080',
+      'mock-fp-lab-01',
+      'lease-1',
+      16
+    )
+
+    expect(snapshot.tracePage.points[0]?.phase).toBe('cooling')
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-plant/run?lease_id=lease-1&after_sample=16',
+      undefined
+    )
+  })
+
   it('sends runtime, wifi, and flash mutations through devd endpoints', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = []
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

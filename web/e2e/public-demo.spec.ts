@@ -216,21 +216,19 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
 
-    await page.getByRole('button', { name: 'Calibration Leave guard active' }).click()
-    await expect(page).toHaveURL(
-      /\/devices\/fp-lab-01\/calibration\/heater-curve\?(?=.*demo=true)(?=.*demoScene=calibration-active)/
-    )
-    await expect(page.getByRole('switch', { name: '标定模式' })).toBeChecked()
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
+    const calibrationMode = page.getByRole('switch', { name: '标定模式' })
+    await calibrationMode.click()
+    await expect(calibrationMode).toBeChecked()
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
-    await fieldKit.click()
+    await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).click()
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
-    await expect(page).toHaveURL(
-      /\/devices\/fp-lab-01\/calibration\/heater-curve\?(?=.*demoScene=calibration-active)/
-    )
+    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/calibration\/rtd-adc\?demo=true$/)
     await page.getByRole('button', { name: '留在当前页' }).click()
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toHaveCount(0)
 
-    await fieldKit.click()
+    await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).click()
     await page.getByRole('button', { name: '关闭并继续' }).click()
     await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demo=true$/)
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
@@ -240,7 +238,10 @@ test.describe('public demo build', () => {
   test('serializes target and override changes behind the calibration leave guard', async ({
     page,
   }) => {
-    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true&demoScene=calibration-active')
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
+    const calibrationMode = page.getByRole('switch', { name: '标定模式' })
+    await calibrationMode.click()
+    await expect(calibrationMode).toBeChecked()
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
     await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).evaluate((target) => {

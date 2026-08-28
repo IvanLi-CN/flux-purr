@@ -320,83 +320,35 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('tab', { name: '加热曲线标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toBeVisible()
-      await expect(await canvas.findByRole('table', { name: '加热曲线点表' })).toBeVisible()
-      const statusCard = await canvas.findByRole('heading', { name: '状态' })
-      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
-      expect(statusCardRoot).not.toBeNull()
-      await expect(within(statusCardRoot).findByText('目标温度')).resolves.toBeVisible()
-      await expect(within(statusCardRoot).findByText('预览')).resolves.toBeVisible()
-      await expect(await canvas.findByRole('heading', { name: '运行时追踪' })).toBeVisible()
-      await expect(await canvas.findByText(/\d+ \/ \d+ 帧/)).toBeVisible()
-      await expect(await canvas.findByRole('button', { name: '导入预览' })).toBeVisible()
-      await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
-      const heaterCurveTable = await canvas.findByRole('table', {
-        name: '加热曲线点表',
+      await expect(await canvas.findByRole('article', { name: '自动热模型标定结果' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: 'R(T) 加热曲线' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '温度轨迹' })).toBeVisible()
+      await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()
+      expect(canvas.queryByRole('button', { name: '导入预览' })).toBeNull()
+      expect(canvas.queryByRole('button', { name: '保存曲线' })).toBeNull()
+      const representativePointTable = await canvas.findByRole('table', {
+        name: 'R(T) 代表点',
       })
-      expect(heaterCurveTable.scrollWidth).toBeLessThanOrEqual(heaterCurveTable.clientWidth + 1)
-    })
-
-    await step('scrolling calibration content keeps the tab strip fixed', async () => {
-      const tabList = canvasElement.querySelector(
-        '.industrial-calibration-tabs__list'
-      ) as HTMLElement | null
-      const activeTabPanel = canvasElement.querySelector('[role="tabpanel"]') as HTMLElement | null
-      expect(tabList).not.toBeNull()
-      expect(activeTabPanel).not.toBeNull()
-      if (!tabList || !activeTabPanel) {
-        throw new Error('Expected calibration tabs and active tab panel to exist')
-      }
-
-      expect(activeTabPanel.scrollHeight).toBeGreaterThan(activeTabPanel.clientHeight)
-      const tabListTop = Math.round(tabList.getBoundingClientRect().top)
-      activeTabPanel.scrollTop = Math.min(
-        240,
-        activeTabPanel.scrollHeight - activeTabPanel.clientHeight
+      expect(representativePointTable.scrollWidth).toBeLessThanOrEqual(
+        representativePointTable.clientWidth + 1
       )
-      activeTabPanel.dispatchEvent(new Event('scroll'))
-
-      await waitFor(() => {
-        expect(activeTabPanel.scrollTop).toBeGreaterThan(0)
-      })
-      expect(Math.round(tabList.getBoundingClientRect().top)).toBe(tabListTop)
     })
 
     await step(
       'temperature and voltage modes keep technical details as secondary panels',
       async () => {
-        await expect(
-          await canvas.findByRole('slider', {
-            name: '加热曲线标定目标温度滑块',
-          })
-        ).toBeVisible()
-        await expect(
-          await canvas.findByRole('spinbutton', {
-            name: '加热曲线标定目标温度输入',
-          })
-        ).toBeVisible()
-        await expect(await canvas.findByRole('heading', { name: '校准控制' })).toBeVisible()
-        expect(canvas.queryByText('PPS 电流能力')).not.toBeInTheDocument()
-        let actionButtons = Array.from(
-          (
-            canvasElement.querySelector(
-              '.industrial-calibration-inline-actions--single-row'
-            ) as HTMLElement | null
-          )?.querySelectorAll('.industrial-button') ?? []
-        ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['自动热模型'])
-        await expect(await canvas.findByRole('button', { name: '自动热模型' })).toBeVisible()
-        await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await userEvent.click(await canvas.findByRole('tab', { name: '温度标定' }))
         await expect(await canvas.findByRole('slider', { name: '目标 ADC 滑块' })).toBeVisible()
         await expect(await canvas.findByRole('spinbutton', { name: '目标 ADC 输入' })).toBeVisible()
-        actionButtons = Array.from(
+        const rtdActionButtons = Array.from(
           (
             canvasElement.querySelector(
               '.industrial-calibration-inline-actions--single-row'
             ) as HTMLElement | null
           )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual([])
+        expect(rtdActionButtons).toEqual([])
         await expect(await canvas.findByRole('switch', { name: '加热开关' })).toBeVisible()
         await expect(await canvas.findByRole('heading', { name: '温度 ADC' })).toBeVisible()
         const targetAdcInput = await canvas.findByRole('spinbutton', {
@@ -445,14 +397,14 @@ export const DemoCalibrationTab: Story = {
         const vinStatusSummary = await canvas.findByLabelText('当前 ADC 标定状态摘要')
         await expect(within(vinStatusSummary).getByText('槽位 A')).toBeVisible()
         await expect(within(vinStatusSummary).getByText('槽位 B')).toBeVisible()
-        actionButtons = Array.from(
+        const vinActionButtons = Array.from(
           (
             canvasElement.querySelector(
               '.industrial-calibration-inline-actions--single-row'
             ) as HTMLElement | null
           )?.querySelectorAll('.industrial-button') ?? []
         ).map((button) => button.textContent?.trim())
-        expect(actionButtons).toEqual(['自动扫点'])
+        expect(vinActionButtons).toEqual(['自动扫点'])
         expect(canvas.queryByRole('switch', { name: '加热开关' })).not.toBeInTheDocument()
         await expect(await canvas.findByLabelText('当前 ADC 标定状态摘要')).toBeVisible()
         await expect(await canvas.findByLabelText('电压 ADC 拟合建议 拟合建议')).toBeVisible()
@@ -627,44 +579,9 @@ export const DemoCalibrationLeaveGuard: Story = {
 }
 
 export const DemoCalibrationHeaterCurvePreview: Story = {
-  name: 'Demo / 加热曲线标定 preview',
+  name: 'Demo / 自动热模型结果',
   args: {
-    scenario: {
-      ...controlPlaneScenario,
-      devices: controlPlaneScenario.devices.map((device) =>
-        device.id === controlPlaneScenario.selectedDeviceId
-          ? {
-              ...device,
-              heaterCurve: {
-                active: {
-                  points: [
-                    { tempCentiC: 2120, resistanceMilliohms: 4251 },
-                    { tempCentiC: 5180, resistanceMilliohms: 4732 },
-                    { tempCentiC: 7560, resistanceMilliohms: 5144 },
-                    { tempCentiC: 10600, resistanceMilliohms: 5555 },
-                    { tempCentiC: 14150, resistanceMilliohms: 6053 },
-                    { tempCentiC: 17675, resistanceMilliohms: 6469 },
-                    { tempCentiC: 21010, resistanceMilliohms: 6831 },
-                    { tempCentiC: 24340, resistanceMilliohms: 7124 },
-                  ],
-                },
-                preview: {
-                  points: [
-                    { tempCentiC: 2120, resistanceMilliohms: 4270 },
-                    { tempCentiC: 5180, resistanceMilliohms: 4750 },
-                    { tempCentiC: 7560, resistanceMilliohms: 5160 },
-                    { tempCentiC: 10600, resistanceMilliohms: 5572 },
-                    { tempCentiC: 14150, resistanceMilliohms: 6073 },
-                    { tempCentiC: 17675, resistanceMilliohms: 6488 },
-                    { tempCentiC: 21010, resistanceMilliohms: 6850 },
-                    { tempCentiC: 24340, resistanceMilliohms: 7142 },
-                  ],
-                },
-              },
-            }
-          : device
-      ),
-    },
+    scenario: calibrationScenario,
     initialView: 'calibration',
     allowDemoControls: true,
     devd: {
@@ -677,28 +594,17 @@ export const DemoCalibrationHeaterCurvePreview: Story = {
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
 
-    await step('shows a previewed heater curve', async () => {
-      await expect(await canvas.findByRole('table', { name: '加热曲线点表' })).toBeVisible()
-      const statusCard = await canvas.findByRole('heading', { name: '状态' })
-      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
-      expect(statusCardRoot).not.toBeNull()
-      await waitFor(() => {
-        expect(within(statusCardRoot).getByText('目标温度')).toBeVisible()
-      })
-      await expect(await canvas.findByRole('columnheader', { name: '预览温度' })).toBeVisible()
-      await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeEnabled()
+    await step('shows the persisted automatic calibration result', async () => {
+      await expect(await canvas.findByRole('table', { name: 'R(T) 代表点' })).toBeVisible()
+      await expect(await canvas.findByText('active 有效')).toBeVisible()
+      await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
+      await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()
+      expect(canvas.queryByRole('button', { name: '保存曲线' })).toBeNull()
     })
 
-    await step('save promotes preview to active curve', async () => {
-      await userEvent.click(await canvas.findByRole('button', { name: '保存曲线' }))
-      const statusCard = await canvas.findByRole('heading', { name: '状态' })
-      const statusCardRoot = statusCard.closest('.industrial-calibration-live-card') as HTMLElement
-      expect(statusCardRoot).not.toBeNull()
-      await waitFor(() => {
-        expect(within(statusCardRoot).getByText('目标温度')).toBeVisible()
-      })
-      await expect(await canvas.findByRole('button', { name: '保存曲线' })).toBeDisabled()
-      await expect(canvas.getByRole('table', { name: '加热曲线点表' })).toBeVisible()
+    await step('switches the sole automatic command into stop mode', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: '重新开始自动校准' }))
+      await expect(await canvas.findByRole('button', { name: '停止自动校准' })).toBeVisible()
     })
   },
 }

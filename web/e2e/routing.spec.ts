@@ -97,18 +97,18 @@ test.describe('device-scoped routing', () => {
   })
 
   test('blocks a routed device switch until calibration exits', async ({ page }) => {
-    await page.goto(`/devices/${identity}/calibration/heater-curve?demo=true`)
+    await page.goto(`/devices/${identity}/calibration/rtd-adc?demo=true`)
     await page.getByRole('switch', { name: '标定模式' }).click()
 
     await page.getByRole('button', { name: '目标设备' }).click()
     await page.locator('[data-device-id="fp-kit-02"]').getByRole('button').first().click()
 
     await expect(page).toHaveURL(
-      new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+      new RegExp(`/devices/${identity}/calibration/rtd-adc\\?demo=true$`)
     )
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
     await page.getByRole('button', { name: '关闭并继续' }).click()
-    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/calibration\/heater-curve\?demo=true$/)
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/calibration\/rtd-adc\?demo=true$/)
   })
 
   test('shows a router 404 for structurally invalid paths', async ({ page }) => {

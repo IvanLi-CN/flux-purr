@@ -22,3 +22,9 @@
 - 样本集合与槽位职责彻底分离：样本只生成拟合建议值；硬件实际使用并持久化的是 `A/B` 槽位。
 - 单点标定规则收口为固定 `gain=1`、只计算 `offset`；不再混入默认 identity point。
 - 导入/导出升级为完整 calibration state；`calibration_apply` 与 HTTP apply endpoint 被移除。
+
+## 2026-08-27
+
+- 自动热模型运行状态从通用 `CalibrationJobState` 分离为 `ThermalPlantRunSnapshot`，以 `runId` 区分每次尝试，以 `afterSample` 游标分页返回受限瞬态轨迹。
+- 快照明确区分 `ambient`、`heating`、`cooling` 阶段、运行中 provisional curve 与 EEPROM 提交后的 `activeResult`；自然冷却样本属于同一次运行的可见证据。
+- USB、LAN、native `devd` 和 Web 使用同一 `thermal_plant_run` v1 契约，并通过 capability 协商避免旧固件重复报错。

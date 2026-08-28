@@ -133,6 +133,8 @@ pub struct ControlMailboxCommand {
     pub lease_id: Option<[u8; LAN_LEASE_ID_BYTES]>,
     /// Optimistic concurrency precondition supplied by the client for writes.
     pub expected_revision: Option<u32>,
+    /// Cursor used by the read-only thermal-plant trace endpoint.
+    pub after_sample: Option<u8>,
     pub body: String<LAN_HTTP_BODY_MAX_LEN>,
 }
 
@@ -205,6 +207,7 @@ pub struct HttpRequest<'a> {
     pub authorization: Option<&'a str>,
     pub lease_id: Option<&'a str>,
     pub expected_revision: Option<u32>,
+    pub after_sample: Option<u8>,
     pub request_private_network: bool,
     pub body: &'a str,
     /// Entropy produced by the hardware RNG. It is never emitted in responses.
@@ -599,6 +602,7 @@ impl NetHttpState {
                 method: request.method,
                 lease_id,
                 expected_revision: request.expected_revision,
+                after_sample: request.after_sample,
                 body,
             },
             allow_origin: None,
@@ -754,6 +758,7 @@ fn endpoint_for_path(path: &str) -> Option<LanEndpoint> {
         "/api/v1/runtime" => Some(LanEndpoint::Runtime),
         "/api/v1/calibration" => Some(LanEndpoint::Calibration),
         "/api/v1/calibration/job" => Some(LanEndpoint::CalibrationJob),
+        "/api/v1/calibration/thermal-plant/run" => Some(LanEndpoint::ThermalPlantRun),
         "/api/v1/heater-curve" => Some(LanEndpoint::HeaterCurve),
         "/api/v1/heater-curve/save" => Some(LanEndpoint::HeaterCurveSave),
         "/api/v1/thermal-profile" => Some(LanEndpoint::ThermalProfile),
@@ -790,6 +795,7 @@ fn endpoint_allows_method(endpoint: LanEndpoint, method: HttpMethod) -> bool {
                 LanEndpoint::CalibrationJob,
                 HttpMethod::Get | HttpMethod::Post
             )
+            | (LanEndpoint::ThermalPlantRun, HttpMethod::Get)
             | (LanEndpoint::HeaterCurveSave, HttpMethod::Post)
     )
 }
@@ -923,6 +929,7 @@ mod tests {
             authorization: None,
             lease_id: None,
             expected_revision: None,
+            after_sample: None,
             request_private_network: false,
             body: "",
             entropy: [7; crate::lan::LAN_TOKEN_BYTES],

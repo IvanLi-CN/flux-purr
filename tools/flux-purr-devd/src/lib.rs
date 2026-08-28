@@ -70,7 +70,8 @@ const FLASH_CONFIG_MIN_SIZE: u64 = 0x2000;
 const LEGACY_FLASH_CONFIG_OFFSET: u64 = 0x110000;
 const LEGACY_FLASH_CONFIG_SIZE: u64 = 0x2000;
 const FLASH_CONFIG_LABEL: &str = "flux_cfg";
-const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
+const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
 const SERIAL_RPC_TIMEOUT: Duration = Duration::from_millis(12_000);
 const LEASE_REAPER_INTERVAL: Duration = Duration::from_secs(1);
@@ -461,6 +462,8 @@ pub struct DeviceRecord {
     pub saved_thermal_control_profile_pps5a: Option<ThermalControlProfilePackage>,
     pub calibration: CalibrationState,
     pub heater_curve: HeaterCurveState,
+    #[serde(default)]
+    pub thermal_plant_run: ThermalPlantRunSnapshot,
     pub selected_artifact_id: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
@@ -472,6 +475,82 @@ struct MockPpsApdo {
     min_mv: u16,
     max_mv: u16,
     max_ma: u16,
+}
+
+fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
+    let curve_points = [
+        (25, 5_674),
+        (61, 6_089),
+        (102, 6_583),
+        (162, 7_307),
+        (220, 8_011),
+    ]
+    .into_iter()
+    .map(|(temp_c, resistance_ohms)| {
+        Some(HeaterCurvePoint {
+            temp_centi_c: temp_c * 100,
+            resistance_milliohms: resistance_ohms,
+        })
+    })
+    .chain(std::iter::repeat(None))
+    .take(HEATER_CURVE_MAX_POINTS)
+    .collect::<Vec<_>>();
+    let curve = HeaterCurvePackage {
+        points: curve_points,
+        raw_observations: None,
+    };
+    let temperatures = [
+        25, 35, 52, 78, 112, 148, 182, 207, 220, 205, 174, 138, 102, 80,
+    ];
+    let points = temperatures
+        .into_iter()
+        .enumerate()
+        .map(|(index, temperature)| ThermalPlantTracePoint {
+            sample_index: index as u8,
+            elapsed_ms: index as u32 * 30_000,
+            temperature_centi_c: temperature * 100,
+            heater_voltage_mv: if index < 9 { 21_000 } else { 0 },
+            duty_percent: if index < 9 { 100 } else { 0 },
+            phase: if index == 0 {
+                ThermalPlantRunPhase::Ambient
+            } else if index < 9 {
+                ThermalPlantRunPhase::Heating
+            } else {
+                ThermalPlantRunPhase::Cooling
+            },
+        })
+        .collect();
+    ThermalPlantRunSnapshot {
+        version: 1,
+        attempt: Some(ThermalPlantRunAttempt {
+            run_id: 7,
+            status: CalibrationJobStatus::Completed,
+            phase: Some(ThermalPlantRunPhase::Cooling),
+            progress_percent: 100,
+            elapsed_ms: 420_000,
+            current_temp_centi_c: 8000,
+            heater_voltage_mv: 0,
+            duty_percent: 0,
+            sample_count: 14,
+            restart_allowed: true,
+            error: None,
+        }),
+        trace_page: ThermalPlantTracePage {
+            start_sample: 0,
+            next_sample: None,
+            total_samples: 14,
+            points,
+        },
+        provisional_curve: None,
+        active_result: Some(ThermalPlantActiveResult {
+            transaction_id: 7,
+            curve,
+            convection_mw_per_c: Some(120.0),
+            radiation_mw_per_k4: Some(0.0002),
+            thermal_capacity_mj_per_c: Some(42_000.0),
+            transport_delay_ms: Some(500),
+        }),
+    }
 }
 
 impl DeviceRecord {
@@ -490,6 +569,7 @@ impl DeviceRecord {
                 "status".to_string(),
                 "network".to_string(),
                 "calibration".to_string(),
+                "thermal_plant_run".to_string(),
                 "wifi_config".to_string(),
                 "wifi_state_v2".to_string(),
                 "monitor".to_string(),
@@ -605,6 +685,7 @@ impl DeviceRecord {
             saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
+            thermal_plant_run: mock_thermal_plant_snapshot(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -707,6 +788,7 @@ impl DeviceRecord {
                     "identity".to_string(),
                     "status".to_string(),
                     "network".to_string(),
+                    "thermal_plant_run".to_string(),
                     "wifi_config".to_string(),
                     "monitor".to_string(),
                     "firmware_check".to_string(),
@@ -721,6 +803,7 @@ impl DeviceRecord {
             saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
+            thermal_plant_run: ThermalPlantRunSnapshot::default(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -1251,6 +1334,81 @@ pub struct HeaterCurveState {
     pub eeprom_probe: Option<HeaterCurveEepromProbe>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalPlantRunPhase {
+    #[default]
+    Ambient,
+    Heating,
+    Cooling,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantTracePoint {
+    pub sample_index: u8,
+    pub elapsed_ms: u32,
+    pub temperature_centi_c: i16,
+    pub heater_voltage_mv: u16,
+    pub duty_percent: u8,
+    pub phase: ThermalPlantRunPhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantTracePage {
+    pub start_sample: u8,
+    pub next_sample: Option<u8>,
+    pub total_samples: u8,
+    #[serde(default)]
+    pub points: Vec<ThermalPlantTracePoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantProvisionalCurve {
+    pub state: String,
+    pub coverage_percent: u8,
+    pub curve: HeaterCurvePackage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRunAttempt {
+    pub run_id: u32,
+    pub status: CalibrationJobStatus,
+    pub phase: Option<ThermalPlantRunPhase>,
+    pub progress_percent: u8,
+    pub elapsed_ms: u32,
+    pub current_temp_centi_c: i16,
+    pub heater_voltage_mv: u16,
+    pub duty_percent: u8,
+    pub sample_count: u8,
+    pub restart_allowed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantActiveResult {
+    pub transaction_id: u32,
+    pub curve: HeaterCurvePackage,
+    pub convection_mw_per_c: Option<f32>,
+    pub radiation_mw_per_k4: Option<f32>,
+    pub thermal_capacity_mj_per_c: Option<f32>,
+    pub transport_delay_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantRunSnapshot {
+    pub version: u8,
+    pub attempt: Option<ThermalPlantRunAttempt>,
+    pub trace_page: ThermalPlantTracePage,
+    pub provisional_curve: Option<ThermalPlantProvisionalCurve>,
+    pub active_result: Option<ThermalPlantActiveResult>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct HeaterCurveEepromProbe {
@@ -1776,6 +1934,15 @@ struct UsbRequestWire<'a> {
     frame_type: &'static str,
     request_id: &'a str,
     op: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbThermalPlantRunWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    after_sample: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -2349,6 +2516,12 @@ pub struct LeaseQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ThermalPlantRunQuery {
+    pub lease_id: Option<String>,
+    pub after_sample: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct BindRequest {
     pub alias: Option<String>,
 }
@@ -2406,6 +2579,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/calibration/job",
             get(device_calibration_job).post(configure_calibration_job),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/calibration/thermal-plant/run",
+            get(device_thermal_plant_run),
         )
         .route(
             "/api/v1/devices/{device_id}/eeprom",
@@ -3295,6 +3472,67 @@ async fn device_calibration_job(
     Ok(Json(target.status.calibration.job))
 }
 
+fn thermal_plant_trace_page(
+    snapshot: &ThermalPlantRunSnapshot,
+    after_sample: u8,
+) -> ThermalPlantRunSnapshot {
+    let start = after_sample.min(snapshot.trace_page.total_samples);
+    let mut page = snapshot.clone();
+    page.trace_page.start_sample = start;
+    page.trace_page.points = snapshot
+        .trace_page
+        .points
+        .iter()
+        .filter(|point| point.sample_index >= start)
+        .take(16)
+        .cloned()
+        .collect();
+    page.trace_page.next_sample = page
+        .trace_page
+        .points
+        .last()
+        .map(|point| point.sample_index.saturating_add(1))
+        .filter(|next| *next < snapshot.trace_page.total_samples);
+    page
+}
+
+async fn device_thermal_plant_run(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<ThermalPlantRunQuery>,
+) -> Result<Json<ThermalPlantRunSnapshot>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    let after_sample = query.after_sample.unwrap_or(0);
+    if target.transport == DeviceTransport::NativeSerial {
+        let snapshot = serial_thermal_plant_run_get(&state, &target, after_sample).await?;
+        return Ok(Json(snapshot));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let path = if after_sample == 0 {
+            "calibration/thermal-plant/run".to_string()
+        } else {
+            format!("calibration/thermal-plant/run?after_sample={after_sample}")
+        };
+        let snapshot = lan_bridge_read::<ThermalPlantRunSnapshot>(&configured, &path).await?;
+        return Ok(Json(snapshot));
+    }
+    Ok(Json(thermal_plant_trace_page(
+        &target.thermal_plant_run,
+        after_sample,
+    )))
+}
+
 async fn configure_calibration_job(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -3359,6 +3597,14 @@ async fn configure_calibration_job(
             };
             disarm_mock_thermal_plant(&mut device.status);
             device.status.calibration.mode = CalibrationMode::Off;
+            if let Some(attempt) = device.thermal_plant_run.attempt.as_mut() {
+                attempt.status = CalibrationJobStatus::Canceled;
+                attempt.phase = Some(ThermalPlantRunPhase::Cooling);
+                attempt.restart_allowed = true;
+                attempt.duty_percent = 0;
+                attempt.heater_voltage_mv = 0;
+                attempt.error = None;
+            }
         }
         CalibrationJobOp::Start => {
             if device.status.calibration.job.status == CalibrationJobStatus::Running {
@@ -3374,8 +3620,14 @@ async fn configure_calibration_job(
                 )
             })?;
             let mut next_request_mv = device.status.calibration.pps_mv;
+            let mut thermal_request_mv = device
+                .status
+                .calibration
+                .pps_mv
+                .unwrap_or(DEFAULT_PD_REQUEST_MV);
             if kind == CalibrationJobKind::ThermalPlantAuto {
                 let (source, request_mv) = thermal_plant_start_request_for_device(device)?;
+                thermal_request_mv = request_mv;
                 device.status.calibration.mode = CalibrationMode::ThermalPlant;
                 disarm_mock_thermal_plant(&mut device.status);
                 device.status.manual_pps_enabled = true;
@@ -3397,6 +3649,29 @@ async fn configure_calibration_job(
                 next_request_mv,
                 message: None,
             };
+            if kind == CalibrationJobKind::ThermalPlantAuto {
+                let next_run_id = device
+                    .thermal_plant_run
+                    .attempt
+                    .as_ref()
+                    .map(|attempt| attempt.run_id.saturating_add(1))
+                    .unwrap_or(1);
+                device.thermal_plant_run.attempt = Some(ThermalPlantRunAttempt {
+                    run_id: next_run_id,
+                    status: CalibrationJobStatus::Running,
+                    phase: Some(ThermalPlantRunPhase::Ambient),
+                    progress_percent: 0,
+                    elapsed_ms: 0,
+                    current_temp_centi_c: 2500,
+                    heater_voltage_mv: thermal_request_mv,
+                    duty_percent: 0,
+                    sample_count: 0,
+                    restart_allowed: false,
+                    error: None,
+                });
+                device.thermal_plant_run.trace_page = ThermalPlantTracePage::default();
+                device.thermal_plant_run.provisional_curve = None;
+            }
         }
     }
     Ok(Json(device.status.calibration.job.clone()))
@@ -5759,6 +6034,11 @@ async fn run_bundle_flash_transaction(
         port_path.into(),
         "--non-interactive".into(),
     ];
+    let initial_reset = if is_esp_usb_serial_jtag_port(port_path) {
+        "usb-reset"
+    } else {
+        "default-reset"
+    };
     let preserved_config = if operation == FirmwareOperation::Update {
         progress.stage_started("write_segments", json!({
             "completedUnits": 0,
@@ -5773,14 +6053,14 @@ async fn run_bundle_flash_transaction(
                 .map_err(bundle_http_error),
         )?;
         let path = workspace.path().join("preserved-flux-cfg.bin");
-        let mut args = vec!["read-flash".into()];
-        args.extend(common.clone());
-        args.extend([
-            format!("0x{:x}", copy.source_address),
-            format!("0x{:x}", copy.length),
-            path.to_string_lossy().into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &args).await)?;
+        let args = build_bundle_read_flash_args(
+            &common,
+            initial_reset,
+            copy.source_address,
+            copy.length,
+            &path,
+        );
+        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         let bytes =
             progress.require(fs::read(&path).map_err(|error| {
                 HttpError::internal(&format!("failed to stage flux_cfg: {error}"))
@@ -5802,7 +6082,7 @@ async fn run_bundle_flash_transaction(
             "--after".into(),
             "no-reset".into(),
         ]);
-        progress.require(require_espflash_success(&program, &args).await)?;
+        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         progress.stage_completed("erase", json!({}));
         progress.stage_started("write_segments", json!({
             "completedUnits": 0,
@@ -5818,21 +6098,9 @@ async fn run_bundle_flash_transaction(
         .sum::<u64>();
     let mut completed_bytes = 0_u64;
     for segment in &bundle.manifest.segments {
-        let mut args = vec!["write-bin".into()];
-        args.extend(common.clone());
-        args.extend([
-            "--before".into(),
-            "default-reset".into(),
-            "--after".into(),
-            "no-reset".into(),
-            format!("0x{:x}", segment.address),
-            workspace
-                .path()
-                .join(format!("{:?}.bin", segment.kind))
-                .to_string_lossy()
-                .into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &args).await)?;
+        let path = workspace.path().join(format!("{:?}.bin", segment.kind));
+        let args = build_bundle_write_bin_args(&common, "no-reset", segment.address, &path);
+        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
         completed_bytes = completed_bytes.saturating_add(segment.length);
         progress.stage_progress(
             "write_segments",
@@ -5861,7 +6129,8 @@ async fn run_bundle_flash_transaction(
     );
     for (index, segment) in bundle.manifest.segments.iter().enumerate() {
         let checksum = build_checksum_md5_args(&common, segment.address, segment.length);
-        let output = progress.require(require_espflash_success(&program, &checksum).await)?;
+        let output = progress
+            .require(require_bundle_espflash_success(&program, &checksum, port_path).await)?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
         if !stdout.contains(&segment.md5) {
             return Err(progress.fail(HttpError::internal(
@@ -5878,26 +6147,17 @@ async fn run_bundle_flash_transaction(
         );
     }
     if let Some((path, expected, copy)) = preserved_config {
-        let mut write = vec!["write-bin".into()];
-        write.extend(common.clone());
-        write.extend([
-            "--before".into(),
-            "default-reset".into(),
-            "--after".into(),
-            "no-reset".into(),
-            format!("0x{:x}", copy.target_address),
-            path.to_string_lossy().into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &write).await)?;
+        let write = build_bundle_write_bin_args(&common, "no-reset", copy.target_address, &path);
+        progress.require(require_bundle_espflash_success(&program, &write, port_path).await)?;
         let verified_path = workspace.path().join("verified-flux-cfg.bin");
-        let mut read = vec!["read-flash".into()];
-        read.extend(common.clone());
-        read.extend([
-            format!("0x{:x}", copy.target_address),
-            format!("0x{:x}", copy.length),
-            verified_path.to_string_lossy().into_owned(),
-        ]);
-        progress.require(require_espflash_success(&program, &read).await)?;
+        let read = build_bundle_read_flash_args(
+            &common,
+            "no-reset",
+            copy.target_address,
+            copy.length,
+            &verified_path,
+        );
+        progress.require(require_bundle_espflash_success(&program, &read, port_path).await)?;
         let actual = progress.require(fs::read(verified_path).map_err(|error| {
             HttpError::internal(&format!("failed to verify preserved flux_cfg: {error}"))
         }))?;
@@ -5940,12 +6200,68 @@ async fn require_espflash_success(program: &Path, args: &[String]) -> Result<Out
     if output.status.success() {
         Ok(output)
     } else {
-        Err(HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "espflash_failed",
-            "Protected espflash transaction failed.",
-            true,
-        ))
+        Err(espflash_command_error(program, args, &output))
+    }
+}
+
+async fn require_bundle_espflash_success(
+    program: &Path,
+    args: &[String],
+    port_path: &str,
+) -> Result<Output, HttpError> {
+    let output = run_espflash_command_with_timeout(program, args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    if output.status.success() {
+        return Ok(output);
+    }
+    let Some(retry_args) = is_esp_usb_serial_jtag_port(port_path)
+        .then(|| replace_espflash_before_reset(args, "usb-reset"))
+        .flatten()
+    else {
+        return Err(espflash_command_error(program, args, &output));
+    };
+    if !espflash_connection_failed(&output) {
+        return Err(espflash_command_error(program, args, &output));
+    }
+
+    tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+    let retry_output =
+        run_espflash_command_with_timeout(program, &retry_args, ESPFLASH_COMMAND_TIMEOUT).await?;
+    if retry_output.status.success() {
+        return Ok(retry_output);
+    }
+    Err(HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: ApiError {
+            code: "espflash_failed".to_string(),
+            message: "Protected espflash transaction failed after USB recovery retry.".to_string(),
+            retryable: true,
+            details: Some(json!({
+                "initialAttempt": espflash_failure_details(program, args, &output),
+                "recoveryAttempt": espflash_failure_details(program, &retry_args, &retry_output),
+            })),
+        },
+    })
+}
+
+fn replace_espflash_before_reset(args: &[String], before_reset: &str) -> Option<Vec<String>> {
+    let index = args.iter().position(|argument| argument == "--before")?;
+    if args.get(index + 1).map(String::as_str) != Some("no-reset") {
+        return None;
+    }
+    let mut replaced = args.to_vec();
+    replaced[index + 1] = before_reset.to_string();
+    Some(replaced)
+}
+
+fn espflash_command_error(program: &Path, args: &[String], output: &Output) -> HttpError {
+    HttpError {
+        status: StatusCode::BAD_GATEWAY,
+        error: ApiError {
+            code: "espflash_failed".to_string(),
+            message: "Protected espflash transaction failed.".to_string(),
+            retryable: true,
+            details: Some(espflash_failure_details(program, args, output)),
+        },
     }
 }
 
@@ -6428,6 +6744,31 @@ async fn serial_calibration_job_get(
         "calibration_job",
     )
     .await
+}
+
+async fn serial_thermal_plant_run_get(
+    state: &AppState,
+    target: &DeviceRecord,
+    after_sample: u8,
+) -> Result<ThermalPlantRunSnapshot, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-thermal-plant-run", now_millis());
+    let request = serde_json::to_string(&UsbThermalPlantRunWire {
+        frame_type: "thermal_plant_run",
+        request_id: &request_id,
+        after_sample,
+    })
+    .map_err(|_| HttpError::internal("failed to encode thermal plant run request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::ReadOnly,
+    )
+    .await?;
+    extract_usb_payload(result, "thermal_plant_run")
 }
 
 async fn serial_calibration_job_config(
@@ -7526,12 +7867,27 @@ fn runtime_config_matches_status(
 }
 
 fn decode_usb_response_line(line: &[u8], request_id: &str) -> Result<Option<Value>, HttpError> {
-    let Ok(text) = std::str::from_utf8(line) else {
-        return Ok(None);
-    };
-    let Ok(frame) = serde_json::from_str::<UsbResponseWire>(text.trim()) else {
-        return Ok(None);
-    };
+    const FRAME_PREFIX: &[u8] = br#"{"type":"#;
+    for (offset, candidate) in line.windows(FRAME_PREFIX.len()).enumerate() {
+        if candidate != FRAME_PREFIX {
+            continue;
+        }
+        let mut frames =
+            serde_json::Deserializer::from_slice(&line[offset..]).into_iter::<UsbResponseWire>();
+        let Some(Ok(frame)) = frames.next() else {
+            continue;
+        };
+        if let Some(payload) = decode_usb_response_frame(frame, request_id)? {
+            return Ok(Some(payload));
+        }
+    }
+    Ok(None)
+}
+
+fn decode_usb_response_frame(
+    frame: UsbResponseWire,
+    request_id: &str,
+) -> Result<Option<Value>, HttpError> {
     if frame.frame_type == "error" && frame.request_id.as_deref() == Some(request_id) {
         return Err(HttpError {
             status: StatusCode::BAD_GATEWAY,
@@ -8065,9 +8421,37 @@ where
                 run_espflash_command_with_timeout(program, &args, ESPFLASH_COMMAND_TIMEOUT).await?;
 
             if !output.status.success() {
+                if espflash_flash_end_requires_reset(&args, &output) {
+                    let reset_args = build_espflash_reset_args(artifact, port_path, before_reset)?;
+                    let reset_output = run_espflash_command_with_timeout(
+                        program,
+                        &reset_args,
+                        ESPFLASH_COMMAND_TIMEOUT,
+                    )
+                    .await?;
+
+                    if reset_output.status.success() {
+                        // The ROM accepted the image data but rejected the final
+                        // run-user-code transition. Reset once, then let the caller
+                        // require the normal runtime-ready verification.
+                        return Ok(());
+                    }
+
+                    return Err(HttpError::internal_with_details(
+                        "flash_recovery_reset_failed",
+                        "espflash reached FlashEnd but the recovery reset failed.",
+                        json!({
+                            "flashAttempt": espflash_failure_details(program, &args, &output),
+                            "resetAttempt": espflash_failure_details(program, &reset_args, &reset_output),
+                        }),
+                    ));
+                }
                 retry_with_next_reset =
                     mode_index + 1 < reset_modes.len() && espflash_connection_failed(&output);
                 if retry_with_next_reset {
+                    if is_esp_usb_serial_jtag_port(port_path) {
+                        tokio::time::sleep(ESPFLASH_USB_RESET_RETRY_DELAY).await;
+                    }
                     break;
                 }
                 return Err(HttpError::internal_with_details(
@@ -8137,6 +8521,10 @@ struct FlashConfigStaging {
     _workspace: tempfile::TempDir,
     plan: FlashConfigMigrationPlan,
     source_path: PathBuf,
+}
+
+fn flash_config_restore_required(plan: &FlashConfigMigrationPlan) -> bool {
+    plan.source.offset != plan.destination.offset || plan.source.size != plan.destination.size
 }
 
 fn flash_partition_ranges(table: &esp_idf_part::PartitionTable) -> Vec<FlashPartitionRange> {
@@ -8297,8 +8685,9 @@ fn build_espflash_read_flash_args(
         "--before".to_string(),
         before_reset.to_string(),
         "--non-interactive".to_string(),
+        "--no-stub".to_string(),
         "--after".to_string(),
-        "hard-reset".to_string(),
+        "no-reset".to_string(),
         format!("0x{address:x}"),
         format!("0x{size:x}"),
         output_path.to_string_lossy().into_owned(),
@@ -8328,10 +8717,76 @@ fn build_espflash_write_bin_args(
         before_reset.to_string(),
         "--non-interactive".to_string(),
         "--after".to_string(),
-        "hard-reset".to_string(),
+        "no-reset".to_string(),
         format!("0x{address:x}"),
         input_path.to_string_lossy().into_owned(),
     ])
+}
+
+fn build_espflash_reset_args(
+    artifact: &FirmwareArtifact,
+    port_path: &str,
+    before_reset: &str,
+) -> Result<Vec<String>, HttpError> {
+    if port_path.is_empty() {
+        return Err(HttpError::bad_request(
+            "missing_port",
+            "Real flash requires an explicit serial port.",
+        ));
+    }
+    Ok(vec![
+        "reset".to_string(),
+        "--chip".to_string(),
+        artifact.target_chip.clone(),
+        "--port".to_string(),
+        port_path.to_string(),
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--after".to_string(),
+        "hard-reset".to_string(),
+        "--non-interactive".to_string(),
+    ])
+}
+
+fn build_bundle_read_flash_args(
+    common: &[String],
+    before_reset: &str,
+    address: u64,
+    size: u64,
+    output_path: &Path,
+) -> Vec<String> {
+    let mut args = vec!["read-flash".to_string()];
+    args.extend(common.iter().cloned());
+    args.extend([
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--no-stub".to_string(),
+        "--after".to_string(),
+        "no-reset".to_string(),
+        format!("0x{address:x}"),
+        format!("0x{size:x}"),
+        output_path.to_string_lossy().into_owned(),
+    ]);
+    args
+}
+
+fn build_bundle_write_bin_args(
+    common: &[String],
+    before_reset: &str,
+    address: u64,
+    input_path: &Path,
+) -> Vec<String> {
+    let mut args = vec!["write-bin".to_string()];
+    args.extend(common.iter().cloned());
+    args.extend([
+        "--before".to_string(),
+        before_reset.to_string(),
+        "--after".to_string(),
+        "no-reset".to_string(),
+        format!("0x{address:x}"),
+        input_path.to_string_lossy().into_owned(),
+    ]);
+    args
 }
 
 async fn stage_flash_config_before_app_flash_with_program(
@@ -8401,42 +8856,6 @@ async fn stage_flash_config_before_app_flash_with_program(
         ));
     }
 
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_write_bin_args(
-            artifact,
-            port_path,
-            before_reset,
-            plan.destination.offset,
-            &source_path,
-        )?])
-    })
-    .await?;
-
-    let verification_path = flash_config_staging_path(workspace.path(), "flux_cfg-verify.bin");
-    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
-        Ok(vec![build_espflash_read_flash_args(
-            artifact,
-            port_path,
-            before_reset,
-            plan.destination.offset,
-            plan.source.size,
-            &verification_path,
-        )?])
-    })
-    .await?;
-    let verification = fs::read(&verification_path).map_err(|_| {
-        HttpError::internal_with_details(
-            "flash_config_verify_unreadable",
-            "Unable to verify the preserved device configuration; refusing to flash.",
-            json!({}),
-        )
-    })?;
-    if verification != source {
-        return Err(HttpError::bad_request(
-            "flash_config_verify_failed",
-            "Device configuration preservation could not be verified; refusing to flash.",
-        ));
-    }
     Ok(Some(FlashConfigStaging {
         _workspace: workspace,
         plan,
@@ -8450,6 +8869,10 @@ async fn restore_flash_config_after_app_flash_with_program(
     port_path: &str,
     staging: &FlashConfigStaging,
 ) -> Result<(), HttpError> {
+    // The app image does not overlap flux_cfg when the partition range is unchanged.
+    if !flash_config_restore_required(&staging.plan) {
+        return Ok(());
+    }
     run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
         Ok(vec![build_espflash_write_bin_args(
             artifact,
@@ -8495,6 +8918,14 @@ async fn restore_flash_config_after_app_flash_with_program(
             "Device configuration restoration could not be verified.",
         ));
     }
+    run_espflash_with_reset_fallback_with_program(program, artifact, port_path, |before_reset| {
+        Ok(vec![build_espflash_reset_args(
+            artifact,
+            port_path,
+            before_reset,
+        )?])
+    })
+    .await?;
     Ok(())
 }
 
@@ -8548,8 +8979,21 @@ fn espflash_failure_details(program: &Path, args: &[String], output: &Output) ->
 }
 
 fn espflash_connection_failed(output: &Output) -> bool {
-    bounded_espflash_output(&output.stderr).contains("Failed to connect to the device")
-        || bounded_espflash_output(&output.stdout).contains("Failed to connect to the device")
+    espflash_connection_failure_text(&bounded_espflash_output(&output.stderr))
+        || espflash_connection_failure_text(&bounded_espflash_output(&output.stdout))
+}
+
+fn espflash_flash_end_requires_reset(args: &[String], output: &Output) -> bool {
+    args.first().map(String::as_str) == Some("flash")
+        && bounded_espflash_output(&output.stderr).contains("Error while running FlashEnd command")
+}
+
+fn espflash_connection_failure_text(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("failed to connect to the device")
+        || output.contains("error while connecting to device")
+        || output.contains("no such device or address")
+        || output.contains("broken pipe")
 }
 
 fn bounded_espflash_output(bytes: &[u8]) -> String {
@@ -8627,6 +9071,7 @@ fn build_espflash_args_with_reset_mode(
             "--before".to_string(),
             before_reset.to_string(),
             "--non-interactive".to_string(),
+            "--no-stub".to_string(),
             "--after".to_string(),
             "hard-reset".to_string(),
         ];
@@ -8719,7 +9164,7 @@ fn firmware_partition_table_binary_path(root: Option<&Path>) -> Result<PathBuf, 
 
 fn espflash_reset_modes(artifact: &FirmwareArtifact, port_path: &str) -> Vec<&'static str> {
     if artifact.target_chip == "esp32s3" && port_path.contains("usbmodem") {
-        vec!["usb-reset", "default-reset"]
+        vec!["usb-reset", "usb-reset"]
     } else {
         vec!["default-reset"]
     }
@@ -8981,10 +9426,13 @@ fn sanitize_io_error(error: io::Error) -> HttpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::ExitStatus;
     use tempfile::tempdir;
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
 
     fn flash_partition_layout(entries: &[(&str, u64, u64)]) -> Vec<FlashPartitionRange> {
         entries
@@ -9060,7 +9508,7 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\naction=\"$1\"\nlast=\"\"\naddress=\"\"\nfor arg in \"$@\"; do\n  last=\"$arg\"\n  case \"$arg\" in\n    0x8000|0x110000|0x210000) address=\"$arg\" ;;\n  esac\ndone\nif [ \"$action\" = \"read-flash\" ]; then\n  case \"$address\" in\n    0x8000) cp \"{}\" \"$last\" ;;\n    0x110000) cp \"{}\" \"$last\" ;;\n    0x210000) cp \"{}\" \"$last\" ;;\n    *) exit 43 ;;\n  esac\n  exit 0\nfi\nif [ \"$action\" = \"write-bin\" ]; then\n  if [ \"$address\" = \"0x210000\" ]; then\n    {}\n  else\n    exit 44\n  fi\n  exit 0\nfi\nif [ \"$action\" = \"flash\" ]; then\n  exit 0\nfi\nexit 45\n",
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$1\" >> \"{}\"\naction=\"$1\"\nlast=\"\"\naddress=\"\"\nfor arg in \"$@\"; do\n  last=\"$arg\"\n  case \"$arg\" in\n    0x8000|0x110000|0x210000) address=\"$arg\" ;;\n  esac\ndone\nif [ \"$action\" = \"read-flash\" ]; then\n  case \"$address\" in\n    0x8000) cp \"{}\" \"$last\" ;;\n    0x110000) cp \"{}\" \"$last\" ;;\n    0x210000) cp \"{}\" \"$last\" ;;\n    *) exit 43 ;;\n  esac\n  exit 0\nfi\nif [ \"$action\" = \"write-bin\" ]; then\n  if [ \"$address\" = \"0x210000\" ]; then\n    {}\n  else\n    exit 44\n  fi\n  exit 0\nfi\nif [ \"$action\" = \"flash\" ] || [ \"$action\" = \"reset\" ]; then\n  exit 0\nfi\nexit 45\n",
                 log_path.display(),
                 table_path.display(),
                 source_path.display(),
@@ -9876,6 +10324,7 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--after", "hard-reset"])
         );
+        assert!(args.iter().any(|argument| argument == "--no-stub"));
         assert!(!args.contains(&"-S".to_string()));
         assert!(args.iter().any(|arg| arg.ends_with("firmware.elf")));
         assert!(args.windows(2).any(|pair| {
@@ -9975,7 +10424,7 @@ mod tests {
     }
 
     #[test]
-    fn usbmodem_flash_retries_default_reset_without_manual_boot_mode() {
+    fn usbmodem_flash_retries_usb_reset_without_manual_boot_mode() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -9991,7 +10440,7 @@ mod tests {
 
         assert_eq!(
             espflash_reset_modes(&artifact, "/dev/cu.usbmodem2111401"),
-            ["usb-reset", "default-reset"]
+            ["usb-reset", "usb-reset"]
         );
     }
 
@@ -10182,7 +10631,7 @@ mod tests {
     }
 
     #[test]
-    fn flash_config_staging_commands_read_and_verify_before_app_flash() {
+    fn flash_config_transport_commands_use_rom_reads_without_intermediate_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
             name: "Test".to_string(),
@@ -10215,21 +10664,165 @@ mod tests {
         .unwrap();
 
         assert_eq!(read[0], "read-flash");
-        assert!(
-            read.windows(2)
-                .any(|pair| pair == ["--after", "hard-reset"])
-        );
+        assert!(read.windows(2).any(|pair| pair == ["--after", "no-reset"]));
+        assert!(read.iter().any(|argument| argument == "--no-stub"));
         assert!(read.windows(2).any(|pair| pair == ["0x110000", "0x2000"]));
         assert_eq!(write[0], "write-bin");
-        assert!(
-            write
-                .windows(2)
-                .any(|pair| pair == ["--after", "hard-reset"])
-        );
+        assert!(write.windows(2).any(|pair| pair == ["--after", "no-reset"]));
         assert!(
             write
                 .windows(2)
                 .any(|pair| pair == ["0x210000", source.to_str().unwrap()])
+        );
+    }
+
+    #[test]
+    fn transient_usb_jtag_connection_errors_are_retryable() {
+        assert!(espflash_connection_failure_text(
+            "Error while connecting to device: No such device or address"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flash_end_error_is_recoverable_only_for_a_complete_flash_command() {
+        let flash_args = vec!["flash".to_string()];
+        let write_args = vec!["write-bin".to_string()];
+        let output = Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"Error: Error while running FlashEnd command".to_vec(),
+        };
+
+        assert!(espflash_flash_end_requires_reset(&flash_args, &output));
+        assert!(!espflash_flash_end_requires_reset(&write_args, &output));
+    }
+
+    #[test]
+    fn flash_end_recovery_reset_is_explicit_and_uses_the_authorized_usb_port() {
+        let artifact = FirmwareArtifact {
+            artifact_id: "test-artifact".to_string(),
+            name: "Test".to_string(),
+            version: "fw/test".to_string(),
+            git_sha: "abc".to_string(),
+            build_id: "build".to_string(),
+            target_chip: "esp32s3".to_string(),
+            profile: "release".to_string(),
+            features: vec![],
+            protocol: "flux-purr.usb.v1".to_string(),
+            files: vec![],
+        };
+
+        let args =
+            build_espflash_reset_args(&artifact, "/dev/cu.usbmodem2111401", "usb-reset").unwrap();
+
+        assert_eq!(args[0], "reset");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--port", "/dev/cu.usbmodem2111401"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--before", "usb-reset"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--after", "hard-reset"])
+        );
+    }
+
+    #[test]
+    fn unchanged_config_range_does_not_need_post_flash_restore() {
+        let unchanged = FlashConfigMigrationPlan {
+            source: FlashPartitionRange {
+                label: "flux_cfg".to_string(),
+                offset: 0x210000,
+                size: 0x2000,
+            },
+            destination: FlashPartitionRange {
+                label: "flux_cfg".to_string(),
+                offset: 0x210000,
+                size: 0x2000,
+            },
+        };
+        let moved = FlashConfigMigrationPlan {
+            source: FlashPartitionRange {
+                label: "legacy_raw".to_string(),
+                offset: 0x110000,
+                size: 0x2000,
+            },
+            destination: unchanged.destination.clone(),
+        };
+
+        assert!(!flash_config_restore_required(&unchanged));
+        assert!(flash_config_restore_required(&moved));
+    }
+
+    #[test]
+    fn bundle_flash_commands_keep_usb_serial_jtag_in_loader_until_final_reset() {
+        let common = vec![
+            "--chip".to_string(),
+            "esp32s3".to_string(),
+            "--port".to_string(),
+            "/dev/cu.usbmodem2111401".to_string(),
+            "--non-interactive".to_string(),
+        ];
+        let config_read = build_bundle_read_flash_args(
+            &common,
+            "usb-reset",
+            LEGACY_FLASH_CONFIG_OFFSET,
+            LEGACY_FLASH_CONFIG_SIZE,
+            Path::new("/private/tmp/flux_cfg.bin"),
+        );
+        let segment_write = build_bundle_write_bin_args(
+            &common,
+            "no-reset",
+            0x10_000,
+            Path::new("/private/tmp/app.bin"),
+        );
+
+        assert!(config_read.iter().any(|argument| argument == "--no-stub"));
+        assert!(
+            config_read
+                .windows(2)
+                .any(|pair| pair == ["--before", "usb-reset"])
+        );
+        assert!(
+            config_read
+                .windows(2)
+                .any(|pair| pair == ["--after", "no-reset"])
+        );
+        assert!(
+            segment_write
+                .windows(2)
+                .any(|pair| pair == ["--before", "no-reset"])
+        );
+        assert!(
+            segment_write
+                .windows(2)
+                .any(|pair| pair == ["--after", "no-reset"])
+        );
+    }
+
+    #[test]
+    fn bundle_retry_replaces_only_the_recoverable_no_reset_mode() {
+        let command = vec![
+            "write-bin".to_string(),
+            "--before".to_string(),
+            "no-reset".to_string(),
+            "--after".to_string(),
+            "no-reset".to_string(),
+        ];
+
+        assert_eq!(
+            replace_espflash_before_reset(&command, "usb-reset"),
+            Some(vec![
+                "write-bin".to_string(),
+                "--before".to_string(),
+                "usb-reset".to_string(),
+                "--after".to_string(),
+                "no-reset".to_string(),
+            ])
         );
     }
 
@@ -10257,18 +10850,17 @@ mod tests {
             vec![
                 "read-flash",
                 "read-flash",
-                "write-bin",
-                "read-flash",
                 "flash",
                 "write-bin",
-                "read-flash"
+                "read-flash",
+                "reset"
             ]
         );
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn flash_transaction_never_writes_the_app_when_config_staging_fails() {
+    async fn flash_transaction_reports_restore_failure_after_writing_the_app() {
         let root = tempdir().unwrap();
         let (program, source, destination) = write_flash_transaction_fixture(root.path(), true);
 
@@ -10288,7 +10880,33 @@ mod tests {
                 .unwrap()
                 .lines()
                 .collect::<Vec<_>>(),
-            vec!["read-flash", "read-flash", "write-bin"]
+            vec!["read-flash", "read-flash", "flash", "write-bin"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn flash_transaction_never_writes_the_app_before_config_backup_is_complete() {
+        let root = tempdir().unwrap();
+        let (program, source, _) = write_flash_transaction_fixture(root.path(), false);
+        fs::remove_file(&source).unwrap();
+
+        let error = run_flash_transaction_with_program(
+            &test_flash_artifact(),
+            Some(root.path()),
+            "/dev/cu.usbmodem2111401",
+            &program,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.error.code, "flash_tool_failed");
+        assert_eq!(
+            fs::read_to_string(root.path().join("espflash-actions.log"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["read-flash", "read-flash"]
         );
     }
 
@@ -11362,6 +11980,51 @@ mod tests {
         assert_eq!(started.next_request_mv, Some(21_000));
     }
 
+    #[tokio::test]
+    async fn thermal_plant_run_reader_pages_cooling_trace_without_raw_adc() {
+        let state = AppState::test();
+        let lease = state.lease_device("mock-fp-lab-01").unwrap();
+
+        let first = device_thermal_plant_run(
+            State(state.clone()),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(ThermalPlantRunQuery {
+                lease_id: Some(lease.lease_id.clone()),
+                after_sample: Some(0),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(first.trace_page.points.len(), 14);
+        assert_eq!(first.trace_page.next_sample, None);
+        assert!(
+            first
+                .trace_page
+                .points
+                .iter()
+                .any(|point| point.phase == ThermalPlantRunPhase::Cooling)
+        );
+        let serialized = serde_json::to_string(&first).unwrap();
+        assert!(!serialized.contains("rawAdc"));
+        assert!(serialized.len() < 8 * 1024);
+
+        let tail = device_thermal_plant_run(
+            State(state),
+            AxumPath("mock-fp-lab-01".to_string()),
+            Query(ThermalPlantRunQuery {
+                lease_id: Some(lease.lease_id),
+                after_sample: Some(8),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(tail.trace_page.start_sample, 8);
+        assert_eq!(tail.trace_page.points.len(), 6);
+        assert_eq!(tail.trace_page.points[0].sample_index, 8);
+    }
+
     #[test]
     fn calibration_slot_fit_normalizes_invalid_coefficients() {
         let mut device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
@@ -11664,6 +12327,19 @@ mod tests {
 
         let payload = decode_usb_response_line(
             br#"{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#,
+            "req-1",
+        )
+        .unwrap()
+        .unwrap();
+
+        let network = extract_usb_payload::<NetworkSummary>(payload, "network").unwrap();
+        assert_eq!(network.state, NetworkState::Disabled);
+    }
+
+    #[test]
+    fn usb_response_decoder_extracts_a_matching_frame_appended_to_a_boot_log() {
+        let payload = decode_usb_response_line(
+            br#"I (181) esp_image: segment 1: paddr=00061018 vaddr=3fc91988 size{"type":"response","requestId":"req-1","ok":true,"result":{"network":{"state":"disabled","dns":[]}}}"#,
             "req-1",
         )
         .unwrap()

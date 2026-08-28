@@ -25,12 +25,31 @@ export function bridgeCandidatesForTransport({
   lanDevices: readonly DeviceTarget[]
 }): DeviceTarget[] {
   const source = transport === 'wifi' ? lanDevices : devices
-  return source.filter(
-    (device) =>
-      (device.connectionAvailable || device.connectionCandidate) &&
-      device.transport === 'devd' &&
-      device.bridgeTransport === transport
-  )
+  const candidates = new Map<string, DeviceTarget>()
+
+  for (const device of source) {
+    if (
+      !(device.connectionAvailable || device.connectionCandidate) ||
+      device.transport !== 'devd' ||
+      device.bridgeTransport !== transport
+    ) {
+      continue
+    }
+
+    const existing = candidates.get(device.id)
+    if (!existing || bridgeCandidatePriority(device) < bridgeCandidatePriority(existing)) {
+      candidates.set(device.id, device)
+    }
+  }
+
+  return [...candidates.values()]
+}
+
+function bridgeCandidatePriority(device: DeviceTarget) {
+  if (device.connectionAvailable && device.leaseState === 'active') return 0
+  if (device.connectionAvailable) return 1
+  if (device.connectionCandidate) return 2
+  return 3
 }
 
 export type BridgeIdentityValidation = { ok: true } | { ok: false; reason: 'unknown_device' }

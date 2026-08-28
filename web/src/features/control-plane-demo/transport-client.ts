@@ -21,6 +21,7 @@ import type {
   Identity,
   NetworkSummary,
   RuntimeConfigRequest,
+  ThermalPlantRunSnapshot,
   UsbRequestFrame,
   UsbWifiConfigFrame,
   WifiConfigRequest,
@@ -95,6 +96,12 @@ export interface ControlPlaneHttpClient {
     deviceId: string,
     leaseId: string
   ): Promise<CalibrationJobState>
+  getThermalPlantRun(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string,
+    afterSample?: number
+  ): Promise<ThermalPlantRunSnapshot>
   configureCalibration(
     devdBaseUrl: string,
     deviceId: string,
@@ -282,6 +289,13 @@ export function createControlPlaneHttpClient(
       return requestJson<CalibrationJobState>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/job?lease_id=${encodeURIComponent(leaseId)}`
+      )
+    },
+    getThermalPlantRun(devdBaseUrl, deviceId, leaseId, afterSample = 0) {
+      const cursor = afterSample > 0 ? `&after_sample=${afterSample}` : ''
+      return requestJson<ThermalPlantRunSnapshot>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-plant/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`
       )
     },
     configureCalibration(devdBaseUrl, deviceId, request) {

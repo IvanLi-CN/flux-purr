@@ -11,12 +11,14 @@ import type {
   Identity,
   InstallStatus,
   NetworkSummary,
+  ThermalPlantRunSnapshot,
   UsbCalibrationConfigFrame,
   UsbCalibrationJobFrame,
   UsbHeaterCurveConfigFrame,
   UsbHeaterCurveSaveFrame,
   UsbRequestFrame,
   UsbRuntimeConfigFrame,
+  UsbThermalPlantRunFrame,
 } from './contracts'
 import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
@@ -134,6 +136,7 @@ type UsbFrameFactory = (
   | UsbRequestFrame
   | UsbRuntimeConfigFrame
   | UsbCalibrationJobFrame
+  | UsbThermalPlantRunFrame
   | UsbCalibrationConfigFrame
   | UsbHeaterCurveConfigFrame
   | UsbHeaterCurveSaveFrame
@@ -438,6 +441,14 @@ export class WebSerialControlPlaneClient {
       'calibration_job',
       createUsbRequestFrame('get_calibration_job')
     )
+  }
+
+  async getThermalPlantRun(afterSample = 0): Promise<ThermalPlantRunSnapshot> {
+    return this.requestPayload<ThermalPlantRunSnapshot>('thermal_plant_run', (requestId) => ({
+      type: 'thermal_plant_run',
+      requestId,
+      afterSample,
+    }))
   }
 
   async configureCalibrationJob(
