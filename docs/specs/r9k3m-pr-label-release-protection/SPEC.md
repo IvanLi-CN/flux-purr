@@ -61,6 +61,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - Manual `Release Product` recovery MUST accept an explicit `main` commit SHA and recover its existing enabled snapshot without recomputing release intent.
 - Manual `Release Product` promotion MUST accept an explicit `main` commit SHA with an enabled RC snapshot produced after successful `CI Main`; it MUST derive the stable version and tag from that snapshot and MUST NOT require a published RC Release.
 - Promotion records MUST be stored separately from release snapshots and MUST bind the candidate SHA and canonical source-snapshot digest.
+- A partial-run retry with an existing stable tag MUST verify that the tag points at the candidate and that any existing Release manifest matches the resolved source, version, channel, components, and asset hashes before reusing it.
 - 主分支 required checks 必须至少包含 `Validate PR labels`、`Firmware checks`、`Web checks`。
 
 ### SHOULD
@@ -92,7 +93,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - Snapshot 缺失时，release workflow 失败而不是重新读取 PR 标签。
 - `recover` 必须保持 snapshot 的 channel、version、tag 与 source SHA 不变。
 - `promote` 必须保持 RC snapshot 不变，并在 `refs/notes/release-promotions` 中写入或复用匹配的 schema-v1 record。
-- Promotion record、source SHA 或 stable tag 不一致时，发布失败而不是覆盖既有记录或 tag。
+- Promotion record、source SHA、stable tag 或既有 Release manifest 不一致时，发布失败而不是覆盖既有记录、tag 或资产。
 - 历史 schema-v1 release snapshot 若使用旧 `components` 格式，必须保持可读并参与版本基线计算；新生成的 snapshot 必须使用单一 `product` 格式。
 - `type:docs` 或 `type:skip` 的 snapshot 导出 `release_enabled=false`。
 - 已存在 release tag 时，发布 workflow 跳过 tag 创建但继续保持 rerun 幂等。

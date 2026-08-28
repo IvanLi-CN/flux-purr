@@ -8,6 +8,7 @@
 - `CI Main` 负责 `main` 上的非抢占式验证和 release snapshot 写入。
 - `Release Product` 从 release snapshot 导出发布意图，并创建单一 product tag。
 - `Release Product` supports explicit `recover` and `promote` dispatches; promotion records are stored under `refs/notes/release-promotions` and preserve the source snapshot.
+- Publish retries verify an existing stable tag and Release manifest against the resolved source, version, channel, component identities, and asset hashes before reusing partial output.
 - Release snapshot validation keeps historical schema-v1 component snapshots readable for version-baseline reconciliation while requiring newly generated snapshots to carry the single product record.
 - The workspace `Cargo.lock` is tracked so all host-tool release matrix builds can honor `cargo ... --locked`.
 - All Ubuntu jobs that build `flux-purr-devd`, including the firmware bundle job, reuse the local Linux serial dependency action to install `pkg-config` and `libudev-dev` before the locked build so `libudev-sys` has its declared system dependency in the clean runner.
