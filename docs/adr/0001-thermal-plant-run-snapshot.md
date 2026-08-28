@@ -14,7 +14,7 @@ Expose a separate read-only `ThermalPlantRunSnapshot` projection through the `th
 
 - `runId` identifies an automatic attempt and never replaces the persisted `transactionId`.
 - `attempt` carries live or terminal state, phase, progress, elapsed time, current temperature, heater voltage, duty, sample count, restart permission, and an optional error.
-- `tracePage` is cursor based. `afterSample` selects strictly greater `sampleIndex` values, each page contains at most 16 points, and each point exposes only elapsed time, projected temperature, measured heater voltage, duty, and `ambient|heating|cooling` phase.
+- `tracePage` is cursor based. `afterSample` is the first `sampleIndex` for the requested page (the initial cursor is `0`); `nextSample` is the next page cursor. Each page contains at most 16 points, and each point exposes only elapsed time, projected temperature, measured heater voltage, duty, and `ambient|heating|cooling` phase.
 - `provisionalCurve` is display-only while a run is in progress. `activeResult` is populated only from the successfully persisted transaction, so it cannot be confused with a preview or candidate.
 - The wire projection is bounded below 8 KiB and is identical across USB JSONL, direct LAN, native devd serial, and native devd LAN adapters.
 - Clients merge pages by `runId` and `sampleIndex`, drain terminal pages, then stop polling once `restartAllowed` is true. Devices without the capability are rendered as explicitly incompatible and are not repeatedly queried.

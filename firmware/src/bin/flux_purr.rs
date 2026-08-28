@@ -4681,7 +4681,7 @@ fn thermal_plant_run_snapshot_wire(
         })
     });
     let active_result = persisted.and_then(|transaction| {
-        thermal_plant_projection_from_transient(transaction).map(|projection| {
+        thermal_plant_projection_for_runtime(memory_config).map(|(projection, _)| {
             ThermalPlantActiveResultWire {
                 transaction_id: transaction.transaction_id,
                 curve: HeaterCurvePackageWire::from_memory(
@@ -16156,6 +16156,22 @@ mod tests {
             CalibrationRuntimeState::default(),
             manual_pps
         ));
+        let valid_snapshot = thermal_plant_run_snapshot_wire(
+            &CalibrationRuntimeState::default(),
+            &memory_config,
+            &CalibrationThermalPlantWorkspace::default(),
+            0,
+            ambient_temp_c,
+            0,
+            0,
+        );
+        assert_eq!(
+            valid_snapshot
+                .active_result
+                .as_ref()
+                .map(|result| result.transaction_id),
+            Some(transaction.transaction_id)
+        );
         let mut unrelated_curve = memory_config.clone();
         unrelated_curve.heater_curve_transaction_id = Some(transaction.transaction_id + 1);
         assert!(!thermal_model_heater_allowed(
@@ -16281,6 +16297,16 @@ mod tests {
             CalibrationRuntimeState::default(),
             manual_pps
         ));
+        let invalid_snapshot = thermal_plant_run_snapshot_wire(
+            &CalibrationRuntimeState::default(),
+            &memory_config,
+            &CalibrationThermalPlantWorkspace::default(),
+            0,
+            ambient_temp_c,
+            0,
+            0,
+        );
+        assert!(invalid_snapshot.active_result.is_none());
 
         let mut below_target = transaction;
         let mut saw_powered_sample = false;

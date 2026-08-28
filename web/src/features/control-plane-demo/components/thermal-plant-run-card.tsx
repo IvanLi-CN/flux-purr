@@ -25,6 +25,52 @@ const statusLabel: Record<string, string> = {
   canceled: '已停止',
 }
 
+export function thermalPlantRunCardPresentation(
+  snapshot: ThermalPlantRunSnapshot,
+  unsupported = false
+) {
+  const attempt = snapshot.attempt
+  const isRunning = attempt?.status === 'running'
+  const status = unsupported ? 'unsupported' : (attempt?.status ?? 'idle')
+  const terminalFailure = status === 'failed' || status === 'canceled'
+  const showActiveResult = Boolean(snapshot.activeResult) && !isRunning
+  const preservesPriorActive = showActiveResult && terminalFailure
+  const trace = snapshot.tracePage.points
+  const statusText = unsupported
+    ? '兼容状态'
+    : terminalFailure
+      ? (statusLabel[status] ?? status)
+      : showActiveResult
+        ? 'active 有效'
+        : (statusLabel[status] ?? status)
+  const runEvidence = isRunning
+    ? `${phaseLabel[attempt?.phase ?? 'ambient']}中 · ${attempt?.sampleCount ?? trace.length} / ${Math.max(snapshot.tracePage.totalSamples, attempt?.sampleCount ?? 0)} 样本`
+    : terminalFailure
+      ? `${statusLabel[status]} · 本次未写入 EEPROM${attempt?.error ? ` · ${attempt.error}` : ''}${preservesPriorActive ? ' · 当前 active 保留' : ''}`
+      : showActiveResult
+        ? `${trace.length} / ${snapshot.tracePage.totalSamples} 瞬态样本 · 220℃断热 · 80℃自然冷却完成`
+        : '等待开始自动热模型标定'
+  const traceStatus = isRunning
+    ? '采样中'
+    : attempt?.status === 'completed'
+      ? '80℃完成'
+      : terminalFailure
+        ? (statusLabel[status] ?? status)
+        : trace.length > 0
+          ? '已记录'
+          : '等待中'
+
+  return {
+    isRunning,
+    showActiveResult,
+    preservesPriorActive,
+    status,
+    statusText,
+    runEvidence,
+    traceStatus,
+  }
+}
+
 export function ThermalPlantRunCard({
   snapshot,
   disabled,
@@ -37,35 +83,22 @@ export function ThermalPlantRunCard({
   onStartStop: () => void
 }) {
   const attempt = snapshot.attempt
-  const isRunning = attempt?.status === 'running'
-  const showActiveResult = Boolean(snapshot.activeResult) && !isRunning
+  const presentation = thermalPlantRunCardPresentation(snapshot, unsupported)
+  const { isRunning, showActiveResult } = presentation
   const result = showActiveResult ? snapshot.activeResult : snapshot.provisionalCurve
   const curve =
     result?.curve.points.filter((point): point is NonNullable<typeof point> => point != null) ?? []
   const trace = snapshot.tracePage.points
-  const status = unsupported ? 'unsupported' : (attempt?.status ?? 'idle')
   const canStart = !unsupported && !isRunning && (attempt == null || attempt.restartAllowed)
-  const statusText = unsupported
-    ? '兼容状态'
-    : showActiveResult
-      ? 'active 有效'
-      : (statusLabel[status] ?? status)
-  const runEvidence = isRunning
-    ? `${phaseLabel[attempt?.phase ?? 'ambient']}中 · ${attempt?.sampleCount ?? trace.length} / ${Math.max(snapshot.tracePage.totalSamples, attempt?.sampleCount ?? 0)} 样本`
-    : showActiveResult
-      ? `${trace.length} / ${snapshot.tracePage.totalSamples} 瞬态样本 · 220℃断热 · 80℃自然冷却完成`
-      : attempt?.error
-        ? attempt.error
-        : '等待开始自动热模型标定'
 
   return (
     <article className="thermal-plant-run-card" aria-label="自动热模型标定结果">
       <header className="thermal-plant-run-card__header">
         <output
-          className={`thermal-plant-run-card__status thermal-plant-run-card__status--${status}`}
+          className={`thermal-plant-run-card__status thermal-plant-run-card__status--${presentation.status}`}
         >
           <span aria-hidden="true" />
-          {statusText}
+          {presentation.statusText}
         </output>
       </header>
 
@@ -127,8 +160,8 @@ export function ThermalPlantRunCard({
           aria-label="电阻曲线"
         >
           <div className="thermal-plant-run-card__section-heading">
-            <h3>R(T) 加热曲线</h3>
-            <span>{curve.length} 点</span>
+            <h3>{presentation.preservesPriorActive ? 'R(T) 当前 active' : 'R(T) 加热曲线'}</h3>
+            <span>{presentation.preservesPriorActive ? '上次成功' : `${curve.length} 点`}</span>
           </div>
           <ResistanceChart points={curve} />
         </section>
@@ -137,7 +170,7 @@ export function ThermalPlantRunCard({
           <section className="thermal-plant-run-card__trace-panel" aria-label="温度轨迹">
             <div className="thermal-plant-run-card__section-heading">
               <h3>温度轨迹</h3>
-              <span>{isRunning ? '采样中' : trace.length > 0 ? '80℃完成' : '等待中'}</span>
+              <span>{presentation.traceStatus}</span>
             </div>
             <TraceChart points={trace} />
             <div className="thermal-plant-run-card__legend">
@@ -195,7 +228,7 @@ export function ThermalPlantRunCard({
       <footer className="thermal-plant-run-card__footer">
         <output className="thermal-plant-run-card__run-evidence" aria-live="polite">
           <Activity size={15} aria-hidden="true" />
-          {runEvidence}
+          {presentation.runEvidence}
         </output>
         <button
           type="button"
