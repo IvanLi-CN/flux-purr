@@ -156,6 +156,20 @@ _Avoid_: Cached result, historical result, preview
 The optional operator workflow for importing, previewing, or saving a heater-resistance curve. It is separate from an Automatic Thermal-Model Result.
 _Avoid_: Automatic thermal-model calibration
 
+## Product Release
+
+**Release Repair PR**:
+A PR that restores the release pipeline without changing the already-approved product source or creating a new product release intent.
+_Avoid_: Product patch, feature release
+
+**Release Recovery**:
+An explicit product-release workflow dispatch that publishes the existing frozen release snapshot for a specified `main` commit when its original release run did not complete publication. It preserves the snapshot's source, channel, version, and tag.
+_Avoid_: Re-release, workflow retry
+
+**Release Promotion**:
+An explicit product-release workflow dispatch that publishes a stable release from an already qualified pre-release candidate at the same source commit and effective version. It records a separate immutable promotion intent instead of changing the candidate's frozen release snapshot.
+_Avoid_: Retagging, channel override
+
 ## Power And Communication
 
 **PD Request**:
