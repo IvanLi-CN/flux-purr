@@ -54,6 +54,7 @@ python3 - <<'PY'
 import importlib.util
 import argparse
 import json
+import re
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
@@ -371,6 +372,17 @@ assert "./.github/actions/setup-linux-serial-deps" in release_workflow
 for workflow_path in (".github/workflows/ci.yml", ".github/workflows/ci-main.yml"):
     workflow = Path(workflow_path).read_text(encoding="utf-8")
     assert "./.github/actions/setup-linux-serial-deps" in workflow
+
+def workflow_job(name):
+    start = release_workflow.index(f"  {name}:")
+    remainder = release_workflow[start + len(f"  {name}:") :]
+    next_job = re.search(r"\n  [a-z][a-z-]+:\n", remainder)
+    return remainder if next_job is None else remainder[: next_job.start()]
+
+for job_name in ("firmware", "host-tools"):
+    job = workflow_job(job_name)
+    assert job.index("Checkout workflow helpers") < job.index("Setup Linux serial build dependencies")
+    assert job.index("Setup Linux serial build dependencies") < job.index("Checkout target")
 PY
 
 echo "Release label tests passed."

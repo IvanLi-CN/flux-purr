@@ -596,14 +596,15 @@ def resolve_release(
 
     fetch_notes(promotions_ref)
     promotion = read_promotion(promotions_ref, target_sha, snapshot)
+    expected_promotion = build_promotion_record(target_sha, snapshot) if promotion is None else promotion
+    existing_commit = stable_tag_commit(expected_promotion["tag"])
+    if existing_commit is not None and existing_commit != target_sha:
+        raise SnapshotError(
+            f"Stable tag {expected_promotion['tag']} already points at {existing_commit}, not {target_sha}"
+        )
     if promotion is None:
-        promotion = build_promotion_record(target_sha, snapshot)
-        existing_commit = stable_tag_commit(promotion["tag"])
+        promotion = expected_promotion
         if existing_commit is not None:
-            if existing_commit != target_sha:
-                raise SnapshotError(
-                    f"Stable tag {promotion['tag']} already points at {existing_commit}, not {target_sha}"
-                )
             raise SnapshotError(
                 f"Stable tag {promotion['tag']} exists without its promotion record"
             )
