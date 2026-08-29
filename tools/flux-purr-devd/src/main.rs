@@ -5,7 +5,7 @@ use flux_purr_devd::{AppConfig, AppState, app};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
-#[command(name = "flux-purr-devd")]
+#[command(name = "flux-purr-devd", version = flux_purr_devd::PRODUCT_VERSION)]
 #[command(about = "Flux Purr local USB/devd bridge")]
 struct Cli {
     #[command(subcommand)]

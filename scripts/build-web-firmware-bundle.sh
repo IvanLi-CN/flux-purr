@@ -5,21 +5,16 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 artifact_root="${FLUX_PURR_FIRMWARE_ARTIFACTS_DIR:-${repo_root}/firmware/target/flux-purr-web-artifacts}"
 source_sha="${FLUX_PURR_SOURCE_SHA:-$(git -C "${repo_root}" rev-parse HEAD)}"
 build_id="${FLUX_PURR_BUILD_ID:-${source_sha:0:16}}"
-if [[ -n "${FLUX_PURR_FIRMWARE_VERSION:-}" ]]; then
-  version="${FLUX_PURR_FIRMWARE_VERSION}"
-else
-  base_version="$(
-    git -C "${repo_root}" tag --merged HEAD --sort=-v:refname \
-      | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' \
-      | head -n 1
-  )"
-  if [[ -z "${base_version}" ]]; then
-    base_version="0.1.0"
-  fi
-  IFS='.' read -r version_major version_minor version_patch <<<"${base_version}"
-  version="${version_major}.${version_minor}.$((version_patch + 1))-dev.${build_id:0:7}"
-fi
-channel="${RELEASE_CHANNEL:-local}"
+build_mode="${FLUX_PURR_BUILD_MODE:-development}"
+IFS=$'\t' read -r version channel resolved_source_sha resolved_build_id < <(
+  python3 "${repo_root}/scripts/product-version.py" \
+    --repo-root "${repo_root}" \
+    --mode "${build_mode}" \
+    --source-sha "${source_sha}" \
+    --format tsv
+)
+source_sha="${resolved_source_sha}"
+build_id="${FLUX_PURR_BUILD_ID:-${resolved_build_id}}"
 elf="${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr"
 # The development proxy exposes only this path as its local build. Replacing
 # it atomically prevents a long-lived Vite process from offering stale builds.
@@ -33,14 +28,9 @@ if [[ ! "${build_id}" =~ ^[0-9a-f]{16,64}$ ]]; then
   echo "FLUX_PURR_BUILD_ID must be 16-64 lowercase hexadecimal characters" >&2
   exit 1
 fi
-if [[ "${channel}" != stable && "${channel}" != rc && "${channel}" != local ]]; then
-  echo "RELEASE_CHANNEL must be stable, rc, or local" >&2
-  exit 1
-fi
-
 mkdir -p "${artifact_root}"
 
-FLUX_PURR_FIRMWARE_VERSION="${version}" \
+FLUX_PURR_BUILD_MODE="${build_mode}" \
   FLUX_PURR_SOURCE_SHA="${source_sha}" \
   FLUX_PURR_BUILD_ID="${build_id}" \
   bash "${repo_root}/scripts/check-firmware-build.sh"

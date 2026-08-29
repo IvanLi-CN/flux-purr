@@ -30,7 +30,7 @@ mod thermal_report;
 mod thermal_retune;
 
 #[derive(Debug, Parser)]
-#[command(name = "flux-purr")]
+#[command(name = "flux-purr", version = flux_purr_devd::PRODUCT_VERSION)]
 #[command(about = "Flux Purr CLI for USB/devd hardware workflows")]
 struct Cli {
     #[arg(long, default_value = DEFAULT_DEVD_URL)]
