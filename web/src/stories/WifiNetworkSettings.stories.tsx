@@ -278,6 +278,29 @@ export const StateGallery: Story = {
   ),
 }
 
+export const ReadOnlyLanSnapshot: Story = {
+  name: 'Read-only / LAN snapshot',
+  args: {
+    networkState: 'connected',
+    savedSsid: 'FluxPurr-Lab',
+    wifiRssi: -54,
+    savedPasswordLength: 11,
+    readOnly: true,
+    unavailableReason: '当前通过 WiFi / LAN 连接，只能查看网络信息；请通过 USB 配置连接修改 WiFi。',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('alert')).toHaveTextContent(
+      '当前通过 WiFi / LAN 连接，只能查看网络信息；请通过 USB 配置连接修改 WiFi。'
+    )
+    await expect(canvas.getByText('FluxPurr-Lab')).toBeVisible()
+    await expect(canvas.getByText('•••••••••••')).toBeVisible()
+    expect(canvas.queryByRole('textbox', { name: 'WiFi 名称' })).toBeNull()
+    expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
+    expect(canvas.queryByRole('button', { name: '清除 WiFi' })).toBeNull()
+  },
+}
+
 export const ProvisioningSucceedsAfterTransientRetry: Story = {
   render: () => <TraceHarness trace={fixtureTrace('transient_retry_success')} />,
   play: async ({ canvasElement }) => {
@@ -486,6 +509,7 @@ export const MobileSavedPasswordLength: Story = {
 export const TransportUnavailable: Story = {
   args: {
     disabled: true,
+    readOnly: true,
     networkState: 'connecting',
     configurationGeneration: 2,
     transitionSequence: 2,

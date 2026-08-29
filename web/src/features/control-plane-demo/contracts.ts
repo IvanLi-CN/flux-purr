@@ -299,6 +299,10 @@ export interface WifiConfigRequest {
   telemetryIntervalMs?: number
 }
 
+export interface WifiConfigReceipt {
+  network: NetworkSummary
+}
+
 export interface RuntimeConfigRequest {
   leaseId: string
   targetTempC?: number

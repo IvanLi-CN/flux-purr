@@ -237,8 +237,15 @@ function App() {
         return
       }
       if (next.view === 'settings') {
+        const settingsTab = next.settingsTab ?? 'presets'
+        const settingsPath =
+          settingsTab === 'fan'
+            ? '/devices/$deviceId/settings/fan'
+            : settingsTab === 'wifi'
+              ? '/devices/$deviceId/settings/wifi'
+              : '/devices/$deviceId/settings/presets'
         await navigate({
-          to: '/devices/$deviceId/settings',
+          to: settingsPath,
           params,
           search,
           replace: options?.replace,

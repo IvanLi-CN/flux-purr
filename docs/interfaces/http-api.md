@@ -256,7 +256,7 @@ Errors must not include WiFi passwords, PSK values, or unrelated host paths.
 
 ## Device HTTP
 
-Direct device HTTP is the WiFi/LAN control plane. The device uses DHCP by default, sends its MAC-derived `flux-purr-<mac>` hostname as DHCP option 12, and announces `_http._tcp.local` with `api=v1`, `path=/api/v1`, `pairing=frontpanel`, and `device=<mac>` TXT metadata. USB/devd remains the only path for initial WiFi provisioning, firmware flash, static IPv4 configuration, and pairing-token reset.
+Direct device HTTP is the WiFi/LAN control plane. The device uses DHCP by default, sends its MAC-derived `flux-purr-<mac>` hostname as DHCP option 12, and announces `_http._tcp.local` with `api=v1`, `path=/api/v1`, `pairing=frontpanel`, and `device=<mac>` TXT metadata. USB configuration transports (Browser Web Serial or native `devd`) remain the only paths for initial WiFi provisioning, firmware flash, static IPv4 configuration, and pairing-token reset. Once connected, Web and devd LAN targets may read the published network summary but are not WiFi credential write paths.
 
 The WiFi station uses bounded driver buffers sized for control traffic. A WiFi-driver or LAN-task startup failure is published in `NetworkSummary` as `state=error`; it must not prevent the USB JSONL control and recovery loop from becoming available.
 
@@ -336,7 +336,7 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...`
 - `GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>`
 - `GET /api/v1/devices/:id/events`
-- `PUT /api/v1/devices/:id/wifi`: WiFi provisioning is USB/devd-only. The live Web Settings form remains visible for a selected native `devd` device with `wifi_config`; without `wifi_state_v2` it locks every configuration control and reports that a protocol update is required. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. Its response is a redacted WiFi receipt with the device-published `NetworkSummary`; `devd` must reject an unversioned or malformed receipt. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. It never sends credentials over direct LAN or Web Serial.
+- `PUT /api/v1/devices/:id/wifi`: native `devd` USB provisioning endpoint. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. Its response is a redacted WiFi receipt with the device-published `NetworkSummary`; `devd` must reject an unversioned or malformed receipt. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. Direct LAN and devd LAN bridge targets must not call this endpoint. Browser Web Serial uses the same USB JSONL `wifi_config` frame directly when connected and capable; it does not send credentials over LAN.
 - `PUT /api/v1/devices/:id/runtime`
 - `PUT /api/v1/devices/:id/calibration`
 - `POST /api/v1/devices/:id/calibration/job`
@@ -691,7 +691,15 @@ Responses must redact the password:
       "op": "set",
       "ssid": "FluxPurr-Lab",
       "password": "<redacted>",
-      "telemetryIntervalMs": 500
+      "telemetryIntervalMs": 500,
+      "network": {
+        "state": "connecting",
+        "configurationGeneration": 1,
+        "transitionSequence": 1,
+        "ssid": "FluxPurr-Lab",
+        "wifiPasswordLength": 11,
+        "wifiRssi": null
+      }
     }
   }
 }

@@ -128,6 +128,7 @@ export const InteractionSmoke: Story = {
 }
 
 const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
+const webSerialWifiWrites: Array<{ op: 'set' | 'clear'; ssid?: string; password?: string }> = []
 let webSerialConnectCalls = 0
 let webSerialDisconnectCalls = 0
 const heaterCurveStoryPackage = {
@@ -171,6 +172,7 @@ const legacyWifiStateScenario = {
       ? {
           ...device,
           transport: 'devd' as const,
+          bridgeTransport: 'usb' as const,
           leaseState: 'active' as const,
           leaseId: 'legacy-wifi-state-lease',
         }
@@ -258,14 +260,16 @@ export const LegacyWifiStateProtocol: Story = {
     const canvas = within(canvasElement)
 
     await step(
-      'WiFi configuration remains visible but cannot submit without wifi_state_v2',
+      'WiFi snapshot remains visible but configuration is blocked without wifi_state_v2',
       async () => {
+        await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
         await expect(await canvas.findByRole('heading', { name: 'WiFi' })).toBeVisible()
         await expect(
           await canvas.findByText('当前设备固件需要 WiFi 状态协议更新后才能提交设置。')
         ).toBeVisible()
-        await expect(await canvas.findByRole('textbox', { name: 'WiFi 名称' })).toBeDisabled()
-        await expect(await canvas.findByRole('button', { name: '保存并连接' })).toBeDisabled()
+        await expect(await canvas.findByText('网络名称')).toBeVisible()
+        expect(canvas.queryByRole('textbox', { name: 'WiFi 名称' })).toBeNull()
+        expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
       }
     )
   },
@@ -887,6 +891,7 @@ export const LiveWebSerialAddDevice: Story = {
     const canvas = within(canvasElement)
     const documentRoot = within(canvasElement.ownerDocument.body)
     webSerialRuntimeWrites.length = 0
+    webSerialWifiWrites.length = 0
     webSerialConnectCalls = 0
     webSerialDisconnectCalls = 0
 
@@ -1011,12 +1016,29 @@ export const LiveWebSerialAddDevice: Story = {
     )
 
     await step('Settings fan policy keeps the acknowledged operator selection', async () => {
+      await userEvent.click(await canvas.findByRole('tab', { name: '风扇策略' }))
       await userEvent.click(await canvas.findByRole('button', { name: 'OFF' }))
 
       await waitFor(() => {
         expect(canvas.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'true')
       })
       await expect(await canvas.findByText('flux-purr-s3-001 fan policy is now OFF.')).toBeVisible()
+    })
+
+    await step('Settings WiFi writes through the connected Web Serial transport', async () => {
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.type(await canvas.findByLabelText('密码'), 'serial-secret')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+
+      await waitFor(() => {
+        expect(webSerialWifiWrites.at(-1)).toEqual({
+          op: 'set',
+          ssid: 'FluxPurr-Lab',
+          password: 'serial-secret',
+        })
+      })
+      await expect(await canvas.findByText('已提交，正在等待设备连接。')).toBeVisible()
     })
 
     await step('Add device can choose another Web Serial port after one is connected', async () => {
@@ -2016,6 +2038,20 @@ class FakeWebSerialClient {
     return Promise.resolve(this.currentStatus satisfies ControlPlaneStatus)
   }
 
+  configureWifi(request: { op: 'set' | 'clear'; ssid?: string; password?: string }) {
+    webSerialWifiWrites.push(request)
+    const nextNetwork: NetworkSummary = {
+      ...this.currentStatus.network,
+      state: request.op === 'clear' ? 'disabled' : 'saving',
+      ssid: request.op === 'clear' ? null : (request.ssid ?? null),
+      wifiPasswordLength: request.op === 'clear' ? 0 : (request.password?.length ?? 0),
+      configurationGeneration: (this.currentStatus.network.configurationGeneration ?? 0) + 1,
+      transitionSequence: (this.currentStatus.network.transitionSequence ?? 0) + 1,
+    }
+    this.currentStatus = { ...this.currentStatus, network: nextNetwork }
+    return Promise.resolve(nextNetwork)
+  }
+
   getHeaterCurve() {
     return Promise.resolve(this.heaterCurve)
   }
@@ -2061,7 +2097,15 @@ const identity = {
   apiVersion: '2026-05-29',
   protocolVersion: 'flux-purr.usb.v1',
   hostname: 'flux-purr-s3-001',
-  capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
+  capabilities: [
+    'identity',
+    'status',
+    'network',
+    'usb_jsonl',
+    'wifi_config',
+    'wifi_state_v2',
+    'monitor',
+  ],
 } satisfies Identity
 
 const network = {
@@ -2071,6 +2115,7 @@ const network = {
   gateway: null,
   dns: [],
   wifiRssi: null,
+  wifiPasswordLength: 0,
   lastError: null,
 } satisfies NetworkSummary
 

@@ -211,6 +211,30 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
+  it('sends WiFi config frames over Web Serial and returns the network payload', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const network = await client.configureWifi({
+      op: 'set',
+      ssid: 'FluxPurr-Lab',
+      password: 'secret-pass',
+    })
+
+    expect(network).toMatchObject({ state: 'saving', ssid: 'FluxPurr-Lab' })
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'wifi_config',
+      op: 'set',
+      ssid: 'FluxPurr-Lab',
+      password: 'secret-pass',
+    })
+
+    await client.configureWifi({ op: 'clear' })
+    expect(fake.requests.at(-1)).toMatchObject({ type: 'wifi_config', op: 'clear' })
+    await client.disconnect()
+  })
+
   it('reports firmware boot and reset markers without treating arbitrary serial output as device state', async () => {
     const fake = new FakeSerial()
     const diagnostics: string[] = []
@@ -797,6 +821,25 @@ function responseFor(request: Record<string, unknown>) {
           heaterOutputPercent: request.heaterEnabled === false ? 0 : baseStatus.heaterOutputPercent,
           fanDisplayState:
             request.activeCoolingEnabled === false ? 'OFF' : baseStatus.fanDisplayState,
+        },
+      },
+    }
+  }
+  if (request.type === 'wifi_config') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        wifi: {
+          network: {
+            ...network,
+            state: request.op === 'clear' ? 'disabled' : 'saving',
+            ssid: request.op === 'clear' ? null : request.ssid,
+            wifiPasswordLength: request.op === 'clear' ? 0 : String(request.password ?? '').length,
+            configurationGeneration: 1,
+            transitionSequence: 1,
+          },
         },
       },
     }

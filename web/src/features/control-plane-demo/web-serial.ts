@@ -19,8 +19,11 @@ import type {
   UsbRequestFrame,
   UsbRuntimeConfigFrame,
   UsbThermalPlantRunFrame,
+  UsbWifiConfigFrame,
+  WifiConfigReceipt,
+  WifiConfigRequest,
 } from './contracts'
-import { ControlPlaneClientError } from './transport-client'
+import { ControlPlaneClientError, createUsbWifiConfigFrame } from './transport-client'
 import type { DeviceTarget } from './types'
 
 const WEB_SERIAL_BAUD_RATE = 115_200
@@ -140,6 +143,7 @@ type UsbFrameFactory = (
   | UsbCalibrationConfigFrame
   | UsbHeaterCurveConfigFrame
   | UsbHeaterCurveSaveFrame
+  | UsbWifiConfigFrame
 
 export function getBrowserSerial(): BrowserSerial | null {
   if (typeof navigator === 'undefined') {
@@ -386,6 +390,13 @@ export class WebSerialControlPlaneClient {
       requestId,
       ...request,
     }))
+  }
+
+  async configureWifi(request: Omit<WifiConfigRequest, 'leaseId'>): Promise<NetworkSummary> {
+    const receipt = await this.requestPayload<WifiConfigReceipt>('wifi', (requestId) =>
+      createUsbWifiConfigFrame(requestId, request)
+    )
+    return receipt.network
   }
 
   async getCalibration(): Promise<CalibrationState> {

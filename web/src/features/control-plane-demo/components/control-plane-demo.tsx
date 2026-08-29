@@ -48,7 +48,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
-import type { ConsoleRouteState } from '@/routing/console-route'
+import type { ConsoleRouteState, SettingsWorkspaceTab } from '@/routing/console-route'
 import {
   type RoutePreferences,
   readRoutePreferences,
@@ -182,17 +182,14 @@ import type {
 } from '../types'
 import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
+import { resolveWifiSettingsAccess } from '../wifi-settings-access'
 import { LanPairingPanel, type LanPairingPanelProps } from './lan-pairing-panel'
 import {
   createDefaultThermalPlantSnapshot,
   createEmptyThermalPlantSnapshot,
   ThermalPlantRunCard,
 } from './thermal-plant-run-card'
-import {
-  resolveWifiSettingsUnavailableReason,
-  WifiNetworkSettings,
-  type WifiNetworkSettingsDraft,
-} from './wifi-network-settings'
+import { WifiNetworkSettings, type WifiNetworkSettingsDraft } from './wifi-network-settings'
 
 export interface LanRuntimeDependencies {
   createLease?: typeof createLanLease
@@ -524,7 +521,7 @@ function ConsoleViewLink({
     return <Link {...shared} to="/devices/$deviceId/overview" params={{ deviceId }} />
   }
   if (view === 'settings') {
-    return <Link {...shared} to="/devices/$deviceId/settings" params={{ deviceId }} />
+    return <Link {...shared} to="/devices/$deviceId/settings/presets" params={{ deviceId }} />
   }
   if (view === 'update') {
     return <Link {...shared} to="/devices/$deviceId/update" params={{ deviceId }} />
@@ -535,6 +532,63 @@ function ConsoleViewLink({
     vin_adc: '/devices/$deviceId/calibration/vin-adc',
   } as const
   return <Link {...shared} to={calibrationPaths[calibrationTab]} params={{ deviceId }} />
+}
+
+function SettingsRouteTab({
+  navigation,
+  tab,
+  children,
+}: {
+  navigation?: ConsoleNavigationAdapter
+  tab: SettingsWorkspaceTab
+  children: ReactNode
+}) {
+  if (!navigation || navigation.state.kind !== 'device') {
+    return (
+      <TabsTrigger value={tab} className="industrial-calibration-tab">
+        <span>{children}</span>
+      </TabsTrigger>
+    )
+  }
+  const paths = {
+    presets: '/devices/$deviceId/settings/presets',
+    fan: '/devices/$deviceId/settings/fan',
+    wifi: '/devices/$deviceId/settings/wifi',
+  } as const
+  return (
+    <TabsTrigger value={tab} className="industrial-calibration-tab" asChild>
+      <Link
+        to={paths[tab]}
+        params={{ deviceId: navigation.state.deviceId }}
+        search={navigation.search}
+        aria-current={navigation.state.settingsTab === tab ? 'page' : undefined}
+        onPointerDownCapture={(event) => {
+          if (
+            event.button !== 0 ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.shiftKey
+          ) {
+            event.stopPropagation()
+          }
+        }}
+        onClick={(event) => {
+          if (
+            event.button === 0 &&
+            !event.altKey &&
+            !event.ctrlKey &&
+            !event.metaKey &&
+            !event.shiftKey
+          ) {
+            event.preventDefault()
+          }
+        }}
+      >
+        <span>{children}</span>
+      </Link>
+    </TabsTrigger>
+  )
 }
 
 function CalibrationRouteTab({
@@ -881,6 +935,9 @@ export function ControlPlaneDemo({
   >({})
   const [calibrationWorkspaceTabByDevice, setCalibrationWorkspaceTabByDevice] = useState<
     Record<string, CalibrationWorkspaceTab>
+  >({})
+  const [settingsWorkspaceTabByDevice, setSettingsWorkspaceTabByDevice] = useState<
+    Record<string, SettingsWorkspaceTab>
   >({})
   const [calibrationRefsByDevice, setCalibrationRefsByDevice] = useState<
     Record<string, { rtdTempC: number; vinMv: number }>
@@ -1852,6 +1909,10 @@ export function ControlPlaneDemo({
     navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
       ? (navigation.state.calibrationTab ?? 'heater_curve')
       : (calibrationWorkspaceTabByDevice[visibleDevice.id] ?? 'heater_curve')
+  const visibleSettingsWorkspaceTab =
+    navigation?.state.kind === 'device' && navigation.state.view === 'settings'
+      ? (navigation.state.settingsTab ?? 'presets')
+      : (settingsWorkspaceTabByDevice[visibleDevice.id] ?? 'presets')
   const visibleCalibrationRefs = calibrationRefsByDevice[visibleDevice.id] ?? {
     rtdTempC: isRenderableTemperature(visibleDevice.currentTempC)
       ? Number(visibleDevice.currentTempC.toFixed(1))
@@ -1906,6 +1967,25 @@ export function ControlPlaneDemo({
         },
         options
       )
+    },
+    [navigation, visibleDevice.id]
+  )
+
+  const setSettingsWorkspaceTab = useCallback(
+    (nextTab: SettingsWorkspaceTab) => {
+      if (!navigation || navigation.state.kind !== 'device') {
+        setSettingsWorkspaceTabByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: nextTab,
+        }))
+        return Promise.resolve()
+      }
+      return navigation.navigate({
+        kind: 'device',
+        deviceId: navigation.state.deviceId,
+        view: 'settings',
+        settingsTab: nextTab,
+      })
     },
     [navigation, visibleDevice.id]
   )
@@ -2923,22 +3003,52 @@ export function ControlPlaneDemo({
   const configureWifi = useCallback(
     async (op: 'set' | 'clear', draft?: WifiNetworkSettingsDraft) => {
       const rejectWifiConfiguration = (detail: string): never => {
-        emitEvent('devd', 'wifi configuration blocked by USB lease state', 'warning')
+        emitEvent(
+          visibleDevice.transport === 'serial' ? 'webserial' : 'devd',
+          'wifi configuration blocked by transport authority',
+          'warning'
+        )
         throw new Error(detail)
       }
 
-      if (visibleDevice.transport !== 'devd') {
-        rejectWifiConfiguration('WiFi 设置仅能通过已连接的 USB / devd 目标写入。')
+      const access = resolveWifiSettingsAccess(visibleDevice)
+      if (access.mode !== 'read-write') {
+        rejectWifiConfiguration(access.reason ?? '当前连接不允许修改 WiFi 设置。')
       }
+
+      if (isDirectWebSerialDevice(visibleDevice)) {
+        const network = await webSerial.configureWifi({
+          op,
+          ...(draft
+            ? {
+                ssid: draft.ssid,
+                ...(draft.password === undefined ? {} : { password: draft.password }),
+              }
+            : {}),
+        })
+        if (!network) {
+          throw new Error(webSerial.error ?? 'Web Serial WiFi 设置未能提交。')
+        }
+        setWifiSnapshotsByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: network,
+        }))
+        emitEvent(
+          'webserial',
+          op === 'set'
+            ? 'wifi configuration submitted through browser Web Serial'
+            : 'saved wifi cleared through browser Web Serial',
+          'success'
+        )
+        return network
+      }
+
       const wifiDevdBaseUrl = devdBaseUrl
       if (!wifiDevdBaseUrl) {
-        return rejectWifiConfiguration('WiFi 设置仅能通过已连接的 USB / devd 目标写入。')
+        return rejectWifiConfiguration('本机 devd 不可用，无法通过 USB 配置 WiFi。')
       }
-      if (!visibleDevice.capabilities.includes('wifi_config')) {
-        rejectWifiConfiguration('当前设备不支持 WiFi 设置。')
-      }
-      if (!visibleDevice.capabilities.includes('wifi_state_v2')) {
-        rejectWifiConfiguration('当前设备固件需要 WiFi 状态协议更新后才能提交设置。')
+      if (visibleDevice.transport !== 'devd' || visibleDevice.bridgeTransport !== 'usb') {
+        return rejectWifiConfiguration('当前连接不是 USB 配置通路。')
       }
       const wifiLeaseId = visibleDevice.leaseId
       if (!wifiLeaseId || visibleDevice.leaseState !== 'active') {
@@ -2976,7 +3086,7 @@ export function ControlPlaneDemo({
         throw error
       }
     },
-    [controlClient, devdBaseUrl, emitEvent, visibleDevice]
+    [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
   )
 
   const handleWifiSave = useCallback(
@@ -4447,6 +4557,7 @@ export function ControlPlaneDemo({
                 presetTemps={visiblePresetTemps}
                 presetEnabled={visiblePresetEnabled}
                 fanPolicyValue={visibleFanPolicy}
+                settingsWorkspaceTab={visibleSettingsWorkspaceTab}
                 artifact={selectedArtifact}
                 feedback={feedback}
                 calibration={visibleCalibration}
@@ -4464,6 +4575,7 @@ export function ControlPlaneDemo({
                 onPresetTempChange={handlePresetTempChange}
                 onPresetEnabledChange={handlePresetEnabledChange}
                 onFanPolicyChange={handleFanPolicyChange}
+                onSettingsWorkspaceTabChange={setSettingsWorkspaceTab}
                 onWifiSave={handleWifiSave}
                 onWifiClear={handleWifiClear}
                 onManualPpsApply={handleManualPpsApply}
@@ -5575,6 +5687,7 @@ function ViewPanel({
   presetTemps,
   presetEnabled,
   fanPolicyValue,
+  settingsWorkspaceTab,
   artifact,
   feedback,
   calibration,
@@ -5592,6 +5705,7 @@ function ViewPanel({
   onPresetTempChange,
   onPresetEnabledChange,
   onFanPolicyChange,
+  onSettingsWorkspaceTabChange,
   onWifiSave,
   onWifiClear,
   onManualPpsApply,
@@ -5639,6 +5753,7 @@ function ViewPanel({
   presetTemps: number[]
   presetEnabled: boolean[]
   fanPolicyValue: DeviceTarget['fanState']
+  settingsWorkspaceTab: SettingsWorkspaceTab
   artifact?: FirmwareArtifact
   feedback: ActionFeedback
   calibration: CalibrationState
@@ -5656,6 +5771,7 @@ function ViewPanel({
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onSettingsWorkspaceTabChange: (tab: SettingsWorkspaceTab) => void | Promise<void>
   onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
   onWifiClear: () => Promise<NetworkSummary>
   onManualPpsApply: (millivolts: number) => void | Promise<void>
@@ -5766,6 +5882,7 @@ function ViewPanel({
       <SettingsView
         device={device}
         fanPolicyValue={fanPolicyValue}
+        settingsWorkspaceTab={settingsWorkspaceTab}
         selectedPresetIndex={selectedPresetIndex}
         presetTemps={presetTemps}
         presetEnabled={presetEnabled}
@@ -5774,6 +5891,7 @@ function ViewPanel({
         onPresetTempChange={onPresetTempChange}
         onPresetEnabledChange={onPresetEnabledChange}
         onFanPolicyChange={onFanPolicyChange}
+        onSettingsWorkspaceTabChange={onSettingsWorkspaceTabChange}
         onWifiSave={onWifiSave}
         onWifiClear={onWifiClear}
       />
@@ -6915,7 +7033,9 @@ function CapabilityStrip({ device }: { device: DeviceTarget }) {
 }
 
 function SettingsView({
+  navigation,
   device,
+  settingsWorkspaceTab,
   fanPolicyValue,
   selectedPresetIndex,
   presetTemps,
@@ -6925,10 +7045,13 @@ function SettingsView({
   onPresetTempChange,
   onPresetEnabledChange,
   onFanPolicyChange,
+  onSettingsWorkspaceTabChange,
   onWifiSave,
   onWifiClear,
 }: {
+  navigation?: ConsoleNavigationAdapter
   device: DeviceTarget
+  settingsWorkspaceTab: SettingsWorkspaceTab
   fanPolicyValue: DeviceTarget['fanState']
   selectedPresetIndex: number
   presetTemps: number[]
@@ -6938,81 +7061,107 @@ function SettingsView({
   onPresetTempChange: (nextTempC: number) => void | Promise<void>
   onPresetEnabledChange: (nextEnabled: boolean) => void | Promise<void>
   onFanPolicyChange: (fanState: DeviceTarget['fanState']) => void
+  onSettingsWorkspaceTabChange: (tab: SettingsWorkspaceTab) => void | Promise<void>
   onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
   onWifiClear: () => Promise<NetworkSummary>
 }) {
-  const hasWifiConfiguration =
-    device.transport === 'devd' && device.capabilities.includes('wifi_config')
-  const supportsWifiStateV2 = device.capabilities.includes('wifi_state_v2')
+  const wifiAccess = resolveWifiSettingsAccess(device)
 
   return (
     <div className="industrial-view-panel">
       <PanelHeader kicker="Settings" title="Heat policy" />
-      <div className="industrial-settings-stack industrial-settings-stack--distilled">
-        <section className="industrial-settings-section industrial-settings-section--summary">
-          <div className="industrial-settings-summary">
-            <div>
-              <span>{formatTemp(device.targetTempC)}</span>
-              <small>Live target</small>
-            </div>
-            <div>
-              <span>M{selectedPresetIndex + 1}</span>
-              <small>
-                {formatPresetTemp(
-                  presetTemps[selectedPresetIndex],
-                  presetEnabled[selectedPresetIndex] ?? true
-                )}{' '}
-                {presetEnabled[selectedPresetIndex] ? 'enabled' : 'disabled'}
-              </small>
-            </div>
+      <Tabs
+        value={settingsWorkspaceTab}
+        onValueChange={(value) => void onSettingsWorkspaceTabChange(value as SettingsWorkspaceTab)}
+        className="industrial-calibration-tabs"
+      >
+        <TabsList
+          variant="line"
+          className="industrial-calibration-tabs__list"
+          aria-label="Settings"
+        >
+          <SettingsRouteTab navigation={navigation} tab="presets">
+            温度预设
+          </SettingsRouteTab>
+          <SettingsRouteTab navigation={navigation} tab="fan">
+            风扇策略
+          </SettingsRouteTab>
+          {wifiAccess.mode !== 'hidden' ? (
+            <SettingsRouteTab navigation={navigation} tab="wifi">
+              WiFi
+            </SettingsRouteTab>
+          ) : null}
+        </TabsList>
+
+        <TabsContent value="presets" className="industrial-calibration-tabs__content">
+          <div className="industrial-settings-stack industrial-settings-stack--distilled">
+            <section className="industrial-settings-section industrial-settings-section--summary">
+              <div className="industrial-settings-summary">
+                <div>
+                  <span>{formatTemp(device.targetTempC)}</span>
+                  <small>Live target</small>
+                </div>
+                <div>
+                  <span>M{selectedPresetIndex + 1}</span>
+                  <small>
+                    {formatPresetTemp(
+                      presetTemps[selectedPresetIndex],
+                      presetEnabled[selectedPresetIndex] ?? true
+                    )}{' '}
+                    {presetEnabled[selectedPresetIndex] ? 'enabled' : 'disabled'}
+                  </small>
+                </div>
+              </div>
+            </section>
+            <section className="industrial-settings-section industrial-settings-section--presets">
+              <h3 className="industrial-section-title">Preset temperatures</h3>
+              <PresetTemperatureEditor
+                selectedPresetIndex={selectedPresetIndex}
+                presetTemps={presetTemps}
+                presetEnabled={presetEnabled}
+                onPresetSlotChange={onPresetSlotChange}
+                onPresetTempChange={onPresetTempChange}
+                onPresetEnabledChange={onPresetEnabledChange}
+              />
+            </section>
           </div>
-        </section>
+        </TabsContent>
 
-        {hasWifiConfiguration ? (
-          <WifiNetworkSettings
-            key={device.id}
-            deviceId={device.id}
-            networkState={device.networkState}
-            savedSsid={device.wifiSsid}
-            wifiRssi={device.wifiRssi}
-            savedPasswordLength={device.wifiPasswordLength ?? 0}
-            configurationGeneration={device.configurationGeneration}
-            transitionSequence={device.transitionSequence}
-            failureCode={device.wifiFailureCode}
-            disabled={!supportsWifiStateV2 || !device.leaseId || device.leaseState !== 'active'}
-            unavailableReason={resolveWifiSettingsUnavailableReason({
-              supportsWifiStateV2,
-              transportIssue: device.transportIssue,
-            })}
-            onSave={onWifiSave}
-            onClear={onWifiClear}
-          />
-        ) : null}
+        <TabsContent value="fan" className="industrial-calibration-tabs__content">
+          <section className="industrial-settings-section industrial-settings-section--controls">
+            <h3 className="industrial-section-title">Fan policy</h3>
+            <div className="industrial-settings-grid industrial-settings-grid--controls">
+              <SegmentedSetting
+                label="Fan policy"
+                value={fanPolicyValue}
+                onChange={onFanPolicyChange}
+                hideLabel
+              />
+            </div>
+          </section>
+        </TabsContent>
 
-        <section className="industrial-settings-section industrial-settings-section--presets">
-          <h3 className="industrial-section-title">Preset temperatures</h3>
-          <PresetTemperatureEditor
-            selectedPresetIndex={selectedPresetIndex}
-            presetTemps={presetTemps}
-            presetEnabled={presetEnabled}
-            onPresetSlotChange={onPresetSlotChange}
-            onPresetTempChange={onPresetTempChange}
-            onPresetEnabledChange={onPresetEnabledChange}
-          />
-        </section>
-
-        <section className="industrial-settings-section industrial-settings-section--controls">
-          <h3 className="industrial-section-title">Fan policy</h3>
-          <div className="industrial-settings-grid industrial-settings-grid--controls">
-            <SegmentedSetting
-              label="Fan policy"
-              value={fanPolicyValue}
-              onChange={onFanPolicyChange}
-              hideLabel
+        <TabsContent value="wifi" className="industrial-calibration-tabs__content">
+          {wifiAccess.mode !== 'hidden' ? (
+            <WifiNetworkSettings
+              key={`${device.id}-${wifiAccess.mode}`}
+              deviceId={device.id}
+              networkState={device.networkState}
+              savedSsid={device.wifiSsid}
+              wifiRssi={device.wifiRssi}
+              savedPasswordLength={device.wifiPasswordLength ?? 0}
+              configurationGeneration={device.configurationGeneration}
+              transitionSequence={device.transitionSequence}
+              failureCode={device.wifiFailureCode}
+              readOnly={wifiAccess.mode === 'read-only'}
+              disabled={wifiAccess.mode !== 'read-write'}
+              unavailableReason={wifiAccess.reason}
+              onSave={onWifiSave}
+              onClear={onWifiClear}
             />
-          </div>
-        </section>
-      </div>
+          ) : null}
+        </TabsContent>
+      </Tabs>
       <ActionFeedbackPanel feedback={feedback} compact />
     </div>
   )

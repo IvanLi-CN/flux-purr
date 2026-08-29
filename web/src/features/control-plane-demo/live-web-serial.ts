@@ -7,7 +7,9 @@ import type {
   DirectRuntimeConfigRequest,
   HeaterCurvePackage,
   HeaterCurveState,
+  NetworkSummary,
   ThermalPlantRunSnapshot,
+  WifiConfigRequest,
 } from './contracts'
 import { rememberKnownWebSerialDevice } from './known-web-serial-devices'
 import { ControlPlaneClientError } from './transport-client'
@@ -51,6 +53,7 @@ export interface LiveWebSerialControls {
   }) => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
+  configureWifi: (request: Omit<WifiConfigRequest, 'leaseId'>) => Promise<NetworkSummary | null>
   getCalibration: () => Promise<CalibrationState>
   getCalibrationJob: () => Promise<CalibrationJobState>
   getThermalPlantRun: (afterSample?: number) => Promise<ThermalPlantRunSnapshot>
@@ -418,6 +421,50 @@ export function useLiveWebSerialScenario(
     [appendEvent, recoverAuthorizedClient]
   )
 
+  const configureWifi = useCallback(
+    async (request: Omit<WifiConfigRequest, 'leaseId'>): Promise<NetworkSummary | null> => {
+      const client = await recoverAuthorizedClient()
+      if (!client) {
+        setError('Web Serial port is not connected.')
+        return null
+      }
+
+      try {
+        const network = await client.configureWifi(request)
+        if (clientRef.current !== client) return null
+        setDevice((current) =>
+          current
+            ? {
+                ...current,
+                wifiSsid: network.ssid ?? null,
+                wifiRssi: network.wifiRssi ?? null,
+                wifiPasswordLength: network.wifiPasswordLength ?? 0,
+                networkState: network.state,
+                configurationGeneration: network.configurationGeneration,
+                transitionSequence: network.transitionSequence,
+                wifiFailureCode: network.failureCode,
+              }
+            : current
+        )
+        setError(undefined)
+        appendEvent(
+          request.op === 'set'
+            ? 'wifi configuration submitted over browser Web Serial'
+            : 'saved wifi cleared over browser Web Serial',
+          'success'
+        )
+        return network
+      } catch (error) {
+        if (clientRef.current !== client) return null
+        setError(error instanceof Error ? error.message : 'Web Serial WiFi update failed.')
+        setState('error')
+        appendEvent('browser Web Serial WiFi update failed', 'warning')
+        return null
+      }
+    },
+    [appendEvent, recoverAuthorizedClient]
+  )
+
   const requireClient = useCallback(async () => {
     const client = await recoverAuthorizedClient()
     if (!client) {
@@ -649,6 +696,7 @@ export function useLiveWebSerialScenario(
       connect,
       disconnect,
       configureRuntime,
+      configureWifi,
       getCalibration,
       getCalibrationJob,
       getThermalPlantRun,
@@ -664,6 +712,7 @@ export function useLiveWebSerialScenario(
       configureCalibration,
       configureCalibrationJob,
       configureRuntime,
+      configureWifi,
       connect,
       device?.id,
       device?.identityId,

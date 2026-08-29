@@ -79,6 +79,7 @@ interface WifiNetworkSettingsProps {
   savedSsid?: string | null
   wifiRssi?: number | null
   savedPasswordLength?: number
+  readOnly?: boolean
   disabled?: boolean
   unavailableReason?: string
   feedbackDismissMs?: number
@@ -167,6 +168,7 @@ export function WifiNetworkSettings({
   savedSsid = null,
   wifiRssi = null,
   savedPasswordLength = 0,
+  readOnly = false,
   disabled = false,
   unavailableReason,
   feedbackDismissMs = DEFAULT_WIFI_FEEDBACK_DISMISS_MS,
@@ -193,7 +195,7 @@ export function WifiNetworkSettings({
   const [clearConfirmationPending, setClearConfirmationPending] = useState(false)
 
   const isBusy = action !== 'idle'
-  const isDisabled = disabled || isBusy
+  const isDisabled = disabled || readOnly || isBusy
   const isDirty = isWifiNetworkSettingsDirty({
     ssid,
     savedSsid: savedSsidValue,
@@ -403,91 +405,112 @@ export function WifiNetworkSettings({
         </div>
       </div>
 
-      {unavailableReason ? (
-        <output className="industrial-wifi-settings__support-message">{unavailableReason}</output>
-      ) : null}
+      {readOnly ? (
+        <>
+          <div className="industrial-wifi-settings__support-message" role="alert">
+            <CircleAlert aria-hidden="true" />
+            <span>{unavailableReason ?? '当前连接仅支持查看 WiFi 信息，不能修改设备配置。'}</span>
+          </div>
+          <dl className="industrial-wifi-settings__snapshot">
+            <div>
+              <dt>网络名称</dt>
+              <dd>{savedSsidValue || '未配置'}</dd>
+            </div>
+            <div>
+              <dt>信号</dt>
+              <dd>{wifiRssi == null ? '不可用' : `${wifiRssi} dBm`}</dd>
+            </div>
+            <div>
+              <dt>已保存密码</dt>
+              <dd>
+                {savedPasswordLength > 0 ? createWifiPasswordMask(savedPasswordLength) : '未配置'}
+              </dd>
+            </div>
+          </dl>
+        </>
+      ) : (
+        <form
+          className="industrial-wifi-settings__form"
+          autoComplete="off"
+          onSubmit={(event) => void submit(event)}
+        >
+          <Label className="industrial-wifi-settings__field" htmlFor={ssidId}>
+            <span>WiFi 名称</span>
+            <Input
+              id={ssidId}
+              className="h-9"
+              value={ssid}
+              onChange={(event) => {
+                hasSsidDraft.current = true
+                setSsid(event.target.value)
+              }}
+              autoComplete="off"
+              disabled={isDisabled}
+              maxLength={MAX_WIFI_SSID_BYTES}
+              placeholder="输入 SSID"
+            />
+          </Label>
 
-      <form
-        className="industrial-wifi-settings__form"
-        autoComplete="off"
-        onSubmit={(event) => void submit(event)}
-      >
-        <Label className="industrial-wifi-settings__field" htmlFor={ssidId}>
-          <span>WiFi 名称</span>
-          <Input
-            id={ssidId}
-            className="h-9"
-            value={ssid}
-            onChange={(event) => {
-              hasSsidDraft.current = true
-              setSsid(event.target.value)
-            }}
-            autoComplete="off"
-            disabled={isDisabled}
-            maxLength={MAX_WIFI_SSID_BYTES}
-            placeholder="输入 SSID"
-          />
-        </Label>
-
-        <Label className="industrial-wifi-settings__field" htmlFor={passwordId}>
-          <span>密码</span>
-          <Input
-            id={passwordId}
-            className="h-9"
-            type="password"
-            aria-label="密码"
-            value={password}
-            onClick={(event) => event.currentTarget.select()}
-            onFocus={(event) => event.currentTarget.select()}
-            onKeyDown={(event) => {
-              if (
-                passwordMode === 'saved-mask' &&
-                (event.key === 'Backspace' || event.key === 'Delete')
-              ) {
-                event.preventDefault()
-                setPassword('')
+          <Label className="industrial-wifi-settings__field" htmlFor={passwordId}>
+            <span>密码</span>
+            <Input
+              id={passwordId}
+              className="h-9"
+              type="password"
+              aria-label="密码"
+              value={password}
+              onClick={(event) => event.currentTarget.select()}
+              onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => {
+                if (
+                  passwordMode === 'saved-mask' &&
+                  (event.key === 'Backspace' || event.key === 'Delete')
+                ) {
+                  event.preventDefault()
+                  setPassword('')
+                  setPasswordMode('draft')
+                }
+              }}
+              onChange={(event) => {
+                setPassword(event.target.value)
                 setPasswordMode('draft')
-              }
-            }}
-            onChange={(event) => {
-              setPassword(event.target.value)
-              setPasswordMode('draft')
-            }}
-            autoComplete="new-password"
-            disabled={isDisabled}
-            maxLength={MAX_WIFI_PASSWORD_BYTES}
-          />
-        </Label>
+              }}
+              autoComplete="new-password"
+              disabled={isDisabled}
+              maxLength={MAX_WIFI_PASSWORD_BYTES}
+            />
+          </Label>
 
-        <div className="industrial-wifi-settings__actions">
-          <Button
-            className="industrial-wifi-settings__submit h-9"
-            type="submit"
-            disabled={isDisabled || !isDirty}
-            aria-busy={action === 'saving'}
-          >
-            {action === 'saving' ? (
-              <LoaderCircle className="animate-spin" aria-hidden="true" />
-            ) : null}
-            {action === 'saving' ? '保存中' : '保存并连接'}
-          </Button>
-          <Button
-            className="h-9"
-            type="button"
-            variant="outline"
-            onClick={() => void clear()}
-            disabled={isDisabled}
-            aria-busy={action === 'clearing'}
-          >
-            {action === 'clearing' ? (
-              <LoaderCircle className="animate-spin" aria-hidden="true" />
-            ) : (
-              <Trash2 aria-hidden="true" />
-            )}
-            {clearConfirmationPending ? '确认清除' : '清除 WiFi'}
-          </Button>
-        </div>
-      </form>
+          <div className="industrial-wifi-settings__actions">
+            <Button
+              className="industrial-wifi-settings__submit h-9"
+              type="submit"
+              disabled={isDisabled || !isDirty}
+              aria-busy={action === 'saving'}
+            >
+              {action === 'saving' ? (
+                <LoaderCircle className="animate-spin" aria-hidden="true" />
+              ) : null}
+              {action === 'saving' ? '保存中' : '保存并连接'}
+            </Button>
+            <Button
+              className="h-9"
+              type="button"
+              variant="outline"
+              onClick={() => void clear()}
+              disabled={isDisabled}
+              aria-busy={action === 'clearing'}
+            >
+              {action === 'clearing' ? (
+                <LoaderCircle className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Trash2 aria-hidden="true" />
+              )}
+              {clearConfirmationPending ? '确认清除' : '清除 WiFi'}
+            </Button>
+          </div>
+        </form>
+      )}
 
       {message ? (
         <div
