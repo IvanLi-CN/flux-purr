@@ -85,9 +85,8 @@ fn watch_git_identity(repo_root: &std::path::Path) {
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
+        && let Some(path) = git_path(&["rev-parse", "--git-path", reference.trim()])
     {
-        if let Some(path) = git_path(&["rev-parse", "--git-path", reference.trim()]) {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 }
