@@ -89,10 +89,11 @@ jobs:
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_completion.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
+          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
           python3 scripts/test-product-version.py
           bash scripts/test-build-identities.sh
           bash .github/scripts/test-release-chain.sh
+          bash .github/scripts/test-release-labels.sh
           python3 -m unittest tools/firmware-web-catalog/test_build_catalog.py
 
       - name: Biome check + typecheck

@@ -110,6 +110,28 @@ def stage(args: argparse.Namespace) -> None:
     current = PRODUCT_VERSION.read_version(ROOT / "VERSION")
     if args.mode == "automatic":
         version = PRODUCT_VERSION.next_patch(current)
+    elif args.mode == "intent":
+        if args.release_level not in {"patch", "minor", "major"}:
+            raise ReleaseChainError("intent mode requires a patch, minor or major release level")
+        parsed = PRODUCT_VERSION.parse_version(current)
+        major = int(parsed["major"])
+        minor = int(parsed["minor"])
+        patch = int(parsed["patch"])
+        current_rc = parsed.get("rc")
+        if args.release_level == "major":
+            major, minor, patch = major + 1, 0, 0
+        elif args.release_level == "minor":
+            minor, patch = minor + 1, 0
+        elif current_rc is None:
+            patch += 1
+        version = f"{major}.{minor}.{patch}"
+        if args.release_channel == "rc":
+            if args.release_level == "patch" and current_rc is not None:
+                version = f"{major}.{minor}.{patch}-rc.{int(current_rc) + 1}"
+            else:
+                version = f"{version}-rc.1"
+        elif args.release_channel != "stable":
+            raise ReleaseChainError("intent mode requires stable or rc channel")
     else:
         if not args.exact_version:
             raise ReleaseChainError("exact mode requires --exact-version")
@@ -193,8 +215,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     stage_parser = sub.add_parser("stage")
     stage_parser.add_argument("--source-sha", required=True)
-    stage_parser.add_argument("--mode", choices=("automatic", "exact"), default="automatic")
+    stage_parser.add_argument("--mode", choices=("automatic", "exact", "intent"), default="automatic")
     stage_parser.add_argument("--exact-version")
+    stage_parser.add_argument("--release-level")
+    stage_parser.add_argument("--release-channel", choices=("stable", "rc"))
     stage_parser.add_argument("--github-output")
     verify_parser = sub.add_parser("verify-commit")
     verify_parser.add_argument("--commit")

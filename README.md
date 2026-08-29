@@ -78,7 +78,9 @@ Development builds derive `nextPatch(VERSION)-dev.<short-sha>`. With `VERSION=0.
 
 Every source commit that passes `CI Main` is released separately. The release controller creates one child Release Commit that changes only `VERSION`, stores the source SHA and product version in commit trailers, builds and verifies all assets from that commit, creates `vX.Y.Z` (or `vX.Y.Z-rc.N`), publishes the manifest, and only then fast-forwards `main`. A failed run keeps the immutable candidate at `release/product-main`; `operation=recover` reuses that same Release Commit. `operation=exact` is for major, minor, or RC values, and `operation=promote` creates a new stable Release Commit from a completed RC.
 
-The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits and the `Release completion`, `Firmware checks`, `DEVD checks`, `Web checks`, and `Worktree bootstrap` checks, and allow only the dedicated release App to bypass the protected Release Commit fast-forward.
+PRs must carry exactly one `type:patch|minor|major|docs|skip` label and exactly one `channel:stable|rc` label. The trusted `Label Gate` validates those labels and freezes the intent on the PR head; the release workflow later consumes the mainline snapshot. Labels select release intent and channel, while the numeric version still comes only from `VERSION`.
+
+The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits and the `Validate PR labels`, `Release completion`, `Firmware checks`, `DEVD checks`, `Web checks`, and `Worktree bootstrap` checks, and allow only the dedicated release App to bypass the protected Release Commit fast-forward.
 
 Each product release attaches Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
 

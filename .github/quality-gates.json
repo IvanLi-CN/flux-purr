@@ -22,6 +22,7 @@
     }
   },
   "required_checks": [
+    "Validate PR labels",
     "Release completion",
     "Firmware checks",
     "DEVD checks",
@@ -31,6 +32,11 @@
   "informational_checks": [],
   "waivers": [],
   "expected_pr_workflows": [
+    {
+      "workflow": "Label Gate",
+      "path": ".github/workflows/label-gate.yml",
+      "jobs": ["Validate PR labels"]
+    },
     {
       "workflow": "Release completion",
       "path": ".github/workflows/release-completion.yml",

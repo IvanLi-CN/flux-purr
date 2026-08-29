@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / ".github/scripts"))
 import release_chain as CHAIN  # noqa: E402
+import release_snapshot as SNAPSHOT  # noqa: E402
 
 
 class CompletionError(RuntimeError):
@@ -99,6 +100,19 @@ def verify_remote_release(repository: str, release: dict[str, str]) -> None:
         raise CompletionError(f"GitHub release {tag} is missing its release manifest")
 
 
+def has_non_release_snapshot(commit: str) -> bool:
+    """Allow docs/skip source commits to advance main without a product Release Commit."""
+    subprocess.run(
+        ["git", "fetch", "--no-tags", "origin", "+refs/notes/release-snapshots:refs/notes/release-snapshots"],
+        cwd=ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    payload = SNAPSHOT.read_snapshot(SNAPSHOT.DEFAULT_NOTES_REF, commit)
+    return payload is not None and payload.get("release_enabled") is False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commit", default="HEAD", help="pull request head commit")
@@ -127,7 +141,13 @@ def main(argv: list[str] | None = None) -> int:
         if "VERSION" in changed:
             raise CompletionError("ordinary pull requests must not modify VERSION")
 
-        release = CHAIN.verify_release_commit(base)
+        try:
+            release = CHAIN.verify_release_commit(base)
+        except CHAIN.ReleaseChainError:
+            if has_non_release_snapshot(base):
+                print(f"release completion: non-release intent snapshot at {base}")
+                return 0
+            raise
         local_tag = local_tag_commit(release["tag"])
         if local_tag and local_tag != release["releaseSha"]:
             raise CompletionError(f"local tag {release['tag']} points to {local_tag}, expected {release['releaseSha']}")

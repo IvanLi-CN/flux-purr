@@ -1,0 +1,55 @@
+name: Label Gate
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+concurrency:
+  group: label-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  validate-labels:
+    name: Validate PR labels
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted policy revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+
+      - name: Validate PR labels
+        run: bash .github/scripts/label-gate.sh
+
+      - name: Record validated release intent
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+        run: |
+          set -euo pipefail
+          type_label="$(jq -r '.pull_request.labels[] | .name | select(startswith("type:"))' "${EVENT_PATH}")"
+          channel_label="$(jq -r '.pull_request.labels[] | .name | select(startswith("channel:"))' "${EVENT_PATH}")"
+          components="$(jq -r '[.pull_request.labels[] | .name | select(startswith("component:"))] | join(",")' "${EVENT_PATH}")"
+          {
+            echo "### Release intent"
+            echo "- type: ${type_label}"
+            echo "- channel: ${channel_label}"
+            echo "- components: ${components:-none}"
+            echo "- source: frozen PR head ${{ github.event.pull_request.head.sha }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Freeze release intent
+        if: github.event.pull_request.state == 'open'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 .github/scripts/release_snapshot.py capture-intent \
+            --event-path "${GITHUB_EVENT_PATH}" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --github-token "${GITHUB_TOKEN}"

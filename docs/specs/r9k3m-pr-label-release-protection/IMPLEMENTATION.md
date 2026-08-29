@@ -2,14 +2,14 @@
 
 ## Current Coverage
 
-This specification is historical. Its label/snapshot release path is superseded by [the version-source specification](../version-source/SPEC.md), `release_chain.py`, and the `Release completion` gate.
+The numeric version calculation is now owned by [the version-source specification](../version-source/SPEC.md) and `release_chain.py`. The label/snapshot path remains active for release intent validation, mainline reconciliation, queue/backfill, and failure context; `Release completion` is an additional completion gate.
 
 - `CI PR` and `CI Main` continue to own firmware, DEVD, Web, and worktree checks.
 - `Release Product` creates one VERSION-only Release Commit per verified source commit, publishes from that commit, and fast-forwards `main` only after asset verification.
 - Recovery reuses the durable `release/product-main` candidate; RC promotion creates a new stable Release Commit.
 - The workspace `Cargo.lock` is tracked so all host-tool release matrix builds can honor `cargo ... --locked`.
 - All Ubuntu jobs that build `flux-purr-devd`, including the firmware bundle job, reuse the local Linux serial dependency action to install `pkg-config` and `libudev-dev` before the locked build so `libudev-sys` has its declared system dependency in the clean runner.
-- `.github/quality-gates.json` 声明主分支保护、签名提交、required checks，以及 owner PR 不强制 approval 的 review policy。
+- `.github/quality-gates.json` 声明主分支保护、签名提交、`Validate PR labels`、`Release completion` 及其他 required checks，以及 owner PR 不强制 approval 的 review policy。
 
 ## Validation
 

@@ -4,13 +4,13 @@ on:
   workflow_run:
     workflows:
       - Release Product
-    types:
-      - completed
-    branches:
-      - main
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 
-permissions: {}
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   notify_failure:
@@ -26,6 +26,15 @@ jobs:
       run_attempt: ${{ github.event.workflow_run.run_attempt }}
       actor: ${{ github.event.workflow_run.triggering_actor.login || github.event.workflow_run.actor.login || github.actor }}
       event_name: ${{ github.event.workflow_run.event }}
+      extra_details: >-
+        release intent context: pr_number=${{ github.event.workflow_run.pull_requests[0].number || 'unknown' }};
+        merge_commit_sha=${{ github.event.workflow_run.head_sha }};
+        type_label=read-from-refs/notes/release-snapshots;
+        channel_label=read-from-refs/notes/release-snapshots;
+        components=read-from-release-manifest;
+        selected_version=read-from-Release-Commit-VERSION;
+        artifact_names=read-from-release-run;
+        backfill=dispatch Release Product with operation=recover and commit_sha=${{ github.event.workflow_run.head_sha }}
     secrets:
       SHOUTRRR_URL: ${{ secrets.SHOUTRRR_URL }}
 
@@ -43,6 +52,6 @@ jobs:
       run_attempt: ${{ github.run_attempt }}
       actor: ${{ github.actor }}
       event_name: "workflow_dispatch"
-      extra_details: "manual notifier smoke test"
+      extra_details: "manual notifier smoke test; backfill=dispatch Release Product recover"
     secrets:
       SHOUTRRR_URL: ${{ secrets.SHOUTRRR_URL }}
