@@ -77,7 +77,7 @@ const meta = {
         data-testid="wifi-network-settings-story"
         className="h-screen overflow-hidden bg-[#d6e4ed] p-8"
       >
-        <div className="w-[60rem] border border-[#536171] bg-[#eef1f4] p-4">
+        <div className="w-full max-w-[60rem] border border-[#536171] bg-[#eef1f4] p-4">
           <Story />
         </div>
       </div>

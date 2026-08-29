@@ -8051,8 +8051,6 @@
   gap: 0.72rem;
   max-width: min(100%, 54rem);
   container-type: inline-size;
-  border-top: 1px solid rgba(96, 111, 132, 0.26);
-  padding-top: 0.82rem;
 }
 
 .industrial-wifi-settings__header {
