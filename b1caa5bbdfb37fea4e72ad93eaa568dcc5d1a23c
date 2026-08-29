@@ -1,0 +1,15 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "3101bcae67f3472bc76d5bdb0969adf8d12f2865",
+  "pr_number": 77,
+  "pr_title": "fix(release): recover frozen releases and promote qualified RCs",
+  "product": {},
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_level": "",
+  "release_reason": "frozen_skip_type_label",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "b1caa5bbdfb37fea4e72ad93eaa568dcc5d1a23c",
+  "type_label": "type:skip"
+}
