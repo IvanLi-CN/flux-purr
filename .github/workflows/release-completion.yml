@@ -20,15 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout pull request head
+      - name: Checkout trusted policy revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           fetch-depth: 0
 
-      - name: Fetch pull request base
+      - name: Fetch pull request commits
         if: github.event_name == 'pull_request_target'
-        run: git fetch --no-tags origin "${{ github.event.pull_request.base.sha }}"
+        run: git fetch --no-tags origin "${{ github.event.pull_request.head.sha }}"
 
       - name: Verify VERSION and release completion
         env:
