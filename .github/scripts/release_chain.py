@@ -68,6 +68,21 @@ def trailers(commit: str) -> dict[str, str]:
     return values
 
 
+def is_strictly_newer(candidate: str, current: str) -> bool:
+    """Compare the supported stable/RC forms without consulting release state."""
+    candidate_parts = PRODUCT_VERSION.parse_version(candidate)
+    current_parts = PRODUCT_VERSION.parse_version(current)
+    candidate_core = tuple(int(candidate_parts[key]) for key in ("major", "minor", "patch"))
+    current_core = tuple(int(current_parts[key]) for key in ("major", "minor", "patch"))
+    if candidate_core != current_core:
+        return candidate_core > current_core
+    candidate_rc = candidate_parts["rc"]
+    current_rc = current_parts["rc"]
+    if candidate_rc is None:
+        return current_rc is not None
+    return current_rc is not None and int(candidate_rc) > int(current_rc)
+
+
 def verify_release_commit(commit: str, source_sha: str | None = None, expected_version: str | None = None) -> dict[str, str]:
     commit = git("rev-parse", f"{commit}^{{commit}}")
     parent = commit_parent(commit)
@@ -110,33 +125,21 @@ def stage(args: argparse.Namespace) -> None:
     current = PRODUCT_VERSION.read_version(ROOT / "VERSION")
     if args.mode == "automatic":
         version = PRODUCT_VERSION.next_patch(current)
-    elif args.mode == "intent":
-        if args.release_level not in {"patch", "minor", "major"}:
-            raise ReleaseChainError("intent mode requires a patch, minor or major release level")
-        parsed = PRODUCT_VERSION.parse_version(current)
-        major = int(parsed["major"])
-        minor = int(parsed["minor"])
-        patch = int(parsed["patch"])
-        current_rc = parsed.get("rc")
-        if args.release_level == "major":
-            major, minor, patch = major + 1, 0, 0
-        elif args.release_level == "minor":
-            minor, patch = minor + 1, 0
-        elif current_rc is None:
-            patch += 1
-        version = f"{major}.{minor}.{patch}"
-        if args.release_channel == "rc":
-            if args.release_level == "patch" and current_rc is not None:
-                version = f"{major}.{minor}.{patch}-rc.{int(current_rc) + 1}"
-            else:
-                version = f"{version}-rc.1"
-        elif args.release_channel != "stable":
-            raise ReleaseChainError("intent mode requires stable or rc channel")
-    else:
+    elif args.mode == "exact":
         if not args.exact_version:
             raise ReleaseChainError("exact mode requires --exact-version")
-        PRODUCT_VERSION.parse_version(args.exact_version)
+        parsed = PRODUCT_VERSION.parse_version(args.exact_version)
+        if args.expected_channel:
+            channel = "rc" if parsed["prerelease"] else "stable"
+            if channel != args.expected_channel:
+                raise ReleaseChainError(
+                    f"exact VERSION channel is {channel}, expected {args.expected_channel} from frozen release intent"
+                )
+        if not is_strictly_newer(args.exact_version, current):
+            raise ReleaseChainError("exact VERSION must be strictly newer than the current VERSION")
         version = args.exact_version
+    else:
+        raise ReleaseChainError(f"unsupported staging mode: {args.mode}")
     (ROOT / "VERSION").write_text(version + "\n", encoding="utf-8")
     if git("diff", "--name-only") != "VERSION":
         raise ReleaseChainError("staging a Release Commit may modify only VERSION")
@@ -215,10 +218,9 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     stage_parser = sub.add_parser("stage")
     stage_parser.add_argument("--source-sha", required=True)
-    stage_parser.add_argument("--mode", choices=("automatic", "exact", "intent"), default="automatic")
+    stage_parser.add_argument("--mode", choices=("automatic", "exact"), default="automatic")
     stage_parser.add_argument("--exact-version")
-    stage_parser.add_argument("--release-level")
-    stage_parser.add_argument("--release-channel", choices=("stable", "rc"))
+    stage_parser.add_argument("--expected-channel", choices=("stable", "rc"))
     stage_parser.add_argument("--github-output")
     verify_parser = sub.add_parser("verify-commit")
     verify_parser.add_argument("--commit")

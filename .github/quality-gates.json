@@ -52,12 +52,7 @@
     {
       "workflow": "CI Main",
       "path": ".github/workflows/ci-main.yml",
-      "jobs": ["Firmware checks", "DEVD checks", "Web checks", "Worktree bootstrap"]
-    },
-    {
-      "workflow": "Release Commit validation",
-      "path": ".github/workflows/release-commit.yml",
-      "jobs": ["Release Commit validation"]
+      "jobs": ["Release Commit validation", "Firmware checks", "DEVD checks", "Web checks", "Worktree bootstrap"]
     }
   ],
   "expected_release_workflows": [

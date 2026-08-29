@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [0004-release-commit-version-control](0004-release-commit-version-control.md)
 
 ## Context
 

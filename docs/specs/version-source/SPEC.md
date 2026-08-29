@@ -45,6 +45,7 @@
 ## Related ADRs
 
 - [0003-version-file-is-the-product-version-source](../../adr/0003-version-file-is-the-product-version-source.md)
+- [0004-release-commit-version-control](../../adr/0004-release-commit-version-control.md)
 
 ## 需求（Requirements）
 
@@ -57,7 +58,7 @@
 - Release Commit 必须以已验证源提交为唯一父提交，diff 只能包含 `VERSION`，并带可审计的 source-commit metadata。该 metadata 只用于顺序验证与审计，不是版本输入。
 - Release controller 必须先从 Release Commit 构建、tag、发布并验证完整资产，再将 `main` fast-forward 到该 commit。`main` 推进失败时不得压缩、重算或替换版本；recovery 只能继续同一 Release Commit。
 - 每个 PR 必须恰好有一个 `type:*` 和一个 `channel:*` 标签；`Validate PR labels` 必须拒绝缺失、重复或未知的 release-intent 标签，并将结果冻结到对应 PR head。
-- `Release Product` 只能消费主线上与源提交绑定的不可变 snapshot；`type:docs`/`type:skip` 跳过产品发布，其他 type/channel 只选择 VERSION 的 bump/channel 动作。
+- `Release Product` 只能消费主线上与源提交绑定的不可变 snapshot；`type:docs`/`type:skip` 跳过产品发布，`type:patch + channel:stable` 唯一允许自动写入 `nextPatch(VERSION)`，`type:minor`、`type:major` 或 `channel:rc` 必须等待受控 `exact` 操作写入精确 VERSION 文本。label、snapshot 与 channel 不得计算或解析数字版本。
 - 所有版本化产物必须由 Release Commit 构建。firmware identity、firmware bundle identity、`devd` `/health`、`flux-purr-devd --version`、`flux-purr --version`、Web build metadata、release manifest 和资产文件名必须一致表达该版本；source SHA 必须指向 Release Commit。
 - package manifest 的 `0.1.0` 或其他 package metadata、Git tag、workflow inputs 与既有 manifest 不得作为版本回退或版本覆盖；snapshot 中的 labels 不得写入或覆盖数字版本。
 - `CI Main` 必须跳过有效 Release Commit 的完整矩阵；`Release Product` 也必须忽略该 push，避免递归 CI 或二次发布。每个产品源提交仍只运行一次完整 CI 和一次发布资产构建。
@@ -69,7 +70,7 @@
 
 - 版本解析器应提供 machine-readable 输出，供 Rust build script、Bash、Python 与 Vite 共用，避免在多处复制 SemVer、next-patch 或 channel 推导逻辑。
 - Release Commit message 应使用 `chore(release): vX.Y.Z`，并记录其 source commit SHA；版本正确性始终由文件与 diff 验证，而不是提交消息。
-- Release controller 应使用现有 workflow token，并由仓库 ruleset 明确允许该 workflow identity 执行受保护 Release Commit 的 fast-forward；不得为了发布流程凭空增加 GitHub environment。
+- Release controller 应使用专用 GitHub App 的 installation token；仓库 variable `RELEASE_APP_ID` 与 secret `RELEASE_APP_PRIVATE_KEY` 仅用于产生短时 token，App 只持有 `contents: write` 并是 ruleset 中唯一的 bypass actor。`GITHUB_TOKEN` 只读 release intent；不得为了发布流程增加 GitHub Environment。
 
 ### COULD
 
@@ -90,7 +91,7 @@
 
 1. 一个产品源提交进入 `main` 并完成 `CI Main`。
 2. Release controller 为该源提交补齐并读取不可变 release intent snapshot，确认该提交仍是 `main` 头部、其父发布链完整且其 `VERSION` 有效。
-3. controller 按 snapshot 的 release level/channel 从 `VERSION` 计算目标值，创建以该源提交为父、且只修改 `VERSION` 的 Release Commit，但暂不推进 `main`。
+3. 若 snapshot 是 `type:patch + channel:stable`，controller 写入 `nextPatch(VERSION)`；若是 major、minor 或 RC intent，controller 停在该源提交并只接受受控 `exact` 操作写入精确 VERSION 文本。两种情况都创建以该源提交为父、且只修改 `VERSION` 的 Release Commit，但暂不推进 `main`。
 4. controller 从 Release Commit checkout，重新解析 `VERSION`，构建 Web、firmware 与 host-tools，生成、发布并校验 firmware bundle、manifest 和 `vX.Y.Z` tag。
 5. 只有发布校验成功后，controller 才将 `main` fast-forward 到 Release Commit 并打开下一次产品源提交的合入门禁。
 
@@ -110,8 +111,8 @@
 
 - `VERSION` 缺失、空白、包含额外行或不符合 contract 时，所有产品构建必须失败；不得降级到 `0.1.0`、package manifest 或最近 tag。
 - 目标源提交在 CI 完成后不再是 `main` 头部，或 Release Commit 最终无法 fast-forward `main` 时，release controller 必须失败并保持 merge gate 关闭；它不得把多个源提交压缩到同一版本。
-- Release Commit 的 diff 不止 `VERSION`、父提交不是目标源提交、版本转换不符合普通规则或已有 tag 指向其他 commit 时，发布必须失败。
-- Release Commit push 不得触发完整 CI、Label Gate 或第二个 product release；迁移完成后，人为 PR 修改 `VERSION` 必须被 release-completion gate 拒绝。
+- Release Commit 的 diff 不止 `VERSION`、父提交不是目标源提交、自动 patch 转换不符合普通规则、exact 文本非法或不严格高于当前 VERSION、或已有 tag 指向其他 commit 时，发布必须失败。
+- Release Commit push 只在 `CI Main` 运行一次结构校验，且 `Release Product` 必须退出；它不得触发完整 CI、Label Gate 或第二个 product release。迁移完成后，人为 PR 修改 `VERSION` 必须被 release-completion gate 拒绝。
 - release artifact 或 GitHub Release 只部分完成时，recovery 必须验证已存在 tag、manifest、资产哈希与 Release Commit identity，再决定复用或失败。
 
 ## 接口契约（Interfaces & Contracts）
@@ -198,7 +199,7 @@ None.
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：active `main` ruleset 目前要求 PR、签名和严格 checks，且没有允许 release workflow identity 的 bypass；现有 `GITHUB_TOKEN` 因此不能创建受保护 Release Commit。仓库还同时保留 classic branch protection，GitHub 会同时执行两套规则。owner 必须先将 classic rule 的保护完整收敛到 ruleset 并移除 classic rule，再为现有 release workflow identity 配置最小必要的 bypass；发布流程不依赖额外 GitHub environment。
+- 风险：active `main` ruleset 目前要求 PR、签名和严格 checks，且没有 release App bypass；`GITHUB_TOKEN` 不能创建受保护 Release Commit。仓库还同时保留 classic branch protection，GitHub 会同时执行两套规则。owner 必须先将 classic rule 的保护完整收敛到 ruleset 并移除 classic rule，安装只具备 `contents: write` 的 release App，将 `RELEASE_APP_ID` 与 `RELEASE_APP_PRIVATE_KEY` 配置为 repository variable/secret，并将该 App 配置为唯一 always-bypass actor；发布流程不依赖 GitHub Environment。
 - 风险：release-completion gate 会在发布失败时停止下一次合入。它只在 `main` 头部是带已验证 tag、manifest 和资产的 Release Commit 时成功。这是保留逐提交回滚距离的必要代价，不得用合并多个提交来绕过。
 - 假设：每个非 Release Commit 的 `main` 变更都代表一个产品版本；文档和维护类变更同样获得独立 patch release。
 - 假设：迁移基线为现有已发布 `v0.22.0`。版本源实现 PR 一次性加入 `VERSION=0.22.0`，其随后 Release Commit 发布 `0.22.1`。在此之前已经积累但没有 Version File 的历史无法在不重写 `main` 的前提下重新切割。

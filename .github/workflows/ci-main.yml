@@ -3,8 +3,6 @@ name: CI Main
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - VERSION
   workflow_dispatch:
 
 concurrency:
@@ -18,8 +16,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  classify:
+    name: Release Commit validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - name: Checkout commit and parent
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Classify and validate main commit
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          has_parent_version=false
+          if git cat-file -e "${GITHUB_SHA}^:VERSION" 2>/dev/null; then
+            has_parent_version=true
+          fi
+          mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")
+          if [ "${has_parent_version}" = true ] && [ "${#changed[@]}" -eq 1 ] && [ "${changed[0]}" = VERSION ]; then
+            python3 .github/scripts/release_chain.py verify-commit --commit "${GITHUB_SHA}"
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=source" >> "$GITHUB_OUTPUT"
+          fi
+
   firmware:
     name: Firmware checks
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -48,6 +77,8 @@ jobs:
 
   devd:
     name: DEVD checks
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -67,6 +98,8 @@ jobs:
 
   web:
     name: Web checks
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -136,6 +169,8 @@ jobs:
 
   worktree-bootstrap:
     name: Worktree bootstrap
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

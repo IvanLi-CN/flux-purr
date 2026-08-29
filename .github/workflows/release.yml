@@ -27,7 +27,9 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
+  issues: read
+  pull-requests: read
 
 jobs:
   release:
@@ -35,16 +37,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
+      - name: Create release controller token
+        id: release-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
+          token: ${{ steps.release-app-token.outputs.token }}
+          persist-credentials: false
 
-      - name: Configure git identity
+      - name: Configure release controller identity
+        env:
+          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+          bot_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          gh auth setup-git
 
       - name: Resolve or reuse staged Release Commit
         id: release
@@ -55,7 +73,7 @@ jobs:
           SOURCE_INPUT: ${{ github.event.workflow_run.head_sha || inputs.commit_sha }}
           DISPATCH_OPERATION: ${{ inputs.operation || 'automatic' }}
           EXACT_VERSION: ${{ inputs.exact_version || '' }}
-          RELEASE_TOKEN: ${{ github.token }}
+          READ_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +88,13 @@ jobs:
           git fetch --force origin main --tags
           main_sha="$(git rev-parse origin/main)"
 
+          if [ "${operation}" = automatic ] && python3 .github/scripts/release_chain.py verify-commit --commit "${SOURCE_INPUT}" >/dev/null 2>&1; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "release_reason=release_commit" >> "$GITHUB_OUTPUT"
+            echo "Release Commit ${SOURCE_INPUT} is structural-only; product release is skipped"
+            exit 0
+          fi
+
           enabled=true
           if [ "${operation}" = automatic ] || [ "${operation}" = exact ]; then
             test -n "${SOURCE_INPUT}"
@@ -78,20 +103,30 @@ jobs:
             python3 .github/scripts/release_snapshot.py ensure \
               --target-sha "${SOURCE_INPUT}" \
               --github-repository "${GITHUB_REPOSITORY}" \
-              --github-token "${{ github.token }}" \
+              --github-token "${READ_TOKEN}" \
               --output "${intent_file}"
             python3 .github/scripts/release_snapshot.py resolve \
-              --operation automatic \
+              --operation "${operation}" \
               --target-sha "${SOURCE_INPUT}" \
               --github-output "$GITHUB_OUTPUT"
             enabled="$(grep '^release_enabled=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
-            echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
             if [ "${enabled}" != true ]; then
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
               echo "Release intent disables product publication for ${SOURCE_INPUT}"
               exit 0
             fi
-            release_level="$(grep '^release_level=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
+            release_action="$(grep '^release_action=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
             release_channel="$(grep '^release_channel=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
+            if [ "${operation}" = automatic ] && [ "${release_action}" = exact ]; then
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
+              echo "release_reason=controlled_exact_required" >> "$GITHUB_OUTPUT"
+              echo "Release intent requires workflow_dispatch operation=exact; no product version was chosen"
+              exit 0
+            fi
+            if [ "${operation}" = exact ]; then
+              test "${release_action}" = exact
+              test -n "${EXACT_VERSION}"
+            fi
           fi
 
           candidate_sha=""
@@ -109,7 +144,7 @@ jobs:
               exit 1
             fi
             if [ -z "${candidate_sha}" ]; then
-              git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${release_sha}:refs/heads/release/product-main"
+              git push origin "${release_sha}:refs/heads/release/product-main"
             fi
           elif [ "${operation}" = promote ]; then
             test "${SOURCE_INPUT}" = "${main_sha}"
@@ -118,7 +153,7 @@ jobs:
             if [ -n "${EXACT_VERSION}" ]; then promote_args+=(--exact-version "${EXACT_VERSION}"); fi
             python3 .github/scripts/release_chain.py "${promote_args[@]}"
             release_sha="$(grep '^releaseSha=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
-            git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${release_sha}:refs/heads/release/product-main"
+            git push origin "${release_sha}:refs/heads/release/product-main"
           else
             test "${SOURCE_INPUT}" = "${main_sha}"
             if [ -n "${candidate_sha}" ]; then
@@ -126,32 +161,37 @@ jobs:
               candidate_source="$(printf '%s' "${candidate_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
               if [ "${candidate_source}" = "${SOURCE_INPUT}" ]; then
                 verify_args=(verify-commit --source-sha "${SOURCE_INPUT}" --commit "${candidate_sha}" --github-output "$GITHUB_OUTPUT")
-                if [ -n "${EXACT_VERSION}" ]; then verify_args+=(--version "${EXACT_VERSION}"); fi
+                if [ "${operation}" = automatic ]; then
+                  expected_version="$(python3 scripts/product-version.py --mode next-patch --source-sha "${SOURCE_INPUT}")"
+                  verify_args+=(--version "${expected_version}")
+                else
+                  verify_args+=(--version "${EXACT_VERSION}")
+                fi
                 python3 .github/scripts/release_chain.py "${verify_args[@]}"
               elif git merge-base --is-ancestor "${candidate_sha}" "${main_sha}"; then
                 git checkout --detach "${SOURCE_INPUT}"
-                stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode intent --release-level "${release_level}" --release-channel "${release_channel}" --github-output "$GITHUB_OUTPUT")
+                stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode "${operation}" --github-output "$GITHUB_OUTPUT")
                 if [ "${operation}" = exact ]; then
                   test -n "${EXACT_VERSION}"
-                  stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode exact --exact-version "${EXACT_VERSION}" --github-output "$GITHUB_OUTPUT")
+                  stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode exact --exact-version "${EXACT_VERSION}" --expected-channel "${release_channel}" --github-output "$GITHUB_OUTPUT")
                 fi
                 python3 .github/scripts/release_chain.py "${stage_args[@]}"
                 release_sha="$(grep '^releaseSha=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
-                git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${release_sha}:refs/heads/release/product-main"
+                git push origin "${release_sha}:refs/heads/release/product-main"
               else
                 echo "release/product-main has an incomplete candidate ${candidate_sha}; recover it before releasing ${SOURCE_INPUT}" >&2
                 exit 1
               fi
             else
               git checkout --detach "${SOURCE_INPUT}"
-              stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode intent --release-level "${release_level}" --release-channel "${release_channel}" --github-output "$GITHUB_OUTPUT")
+              stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode "${operation}" --github-output "$GITHUB_OUTPUT")
               if [ "${operation}" = exact ]; then
                 test -n "${EXACT_VERSION}"
-                stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode exact --exact-version "${EXACT_VERSION}" --github-output "$GITHUB_OUTPUT")
+                stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode exact --exact-version "${EXACT_VERSION}" --expected-channel "${release_channel}" --github-output "$GITHUB_OUTPUT")
               fi
               python3 .github/scripts/release_chain.py "${stage_args[@]}"
               release_sha="$(grep '^releaseSha=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
-              git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${release_sha}:refs/heads/release/product-main"
+              git push origin "${release_sha}:refs/heads/release/product-main"
             fi
           fi
           release_sha="$(grep '^releaseSha=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
@@ -252,20 +292,19 @@ jobs:
         env:
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git show-ref --tags --verify --quiet "refs/tags/${PRODUCT_TAG}"; then
             test "$(git rev-list -n1 "refs/tags/${PRODUCT_TAG}")" = "${RELEASE_SHA}"
           else
             git tag -a "${PRODUCT_TAG}" "${RELEASE_SHA}" -m "${PRODUCT_TAG}"
-            git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${PRODUCT_TAG}"
+            git push origin "${PRODUCT_TAG}"
           fi
 
       - name: Publish and verify release assets
         if: steps.release.outputs.enabled == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
         shell: bash
@@ -298,6 +337,7 @@ jobs:
         env:
           EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
           EDGEONE_PROJECT_NAME: ${{ secrets.EDGEONE_PROJECT_NAME }}
+          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
           PRODUCT_VERSION: ${{ steps.release.outputs.version }}
         shell: bash
         run: |
@@ -322,9 +362,8 @@ jobs:
         env:
           SOURCE_SHA: ${{ steps.release.outputs.sourceSha }}
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
-          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git fetch --force origin main
           test "$(git rev-parse origin/main)" = "${SOURCE_SHA}"
-          git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${RELEASE_SHA}:refs/heads/main"
+          git push origin "${RELEASE_SHA}:refs/heads/main"

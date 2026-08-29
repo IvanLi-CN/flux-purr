@@ -96,6 +96,15 @@ def release_fields(type_label: str, channel_label: str) -> tuple[bool, str, str]
     return True, type_label.split(":", 1)[1], "pr_labels"
 
 
+def release_action(payload: dict[str, Any]) -> str:
+    """Map frozen label intent to a controller operation, never a version number."""
+    if payload["release_enabled"] is False:
+        return "skip"
+    if payload["type_label"] == "type:patch" and payload["channel_label"] == "channel:stable":
+        return "automatic"
+    return "exact"
+
+
 def validate_snapshot(payload: Any, target_sha: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise SnapshotError("unsupported release snapshot schema")
@@ -321,6 +330,7 @@ def ensure(args: argparse.Namespace) -> None:
 def write_outputs(payload: dict[str, Any], output_path: str) -> None:
     values = {
         "release_enabled": str(payload["release_enabled"]).lower(),
+        "release_action": release_action(payload),
         "release_level": payload.get("release_level", ""),
         "release_channel": payload["release_channel"],
         "release_reason": payload["release_reason"],
@@ -363,7 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     ensure_parser.add_argument("--api-root", default=os.environ.get("GITHUB_API_URL", "https://api.github.com"))
     ensure_parser.add_argument("--output", required=True)
     resolve_parser = sub.add_parser("resolve")
-    resolve_parser.add_argument("--operation", choices=("automatic", "recover", "promote"), required=True)
+    resolve_parser.add_argument("--operation", choices=("automatic", "exact", "recover", "promote"), required=True)
     resolve_parser.add_argument("--target-sha", required=True)
     resolve_parser.add_argument("--notes-ref", default=DEFAULT_NOTES_REF)
     resolve_parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))

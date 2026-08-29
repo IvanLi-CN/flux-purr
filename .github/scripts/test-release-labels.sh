@@ -84,6 +84,13 @@ payload = {
     'release_reason': 'frozen_pr_labels',
 }
 assert module.validate_snapshot(payload, 'a' * 40) == payload
+assert module.release_action(payload) == 'automatic'
+payload['type_label'] = 'type:minor'
+assert module.release_action(payload) == 'exact'
+payload['type_label'] = 'type:patch'
+payload['channel_label'] = 'channel:rc'
+assert module.release_action(payload) == 'exact'
+payload['channel_label'] = 'channel:stable'
 assert payload.get('version') is None
 legacy = {
     'schema_version': 1,

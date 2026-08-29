@@ -79,7 +79,7 @@
 - 开发者执行 `bash scripts/check-*.sh` 可复用与 CI 相同的检查路径。
 - Web 通过 `bun run --cwd web storybook` 调试组件，通过 `build-storybook` 生成静态产物。
 - 固件通过 `cargo` 命令完成 no-std crate 质量门禁；S3 目标方向在 README 与 CI/release 中保持一致。
-- Release workflow 在 push main 场景下根据关联 PR labels 决策发布意图级别与通道，数字版本由根目录 `VERSION` 决定，也支持手动触发。
+- Release workflow 在 push main 场景下根据关联 PR labels 决定自动 patch、受控 exact 或跳过；数字版本由根目录 `VERSION` 决定，也支持手动触发。
 
 ### Edge cases / errors
 

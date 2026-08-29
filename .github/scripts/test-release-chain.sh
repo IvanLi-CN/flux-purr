@@ -44,16 +44,31 @@ assert module.commit_parent(release) == source
 run("git", "add", "README")
 run("git", "commit", "--signoff", "-m", "rc source")
 rc_source = run("git", "rev-parse", "HEAD")
-module.stage(Namespace(source_sha=rc_source, mode="intent", exact_version=None, release_level="minor", release_channel="rc", github_output=None))
-intent_release = run("git", "rev-parse", "HEAD")
-assert module.verify_release_commit(intent_release, rc_source, "0.23.0-rc.1")["tag"] == "v0.23.0-rc.1"
-
-run("git", "reset", "--hard", rc_source)
-module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.23.0-rc.1", github_output=None))
+module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.23.0-rc.1", expected_channel="rc", github_output=None))
 rc_release = run("git", "rev-parse", "HEAD")
 assert module.verify_release_commit(rc_release, rc_source, "0.23.0-rc.1")["version"] == "0.23.0-rc.1"
 module.promote(Namespace(commit=rc_release, exact_version=None, github_output=None))
 stable_release = run("git", "rev-parse", "HEAD")
 assert module.verify_release_commit(stable_release, rc_release, "0.23.0")["version"] == "0.23.0"
+
+run("git", "reset", "--hard", rc_source)
+try:
+    module.stage(Namespace(source_sha=rc_source, mode="intent", exact_version=None, expected_channel=None, github_output=None))
+except module.ReleaseChainError:
+    pass
+else:
+    raise AssertionError("labels must not select a numeric staging mode")
+try:
+    module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.23.0", expected_channel="rc", github_output=None))
+except module.ReleaseChainError:
+    pass
+else:
+    raise AssertionError("exact VERSION must match the frozen release channel")
+try:
+    module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.22.1", expected_channel="stable", github_output=None))
+except module.ReleaseChainError:
+    pass
+else:
+    raise AssertionError("exact VERSION must be strictly newer than the source VERSION")
 print("release chain fixture passed")
 PY

@@ -2,8 +2,8 @@
 
 ## Related ADRs
 
-- [0002-release-recovery-and-promotion](../../adr/0002-release-recovery-and-promotion.md)
 - [0003-version-file-is-the-product-version-source](../../adr/0003-version-file-is-the-product-version-source.md)
+- [0004-release-commit-version-control](../../adr/0004-release-commit-version-control.md)
 
 ## Supersession
 
@@ -58,22 +58,21 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - 每个 PR 必须恰好有一个 `channel:*` 标签：`channel:stable`、`channel:rc`。
 - 未知、缺失或重复的 release intent 标签必须让 label gate 失败。
 - `type:docs` 与 `type:skip` 必须禁止 product release 发布。
-- `type:patch|minor|major` 必须驱动单一 product release 发布。
-- 发布 workflow 必须只在 `CI Main` 成功后或显式手动 `recover|promote` 时读取 release snapshot。
+- `type:patch|minor|major` 必须驱动单一 product release 发布；`type:patch + channel:stable` 自动发布，`type:minor`、`type:major` 与 `channel:rc` 需要显式 `exact` 后才能发布。
+- 发布 workflow 必须只在 `CI Main` 成功后或显式手动 `recover|exact|promote` 时读取 release snapshot。
 - Product host-tools release builds MUST use the workspace's version-controlled `Cargo.lock` with `--locked`.
 - Ubuntu host-tools release jobs MUST install the system packages required by the locked workspace build, including `pkg-config` and `libudev-dev`, before running the release build.
 - Every Ubuntu job that builds `flux-purr-devd` MUST use the shared Linux serial dependency action before the locked build.
 - Manual `Release Product` recovery MUST accept an explicit `main` commit SHA and recover its existing enabled snapshot without recomputing release intent.
-- Manual `Release Product` promotion MUST accept an explicit `main` commit SHA with an enabled RC snapshot produced after successful `CI Main`; it MUST derive the stable version and tag from that snapshot and MUST NOT require a published RC Release.
-- Promotion records MUST be stored separately from release snapshots and MUST bind the candidate SHA and canonical source-snapshot digest.
+- Manual `Release Product` promotion MUST accept an explicit RC Release Commit SHA on `main`; it creates a new stable Release Commit that removes only the RC suffix and never retags the RC commit.
 - A partial-run retry with an existing stable tag MUST verify that the tag points at the candidate and that any existing Release manifest matches the resolved source, version, channel, components, and asset hashes before reusing it.
 - 主分支 required checks 必须包含 `Release completion`、`Firmware checks`、`DEVD checks`、`Web checks` 与 `Worktree bootstrap`。
 
 ### SHOULD
 
-- 版本计算优先基于已有 product 稳定 tag 的最大 semver，再应用 PR 标签中的 bump level。
+- Label Gate 与 snapshot 只冻结发布意图；数字版本只从 root `VERSION` 读取。`type:patch + channel:stable` 的自动发布写入 `nextPatch(VERSION)`，其他发布由 `exact` 写入明确版本文本。
 - Stable tag 使用 `vX.Y.Z`。
-- RC tag 使用 `vX.Y.Z-rc.<sha7>`。
+- RC tag 使用 `vX.Y.Z-rc.N`。
 - Release snapshot 写入应保持幂等，已有 snapshot 不应被后续 PR 标签变更覆盖。
 
 ## 功能与行为规格（Functional / Behavior Spec）
@@ -86,9 +85,10 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - 合入 `main` 后，`CI Main` 以目标 SHA 隔离并以非抢占方式重新运行 firmware 和 web 检查。
 - Release workflow 以目标 commit 作为并发隔离键，避免不同 `main` commit 的 pending release run 互相替换。
 - `CI Main` 通过后，版本源发布链为该源提交创建唯一的 VERSION-only Release Commit；snapshot notes 只保存已冻结的 label intent，不保存或计算数字产品版本。
-- `Release Product` 由 push 事件产生且成功的 `CI Main` 触发，读取对应 commit 的 snapshot 后决定发布或跳过，再由 `VERSION` 解析器选择 Release Commit 的数字版本。
-- 手动 `recover` 必须显式提供 `main` 上的 commit SHA，并读取已有 snapshot。
-- 手动 `promote` 必须显式提供 `main` 上的 commit SHA，并读取已有 RC snapshot 或匹配的 promotion record；它使用同一有效版本生成 stable tag。
+- `Release Product` 由 push 事件产生且成功的 `CI Main` 触发，读取对应 commit 的 snapshot 后决定发布、等待受控 `exact`，或跳过。它不从 snapshot 解析数字版本。
+- 手动 `recover` 必须显式提供已有 Release Commit SHA，并复用该 commit。
+- 手动 `exact` 必须显式提供当前 `main` source SHA 和严格高于当前 VERSION 的有效版本文本；其 RC/stable channel 必须与冻结标签匹配。
+- 手动 `promote` 必须显式提供当前 `main` 上的 RC Release Commit SHA；它创建新的稳定 Release Commit。
 
 ### Edge cases / errors
 
@@ -96,15 +96,13 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - 找不到与 PR head SHA 匹配的冻结 release intent marker 时，snapshot 生成失败。
 - 首次合入本机制时，若目标 commit 的父提交尚不具备冻结 marker gate，允许一次性从 PR 当前标签生成 rollout snapshot；后续 commit 必须存在冻结 marker。
 - Snapshot 缺失时，release workflow 失败而不是重新读取 PR 标签。
-- `recover` 必须保持 snapshot 的 channel、version、tag 与 source SHA 不变。
-- `promote` 必须保持 RC snapshot 不变，并在 `refs/notes/release-promotions` 中写入或复用匹配的 schema-v1 record。
-- Promotion record、source SHA、stable tag 或既有 Release manifest 不一致时，发布失败而不是覆盖既有记录、tag 或资产。
-- 历史 schema-v1 release snapshot 若使用旧 `components` 格式，必须保持可读并参与版本基线计算；新生成的 snapshot 必须使用单一 `product` 格式。
+- `recover` 必须保持 Release Commit、VERSION、tag 与 source SHA 不变。
+- `promote` 必须保持 RC Release Commit 不变；其新 stable Release Commit、tag 或既有 Release manifest 不一致时，发布失败而不是覆盖既有记录、tag 或资产。
+- 历史 snapshot 仅为可读审计记录，不能参与版本基线或数字版本计算。
 - `type:docs` 或 `type:skip` 的 snapshot 导出 `release_enabled=false`。
 - 已存在 release tag 时，发布 workflow 跳过 tag 创建但继续保持 rerun 幂等。
-- 连续合入多个 stable release PR 时，后续 snapshot 必须把已冻结但尚未发布的前序 stable snapshot 纳入版本基线。
-- 后续 main commit 先完成 CI 时，snapshot 生成必须按 first-parent 补齐缺失的近邻祖先 snapshot，再计算目标 commit 的版本。
-- 多个 main CI job 同时写入 release snapshot notes 时，必须 fetch 最新 notes、重放本 job 的缺失 note 并重试 push。
+- release-completion gate 必须在一个源提交发布完成前阻止下一产品源提交合入；不得以 queue、first-parent 补齐或压缩多个提交的方式决定版本。
+- 多个 main CI job 同时写入 release snapshot notes 时，必须 fetch 最新 notes、重放本 job 的缺失 note 并重试 push；该并发保护不参与数字版本计算。
 
 ## 主分支保护契约
 
@@ -120,8 +118,8 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - Given 缺失、重复或未知 release intent 标签，When 执行 label gate，Then 检查失败。
 - Given `type:docs` 或 `type:skip`，When 导出 release snapshot，Then `release_enabled=false`。
 - Given `Release Product` 被 `workflow_run` 触发，When 对应 `CI Main` 失败，Then release job 不发布。
-- Given an enabled RC snapshot on `main`, When `Release Product` is dispatched with `operation=promote`, Then the resolver emits the same source SHA and effective version with a stable tag and leaves the RC snapshot unchanged.
-- Given a `promote` dispatch whose stable tag points at another commit, When the resolver runs, Then it fails before writing a promotion record or publishing assets.
+- Given an enabled RC source on `main`, When `Release Product` is dispatched with `operation=exact`, Then it writes the supplied `X.Y.Z-rc.N` text to a new Release Commit and leaves the frozen snapshot unchanged.
+- Given an RC Release Commit on `main`, When `Release Product` is dispatched with `operation=promote`, Then it creates a new stable Release Commit and fails before publishing when its stable tag points at another commit.
 - Given `.github/quality-gates.json`，When 执行质量门禁校验，Then required checks 能映射到 repo-local workflow job。
 
 ## 非功能性验收 / 质量门槛
@@ -138,7 +136,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 ## 实现里程碑
 
 - [x] Workflow 拆分为 PR CI、Main CI、Release-after-main-CI。
-- [x] Release snapshot 与版本计算脚本落地。
+- [x] Release snapshot 与产品版本 identity 脚本落地。
 - [x] 质量门禁声明与校验落地。
 - [x] 标签、版本、CI、文档验证完成。
 

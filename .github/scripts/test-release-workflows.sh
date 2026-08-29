@@ -13,14 +13,21 @@ completion = (root / ".github/workflows/release-completion.yml").read_text(encod
 quality = (root / ".github/quality-gates.json").read_text(encoding="utf-8")
 label_gate = (root / ".github/workflows/label-gate.yml").read_text(encoding="utf-8")
 
-assert "paths-ignore:" in ci_main and "      - VERSION" in ci_main
+assert "paths-ignore:" not in ci_main
+assert "Release Commit validation" in ci_main
+assert "needs: classify" in ci_main
+assert "kind=release" in ci_main
 assert "Release Snapshot" not in ci_main
 assert "release/product-main" in release
 assert "operation=recover" not in release
-for token in ("stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
+for token in ("actions/create-github-app-token@v3", "RELEASE_APP_ID", "RELEASE_APP_PRIVATE_KEY", "release_action", "controlled_exact_required", "stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
     assert token in release, token
 assert "github.token" in release
+assert "issues: read" in release
 assert "environment: product-release" not in release
+assert "--mode intent" not in release
+assert "release_level=" not in release
+assert not (root / ".github/workflows/release-commit.yml").exists()
 assert "Release completion" in completion
 assert ".github/scripts/release_completion.py" in completion
 assert "Validate PR labels" in quality
