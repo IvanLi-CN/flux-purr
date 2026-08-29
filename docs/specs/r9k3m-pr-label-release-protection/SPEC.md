@@ -3,6 +3,11 @@
 ## Related ADRs
 
 - [0002-release-recovery-and-promotion](../../adr/0002-release-recovery-and-promotion.md)
+- [0003-version-file-is-the-product-version-source](../../adr/0003-version-file-is-the-product-version-source.md)
+
+## Supersession
+
+The product-version and release-selection rules in this specification are superseded by [the version-source specification](../version-source/SPEC.md) and ADR 0003. In particular, PR labels, release snapshots, Git tags, package manifests, and workflow channels no longer determine a product version. The label-gate and branch-protection requirements remain separate until their replacement is implemented.
 
 ## 状态
 
