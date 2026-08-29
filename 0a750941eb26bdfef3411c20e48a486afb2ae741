@@ -1,0 +1,18 @@
+{
+  "channel_label": "channel:stable",
+  "pr_head_sha": "59efb169cf5c9d8dfe265c3b98befb6cb54115e9",
+  "pr_number": 75,
+  "pr_title": "feat(firmware): integrate fusb302 crate",
+  "product": {
+    "effective_version": "0.22.0",
+    "tag": "v0.22.0"
+  },
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_level": "minor",
+  "release_reason": "frozen_pr_labels",
+  "schema_version": 1,
+  "snapshot_source": "frozen_pr_marker",
+  "target_sha": "0a750941eb26bdfef3411c20e48a486afb2ae741",
+  "type_label": "type:minor"
+}
