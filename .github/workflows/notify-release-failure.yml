@@ -11,10 +11,56 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 jobs:
+  release_context:
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
+    name: Collect release context
+    runs-on: ubuntu-latest
+    outputs:
+      details: ${{ steps.context.outputs.details }}
+    steps:
+      - name: Checkout release metadata helpers
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Collect immutable release context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          MERGE_SHA: ${{ github.event.workflow_run.head_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_number="$(gh api "repos/${REPOSITORY}/commits/${MERGE_SHA}/pulls" --jq '.[0].number // "unknown"' 2>/dev/null || printf '%s' unknown)"
+          labels="unknown"
+          if [ "${pr_number}" != unknown ]; then
+            labels="$(gh api "repos/${REPOSITORY}/pulls/${pr_number}" --jq '[.labels[].name] | join(",")' 2>/dev/null || printf '%s' unknown)"
+          fi
+          type_label="$(printf '%s' "${labels}" | tr ',' '\n' | grep '^type:' | head -n1 || true)"
+          channel_label="$(printf '%s' "${labels}" | tr ',' '\n' | grep '^channel:' | head -n1 || true)"
+          components="$(printf '%s' "${labels}" | tr ',' '\n' | grep '^component:' | paste -sd, - || true)"
+          artifact_names="$(gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --jq '[.artifacts[].name] | join(",")' 2>/dev/null || printf '%s' unknown)"
+          candidate_version="unknown"
+          candidate_sha="$(git ls-remote origin refs/heads/release/product-main | awk 'NR == 1 {print $1}')"
+          if [[ "${candidate_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            git fetch --no-tags origin "${candidate_sha}" >/dev/null 2>&1 || true
+            candidate_version="$(git show "${candidate_sha}:VERSION" 2>/dev/null || printf '%s' unknown)"
+          fi
+          details="pr_number=${pr_number}; merge_commit_sha=${MERGE_SHA}; type_label=${type_label:-unknown}; channel_label=${channel_label:-unknown}; components=${components:-none}; selected_version=${candidate_version}; artifact_names=${artifact_names}; run_url=${{ github.event.workflow_run.html_url }}; backfill=dispatch Release Product with operation=recover and commit_sha=${MERGE_SHA}"
+          {
+            echo 'details<<EOF'
+            printf '%s\n' "${details}"
+            echo EOF
+          } >> "${GITHUB_OUTPUT}"
+
   notify_failure:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
+    needs: release_context
     uses: IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main
     with:
       repository: ${{ github.repository }}
@@ -26,15 +72,7 @@ jobs:
       run_attempt: ${{ github.event.workflow_run.run_attempt }}
       actor: ${{ github.event.workflow_run.triggering_actor.login || github.event.workflow_run.actor.login || github.actor }}
       event_name: ${{ github.event.workflow_run.event }}
-      extra_details: >-
-        release intent context: pr_number=${{ github.event.workflow_run.pull_requests[0].number || 'unknown' }};
-        merge_commit_sha=${{ github.event.workflow_run.head_sha }};
-        type_label=read-from-refs/notes/release-snapshots;
-        channel_label=read-from-refs/notes/release-snapshots;
-        components=read-from-release-manifest;
-        selected_version=read-from-Release-Commit-VERSION;
-        artifact_names=read-from-release-run;
-        backfill=dispatch Release Product with operation=recover and commit_sha=${{ github.event.workflow_run.head_sha }}
+      extra_details: ${{ needs.release_context.outputs.details }}
     secrets:
       SHOUTRRR_URL: ${{ secrets.SHOUTRRR_URL }}
 
