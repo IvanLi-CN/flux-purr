@@ -47,11 +47,47 @@ fn main() {
     println!("cargo:rerun-if-env-changed=FLUX_PURR_BUILD_ID");
     println!("cargo:rerun-if-changed=../VERSION");
     println!("cargo:rerun-if-changed=../scripts/product-version.py");
+    watch_git_identity(repo_root);
 
     let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 
     if target_arch == "xtensa" && target_os == "none" {
         println!("cargo:rustc-link-arg=-Tdefmt.x");
+    }
+}
+
+fn watch_git_identity(repo_root: &std::path::Path) {
+    let git_path = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(repo_root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| {
+                let path = std::path::PathBuf::from(value.trim());
+                if path.is_absolute() {
+                    path
+                } else {
+                    repo_root.join(path)
+                }
+            })
+    };
+    if let Some(path) = git_path(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    if let Some(reference) = std::process::Command::new("git")
+        .current_dir(repo_root)
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+    {
+        if let Some(path) = git_path(&["rev-parse", "--git-path", reference.trim()]) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
 }

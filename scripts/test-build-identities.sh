@@ -13,6 +13,19 @@ test "${devd_version}" = "flux-purr-devd ${expected}"
 test "${cli_version}" = "flux-purr ${expected}"
 
 if [[ -f "${repo_root}/web/dist/build-info.json" ]]; then
+  if ! python3 - "${repo_root}/web/dist/build-info.json" "${expected}" "${source_sha}" 2>/dev/null <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert payload["version"] == sys.argv[2]
+assert payload["sourceSha"] == sys.argv[3]
+assert payload["channel"] == "local"
+PY
+  then
+    bun run --cwd "${repo_root}/web" build >/dev/null
+  fi
   python3 - "${repo_root}/web/dist/build-info.json" "${expected}" "${source_sha}" <<'PY'
 import json
 import sys

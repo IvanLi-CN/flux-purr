@@ -50,4 +50,40 @@ fn main() {
         repo_root.join("VERSION").display()
     );
     println!("cargo:rerun-if-changed={}", resolver.display());
+    watch_git_identity(repo_root);
+}
+
+fn watch_git_identity(repo_root: &std::path::Path) {
+    let git_path = |args: &[&str]| {
+        Command::new("git")
+            .current_dir(repo_root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| {
+                let path = PathBuf::from(value.trim());
+                if path.is_absolute() {
+                    path
+                } else {
+                    repo_root.join(path)
+                }
+            })
+    };
+    if let Some(path) = git_path(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    if let Some(reference) = Command::new("git")
+        .current_dir(repo_root)
+        .args(["symbolic-ref", "-q", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+    {
+        if let Some(path) = git_path(&["rev-parse", "--git-path", reference.trim()]) {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }
