@@ -33,7 +33,6 @@ jobs:
   release:
     name: Release Product
     runs-on: ubuntu-latest
-    environment: product-release
     timeout-minutes: 60
     steps:
       - name: Checkout main
@@ -56,11 +55,10 @@ jobs:
           SOURCE_INPUT: ${{ github.event.workflow_run.head_sha || inputs.commit_sha }}
           DISPATCH_OPERATION: ${{ inputs.operation || 'automatic' }}
           EXACT_VERSION: ${{ inputs.exact_version || '' }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_APP_TOKEN }}
+          RELEASE_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${RELEASE_TOKEN}" || { echo "product-release requires secrets.RELEASE_APP_TOKEN" >&2; exit 1; }
           if [ "${EVENT_NAME}" = workflow_run ]; then
             test "${WORKFLOW_CONCLUSION}" = success
             test "${WORKFLOW_EVENT}" = push
@@ -254,7 +252,7 @@ jobs:
         env:
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_APP_TOKEN }}
+          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if git show-ref --tags --verify --quiet "refs/tags/${PRODUCT_TAG}"; then
@@ -267,7 +265,7 @@ jobs:
       - name: Publish and verify release assets
         if: steps.release.outputs.enabled == 'true'
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_APP_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
         shell: bash
@@ -304,8 +302,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -n "${EDGEONE_API_TOKEN}" || { echo "product-release requires EDGEONE_API_TOKEN" >&2; exit 1; }
-          test -n "${EDGEONE_PROJECT_NAME}" || { echo "product-release requires EDGEONE_PROJECT_NAME" >&2; exit 1; }
+          test -n "${EDGEONE_API_TOKEN}" || { echo "repository secret EDGEONE_API_TOKEN is required" >&2; exit 1; }
+          test -n "${EDGEONE_PROJECT_NAME}" || { echo "repository secret EDGEONE_PROJECT_NAME is required" >&2; exit 1; }
           if gh release view "${{ steps.release.outputs.tag }}" --json assets --jq '.assets[].name' | grep -Fxq .edgeone-deployed; then
             echo "EdgeOne deployment marker already exists; skip duplicate deployment"
             exit 0
@@ -324,7 +322,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ steps.release.outputs.sourceSha }}
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
-          RELEASE_TOKEN: ${{ secrets.RELEASE_APP_TOKEN }}
+          RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           git fetch --force origin main

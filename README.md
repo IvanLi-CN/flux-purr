@@ -80,7 +80,7 @@ Every source commit that passes `CI Main` is released separately. The release co
 
 PRs must carry exactly one `type:patch|minor|major|docs|skip` label and exactly one `channel:stable|rc` label. The trusted `Label Gate` validates those labels and freezes the intent on the PR head; the release workflow later consumes the mainline snapshot. Labels select release intent and channel, while the numeric version still comes only from `VERSION`.
 
-The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits and the `Validate PR labels`, `Release completion`, `Firmware checks`, `DEVD checks`, `Web checks`, and `Worktree bootstrap` checks, and allow only the dedicated release App to bypass the protected Release Commit fast-forward.
+The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits and the `Validate PR labels`, `Release completion`, `Firmware checks`, `DEVD checks`, `Web checks`, and `Worktree bootstrap` checks, and allow only the release workflow identity to bypass the protected Release Commit fast-forward. The workflow uses the repository `GITHUB_TOKEN`; no additional GitHub environment is required.
 
 Each product release attaches Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
 

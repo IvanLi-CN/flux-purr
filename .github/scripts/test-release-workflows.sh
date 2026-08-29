@@ -19,7 +19,8 @@ assert "release/product-main" in release
 assert "operation=recover" not in release
 for token in ("stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
     assert token in release, token
-assert "secrets.RELEASE_APP_TOKEN" in release
+assert "github.token" in release
+assert "environment: product-release" not in release
 assert "Release completion" in completion
 assert ".github/scripts/release_completion.py" in completion
 assert "Validate PR labels" in quality

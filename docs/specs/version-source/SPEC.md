@@ -69,7 +69,7 @@
 
 - 版本解析器应提供 machine-readable 输出，供 Rust build script、Bash、Python 与 Vite 共用，避免在多处复制 SemVer、next-patch 或 channel 推导逻辑。
 - Release Commit message 应使用 `chore(release): vX.Y.Z`，并记录其 source commit SHA；版本正确性始终由文件与 diff 验证，而不是提交消息。
-- Release controller 应使用专用 GitHub App token，并只授予它创建受限 Release Commit 和 tag 所需的最小权限。
+- Release controller 应使用现有 workflow token，并由仓库 ruleset 明确允许该 workflow identity 执行受保护 Release Commit 的 fast-forward；不得为了发布流程凭空增加 GitHub environment。
 
 ### COULD
 
@@ -198,7 +198,7 @@ None.
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：active `main` ruleset 目前要求 PR、签名和严格 checks，且没有 bypass actor；现有 `GITHUB_TOKEN` 不能创建 Release Commit。仓库还同时保留 classic branch protection，GitHub 会同时执行两套规则。owner 必须先将 classic rule 的保护完整收敛到 ruleset 并移除 classic rule，再安装专用 GitHub App，将该 Integration 以 `always` bypass 加入 ruleset，并把 App token 限制在 release workflow 的受保护环境中。
+- 风险：active `main` ruleset 目前要求 PR、签名和严格 checks，且没有允许 release workflow identity 的 bypass；现有 `GITHUB_TOKEN` 因此不能创建受保护 Release Commit。仓库还同时保留 classic branch protection，GitHub 会同时执行两套规则。owner 必须先将 classic rule 的保护完整收敛到 ruleset 并移除 classic rule，再为现有 release workflow identity 配置最小必要的 bypass；发布流程不依赖额外 GitHub environment。
 - 风险：release-completion gate 会在发布失败时停止下一次合入。它只在 `main` 头部是带已验证 tag、manifest 和资产的 Release Commit 时成功。这是保留逐提交回滚距离的必要代价，不得用合并多个提交来绕过。
 - 假设：每个非 Release Commit 的 `main` 变更都代表一个产品版本；文档和维护类变更同样获得独立 patch release。
 - 假设：迁移基线为现有已发布 `v0.22.0`。版本源实现 PR 一次性加入 `VERSION=0.22.0`，其随后 Release Commit 发布 `0.22.1`。在此之前已经积累但没有 Version File 的历史无法在不重写 `main` 的前提下重新切割。
