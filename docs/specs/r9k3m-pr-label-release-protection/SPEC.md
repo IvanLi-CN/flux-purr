@@ -1,5 +1,9 @@
 # Flux Purr PR 标签发布与主分支保护（#r9k3m）
 
+## Related ADRs
+
+- [0002-release-recovery-and-promotion](../../adr/0002-release-recovery-and-promotion.md)
+
 ## 状态
 
 - Status: 已完成
@@ -50,9 +54,14 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - 未知、缺失或重复的 release intent 标签必须让 label gate 失败。
 - `type:docs` 与 `type:skip` 必须禁止 product release 发布。
 - `type:patch|minor|major` 必须驱动单一 product release 发布。
-- 发布 workflow 必须只在 `CI Main` 成功后或显式手动 backfill 时读取 release snapshot。
+- 发布 workflow 必须只在 `CI Main` 成功后或显式手动 `recover|promote` 时读取 release snapshot。
 - Product host-tools release builds MUST use the workspace's version-controlled `Cargo.lock` with `--locked`.
 - Ubuntu host-tools release jobs MUST install the system packages required by the locked workspace build, including `pkg-config` and `libudev-dev`, before running the release build.
+- Every Ubuntu job that builds `flux-purr-devd` MUST use the shared Linux serial dependency action before the locked build.
+- Manual `Release Product` recovery MUST accept an explicit `main` commit SHA and recover its existing enabled snapshot without recomputing release intent.
+- Manual `Release Product` promotion MUST accept an explicit `main` commit SHA with an enabled RC snapshot produced after successful `CI Main`; it MUST derive the stable version and tag from that snapshot and MUST NOT require a published RC Release.
+- Promotion records MUST be stored separately from release snapshots and MUST bind the candidate SHA and canonical source-snapshot digest.
+- A partial-run retry with an existing stable tag MUST verify that the tag points at the candidate and that any existing Release manifest matches the resolved source, version, channel, components, and asset hashes before reusing it.
 - 主分支 required checks 必须至少包含 `Validate PR labels`、`Firmware checks`、`Web checks`。
 
 ### SHOULD
@@ -73,7 +82,8 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - Release workflow 以目标 commit 作为并发隔离键，避免不同 `main` commit 的 pending release run 互相替换。
 - `CI Main` 通过后，`Release Snapshot` 根据合入 commit 关联的唯一 PR 读取对应 PR head SHA 的冻结 marker，并把发布意图写入 git notes。
 - `Release Product` 由 push 事件产生且成功的 `CI Main` 触发，读取对应 commit 的 snapshot 后决定发布或跳过。
-- 手动 backfill 必须显式提供 `main` 上的 commit SHA，并读取已有 snapshot。
+- 手动 `recover` 必须显式提供 `main` 上的 commit SHA，并读取已有 snapshot。
+- 手动 `promote` 必须显式提供 `main` 上的 commit SHA，并读取已有 RC snapshot 或匹配的 promotion record；它使用同一有效版本生成 stable tag。
 
 ### Edge cases / errors
 
@@ -81,6 +91,9 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - 找不到与 PR head SHA 匹配的冻结 release intent marker 时，snapshot 生成失败。
 - 首次合入本机制时，若目标 commit 的父提交尚不具备冻结 marker gate，允许一次性从 PR 当前标签生成 rollout snapshot；后续 commit 必须存在冻结 marker。
 - Snapshot 缺失时，release workflow 失败而不是重新读取 PR 标签。
+- `recover` 必须保持 snapshot 的 channel、version、tag 与 source SHA 不变。
+- `promote` 必须保持 RC snapshot 不变，并在 `refs/notes/release-promotions` 中写入或复用匹配的 schema-v1 record。
+- Promotion record、source SHA、stable tag 或既有 Release manifest 不一致时，发布失败而不是覆盖既有记录、tag 或资产。
 - 历史 schema-v1 release snapshot 若使用旧 `components` 格式，必须保持可读并参与版本基线计算；新生成的 snapshot 必须使用单一 `product` 格式。
 - `type:docs` 或 `type:skip` 的 snapshot 导出 `release_enabled=false`。
 - 已存在 release tag 时，发布 workflow 跳过 tag 创建但继续保持 rerun 幂等。
@@ -102,6 +115,8 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - Given 缺失、重复或未知 release intent 标签，When 执行 label gate，Then 检查失败。
 - Given `type:docs` 或 `type:skip`，When 导出 release snapshot，Then `release_enabled=false`。
 - Given `Release Product` 被 `workflow_run` 触发，When 对应 `CI Main` 失败，Then release job 不发布。
+- Given an enabled RC snapshot on `main`, When `Release Product` is dispatched with `operation=promote`, Then the resolver emits the same source SHA and effective version with a stable tag and leaves the RC snapshot unchanged.
+- Given a `promote` dispatch whose stable tag points at another commit, When the resolver runs, Then it fails before writing a promotion record or publishing assets.
 - Given `.github/quality-gates.json`，When 执行质量门禁校验，Then required checks 能映射到 repo-local workflow job。
 
 ## 非功能性验收 / 质量门槛
@@ -112,7 +127,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 
 ## 文档更新
 
-- README 必须说明 PR 标签、发布触发、手动 backfill 和分支保护检查项。
+- README 必须说明 PR 标签、发布触发、手动 `recover|promote` 和分支保护检查项。
 - `.github/quality-gates.json` 必须作为 GitHub 远端保护设置的对齐依据。
 
 ## 实现里程碑

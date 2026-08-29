@@ -79,7 +79,7 @@ PRs targeting `main` must carry exactly one release type label and exactly one r
 
 `type:patch`, `type:minor`, and `type:major` publish one product release after `CI Main` succeeds on the merged commit. `type:docs` and `type:skip` intentionally skip the release workflow. Stable releases use `vX.Y.Z`; RC releases use `vX.Y.Z-rc.<sha7>`.
 
-`Label Gate` records the validated release intent against the PR head SHA before merge. After `CI Main` succeeds, release intent is frozen on `main` in git notes under `refs/notes/release-snapshots`; the product release job reads only that snapshot, not mutable post-merge PR labels. Manual release backfill uses the `Release Product` workflow with an explicit `main` commit SHA and reads the existing snapshot for that commit.
+`Label Gate` records the validated release intent against the PR head SHA before merge. After `CI Main` succeeds, release intent is frozen on `main` in git notes under `refs/notes/release-snapshots`; the product release job reads only that snapshot, not mutable post-merge PR labels. Manual recovery uses the `Release Product` workflow with `operation=recover` and an explicit `main` commit SHA. A qualified RC can use `operation=promote` to publish stable from the same source SHA and effective version; the workflow records that promotion separately under `refs/notes/release-promotions` and does not require the RC Release to have been published first.
 
 Each product release attaches Web, Firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,8 @@ from urllib import error, request
 
 SCHEMA_VERSION = 1
 DEFAULT_NOTES_REF = "refs/notes/release-snapshots"
+DEFAULT_PROMOTIONS_REF = "refs/notes/release-promotions"
+PROMOTION_SCHEMA_VERSION = 1
 VALID_TYPES = {"type:patch", "type:minor", "type:major", "type:docs", "type:skip"}
 VALID_CHANNELS = {"channel:stable", "channel:rc"}
 STABLE_TAG_RE = re.compile(r"^v([0-9]+)\.([0-9]+)\.([0-9]+)$")
@@ -21,6 +24,14 @@ INTENT_MARKER = "<!-- flux-purr-release-intent:v1 -->"
 
 class SnapshotError(RuntimeError):
     pass
+
+
+def canonical_json(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def snapshot_digest(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -46,6 +57,13 @@ def stable_tag_points_at(target_sha: str) -> bool:
         if STABLE_TAG_RE.fullmatch(tag):
             return True
     return False
+
+
+def stable_tag_commit(tag: str) -> str | None:
+    if not STABLE_TAG_RE.fullmatch(tag):
+        raise SnapshotError(f"Invalid stable tag: {tag}")
+    result = run_git("rev-list", "-n", "1", tag, check=False)
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def github_request(api_root: str, token: str, repository: str, path: str, method: str = "GET", payload: Any = None) -> Any:
@@ -123,6 +141,75 @@ def validate_snapshot(payload: Any, target_sha: str) -> dict[str, Any]:
     if not payload["release_enabled"] and payload.get("release_level") not in {"", None}:
         raise SnapshotError("Non-release snapshot must not include release_level")
     return payload
+
+
+def product_record(payload: dict[str, Any], target_sha: str) -> dict[str, str]:
+    if not payload["release_enabled"]:
+        raise SnapshotError(f"Snapshot for {target_sha} does not enable a product release")
+    product = payload.get("product")
+    if not isinstance(product, dict):
+        raise SnapshotError(f"Snapshot for {target_sha} has no single product record")
+    effective_version = product.get("effective_version")
+    tag = product.get("tag")
+    if not isinstance(effective_version, str) or not isinstance(tag, str):
+        raise SnapshotError(f"Snapshot for {target_sha} has an incomplete product record")
+    parse_version(effective_version)
+    return {"effective_version": effective_version, "tag": tag}
+
+
+def build_promotion_record(target_sha: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    if snapshot["target_sha"] != target_sha:
+        raise SnapshotError(f"Promotion target mismatch for {target_sha}")
+    if snapshot["release_channel"] != "rc":
+        raise SnapshotError(f"Only rc snapshots may be promoted: {target_sha}")
+    product = product_record(snapshot, target_sha)
+    expected_rc_tag = f"v{product['effective_version']}-rc.{target_sha[:7]}"
+    if product["tag"] != expected_rc_tag:
+        raise SnapshotError(
+            f"RC snapshot tag does not match its source: expected {expected_rc_tag}, got {product['tag']}"
+        )
+    return {
+        "schema_version": PROMOTION_SCHEMA_VERSION,
+        "candidate_sha": target_sha,
+        "candidate_snapshot_digest": snapshot_digest(snapshot),
+        "candidate_tag": product["tag"],
+        "source_release_channel": "rc",
+        "release_channel": "stable",
+        "effective_version": product["effective_version"],
+        "tag": f"v{product['effective_version']}",
+    }
+
+
+def validate_promotion(payload: Any, target_sha: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise SnapshotError("Promotion record must be a JSON object")
+    expected = build_promotion_record(target_sha, snapshot)
+    if payload != expected:
+        raise SnapshotError(f"Promotion record for {target_sha} does not match its RC snapshot")
+    return payload
+
+
+def read_promotion(promotions_ref: str, target_sha: str, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    result = run_git("notes", f"--ref={promotions_ref}", "show", target_sha, check=False)
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SnapshotError(f"Promotion record for {target_sha} is not valid JSON") from exc
+    return validate_promotion(payload, target_sha, snapshot)
+
+
+def promoted_snapshot(snapshot: dict[str, Any], promotion: dict[str, Any]) -> dict[str, Any]:
+    result = dict(snapshot)
+    result["channel_label"] = "channel:stable"
+    result["release_channel"] = "stable"
+    result["release_reason"] = "promoted_rc"
+    result["product"] = {
+        "effective_version": promotion["effective_version"],
+        "tag": promotion["tag"],
+    }
+    return validate_snapshot(result, snapshot["target_sha"])
 
 
 def validate_legacy_components(components: Any) -> None:
@@ -464,6 +551,79 @@ def push_notes_with_retry(notes_ref: str, payloads: list[tuple[str, dict[str, An
                 add_note(notes_ref, target_sha, payload)
 
 
+def push_promotion_with_retry(
+    promotions_ref: str, target_sha: str, payload: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    for attempt in range(1, 4):
+        result = run_git("push", "origin", f"{promotions_ref}:{promotions_ref}", check=False)
+        if result.returncode == 0:
+            return
+        fetch_notes(promotions_ref)
+        existing = read_promotion(promotions_ref, target_sha, snapshot)
+        if existing is not None:
+            return
+        if attempt == 3:
+            detail = result.stderr.strip() or result.stdout.strip() or "git promotion notes push failed"
+            raise SnapshotError(detail)
+        add_note(promotions_ref, target_sha, payload)
+
+
+def resolve_release(
+    operation: str,
+    target_sha: str,
+    notes_ref: str,
+    promotions_ref: str,
+    github_output: str,
+    main_ref: str | None = None,
+) -> dict[str, Any]:
+    if operation not in {"automatic", "recover", "promote"}:
+        raise SnapshotError(f"Unsupported release operation: {operation}")
+    if not re.fullmatch(r"[0-9a-f]{40}", target_sha):
+        raise SnapshotError(f"Invalid target SHA: {target_sha}")
+    run_git("cat-file", "-e", f"{target_sha}^{{commit}}")
+    if main_ref is not None:
+        ancestry = run_git("merge-base", "--is-ancestor", target_sha, main_ref, check=False)
+        if ancestry.returncode != 0:
+            raise SnapshotError(f"Commit {target_sha} is not contained in {main_ref}")
+
+    fetch_notes(notes_ref)
+    snapshot = read_snapshot(notes_ref, target_sha)
+    if snapshot is None:
+        raise SnapshotError(f"No release snapshot found for {target_sha}")
+    if operation in {"automatic", "recover"}:
+        product = snapshot.get("product")
+        if snapshot["release_enabled"] and isinstance(product, dict):
+            tag = product.get("tag")
+            if isinstance(tag, str) and STABLE_TAG_RE.fullmatch(tag):
+                existing_commit = stable_tag_commit(tag)
+                if existing_commit is not None and existing_commit != target_sha:
+                    raise SnapshotError(
+                        f"Stable tag {tag} already points at {existing_commit}, not {target_sha}"
+                    )
+        write_outputs(snapshot, github_output)
+        return snapshot
+
+    fetch_notes(promotions_ref)
+    promotion = read_promotion(promotions_ref, target_sha, snapshot)
+    expected_promotion = build_promotion_record(target_sha, snapshot) if promotion is None else promotion
+    existing_commit = stable_tag_commit(expected_promotion["tag"])
+    if existing_commit is not None and existing_commit != target_sha:
+        raise SnapshotError(
+            f"Stable tag {expected_promotion['tag']} already points at {existing_commit}, not {target_sha}"
+        )
+    if promotion is None:
+        promotion = expected_promotion
+        if existing_commit is not None:
+            raise SnapshotError(
+                f"Stable tag {promotion['tag']} exists without its promotion record"
+            )
+        add_note(promotions_ref, target_sha, promotion)
+        push_promotion_with_retry(promotions_ref, target_sha, promotion, snapshot)
+    promoted = promoted_snapshot(snapshot, promotion)
+    write_outputs(promoted, github_output)
+    return promoted
+
+
 def cmd_ensure(args: argparse.Namespace) -> None:
     if not re.fullmatch(r"[0-9a-f]{40}", args.target_sha):
         raise SnapshotError(f"Invalid target SHA: {args.target_sha}")
@@ -494,6 +654,19 @@ def cmd_export(args: argparse.Namespace) -> None:
     if payload is None:
         raise SnapshotError(f"No release snapshot found for {args.target_sha}")
     write_outputs(payload, args.github_output)
+
+
+def cmd_resolve(args: argparse.Namespace) -> None:
+    if args.main_ref:
+        run_git("fetch", "--no-tags", "origin", "main")
+    resolve_release(
+        operation=args.operation,
+        target_sha=args.target_sha,
+        notes_ref=args.notes_ref,
+        promotions_ref=args.promotions_ref,
+        github_output=args.github_output,
+        main_ref=args.main_ref,
+    )
 
 
 def cmd_capture_intent(args: argparse.Namespace) -> None:
@@ -549,6 +722,14 @@ def parse_args() -> argparse.Namespace:
     export.add_argument("--notes-ref", default=DEFAULT_NOTES_REF)
     export.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
 
+    resolve = sub.add_parser("resolve")
+    resolve.add_argument("--operation", choices=("automatic", "recover", "promote"), required=True)
+    resolve.add_argument("--target-sha", required=True)
+    resolve.add_argument("--notes-ref", default=DEFAULT_NOTES_REF)
+    resolve.add_argument("--promotions-ref", default=DEFAULT_PROMOTIONS_REF)
+    resolve.add_argument("--main-ref", default="origin/main")
+    resolve.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
+
     capture = sub.add_parser("capture-intent")
     capture.add_argument("--event-path", default=os.environ.get("GITHUB_EVENT_PATH", ""))
     capture.add_argument("--github-repository", required=True)
@@ -565,6 +746,8 @@ def main() -> int:
             cmd_ensure(args)
         elif args.command == "export":
             cmd_export(args)
+        elif args.command == "resolve":
+            cmd_resolve(args)
         elif args.command == "capture-intent":
             cmd_capture_intent(args)
         return 0
