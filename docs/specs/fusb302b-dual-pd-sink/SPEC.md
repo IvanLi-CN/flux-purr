@@ -1,5 +1,9 @@
 # FUSB302B Dual PD Sink
 
+## Related ADRs
+
+- None
+
 ## Goal
 
 Flux Purr supports two mutually exclusive USB-C PD sink board variants without changing the legacy CH224Q board behavior:
@@ -17,6 +21,7 @@ Flux Purr supports two mutually exclusive USB-C PD sink board variants without c
 ## Contract Policy
 
 - FUSB302BMPX selects the best usable PPS APDO covering the requested voltage within `5V..21V`; it selects the highest usable fixed PDO at or below `20V` only when no suitable APDO is present.
+- Automatic idle operation requests `12V` from a usable PPS APDO. The APDO must still cover `20V @ 3A` before it qualifies for the performance tier; heater control raises the request only when its power policy requires it.
 - Source capabilities, PPS RDOs, fixed RDOs, `Accept`, `PS_RDY`, detach, reset, reject, wait, and I2C faults are explicit policy states.
 - Heating is authorized only after `Accept` then `PS_RDY`. Contract loss clears the authorization and heater output.
 - Contract selection rejects source capabilities below `3A`. FUSB302BMPX clamps contractual current to `3A..5A`, PPS voltage to `5V..21V`, and fixed-PDO voltage to `5V..20V`.
@@ -51,8 +56,9 @@ C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly re
 
 ## Driver Boundary
 
-- The firmware uses a repository-owned, register-level FUSB302B PHY driver. Its PHY and controller-neutral policy boundary follow the established `mains-aegis` implementation shape and are intended for future crate extraction.
-- The driver emits PPS and fixed RDOs directly through the project's ESP32-S3 transport boundary. Source-only validation proves framing and policy, not real-source interoperability.
+- The firmware uses the public `fusb302` crate for FUSB302B physical-layer configuration, status, FIFO handling, packet transport, and read-only device identification. Flux Purr adapts its existing blocking ESP32-S3 I2C transport to the crate's async API at the transaction boundary.
+- Before sink toggle, the runtime applies the PHY's default host-current setting, disables CC measurement, and selects the toggle interrupt mask. After CC attachment, it selects the attached CC pin for measurement and applies the receiver interrupt mask before packet transmission.
+- Flux Purr owns controller selection, PPS/fixed contract policy, RDO selection, `Accept`/`PS_RDY` contract commit, recovery timing, and heater interlock. The FUSB302BMPX PD 3.0 GoodCRC encoding is an explicit target-hardware opt-in. Source-only validation proves framing and policy, not real-source interoperability.
 
 ## Milestones
 

@@ -237,7 +237,7 @@ The calibration state machine uses the current valid RTD measurement directly fo
 }
 ```
 
-`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`, while other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the `flux_cfg` layout is installed and the application starts.
+`devd` computes file size and `sha256` from local build outputs before returning catalog entries. Paths are repo-relative and must not expose unrelated host paths in errors. The local ESP32-S3 release artifact is an ELF and is flashed with `espflash flash`; an authorized native USB Serial/JTAG `cu.usbmodem*` port uses `--before usb-reset`. A connection failure waits one second and retries that USB reset once before a final `default-reset` fallback; no retry changes the authorized port. Other serial paths retain `default-reset`. `flashAddress` is only set for raw app binaries. For a raw app, devd writes the checked-in `firmware/partitions.bin` at `0x8000`, writes the app at its explicit address, then explicitly resets the target so the `flux_cfg` layout is installed and the application starts.
 
 ### `ApiError`
 

@@ -63,7 +63,7 @@
 
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
-| - | FUSB302B 双硬件 PD Sink | 部分完成（2/3） | `fusb302b-dual-pd-sink/SPEC.md` | 2026-08-25 | Read-only `0x9x` identification, `5V..21V` PPS runtime dispatch with fixed-PDO fallback, contract-capped PWM, status contract, and netlist baseline are present; PPS `20V/3A` and `20V/5A` source HIL remains gated |
+| - | FUSB302B 双硬件 PD Sink | 部分完成（2/3） | `fusb302b-dual-pd-sink/SPEC.md` | 2026-08-27 | Public `fusb302` PHY integration, read-only `0x9x` identification, `5V..21V` PPS runtime dispatch with fixed-PDO fallback, contract-capped PWM, status contract, and netlist baseline are present; PPS `20V/3A` and `20V/5A` source HIL remains gated |
 | 233y7 | Flux Purr S3FH4R2 + CH224Q 直连前面板基线（移除 CH442E / TCA6408A） | 已完成 | `233y7-c3-ch224q-ch442e-frontpanel/SPEC.md` | 2026-04-22 | Baseline updated for RGB status LED PWM on GPIO39/38/37 in addition to the frozen S3FH4R2 direct panel wiring |
 | n6csh | Flux Purr 初始化（Hooks + Storybook + shadcn + UI UX Pro Max） | 已完成 | `n6csh-flux-purr-init/SPEC.md` | 2026-03-02 | Local PR-ready（未 push / 未建 PR） |
 | 744yg | PD Mini加热台二开资料采集与基础文档 | 已完成 | `744yg-mini-hotplate-doc-baseline/SPEC.md` | 2026-03-03 | Research: [mini-hotplate](../research/mini-hotplate/README.md) |

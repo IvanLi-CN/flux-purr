@@ -1758,6 +1758,7 @@ name = "flux-purr-firmware"
 version = "0.1.0"
 dependencies = [
  "defmt",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
@@ -1776,6 +1777,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-storage",
+ "fusb302",
  "gc9d01",
  "heapless 0.8.0",
  "micromath",
@@ -1816,6 +1818,17 @@ name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
+
+[[package]]
+name = "fusb302"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "368deb1b8a1ef43bb4fcdc9c811cb2a2ed25564d8dac48159235e6c1a805df7e"
+dependencies = [
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "maybe-async-cfg",
+]
 
 [[package]]
 name = "futures-channel"
