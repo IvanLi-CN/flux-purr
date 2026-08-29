@@ -18,12 +18,12 @@
 
 | `VERSION` | build mode | Product version |
 | --- | --- | --- |
-| `0.21.1` | development at `abcdef0` | `0.21.2-dev.abcdef0` |
-| `0.21.1` | ordinary release | `0.21.2` |
+| `0.22.0` | development at `abcdef0` | `0.22.1-dev.abcdef0` |
+| `0.22.0` | ordinary release | `0.22.1` |
 | `0.22.0-rc.1` | release | `0.22.0-rc.1` |
 
 ### 兼容性与迁移（Compatibility / migration）
 
-- Version File migration starts from `0.21.0`, the published product baseline immediately preceding this contract.
+- Version File migration starts from `0.22.0`, the published product baseline immediately preceding this contract.
 - A missing or invalid file is a hard error after migration. Cargo/NPM package versions, Git tags, release snapshots and environment variables are not fallbacks.
 - An explicit major, minor or RC release writes the exact valid text in a Release Commit. All consumers then parse the file exactly as they do for an ordinary release.

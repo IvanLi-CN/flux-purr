@@ -10,7 +10,7 @@
 
 ## Replacements / Background
 
-- 当前最后已发布 tag `v0.21.0` 是 Version File migration baseline。首次版本源发布使用 `0.21.1`，之后的每个源提交都有独立版本边界。
+- 当前最后已发布 tag `v0.22.0` 是 Version File migration baseline。首次版本源发布使用 `0.22.1`，之后的每个源提交都有独立版本边界。
 - 一源提交一版本要求 Release Commit 在下一个源提交前完成；该顺序替代了以多个连续 `main` 提交合并发布的设计。
 
 ## References
