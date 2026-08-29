@@ -7,7 +7,7 @@
 
 ## Supersession
 
-The product-version and release-selection rules in this specification are superseded by [the version-source specification](../version-source/SPEC.md) and ADR 0003. In particular, PR labels, release snapshots, Git tags, package manifests, and workflow channels no longer determine a product version. The label-gate and branch-protection requirements remain separate until their replacement is implemented.
+The product-version and release-selection rules in this specification are superseded by [the version-source specification](../version-source/SPEC.md) and ADR 0003. In particular, PR labels, release snapshots, Git tags, package manifests, and workflow channels no longer determine a product version. The former label gate is replaced by the `Release completion` check; this specification remains only as historical context for the retired label workflow.
 
 ## 状态
 
@@ -67,7 +67,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - Manual `Release Product` promotion MUST accept an explicit `main` commit SHA with an enabled RC snapshot produced after successful `CI Main`; it MUST derive the stable version and tag from that snapshot and MUST NOT require a published RC Release.
 - Promotion records MUST be stored separately from release snapshots and MUST bind the candidate SHA and canonical source-snapshot digest.
 - A partial-run retry with an existing stable tag MUST verify that the tag points at the candidate and that any existing Release manifest matches the resolved source, version, channel, components, and asset hashes before reusing it.
-- 主分支 required checks 必须至少包含 `Validate PR labels`、`Firmware checks`、`Web checks`。
+- 主分支 required checks 必须包含 `Release completion`、`Firmware checks`、`DEVD checks`、`Web checks` 与 `Worktree bootstrap`。
 
 ### SHOULD
 
@@ -85,7 +85,7 @@ Flux Purr 使用 PR label gate、product release workflow 和 release 失败通�
 - PR CI 运行 firmware 和 web 检查，保持可抢占以节省无效分支运行时间。
 - 合入 `main` 后，`CI Main` 以目标 SHA 隔离并以非抢占方式重新运行 firmware 和 web 检查。
 - Release workflow 以目标 commit 作为并发隔离键，避免不同 `main` commit 的 pending release run 互相替换。
-- `CI Main` 通过后，`Release Snapshot` 根据合入 commit 关联的唯一 PR 读取对应 PR head SHA 的冻结 marker，并把发布意图写入 git notes。
+- `CI Main` 通过后，版本源发布链为该源提交创建唯一的 VERSION-only Release Commit；不再写入 release snapshot notes。
 - `Release Product` 由 push 事件产生且成功的 `CI Main` 触发，读取对应 commit 的 snapshot 后决定发布或跳过。
 - 手动 `recover` 必须显式提供 `main` 上的 commit SHA，并读取已有 snapshot。
 - 手动 `promote` 必须显式提供 `main` 上的 commit SHA，并读取已有 RC snapshot 或匹配的 promotion record；它使用同一有效版本生成 stable tag。

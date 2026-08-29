@@ -4,14 +4,14 @@
 
 ## Current Status
 
-- Implementation: 未开始
+- Implementation: implemented in the version-source branch; rollout requires owner-side GitHub protection/App configuration.
 - Lifecycle: active
-- Catalog note: root `VERSION`、一源提交一产品版本和 release-completion gate 尚未落地。
+- Catalog note: root `VERSION`, one-source-commit/one-product-release sequencing, and the release-completion gate are implemented in repository code and workflows.
 
 ## Coverage / rollout summary
 
-- 当前 firmware `build.rs` 在未注入 `FLUX_PURR_FIRMWARE_VERSION` 时回退到 `CARGO_PKG_VERSION`；`tools/flux-purr-devd` 的 `/health` 直接返回 `CARGO_PKG_VERSION`。相关 Cargo/NPM manifests 目前均含 `0.1.0`，不能作为产品版本事实。
-- 当前 local firmware bundle 从 Git tag 推导开发版本，release workflow 从 PR labels、Git notes snapshot 和 tag baseline 推导 effective version。它们都将被 shared resolver 和 `VERSION` 取代。
+- firmware `build.rs`, `flux-purr-devd` build script, CLI metadata, `/health`, local firmware bundle, Vite build metadata, release manifest, and release workflow all resolve product identity from root `VERSION` through `scripts/product-version.py`.
+- Development mode derives `nextPatch(VERSION)-dev.<short-sha>` and never writes `VERSION`; release mode reads the file verbatim. Git tags, PR labels, package manifests, notes, and workflow channels are not version inputs.
 - 当前 active GitHub ruleset 没有 bypass actor，不能让现有 workflow token 创建受保护 `main` Release Commit。仓库还同时保留 classic branch protection；两者会同时生效，单独为 ruleset 添加 App bypass 不足以放行 Release Commit。发布自动化必须使用受限的 GitHub App Integration bypass，并先将 classic protection 收敛到 ruleset；该远端配置由 owner 执行，不在仓库代码变更范围内。
 
 ## Required Rollout
@@ -24,12 +24,11 @@
 
 ## Remaining Gaps
 
-- 新增 `VERSION` file-format parser、Rust build-script bridge、Bash/Python/Vite consumer 和 deterministic test fixtures。
-- 为 `devd` 与 CLI 增加 product version constants，替换 `CARGO_PKG_VERSION` 运行时输出。
-- 为 Web build 生成并校验 build-info metadata。
-- 重写 `CI Main` / `Release Product` 的 target resolution、release commit creation、recovery 和 recursion guards。
-- 实现 release-completion required check，并在 GitHub ruleset 中实际启用。
-- 移除 label/snapshot 版本路径、对应 workflow jobs、tests 和 README 文案；保留 labels 仅作非版本化 issue/PR 分类时不读取它们。
+- `VERSION` and the strict resolver are checked by `scripts/test-product-version.py`.
+- `release_chain.py` enforces a one-parent, VERSION-only Release Commit with `Release-Source-SHA` and `Product-Version` trailers; recovery and RC promotion preserve that identity.
+- `release_completion.py` rejects ordinary PR VERSION changes, permits only the exact migration baseline, and verifies the latest main release tag and published assets.
+- `CI Main` runs the full matrix only for source commits; VERSION-only Release Commits use `release-commit.yml` structural validation. Product assets are built once from R before main is advanced.
+- Label gate, release snapshot, and legacy version computation are no longer active or present as executable release paths; their historical contract is retained only in the superseded specifications.
 
 ## Related Changes
 

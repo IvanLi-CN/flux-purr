@@ -4,7 +4,7 @@
 
 ## 背景 / 问题陈述
 
-- 当前 root、firmware、`devd` 与 Web package manifest 都保留 `0.1.0`；firmware 和本地 Web firmware bundle 的开发路径还会从 Cargo package 或 Git tag 回退，因此构建产物和运行中的 daemon 不能可靠表达所基于的产品版本。
+- 历史 root、firmware、`devd` 与 Web package manifest 曾保留 `0.1.0`；版本源实现后，package metadata 仍可保持该值，但任何产品构建、运行时、bundle、manifest 或发布流程都不再读取它，也不从 Git tag 回退。
 - 当前发布流程从 PR `type:*` / `channel:*` labels、Git notes snapshot 与 Git tag 基线推导 effective version。这些都是可变工作流状态或历史记录，不是产品源代码中的版本事实。
 - 每个已验证产品源提交必须有独立的产品版本和 Release Commit。合并多个提交再发布会拉长回滚距离，并使生产问题难以定位到一个明确的变更边界。
 

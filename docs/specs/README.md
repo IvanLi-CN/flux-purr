@@ -85,4 +85,4 @@ New slug-only topics use `-` in the legacy `ID` column below; their directory sl
 | m8r4q | Flux Purr 真实控制平面运行时 | active | `m8r4q-real-control-plane-runtime/SPEC.md` | 2026-05-29 | Web + firmware + native devd real transport contract |
 | jt8r2 | Flux Purr ADC 校准控制面 | 已完成 | `jt8r2-adc-calibration-control-plane/SPEC.md` | 2026-06-02 | RTD/VIN ADC calibration with persisted draft/active packages |
 | web-firmware-install-recovery | Flux Purr Web 固件安装与恢复 | 待实现 | `web-firmware-install-recovery/SPEC.md` | 2026-08-15 | Unified devd and Browser Web Serial firmware workbench |
-| - | Flux Purr 单一产品版本源 | 待实现 | `version-source/SPEC.md` | 2026-08-29 | Root `VERSION`, one-source-commit/one-product-release sequencing, and the release-completion gate |
+| - | Flux Purr 单一产品版本源 | 已实现 | `version-source/SPEC.md` | 2026-08-29 | Root `VERSION`, one-source-commit/one-product-release sequencing, and the release-completion gate |

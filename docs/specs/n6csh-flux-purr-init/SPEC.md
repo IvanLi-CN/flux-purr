@@ -1,5 +1,7 @@
 # Flux Purr 初始化（#n6csh）
 
+初始化时期的 label-gate 与 compute-version 发布条款已由 [version-source](../version-source/SPEC.md) 取代；本文件其余内容仍描述仓库初始化基线。
+
 ## 状态
 
 - Status: 已完成

@@ -3,10 +3,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+VERSION_SCRIPT = ROOT / "scripts/product-version.py"
+VERSION_SPEC = importlib.util.spec_from_file_location("product_version", VERSION_SCRIPT)
+if VERSION_SPEC is None or VERSION_SPEC.loader is None:
+    raise RuntimeError(f"Unable to load {VERSION_SCRIPT}")
+PRODUCT_VERSION = importlib.util.module_from_spec(VERSION_SPEC)
+VERSION_SPEC.loader.exec_module(PRODUCT_VERSION)
 
 SCHEMA_VERSION = 1
 FIRMWARE_BUNDLE_MEDIA_TYPE = "application/vnd.flux-purr.firmware-bundle+zip"
@@ -125,12 +134,33 @@ def build_component(
 
 
 def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
+    repo_root = Path(getattr(args, "repo_root", ROOT)).resolve()
+    expected = PRODUCT_VERSION.resolve(repo_root, "release", args.source_sha)
+    if args.version != expected["version"]:
+        raise ManifestError(
+            f"Manifest version {args.version} does not match VERSION at {repo_root}: {expected['version']}"
+        )
+    requested_channel = getattr(args, "channel", None)
+    if requested_channel and requested_channel != expected["channel"]:
+        raise ManifestError(
+            f"Manifest channel {requested_channel} does not match VERSION-derived channel {expected['channel']}"
+        )
     previous = read_previous(args.previous_manifest)
     previous_by_id = previous_components(previous)
     root = Path(args.asset_root)
+    parsed_components = [parse_component(raw) for raw in args.component]
+    for component in parsed_components:
+        if component["version"] != args.version:
+            raise ManifestError(
+                f"Component {component['id']} version {component['version']} does not match product {args.version}"
+            )
+        if component.get("channel") and component["channel"] != expected["channel"]:
+            raise ManifestError(
+                f"Component {component['id']} channel does not match VERSION-derived channel {expected['channel']}"
+            )
     components = [
-        build_component(parse_component(raw), root, previous_by_id, args.source_sha)
-        for raw in args.component
+        build_component(component, root, previous_by_id, args.source_sha)
+        for component in parsed_components
     ]
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -138,7 +168,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "version": args.version,
         "tag": args.tag,
         "sourceSha": args.source_sha,
-        "channel": getattr(args, "channel", "stable"),
+        "channel": expected["channel"],
         "components": components,
     }
 
@@ -148,7 +178,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--version", required=True)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--channel", choices=("stable", "rc"), default="stable")
+    parser.add_argument("--channel", choices=("stable", "rc"))
+    parser.add_argument("--repo-root", default=str(ROOT))
     parser.add_argument("--asset-root", default=".")
     parser.add_argument("--previous-manifest")
     parser.add_argument("--component", action="append", required=True)

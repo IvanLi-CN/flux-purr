@@ -51,6 +51,16 @@ def read_version(version_file: Path) -> str:
     return value
 
 
+def read_version_from_text(text: str) -> str:
+    if not text.endswith("\n") or text.endswith("\n\n"):
+        raise VersionError("VERSION must contain exactly one trailing LF")
+    value = text[:-1]
+    if "\n" in value or value != value.strip():
+        raise VersionError("VERSION must contain exactly one non-blank line")
+    parse_version(value)
+    return value
+
+
 def next_patch(value: str) -> str:
     parsed = parse_version(value)
     return f"{parsed['major']}.{parsed['minor']}.{int(parsed['patch']) + 1}"
