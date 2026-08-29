@@ -98,10 +98,27 @@ jobs:
             git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${release_sha}:refs/heads/release/product-main"
           else
             test "${SOURCE_INPUT}" = "${main_sha}"
-            verify_args=(verify-commit --source-sha "${SOURCE_INPUT}")
-            if [ -n "${EXACT_VERSION}" ]; then verify_args+=(--version "${EXACT_VERSION}"); fi
             if [ -n "${candidate_sha}" ]; then
-              python3 .github/scripts/release_chain.py "${verify_args[@]}" --commit "${candidate_sha}" --github-output "$GITHUB_OUTPUT"
+              candidate_json="$(python3 .github/scripts/release_chain.py verify-commit --commit "${candidate_sha}")"
+              candidate_source="$(printf '%s' "${candidate_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sourceSha"])')"
+              if [ "${candidate_source}" = "${SOURCE_INPUT}" ]; then
+                verify_args=(verify-commit --source-sha "${SOURCE_INPUT}" --commit "${candidate_sha}" --github-output "$GITHUB_OUTPUT")
+                if [ -n "${EXACT_VERSION}" ]; then verify_args+=(--version "${EXACT_VERSION}"); fi
+                python3 .github/scripts/release_chain.py "${verify_args[@]}"
+              elif git merge-base --is-ancestor "${candidate_sha}" "${main_sha}"; then
+                git checkout --detach "${SOURCE_INPUT}"
+                stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode automatic --github-output "$GITHUB_OUTPUT")
+                if [ "${operation}" = exact ]; then
+                  test -n "${EXACT_VERSION}"
+                  stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode exact --exact-version "${EXACT_VERSION}" --github-output "$GITHUB_OUTPUT")
+                fi
+                python3 .github/scripts/release_chain.py "${stage_args[@]}"
+                release_sha="$(grep '^releaseSha=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2-)"
+                git -c "http.extraheader=AUTHORIZATION: bearer ${RELEASE_TOKEN}" push origin "${release_sha}:refs/heads/release/product-main"
+              else
+                echo "release/product-main has an incomplete candidate ${candidate_sha}; recover it before releasing ${SOURCE_INPUT}" >&2
+                exit 1
+              fi
             else
               git checkout --detach "${SOURCE_INPUT}"
               stage_args=(stage --source-sha "${SOURCE_INPUT}" --mode automatic --github-output "$GITHUB_OUTPUT")

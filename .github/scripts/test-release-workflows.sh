@@ -17,7 +17,7 @@ assert "Release Snapshot" not in ci_main
 assert "release_snapshot.py" not in ci_main
 assert "release/product-main" in release
 assert "operation=recover" not in release
-for token in ("stage", "verify-commit", "promote", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
+for token in ("stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
     assert token in release, token
 assert "secrets.RELEASE_APP_TOKEN" in release
 assert "Release completion" in completion
