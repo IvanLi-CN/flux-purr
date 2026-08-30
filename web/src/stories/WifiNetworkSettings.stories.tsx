@@ -298,6 +298,7 @@ export const ReadOnlyLanSnapshot: Story = {
     await expect(canvas.getByLabelText('密码')).toHaveValue('•••••••••••')
     await expect(canvas.getByLabelText('密码')).toHaveAttribute('readonly', '')
     await expect(canvas.getByRole('status', { name: '信号' })).toHaveTextContent('-54 dBm')
+    await expect(canvas.getAllByText('-54 dBm')).toHaveLength(1)
     expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
     expect(canvas.queryByRole('button', { name: '清除 WiFi' })).toBeNull()
   },

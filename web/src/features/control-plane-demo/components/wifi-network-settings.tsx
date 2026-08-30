@@ -398,7 +398,7 @@ export function WifiNetworkSettings({
           <h3>WiFi</h3>
           <output aria-live="polite">
             <strong>{stateLabel}</strong>
-            {networkState === 'connected' && wifiRssi != null ? (
+            {!readOnly && networkState === 'connected' && wifiRssi != null ? (
               <small>{wifiRssi} dBm</small>
             ) : null}
           </output>
