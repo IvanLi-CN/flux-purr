@@ -106,7 +106,14 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       wifiPasswordLength: 12,
       networkState: 'connected',
       leaseState: 'none',
-      capabilities: ['identity', 'status', 'wifi_config', 'flash', 'monitor'],
+      capabilities: [
+        'identity',
+        'status',
+        'wifi_config',
+        'flash',
+        'monitor',
+        'thermal_tuning_run_v1',
+      ],
     },
     {
       id: 'fp-kit-02',

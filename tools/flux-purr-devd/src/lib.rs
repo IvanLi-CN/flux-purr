@@ -469,6 +469,8 @@ pub struct DeviceRecord {
     pub heater_curve: HeaterCurveState,
     #[serde(default)]
     pub thermal_plant_run: ThermalPlantRunSnapshot,
+    #[serde(default = "mock_thermal_tuning_snapshot")]
+    pub thermal_tuning_run: Value,
     pub selected_artifact_id: Option<String>,
     pub logs: VecDeque<LogEntry>,
     pub trace: VecDeque<TraceEntry>,
@@ -575,12 +577,14 @@ impl DeviceRecord {
                 "network".to_string(),
                 "calibration".to_string(),
                 "thermal_plant_run".to_string(),
+                "thermal_tuning_run_v1".to_string(),
                 "wifi_config".to_string(),
                 "wifi_state_v2".to_string(),
                 "monitor".to_string(),
                 "firmware_check".to_string(),
                 "flash".to_string(),
             ],
+            thermal_tuning: Some(mock_thermal_tuning_capability()),
         };
         let network = NetworkSummary {
             state: NetworkState::Connected,
@@ -691,6 +695,7 @@ impl DeviceRecord {
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             thermal_plant_run: mock_thermal_plant_snapshot(),
+            thermal_tuning_run: mock_thermal_tuning_snapshot(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -794,11 +799,13 @@ impl DeviceRecord {
                     "status".to_string(),
                     "network".to_string(),
                     "thermal_plant_run".to_string(),
+                    "thermal_tuning_run_v1".to_string(),
                     "wifi_config".to_string(),
                     "monitor".to_string(),
                     "firmware_check".to_string(),
                     "flash".to_string(),
                 ],
+                thermal_tuning: Some(mock_thermal_tuning_capability()),
             },
             network,
             status,
@@ -809,6 +816,7 @@ impl DeviceRecord {
             calibration: CalibrationState::default(),
             heater_curve: HeaterCurveState::default(),
             thermal_plant_run: ThermalPlantRunSnapshot::default(),
+            thermal_tuning_run: mock_thermal_tuning_snapshot(),
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -870,6 +878,44 @@ pub struct Identity {
     pub protocol_version: String,
     pub hostname: String,
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thermal_tuning: Option<ThermalTuningCapability>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningTraceCapability {
+    pub paged: bool,
+    pub acknowledged: bool,
+    pub sealed_review: bool,
+    pub buffer_capacity: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningCapability {
+    pub id: String,
+    pub supported_power_classes: Vec<String>,
+    pub target_schedule_c: [i16; 9],
+    pub physical_targets_c: [i16; 9],
+    pub trace: ThermalTuningTraceCapability,
+    pub candidate_promotion: bool,
+}
+
+fn mock_thermal_tuning_capability() -> ThermalTuningCapability {
+    ThermalTuningCapability {
+        id: "thermal_tuning_run_v1".to_string(),
+        supported_power_classes: vec!["pps3a".to_string(), "pps5a".to_string()],
+        target_schedule_c: [60, 240, 140, 100, 80, 120, 180, 160, 220],
+        physical_targets_c: [60, 80, 100, 120, 140, 160, 180, 220, 240],
+        trace: ThermalTuningTraceCapability {
+            paged: true,
+            acknowledged: true,
+            sealed_review: true,
+            buffer_capacity: 96,
+        },
+        candidate_promotion: true,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1412,6 +1458,83 @@ pub struct ThermalPlantRunSnapshot {
     pub trace_page: ThermalPlantTracePage,
     pub provisional_curve: Option<ThermalPlantProvisionalCurve>,
     pub active_result: Option<ThermalPlantActiveResult>,
+}
+
+/// Device-owned thermal tuning is intentionally kept as an opaque snapshot in
+/// devd. The daemon forwards this JSON contract between USB, LAN, and the
+/// localhost API; it does not interpret candidates or run the tuner.
+pub const THERMAL_TUNING_RUN_SCHEMA: &str = "thermal_tuning_run_v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningRunRequest {
+    pub lease_id: String,
+    pub op: String,
+    pub run_id: Option<String>,
+    pub power_class: Option<String>,
+    pub after_sequence: Option<u64>,
+    pub limit: Option<u16>,
+    pub through_sequence: Option<u64>,
+    pub trace_digest: Option<String>,
+    pub candidate_id: Option<String>,
+    pub candidate_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningRunQuery {
+    pub lease_id: Option<String>,
+    pub after_sequence: Option<u64>,
+    pub limit: Option<u16>,
+}
+
+fn mock_thermal_tuning_snapshot() -> Value {
+    json!({
+        "schema": THERMAL_TUNING_RUN_SCHEMA,
+        "run": {
+            "runId": "idle",
+            "state": "idle",
+            "powerClass": null,
+            "phase": "idle",
+            "currentTargetC": null,
+            "targetProgress": {
+                "acceptedC": [],
+                "failedC": [],
+                "skippedC": []
+            },
+            "terminalDisposition": null,
+            "eligibility": {
+                "ready": true,
+                "reasons": [],
+                "activeOwner": null
+            },
+            "review": {
+                "state": "not_applicable",
+                "reason": null,
+                "acknowledgedThrough": null,
+                "terminalSequence": null,
+                "traceDigest": null
+            },
+            "candidate": {
+                "candidateId": null,
+                "candidateHash": null,
+                "powerClass": null,
+                "promotionState": "unavailable"
+            },
+            "journal": {
+                "lastRunId": null,
+                "lastDisposition": null
+            }
+        },
+        "page": {
+            "earliestSequence": 0,
+            "emittedThrough": null,
+            "nextAfterSequence": 0,
+            "acknowledgedThrough": null,
+            "digestThroughPage": null,
+            "events": []
+        }
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2598,6 +2721,10 @@ pub fn app(state: AppState) -> Router {
             get(device_thermal_plant_run),
         )
         .route(
+            "/api/v1/devices/{device_id}/calibration/thermal-tuning/run",
+            get(device_thermal_tuning_run).post(configure_device_thermal_tuning_run),
+        )
+        .route(
             "/api/v1/devices/{device_id}/eeprom",
             post(configure_eeprom_maintenance),
         )
@@ -3547,6 +3674,367 @@ async fn device_thermal_plant_run(
         &target.thermal_plant_run,
         after_sample,
     )))
+}
+
+fn thermal_tuning_trace_page(snapshot: &Value, after_sequence: Option<u64>, limit: usize) -> Value {
+    let mut page = snapshot.clone();
+    let Some(page_object) = page.get_mut("page").and_then(Value::as_object_mut) else {
+        return page;
+    };
+    let events = page_object
+        .get("events")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let selected = events
+        .into_iter()
+        .filter(|event| {
+            event
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .is_some_and(|sequence| after_sequence.is_none_or(|cursor| sequence > cursor))
+        })
+        .take(limit.max(1))
+        .collect::<Vec<_>>();
+    let next_after = selected
+        .last()
+        .and_then(|event| event.get("sequence"))
+        .and_then(Value::as_u64)
+        .map_or_else(
+            || after_sequence.map_or(0, |cursor| cursor.saturating_add(1)),
+            |sequence| sequence.saturating_add(1),
+        );
+    page_object.insert("events".to_string(), Value::Array(selected));
+    page_object.insert("nextAfterSequence".to_string(), json!(next_after));
+    page
+}
+
+fn thermal_tuning_lan_path(after_sequence: Option<u64>, limit: usize) -> String {
+    match after_sequence {
+        None if limit == 16 => "calibration/thermal-tuning/run".to_string(),
+        None => format!("calibration/thermal-tuning/run?limit={limit}"),
+        Some(cursor) => {
+            format!("calibration/thermal-tuning/run?afterSequence={cursor}&limit={limit}")
+        }
+    }
+}
+
+fn mock_thermal_tuning_command(
+    snapshot: &mut Value,
+    payload: &ThermalTuningRunRequest,
+) -> Result<Value, HttpError> {
+    if snapshot.get("run").and_then(Value::as_object).is_none() {
+        return Err(HttpError::internal(
+            "mock thermal tuning snapshot is invalid",
+        ));
+    }
+    let op = payload.op.as_str();
+    if !matches!(op, "start" | "get") {
+        let run = snapshot
+            .get("run")
+            .and_then(Value::as_object)
+            .ok_or_else(|| HttpError::internal("mock thermal tuning snapshot is invalid"))?;
+        let active_run_id = run.get("runId").and_then(Value::as_str).unwrap_or("idle");
+        if active_run_id == "idle" || payload.run_id.as_deref() != Some(active_run_id) {
+            return Err(HttpError::bad_request(
+                "tuning_run_not_active",
+                "The requested thermal tuning run is not active.",
+            ));
+        }
+    }
+    match op {
+        "start" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            let power_class = payload.power_class.as_deref().ok_or_else(|| {
+                HttpError::bad_request(
+                    "tuning_power_class_required",
+                    "Thermal tuning requires explicit pps3a or pps5a.",
+                )
+            })?;
+            if !matches!(power_class, "pps3a" | "pps5a") {
+                return Err(HttpError::bad_request(
+                    "tuning_power_class_unsupported",
+                    "Only pps3a and pps5a are supported.",
+                ));
+            }
+            if run.get("state").and_then(Value::as_str) == Some("running") {
+                return Err(HttpError::conflict(
+                    "tuning_busy",
+                    "A thermal tuning run is already active.",
+                    json!({}),
+                ));
+            }
+            let run_id = now_millis().to_string();
+            let candidate_hash = format!(
+                "{}",
+                hex::encode(Sha256::digest(
+                    format!("{THERMAL_TUNING_RUN_SCHEMA}:{power_class}").as_bytes()
+                ))
+            );
+            run.insert("runId".to_string(), json!(run_id));
+            run.insert("state".to_string(), json!("running"));
+            run.insert("powerClass".to_string(), json!(power_class));
+            run.insert("phase".to_string(), json!("cooldown_wait"));
+            run.insert("currentTargetC".to_string(), json!(60));
+            run.insert("terminalDisposition".to_string(), Value::Null);
+            run.insert(
+                "candidate".to_string(),
+                json!({
+                    "candidateId": "candidate-1",
+                    "candidateHash": candidate_hash,
+                    "powerClass": power_class,
+                    "promotionState": "awaiting_review"
+                }),
+            );
+            run.insert(
+                "review".to_string(),
+                json!({
+                    "state": "recording",
+                    "reason": null,
+                    "acknowledgedThrough": null,
+                    "terminalSequence": null,
+                    "traceDigest": null
+                }),
+            );
+            if let Some(page) = snapshot.get_mut("page").and_then(Value::as_object_mut) {
+                page.insert("earliestSequence".to_string(), json!(0));
+                page.insert("emittedThrough".to_string(), json!(0));
+                page.insert("nextAfterSequence".to_string(), json!(1));
+                page.insert(
+                    "events".to_string(),
+                    json!([{
+                        "sequence": 0,
+                        "elapsedMs": 0,
+                        "kind": "decision",
+                        "phase": "cooldown_wait",
+                        "targetC": 60,
+                        "temperatureCentiC": 2500,
+                        "vinMv": null,
+                        "ppsContractMv": 20000,
+                        "ppsContractMa": if power_class == "pps3a" { 3250 } else { 5000 },
+                        "heaterOutputPermille": 0,
+                        "measurementValid": true,
+                        "disposition": "pending",
+                        "scoreTracking": 0,
+                        "scoreEnergy": 0,
+                        "scoreOvershoot": 0,
+                        "scoreStability": 0,
+                        "gates": 0,
+                        "candidateHash": candidate_hash
+                    }]),
+                );
+            }
+        }
+        "cancel" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            run.insert("state".to_string(), json!("terminal"));
+            run.insert("phase".to_string(), json!("terminal"));
+            run.insert("terminalDisposition".to_string(), json!("cancelled"));
+            if let Some(candidate) = run.get_mut("candidate").and_then(Value::as_object_mut) {
+                candidate.insert("promotionState".to_string(), json!("unavailable"));
+            }
+        }
+        "ack_trace" => {
+            let through = payload.through_sequence.ok_or_else(|| {
+                HttpError::bad_request("trace_ack_invalid", "throughSequence is required.")
+            })?;
+            if let Some(page) = snapshot.get_mut("page").and_then(Value::as_object_mut) {
+                page.insert("acknowledgedThrough".to_string(), json!(through));
+            }
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            if let Some(review) = run.get_mut("review").and_then(Value::as_object_mut) {
+                review.insert("acknowledgedThrough".to_string(), json!(through));
+            }
+        }
+        "seal_review" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            run.insert("state".to_string(), json!("terminal"));
+            run.insert("phase".to_string(), json!("terminal"));
+            run.insert("terminalDisposition".to_string(), json!("completed"));
+            if let Some(review) = run.get_mut("review").and_then(Value::as_object_mut) {
+                review.insert("state".to_string(), json!("complete"));
+            }
+            if let Some(candidate) = run.get_mut("candidate").and_then(Value::as_object_mut) {
+                candidate.insert("promotionState".to_string(), json!("ready"));
+            }
+        }
+        "preview" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            let candidate = run
+                .get_mut("candidate")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    HttpError::bad_request("candidate_mismatch", "No candidate is available.")
+                })?;
+            if payload.candidate_id.as_deref()
+                != candidate.get("candidateId").and_then(Value::as_str)
+                || payload.candidate_hash.as_deref()
+                    != candidate.get("candidateHash").and_then(Value::as_str)
+                || payload.power_class.as_deref()
+                    != candidate.get("powerClass").and_then(Value::as_str)
+            {
+                return Err(HttpError::bad_request(
+                    "candidate_mismatch",
+                    "Candidate identity does not match the device-owned candidate.",
+                ));
+            }
+            candidate.insert("promotionState".to_string(), json!("previewed"));
+        }
+        "discard_preview" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            let candidate = run
+                .get_mut("candidate")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    HttpError::bad_request("candidate_mismatch", "No candidate is available.")
+                })?;
+            if payload.candidate_id.as_deref()
+                != candidate.get("candidateId").and_then(Value::as_str)
+                || payload.candidate_hash.as_deref()
+                    != candidate.get("candidateHash").and_then(Value::as_str)
+                || payload.power_class.as_deref()
+                    != candidate.get("powerClass").and_then(Value::as_str)
+            {
+                return Err(HttpError::bad_request(
+                    "candidate_mismatch",
+                    "Candidate identity does not match the device-owned candidate.",
+                ));
+            }
+            candidate.insert("promotionState".to_string(), json!("ready"));
+        }
+        "save" => {
+            let Some(run) = snapshot.get_mut("run").and_then(Value::as_object_mut) else {
+                return Err(HttpError::internal(
+                    "mock thermal tuning snapshot is invalid",
+                ));
+            };
+            if let Some(candidate) = run.get_mut("candidate").and_then(Value::as_object_mut) {
+                if candidate.get("promotionState").and_then(Value::as_str) != Some("previewed") {
+                    return Err(HttpError::bad_request(
+                        "candidate_preview_required",
+                        "Candidate save requires a successful preview and confirmation.",
+                    ));
+                }
+                candidate.insert("promotionState".to_string(), json!("saved"));
+            }
+        }
+        "get" => {}
+        _ => {
+            return Err(HttpError::bad_request(
+                "thermal_tuning_op_unsupported",
+                "Unsupported thermal tuning operation.",
+            ));
+        }
+    }
+    Ok(snapshot.clone())
+}
+
+async fn device_thermal_tuning_run(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<ThermalTuningRunQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    let after_sequence = query.after_sequence;
+    let limit = usize::from(query.limit.unwrap_or(16).min(16));
+    if target.transport == DeviceTransport::NativeSerial {
+        let snapshot =
+            serial_thermal_tuning_run_get(&state, &target, after_sequence, limit).await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.thermal_tuning_run = snapshot.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(snapshot));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let path = thermal_tuning_lan_path(after_sequence, limit);
+        let snapshot = lan_bridge_read::<Value>(&configured, &path).await?;
+        return Ok(Json(snapshot));
+    }
+    Ok(Json(thermal_tuning_trace_page(
+        &target.thermal_tuning_run,
+        after_sequence,
+        limit,
+    )))
+}
+
+async fn configure_device_thermal_tuning_run(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<ThermalTuningRunRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let snapshot = serial_thermal_tuning_run_command(&state, &target, &payload).await?;
+        let mut state_lock = state.lock()?;
+        if let Some(device) = state_lock.devices.get_mut(&device_id) {
+            device.thermal_tuning_run = snapshot.clone();
+            device.connection = ConnectionState::Connected;
+        }
+        return Ok(Json(snapshot));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let snapshot = lan_bridge_write::<Value>(
+            &configured,
+            "calibration/thermal-tuning/run",
+            Method::POST,
+            Some(lan_bridge_payload(&payload)?),
+        )
+        .await?;
+        return Ok(Json(snapshot));
+    }
+    let mut state_lock = state.lock()?;
+    let device = state_lock
+        .devices
+        .get_mut(&device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
+    let snapshot = mock_thermal_tuning_command(&mut device.thermal_tuning_run, &payload)?;
+    Ok(Json(snapshot))
 }
 
 async fn configure_calibration_job(
@@ -6817,6 +7305,76 @@ async fn serial_thermal_plant_run_get(
     )
     .await?;
     extract_usb_payload(result, "thermal_plant_run")
+}
+
+async fn serial_thermal_tuning_run_get(
+    state: &AppState,
+    target: &DeviceRecord,
+    after_sequence: Option<u64>,
+    limit: usize,
+) -> Result<Value, HttpError> {
+    let mut payload = json!({
+        "type": "thermal_tuning_run",
+        "requestId": format!("devd-{}-thermal-tuning-run", now_millis()),
+        "op": "get",
+        "limit": u16::try_from(limit.min(16)).unwrap_or(16),
+    });
+    if let Some(sequence) = after_sequence
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert("afterSequence".to_string(), json!(sequence));
+    }
+    serial_thermal_tuning_exchange(state, target, payload).await
+}
+
+async fn serial_thermal_tuning_run_command(
+    state: &AppState,
+    target: &DeviceRecord,
+    command: &ThermalTuningRunRequest,
+) -> Result<Value, HttpError> {
+    let mut payload = serde_json::to_value(command)
+        .map_err(|_| HttpError::internal("failed to encode thermal tuning request"))?;
+    let Some(object) = payload.as_object_mut() else {
+        return Err(HttpError::internal(
+            "thermal tuning request is not an object",
+        ));
+    };
+    object.remove("leaseId");
+    object.insert("type".to_string(), json!("thermal_tuning_run"));
+    object.insert(
+        "requestId".to_string(),
+        json!(format!("devd-{}-thermal-tuning-run", now_millis())),
+    );
+    serial_thermal_tuning_exchange(state, target, payload).await
+}
+
+async fn serial_thermal_tuning_exchange(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: Value,
+) -> Result<Value, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = payload
+        .get("requestId")
+        .and_then(Value::as_str)
+        .unwrap_or("devd-thermal-tuning-run")
+        .to_string();
+    let request = serde_json::to_string(&payload)
+        .map_err(|_| HttpError::internal("failed to encode thermal tuning USB request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        if payload.get("op").and_then(Value::as_str) == Some("get") {
+            SerialRetryPolicy::ReadOnly
+        } else {
+            SerialRetryPolicy::SingleShot
+        },
+    )
+    .await?;
+    extract_usb_payload(result, "thermal_tuning_run")
 }
 
 async fn serial_calibration_job_config(
@@ -13863,5 +14421,65 @@ mod tests {
         .expect_err("mock transport must not expose install status");
 
         assert_eq!(error.error.code, "native_serial_required");
+    }
+
+    #[test]
+    fn thermal_tuning_first_page_preserves_sequence_zero_and_following_cursor_is_exclusive() {
+        let snapshot = json!({
+            "page": {
+                "events": [
+                    {"sequence": 0, "kind": "sample"},
+                    {"sequence": 1, "kind": "decision"}
+                ]
+            }
+        });
+
+        let first = thermal_tuning_trace_page(&snapshot, None, 16);
+        assert_eq!(first["page"]["events"][0]["sequence"], json!(0));
+        assert_eq!(first["page"]["nextAfterSequence"], json!(2));
+
+        let second = thermal_tuning_trace_page(&snapshot, Some(0), 16);
+        assert_eq!(second["page"]["events"][0]["sequence"], json!(1));
+        assert_eq!(second["page"]["nextAfterSequence"], json!(2));
+    }
+
+    #[test]
+    fn thermal_tuning_lan_page_keeps_sequence_zero_when_limit_is_explicit() {
+        assert_eq!(
+            thermal_tuning_lan_path(None, 32),
+            "calibration/thermal-tuning/run?limit=32"
+        );
+        assert_eq!(
+            thermal_tuning_lan_path(Some(0), 32),
+            "calibration/thermal-tuning/run?afterSequence=0&limit=32"
+        );
+    }
+
+    #[test]
+    fn thermal_tuning_mock_uses_shared_wire_enum_values() {
+        let mut snapshot = mock_thermal_tuning_snapshot();
+        let start = ThermalTuningRunRequest {
+            lease_id: "lease".to_string(),
+            op: "start".to_string(),
+            run_id: None,
+            power_class: Some("pps3a".to_string()),
+            after_sequence: None,
+            limit: None,
+            through_sequence: None,
+            trace_digest: None,
+            candidate_id: None,
+            candidate_hash: None,
+        };
+        mock_thermal_tuning_command(&mut snapshot, &start).unwrap();
+        assert_eq!(snapshot["run"]["phase"], json!("cooldown_wait"));
+
+        let cancel = ThermalTuningRunRequest {
+            op: "cancel".to_string(),
+            run_id: snapshot["run"]["runId"].as_str().map(str::to_string),
+            ..start
+        };
+        mock_thermal_tuning_command(&mut snapshot, &cancel).unwrap();
+        assert_eq!(snapshot["run"]["phase"], json!("terminal"));
+        assert_eq!(snapshot["run"]["terminalDisposition"], json!("cancelled"));
     }
 }

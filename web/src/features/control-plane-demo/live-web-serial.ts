@@ -10,6 +10,8 @@ import type {
   NetworkSummary,
   ThermalPlantRunSnapshot,
   WifiConfigRequest,
+  ThermalTuningRunRequest,
+  ThermalTuningRunSnapshot,
 } from './contracts'
 import { rememberKnownWebSerialDevice } from './known-web-serial-devices'
 import { ControlPlaneClientError } from './transport-client'
@@ -60,12 +62,16 @@ export interface LiveWebSerialControls {
   getCalibration: () => Promise<CalibrationState>
   getCalibrationJob: () => Promise<CalibrationJobState>
   getThermalPlantRun: (afterSample?: number) => Promise<ThermalPlantRunSnapshot>
+  getThermalTuningRun: (afterSequence?: number, limit?: number) => Promise<ThermalTuningRunSnapshot>
   configureCalibration: (
     request: Omit<CalibrationConfigRequest, 'leaseId'>
   ) => Promise<CalibrationState>
   configureCalibrationJob: (
     request: Omit<CalibrationJobRequest, 'leaseId'>
   ) => Promise<CalibrationJobState>
+  configureThermalTuningRun: (
+    request: Omit<ThermalTuningRunRequest, 'leaseId'>
+  ) => Promise<ThermalTuningRunSnapshot>
   getHeaterCurve: () => Promise<HeaterCurveState>
   previewHeaterCurve: (heaterCurve: HeaterCurvePackage) => Promise<HeaterCurveState>
   clearHeaterCurvePreview: () => Promise<HeaterCurveState>
@@ -779,6 +785,25 @@ export function useLiveWebSerialScenario(
     [appendEvent, requireClient, requireCurrentClient]
   )
 
+  const getThermalTuningRun = useCallback(
+    async (afterSequence?: number, limit = 16) => {
+      const client = await requireClient()
+      try {
+        const snapshot = await client.getThermalTuningRun(afterSequence, limit)
+        requireCurrentClient(client)
+        appendEvent('thermal tuning snapshot read over browser Web Serial', 'success')
+        return snapshot
+      } catch (error) {
+        if (clientRef.current !== client) throw error
+        setError(error instanceof Error ? error.message : 'Web Serial thermal tuning read failed.')
+        setState('error')
+        appendEvent('browser Web Serial thermal tuning read failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient, requireCurrentClient]
+  )
+
   const configureCalibrationJob = useCallback(
     async (request: Omit<CalibrationJobRequest, 'leaseId'>) => {
       const client = await requireClient()
@@ -794,6 +819,27 @@ export function useLiveWebSerialScenario(
         )
         setState('error')
         appendEvent('browser Web Serial calibration job update failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient, requireCurrentClient]
+  )
+
+  const configureThermalTuningRun = useCallback(
+    async (request: Omit<ThermalTuningRunRequest, 'leaseId'>) => {
+      const client = await requireClient()
+      try {
+        const snapshot = await client.configureThermalTuningRun(request)
+        requireCurrentClient(client)
+        appendEvent('thermal tuning command accepted over browser Web Serial', 'success')
+        return snapshot
+      } catch (error) {
+        if (clientRef.current !== client) throw error
+        setError(
+          error instanceof Error ? error.message : 'Web Serial thermal tuning command failed.'
+        )
+        setState('error')
+        appendEvent('browser Web Serial thermal tuning command failed', 'warning')
         throw error
       }
     },
@@ -911,8 +957,10 @@ export function useLiveWebSerialScenario(
       getCalibration,
       getCalibrationJob,
       getThermalPlantRun,
+      getThermalTuningRun,
       configureCalibration,
       configureCalibrationJob,
+      configureThermalTuningRun,
       getHeaterCurve,
       previewHeaterCurve,
       clearHeaterCurvePreview,
@@ -932,6 +980,7 @@ export function useLiveWebSerialScenario(
       getCalibration,
       getCalibrationJob,
       getThermalPlantRun,
+      getThermalTuningRun,
       getHeaterCurve,
       preauthorizedPortsReady,
       previewHeaterCurve,
@@ -939,6 +988,7 @@ export function useLiveWebSerialScenario(
       state,
       supported,
       wifiOperationInterruption,
+      configureThermalTuningRun,
     ]
   )
 

@@ -1,6 +1,6 @@
 import type { CalibrationMode } from './contracts'
 
-export type CalibrationWorkspaceTab = 'heater_curve' | 'rtd_adc' | 'vin_adc'
+export type CalibrationWorkspaceTab = 'heater_curve' | 'rtd_adc' | 'vin_adc' | 'thermal_tuning'
 export type ConsoleView = 'dashboard' | 'settings' | 'calibration' | 'update' | 'add-device'
 
 export type CalibrationLeaveReason =

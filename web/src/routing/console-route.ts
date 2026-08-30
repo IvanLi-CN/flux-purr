@@ -20,12 +20,14 @@ const calibrationPathToTab = {
   'heater-curve': 'heater_curve',
   'rtd-adc': 'rtd_adc',
   'vin-adc': 'vin_adc',
+  'thermal-tuning': 'thermal_tuning',
 } as const
 
 const calibrationTabToPath = {
   heater_curve: 'heater-curve',
   rtd_adc: 'rtd-adc',
   vin_adc: 'vin-adc',
+  thermal_tuning: 'thermal-tuning',
 } as const
 
 const settingsPathToTab = {
@@ -91,6 +93,7 @@ export function routeLabel(state: ConsoleRouteState | null) {
     heater_curve: '加热曲线标定',
     rtd_adc: '温度标定',
     vin_adc: '电压读数标定',
+    thermal_tuning: '热控调优',
   }
   return labels[state.calibrationTab ?? 'heater_curve']
 }

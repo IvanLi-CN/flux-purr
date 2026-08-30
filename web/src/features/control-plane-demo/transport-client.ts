@@ -22,6 +22,8 @@ import type {
   NetworkSummary,
   RuntimeConfigRequest,
   ThermalPlantRunSnapshot,
+  ThermalTuningRunRequest,
+  ThermalTuningRunSnapshot,
   UsbRequestFrame,
   UsbWifiConfigFrame,
   WifiConfigRequest,
@@ -102,6 +104,18 @@ export interface ControlPlaneHttpClient {
     leaseId: string,
     afterSample?: number
   ): Promise<ThermalPlantRunSnapshot>
+  getThermalTuningRun(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string,
+    afterSequence?: number,
+    limit?: number
+  ): Promise<ThermalTuningRunSnapshot>
+  configureThermalTuningRun(
+    devdBaseUrl: string,
+    deviceId: string,
+    request: ThermalTuningRunRequest
+  ): Promise<ThermalTuningRunSnapshot>
   configureCalibration(
     devdBaseUrl: string,
     deviceId: string,
@@ -296,6 +310,24 @@ export function createControlPlaneHttpClient(
       return requestJson<ThermalPlantRunSnapshot>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-plant/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`
+      )
+    },
+    getThermalTuningRun(devdBaseUrl, deviceId, leaseId, afterSequence, limit = 16) {
+      const cursor = `${afterSequence === undefined ? '' : `&afterSequence=${encodeURIComponent(String(afterSequence))}`}&limit=${encodeURIComponent(String(limit))}`
+      return requestJson<ThermalTuningRunSnapshot>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-tuning/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`
+      )
+    },
+    configureThermalTuningRun(devdBaseUrl, deviceId, request) {
+      return requestJson<ThermalTuningRunSnapshot>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-tuning/run`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request),
+        }
       )
     },
     configureCalibration(devdBaseUrl, deviceId, request) {

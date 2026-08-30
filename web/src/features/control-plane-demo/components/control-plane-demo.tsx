@@ -101,6 +101,8 @@ import type {
   NetworkSummary,
   RtdCalibrationSample,
   ThermalPlantRunSnapshot,
+  ThermalTuningRunRequest,
+  ThermalTuningRunSnapshot,
   VinCalibrationSample,
 } from '../contracts'
 import {
@@ -167,6 +169,10 @@ import {
   shouldReplacePassiveFeedbackWithHeaterLock,
 } from '../runtime-status'
 import {
+  loadLatestThermalTuningSnapshot,
+  persistThermalTuningSnapshot,
+} from '../thermal-tuning-recorder'
+import {
   ControlPlaneClientError,
   type ControlPlaneHttpClient,
   createControlPlaneHttpClient,
@@ -189,7 +195,16 @@ import {
   createEmptyThermalPlantSnapshot,
   ThermalPlantRunCard,
 } from './thermal-plant-run-card'
-import { WifiNetworkSettings, type WifiNetworkSettingsDraft } from './wifi-network-settings'
+import {
+  applyMockThermalTuningCommand,
+  createDefaultThermalTuningSnapshot,
+  ThermalTuningRunCard,
+} from './thermal-tuning-card'
+import {
+  resolveWifiSettingsUnavailableReason,
+  WifiNetworkSettings,
+  type WifiNetworkSettingsDraft,
+} from './wifi-network-settings'
 
 export interface LanRuntimeDependencies {
   createLease?: typeof createLanLease
@@ -539,6 +554,7 @@ function ConsoleViewLink({
     heater_curve: '/devices/$deviceId/calibration/heater-curve',
     rtd_adc: '/devices/$deviceId/calibration/rtd-adc',
     vin_adc: '/devices/$deviceId/calibration/vin-adc',
+    thermal_tuning: '/devices/$deviceId/calibration/thermal-tuning',
   } as const
   return <Link {...shared} to={calibrationPaths[calibrationTab]} params={{ deviceId }} />
 }
@@ -620,6 +636,7 @@ function CalibrationRouteTab({
     heater_curve: '/devices/$deviceId/calibration/heater-curve',
     rtd_adc: '/devices/$deviceId/calibration/rtd-adc',
     vin_adc: '/devices/$deviceId/calibration/vin-adc',
+    thermal_tuning: '/devices/$deviceId/calibration/thermal-tuning',
   } as const
   return (
     <TabsTrigger value={tab} className="industrial-calibration-tab" asChild>
@@ -768,6 +785,22 @@ export function shouldUseWifiReceipt(
     // newer than the pre-reboot cached snapshot, not an out-of-order packet.
     (receiptGeneration < deviceGeneration && receiptSequence < deviceSequence)
   )
+}
+
+function mergeThermalTuningSnapshots(
+  previous: ThermalTuningRunSnapshot,
+  next: ThermalTuningRunSnapshot
+) {
+  if (previous.run.runId !== next.run.runId) return next
+  const events = new Map(previous.page.events.map((event) => [event.sequence, event]))
+  for (const event of next.page.events) events.set(event.sequence, event)
+  return {
+    ...next,
+    page: {
+      ...next.page,
+      events: [...events.values()].sort((left, right) => left.sequence - right.sequence),
+    },
+  }
 }
 
 export function ControlPlaneDemo({
@@ -941,6 +974,9 @@ export function ControlPlaneDemo({
   )
   const [thermalPlantRunByDevice, setThermalPlantRunByDevice] = useState<
     Record<string, ThermalPlantRunSnapshot>
+  >({})
+  const [thermalTuningRunByDevice, setThermalTuningRunByDevice] = useState<
+    Record<string, ThermalTuningRunSnapshot>
   >({})
   const [calibrationWorkspaceTabByDevice, setCalibrationWorkspaceTabByDevice] = useState<
     Record<string, CalibrationWorkspaceTab>
@@ -1914,6 +1950,14 @@ export function ControlPlaneDemo({
       : createEmptyThermalPlantSnapshot())
   const thermalPlantRunUnsupported =
     visibleDevice.transport !== 'mock' && !visibleDevice.capabilities.includes('thermal_plant_run')
+  const visibleThermalTuningRun =
+    thermalTuningRunByDevice[visibleDevice.id] ??
+    (visibleDevice.transport === 'mock'
+      ? createDefaultThermalTuningSnapshot()
+      : createDefaultThermalTuningSnapshot())
+  const thermalTuningRunUnsupported =
+    visibleDevice.transport !== 'mock' &&
+    !visibleDevice.capabilities.includes('thermal_tuning_run_v1')
   const visibleCalibrationWorkspaceTab =
     navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
       ? (navigation.state.calibrationTab ?? 'heater_curve')
@@ -2421,6 +2465,23 @@ export function ControlPlaneDemo({
   const visibleDeviceNetworkState = visibleDevice.networkState
   const visibleDeviceIsDirectWebSerial = isDirectWebSerialDevice(visibleDevice)
 
+  useEffect(() => {
+    let cancelled = false
+    void loadLatestThermalTuningSnapshot(visibleDeviceId)
+      .then((snapshot) => {
+        if (cancelled || !snapshot) return
+        setThermalTuningRunByDevice((current) =>
+          current[visibleDeviceId] ? current : { ...current, [visibleDeviceId]: snapshot }
+        )
+      })
+      .catch(() => {
+        // Transport polling remains the source of truth when local recovery is unavailable.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [visibleDeviceId])
+
   const commitCalibrationState = useCallback((deviceId: string, calibration: CalibrationState) => {
     const normalized = normalizeCalibrationState(calibration)
     calibrationVersionByDeviceRef.current[deviceId] =
@@ -2701,6 +2762,126 @@ export function ControlPlaneDemo({
     visibleDeviceNetworkState,
     visibleDeviceTransport,
     visibleRuntimeCalibration.job.status,
+    webSerial,
+  ])
+  useEffect(() => {
+    if (activeView !== 'calibration' || visibleDeviceTransport === 'mock') {
+      return
+    }
+    if (!visibleDevice.capabilities.includes('thermal_tuning_run_v1')) {
+      return
+    }
+    let cancelled = false
+    let inFlight = false
+    let timer: number | null = null
+    const readPage = async (afterSequence?: number) => {
+      if (visibleDeviceIsDirectWebSerial) {
+        return webSerial.getThermalTuningRun(afterSequence, 32)
+      }
+      if (isDirectLanDevice(visibleDevice) && visibleDeviceLeaseId) {
+        const session = loadLanDeviceSession(visibleDevice.baseUrl)
+        if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+        const suffix = `${afterSequence === undefined ? '?' : `?afterSequence=${afterSequence}&`}limit=32`
+        return authorizedLanRequest<ThermalTuningRunSnapshot>(
+          session,
+          `calibration/thermal-tuning/run${suffix}`,
+          'GET',
+          undefined,
+          visibleDeviceLeaseId
+        )
+      }
+      if (
+        visibleDeviceTransport === 'devd' &&
+        visibleDeviceLeaseId &&
+        devdBaseUrl &&
+        visibleDeviceNetworkState !== 'error' &&
+        visibleDeviceNetworkState !== 'timeout'
+      ) {
+        return controlClient.getThermalTuningRun(
+          devdBaseUrl,
+          visibleDeviceId,
+          visibleDeviceLeaseId,
+          afterSequence,
+          32
+        )
+      }
+      return null
+    }
+    const poll = async () => {
+      if (cancelled || inFlight) return
+      inFlight = true
+      try {
+        const previous = thermalTuningRunByDevice[visibleDeviceId]
+        const afterSequence =
+          previous && previous.page.nextAfterSequence > 0
+            ? Math.max(0, previous.page.nextAfterSequence - 1)
+            : undefined
+        const next = await readPage(afterSequence)
+        if (!next || cancelled) return
+        const sameRun = previous?.run.runId === next.run.runId
+        const events = sameRun
+          ? new Map(previous?.page.events.map((event) => [event.sequence, event]))
+          : new Map<number, ThermalTuningRunSnapshot['page']['events'][number]>()
+        for (const event of next.page.events) events.set(event.sequence, event)
+        const merged = sameRun
+          ? {
+              ...next,
+              page: {
+                ...next.page,
+                events: [...events.values()].sort((left, right) => left.sequence - right.sequence),
+              },
+            }
+          : next
+        setThermalTuningRunByDevice((current) => ({ ...current, [visibleDeviceId]: merged }))
+        await persistThermalTuningSnapshot(visibleDeviceId, merged)
+      } catch (error) {
+        if (error instanceof ControlPlaneClientError && error.code === 'trace_gap') {
+          const previous = thermalTuningRunByDevice[visibleDeviceId]
+          if (previous) {
+            const incomplete: ThermalTuningRunSnapshot = {
+              ...previous,
+              run: {
+                ...previous.run,
+                review: {
+                  ...previous.run.review,
+                  state: 'incomplete',
+                  reason: 'trace_gap',
+                },
+                candidate: {
+                  ...previous.run.candidate,
+                  promotionState: 'unavailable',
+                },
+              },
+            }
+            setThermalTuningRunByDevice((current) => ({
+              ...current,
+              [visibleDeviceId]: incomplete,
+            }))
+            await persistThermalTuningSnapshot(visibleDeviceId, incomplete)
+          }
+        }
+        // The existing transport status panels own connection diagnostics.
+      } finally {
+        inFlight = false
+        if (!cancelled) timer = window.setTimeout(() => void poll(), 1_000)
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer != null) window.clearTimeout(timer)
+    }
+  }, [
+    activeView,
+    controlClient,
+    devdBaseUrl,
+    thermalTuningRunByDevice,
+    visibleDevice,
+    visibleDeviceId,
+    visibleDeviceIsDirectWebSerial,
+    visibleDeviceLeaseId,
+    visibleDeviceNetworkState,
+    visibleDeviceTransport,
     webSerial,
   ])
   const scenarioEvents = useMemo(
@@ -4425,6 +4606,85 @@ export function ControlPlaneDemo({
     ]
   )
 
+  const handleThermalTuningCommand = useCallback(
+    async (
+      request: Omit<ThermalTuningRunRequest, 'leaseId'>
+    ): Promise<ThermalTuningRunSnapshot | undefined> => {
+      const blockedReason = deviceControlBlockReason(visibleDevice)
+      if (blockedReason) {
+        setFeedback({
+          title: '热控调优被阻止',
+          detail: blockedReason,
+          tone: 'warning',
+        })
+        emitEvent('calibration', 'thermal tuning command blocked by transport state', 'warning')
+        return
+      }
+
+      const current =
+        thermalTuningRunByDevice[visibleDevice.id] ?? createDefaultThermalTuningSnapshot()
+      if (request.op === 'ack_trace') {
+        // The host recorder must durably commit the page before acknowledging it to firmware.
+        await persistThermalTuningSnapshot(visibleDevice.id, current)
+      }
+
+      try {
+        let next: ThermalTuningRunSnapshot
+        if (visibleDevice.transport === 'mock') {
+          next = applyMockThermalTuningCommand(current, request)
+        } else if (visibleDeviceIsDirectWebSerial) {
+          next = await webSerial.configureThermalTuningRun(request)
+        } else if (isDirectLanDevice(visibleDevice)) {
+          const session = loadLanDeviceSession(visibleDevice.baseUrl)
+          if (!session || !visibleDevice.leaseId) {
+            throw new Error('设备未取得有效 LAN lease，请重新选择或配对。')
+          }
+          next = await authorizedLanRequest<ThermalTuningRunSnapshot>(
+            session,
+            'calibration/thermal-tuning/run',
+            'POST',
+            request,
+            visibleDevice.leaseId
+          )
+        } else if (visibleDevice.transport === 'devd' && visibleDevice.leaseId && devdBaseUrl) {
+          next = await controlClient.configureThermalTuningRun(devdBaseUrl, visibleDevice.id, {
+            leaseId: visibleDevice.leaseId,
+            ...request,
+          })
+        } else {
+          throw new Error('当前设备没有可用的热控调优 transport。')
+        }
+        const merged = mergeThermalTuningSnapshots(current, next)
+        setThermalTuningRunByDevice((states) => ({ ...states, [visibleDevice.id]: merged }))
+        await persistThermalTuningSnapshot(visibleDevice.id, merged)
+        setFeedback({
+          title: request.op === 'save' ? '调优候选已保存' : '热控调优状态已同步',
+          detail: `${request.op} · ${merged.run.runId}`,
+          tone: 'success',
+        })
+        emitEvent('calibration', `thermal tuning ${request.op}`, 'success')
+        return merged
+      } catch (error) {
+        setFeedback({
+          title: '热控调优操作失败',
+          detail: errorMessage(error),
+          tone: 'warning',
+        })
+        emitEvent('calibration', `thermal tuning ${request.op} failed`, 'warning')
+        return
+      }
+    },
+    [
+      controlClient,
+      devdBaseUrl,
+      emitEvent,
+      thermalTuningRunByDevice,
+      visibleDevice,
+      visibleDeviceIsDirectWebSerial,
+      webSerial,
+    ]
+  )
+
   const handleCalibrationModeExit = async (): Promise<boolean> => {
     const liveUpdated = await updateCalibrationRuntime(
       { mode: 'off', ppsEnabled: false, heaterEnabled: false },
@@ -4627,6 +4887,8 @@ export function ControlPlaneDemo({
                 heaterCurve={visibleHeaterCurve}
                 thermalPlantRun={visibleThermalPlantRun}
                 thermalPlantRunUnsupported={thermalPlantRunUnsupported}
+                thermalTuningRun={visibleThermalTuningRun}
+                thermalTuningRunUnsupported={thermalTuningRunUnsupported}
                 runtimeCalibration={visibleRuntimeCalibration}
                 calibrationRefs={visibleCalibrationRefs}
                 calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
@@ -4661,6 +4923,7 @@ export function ControlPlaneDemo({
                 onCalibrationJobChange={(request, failureMessage) =>
                   void updateCalibrationJob(request, failureMessage)
                 }
+                onThermalTuningCommand={handleThermalTuningCommand}
                 onHeaterCurvePreview={handleHeaterCurvePreview}
                 onHeaterCurveClearPreview={handleHeaterCurveClearPreview}
                 onHeaterCurveSave={handleHeaterCurveSave}
@@ -5391,7 +5654,7 @@ function effectivePpsCurrentCapabilityMa(device: DeviceTarget) {
   )
 }
 
-function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
+function calibrationModeLabel(mode: CalibrationWorkspaceTab | CalibrationWorkbenchMode) {
   switch (mode) {
     case 'vin_adc':
       return '电压读数标定'
@@ -5399,6 +5662,8 @@ function calibrationModeLabel(mode: CalibrationWorkbenchMode) {
       return '温度标定'
     case 'heater_curve':
       return '加热曲线标定'
+    case 'thermal_tuning':
+      return '热控调优'
   }
 }
 
@@ -5759,6 +6024,8 @@ function ViewPanel({
   heaterCurve,
   thermalPlantRun,
   thermalPlantRunUnsupported,
+  thermalTuningRun,
+  thermalTuningRunUnsupported,
   runtimeCalibration,
   calibrationRefs,
   calibrationWorkspaceTab,
@@ -5800,6 +6067,7 @@ function ViewPanel({
   onCalibrationModeExit,
   onCalibrationRuntimeChange,
   onCalibrationJobChange,
+  onThermalTuningCommand,
   onHeaterCurvePreview,
   onHeaterCurveClearPreview,
   onHeaterCurveSave,
@@ -5827,6 +6095,8 @@ function ViewPanel({
   heaterCurve: HeaterCurveState
   thermalPlantRun: ThermalPlantRunSnapshot
   thermalPlantRunUnsupported: boolean
+  thermalTuningRun: ThermalTuningRunSnapshot
+  thermalTuningRunUnsupported: boolean
   runtimeCalibration: CalibrationRuntimeState
   calibrationRefs: { rtdTempC: number; vinMv: number }
   calibrationWorkspaceTab: CalibrationWorkspaceTab
@@ -5890,6 +6160,9 @@ function ViewPanel({
     },
     failureMessage: string
   ) => void | Promise<void>
+  onThermalTuningCommand: (
+    request: Omit<ThermalTuningRunRequest, 'leaseId'>
+  ) => Promise<ThermalTuningRunSnapshot | undefined> | ThermalTuningRunSnapshot | undefined
   onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
   onHeaterCurveClearPreview: () => void | Promise<void>
   onHeaterCurveSave: () => void | Promise<void>
@@ -5979,6 +6252,8 @@ function ViewPanel({
         heaterCurve={heaterCurve}
         thermalPlantRun={thermalPlantRun}
         thermalPlantRunUnsupported={thermalPlantRunUnsupported}
+        thermalTuningRun={thermalTuningRun}
+        thermalTuningRunUnsupported={thermalTuningRunUnsupported}
         runtimeCalibration={runtimeCalibration}
         refs={calibrationRefs}
         feedback={feedback}
@@ -5994,6 +6269,7 @@ function ViewPanel({
         onModeExit={onCalibrationModeExit}
         onCalibrationRuntimeChange={onCalibrationRuntimeChange}
         onCalibrationJobChange={onCalibrationJobChange}
+        onThermalTuningCommand={onThermalTuningCommand}
         onHeaterCurvePreview={onHeaterCurvePreview}
         onHeaterCurveClearPreview={onHeaterCurveClearPreview}
         onHeaterCurveSave={onHeaterCurveSave}
@@ -7262,6 +7538,8 @@ function CalibrationView({
   heaterCurve,
   thermalPlantRun,
   thermalPlantRunUnsupported,
+  thermalTuningRun,
+  thermalTuningRunUnsupported,
   runtimeCalibration,
   refs,
   feedback,
@@ -7277,6 +7555,7 @@ function CalibrationView({
   onModeExit,
   onCalibrationRuntimeChange,
   onCalibrationJobChange,
+  onThermalTuningCommand,
   onHeaterCurvePreview,
   onHeaterCurveClearPreview,
   onHeaterCurveSave,
@@ -7291,6 +7570,8 @@ function CalibrationView({
   heaterCurve: HeaterCurveState
   thermalPlantRun: ThermalPlantRunSnapshot
   thermalPlantRunUnsupported: boolean
+  thermalTuningRun: ThermalTuningRunSnapshot
+  thermalTuningRunUnsupported: boolean
   runtimeCalibration: CalibrationRuntimeState
   refs: { rtdTempC: number; vinMv: number }
   feedback: ActionFeedback
@@ -7328,6 +7609,9 @@ function CalibrationView({
     },
     failureMessage: string
   ) => void | Promise<void>
+  onThermalTuningCommand: (
+    request: Omit<ThermalTuningRunRequest, 'leaseId'>
+  ) => Promise<ThermalTuningRunSnapshot | undefined> | ThermalTuningRunSnapshot | undefined
   onHeaterCurvePreview: (heaterCurve: HeaterCurvePackage) => void | Promise<void>
   onHeaterCurveClearPreview: () => void | Promise<void>
   onHeaterCurveSave: () => void | Promise<void>
@@ -7788,6 +8072,9 @@ function CalibrationView({
             <CalibrationRouteTab navigation={navigation} tab="vin_adc">
               电压读数标定
             </CalibrationRouteTab>
+            <CalibrationRouteTab navigation={navigation} tab="thermal_tuning">
+              热控调优
+            </CalibrationRouteTab>
           </TabsList>
 
           <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">
@@ -7813,6 +8100,17 @@ function CalibrationView({
                     }
                   })
                 }
+              />
+            </section>
+          </TabsContent>
+          <TabsContent value="thermal_tuning" className="industrial-calibration-tabs__content">
+            <section className="industrial-calibration-mode-panel" aria-label="热控调优">
+              <ThermalTuningRunCard
+                deviceId={device.id}
+                snapshot={thermalTuningRun}
+                unsupported={thermalTuningRunUnsupported}
+                disabled={controlsBlocked || pendingCalibrationAction != null}
+                onCommand={onThermalTuningCommand}
               />
             </section>
           </TabsContent>

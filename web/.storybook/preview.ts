@@ -2,6 +2,15 @@ import type { Preview } from '@storybook/react-vite'
 import { MINIMAL_VIEWPORTS } from 'storybook/viewport'
 import '../src/index.css'
 
+const thermalTuningMobileViewport = {
+  name: '热控调优 · 393x852',
+  styles: {
+    width: '393px',
+    height: '852px',
+  },
+  type: 'mobile',
+} as const
+
 const preview: Preview = {
   parameters: {
     viewport: {
@@ -14,6 +23,7 @@ const preview: Preview = {
             height: '852px',
           },
         },
+        thermalTuningMobile: thermalTuningMobileViewport,
       },
     },
     controls: {

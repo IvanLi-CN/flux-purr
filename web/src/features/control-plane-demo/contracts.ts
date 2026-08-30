@@ -22,6 +22,22 @@ export type PdState = 'negotiating' | 'ready' | 'fallback_5v' | 'fault'
 export type FanDisplayState = 'OFF' | 'AUTO' | 'RUN'
 export type HeaterLockReason = 'cooling-disabled-overtemp' | 'hard-overtemp'
 
+export interface ThermalTuningTraceCapability {
+  paged: boolean
+  acknowledged: boolean
+  sealedReview: boolean
+  bufferCapacity: number
+}
+
+export interface ThermalTuningCapability {
+  id: 'thermal_tuning_run_v1' | string
+  supportedPowerClasses: ThermalTuningPowerClass[]
+  targetScheduleC: number[]
+  physicalTargetsC: number[]
+  trace: ThermalTuningTraceCapability
+  candidatePromotion: boolean
+}
+
 export interface Identity {
   deviceId: string
   firmwareVersion: string
@@ -32,6 +48,7 @@ export interface Identity {
   protocolVersion: string
   hostname: string
   capabilities: string[]
+  thermalTuning?: ThermalTuningCapability | null
 }
 
 export interface NetworkSummary {
@@ -199,6 +216,143 @@ export interface ThermalPlantRunSnapshot {
   activeResult?: ThermalPlantActiveResult | null
 }
 
+export type ThermalTuningPowerClass = 'pps3a' | 'pps5a'
+export type ThermalTuningRunOp =
+  | 'get'
+  | 'start'
+  | 'cancel'
+  | 'ack_trace'
+  | 'seal_review'
+  | 'preview'
+  | 'discard_preview'
+  | 'save'
+export type ThermalTuningRunState = 'idle' | 'running' | 'terminal'
+export type ThermalTuningPhase =
+  | 'idle'
+  | 'cooldown_wait'
+  | 'scout'
+  | 'retune'
+  | 'hold_confirm'
+  | 'terminal'
+export type ThermalTuningReviewState =
+  | 'not_applicable'
+  | 'recording'
+  | 'awaiting_seal'
+  | 'complete'
+  | 'incomplete'
+export type ThermalTuningPromotionState =
+  | 'unavailable'
+  | 'awaiting_review'
+  | 'ready'
+  | 'previewed'
+  | 'saved'
+  | 'expired'
+export type ThermalTuningTraceKind = 'sample' | 'decision'
+export type ThermalTuningTargetDisposition = 'pending' | 'accepted' | 'failed' | 'skipped'
+
+export interface ThermalTuningEligibility {
+  ready: boolean
+  reasons: string[]
+  activeOwner?: string | null
+}
+
+export interface ThermalTuningTargetProgress {
+  acceptedC: number[]
+  failedC: number[]
+  skippedC: number[]
+}
+
+export interface ThermalTuningReview {
+  state: ThermalTuningReviewState
+  reason?: string | null
+  acknowledgedThrough?: number | null
+  terminalSequence?: number | null
+  traceDigest?: string | null
+}
+
+export interface ThermalTuningCandidate {
+  candidateId?: string | null
+  candidateHash?: string | null
+  canonicalProfileHex?: string | null
+  powerClass?: ThermalTuningPowerClass | null
+  promotionState: ThermalTuningPromotionState
+}
+
+export interface ThermalTuningJournal {
+  lastRunId?: string | null
+  lastDisposition?: string | null
+}
+
+export interface ThermalTuningRun {
+  runId: string
+  state: ThermalTuningRunState
+  powerClass?: ThermalTuningPowerClass | null
+  phase: ThermalTuningPhase
+  currentTargetC?: number | null
+  targetProgress: ThermalTuningTargetProgress
+  terminalDisposition?: string | null
+  eligibility: ThermalTuningEligibility
+  review: ThermalTuningReview
+  candidate: ThermalTuningCandidate
+  journal: ThermalTuningJournal
+}
+
+export interface ThermalTuningTraceEvent {
+  sequence: number
+  elapsedMs: number
+  kind: ThermalTuningTraceKind
+  phase?: ThermalTuningPhase | null
+  targetC?: number | null
+  temperatureCentiC?: number | null
+  vinMv?: number | null
+  ppsContractMv?: number | null
+  ppsContractMa?: number | null
+  heaterOutputPermille?: number | null
+  measurementValid?: boolean | null
+  disposition?: ThermalTuningTargetDisposition | null
+  scoreTracking?: number | null
+  scoreEnergy?: number | null
+  scoreOvershoot?: number | null
+  scoreStability?: number | null
+  scoreSettleMs?: number | null
+  scoreHoldMeanAbsoluteErrorCenti?: number | null
+  scoreOutputSwitches?: number | null
+  intervalLowerBoundaryC?: number | null
+  intervalUpperBoundaryC?: number | null
+  intervalPruned?: boolean | null
+  candidateFrozen?: boolean | null
+  gates?: number | null
+  candidateHash?: string | null
+}
+
+export interface ThermalTuningTracePage {
+  earliestSequence: number
+  emittedThrough?: number | null
+  nextAfterSequence: number
+  acknowledgedThrough?: number | null
+  digestThroughPage?: string | null
+  events: ThermalTuningTraceEvent[]
+}
+
+export interface ThermalTuningRunSnapshot {
+  schema: 'thermal_tuning_run_v1' | string
+  run: ThermalTuningRun
+  page: ThermalTuningTracePage
+}
+
+export interface ThermalTuningRunRequest {
+  leaseId: string
+  op: ThermalTuningRunOp
+  runId?: string
+  powerClass?: ThermalTuningPowerClass
+  afterSequence?: number
+  limit?: number
+  throughSequence?: number
+  traceDigest?: string
+  candidateId?: string
+  candidateHash?: string
+}
+
 export interface ApiErrorEnvelope {
   error: {
     code: string
@@ -220,6 +374,7 @@ export interface DevdDeviceRecord {
   calibration?: CalibrationState
   heaterCurve?: HeaterCurveState
   thermalPlantRun?: ThermalPlantRunSnapshot
+  thermalTuningRun?: ThermalTuningRunSnapshot
   logs?: DevdLogEntry[]
   trace?: DevdTraceEntry[]
   events?: DevdEvent[]
@@ -509,6 +664,20 @@ export interface UsbThermalPlantRunFrame {
   type: 'thermal_plant_run'
   requestId: string
   afterSample?: number
+}
+
+export interface UsbThermalTuningRunFrame {
+  type: 'thermal_tuning_run'
+  requestId: string
+  op: ThermalTuningRunOp
+  runId?: string
+  powerClass?: ThermalTuningPowerClass
+  afterSequence?: number
+  limit?: number
+  throughSequence?: number
+  traceDigest?: string
+  candidateId?: string
+  candidateHash?: string
 }
 
 export interface UsbCalibrationConfigFrame {

@@ -48,6 +48,7 @@ pd-request-20v = []
 pd-request-28v = []
 
 [dependencies]
+flux-purr-thermal-tuning-core = { path = "../crates/thermal-tuning-core" }
 embassy-futures = "0.1.2"
 embedded-graphics = "0.8.1"
 embedded-hal = "1.0.0"

@@ -64,6 +64,371 @@
     inset -1px -1px 2px color-mix(in oklch, var(--industrial-light) 72%, transparent);
 }
 
+/* Firmware-owned thermal tuning work surface. The host records the bounded
+   trace, while the device remains the live authority for every decision. */
+.industrial-calibration-tabs__content:has(.thermal-tuning-card) {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.thermal-tuning-card {
+  display: grid;
+  min-width: 0;
+  gap: 0.75rem;
+  border: 1px solid var(--industrial-panel-border-strong);
+  border-radius: 8px;
+  padding: clamp(0.75rem, 1.5vw, 1.1rem);
+  background: var(--industrial-panel);
+  box-shadow: var(--industrial-surface-shadow);
+  color: var(--industrial-text);
+}
+
+.thermal-tuning-card__header,
+.thermal-tuning-card__section-title,
+.thermal-tuning-card__actions,
+.thermal-tuning-card__confirm {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.thermal-tuning-card__header {
+  justify-content: space-between;
+  align-items: flex-start;
+  border-bottom: 1px solid var(--industrial-panel-border);
+  padding-bottom: 0.75rem;
+}
+
+.thermal-tuning-card__header h2,
+.thermal-tuning-card__section-title h3 {
+  margin: 0;
+  color: var(--industrial-text);
+}
+
+.thermal-tuning-card__header h2 {
+  font-size: clamp(1.15rem, 2vw, 1.45rem);
+  line-height: 1.2;
+}
+
+.thermal-tuning-card__eyebrow {
+  margin: 0 0 0.22rem;
+  color: var(--industrial-muted-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.thermal-tuning-card__lede,
+.thermal-tuning-card__candidate p,
+.thermal-tuning-card__ok,
+.thermal-tuning-card__warning {
+  margin: 0.35rem 0 0;
+  color: var(--industrial-muted-text);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.thermal-tuning-card__status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid color-mix(in oklch, var(--industrial-accent) 50%, transparent);
+  border-radius: 999px;
+  padding: 0.35rem 0.5rem;
+  color: var(--industrial-accent);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.65rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.thermal-tuning-card__status > span {
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.thermal-tuning-card__status--idle {
+  border-color: var(--industrial-panel-border-strong);
+  color: var(--industrial-muted-text);
+}
+
+.thermal-tuning-card__status--terminal {
+  border-color: color-mix(in oklch, var(--industrial-green) 46%, transparent);
+  color: var(--industrial-green);
+}
+
+.thermal-tuning-card__eligibility,
+.thermal-tuning-card__controls,
+.thermal-tuning-card__progress,
+.thermal-tuning-card__trace,
+.thermal-tuning-card__candidate {
+  min-width: 0;
+  border: 1px solid var(--industrial-panel-border);
+  border-radius: 6px;
+  padding: 0.7rem;
+  background: color-mix(in oklch, var(--industrial-bg) 72%, var(--industrial-panel));
+}
+
+.thermal-tuning-card__section-title {
+  justify-content: flex-start;
+}
+
+.thermal-tuning-card__section-title > svg {
+  width: 1rem;
+  height: 1rem;
+  flex: 0 0 auto;
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__section-title h3 {
+  font-size: 0.84rem;
+  font-weight: 850;
+}
+
+.thermal-tuning-card__section-title > span {
+  margin-left: auto;
+  color: var(--industrial-muted-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.64rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.thermal-tuning-card__section-title > span.is-ok {
+  color: var(--industrial-green);
+}
+
+.thermal-tuning-card__section-title > span.is-warning,
+.thermal-tuning-card__warning {
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__eligibility ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.2rem;
+  color: var(--industrial-accent);
+  font-size: 0.75rem;
+}
+
+.thermal-tuning-card__segmented {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.thermal-tuning-card__segmented,
+.thermal-tuning-card__confirm {
+  min-width: 0;
+  margin-inline: 0;
+}
+
+.thermal-tuning-card__segmented {
+  border: 0;
+  padding: 0;
+}
+
+.thermal-tuning-card__segmented legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.thermal-tuning-card__segmented button {
+  min-width: 0;
+  min-height: 2.35rem;
+  border: 1px solid var(--industrial-panel-border-strong);
+  border-radius: 5px;
+  padding: 0.4rem 0.55rem;
+  background: var(--industrial-panel);
+  color: var(--industrial-muted-text);
+  font-size: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.thermal-tuning-card__segmented button[aria-pressed="true"] {
+  border-color: var(--industrial-accent);
+  background: color-mix(in oklch, var(--industrial-accent) 14%, var(--industrial-panel));
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__segmented button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.thermal-tuning-card__targets {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 0.3rem;
+  margin-top: 0.55rem;
+  padding: 0;
+  list-style: none;
+}
+
+.thermal-tuning-card__targets li {
+  display: grid;
+  min-width: 0;
+  min-height: 2rem;
+  place-items: center;
+  border: 1px solid var(--industrial-panel-border);
+  border-radius: 4px;
+  color: var(--industrial-muted-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+
+.thermal-tuning-card__targets li.is-accepted {
+  border-color: color-mix(in oklch, var(--industrial-green) 48%, transparent);
+  background: color-mix(in oklch, var(--industrial-green) 12%, transparent);
+  color: var(--industrial-green);
+}
+
+.thermal-tuning-card__targets li.is-failed,
+.thermal-tuning-card__targets li.is-skipped {
+  border-color: color-mix(in oklch, var(--industrial-accent) 48%, transparent);
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__trace dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin: 0.55rem 0 0;
+}
+
+.thermal-tuning-card__trace dl div {
+  min-width: 0;
+  border-left: 2px solid var(--industrial-panel-border-strong);
+  padding-left: 0.45rem;
+}
+
+.thermal-tuning-card__trace dt,
+.thermal-tuning-card__trace dd {
+  margin: 0;
+}
+
+.thermal-tuning-card__trace dt {
+  color: var(--industrial-muted-text);
+  font-size: 0.65rem;
+}
+
+.thermal-tuning-card__trace dd {
+  overflow: hidden;
+  color: var(--industrial-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thermal-tuning-card__actions {
+  flex-wrap: wrap;
+  align-items: center;
+  padding-top: 0.15rem;
+}
+
+.thermal-tuning-card__actions > button,
+.thermal-tuning-card__confirm > button {
+  min-height: 2.25rem;
+}
+
+.thermal-tuning-card__confirm {
+  flex-wrap: wrap;
+  border: 1px solid color-mix(in oklch, var(--industrial-accent) 40%, transparent);
+  border-radius: 5px;
+  padding: 0.35rem 0.45rem;
+  color: var(--industrial-text);
+  font-size: 0.72rem;
+}
+
+.thermal-tuning-card__confirm {
+  min-width: min(100%, 22rem);
+  margin: 0;
+}
+
+.thermal-tuning-card__confirm legend {
+  padding: 0 0.2rem;
+  color: var(--industrial-muted-text);
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+
+.thermal-tuning-card__empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.thermal-tuning-card__empty > svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  flex: 0 0 auto;
+  color: var(--industrial-accent);
+}
+
+.thermal-tuning-card__empty h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.thermal-tuning-card__empty p {
+  margin: 0.35rem 0 0;
+  color: var(--industrial-muted-text);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+@media (max-width: 759px) {
+  .thermal-tuning-card {
+    padding: 0.65rem;
+  }
+
+  .thermal-tuning-card__header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .thermal-tuning-card__status {
+    justify-self: start;
+  }
+
+  .thermal-tuning-card__targets {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+
+  .thermal-tuning-card__trace dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .thermal-tuning-card__actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .thermal-tuning-card__actions > button {
+    width: 100%;
+  }
+
+  .thermal-tuning-card__confirm {
+    grid-column: 1 / -1;
+  }
+}
+
 /* Production automatic thermal-model result card. The grid stays within the
    desktop calibration panel; trace and curve are fixed-format SVGs, while the
    representative-point table keeps its natural row height. */

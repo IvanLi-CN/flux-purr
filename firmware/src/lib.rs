@@ -16,6 +16,7 @@ pub mod net;
 pub mod net_http;
 pub mod status_light;
 pub mod thermal_plant;
+pub mod thermal_tuning;
 pub mod wifi_state;
 
 use core::sync::atomic::{AtomicU32, Ordering};

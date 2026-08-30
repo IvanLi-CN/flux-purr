@@ -2,5 +2,7 @@
 resolver = "3"
 members = [
   "firmware",
+  "crates/thermal-tuning-core",
+  "crates/thermal-tuning-wasm",
   "tools/flux-purr-devd",
 ]

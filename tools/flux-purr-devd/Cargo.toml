@@ -28,6 +28,7 @@ path = "src/bin/flux-purr-build-firmware-bundle.rs"
 [dependencies]
 axum = { version = "0.8.4", features = ["json"] }
 clap = { version = "4.5.53", features = ["derive"] }
+flux-purr-thermal-tuning-core = { path = "../../crates/thermal-tuning-core" }
 esp-idf-part = "0.6"
 espflash = { version = "=4.5.0", default-features = false, features = ["serialport"] }
 ipnet = "2.12.0"

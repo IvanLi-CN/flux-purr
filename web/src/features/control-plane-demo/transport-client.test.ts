@@ -59,6 +59,22 @@ describe('control-plane transport client', () => {
       body: JSON.stringify({ cidr: '192.168.31.0/24' }),
     })
   })
+
+  it('starts thermal tuning paging without an exclusive cursor', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        jsonResponse({ schema: 'thermal_tuning_run_v1', run: {}, page: { events: [] } })
+      )
+    const client = createControlPlaneHttpClient(fetcher)
+
+    await client.getThermalTuningRun('http://127.0.0.1:30080', 'mock-fp-lab-01', 'lease-1')
+
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run?lease_id=lease-1&limit=16',
+      undefined
+    )
+  })
   it('maps devd records into demo device targets', () => {
     const record: DevdDeviceRecord = {
       id: 'mock-fp-lab-01',
@@ -1299,6 +1315,71 @@ describe('control-plane transport client', () => {
       'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-plant/run?lease_id=lease-1&after_sample=16',
       undefined
     )
+  })
+
+  it('keeps thermal tuning on the dedicated devd route with explicit PPS and trace paging', async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse({
+        schema: 'thermal_tuning_run_v1',
+        run: {
+          runId: 'run-12',
+          state: 'running',
+          powerClass: 'pps3a',
+          phase: 'scout',
+          currentTargetC: 60,
+          targetProgress: { acceptedC: [], failedC: [], skippedC: [] },
+          terminalDisposition: null,
+          eligibility: { ready: true, reasons: [], activeOwner: null },
+          review: {
+            state: 'recording',
+            reason: null,
+            acknowledgedThrough: 0,
+            terminalSequence: null,
+            traceDigest: null,
+          },
+          candidate: {
+            candidateId: null,
+            candidateHash: null,
+            powerClass: 'pps3a',
+            promotionState: 'awaiting_review',
+          },
+          journal: { lastRunId: null, lastDisposition: null },
+        },
+        page: {
+          earliestSequence: 1,
+          emittedThrough: 0,
+          nextAfterSequence: 1,
+          acknowledgedThrough: 0,
+          digestThroughPage: null,
+          events: [],
+        },
+      })
+    )
+    const client = createControlPlaneHttpClient(fetcher)
+
+    await client.getThermalTuningRun('http://127.0.0.1:30080', 'mock-fp-lab-01', 'lease-1', 7, 24)
+    await client.configureThermalTuningRun('http://127.0.0.1:30080', 'mock-fp-lab-01', {
+      leaseId: 'lease-1',
+      op: 'start',
+      powerClass: 'pps3a',
+    })
+
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run?lease_id=lease-1&afterSequence=7&limit=24',
+      undefined
+    )
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ leaseId: 'lease-1', op: 'start', powerClass: 'pps3a' }),
+      }
+    )
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain('vbus')
+    expect(JSON.stringify(fetcher.mock.calls)).not.toContain('source')
   })
 
   it('sends runtime, wifi, and flash mutations through devd endpoints', async () => {

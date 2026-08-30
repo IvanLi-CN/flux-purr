@@ -146,6 +146,7 @@ const TLV_WIFI_STATIC_IPV4: u8 = 0x39;
 const TLV_THERMAL_PLANT_TRANSIENT_ACTIVE: u8 = 0x3a;
 const TLV_HEATER_CURVE_TRANSACTION_ID: u8 = 0x3b;
 const TLV_COMMISSIONING_REQUIRED: u8 = 0x3c;
+const TLV_THERMAL_TUNING_JOURNAL: u8 = 0x3d;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WifiStaticIpv4Config {
@@ -204,6 +205,15 @@ pub struct MemoryConfig {
     pub active_thermal_control_profile: ThermalControlProfileConfig,
     pub thermal_control_profile_pps5a: ThermalControlProfileConfig,
     pub thermal_profile_mode: ThermalProfileMode,
+    /// Compact recovery projection for the most recent firmware-owned tuning
+    /// run. Raw trace events and candidates never enter persistent memory.
+    pub thermal_tuning_journal: Option<ThermalTuningJournal>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThermalTuningJournal {
+    pub run_id: u64,
+    pub disposition: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,6 +634,7 @@ impl Default for MemoryConfig {
             active_thermal_control_profile: ThermalControlProfileConfig::default(),
             thermal_control_profile_pps5a: ThermalControlProfileConfig::default(),
             thermal_profile_mode: ThermalProfileMode::W65,
+            thermal_tuning_journal: None,
         }
     }
 }
@@ -674,6 +685,9 @@ impl MemoryConfig {
             .filter(thermal_plant_transient_transaction_has_valid_structure);
         sanitize_thermal_control_profile(&mut self.active_thermal_control_profile);
         sanitize_thermal_control_profile(&mut self.thermal_control_profile_pps5a);
+        self.thermal_tuning_journal = self
+            .thermal_tuning_journal
+            .filter(|journal| journal.run_id != 0);
     }
 
     pub const fn thermal_profile(&self, bank: ThermalProfileBank) -> &ThermalControlProfileConfig {
@@ -1666,6 +1680,12 @@ fn encode_config_payload(
             &mut cursor,
         )?;
     }
+    if let Some(journal) = config.thermal_tuning_journal {
+        let mut payload = [0u8; 9];
+        payload[..8].copy_from_slice(&journal.run_id.to_le_bytes());
+        payload[8] = journal.disposition;
+        push_tlv(TLV_THERMAL_TUNING_JOURNAL, &payload, out, &mut cursor)?;
+    }
     Ok(cursor)
 }
 
@@ -1848,6 +1868,15 @@ fn decode_config_payload(
             {
                 config.thermal_plant_transient_active =
                     decode_thermal_plant_transient_transaction(value);
+            }
+            TLV_THERMAL_TUNING_JOURNAL if len == 9 => {
+                config.thermal_tuning_journal = Some(ThermalTuningJournal {
+                    run_id: u64::from_le_bytes([
+                        value[0], value[1], value[2], value[3], value[4], value[5], value[6],
+                        value[7],
+                    ]),
+                    disposition: value[8],
+                });
             }
             _ => {}
         }

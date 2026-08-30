@@ -1,6 +1,7 @@
 use std::{
-    fs::{self, File},
-    io::{self, BufRead, BufReader, BufWriter, Read, Write},
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File, OpenOptions},
+    io::{self, BufRead, BufReader, BufWriter, IsTerminal, Read, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
@@ -18,6 +19,7 @@ use flux_purr_devd::{
     },
     read_user_config, write_user_config,
 };
+use flux_purr_thermal_tuning_core::{CANDIDATE_PROFILE_CANONICAL_BYTES, PpsPowerClass, sha256};
 use reqwest::{Client, Method, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -451,9 +453,13 @@ enum ThermalCommand {
     #[command(
         name = "tune",
         visible_alias = "flagship-tune",
-        about = "Run the owner-facing 5A full-batch thermal tuning workflow and emit a canonical preliminary review bundle."
+        about = "Run firmware-owned PPS tuning or the retained host-reference workflow and emit a canonical review bundle."
     )]
     Tune(ThermalFlagshipTuneArgs),
+    #[command(
+        about = "Compare a firmware tuning bundle with the retained host-reference evidence."
+    )]
+    Compare(ThermalCompareArgs),
     Report {
         #[command(subcommand)]
         command: ThermalReportCommand,
@@ -462,6 +468,30 @@ enum ThermalCommand {
         about = "Recompute analysis and tuned candidate from an existing thermal self-test run."
     )]
     Retune(ThermalRetuneArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ThermalTuneEngine {
+    Firmware,
+    #[value(name = "host-reference")]
+    HostReference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ThermalTunePowerClass {
+    #[value(name = "pps3a")]
+    Pps3a,
+    #[value(name = "pps5a")]
+    Pps5a,
+}
+
+impl ThermalTunePowerClass {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pps3a => "pps3a",
+            Self::Pps5a => "pps5a",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -658,6 +688,10 @@ struct ThermalRetuneArgs {
 struct ThermalFlagshipTuneArgs {
     #[command(flatten)]
     target: TargetSelector,
+    #[arg(long, value_enum)]
+    engine: Option<ThermalTuneEngine>,
+    #[arg(long = "power-class", value_enum)]
+    power_class: Option<ThermalTunePowerClass>,
     #[arg(
         long = "source-kind",
         value_enum,
@@ -668,11 +702,13 @@ struct ThermalFlagshipTuneArgs {
     #[arg(
         long = "source-id",
         alias = "source-device-id",
+        default_value = "",
         help = "Expected bench source identity returned by the selected source provider."
     )]
     source_id: String,
     #[arg(
         long = "source-url",
+        default_value = "",
         help = "Bench source URL used by the selected source provider."
     )]
     source_url: String,
@@ -733,6 +769,7 @@ struct ThermalFlagshipTuneArgs {
     seed_profile_file: Option<PathBuf>,
     #[arg(
         long = "output-root",
+        alias = "output-dir",
         default_value = "thermal-self-test-runs",
         help = "Root directory for flagship tuning artifacts."
     )]
@@ -753,8 +790,30 @@ struct ThermalFlagshipTuneArgs {
     scout_hold_seconds: u64,
     #[arg(long = "confirm-hold-seconds", default_value_t = 60)]
     confirm_hold_seconds: u64,
+    #[arg(
+        long = "confirm",
+        action = ArgAction::SetTrue,
+        help = "Confirm the firmware-owned tuning run without entering a password or token."
+    )]
+    confirm: bool,
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
     dry_run: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+struct ThermalCompareArgs {
+    #[arg(
+        long = "firmware-bundle",
+        help = "Directory or ZIP containing the firmware thermal-tuning-v2 bundle."
+    )]
+    firmware_bundle: PathBuf,
+    #[arg(
+        long = "reference-bundle",
+        help = "Optional directory or ZIP containing the retained host-reference evidence."
+    )]
+    reference_bundle: Option<PathBuf>,
+    #[arg(long, help = "JSON path for the diagnostic comparison result.")]
+    output: PathBuf,
 }
 
 #[derive(Debug, Args, Clone)]
@@ -2564,8 +2623,37 @@ async fn handle_thermal_command(
             collect_thermal_self_test(client, default_devd, args).await
         }
         ThermalCommand::Tune(args) => {
-            thermal_flagship::run_flagship_tuning(client, default_devd, args).await
+            match args.engine {
+                Some(ThermalTuneEngine::Firmware) => {
+                    if has_legacy_thermal_source_options(&args) {
+                        return Err(
+                            "thermal tune --engine firmware does not accept source/VBUS options; use --engine host-reference for the legacy host workflow".into(),
+                        );
+                    }
+                    run_firmware_thermal_tuning(client, default_devd, args).await
+                }
+                Some(ThermalTuneEngine::HostReference) => {
+                    thermal_flagship::run_flagship_tuning(
+                        client,
+                        default_devd,
+                        host_reference_args(args)?,
+                    )
+                    .await
+                }
+                None if !has_legacy_thermal_source_options(&args) => Err(
+                    "thermal tune requires explicit --engine firmware --power-class pps3a|pps5a, or legacy --source-* arguments for host-reference".into(),
+                ),
+                None => {
+                    thermal_flagship::run_flagship_tuning(
+                        client,
+                        default_devd,
+                        host_reference_args(args)?,
+                    )
+                    .await
+                }
+            }
         }
+        ThermalCommand::Compare(args) => compare_thermal_bundles(args),
         ThermalCommand::Report { command } => match command {
             ThermalReportCommand::RenderSelfTest(args) => {
                 thermal_report::render_self_test_evidence_bundle(
@@ -2588,6 +2676,953 @@ async fn handle_thermal_command(
             thermal_retune::run_thermal_retune(client, default_devd, args).await
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ThermalComparisonEvidence {
+    schema: String,
+    engine: String,
+    power_class: Option<String>,
+    physical_targets_c: Vec<i64>,
+    execution_order_c: Vec<i64>,
+    candidate_hash: Option<String>,
+    decisions: BTreeMap<i64, Value>,
+    complete: bool,
+    missing: Vec<String>,
+}
+
+impl ThermalComparisonEvidence {
+    fn invalid(reason: impl Into<String>) -> Self {
+        Self {
+            schema: "invalid".to_string(),
+            engine: "unknown".to_string(),
+            power_class: None,
+            physical_targets_c: Vec::new(),
+            execution_order_c: Vec::new(),
+            candidate_hash: None,
+            decisions: BTreeMap::new(),
+            complete: false,
+            missing: vec![reason.into()],
+        }
+    }
+}
+
+fn compare_thermal_bundles(
+    args: ThermalCompareArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let reference_path = args.reference_bundle.clone();
+    let result = match reference_path {
+        None => json!({
+            "schema": "thermal-tuning-comparison-v1",
+            "outcome": "not_run",
+            "firmwareBundle": path_string(args.firmware_bundle),
+            "referenceBundle": Value::Null,
+            "differences": [],
+            "reason": "reference_bundle_not_requested"
+        }),
+        Some(reference_path) => {
+            let firmware = load_thermal_comparison_bundle(&args.firmware_bundle)
+                .unwrap_or_else(|error| ThermalComparisonEvidence::invalid(error.to_string()));
+            let reference = load_thermal_comparison_bundle(&reference_path)
+                .unwrap_or_else(|error| ThermalComparisonEvidence::invalid(error.to_string()));
+            let mut differences = Vec::new();
+
+            if !firmware.complete {
+                differences.push("firmware_evidence_incomplete".to_string());
+            }
+            if !reference.complete {
+                differences.push("reference_evidence_incomplete".to_string());
+            }
+            if firmware.complete && reference.complete {
+                if firmware.power_class != reference.power_class {
+                    differences.push(format!(
+                        "power_class differs: firmware={:?}, reference={:?}",
+                        firmware.power_class, reference.power_class
+                    ));
+                }
+                if firmware.physical_targets_c != reference.physical_targets_c {
+                    differences.push(format!(
+                        "physical_targets_c differs: firmware={:?}, reference={:?}",
+                        firmware.physical_targets_c, reference.physical_targets_c
+                    ));
+                }
+                if firmware.execution_order_c != reference.execution_order_c {
+                    differences.push(format!(
+                        "execution_order_c differs: firmware={:?}, reference={:?}",
+                        firmware.execution_order_c, reference.execution_order_c
+                    ));
+                }
+                if firmware.candidate_hash != reference.candidate_hash {
+                    differences.push(format!(
+                        "candidate_hash differs: firmware={:?}, reference={:?}",
+                        firmware.candidate_hash, reference.candidate_hash
+                    ));
+                }
+                if firmware.decisions != reference.decisions {
+                    differences.push("canonical_decisions differ".to_string());
+                }
+            }
+
+            let outcome = if !firmware.complete || !reference.complete {
+                "inconclusive"
+            } else if differences.is_empty() {
+                "equivalent"
+            } else {
+                "divergent"
+            };
+            json!({
+                "schema": "thermal-tuning-comparison-v1",
+                "outcome": outcome,
+                "firmwareBundle": path_string(args.firmware_bundle),
+                "referenceBundle": path_string(reference_path),
+                "differences": differences,
+                "firmware": thermal_comparison_evidence_summary(&firmware),
+                "reference": thermal_comparison_evidence_summary(&reference)
+            })
+        }
+    };
+
+    if let Some(parent) = args
+        .output
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&args.output, serde_json::to_vec_pretty(&result)?)?;
+    Ok(result)
+}
+
+fn load_thermal_comparison_bundle(
+    bundle_path: &Path,
+) -> Result<ThermalComparisonEvidence, Box<dyn std::error::Error + Send + Sync>> {
+    let run_bytes = read_thermal_bundle_entry(bundle_path, "run.bundle.json")?
+        .ok_or("bundle is missing run.bundle.json")?;
+    let run_bundle: Value = serde_json::from_slice(&run_bytes)?;
+    let schema = run_bundle
+        .get("schema")
+        .or_else(|| run_bundle.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let supported_schema = matches!(
+        schema.as_str(),
+        "thermal-tuning-v2"
+            | "thermal_self_test_preliminary_bundle"
+            | "thermal_self_test_report_bundle"
+    );
+    let mut missing = Vec::new();
+    if !supported_schema {
+        missing.push(format!("unsupported_schema:{schema}"));
+    }
+
+    let samples = read_thermal_bundle_entry(bundle_path, "samples.ndjson")?;
+    if samples.is_none() {
+        missing.push("samples.ndjson".to_string());
+    }
+
+    let candidate_bytes =
+        read_thermal_bundle_entry(bundle_path, "thermal-profile.candidate.json")?.or(
+            read_thermal_bundle_entry(bundle_path, "thermal-profile.accepted.json")?,
+        );
+    let candidate_file = match candidate_bytes {
+        Some(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                missing.push(format!("invalid_candidate_file:{error}"));
+                None
+            }
+        },
+        None => None,
+    };
+
+    let candidate = thermal_bundle_value(&run_bundle, "candidate")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| {
+            candidate_file
+                .as_ref()
+                .and_then(|value| value.get("candidate"))
+                .filter(|value| !value.is_null())
+                .cloned()
+        });
+    let candidate_hash = candidate
+        .as_ref()
+        .and_then(|value| value.get("candidateHash").or_else(|| value.get("hash")))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            candidate_file
+                .as_ref()
+                .and_then(|value| value.get("candidateHash").or_else(|| value.get("hash")))
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+
+    let ledger = read_thermal_bundle_entry(bundle_path, "decision-ledger.ndjson")?;
+    let mut decisions = BTreeMap::new();
+    let mut has_decision_source = false;
+    if let Some(bytes) = ledger {
+        has_decision_source = true;
+        for event in parse_thermal_ndjson_bytes(&bytes)? {
+            if let Some(target) = thermal_comparison_target(&event) {
+                decisions.insert(target, normalized_thermal_decision(&event));
+            }
+        }
+    }
+
+    if let Some(report_runs) =
+        thermal_bundle_value(&run_bundle, "reportRuns").and_then(Value::as_array)
+    {
+        has_decision_source = true;
+        for entry in report_runs {
+            if let Some(target) = thermal_comparison_target(entry) {
+                decisions.insert(target, normalized_thermal_decision(entry));
+            }
+        }
+    }
+
+    if let Some(dispositions) =
+        thermal_bundle_value(&run_bundle, "candidateDispositions").and_then(Value::as_object)
+    {
+        has_decision_source = true;
+        for (target, disposition) in dispositions {
+            if let Ok(target) = target.parse::<i64>() {
+                decisions.insert(
+                    target,
+                    json!({
+                        "disposition": canonical_thermal_disposition(Some(disposition)),
+                        "candidateHash": Value::Null,
+                        "gates": Value::Null
+                    }),
+                );
+            }
+        }
+    }
+
+    let progress = thermal_bundle_value(&run_bundle, "targetProgress");
+    for (key, disposition) in [
+        ("acceptedC", "accepted"),
+        ("failedC", "failed"),
+        ("skippedC", "skipped"),
+    ] {
+        for target in thermal_bundle_i64_array(progress.and_then(|value| value.get(key))) {
+            has_decision_source = true;
+            decisions.entry(target).or_insert_with(|| {
+                json!({
+                    "disposition": disposition,
+                    "candidateHash": Value::Null,
+                    "gates": Value::Null
+                })
+            });
+        }
+    }
+
+    let mut physical_targets_c = thermal_bundle_i64_array(
+        thermal_bundle_value(&run_bundle, "physicalTargetsC")
+            .or_else(|| thermal_bundle_value(&run_bundle, "tuningTargetsC"))
+            .or_else(|| thermal_bundle_value(&run_bundle, "targetsC")),
+    );
+    if physical_targets_c.is_empty() {
+        physical_targets_c = decisions.keys().copied().collect();
+    }
+    let execution_order_c = thermal_bundle_i64_array(
+        thermal_bundle_value(&run_bundle, "executionOrderC")
+            .or_else(|| thermal_bundle_value(&run_bundle, "tuningExecutionOrderC")),
+    );
+
+    if !has_decision_source || decisions.is_empty() {
+        missing.push("decision-ledger.ndjson".to_string());
+    }
+    if physical_targets_c.is_empty() {
+        missing.push("physicalTargetsC".to_string());
+    }
+    if execution_order_c.is_empty() {
+        missing.push("executionOrderC".to_string());
+    }
+    for target in &physical_targets_c {
+        if !decisions.contains_key(target) {
+            missing.push(format!("ledger_target:{target}"));
+        }
+    }
+
+    let has_accepted = decisions
+        .values()
+        .any(|decision| decision.get("disposition").and_then(Value::as_str) == Some("accepted"));
+    if has_accepted && candidate_hash.is_none() {
+        missing.push("candidate_hash".to_string());
+    }
+
+    let review_state = thermal_bundle_value(&run_bundle, "reviewDisposition")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            thermal_bundle_value(&run_bundle, "review")
+                .and_then(|value| value.get("state"))
+                .and_then(Value::as_str)
+        });
+    if matches!(
+        review_state,
+        Some("incomplete" | "review_incomplete" | "trace_gap")
+    ) {
+        missing.push("review_incomplete".to_string());
+    }
+    if thermal_bundle_value(&run_bundle, "trace")
+        .and_then(|value| value.get("complete"))
+        .and_then(Value::as_bool)
+        == Some(false)
+        || thermal_bundle_value(&run_bundle, "trace")
+            .and_then(|value| value.get("gap"))
+            .is_some_and(|value| !value.is_null())
+    {
+        missing.push("trace_gap".to_string());
+    }
+
+    let engine = thermal_bundle_value(&run_bundle, "engine")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            if matches!(
+                schema.as_str(),
+                "thermal_self_test_preliminary_bundle" | "thermal_self_test_report_bundle"
+            ) {
+                Some("host-reference".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+    let power_class = thermal_bundle_power_class(&run_bundle);
+
+    Ok(ThermalComparisonEvidence {
+        schema,
+        engine,
+        power_class,
+        physical_targets_c,
+        execution_order_c,
+        candidate_hash,
+        decisions,
+        complete: missing.is_empty(),
+        missing,
+    })
+}
+
+fn read_thermal_bundle_entry(
+    bundle_path: &Path,
+    entry_name: &str,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    if bundle_path.is_dir() {
+        let path = bundle_path.join(entry_name);
+        return if path.is_file() {
+            Ok(Some(fs::read(path)?))
+        } else {
+            Ok(None)
+        };
+    }
+    let file = File::open(bundle_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    if !archive.file_names().any(|name| name == entry_name) {
+        return Ok(None);
+    }
+    let mut entry = archive.by_name(entry_name)?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+fn parse_thermal_ndjson_bytes(
+    bytes: &[u8],
+) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut values = Vec::new();
+    for line in std::str::from_utf8(bytes)?.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        values.push(serde_json::from_str(line)?);
+    }
+    Ok(values)
+}
+
+fn thermal_bundle_value<'a>(bundle: &'a Value, key: &str) -> Option<&'a Value> {
+    bundle
+        .get(key)
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            bundle
+                .get("run")
+                .and_then(|run| run.get(key))
+                .filter(|value| !value.is_null())
+        })
+}
+
+fn thermal_bundle_i64_array(value: Option<&Value>) -> Vec<i64> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_i64)
+        .collect()
+}
+
+fn thermal_comparison_target(value: &Value) -> Option<i64> {
+    value
+        .get("targetTempC")
+        .or_else(|| value.get("target"))
+        .and_then(Value::as_i64)
+}
+
+fn canonical_thermal_disposition(value: Option<&Value>) -> Option<&'static str> {
+    match value.and_then(Value::as_str) {
+        Some("accepted" | "passed" | "ready" | "promoted") => Some("accepted"),
+        Some("failed" | "rejected" | "not_converged" | "environment_blocked") => Some("failed"),
+        Some("skipped" | "not_executed_without_accepted_bounds") => Some("skipped"),
+        Some("budget_exhausted") => Some("budget_exhausted"),
+        Some("cancelled" | "canceled") => Some("cancelled"),
+        _ => None,
+    }
+}
+
+fn normalized_thermal_decision(value: &Value) -> Value {
+    let disposition = canonical_thermal_disposition(
+        value
+            .get("candidateDisposition")
+            .or_else(|| value.get("disposition"))
+            .or_else(|| value.get("promotionState"))
+            .or_else(|| value.get("stopReason")),
+    )
+    .or_else(|| {
+        value
+            .get("candidateReady")
+            .and_then(Value::as_bool)
+            .filter(|ready| *ready)
+            .map(|_| "accepted")
+    })
+    .unwrap_or("unknown");
+    let candidate_hash = value
+        .get("candidateHash")
+        .or_else(|| value.get("hash"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let gates = value
+        .get("gates")
+        .or_else(|| value.get("gateResults"))
+        .or_else(|| value.get("gate"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "disposition": disposition,
+        "candidateHash": candidate_hash,
+        "gates": gates
+    })
+}
+
+fn thermal_bundle_power_class(bundle: &Value) -> Option<String> {
+    let value = thermal_bundle_value(bundle, "powerClass")
+        .or_else(|| thermal_bundle_value(bundle, "selectedMode"))
+        .and_then(Value::as_str)?;
+    match value {
+        "pps3a" | "pps5a" => Some(value.to_string()),
+        "65w" => Some("pps3a".to_string()),
+        "100w" => Some("pps5a".to_string()),
+        _ => None,
+    }
+}
+
+fn thermal_comparison_evidence_summary(evidence: &ThermalComparisonEvidence) -> Value {
+    let decisions = evidence
+        .decisions
+        .iter()
+        .map(|(target, decision)| (target.to_string(), decision.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    json!({
+        "schema": evidence.schema,
+        "engine": evidence.engine,
+        "powerClass": evidence.power_class,
+        "physicalTargetsC": evidence.physical_targets_c,
+        "executionOrderC": evidence.execution_order_c,
+        "candidateHash": evidence.candidate_hash,
+        "decisions": decisions,
+        "complete": evidence.complete,
+        "missing": evidence.missing
+    })
+}
+
+fn has_legacy_thermal_source_options(args: &ThermalFlagshipTuneArgs) -> bool {
+    !matches!(args.source_kind, BenchSourceKind::Isolapurr)
+        || args.source_mode != "auto-follow"
+        || args.profile_mode != ThermalProfileMode::W100
+        || !args.source_id.is_empty()
+        || !args.source_url.is_empty()
+        || args.source_voltage_v.is_some()
+        || args.source_current_a.is_some()
+        || args.source_power_watts.is_some()
+}
+
+fn host_reference_args(
+    mut args: ThermalFlagshipTuneArgs,
+) -> Result<ThermalFlagshipTuneArgs, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(power_class) = args.power_class {
+        args.profile_mode = match power_class {
+            ThermalTunePowerClass::Pps3a => ThermalProfileMode::W65,
+            ThermalTunePowerClass::Pps5a => ThermalProfileMode::W100,
+        };
+    }
+    Ok(args)
+}
+
+async fn run_firmware_thermal_tuning(
+    client: &Client,
+    default_devd: &str,
+    args: ThermalFlagshipTuneArgs,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let power_class = args
+        .power_class
+        .ok_or("firmware thermal tuning requires --power-class pps3a or pps5a")?;
+    confirm_firmware_tuning_start(power_class, args.confirm, args.dry_run)?;
+    let resolved = resolve_target(args.target.clone(), default_devd)?;
+    let output_dir = args.bundle_dir.unwrap_or_else(|| {
+        args.output_root
+            .join(format!("thermal-tuning-{}", power_class.as_str()))
+    });
+    if args.dry_run {
+        return write_firmware_tuning_bundle(
+            &output_dir,
+            &resolved,
+            power_class,
+            &json!({
+                "schema": "thermal_tuning_run_v1",
+                "run": {
+                    "runId": "dry-run",
+                    "state": "terminal",
+                    "powerClass": power_class.as_str(),
+                    "phase": "terminal",
+                    "currentTargetC": null,
+                    "targetProgress": {
+                        "acceptedC": [60, 80, 100, 120, 140, 160, 180, 220, 240],
+                        "failedC": [],
+                        "skippedC": []
+                    },
+                    "terminalDisposition": "completed",
+                    "eligibility": {"ready": true, "reasons": [], "activeOwner": null},
+                    "review": {
+                        "state": "complete",
+                        "reason": null,
+                        "acknowledgedThrough": 8,
+                        "terminalSequence": 8,
+                        "traceDigest": "dry-run"
+                    },
+                    "candidate": {
+                        "candidateId": "dry-run-candidate",
+                        "candidateHash": "dry-run",
+                        "powerClass": power_class.as_str(),
+                        "promotionState": "ready"
+                    },
+                    "journal": {"lastRunId": "dry-run", "lastDisposition": "completed"}
+                },
+                "page": {
+                    "earliestSequence": 0,
+                    "emittedThrough": 8,
+                    "nextAfterSequence": 9,
+                    "acknowledgedThrough": 8,
+                    "digestThroughPage": "dry-run",
+                    "events": []
+                }
+            }),
+            Vec::new(),
+            Vec::new(),
+        );
+    }
+
+    let lease = create_lease(client, &resolved).await?;
+    fs::create_dir_all(&output_dir)?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let result =
+        run_firmware_tuning_session(client, &resolved, &lease.lease_id, power_class, &output_dir)
+            .await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    let (snapshot, samples, decisions) = result?;
+    let bundle = write_firmware_tuning_bundle(
+        &output_dir,
+        &resolved,
+        power_class,
+        &snapshot,
+        samples,
+        decisions,
+    )?;
+    if let Some(id) = resolved.hardware_id.as_deref() {
+        let _ = remember_usb(id, &resolved.device, &resolved.devd);
+    }
+    Ok(bundle)
+}
+
+fn confirm_firmware_tuning_start(
+    power_class: ThermalTunePowerClass,
+    explicitly_confirmed: bool,
+    dry_run: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if explicitly_confirmed || dry_run {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() {
+        return Err(
+            "firmware thermal tuning requires --confirm when stdin is not interactive".into(),
+        );
+    }
+    eprint!(
+        "Start firmware-owned {} thermal tuning across nine PPS targets? [y/N] ",
+        power_class.as_str()
+    );
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes") {
+        Ok(())
+    } else {
+        Err("firmware thermal tuning was not confirmed".into())
+    }
+}
+
+async fn run_firmware_tuning_session(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    power_class: ThermalTunePowerClass,
+    output_dir: &Path,
+) -> Result<(Value, Vec<Value>, Vec<Value>), Box<dyn std::error::Error + Send + Sync>> {
+    request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::POST,
+        "/calibration/thermal-tuning/run",
+        Some(json!({"op": "start", "powerClass": power_class.as_str()})),
+    )
+    .await?;
+    let mut samples = Vec::new();
+    let mut decisions = Vec::new();
+    let mut recorded_sequences = BTreeSet::new();
+    let mut after_sequence: Option<u64> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(9 * 1_200 + 180);
+    let mut snapshot = request_leased(
+        client,
+        resolved,
+        lease_id,
+        Method::GET,
+        "/calibration/thermal-tuning/run?limit=16",
+        None,
+    )
+    .await?;
+    loop {
+        let page = snapshot.get("page").cloned().unwrap_or(Value::Null);
+        let page_events = page
+            .get("events")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut new_page_events = Vec::new();
+        for event in &page_events {
+            if let Some(sequence) = event.get("sequence").and_then(Value::as_u64) {
+                if !recorded_sequences.insert(sequence) {
+                    continue;
+                }
+                after_sequence =
+                    Some(after_sequence.map_or(sequence, |current| current.max(sequence)));
+            }
+            new_page_events.push(event.clone());
+            match event.get("kind").and_then(Value::as_str) {
+                Some("sample") => samples.push(event.clone()),
+                Some("decision") => decisions.push(event.clone()),
+                _ => {}
+            }
+        }
+        persist_firmware_trace_events(output_dir, &new_page_events)?;
+        if let (Some(through), Some(digest)) = (
+            page_events
+                .last()
+                .and_then(|event| event.get("sequence"))
+                .and_then(Value::as_u64),
+            page.get("digestThroughPage").and_then(Value::as_str),
+        ) {
+            snapshot = request_leased(
+                client,
+                resolved,
+                lease_id,
+                Method::POST,
+                "/calibration/thermal-tuning/run",
+                Some(json!({
+                    "op": "ack_trace",
+                    "runId": snapshot.pointer("/run/runId").cloned().unwrap_or(Value::Null),
+                    "afterSequence": through,
+                    "throughSequence": through,
+                    "traceDigest": digest,
+                })),
+            )
+            .await?;
+        }
+        let state = snapshot
+            .get("run")
+            .and_then(|run| run.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let emitted_through = snapshot
+            .pointer("/page/emittedThrough")
+            .and_then(Value::as_u64);
+        let acknowledged_through = snapshot
+            .pointer("/page/acknowledgedThrough")
+            .and_then(Value::as_u64);
+        let trace_caught_up =
+            emitted_through.is_none_or(|emitted| acknowledged_through == Some(emitted));
+        if matches!(state, "terminal" | "idle") && trace_caught_up {
+            break;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("firmware thermal tuning exceeded its bounded host wait window".into());
+        }
+        if page_events.is_empty() {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        let suffix = after_sequence.map_or_else(
+            || "/calibration/thermal-tuning/run?limit=16".to_string(),
+            |sequence| format!("/calibration/thermal-tuning/run?afterSequence={sequence}&limit=16"),
+        );
+        snapshot = request_leased(client, resolved, lease_id, Method::GET, &suffix, None).await?;
+    }
+    if firmware_review_requires_seal(&snapshot) {
+        let through = snapshot
+            .pointer("/run/review/terminalSequence")
+            .and_then(Value::as_u64);
+        let digest = snapshot
+            .pointer("/run/review/traceDigest")
+            .and_then(Value::as_str);
+        if let (Some(through), Some(digest)) = (through, digest) {
+            snapshot = request_leased(
+                client,
+                resolved,
+                lease_id,
+                Method::POST,
+                "/calibration/thermal-tuning/run",
+                Some(json!({
+                    "op": "seal_review",
+                    "runId": snapshot.pointer("/run/runId").cloned().unwrap_or(Value::Null),
+                    "afterSequence": through,
+                    "throughSequence": through,
+                    "traceDigest": digest,
+                })),
+            )
+            .await?;
+        }
+    }
+    validate_native_firmware_candidate(&snapshot, power_class)?;
+    Ok((snapshot, samples, decisions))
+}
+
+fn firmware_review_requires_seal(snapshot: &Value) -> bool {
+    snapshot
+        .pointer("/run/terminalDisposition")
+        .and_then(Value::as_str)
+        == Some("completed")
+        && snapshot
+            .pointer("/run/review/state")
+            .and_then(Value::as_str)
+            == Some("awaiting_seal")
+}
+
+fn validate_native_firmware_candidate(
+    snapshot: &Value,
+    requested_power_class: ThermalTunePowerClass,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(candidate) = snapshot.pointer("/run/candidate") else {
+        return Ok(());
+    };
+    let Some(candidate_hash) = candidate.get("candidateHash").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let profile_hex = candidate
+        .get("canonicalProfileHex")
+        .and_then(Value::as_str)
+        .ok_or("firmware candidate is missing canonicalProfileHex")?;
+    let canonical = hex::decode(profile_hex)?;
+    if canonical.len() != CANDIDATE_PROFILE_CANONICAL_BYTES {
+        return Err(format!(
+            "firmware candidate canonical profile has {} bytes; expected {}",
+            canonical.len(),
+            CANDIDATE_PROFILE_CANONICAL_BYTES
+        )
+        .into());
+    }
+    let expected_marker = match requested_power_class {
+        ThermalTunePowerClass::Pps3a => (PpsPowerClass::Pps3a, 3),
+        ThermalTunePowerClass::Pps5a => (PpsPowerClass::Pps5a, 5),
+    };
+    if canonical[0] != expected_marker.1 {
+        return Err(format!(
+            "firmware candidate power marker {} does not match {}",
+            canonical[0],
+            expected_marker.0.as_str()
+        )
+        .into());
+    }
+    let actual_hash = hex::encode(sha256(&canonical));
+    if actual_hash != candidate_hash.to_ascii_lowercase() {
+        return Err("firmware candidate canonical profile hash mismatch".into());
+    }
+    Ok(())
+}
+
+fn persist_firmware_trace_events(
+    output_dir: &Path,
+    events: &[Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut samples = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output_dir.join("samples.ndjson"))?;
+    let mut decisions = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(output_dir.join("decision-ledger.ndjson"))?;
+    for event in events {
+        let Some(kind) = event.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
+        let line = serde_json::to_string(event)?;
+        match kind {
+            "sample" => {
+                samples.write_all(line.as_bytes())?;
+                samples.write_all(b"\n")?;
+            }
+            "decision" => {
+                decisions.write_all(line.as_bytes())?;
+                decisions.write_all(b"\n")?;
+            }
+            _ => {}
+        }
+    }
+    samples.flush()?;
+    decisions.flush()?;
+    samples.sync_data()?;
+    decisions.sync_data()?;
+    Ok(())
+}
+
+fn write_firmware_tuning_bundle(
+    output_dir: &Path,
+    resolved: &ResolvedUsbTarget,
+    power_class: ThermalTunePowerClass,
+    snapshot: &Value,
+    samples: Vec<Value>,
+    decisions: Vec<Value>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    fs::create_dir_all(output_dir)?;
+    let run_bundle_path = output_dir.join("run.bundle.json");
+    let samples_path = output_dir.join("samples.ndjson");
+    let candidate_path = output_dir.join("thermal-profile.candidate.json");
+    let ledger_path = output_dir.join("decision-ledger.ndjson");
+    let index_path = output_dir.join("index.html");
+    let run = snapshot.get("run").cloned().unwrap_or(Value::Null);
+    let candidate = run.get("candidate").cloned().unwrap_or(Value::Null);
+    let run_id = run.get("runId").cloned().unwrap_or(Value::Null);
+    let terminal_disposition = run
+        .get("terminalDisposition")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let review_disposition = match run.pointer("/review/state").and_then(Value::as_str) {
+        Some("complete") => "complete",
+        Some("not_applicable") => "not_applicable",
+        _ => "incomplete",
+    };
+    let emitted_through = snapshot
+        .pointer("/page/emittedThrough")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let first_sequence = samples
+        .iter()
+        .chain(decisions.iter())
+        .filter_map(|event| event.get("sequence").and_then(Value::as_u64))
+        .min()
+        .unwrap_or(0);
+    let last_sequence = samples
+        .iter()
+        .chain(decisions.iter())
+        .filter_map(|event| event.get("sequence").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    let trace_complete = review_disposition == "complete";
+    let bundle = json!({
+        "schema": "thermal-tuning-v2",
+        "engine": "firmware",
+        "runId": run_id,
+        "powerClass": power_class.as_str(),
+        "physicalTargetsC": [60, 80, 100, 120, 140, 160, 180, 220, 240],
+        "executionOrderC": [60, 240, 140, 100, 80, 120, 180, 160, 220],
+        "terminalDisposition": terminal_disposition,
+        "reviewDisposition": review_disposition,
+        "trace": {
+            "firstSequence": first_sequence,
+            "lastSequence": last_sequence.max(emitted_through.as_u64().unwrap_or(0)),
+            "complete": trace_complete,
+            "digest": snapshot.pointer("/page/digestThroughPage").cloned().unwrap_or(Value::Null),
+            "gap": if trace_complete { Value::Null } else { json!("review_incomplete") }
+        },
+        "candidate": candidate,
+        "referenceComparison": "not_run",
+        "deviceId": resolved.device,
+        "run": run,
+        "files": {
+            "index.html": null,
+            "run.bundle.json": null,
+            "samples.ndjson": null,
+            "thermal-profile.candidate.json": null,
+            "decision-ledger.ndjson": null
+        }
+    });
+    fs::write(&run_bundle_path, serde_json::to_vec_pretty(&bundle)?)?;
+    fs::write(
+        &samples_path,
+        samples
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n"),
+    )?;
+    fs::write(
+        &candidate_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "thermal-tuning-v2-candidate",
+            "runId": run_id,
+            "candidate": candidate,
+            "powerClass": power_class.as_str(),
+            "reviewDisposition": review_disposition
+        }))?,
+    )?;
+    fs::write(
+        &ledger_path,
+        decisions
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n"),
+    )?;
+    let rendered = serde_json::to_string(snapshot)?.replace("<", "\\u003c");
+    let html = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Flux Purr thermal tuning</title><main><h1>Flux Purr thermal tuning</h1><p>Engine: firmware | Power class: {}</p><pre id=\"run\"></pre></main><script>document.querySelector('#run').textContent={rendered};</script>",
+        power_class.as_str()
+    );
+    fs::write(&index_path, html)?;
+    Ok(json!({
+        "ok": true,
+        "schema": "thermal-tuning-v2",
+        "engine": "firmware",
+        "powerClass": power_class.as_str(),
+        "outputDir": output_dir,
+        "files": [
+            run_bundle_path,
+            samples_path,
+            candidate_path,
+            ledger_path,
+            index_path
+        ]
+    }))
 }
 
 #[derive(Debug, Clone)]
@@ -13360,6 +14395,105 @@ mod tests {
     }
 
     #[test]
+    fn firmware_tune_uses_simple_boolean_confirmation() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "tune",
+            "--engine",
+            "firmware",
+            "--power-class",
+            "pps3a",
+            "--confirm",
+            "--output-dir",
+            "/tmp/thermal-tuning-bundle",
+            "--dry-run",
+        ])
+        .expect("parse firmware tuning confirmation");
+
+        let Command::Thermal {
+            command: ThermalCommand::Tune(args),
+        } = cli.command
+        else {
+            panic!("expected thermal tune command");
+        };
+
+        assert_eq!(args.engine, Some(ThermalTuneEngine::Firmware));
+        assert_eq!(args.power_class, Some(ThermalTunePowerClass::Pps3a));
+        assert!(args.confirm);
+        assert_eq!(
+            args.output_root,
+            PathBuf::from("/tmp/thermal-tuning-bundle")
+        );
+        assert!(confirm_firmware_tuning_start(
+            ThermalTunePowerClass::Pps3a,
+            args.confirm,
+            args.dry_run,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn firmware_tune_requires_boolean_confirmation_for_noninteractive_start() {
+        let error = confirm_firmware_tuning_start(ThermalTunePowerClass::Pps5a, false, false)
+            .expect_err("noninteractive tuning must require explicit confirmation");
+        assert!(
+            error
+                .to_string()
+                .contains("requires --confirm when stdin is not interactive")
+        );
+    }
+
+    #[test]
+    fn firmware_bundle_seals_only_successful_terminal_runs() {
+        let successful = json!({
+            "run": {
+                "terminalDisposition": "completed",
+                "review": {"state": "awaiting_seal"}
+            }
+        });
+        let failed = json!({
+            "run": {
+                "terminalDisposition": "failed",
+                "review": {"state": "awaiting_seal"}
+            }
+        });
+        let gap = json!({
+            "run": {
+                "terminalDisposition": "completed",
+                "review": {"state": "incomplete"}
+            }
+        });
+
+        assert!(firmware_review_requires_seal(&successful));
+        assert!(!firmware_review_requires_seal(&failed));
+        assert!(!firmware_review_requires_seal(&gap));
+    }
+
+    #[test]
+    fn legacy_profile_mode_selects_host_reference_without_source_identity() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "tune",
+            "--profile-mode",
+            "65w",
+            "--dry-run",
+        ])
+        .expect("parse legacy profile-mode tuning");
+
+        let Command::Thermal {
+            command: ThermalCommand::Tune(args),
+        } = cli.command
+        else {
+            panic!("expected thermal tune command");
+        };
+
+        assert_eq!(args.profile_mode, ThermalProfileMode::W65);
+        assert!(has_legacy_thermal_source_options(&args));
+    }
+
+    #[test]
     fn parses_thermal_flagship_tune_alias() {
         let cli = Cli::try_parse_from([
             "flux-purr",
@@ -13385,6 +14519,123 @@ mod tests {
         assert_eq!(args.profile_mode, ThermalProfileMode::W100);
         assert_eq!(args.source_id, "iso-mock");
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_thermal_compare_command() {
+        let cli = Cli::try_parse_from([
+            "flux-purr",
+            "thermal",
+            "compare",
+            "--firmware-bundle",
+            "/tmp/firmware-bundle",
+            "--reference-bundle",
+            "/tmp/reference-bundle.zip",
+            "--output",
+            "/tmp/comparison.json",
+        ])
+        .expect("parse thermal compare");
+
+        let Command::Thermal {
+            command: ThermalCommand::Compare(args),
+        } = cli.command
+        else {
+            panic!("expected thermal compare command");
+        };
+
+        assert_eq!(args.firmware_bundle, PathBuf::from("/tmp/firmware-bundle"));
+        assert_eq!(
+            args.reference_bundle,
+            Some(PathBuf::from("/tmp/reference-bundle.zip"))
+        );
+        assert_eq!(args.output, PathBuf::from("/tmp/comparison.json"));
+    }
+
+    fn write_thermal_comparison_fixture(path: &Path, schema: &str) {
+        fs::create_dir_all(path).unwrap();
+        fs::write(
+            path.join("run.bundle.json"),
+            serde_json::to_vec_pretty(&json!({
+                "schema": schema,
+                "engine": if schema == "thermal-tuning-v2" { "firmware" } else { "host-reference" },
+                "powerClass": "pps3a",
+                "physicalTargetsC": [60],
+                "executionOrderC": [60],
+                "reviewDisposition": "complete",
+                "trace": { "complete": true, "gap": null },
+                "candidate": { "candidateHash": "sha256:fixture" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(path.join("samples.ndjson"), b"\n").unwrap();
+        fs::write(
+            path.join("thermal-profile.candidate.json"),
+            br#"{"candidateHash":"sha256:fixture"}"#,
+        )
+        .unwrap();
+        fs::write(
+            path.join("decision-ledger.ndjson"),
+            br#"{"targetTempC":60,"candidateDisposition":"accepted","candidateHash":"sha256:fixture","gates":{"settle":true}}"#,
+        )
+        .unwrap();
+        fs::write(path.join("index.html"), b"<!doctype html>").unwrap();
+    }
+
+    #[test]
+    fn thermal_compare_reports_equivalent_for_matching_complete_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let firmware = dir.path().join("firmware");
+        let reference = dir.path().join("reference");
+        write_thermal_comparison_fixture(&firmware, "thermal-tuning-v2");
+        write_thermal_comparison_fixture(&reference, "thermal_self_test_preliminary_bundle");
+        let output = dir.path().join("comparison.json");
+
+        let result = compare_thermal_bundles(ThermalCompareArgs {
+            firmware_bundle: firmware,
+            reference_bundle: Some(reference),
+            output: output.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(result["outcome"], "equivalent");
+        assert_eq!(result["schema"], "thermal-tuning-comparison-v1");
+        assert!(output.is_file());
+    }
+
+    #[test]
+    fn thermal_compare_marks_missing_ledger_inconclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        let firmware = dir.path().join("firmware");
+        let reference = dir.path().join("reference");
+        write_thermal_comparison_fixture(&firmware, "thermal-tuning-v2");
+        write_thermal_comparison_fixture(&reference, "thermal_self_test_preliminary_bundle");
+        fs::remove_file(firmware.join("decision-ledger.ndjson")).unwrap();
+
+        let result = compare_thermal_bundles(ThermalCompareArgs {
+            firmware_bundle: firmware,
+            reference_bundle: Some(reference),
+            output: dir.path().join("comparison.json"),
+        })
+        .unwrap();
+
+        assert_eq!(result["outcome"], "inconclusive");
+        assert_eq!(result["firmware"]["complete"], false);
+    }
+
+    #[test]
+    fn thermal_compare_without_reference_is_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("comparison.json");
+        let result = compare_thermal_bundles(ThermalCompareArgs {
+            firmware_bundle: dir.path().join("missing"),
+            reference_bundle: None,
+            output: output.clone(),
+        })
+        .unwrap();
+
+        assert_eq!(result["outcome"], "not_run");
+        assert!(output.is_file());
     }
 
     #[test]

@@ -135,6 +135,8 @@ pub struct ControlMailboxCommand {
     pub expected_revision: Option<u32>,
     /// Cursor used by the read-only thermal-plant trace endpoint.
     pub after_sample: Option<u8>,
+    /// Exclusive cursor used by the thermal-tuning trace endpoint.
+    pub after_sequence: Option<u64>,
     pub body: String<LAN_HTTP_BODY_MAX_LEN>,
 }
 
@@ -208,6 +210,7 @@ pub struct HttpRequest<'a> {
     pub lease_id: Option<&'a str>,
     pub expected_revision: Option<u32>,
     pub after_sample: Option<u8>,
+    pub after_sequence: Option<u64>,
     pub request_private_network: bool,
     pub body: &'a str,
     /// Entropy produced by the hardware RNG. It is never emitted in responses.
@@ -592,7 +595,13 @@ impl NetHttpState {
             ));
         }
         let mut body = String::new();
-        let _ = body.push_str(request.body);
+        if endpoint == LanEndpoint::ThermalTuningRun && request.method == HttpMethod::Get {
+            if let Some((_, query)) = request.path.split_once('?') {
+                let _ = body.push_str(query);
+            }
+        } else {
+            let _ = body.push_str(request.body);
+        }
         HttpGate::Dispatch {
             command: ControlMailboxCommand {
                 request_id: 0,
@@ -603,6 +612,7 @@ impl NetHttpState {
                 lease_id,
                 expected_revision: request.expected_revision,
                 after_sample: request.after_sample,
+                after_sequence: request.after_sequence,
                 body,
             },
             allow_origin: None,
@@ -746,6 +756,7 @@ impl NetHttpState {
 }
 
 fn endpoint_for_path(path: &str) -> Option<LanEndpoint> {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
     match path {
         "/health" => Some(LanEndpoint::Health),
         "/api/v1/pairing" => Some(LanEndpoint::Pairing),
@@ -759,6 +770,7 @@ fn endpoint_for_path(path: &str) -> Option<LanEndpoint> {
         "/api/v1/calibration" => Some(LanEndpoint::Calibration),
         "/api/v1/calibration/job" => Some(LanEndpoint::CalibrationJob),
         "/api/v1/calibration/thermal-plant/run" => Some(LanEndpoint::ThermalPlantRun),
+        "/api/v1/calibration/thermal-tuning/run" => Some(LanEndpoint::ThermalTuningRun),
         "/api/v1/heater-curve" => Some(LanEndpoint::HeaterCurve),
         "/api/v1/heater-curve/save" => Some(LanEndpoint::HeaterCurveSave),
         "/api/v1/thermal-profile" => Some(LanEndpoint::ThermalProfile),
@@ -796,6 +808,10 @@ fn endpoint_allows_method(endpoint: LanEndpoint, method: HttpMethod) -> bool {
                 HttpMethod::Get | HttpMethod::Post
             )
             | (LanEndpoint::ThermalPlantRun, HttpMethod::Get)
+            | (
+                LanEndpoint::ThermalTuningRun,
+                HttpMethod::Get | HttpMethod::Post
+            )
             | (LanEndpoint::HeaterCurveSave, HttpMethod::Post)
     )
 }
@@ -930,6 +946,7 @@ mod tests {
             lease_id: None,
             expected_revision: None,
             after_sample: None,
+            after_sequence: None,
             request_private_network: false,
             body: "",
             entropy: [7; crate::lan::LAN_TOKEN_BYTES],

@@ -12,6 +12,8 @@ import type {
   InstallStatus,
   NetworkSummary,
   ThermalPlantRunSnapshot,
+  ThermalTuningRunRequest,
+  ThermalTuningRunSnapshot,
   UsbCalibrationConfigFrame,
   UsbCalibrationJobFrame,
   UsbHeaterCurveConfigFrame,
@@ -19,6 +21,7 @@ import type {
   UsbRequestFrame,
   UsbRuntimeConfigFrame,
   UsbThermalPlantRunFrame,
+  UsbThermalTuningRunFrame,
   UsbWifiConfigFrame,
   WifiConfigReceipt,
   WifiConfigRequest,
@@ -140,6 +143,7 @@ type UsbFrameFactory = (
   | UsbRuntimeConfigFrame
   | UsbCalibrationJobFrame
   | UsbThermalPlantRunFrame
+  | UsbThermalTuningRunFrame
   | UsbCalibrationConfigFrame
   | UsbHeaterCurveConfigFrame
   | UsbHeaterCurveSaveFrame
@@ -466,6 +470,26 @@ export class WebSerialControlPlaneClient {
       type: 'thermal_plant_run',
       requestId,
       afterSample,
+    }))
+  }
+
+  async getThermalTuningRun(afterSequence?: number, limit = 16): Promise<ThermalTuningRunSnapshot> {
+    return this.requestPayload<ThermalTuningRunSnapshot>('thermal_tuning_run', (requestId) => ({
+      type: 'thermal_tuning_run',
+      requestId,
+      op: 'get',
+      ...(afterSequence === undefined ? {} : { afterSequence }),
+      limit,
+    }))
+  }
+
+  async configureThermalTuningRun(
+    request: Omit<ThermalTuningRunRequest, 'leaseId'>
+  ): Promise<ThermalTuningRunSnapshot> {
+    return this.requestPayload<ThermalTuningRunSnapshot>('thermal_tuning_run', (requestId) => ({
+      type: 'thermal_tuning_run',
+      requestId,
+      ...request,
     }))
   }
 
