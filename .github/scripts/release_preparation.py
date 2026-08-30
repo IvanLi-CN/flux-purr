@@ -49,19 +49,33 @@ def read_json(path: Path) -> object:
         raise PreparationError(f"cannot read JSON at {path}: {error}") from error
 
 
-def require_completed_checks(payload: object) -> None:
+def latest_check_outcomes(payload: object) -> dict[str, str]:
     rows = payload.get("check_runs") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         raise PreparationError("check-runs JSON is missing check_runs")
-    outcomes: dict[str, str] = {}
-    for row in rows:
+    outcomes: dict[str, tuple[str, str]] = {}
+    for index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
         name = row.get("name")
         conclusion = row.get("conclusion")
         if isinstance(name, str) and isinstance(conclusion, str):
-            outcomes[name] = conclusion
-    failed = sorted(name for name in REQUIRED_SOURCE_CHECKS if outcomes.get(name) != "success")
+            completed_at = row.get("completed_at")
+            started_at = row.get("started_at")
+            timestamp = completed_at if isinstance(completed_at, str) else started_at if isinstance(started_at, str) else ""
+            candidate = (f"{timestamp}:{index:06d}", conclusion)
+            if name not in outcomes or candidate[0] >= outcomes[name][0]:
+                outcomes[name] = candidate
+    return {name: value for name, (_, value) in outcomes.items()}
+
+
+def incomplete_source_checks(payload: object) -> list[str]:
+    outcomes = latest_check_outcomes(payload)
+    return sorted(name for name in REQUIRED_SOURCE_CHECKS if outcomes.get(name) != "success")
+
+
+def require_completed_checks(payload: object) -> None:
+    failed = incomplete_source_checks(payload)
     if failed:
         raise PreparationError(f"source checks are not all successful: {failed}")
 
@@ -101,8 +115,19 @@ def prepare(args: argparse.Namespace) -> None:
     repo_root = args.repo_root.resolve()
     if not repo_root.is_dir():
         raise PreparationError(f"repository worktree does not exist: {repo_root}")
-    require_completed_checks(read_json(args.checks_json))
     type_label, channel, components, action = read_intent(args.labels_json)
+    incomplete_checks = incomplete_source_checks(read_json(args.checks_json))
+    if incomplete_checks:
+        values = {
+            "release_enabled": "false",
+            "release_action": action,
+            "release_reason": "source_checks_not_ready",
+            "source_sha": args.source_sha,
+            "prepared": "waiting",
+        }
+        write_outputs(values, args.github_output)
+        print(json.dumps(values, sort_keys=True))
+        return
 
     CHAIN.ROOT = repo_root
     try:

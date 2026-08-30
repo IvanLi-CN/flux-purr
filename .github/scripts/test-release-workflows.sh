@@ -31,6 +31,8 @@ assert "verify-prepared" in prepare
 assert "verify-merged-prepared" in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
+assert "latest_check_outcomes" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
+assert "latest_check_outcomes" in (root / ".github/scripts/release_completion.py").read_text(encoding="utf-8")
 assert "no_prepared_product_merge" in release_chain
 assert "release/product-main" not in release
 assert "Fast-forward main" not in release
