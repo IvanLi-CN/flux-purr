@@ -1,6 +1,7 @@
 /// <reference types="vitest/config" />
 
 // https://vite.dev/config/
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
@@ -15,6 +16,29 @@ import { defineConfig, type Plugin } from 'vite'
 
 const dirname =
   typeof __dirname !== 'undefined' ? __dirname : path.dirname(fileURLToPath(import.meta.url))
+const repoRoot = path.resolve(dirname, '..')
+
+function productBuildInfo() {
+  const mode = process.env.FLUX_PURR_BUILD_MODE ?? 'development'
+  const args = [
+    path.join(repoRoot, 'scripts/product-version.py'),
+    '--repo-root',
+    repoRoot,
+    '--mode',
+    mode,
+    '--format',
+    'json',
+  ]
+  if (process.env.FLUX_PURR_SOURCE_SHA) args.push('--source-sha', process.env.FLUX_PURR_SOURCE_SHA)
+  return JSON.parse(execFileSync('python3', args, { cwd: repoRoot, encoding: 'utf8' })) as {
+    version: string
+    channel: 'stable' | 'rc' | 'local'
+    sourceSha: string
+    buildId: string
+  }
+}
+
+const currentProductBuild = productBuildInfo()
 const firmwareLocalRoot = path.resolve(
   dirname,
   process.env.FLUX_PURR_FIRMWARE_ARTIFACTS_DIR ?? '../firmware/target/flux-purr-web-artifacts'
@@ -509,9 +533,23 @@ function devFirmwarePlugin(): Plugin {
   }
 }
 
+function productBuildInfoPlugin(info: ReturnType<typeof productBuildInfo>): Plugin {
+  return {
+    name: 'flux-purr-product-build-info',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'build-info.json',
+        source: `${JSON.stringify(info, null, 2)}\n`,
+      })
+    },
+  }
+}
+
 // More info at: https://storybook.js.org/docs/next/writing-tests/integrations/vitest-addon
 export default defineConfig({
   plugins: [
+    productBuildInfoPlugin(currentProductBuild),
     tanstackRouter({ target: 'react', autoCodeSplitting: true }),
     devFirmwarePlugin(),
     react(),

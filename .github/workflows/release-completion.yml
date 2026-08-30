@@ -1,0 +1,45 @@
+name: Release completion
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: release-completion-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  release-completion:
+    name: Release completion
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted policy revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Fetch pull request commits
+        if: github.event_name == 'pull_request_target'
+        run: git fetch --no-tags origin "${{ github.event.pull_request.head.sha }}"
+
+      - name: Verify VERSION and release completion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+        run: |
+          set -euo pipefail
+          args=(--commit "${HEAD_SHA}" --base "${BASE_SHA}" --allow-migration --repository "${REPOSITORY}")
+          if [ "${GITHUB_EVENT_NAME}" = workflow_dispatch ]; then
+            args+=(--skip-remote)
+          fi
+          python3 .github/scripts/release_completion.py "${args[@]}"

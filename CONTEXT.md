@@ -158,16 +158,32 @@ _Avoid_: Automatic thermal-model calibration
 
 ## Product Release
 
+**Product Release Version**:
+The exact SemVer identity declared solely by the root `VERSION` file, including a prerelease identifier when applicable; a matching immutable Flux Purr product Git tag records a published instance but does not establish the version.
+_Avoid_: Cargo package version, NPM package version, build ID, release label
+
+**Version File**:
+The root `VERSION` file that declares the Product Release Version. It remains unchanged during development and is updated by a Release Commit.
+_Avoid_: Git tag, Cargo package version, NPM package version, PR label
+
+**Build Identity**:
+The non-release display identity deterministically generated from the Version File without modifying it, optionally qualified by Git source revision data.
+_Avoid_: Product Release Version, PR label, release channel
+
+**Release Commit**:
+The constrained `main` commit that immediately follows one verified product-source commit and records its Product Release Version in the Version File.
+_Avoid_: Feature commit, product tag
+
 **Release Repair PR**:
-A PR that restores the release pipeline without changing the already-approved product source or creating a new product release intent.
+A PR that restores the release pipeline without changing the already-approved product source or creating a new Product Release Version.
 _Avoid_: Product patch, feature release
 
 **Release Recovery**:
-An explicit product-release workflow dispatch that publishes the existing frozen release snapshot for a specified `main` commit when its original release run did not complete publication. It preserves the snapshot's source, channel, version, and tag.
+An explicit product-release operation that republishes the Product Release Version recorded by an existing Release Commit without changing that commit.
 _Avoid_: Re-release, workflow retry
 
 **Release Promotion**:
-An explicit product-release workflow dispatch that publishes a stable release from an already qualified pre-release candidate at the same source commit and effective version. It records a separate immutable promotion intent instead of changing the candidate's frozen release snapshot.
+An explicit product-release operation that creates a stable Release Commit from a prerelease Release Commit without changing or retagging the prerelease.
 _Avoid_: Retagging, channel override
 
 ## Power And Communication

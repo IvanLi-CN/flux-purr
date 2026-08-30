@@ -70,25 +70,19 @@ bun run check:storybook
 bun run test:worktree-bootstrap
 ```
 
-## PR labels, releases, and branch protection
+## Product version and releases
 
-PRs targeting `main` must carry exactly one release type label and exactly one release channel label:
+The root [`VERSION`](VERSION) file is the only product-version source. It contains one stable SemVer or `-rc.N` value and is read without modification by local development, tests, firmware, `flux-purr-devd`, the CLI, Web builds, bundles, manifests, and releases. Cargo and NPM package versions remain package metadata only.
 
-- Type: `type:patch`, `type:minor`, `type:major`, `type:docs`, or `type:skip`
-- Channel: `channel:stable` or `channel:rc`
+Development builds derive `nextPatch(VERSION)-dev.<short-sha>`. With `VERSION=0.22.0` and source commit `abcdef0...`, every local consumer reports `0.22.1-dev.abcdef0`; no development command writes `VERSION`.
 
-`type:patch`, `type:minor`, and `type:major` publish one product release after `CI Main` succeeds on the merged commit. `type:docs` and `type:skip` intentionally skip the release workflow. Stable releases use `vX.Y.Z`; RC releases use `vX.Y.Z-rc.<sha7>`.
+Every source commit that passes `CI Main` is released separately. The release controller creates one child Release Commit that changes only `VERSION`, stores the source SHA and product version in commit trailers, builds and verifies all assets from that commit, creates `vX.Y.Z` (or `vX.Y.Z-rc.N`), publishes the manifest, and only then fast-forwards `main`. A failed run keeps the immutable candidate at `release/product-main`; `operation=recover` reuses that same Release Commit. `operation=exact` is for major, minor, or RC values, and `operation=promote` creates a new stable Release Commit from a completed RC.
 
-`Label Gate` records the validated release intent against the PR head SHA before merge. After `CI Main` succeeds, release intent is frozen on `main` in git notes under `refs/notes/release-snapshots`; the product release job reads only that snapshot, not mutable post-merge PR labels. Manual recovery uses the `Release Product` workflow with `operation=recover` and an explicit `main` commit SHA. A qualified RC can use `operation=promote` to publish stable from the same source SHA and effective version; the workflow records that promotion separately under `refs/notes/release-promotions` and does not require the RC Release to have been published first.
+PRs must carry exactly one `type:patch|minor|major|docs|skip` label and exactly one `channel:stable|rc` label. The trusted `Label Gate` validates those labels and freezes the intent on the PR head; the release workflow later consumes the mainline snapshot. `type:patch + channel:stable` starts the automatic `nextPatch(VERSION)` release. `type:minor`, `type:major`, and `channel:rc` require a controlled `operation=exact` dispatch that writes its exact text once to the Release Commit. Labels never calculate or override a product version.
 
-Each product release attaches Web, Firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
+The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits and the `Validate PR labels`, `Release completion`, `Firmware checks`, `DEVD checks`, `Web checks`, and `Worktree bootstrap` checks. The release controller uses the existing workflow `GITHUB_TOKEN` with `contents: write`; the existing `github-actions` integration (ID `15368`) is the only ruleset bypass actor for the staged Release Commit writes. No new App, secret, variable, or GitHub Environment is used.
 
-The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require PRs, require signed commits, disallow force pushes/deletions, and require these checks before merge:
-
-- `Validate PR labels`
-- `Firmware checks`
-- `Web checks`
-- `Worktree bootstrap`
+Each product release attaches Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
 
 ## Firmware target notes
 

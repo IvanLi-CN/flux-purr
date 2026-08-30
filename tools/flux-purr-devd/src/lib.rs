@@ -38,6 +38,11 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 pub mod firmware_bundle;
 pub mod lan;
 
+pub const PRODUCT_VERSION: &str = env!("FLUX_PURR_PRODUCT_VERSION");
+pub const PRODUCT_CHANNEL: &str = env!("FLUX_PURR_PRODUCT_CHANNEL");
+pub const PRODUCT_SOURCE_SHA: &str = env!("FLUX_PURR_PRODUCT_SOURCE_SHA");
+pub const PRODUCT_BUILD_ID: &str = env!("FLUX_PURR_PRODUCT_BUILD_ID");
+
 pub const DEFAULT_EVENT_LIMIT: usize = 1_000;
 pub const DEFAULT_LOG_LIMIT: usize = 2_000;
 pub const DEFAULT_TRACE_LIMIT: usize = 2_000;
@@ -2663,7 +2668,10 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, HttpError>
     let state_lock = state.lock()?;
     Ok(Json(json!({
         "name": "flux-purr-devd",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": PRODUCT_VERSION,
+        "channel": PRODUCT_CHANNEL,
+        "sourceSha": PRODUCT_SOURCE_SHA,
+        "buildId": PRODUCT_BUILD_ID,
         "bind": state.config.bind.to_string(),
         "deviceCount": state_lock.devices.len(),
         "limits": {

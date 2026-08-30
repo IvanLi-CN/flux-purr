@@ -23,7 +23,9 @@
   },
   "required_checks": [
     "Validate PR labels",
+    "Release completion",
     "Firmware checks",
+    "DEVD checks",
     "Web checks",
     "Worktree bootstrap"
   ],
@@ -36,29 +38,28 @@
       "jobs": ["Validate PR labels"]
     },
     {
+      "workflow": "Release completion",
+      "path": ".github/workflows/release-completion.yml",
+      "jobs": ["Release completion"]
+    },
+    {
       "workflow": "CI PR",
       "path": ".github/workflows/ci.yml",
-      "jobs": ["Firmware checks", "Web checks", "Worktree bootstrap"]
+      "jobs": ["Firmware checks", "DEVD checks", "Web checks", "Worktree bootstrap"]
     }
   ],
   "expected_main_workflows": [
     {
       "workflow": "CI Main",
       "path": ".github/workflows/ci-main.yml",
-      "jobs": ["Firmware checks", "Web checks", "Worktree bootstrap", "Release Snapshot"]
+      "jobs": ["Release Commit validation", "Firmware checks", "DEVD checks", "Web checks", "Worktree bootstrap"]
     }
   ],
   "expected_release_workflows": [
     {
       "workflow": "Release Product",
       "path": ".github/workflows/release.yml",
-      "jobs": [
-        "Release Product Meta",
-        "Release Product Web Asset",
-        "Release Product Firmware Asset",
-        "Release Product Host Tools",
-        "Release Product Publish"
-      ]
+      "jobs": ["Release Product"]
     }
   ]
 }

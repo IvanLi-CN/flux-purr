@@ -264,7 +264,7 @@ Base URL: `http://<device-ip>` or the MAC-derived `http://flux-purr-<mac>.local`
 
 Public endpoints:
 
-- `GET /health` is the anonymous, low-frequency connection summary. It returns `api`, MAC-derived `deviceId` and `hostname`, firmware version, and `{ pairing: { mode, active, attemptsRemaining } }`; it never returns runtime telemetry, a code, or a bearer token. `mode` is `required` (current default), `optional` (the device may claim without a code), or `unavailable` (basic public information only).
+- `GET /health` is the anonymous, low-frequency daemon summary. It returns the product `version`, derived `channel`, Release/build `sourceSha`, and `buildId` alongside the daemon bind/device counts; it never returns runtime telemetry, a code, or a bearer token. Development daemons report `nextPatch(VERSION)-dev.<short-sha>` with channel `local`, while release daemons report the exact root `VERSION` and its stable/RC channel.
 - `GET /api/v1/pairing` returns the same current policy and whether a code is currently visible, never the code.
 - `POST /api/v1/pairing/claim` returns the stable bearer token plus MAC-derived `deviceId` and `hostname`. `required` accepts `{ "code": "4827" }` only after the physical WiFi Info page opens the pairing window; `optional` accepts `{}`; `unavailable` rejects the claim with `pairing_unavailable`.
 
@@ -587,7 +587,7 @@ Core commands:
 
 ## Product Release Manifest
 
-Flux Purr releases use one product tag: `vX.Y.Z` for stable releases and `vX.Y.Z-rc.<sha7>` for RC releases. Web, firmware, and host-tools assets attach to the same GitHub Release. The release Web archive contains a same-origin firmware catalog so the Browser never has to call GitHub.
+Flux Purr releases use one product tag containing the exact root `VERSION`: `vX.Y.Z` for stable releases and `vX.Y.Z-rc.N` for RC releases. Web, firmware, and host-tools assets attach to the same GitHub Release. The release Web archive contains a same-origin firmware catalog so the Browser never has to call GitHub. Development builds are displayed as `nextPatch(VERSION)-dev.<short-sha>` and are never release tags.
 
 Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
 
@@ -595,13 +595,14 @@ Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
 {
   "schemaVersion": 1,
   "product": "flux-purr",
-  "version": "0.2.0",
-  "tag": "v0.2.0",
+  "version": "0.22.1",
+  "tag": "v0.22.1",
   "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
+  "channel": "stable",
   "components": [
     {
       "id": "firmware",
-      "version": "0.2.0",
+      "version": "0.22.1",
       "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
       "protocolVersions": ["flux-purr.usb.v1"],
       "assets": [

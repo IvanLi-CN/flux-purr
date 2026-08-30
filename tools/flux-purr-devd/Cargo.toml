@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Native localhost daemon for Flux Purr USB/control-plane workflows"
 license = "MIT OR Apache-2.0"
+build = "build.rs"
 
 [lib]
 path = "src/lib.rs"

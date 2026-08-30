@@ -27,7 +27,7 @@
 - `cargo test --manifest-path tools/flux-purr-devd/Cargo.toml --lib`
 - `cargo test --manifest-path firmware/Cargo.toml --lib control_plane`
 - `bun run typecheck`, `bun run check`, installer unit tests, `ui_demo` visual review and E2E coverage
-- `.github/scripts/test-release-labels.sh`
+- `.github/scripts/test-release-chain.sh`
 
 ## Remaining Gate
 
