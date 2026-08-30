@@ -355,9 +355,27 @@ fn rom_log_line(line: &[u8]) {
 }
 
 #[cfg(target_arch = "xtensa")]
+struct RomPanicWriter;
+
+#[cfg(target_arch = "xtensa")]
+impl core::fmt::Write for RomPanicWriter {
+    fn write_str(&mut self, value: &str) -> core::fmt::Result {
+        rom_log_line(value.as_bytes());
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
+fn panic(info: &PanicInfo<'_>) -> ! {
     rom_log_line(b"panic=firmware_fault\n");
+    if let Some(location) = info.location() {
+        let mut writer = RomPanicWriter;
+        let _ = core::fmt::Write::write_fmt(
+            &mut writer,
+            format_args!("panic_location={}:{}\n", location.file(), location.line()),
+        );
+    }
     esp_hal::rom::ets_delay_us(250_000);
     esp_hal::system::software_reset()
 }
@@ -12999,7 +13017,12 @@ async fn main(_spawner: Spawner) {
     }
     log_ui_state(&ui_state);
     #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, RUNTIME_READY_BOOT_STAGE_LINE);
+    {
+        let _ = usb_write_bytes_bounded(&mut usb_serial, RUNTIME_READY_BOOT_STAGE_LINE);
+        // The daemon may attach after early boot framing; repeat the latched
+        // reset cause once JSONL control is ready for post-reset diagnosis.
+        let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
+    }
 
     let runtime_started_ms = Instant::now().as_millis();
     let mut last_control_ms: u64 = 0;
