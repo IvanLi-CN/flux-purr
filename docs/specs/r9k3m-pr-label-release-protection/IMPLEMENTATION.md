@@ -10,7 +10,7 @@ The numeric version calculation is now owned by [the version-source specificatio
 - The workspace `Cargo.lock` is tracked so all host-tool release matrix builds can honor `cargo ... --locked`.
 - All Ubuntu jobs that build `flux-purr-devd`, including the firmware bundle job, reuse the local Linux serial dependency action to install `pkg-config` and `libudev-dev` before the locked build so `libudev-sys` has its declared system dependency in the clean runner.
 - `.github/quality-gates.json` 声明主分支保护、签名提交、`Validate PR labels`、`Release completion` 及其他 required checks，以及 owner PR 不强制 approval 的 review policy。
-- Release writes use the dedicated GitHub App token; `GITHUB_TOKEN` only reads frozen intent, and no GitHub Environment is required.
+- Release writes use the existing workflow `GITHUB_TOKEN`; the existing `github-actions` integration is the sole ruleset bypass actor, and no new App or GitHub Environment is required.
 
 ## Validation
 

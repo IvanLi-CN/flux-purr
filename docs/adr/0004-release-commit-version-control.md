@@ -32,17 +32,18 @@ The root `VERSION` file is the only product version source.
 - `CI Main` performs the single structural validation for a Release Commit and
   skips the full matrix. `Release Product` observes that validation and exits,
   so product assets are built once for each source commit.
-- A dedicated GitHub App with only `contents: write` performs release writes
-  and is the sole ruleset bypass actor. The workflow's `GITHUB_TOKEN` remains
-  read-only for release-intent lookup. No GitHub Environment is introduced.
+- The existing workflow `GITHUB_TOKEN` with `contents: write` performs release
+  writes. The existing `github-actions` integration (ID `15368`) is the sole
+  ruleset bypass actor for the staged Release Commit writes. No new App,
+  secret, variable, or GitHub Environment is introduced.
 
 ## Consequences
 
 The exact release version is immutable once its Release Commit exists. A
 failed publication leaves that candidate available for recovery and keeps the
-release-completion gate closed. The owner must install the App, configure
-`RELEASE_APP_ID` and `RELEASE_APP_PRIVATE_KEY`, make it the only always-bypass
-actor, and remove overlapping classic branch protection before rollout.
+release-completion gate closed. The owner must allow the existing
+`github-actions` integration as the only always-bypass actor for the release
+ruleset and remove overlapping classic branch protection before rollout.
 
 ## Alternatives considered
 
@@ -50,5 +51,5 @@ actor, and remove overlapping classic branch protection before rollout.
   a second product-version source.
 - Reusing an RC commit for its stable tag would give one commit two product
   identities and weaken rollback provenance.
-- Using `GITHUB_TOKEN` for protected-main writes cannot satisfy the ruleset
-  boundary.
+- Using a new App or GitHub Environment would add credentials and resources
+  that are not part of this repository's existing release surface.

@@ -27,7 +27,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
   issues: read
   pull-requests: read
 
@@ -37,31 +37,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Create release controller token
-        id: release-app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
-          token: ${{ steps.release-app-token.outputs.token }}
+          token: ${{ github.token }}
           persist-credentials: false
 
       - name: Configure release controller identity
         env:
-          APP_SLUG: ${{ steps.release-app-token.outputs.app-slug }}
-          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          bot_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           gh auth setup-git
 
       - name: Resolve or reuse staged Release Commit
@@ -304,7 +294,7 @@ jobs:
       - name: Publish and verify release assets
         if: steps.release.outputs.enabled == 'true'
         env:
-          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_SHA: ${{ steps.release.outputs.releaseSha }}
         shell: bash
@@ -337,7 +327,7 @@ jobs:
         env:
           EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
           EDGEONE_PROJECT_NAME: ${{ secrets.EDGEONE_PROJECT_NAME }}
-          GH_TOKEN: ${{ steps.release-app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
           PRODUCT_VERSION: ${{ steps.release.outputs.version }}
         shell: bash
         run: |

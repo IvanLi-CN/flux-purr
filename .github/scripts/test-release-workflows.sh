@@ -20,9 +20,14 @@ assert "kind=release" in ci_main
 assert "Release Snapshot" not in ci_main
 assert "release/product-main" in release
 assert "operation=recover" not in release
-for token in ("actions/create-github-app-token@v3", "RELEASE_APP_ID", "RELEASE_APP_PRIVATE_KEY", "release_action", "controlled_exact_required", "stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
+for token in ("release_action", "controlled_exact_required", "stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
     assert token in release, token
 assert "github.token" in release
+assert "contents: write" in release
+assert "github-actions[bot]" in release
+assert "actions/create-github-app-token@v3" not in release
+assert "RELEASE_APP_ID" not in release
+assert "RELEASE_APP_PRIVATE_KEY" not in release
 assert "issues: read" in release
 assert "environment: product-release" not in release
 assert "--mode intent" not in release
