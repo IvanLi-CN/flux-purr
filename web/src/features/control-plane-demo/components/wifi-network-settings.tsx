@@ -411,22 +411,45 @@ export function WifiNetworkSettings({
             <CircleAlert aria-hidden="true" />
             <span>{unavailableReason ?? '当前连接仅支持查看 WiFi 信息，不能修改设备配置。'}</span>
           </div>
-          <dl className="industrial-wifi-settings__snapshot">
-            <div>
-              <dt>网络名称</dt>
-              <dd>{savedSsidValue || '未配置'}</dd>
-            </div>
-            <div>
-              <dt>信号</dt>
-              <dd>{wifiRssi == null ? '不可用' : `${wifiRssi} dBm`}</dd>
-            </div>
-            <div>
-              <dt>已保存密码</dt>
-              <dd>
-                {savedPasswordLength > 0 ? createWifiPasswordMask(savedPasswordLength) : '未配置'}
-              </dd>
-            </div>
-          </dl>
+          <fieldset className="industrial-wifi-settings__form industrial-wifi-settings__form--readonly">
+            <legend className="sr-only">WiFi 只读配置</legend>
+            <Label className="industrial-wifi-settings__field" htmlFor={ssidId}>
+              <span>WiFi 名称</span>
+              <Input
+                id={ssidId}
+                className="h-9"
+                value={savedSsidValue || '未配置'}
+                readOnly
+                aria-readonly="true"
+              />
+            </Label>
+
+            <Label className="industrial-wifi-settings__field" htmlFor={passwordId}>
+              <span>已保存密码</span>
+              <Input
+                id={passwordId}
+                className="h-9"
+                type={savedPasswordLength > 0 ? 'password' : 'text'}
+                aria-label="密码"
+                value={
+                  savedPasswordLength > 0 ? createWifiPasswordMask(savedPasswordLength) : '未配置'
+                }
+                readOnly
+                aria-readonly="true"
+              />
+            </Label>
+
+            <Label className="industrial-wifi-settings__field" htmlFor={`${inputId}-rssi`}>
+              <span>信号</span>
+              <Input
+                id={`${inputId}-rssi`}
+                className="h-9"
+                value={wifiRssi == null ? '不可用' : `${wifiRssi} dBm`}
+                readOnly
+                aria-readonly="true"
+              />
+            </Label>
+          </fieldset>
         </>
       ) : (
         <form

@@ -293,9 +293,11 @@ export const ReadOnlyLanSnapshot: Story = {
     await expect(canvas.getByRole('alert')).toHaveTextContent(
       '当前通过 WiFi / LAN 连接，只能查看网络信息；请通过 USB 配置连接修改 WiFi。'
     )
-    await expect(canvas.getByText('FluxPurr-Lab')).toBeVisible()
-    await expect(canvas.getByText('•••••••••••')).toBeVisible()
-    expect(canvas.queryByRole('textbox', { name: 'WiFi 名称' })).toBeNull()
+    await expect(canvas.getByRole('textbox', { name: 'WiFi 名称' })).toHaveValue('FluxPurr-Lab')
+    await expect(canvas.getByRole('textbox', { name: 'WiFi 名称' })).toHaveAttribute('readonly', '')
+    await expect(canvas.getByLabelText('密码')).toHaveValue('•••••••••••')
+    await expect(canvas.getByLabelText('密码')).toHaveAttribute('readonly', '')
+    await expect(canvas.getByRole('textbox', { name: '信号' })).toHaveValue('-54 dBm')
     expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
     expect(canvas.queryByRole('button', { name: '清除 WiFi' })).toBeNull()
   },

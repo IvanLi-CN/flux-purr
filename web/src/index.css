@@ -8153,6 +8153,18 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end;
   gap: 0.58rem;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.industrial-wifi-settings__form--readonly {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.industrial-wifi-settings__form--readonly [data-slot="input"] {
+  cursor: default;
+  background: rgba(239, 244, 248, 0.68);
 }
 
 .industrial-wifi-settings__field {
@@ -8292,6 +8304,10 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
+  .industrial-wifi-settings__form--readonly {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .industrial-wifi-settings__actions {
     grid-column: span 1;
   }
@@ -8303,6 +8319,10 @@
   }
 
   .industrial-wifi-settings__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__form--readonly {
     grid-template-columns: minmax(0, 1fr);
   }
 
