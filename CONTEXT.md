@@ -163,28 +163,28 @@ The exact SemVer identity declared solely by the root `VERSION` file, including 
 _Avoid_: Cargo package version, NPM package version, build ID, release label
 
 **Version File**:
-The root `VERSION` file that declares the Product Release Version. It remains unchanged during development and is updated by a Release Commit.
+The root `VERSION` file that declares the Product Release Version. It remains unchanged during development and is updated only by a VERSION-only preparation commit on an already-open product PR.
 _Avoid_: Git tag, Cargo package version, NPM package version, PR label
 
 **Build Identity**:
 The non-release display identity deterministically generated from the Version File without modifying it, optionally qualified by Git source revision data.
 _Avoid_: Product Release Version, PR label, release channel
 
-**Release Commit**:
-The constrained `main` commit that immediately follows one verified product-source commit and records its Product Release Version in the Version File.
-_Avoid_: Feature commit, product tag
+**Version Preparation Commit**:
+The VERSION-only preparation commit appended to a verified product PR. Its normal protected merge carries the Product Release Version into `main`.
+_Avoid_: Feature commit, product tag, direct main write
 
 **Release Repair PR**:
 A PR that restores the release pipeline without changing the already-approved product source or creating a new Product Release Version.
 _Avoid_: Product patch, feature release
 
 **Release Recovery**:
-An explicit product-release operation that republishes the Product Release Version recorded by an existing Release Commit without changing that commit.
+An explicit product-release operation that republishes the Product Release Version recorded by an existing prepared main merge without changing that commit.
 _Avoid_: Re-release, workflow retry
 
 **Release Promotion**:
-An explicit product-release operation that creates a stable Release Commit from a prerelease Release Commit without changing or retagging the prerelease.
-_Avoid_: Retagging, channel override
+A stable product PR with its own protected merge boundary and exact stable `VERSION`; it must not retag the prerelease commit.
+_Avoid_: Retagging, channel override, direct main write
 
 ## Power And Communication
 

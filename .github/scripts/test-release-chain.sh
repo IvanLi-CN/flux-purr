@@ -33,10 +33,20 @@ def run(*args):
 
 source = run("git", "rev-parse", "HEAD")
 assert (tmp / "VERSION").read_text(encoding="utf-8") == "0.22.0\n"
-module.stage(Namespace(source_sha=source, mode="automatic", exact_version=None, github_output=None))
+module.stage(Namespace(
+    source_sha=source,
+    mode="automatic",
+    exact_version=None,
+    expected_channel="stable",
+    intent_type="type:patch",
+    intent_channel="stable",
+    intent_components="none",
+    github_output=None,
+))
 release = run("git", "rev-parse", "HEAD")
 values = module.verify_release_commit(release, source, "0.22.1")
 assert values["tag"] == "v0.22.1"
+assert module.verify_prepared_commit(release, source, "0.22.1")["action"] == "automatic"
 assert module.diff_names(release) == ["VERSION"]
 assert module.commit_parent(release) == source
 
@@ -44,28 +54,38 @@ assert module.commit_parent(release) == source
 run("git", "add", "README")
 run("git", "commit", "--signoff", "-m", "rc source")
 rc_source = run("git", "rev-parse", "HEAD")
-module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.23.0-rc.1", expected_channel="rc", github_output=None))
+module.stage(Namespace(
+    source_sha=rc_source,
+    mode="exact",
+    exact_version="0.23.0-rc.1",
+    expected_channel="rc",
+    intent_type="type:patch",
+    intent_channel="rc",
+    intent_components="none",
+    github_output=None,
+))
 rc_release = run("git", "rev-parse", "HEAD")
 assert module.verify_release_commit(rc_release, rc_source, "0.23.0-rc.1")["version"] == "0.23.0-rc.1"
+assert module.verify_prepared_commit(rc_release, rc_source, "0.23.0-rc.1")["action"] == "exact"
 module.promote(Namespace(commit=rc_release, exact_version=None, github_output=None))
 stable_release = run("git", "rev-parse", "HEAD")
 assert module.verify_release_commit(stable_release, rc_release, "0.23.0")["version"] == "0.23.0"
 
 run("git", "reset", "--hard", rc_source)
 try:
-    module.stage(Namespace(source_sha=rc_source, mode="intent", exact_version=None, expected_channel=None, github_output=None))
+    module.stage(Namespace(source_sha=rc_source, mode="intent", exact_version=None, expected_channel=None, intent_type=None, intent_channel=None, intent_components="none", github_output=None))
 except module.ReleaseChainError:
     pass
 else:
     raise AssertionError("labels must not select a numeric staging mode")
 try:
-    module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.23.0", expected_channel="rc", github_output=None))
+    module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.23.0", expected_channel="rc", intent_type="type:patch", intent_channel="rc", intent_components="none", github_output=None))
 except module.ReleaseChainError:
     pass
 else:
     raise AssertionError("exact VERSION must match the frozen release channel")
 try:
-    module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.22.1", expected_channel="stable", github_output=None))
+    module.stage(Namespace(source_sha=rc_source, mode="exact", exact_version="0.22.1", expected_channel="stable", intent_type="type:patch", intent_channel="stable", intent_components="none", github_output=None))
 except module.ReleaseChainError:
     pass
 else:

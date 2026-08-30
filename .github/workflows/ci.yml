@@ -16,8 +16,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  classify:
+    name: Release preparation validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      kind: ${{ steps.classify.outputs.kind }}
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Classify prepared VERSION commit
+        id: classify
+        shell: bash
+        run: |
+          set -euo pipefail
+          if python3 .github/scripts/release_chain.py verify-prepared --commit HEAD >/dev/null 2>&1; then
+            echo "kind=prepared" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=source" >> "$GITHUB_OUTPUT"
+          fi
+
   firmware:
     name: Firmware checks
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -46,6 +72,8 @@ jobs:
 
   devd:
     name: DEVD checks
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -65,6 +93,8 @@ jobs:
 
   web:
     name: Web checks
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -90,10 +120,12 @@ jobs:
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
+          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_preparation.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
           python3 scripts/test-product-version.py
           bash scripts/test-build-identities.sh
           bash .github/scripts/test-release-chain.sh
+          bash .github/scripts/test-release-preparation.sh
+          bash .github/scripts/test-release-completion.sh
           bash .github/scripts/test-release-labels.sh
           python3 -m unittest tools/firmware-web-catalog/test_build_catalog.py
 
@@ -119,6 +151,8 @@ jobs:
 
   worktree-bootstrap:
     name: Worktree bootstrap
+    needs: classify
+    if: needs.classify.outputs.kind == 'source'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

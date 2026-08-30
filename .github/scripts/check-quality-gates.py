@@ -62,7 +62,12 @@ def main() -> int:
     require(declaration["policy"]["require_signed_commits"] is True, "signed commits must be required", errors)
 
     workflow_jobs: set[str] = set()
-    for key in ("expected_pr_workflows", "expected_main_workflows", "expected_release_workflows"):
+    for key in (
+        "expected_pr_workflows",
+        "expected_preparation_workflows",
+        "expected_main_workflows",
+        "expected_release_workflows",
+    ):
         for entry in declaration.get(key, []):
             validate_workflow(entry, repo_root, errors)
             workflow_jobs.update(entry["jobs"])

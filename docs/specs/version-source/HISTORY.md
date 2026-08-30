@@ -4,15 +4,15 @@
 
 ## Lifecycle / Compatibility
 
-- 本主题是 Flux Purr 产品版本、开发 build identity、Release Commit 和逐源提交发布顺序的当前契约。
+- 本主题是 Flux Purr 产品版本、开发 build identity、VERSION-only 准备提交和逐源提交发布顺序的当前契约。
 - `docs/specs/r9k3m-pr-label-release-protection/` 中由 PR label、snapshot、channel 和 tag baseline 决定数字版本的部分已被本主题与 ADR 0003 取代；Label Gate、snapshot、channel routing、主分支保护和非版本化 PR policy 仍继续生效。
 - 既有 Git tags、GitHub Releases、release manifests 与 Git notes 保持历史可读，但不再是新构建或新发布的版本输入。
 
 ## Replacements / Background
 
-- 当前最后已发布 tag `v0.22.0` 是 Version File migration baseline。首个 `type:patch + channel:stable` Release Commit 使用 `0.22.1`；exact intent 在其 Release Commit 中锁定所给文本，之后的每个源提交都有独立版本边界。
-- 一源提交一版本要求 Release Commit 在下一个源提交前完成；该顺序替代了以多个连续 `main` 提交合并发布的设计。
-- 自动 patch、受控 exact、RC promotion 与现有 `GITHUB_TOKEN` / `github-actions` 权限边界由 ADR 0004 固化；Label Gate 和 snapshot 继续仅保存发布意图。
+- `VERSION=0.22.0` 是 Version File migration baseline。普通 patch 在同一 PR 上准备 `0.22.1`；exact intent 在准备提交中锁定所给文本，之后的每个产品 PR 都有独立版本边界。
+- 一产品 PR 一版本要求 VERSION-only 准备提交在正常 protected merge 前完成；该顺序替代了发布后直接写入 `main` 的设计。
+- 自动 patch、受控 exact、main-merge recovery 与既有 `GITHUB_TOKEN` 权限边界由 ADR 0005 固化；Label Gate 继续只保存发布意图，不参与数字版本计算。
 
 ## References
 

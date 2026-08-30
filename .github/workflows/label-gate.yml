@@ -11,7 +11,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write
   pull-requests: read
 
 jobs:
@@ -44,12 +43,6 @@ jobs:
             echo "- source: frozen PR head ${{ github.event.pull_request.head.sha }}"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Freeze release intent
-        if: github.event.pull_request.state == 'open'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          python3 .github/scripts/release_snapshot.py capture-intent \
-            --event-path "${GITHUB_EVENT_PATH}" \
-            --github-repository "${GITHUB_REPOSITORY}" \
-            --github-token "${GITHUB_TOKEN}"
+      # The preparation workflow reads this successful gate and copies the
+      # validated labels into the immutable VERSION-only commit.  Keeping this
+      # workflow read-only avoids depending on issue-comment write access.

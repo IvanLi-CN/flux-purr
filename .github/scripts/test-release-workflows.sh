@@ -7,39 +7,42 @@ from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
+ci_pr = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 ci_main = (root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8")
+prepare = (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
 release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 completion = (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
 quality = (root / ".github/quality-gates.json").read_text(encoding="utf-8")
 label_gate = (root / ".github/workflows/label-gate.yml").read_text(encoding="utf-8")
 
-assert "paths-ignore:" not in ci_main
-assert "Release Commit validation" in ci_main
-assert "needs: classify" in ci_main
-assert "kind=release" in ci_main
-assert "Release Snapshot" not in ci_main
-assert "release/product-main" in release
+assert "Release preparation validation" in ci_pr
+assert "kind=prepared" in ci_pr
+assert "needs: classify" in ci_pr
+assert "prepared-integration" in ci_main
+assert "git diff --quiet" in ci_main
+assert "Prepare product version" in prepare
+assert "workflows: [CI PR, Label Gate]" in prepare
+assert "contents: write" in prepare
+assert "Push prepared VERSION commit to the existing pull request" in prepare
+assert "refs/heads/main" not in prepare
+assert "verification_sha" in prepare
+assert "verify-prepared" in prepare
+assert "verify-prepared" in release
+assert "no_prepared_product_merge" in release
+assert "release/product-main" not in release
+assert "Fast-forward main" not in release
+assert "git push origin \"${RELEASE_SHA}:refs/heads/main\"" not in release
 assert "operation=recover" not in release
-for token in ("release_action", "controlled_exact_required", "stage", "verify-commit", "promote", "candidate_source", "git merge-base --is-ancestor", "incomplete candidate", "flux-purr-firmware-v", "flux-purr-web-v", "flux-purr-host-tools-", "product_release_manifest.py", "Deploy published Web archive to EdgeOne", ".edgeone-deployed", "Fast-forward main"):
-    assert token in release, token
-assert "github.token" in release
-assert "contents: write" in release
-assert "github-actions[bot]" in release
-assert "actions/create-github-app-token@v3" not in release
-assert "RELEASE_APP_ID" not in release
-assert "RELEASE_APP_PRIVATE_KEY" not in release
-assert "issues: read" in release
-assert "environment: product-release" not in release
-assert "--mode intent" not in release
-assert "release_level=" not in release
-assert not (root / ".github/workflows/release-commit.yml").exists()
+assert "release_snapshot.py" not in release
 assert "Release completion" in completion
-assert ".github/scripts/release_completion.py" in completion
+assert "--labels-json" in completion
+assert "--checks-json" in completion
+assert "checks: read" in completion
+assert "source-checks.json" in completion
+assert "Verify VERSION and release completion" in completion
 assert "Validate PR labels" in quality
-assert "label-gate.yml" in quality
+assert "Release completion" in quality
 assert "Validate PR labels" in label_gate
-assert "release_snapshot.py" in label_gate
-assert "release_snapshot.py" in release
-assert "VERSION" in release
+assert "capture-intent" not in label_gate
 print("release workflow fixtures passed")
 PY
