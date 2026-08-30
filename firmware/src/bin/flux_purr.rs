@@ -6498,9 +6498,19 @@ async fn write_memory_record(
     match write_eeprom_memory_record(i2c, pd_port, elapsed_ms, commit_started_at, record, scratch)
         .await
     {
-        // EEPROM is the primary store. A synchronous flash mirror adds an
-        // avoidable control-loop pause after every successful EEPROM commit.
-        Ok(()) => Ok(MemoryCommitBackend::Eeprom),
+        Ok(()) => {
+            // Keep flash recoverable from the newest EEPROM record. A later
+            // EEPROM failure must not restore stale credentials or settings.
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            if let Err(error) = write_flash_memory_record(flash, record, scratch) {
+                info!(
+                    "memory commit flash mirror unavailable reason={=str}",
+                    error.code()
+                );
+            }
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            Ok(MemoryCommitBackend::Eeprom)
+        }
         Err(eeprom_error) => {
             info!(
                 "memory commit falling back to flash reason={=str}",
