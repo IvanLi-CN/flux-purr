@@ -276,9 +276,10 @@ export const LegacyWifiStateProtocol: Story = {
           ''
         )
         await expect(await canvas.findByLabelText('密码')).toHaveAttribute('readonly', '')
-        await expect(await canvas.findByRole('status', { name: '信号' })).toHaveTextContent(
-          '-54 dBm'
-        )
+        await expect(
+          await canvas.findByRole('status', { name: 'WiFi 连接状态' })
+        ).toHaveTextContent('已连接')
+        expect(canvas.queryByText('-54 dBm')).toBeNull()
         expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
       }
     )
