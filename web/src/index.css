@@ -8167,6 +8167,22 @@
   background: rgba(239, 244, 248, 0.68);
 }
 
+.industrial-wifi-settings__readonly-output {
+  display: flex;
+  align-items: center;
+  min-height: 2.25rem;
+  padding: 0 0.08rem;
+  color: var(--industrial-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.875rem;
+  font-weight: 800;
+  line-height: 1.25rem;
+}
+
+.industrial-wifi-settings__field--status {
+  align-content: start;
+}
+
 .industrial-wifi-settings__field {
   display: grid;
   min-width: 0;

@@ -411,8 +411,7 @@ export function WifiNetworkSettings({
             <CircleAlert aria-hidden="true" />
             <span>{unavailableReason ?? '当前连接仅支持查看 WiFi 信息，不能修改设备配置。'}</span>
           </div>
-          <fieldset className="industrial-wifi-settings__form industrial-wifi-settings__form--readonly">
-            <legend className="sr-only">WiFi 只读配置</legend>
+          <div className="industrial-wifi-settings__form industrial-wifi-settings__form--readonly">
             <Label className="industrial-wifi-settings__field" htmlFor={ssidId}>
               <span>WiFi 名称</span>
               <Input
@@ -439,17 +438,17 @@ export function WifiNetworkSettings({
               />
             </Label>
 
-            <Label className="industrial-wifi-settings__field" htmlFor={`${inputId}-rssi`}>
+            <div className="industrial-wifi-settings__field industrial-wifi-settings__field--status">
               <span>信号</span>
-              <Input
+              <output
                 id={`${inputId}-rssi`}
-                className="h-9"
-                value={wifiRssi == null ? '不可用' : `${wifiRssi} dBm`}
-                readOnly
-                aria-readonly="true"
-              />
-            </Label>
-          </fieldset>
+                className="industrial-wifi-settings__readonly-output"
+                aria-label="信号"
+              >
+                {wifiRssi == null ? '不可用' : `${wifiRssi} dBm`}
+              </output>
+            </div>
+          </div>
         </>
       ) : (
         <form
