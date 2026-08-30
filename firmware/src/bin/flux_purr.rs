@@ -135,10 +135,11 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET,
-    MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
-    PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
-    encode_memory_record, select_latest_optional_memory_record,
+    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_RECORD_HEADER_LEN,
+    MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS,
+    MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
+    PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record, encode_memory_record,
+    select_latest_optional_memory_record,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -6270,18 +6271,6 @@ fn load_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn load_memory_record(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    flash: &mut FlashStorage,
-    scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
-    let (eeprom, _) = load_eeprom_memory_record(i2c, scratch);
-    let flash = load_flash_memory_record_with_legacy_migration(flash, scratch);
-    select_latest_optional_memory_record(eeprom, flash)
-}
-
-#[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemoryCommitError {
     EncodeFailed,
@@ -6344,6 +6333,9 @@ fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> us
 #[inline(never)]
 async fn write_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
     record: &MemoryRecord,
     scratch: &mut MemoryIoScratch,
 ) -> Result<(), MemoryCommitError> {
@@ -6353,10 +6345,10 @@ async fn write_eeprom_memory_record(
         return Err(MemoryCommitError::EncodeFailed);
     };
     let base_offset = memory_slot_offset_for_sequence(record.sequence);
+    service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut written = 0usize;
     while written < record_len {
         let absolute_offset = usize::from(base_offset) + written;
@@ -6365,16 +6357,24 @@ async fn write_eeprom_memory_record(
             info!("memory commit offset overflow");
             return Err(MemoryCommitError::WriteFailed);
         };
-        if let Err(error) = eeprom.write_page(
-            page_offset,
-            &scratch.record_bytes[written..written + chunk_len],
-        ) {
+        let write_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.write_page(
+                page_offset,
+                &scratch.record_bytes[written..written + chunk_len],
+            )
+        };
+        if let Err(error) = write_result {
             let error = memory_commit_error_from_eeprom(error);
             info!("memory commit write failed seq={=u32}", record.sequence);
             return Err(error);
         }
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
+        // FUSB302B shares this bus. Dropping the EEPROM adapter before every
+        // PD poll keeps its receive and contract deadlines serviced throughout
+        // a long record write.
+        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
     info!(
         "memory commit ok seq={=u32} bytes={=u16} slot=0x{=u16:04x}",
@@ -6384,29 +6384,116 @@ async fn write_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn service_pd_during_memory_commit(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
+) {
+    let now_ms = elapsed_ms.saturating_add(
+        Instant::now()
+            .as_millis()
+            .saturating_sub(commit_started_at.as_millis()),
+    );
+    let _ = read_pd_status(i2c, pd_port, now_ms).await;
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn verify_eeprom_memory_record(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
+    record: &MemoryRecord,
+    scratch: &mut MemoryIoScratch,
+) -> Result<MemoryRecord, MemoryCommitError> {
+    service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    };
+    let base_offset = memory_slot_offset_for_sequence(record.sequence);
+    let header_read = {
+        let mut eeprom = M24c64::with_address(&mut *i2c, address);
+        eeprom.read_bytes(
+            base_offset,
+            &mut scratch.record_bytes[..MEMORY_RECORD_HEADER_LEN],
+        )
+    };
+    if header_read.is_err() {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    }
+    service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+
+    let payload_len = usize::from(u16::from_le_bytes([
+        scratch.record_bytes[6],
+        scratch.record_bytes[7],
+    ]));
+    let Some(record_len) = MEMORY_RECORD_HEADER_LEN.checked_add(payload_len) else {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    };
+    if record_len > MEMORY_SLOT_SIZE {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    }
+
+    let mut read = MEMORY_RECORD_HEADER_LEN;
+    while read < record_len {
+        let chunk_len = (record_len - read).min(EEPROM_WRITE_CHUNK_MAX_BYTES);
+        let chunk_offset = base_offset
+            .checked_add(read as u16)
+            .ok_or(MemoryCommitError::VerifyUnreadable)?;
+        let read_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.read_bytes(
+                chunk_offset,
+                &mut scratch.record_bytes[read..read + chunk_len],
+            )
+        };
+        if read_result.is_err() {
+            return Err(MemoryCommitError::VerifyUnreadable);
+        }
+        read += chunk_len;
+        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+    }
+
+    decode_memory_record(&scratch.record_bytes[..record_len])
+        .map_err(|_| MemoryCommitError::VerifyUnreadable)
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryCommitBackend {
+    Eeprom,
+    Flash,
+}
+
+#[cfg(target_arch = "xtensa")]
 #[inline(never)]
 async fn write_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
     flash: &mut FlashStorage,
     record: &MemoryRecord,
     scratch: &mut MemoryIoScratch,
-) -> Result<(), MemoryCommitError> {
-    match write_eeprom_memory_record(i2c, record, scratch).await {
-        Ok(()) => {
-            if let Err(error) = write_flash_memory_record(flash, record, scratch) {
-                info!(
-                    "memory commit flash mirror unavailable reason={=str}",
-                    error.code()
-                );
-            }
-            Ok(())
-        }
+) -> Result<MemoryCommitBackend, MemoryCommitError> {
+    match write_eeprom_memory_record(i2c, pd_port, elapsed_ms, commit_started_at, record, scratch)
+        .await
+    {
+        // EEPROM is the primary store. A synchronous flash mirror adds an
+        // avoidable control-loop pause after every successful EEPROM commit.
+        Ok(()) => Ok(MemoryCommitBackend::Eeprom),
         Err(eeprom_error) => {
             info!(
                 "memory commit falling back to flash reason={=str}",
                 eeprom_error.code()
             );
-            write_flash_memory_record(flash, record, scratch).map_err(|_| eeprom_error)
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            let flash_result = write_flash_memory_record(flash, record, scratch);
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            flash_result
+                .map(|()| MemoryCommitBackend::Flash)
+                .map_err(|_| eeprom_error)
         }
     }
 }
@@ -6415,6 +6502,8 @@ async fn write_memory_record(
 #[inline(never)]
 async fn commit_memory_config_now(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
     flash: &mut FlashStorage,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
@@ -6425,6 +6514,7 @@ async fn commit_memory_config_now(
     let mut expected_config = memory_config.clone();
     expected_config.sanitize();
     let mut last_error = MemoryCommitError::WriteFailed;
+    let commit_started_at = Instant::now();
 
     for attempt in 0..2 {
         let next_sequence = memory_sequence.saturating_add(1 + attempt);
@@ -6432,17 +6522,54 @@ async fn commit_memory_config_now(
             sequence: next_sequence,
             config: expected_config.clone(),
         };
-        if let Err(error) = write_memory_record(i2c, flash, &record, &mut scratch).await {
-            last_error = error;
-            continue;
-        }
-        let Some(verified) = load_memory_record(i2c, flash, &mut scratch) else {
-            info!(
-                "memory commit verify failed seq={=u32} reason=unreadable",
-                next_sequence
-            );
-            last_error = MemoryCommitError::VerifyUnreadable;
-            continue;
+        let backend = match write_memory_record(
+            i2c,
+            pd_port,
+            elapsed_ms,
+            commit_started_at,
+            flash,
+            &record,
+            &mut scratch,
+        )
+        .await
+        {
+            Ok(backend) => backend,
+            Err(error) => {
+                last_error = error;
+                continue;
+            }
+        };
+        let verified = match backend {
+            MemoryCommitBackend::Eeprom => {
+                verify_eeprom_memory_record(
+                    i2c,
+                    pd_port,
+                    elapsed_ms,
+                    commit_started_at,
+                    &record,
+                    &mut scratch,
+                )
+                .await
+            }
+            MemoryCommitBackend::Flash => {
+                service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+                let verified = load_flash_memory_record(flash, &mut scratch)
+                    .ok_or(MemoryCommitError::VerifyUnreadable);
+                service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+                verified
+            }
+        };
+        let verified = match verified {
+            Ok(verified) => verified,
+            Err(error) => {
+                info!(
+                    "memory commit verify failed seq={=u32} reason={=str}",
+                    next_sequence,
+                    error.code(),
+                );
+                last_error = error;
+                continue;
+            }
         };
         if verified.sequence != next_sequence || verified.config != expected_config {
             info!(
@@ -11064,6 +11191,8 @@ async fn process_control_line(
                 if *memory_config != previous_memory_config {
                     if commit_memory_config_now(
                         pd_i2c,
+                        pd_port,
+                        elapsed_ms,
                         flash_storage,
                         memory_sequence,
                         memory_config,
@@ -11181,9 +11310,15 @@ async fn process_control_line(
                         manual_pps,
                     );
                 }
-                if let Err(error) =
-                    commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
-                        .await
+                if let Err(error) = commit_memory_config_now(
+                    pd_i2c,
+                    pd_port,
+                    elapsed_ms,
+                    flash_storage,
+                    memory_sequence,
+                    memory_config,
+                )
+                .await
                 {
                     *memory_config = previous_memory_config;
                     return (
@@ -13611,6 +13746,8 @@ async fn main(_spawner: Spawner) {
                 if thermal_plant_completed {
                     if let Err(error) = commit_memory_config_now(
                         &mut pd_i2c,
+                        &mut pd_port,
+                        elapsed_ms,
                         &mut flash_storage,
                         &mut memory_sequence,
                         &memory_config,
@@ -13832,6 +13969,8 @@ async fn main(_spawner: Spawner) {
             memory_commit_due_ms = None;
             if commit_memory_config_now(
                 &mut pd_i2c,
+                &mut pd_port,
+                elapsed_ms,
                 &mut flash_storage,
                 &mut memory_sequence,
                 &memory_config,

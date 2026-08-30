@@ -61,6 +61,7 @@
 - `selected_preset_slot` 越界时必须回到默认槽位。
 - 用户接受操作导致记忆字段变化时必须 debounce 后写回，不得每个按键事件立即写入持久化后端。
 - EEPROM 读写失败不得阻断 heater/fan 保护逻辑；fallback flash 不可用时保存失败必须可见，但不得屏蔽安全保护。
+- M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，`flux_cfg` 只作为 EEPROM 不可达或写入失败时的 fallback，不能在成功路径同步 mirror 而阻塞 PD 控制。
 - 日志不得输出 Wi-Fi 密码明文。
 - EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
 - USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、请求 fixed PD，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
@@ -79,7 +80,7 @@
 - 写回流程：
   - 前面板已接受交互完成后，从 UI 状态生成下一份 `MemoryConfig`。
   - 若配置相对上一份有变化，设置约 `2s` 写回 deadline。
-  - deadline 到期后写入下一 record sequence 对应的槽；EEPROM 不可用时写入 flash fallback；两者都失败则重新排队。
+  - deadline 到期后写入下一 record sequence 对应的槽；每页 EEPROM 写和验证 chunk 后先服务共享总线上的 PD，再进入下一段。EEPROM 不可用时写入 flash fallback；两者都失败则重新排队。
 - Wi-Fi 字段：
   - `ssid`、`password`、`telemetryIntervalMs` 进入持久化模型；自动重连是固件固定策略，不属于用户配置。
   - 旧版本的 `wifi_auto_reconnect` TLV 继续读取以兼容已有记录，但加载与 sanitize 时始终归一化为 `true`。
@@ -135,6 +136,7 @@
 - Given record payload 包含未知 TLV，When 解码，Then 忽略未知字段并保留已知字段。
 - Given 目标温度或 preset 超出范围，When 解码完成，Then 温度被 clamp 到 `0..400°C`。
 - Given 用户修改目标温度、preset 或主动降温策略，When 约 `2s` debounce 到期，Then 写入下一持久化槽。
+- Given FUSB302B 与 EEPROM 共享 I2C 且一个 record 需要多页写入，When debounce 或 WiFi 配置触发持久化，Then 每个写或验证 chunk 后都必须轮询 PD，且 EEPROM 成功不得触发同步 flash mirror。
 - Given heater 曾在重启前开启，When 固件重启，Then heater 不因持久化配置自动开启。
 - Given ADC calibration state 已写入持久化后端，When 固件重启，Then 共享样本、A/B 槽位与当前激活槽位都恢复。
 - Given ADC calibration sample 在保存时带有 `referenceTempC` 或 `referenceVinMv`，When 固件重启或 control-plane 重新读取 calibration package，Then ADC-domain points 与原始 physical reference 都恢复，页面不需要靠 `expectedMv` 反推 owner-facing 标定值。
