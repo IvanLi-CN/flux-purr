@@ -67,4 +67,15 @@ describe('Demo Inspector state', () => {
     expect(fixture).toBeDefined()
     expect(fixture && resolveWifiSettingsAccess(fixture)).toEqual({ mode: 'read-write' })
   })
+
+  it('keeps the read-only mock snapshot visible with SSID metadata', () => {
+    const scenario = deriveDemoScenario(defaultDemoInspectorState)
+    const fixture = scenario.devices.find((device) => device.id === 'fp-lab-01')
+
+    expect(fixture).toMatchObject({
+      wifiSsid: 'FluxPurr-Lab',
+      wifiRssi: -54,
+      wifiPasswordLength: 12,
+    })
+  })
 })

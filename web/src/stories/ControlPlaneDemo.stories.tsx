@@ -268,6 +268,7 @@ export const LegacyWifiStateProtocol: Story = {
           await canvas.findByText('当前设备固件需要 WiFi 状态协议更新后才能提交设置。')
         ).toBeVisible()
         await expect(await canvas.findByText('网络名称')).toBeVisible()
+        await expect(await canvas.findByText('FluxPurr-Lab')).toBeVisible()
         expect(canvas.queryByRole('textbox', { name: 'WiFi 名称' })).toBeNull()
         expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
       }
