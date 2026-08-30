@@ -7069,7 +7069,6 @@ function SettingsView({
 
   return (
     <div className="industrial-view-panel">
-      <PanelHeader kicker="Settings" title="Heat policy" />
       <Tabs
         value={settingsWorkspaceTab}
         onValueChange={(value) => void onSettingsWorkspaceTabChange(value as SettingsWorkspaceTab)}

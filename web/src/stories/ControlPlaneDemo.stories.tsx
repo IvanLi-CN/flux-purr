@@ -978,7 +978,8 @@ export const LiveWebSerialAddDevice: Story = {
     await step('global log remains expanded after switching to settings', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
 
-      await expect(await canvas.findByRole('heading', { name: 'Heat policy' })).toBeVisible()
+      await expect(await canvas.findByRole('tablist', { name: 'Settings' })).toBeVisible()
+      await expect(await canvas.findByRole('tab', { name: '温度预设' })).toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '运行时追踪' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '全部' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '完成' })).toBeVisible()
