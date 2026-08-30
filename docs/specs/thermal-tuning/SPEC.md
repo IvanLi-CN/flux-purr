@@ -355,5 +355,17 @@ ring 的可用容量、EEPROM journal 的原子恢复行为、Wasm/native canoni
 
 ## Visual Evidence
 
-实现完成前没有 owner-facing UI 证据。实现里程碑中的 Web 交付必须补充受控的
-Storybook/browser 视觉证据，并在交付时展示给主人。
+实现包含受控的 mock-only Storybook 视觉证据，覆盖桌面工作面和 `393x852` 移动视口。
+截图只展示 fixture 数据，不连接真实设备，也不包含硬件、外部电源或敏感信息。
+
+- [`thermal-tuning-ready-desktop.png`](assets/thermal-tuning-ready-desktop.png)：
+  `storybook_canvas`，`Calibration/ThermalTuningRunCard--Ready`，桌面默认视口；
+  `state=ready-pps3a-nine-targets`，`capture_scope=component`，
+  `target_program=mock-only`。
+- [`thermal-tuning-ready-mobile.png`](assets/thermal-tuning-ready-mobile.png)：
+  `storybook_canvas`，`Calibration/ThermalTuningRunCard--ReadyMobile`，
+  `requested_viewport=393x852`；`state=ready-pps3a-nine-targets-responsive`，
+  `capture_scope=component`，`target_program=mock-only`。
+
+两张图均保留组件外边距，用于审查焦点、标签、状态提示和窄视口下的布局边界；
+它们是组件级 owner-facing 证据，不代表真实硬件运行结果。
