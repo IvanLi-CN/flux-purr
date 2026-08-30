@@ -6,6 +6,7 @@ import {
   defaultDemoInspectorState,
 } from '../demo-inspector-state'
 import type { DeviceTarget, EventLogEntry } from '../types'
+import { resolveWifiSettingsAccess } from '../wifi-settings-access'
 
 interface DemoInspectorProps {
   state: DemoInspectorState
@@ -121,7 +122,12 @@ export function DemoInspector({
                     {device.id === 'fp-kit-02'
                       ? 'SIMULATED SERIAL'
                       : device.transport.toUpperCase()}{' '}
-                    · {device.firmware}
+                    · {device.firmware} · WiFi{' '}
+                    {resolveWifiSettingsAccess(device).mode === 'read-write'
+                      ? '可配置'
+                      : resolveWifiSettingsAccess(device).mode === 'read-only'
+                        ? '只读'
+                        : '不可用'}
                   </span>
                 </button>
               ))}

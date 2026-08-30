@@ -3016,6 +3016,46 @@ export function ControlPlaneDemo({
         rejectWifiConfiguration(access.reason ?? '当前连接不允许修改 WiFi 设置。')
       }
 
+      if (mockOnly && allowDemoControls) {
+        const nextGeneration = (visibleDevice.configurationGeneration ?? 0) + 1
+        const nextSequence = (visibleDevice.transitionSequence ?? 0) + 1
+        const network: NetworkSummary =
+          op === 'clear'
+            ? {
+                state: 'disabled',
+                ssid: null,
+                wifiRssi: null,
+                wifiPasswordLength: 0,
+                configurationGeneration: nextGeneration,
+                transitionSequence: nextSequence,
+                failureCode: null,
+                lastError: null,
+              }
+            : {
+                state: 'connected',
+                ssid: draft?.ssid ?? visibleDevice.wifiSsid ?? null,
+                wifiRssi: visibleDevice.wifiRssi,
+                wifiPasswordLength:
+                  draft?.password !== undefined
+                    ? draft.password.length
+                    : (visibleDevice.wifiPasswordLength ?? 0),
+                configurationGeneration: nextGeneration,
+                transitionSequence: nextSequence,
+                failureCode: null,
+                lastError: null,
+              }
+        setWifiSnapshotsByDevice((current) => ({
+          ...current,
+          [visibleDevice.id]: network,
+        }))
+        emitEvent(
+          'demo',
+          op === 'set' ? 'simulated WiFi credentials saved' : 'simulated saved WiFi cleared',
+          'success'
+        )
+        return network
+      }
+
       if (isDirectWebSerialDevice(visibleDevice)) {
         const network = await webSerial.configureWifi({
           op,
@@ -3086,7 +3126,7 @@ export function ControlPlaneDemo({
         throw error
       }
     },
-    [controlClient, devdBaseUrl, emitEvent, visibleDevice, webSerial]
+    [allowDemoControls, controlClient, devdBaseUrl, emitEvent, mockOnly, visibleDevice, webSerial]
   )
 
   const handleWifiSave = useCallback(
