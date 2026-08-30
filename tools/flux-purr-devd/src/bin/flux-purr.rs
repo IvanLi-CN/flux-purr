@@ -3263,7 +3263,10 @@ fn confirm_firmware_tuning_start(
     if explicitly_confirmed || dry_run {
         return Ok(());
     }
-    if !io::stdin().is_terminal() {
+    // Unit tests can inherit the hook's pseudo-terminal even though no operator is
+    // present to answer a prompt. Keep that path fail-closed like any other
+    // non-interactive invocation.
+    if !io::stdin().is_terminal() || cfg!(test) {
         return Err(
             "firmware thermal tuning requires --confirm when stdin is not interactive".into(),
         );
