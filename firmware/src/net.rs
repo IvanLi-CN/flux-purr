@@ -624,22 +624,7 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
                 .with_password(alloc::string::String::from(config.password.as_str())),
         );
         stack.set_config_v4(net_config(&config).ipv4);
-        // esp-radio only supports changing STA credentials while the
-        // controller is stopped. Retry paths can arrive here after an
-        // association or DHCP failure, so enforce the same lifecycle rule for
-        // every configuration attempt rather than only a live user update.
-        let controller_stopped = match controller.is_started() {
-            Ok(true) => with_timeout(
-                Duration::from_millis(SAVING_TIMEOUT_MS as u64),
-                controller.stop_async(),
-            )
-            .await
-            .is_ok(),
-            Ok(false) => true,
-            Err(_) => false,
-        };
-        if !controller_stopped
-            || controller.set_config(&client).is_err()
+        if controller.set_config(&client).is_err()
             || (!matches!(controller.is_started(), Ok(true))
                 && controller.start_async().await.is_err())
         {
@@ -753,17 +738,8 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
                     controller.disconnect_async(),
                 )
                 .await;
-                // `set_config` replaces the STA mode and credentials.  Leaving
-                // the old controller started while doing that has caused the
-                // ESP WiFi driver to fault on a live reconfiguration.  Finish
-                // the controller lifecycle before the next loop configures it.
-                let stopped = with_timeout(
-                    Duration::from_millis(SAVING_TIMEOUT_MS as u64),
-                    controller.stop_async(),
-                )
-                .await;
                 let latest_config = WIFI_CONFIG.lock().await.clone();
-                if disconnected.is_ok() && stopped.is_ok() {
+                if disconnected.is_ok() {
                     let _ = publish_wifi_event(
                         &latest_config,
                         ProvisioningEvent::DisconnectCompleted,
@@ -774,7 +750,7 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
                     let follow_up = progress_wifi_failure(
                         &latest_config,
                         ProvisioningEvent::DisconnectTimedOut,
-                        "Timed out while disconnecting or stopping WiFi.",
+                        "Timed out while stopping WiFi.",
                     )
                     .await;
                     if matches!(follow_up, WifiFailureFollowUp::AwaitReconfiguration) {
