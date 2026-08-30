@@ -65,6 +65,26 @@ def read_labels(path: Path | None) -> tuple[str, str, str]:
     return type_label, channel_label.split(":", 1)[1], ",".join(components) if components else "none"
 
 
+def latest_check_outcomes(payload: object) -> dict[str, str]:
+    rows = payload.get("check_runs") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise CompletionError("source check results are missing check_runs")
+    outcomes: dict[str, tuple[str, str]] = {}
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        conclusion = row.get("conclusion")
+        if isinstance(name, str) and isinstance(conclusion, str):
+            completed_at = row.get("completed_at")
+            started_at = row.get("started_at")
+            timestamp = completed_at if isinstance(completed_at, str) else started_at if isinstance(started_at, str) else ""
+            candidate = (f"{timestamp}:{index:06d}", conclusion)
+            if name not in outcomes or candidate[0] >= outcomes[name][0]:
+                outcomes[name] = candidate
+    return {name: value for name, (_, value) in outcomes.items()}
+
+
 def require_completed_source_checks(path: Path | None) -> None:
     if path is None:
         raise CompletionError("--checks-json is required for a product VERSION preparation")
@@ -72,17 +92,7 @@ def require_completed_source_checks(path: Path | None) -> None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise CompletionError(f"cannot read source check results: {error}") from error
-    rows = payload.get("check_runs") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        raise CompletionError("source check results are missing check_runs")
-    outcomes: dict[str, str] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = row.get("name")
-        conclusion = row.get("conclusion")
-        if isinstance(name, str) and isinstance(conclusion, str):
-            outcomes[name] = conclusion
+    outcomes = latest_check_outcomes(payload)
     failed = sorted(name for name in REQUIRED_SOURCE_CHECKS if outcomes.get(name) != "success")
     if failed:
         raise CompletionError(f"prepared source checks are not all successful: {failed}")

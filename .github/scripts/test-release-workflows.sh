@@ -14,6 +14,7 @@ release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 completion = (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
 quality = (root / ".github/quality-gates.json").read_text(encoding="utf-8")
 label_gate = (root / ".github/workflows/label-gate.yml").read_text(encoding="utf-8")
+release_chain = (root / ".github/scripts/release_chain.py").read_text(encoding="utf-8")
 
 assert "Release preparation validation" in ci_pr
 assert "kind=prepared" in ci_pr
@@ -27,13 +28,23 @@ assert "Push prepared VERSION commit to the existing pull request" in prepare
 assert "refs/heads/main" not in prepare
 assert "verification_sha" in prepare
 assert "verify-prepared" in prepare
-assert "verify-prepared" in release
-assert "no_prepared_product_merge" in release
+assert "verify-merged-prepared" in release
+assert "verify_merged_prepared_release" in release_chain
+assert "verify_prepared_commit" in release_chain
+assert "latest_check_outcomes" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
+assert "latest_check_outcomes" in (root / ".github/scripts/release_completion.py").read_text(encoding="utf-8")
+assert "no_prepared_product_merge" in release_chain
 assert "release/product-main" not in release
 assert "Fast-forward main" not in release
 assert "git push origin \"${RELEASE_SHA}:refs/heads/main\"" not in release
 assert "operation=recover" not in release
 assert "release_snapshot.py" not in release
+assert "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" in release
+assert "Deploy published public demo archive to EdgeOne" in release
+assert "web-production-bundle" not in ci_main
+assert "web-demo-bundle" not in ci_main
+assert not (root / ".github/workflows/deploy-edgeone.yml").exists()
+assert not (root / ".github/workflows/deploy-edgeone-demo.yml").exists()
 assert "Release completion" in completion
 assert "--labels-json" in completion
 assert "--checks-json" in completion

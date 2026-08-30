@@ -21,7 +21,7 @@
 - `web/public/edgeone.json` 仅将 `/devices` history 深链 rewrite 到 `/index.html`，让 `/assets/*` 按文件路径提供。
 - `build:demo` 使用 Vite demo mode 输出 `web/dist-demo`；它固定为 fixture runtime、关闭 devd/Web Serial，并把 root replace 到 `fp-lab-01` overview。
 - `DemoInspector` 作为控制台同级的可收起工具层，使用 `demoScene`、`demoLease`、`demoNetwork` 与 `demoArtifact` 复现确定性状态；高级状态只读可复制，面板布局不进入 URL。
-- `.github/workflows/ci-main.yml` 上传独立 `web-demo-bundle`，`.github/workflows/deploy-edgeone-demo.yml` 在成功的 `main` CI 后从 runner 临时目录部署该 artifact 到 `flux-purr-demo`。
+- `Release Product` 将独立的版本化 public-demo archive 发布到 GitHub Release，并只在发布资产验证完成后部署该 archive 到 `flux-purr-demo`；release marker 使 recovery 不会重复部署。
 - `web/src/features/control-plane-demo/**` 提供 scenario types、deterministic mock data 与工业风固定控制台界面。
 - `web/src/stories/ControlPlaneDemo.stories.tsx` 覆盖 default、degraded、settings review、update review、gallery、mobile review 与 interaction smoke。
 - 工业风 token 与组件样式集中在 `web/src/index.css` 的 `.industrial-*` class；当前 UI 提供 Dashboard / Settings / Calibration / Update 与桌面全局日志，不改变 frontpanel preview 渲染器。

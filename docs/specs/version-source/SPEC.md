@@ -61,7 +61,7 @@
 - `Release Product` 只能消费带有效准备提交的 main 合并提交；`type:docs`/`type:skip` 跳过产品发布，`type:patch + channel:stable` 唯一允许自动写入 `nextPatch(VERSION)`，`type:minor`、`type:major` 或 `channel:rc` 必须等待受控 `exact` 操作写入精确 VERSION 文本。label、metadata 与 channel 不得计算或解析数字版本。
 - 所有版本化产物必须由该 main 合并提交构建。firmware identity、firmware bundle identity、`devd` `/health`、`flux-purr-devd --version`、`flux-purr --version`、Web build metadata、release manifest 和资产文件名必须一致表达该版本；source SHA 必须指向该 main 合并提交。
 - package manifest 的 `0.1.0` 或其他 package metadata、Git tag、workflow inputs 与既有 manifest 不得作为版本回退或版本覆盖；snapshot 中的 labels 不得写入或覆盖数字版本。
-- `CI PR` 对产品源提交运行完整矩阵；准备提交只运行结构验证。`CI Main` 对其正常 merge 进行结构验证，`Release Product` 从该 merge 构建一次资产。每个产品源提交仍只运行一次完整 CI 和一次发布资产构建。
+- `CI PR` 对产品源提交运行完整矩阵；准备提交只运行结构验证。`CI Main` 对其正常 merge 进行结构验证，`Release Product` 从该 merge 构建一次资产，并且仅从这些已验证发布资产部署 EdgeOne production 与 public demo。每个产品源提交仍只运行一次完整 CI、一次发布资产构建和一组发布部署。
 - 发布失败时，后续产品准备必须保持关闭；recovery 只能以现有 main 合并提交为目标，重建该提交的资产或 Release，不得重新计算、改写或合并版本。
 - `channel` 若仍被 firmware bundle、catalog 或 GitHub Release 使用，必须从 `VERSION` 派生：稳定 SemVer 为 `stable`，`-rc.N` 为 `rc`，开发 build 为 `local`。不存在独立 channel 输入。
 - 非普通 patch 的 major、minor 或 RC 发布必须以受控准备提交中的精确 `VERSION` 文本表达。该一次性写入完成后，所有下游步骤仍只读取文件；不得从 label 或 tag 推断该值。
@@ -93,7 +93,7 @@
 2. `Prepare product version` 从受信任的 `main` policy checkout 检查当前 PR head、base 和 checks。自动 patch 写入 `nextPatch(VERSION)`；major、minor 或 RC intent 只接受受控 `exact` 写入精确 VERSION 文本。
 3. 工作流在同一 PR 分支追加以源提交为父、且只修改 `VERSION` 的准备提交；其 trailers 固化 source SHA、产品版本与 validated intent。
 4. `Release completion` 验证准备提交、当前 base 与 labels，并只读核验准备提交父提交的完整 CI 结果。PR 以 merge commit 正常合入 `main`，该 merge 的 tree 必须等于准备提交的 tree。
-5. `CI Main` 结构验证该 merge；`Release Product` 从该 merge checkout，重新解析 `VERSION`，构建 Web、firmware 与 host-tools，生成、发布并校验 firmware bundle、manifest 和 `vX.Y.Z` tag。
+5. `CI Main` 结构验证该 merge；`Release Product` 只在其第二父提交是带完整 release trailers 的准备提交时继续。它从该 merge checkout，重新解析 `VERSION`，构建 Web、public demo、firmware 与 host-tools，生成、发布并校验资产、manifest 和 `vX.Y.Z` tag，然后从这些归档各部署一次 EdgeOne production 与 public demo。
 
 #### Recovery
 

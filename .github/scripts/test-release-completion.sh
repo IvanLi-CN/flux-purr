@@ -51,11 +51,12 @@ labels = Path(tempfile.mkstemp()[1])
 labels.write_text(json.dumps([{"name": "type:patch"}, {"name": "channel:stable"}]), encoding="utf-8")
 checks = Path(tempfile.mkstemp()[1])
 checks.write_text(json.dumps({"check_runs": [
-    {"name": "Validate PR labels", "conclusion": "success"},
-    {"name": "Firmware checks", "conclusion": "success"},
-    {"name": "DEVD checks", "conclusion": "success"},
-    {"name": "Web checks", "conclusion": "success"},
-    {"name": "Worktree bootstrap", "conclusion": "success"},
+    {"name": "Validate PR labels", "conclusion": "failure", "completed_at": "2026-08-30T03:43:02Z"},
+    {"name": "Validate PR labels", "conclusion": "success", "completed_at": "2026-08-30T03:43:31Z"},
+    {"name": "Firmware checks", "conclusion": "success", "completed_at": "2026-08-30T03:45:52Z"},
+    {"name": "DEVD checks", "conclusion": "success", "completed_at": "2026-08-30T03:44:59Z"},
+    {"name": "Web checks", "conclusion": "success", "completed_at": "2026-08-30T03:48:37Z"},
+    {"name": "Worktree bootstrap", "conclusion": "success", "completed_at": "2026-08-30T03:43:38Z"},
 ]}), encoding="utf-8")
 
 chain.stage(Namespace(

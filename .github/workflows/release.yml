@@ -68,16 +68,17 @@ jobs:
           test -n "${MAIN_INPUT}"
           test "${MAIN_INPUT}" = "${main_sha}"
           git checkout --detach "${MAIN_INPUT}"
-          parents="$(git show -s --format=%P "${MAIN_INPUT}")"
-          if [ "$(wc -w <<<"${parents}")" -ne 2 ] || ! git diff --quiet "${MAIN_INPUT}" "${MAIN_INPUT}^2"; then
+          preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
+          prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
+          if [ "${prepared}" != true ]; then
+            reason="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')"
             echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "release_reason=no_prepared_product_merge" >> "$GITHUB_OUTPUT"
-            echo "Main commit ${MAIN_INPUT} is not a merged product VERSION preparation"
+            echo "release_reason=${reason}" >> "$GITHUB_OUTPUT"
+            echo "Main commit ${MAIN_INPUT} is not a merged product VERSION preparation (${reason})"
             exit 0
           fi
-          preparation_sha="$(git rev-parse "${MAIN_INPUT}^2")"
-          preparation_json="$(python3 .github/scripts/release_chain.py verify-prepared --commit "${preparation_sha}")"
           version="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          preparation_sha="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
           test "$(python3 scripts/product-version.py --mode release --source-sha "${MAIN_INPUT}")" = "${version}"
           {
             echo "enabled=true"
@@ -153,13 +154,15 @@ jobs:
             --current-tag "${PRODUCT_TAG}" \
             --current-published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           bun run --cwd web build
+          bun run --cwd web build:demo
           tar -czf "release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz" -C web/dist .
+          tar -czf "release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" -C web/dist-demo .
           mkdir -p host-tools/bin
           cp target/release/flux-purr target/release/flux-purr-devd host-tools/bin/
           cp build-info.json VERSION host-tools/
           tar -czf "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" -C host-tools .
           cp build-info.json VERSION release-assets/
-          web_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"web","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":["flux-purr-web-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
+          web_component="$(CHANNEL="${channel}" python3 -c 'import json,os; version=os.environ["PRODUCT_VERSION"]; print(json.dumps({"id":"web","version":version,"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":["flux-purr-web-v"+version+".tar.gz","flux-purr-web-demo-v"+version+".tar.gz"]}))')"
           firmware_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.usb.v1"],"assets":["flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".fluxpurr-fw","flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           host_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.devd-http.v1"],"assets":["flux-purr-host-tools-linux-x64-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           manifest="release-assets/flux-purr-release-manifest-${PRODUCT_TAG}.json"
@@ -215,6 +218,7 @@ jobs:
           names = {item["name"] for item in payload["assets"]}
           required = {name for name in names if name.startswith("flux-purr-")}
           if not any(name.startswith("flux-purr-web-v") for name in required): raise SystemExit("missing web asset")
+          if not any(name.startswith("flux-purr-web-demo-v") for name in required): raise SystemExit("missing public demo asset")
           if not any(name.endswith(".fluxpurr-fw") for name in required): raise SystemExit("missing firmware bundle")
           if not any(name.startswith("flux-purr-host-tools-") for name in required): raise SystemExit("missing host tools")
           if not any(name.startswith("flux-purr-release-manifest-") for name in required): raise SystemExit("missing release manifest")
@@ -243,3 +247,27 @@ jobs:
           npx --yes edgeone@1.6.18 makers deploy web-dist -n "${EDGEONE_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber
+
+      - name: Deploy published public demo archive to EdgeOne
+        if: steps.release.outputs.enabled == 'true'
+        env:
+          EDGEONE_API_TOKEN: ${{ secrets.EDGEONE_API_TOKEN }}
+          EDGEONE_DEMO_PROJECT_NAME: ${{ secrets.EDGEONE_DEMO_PROJECT_NAME }}
+          PRODUCT_VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${EDGEONE_API_TOKEN}" || { echo "repository secret EDGEONE_API_TOKEN is required" >&2; exit 1; }
+          test -n "${EDGEONE_DEMO_PROJECT_NAME}" || { echo "repository secret EDGEONE_DEMO_PROJECT_NAME is required" >&2; exit 1; }
+          if gh release view "${{ steps.release.outputs.tag }}" --json assets --jq '.assets[].name' | grep -Fxq .edgeone-demo-deployed; then
+            echo "EdgeOne public demo deployment marker already exists; skip duplicate deployment"
+            exit 0
+          fi
+          archive="release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"
+          test -f "${archive}"
+          rm -rf web-demo-dist
+          mkdir web-demo-dist
+          tar -xzf "${archive}" -C web-demo-dist
+          npx --yes edgeone@1.6.18 makers deploy web-demo-dist -n "${EDGEONE_DEMO_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
+          printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed
+          gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber
