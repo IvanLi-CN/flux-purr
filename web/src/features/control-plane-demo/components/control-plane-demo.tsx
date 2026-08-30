@@ -218,6 +218,15 @@ export interface CalibrationRouteGuard {
   workspaceTab: CalibrationWorkspaceTab
 }
 
+export function normalizeSettingsWorkspaceTab(
+  requestedTab: SettingsWorkspaceTab,
+  device: DeviceTarget
+): SettingsWorkspaceTab {
+  return requestedTab === 'wifi' && resolveWifiSettingsAccess(device).mode === 'hidden'
+    ? 'presets'
+    : requestedTab
+}
+
 export interface ConsoleNavigationAdapter {
   state: ConsoleRouteState
   variant: AppVariant
@@ -1909,10 +1918,14 @@ export function ControlPlaneDemo({
     navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
       ? (navigation.state.calibrationTab ?? 'heater_curve')
       : (calibrationWorkspaceTabByDevice[visibleDevice.id] ?? 'heater_curve')
-  const visibleSettingsWorkspaceTab =
+  const requestedSettingsWorkspaceTab =
     navigation?.state.kind === 'device' && navigation.state.view === 'settings'
       ? (navigation.state.settingsTab ?? 'presets')
       : (settingsWorkspaceTabByDevice[visibleDevice.id] ?? 'presets')
+  const visibleSettingsWorkspaceTab = normalizeSettingsWorkspaceTab(
+    requestedSettingsWorkspaceTab,
+    visibleDevice
+  )
   const visibleCalibrationRefs = calibrationRefsByDevice[visibleDevice.id] ?? {
     rtdTempC: isRenderableTemperature(visibleDevice.currentTempC)
       ? Number(visibleDevice.currentTempC.toFixed(1))
@@ -1972,7 +1985,7 @@ export function ControlPlaneDemo({
   )
 
   const setSettingsWorkspaceTab = useCallback(
-    (nextTab: SettingsWorkspaceTab) => {
+    (nextTab: SettingsWorkspaceTab, options?: { replace?: boolean }) => {
       if (!navigation || navigation.state.kind !== 'device') {
         setSettingsWorkspaceTabByDevice((current) => ({
           ...current,
@@ -1980,15 +1993,23 @@ export function ControlPlaneDemo({
         }))
         return Promise.resolve()
       }
-      return navigation.navigate({
-        kind: 'device',
-        deviceId: navigation.state.deviceId,
-        view: 'settings',
-        settingsTab: nextTab,
-      })
+      return navigation.navigate(
+        {
+          kind: 'device',
+          deviceId: navigation.state.deviceId,
+          view: 'settings',
+          settingsTab: nextTab,
+        },
+        options
+      )
     },
     [navigation, visibleDevice.id]
   )
+
+  useEffect(() => {
+    if (visibleSettingsWorkspaceTab === requestedSettingsWorkspaceTab) return
+    void setSettingsWorkspaceTab(visibleSettingsWorkspaceTab, { replace: true })
+  }, [requestedSettingsWorkspaceTab, setSettingsWorkspaceTab, visibleSettingsWorkspaceTab])
 
   const onCalibrationGuardChange = navigation?.onCalibrationGuardChange
   const navigationDeviceId = navigation?.state.kind === 'device' ? navigation.state.deviceId : null
@@ -3066,9 +3087,6 @@ export function ControlPlaneDemo({
               }
             : {}),
         })
-        if (!network) {
-          throw new Error(webSerial.error ?? 'Web Serial WiFi 设置未能提交。')
-        }
         setWifiSnapshotsByDevice((current) => ({
           ...current,
           [visibleDevice.id]: network,

@@ -53,7 +53,7 @@ export interface LiveWebSerialControls {
   }) => Promise<boolean>
   disconnect: () => Promise<void>
   configureRuntime: (request: DirectRuntimeConfigRequest) => Promise<boolean>
-  configureWifi: (request: Omit<WifiConfigRequest, 'leaseId'>) => Promise<NetworkSummary | null>
+  configureWifi: (request: Omit<WifiConfigRequest, 'leaseId'>) => Promise<NetworkSummary>
   getCalibration: () => Promise<CalibrationState>
   getCalibrationJob: () => Promise<CalibrationJobState>
   getThermalPlantRun: (afterSample?: number) => Promise<ThermalPlantRunSnapshot>
@@ -422,20 +422,28 @@ export function useLiveWebSerialScenario(
   )
 
   const configureWifi = useCallback(
-    async (request: Omit<WifiConfigRequest, 'leaseId'>): Promise<NetworkSummary | null> => {
+    async (request: Omit<WifiConfigRequest, 'leaseId'>): Promise<NetworkSummary> => {
       const client = await recoverAuthorizedClient()
       if (!client) {
-        setError('Web Serial port is not connected.')
-        return null
+        const message = 'Web Serial port is not connected.'
+        setError(message)
+        throw new ControlPlaneClientError(message, 'web_serial_not_connected', true)
       }
-
       try {
         const network = await client.configureWifi(request)
-        if (clientRef.current !== client) return null
+        if (clientRef.current !== client) {
+          throw new ControlPlaneClientError(
+            'Web Serial connection changed.',
+            'web_serial_closed',
+            true
+          )
+        }
         setDevice((current) =>
           current
             ? {
                 ...current,
+                connectionAvailable: true,
+                transportIssue: undefined,
                 wifiSsid: network.ssid ?? null,
                 wifiRssi: network.wifiRssi ?? null,
                 wifiPasswordLength: network.wifiPasswordLength ?? 0,
@@ -455,11 +463,20 @@ export function useLiveWebSerialScenario(
         )
         return network
       } catch (error) {
-        if (clientRef.current !== client) return null
-        setError(error instanceof Error ? error.message : 'Web Serial WiFi update failed.')
+        if (clientRef.current !== client) throw error
+        const message = error instanceof Error ? error.message : 'Web Serial WiFi update failed.'
+        setDevice((current) =>
+          current
+            ? {
+                ...current,
+                transportIssue: message,
+              }
+            : current
+        )
+        setError(message)
         setState('error')
         appendEvent('browser Web Serial WiFi update failed', 'warning')
-        return null
+        throw error
       }
     },
     [appendEvent, recoverAuthorizedClient]

@@ -31,6 +31,20 @@ describe('resolveWifiSettingsAccess', () => {
     ).toEqual({ mode: 'read-write' })
   })
 
+  it('keeps an authorized USB route read-only after a transport failure', () => {
+    expect(
+      resolveWifiSettingsAccess({
+        ...base,
+        transport: 'serial',
+        leaseState: 'active',
+        transportIssue: 'Timed out waiting for a matching USB JSONL response.',
+      })
+    ).toEqual({
+      mode: 'read-only',
+      reason: 'Timed out waiting for a matching USB JSONL response.',
+    })
+  })
+
   it('keeps direct LAN and devd LAN bridge read-only', () => {
     expect(resolveWifiSettingsAccess({ ...base, transport: 'wifi', leaseState: 'none' }).mode).toBe(
       'read-only'

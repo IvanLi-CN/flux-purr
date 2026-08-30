@@ -1069,6 +1069,48 @@ export const LiveWebSerialAddDevice: Story = {
   },
 }
 
+export const LiveWebSerialWifiConfigFailure: Story = {
+  name: 'Live / Web Serial WiFi write failure',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: () =>
+        new FakeWebSerialClient(
+          {},
+          {
+            wifiConfigError: new Error('Web Serial WiFi transport lost.'),
+          }
+        ) as unknown as WebSerialControlPlaneClient,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('connects the writable Web Serial target', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await expect(await canvas.findByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await expect(await canvas.findByRole('button', { name: '保存并连接' })).toBeVisible()
+    })
+
+    await step(
+      'write failures surface the reason and downgrade the form to read-only',
+      async () => {
+        await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+        await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+
+        await waitFor(() => {
+          expect(canvas.getAllByText('Web Serial WiFi transport lost.')).toHaveLength(2)
+        })
+        await expect(await canvas.findByLabelText('WiFi 名称')).toHaveAttribute('readonly')
+        expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
+      }
+    )
+  },
+}
+
 export const LiveKnownWebSerialReconnect: Story = {
   name: 'Live / Known Web Serial reconnect',
   args: {
@@ -1941,6 +1983,7 @@ function createIncompleteRtdSingleSampleScenario(): ControlPlaneScenario {
 
 type FakeWebSerialClientOptions = {
   mutateOnProbe?: (currentStatus: ControlPlaneStatus) => ControlPlaneStatus
+  wifiConfigError?: Error
 }
 
 class HangingWebSerialClient {
@@ -2051,6 +2094,9 @@ class FakeWebSerialClient {
   }
 
   configureWifi(request: { op: 'set' | 'clear'; ssid?: string; password?: string }) {
+    if (this.options.wifiConfigError) {
+      return Promise.reject(this.options.wifiConfigError)
+    }
     webSerialWifiWrites.push(request)
     const nextNetwork: NetworkSummary = {
       ...this.currentStatus.network,

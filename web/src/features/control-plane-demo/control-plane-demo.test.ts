@@ -9,6 +9,7 @@ import {
   devicePickerTargets,
   formatRuntimeEventTime,
   nextFirmwareActivitySequence,
+  normalizeSettingsWorkspaceTab,
   preferredLiveTransportForRoute,
   shouldEnableAutomaticLiveDevdDiscovery,
   shouldRecoverWebSerialControl,
@@ -17,6 +18,14 @@ import {
 } from './components/control-plane-demo'
 import { liveControlPlaneScenario } from './live-scenario'
 import { controlPlaneScenario } from './mock-data'
+
+describe('settings route normalization', () => {
+  it('returns a WiFi deep link without capability to the presets tab', () => {
+    const device = controlPlaneScenario.devices.find((candidate) => candidate.id === 'fp-demo-03')
+    if (!device) throw new Error('Expected fixture without WiFi capabilities.')
+    expect(normalizeSettingsWorkspaceTab('wifi', device)).toBe('presets')
+  })
+})
 
 describe('calibration draft synchronization', () => {
   it('initializes the draft from the first live runtime value', () => {

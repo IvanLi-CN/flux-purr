@@ -18,12 +18,17 @@ export function resolveWifiSettingsAccess(
     | 'severity'
     | 'connectionAvailable'
     | 'networkState'
+    | 'transportIssue'
   >
 ): WifiSettingsAccess {
   const hasWifiCapability =
     device.capabilities.includes('wifi_config') || device.capabilities.includes('wifi_state_v2')
   if (!hasWifiCapability) {
     return { mode: 'hidden' }
+  }
+
+  if (device.transportIssue) {
+    return { mode: 'read-only', reason: device.transportIssue }
   }
 
   if (device.severity === 'offline' || device.connectionAvailable === false) {

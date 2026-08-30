@@ -64,6 +64,13 @@ test.describe('device-scoped routing', () => {
     await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
   })
 
+  test('replaces a hidden WiFi deep link with the preset settings route', async ({ page }) => {
+    await page.goto('/devices/fp-demo-03/settings/wifi?demo=true')
+
+    await expect(page).toHaveURL(/\/devices\/fp-demo-03\/settings\/presets\?demo=true$/)
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
+  })
+
   test('pushes one history entry for a calibration tab mouse click', async ({ page }) => {
     await page.goto(`/devices/${identity}/calibration/heater-curve?demo=true`)
 
