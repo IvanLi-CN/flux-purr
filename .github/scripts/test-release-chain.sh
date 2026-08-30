@@ -50,6 +50,31 @@ assert module.verify_prepared_commit(release, source, "0.22.1")["action"] == "au
 assert module.diff_names(release) == ["VERSION"]
 assert module.commit_parent(release) == source
 
+# A normal PR merge can have a tree identical to its second parent.  It must
+# not become a product release unless that parent is a verified preparation.
+run("git", "branch", "prepared-release", release)
+run("git", "checkout", "-q", "-b", "release-main", source)
+run("git", "merge", "--no-ff", "--no-edit", "prepared-release")
+merged_release = run("git", "rev-parse", "HEAD")
+merged_values = module.verify_merged_prepared_release(merged_release)
+assert merged_values["prepared"] == "true"
+assert merged_values["mergeSha"] == merged_release
+assert merged_values["preparationSha"] == release
+assert merged_values["version"] == "0.22.1"
+
+run("git", "checkout", "-q", "-b", "bootstrap-source", merged_release)
+(tmp / "README").write_text("bootstrap workflow change\n", encoding="utf-8")
+run("git", "add", "README")
+run("git", "commit", "--signoff", "-m", "bootstrap workflow change")
+run("git", "checkout", "-q", "release-main")
+run("git", "merge", "--no-ff", "--no-edit", "bootstrap-source")
+bootstrap_merge = run("git", "rev-parse", "HEAD")
+assert module.verify_merged_prepared_release(bootstrap_merge) == {
+    "prepared": "false",
+    "reason": "no_prepared_product_merge",
+}
+run("git", "checkout", "-q", "prepared-release")
+
 (tmp / "README").write_text("rc source\n", encoding="utf-8")
 run("git", "add", "README")
 run("git", "commit", "--signoff", "-m", "rc source")

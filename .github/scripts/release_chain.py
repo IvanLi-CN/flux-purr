@@ -143,6 +143,43 @@ def verify_prepared_commit(
     return values
 
 
+def verify_merged_prepared_release(commit: str) -> dict[str, str]:
+    """Classify a main merge and verify its prepared-release provenance.
+
+    A regular PR merge can have the same tree as its second parent.  It is a
+    release merge only when that parent explicitly identifies itself as a
+    VERSION preparation commit.  Once either identifying trailer exists, any
+    malformed preparation is a hard error rather than a silent skip.
+    """
+    merge_sha = git("rev-parse", f"{commit}^{{commit}}")
+    parents = git("show", "-s", "--format=%P", merge_sha).split()
+    if len(parents) != 2:
+        return {"prepared": "false", "reason": "not_merge_commit"}
+    if subprocess.run(
+        ["git", "diff", "--quiet", merge_sha, f"{merge_sha}^2"], cwd=ROOT
+    ).returncode != 0:
+        return {"prepared": "false", "reason": "merge_tree_differs_from_preparation"}
+
+    source_sha, preparation_sha = parents
+    preparation_trailers = trailers(preparation_sha)
+    has_source = "Release-Source-SHA" in preparation_trailers
+    has_version = "Product-Version" in preparation_trailers
+    if not has_source and not has_version:
+        return {"prepared": "false", "reason": "no_prepared_product_merge"}
+    if not has_source or not has_version:
+        raise ReleaseChainError("VERSION preparation commit has incomplete release identity trailers")
+
+    values = verify_prepared_commit(preparation_sha, source_sha)
+    values.update(
+        {
+            "prepared": "true",
+            "mergeSha": merge_sha,
+            "preparationSha": preparation_sha,
+        }
+    )
+    return values
+
+
 def write_github_output(values: dict[str, str], path: str | None) -> None:
     if not path:
         return
@@ -289,6 +326,12 @@ def check_prepared_commit(args: argparse.Namespace) -> None:
     print(json.dumps(values, sort_keys=True))
 
 
+def check_merged_prepared_release(args: argparse.Namespace) -> None:
+    values = verify_merged_prepared_release(args.commit)
+    write_github_output(values, args.github_output)
+    print(json.dumps(values, sort_keys=True))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -311,6 +354,9 @@ def main(argv: list[str] | None = None) -> int:
     verify_prepared_parser.add_argument("--source-sha")
     verify_prepared_parser.add_argument("--version")
     verify_prepared_parser.add_argument("--github-output")
+    verify_merged_parser = sub.add_parser("verify-merged-prepared")
+    verify_merged_parser.add_argument("--commit", default="HEAD")
+    verify_merged_parser.add_argument("--github-output")
     promote_parser = sub.add_parser("promote")
     promote_parser.add_argument("--commit", required=True)
     promote_parser.add_argument("--exact-version")
@@ -323,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
             check_commit(args)
         elif args.command == "verify-prepared":
             check_prepared_commit(args)
+        elif args.command == "verify-merged-prepared":
+            check_merged_prepared_release(args)
         else:
             promote(args)
         return 0

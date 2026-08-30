@@ -155,22 +155,6 @@ jobs:
       - name: E2E tests
         run: bash scripts/check-web-e2e.sh
 
-      - name: Upload verified web bundle
-        if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-production-bundle
-          path: web/dist
-          if-no-files-found: error
-
-      - name: Upload verified public demo bundle
-        if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-demo-bundle
-          path: web/dist-demo
-          if-no-files-found: error
-
   worktree-bootstrap:
     name: Worktree bootstrap
     needs: classify
