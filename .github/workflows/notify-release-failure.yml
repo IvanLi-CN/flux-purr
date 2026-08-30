@@ -45,12 +45,7 @@ jobs:
           channel_label="$(printf '%s' "${labels}" | tr ',' '\n' | grep '^channel:' | head -n1 || true)"
           components="$(printf '%s' "${labels}" | tr ',' '\n' | grep '^component:' | paste -sd, - || true)"
           artifact_names="$(gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --jq '[.artifacts[].name] | join(",")' 2>/dev/null || printf '%s' unknown)"
-          candidate_version="unknown"
-          candidate_sha="$(git ls-remote origin refs/heads/release/product-main | awk 'NR == 1 {print $1}')"
-          if [[ "${candidate_sha}" =~ ^[0-9a-f]{40}$ ]]; then
-            git fetch --no-tags origin "${candidate_sha}" >/dev/null 2>&1 || true
-            candidate_version="$(git show "${candidate_sha}:VERSION" 2>/dev/null || printf '%s' unknown)"
-          fi
+          candidate_version="$(git show "${MERGE_SHA}:VERSION" 2>/dev/null || printf '%s' unknown)"
           details="pr_number=${pr_number}; merge_commit_sha=${MERGE_SHA}; type_label=${type_label:-unknown}; channel_label=${channel_label:-unknown}; components=${components:-none}; selected_version=${candidate_version}; artifact_names=${artifact_names}; run_url=${{ github.event.workflow_run.html_url }}; backfill=dispatch Release Product with operation=recover and commit_sha=${MERGE_SHA}"
           {
             echo 'details<<EOF'

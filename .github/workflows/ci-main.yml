@@ -17,7 +17,7 @@ env:
 
 jobs:
   classify:
-    name: Release Commit validation
+    name: Release preparation validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -26,21 +26,20 @@ jobs:
       - name: Checkout commit and parent
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Classify and validate main commit
         id: classify
         shell: bash
         run: |
           set -euo pipefail
-          has_parent_version=false
-          if git cat-file -e "${GITHUB_SHA}^:VERSION" 2>/dev/null; then
-            has_parent_version=true
-          fi
-          mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r "${GITHUB_SHA}")
-          if [ "${has_parent_version}" = true ] && [ "${#changed[@]}" -eq 1 ] && [ "${changed[0]}" = VERSION ]; then
-            python3 .github/scripts/release_chain.py verify-commit --commit "${GITHUB_SHA}"
-            echo "kind=release" >> "$GITHUB_OUTPUT"
+          parents="$(git show -s --format=%P "${GITHUB_SHA}")"
+          if [ "$(wc -w <<<"${parents}")" -eq 2 ] && git diff --quiet "${GITHUB_SHA}" "${GITHUB_SHA}^2"; then
+            if python3 .github/scripts/release_chain.py verify-prepared --commit "${GITHUB_SHA}^2"; then
+              echo "kind=prepared-integration" >> "$GITHUB_OUTPUT"
+            else
+              echo "kind=pr-integration" >> "$GITHUB_OUTPUT"
+            fi
           else
             echo "kind=source" >> "$GITHUB_OUTPUT"
           fi
@@ -117,15 +116,20 @@ jobs:
       - name: Install Playwright browsers
         run: cd web && bunx playwright install --with-deps chromium
 
+      - name: Setup Linux serial build dependencies
+        uses: ./.github/actions/setup-linux-serial-deps
+
       - name: Quality gates declaration
         run: python3 .github/scripts/check-quality-gates.py
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
+          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_preparation.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
           python3 scripts/test-product-version.py
           bash scripts/test-build-identities.sh
           bash .github/scripts/test-release-chain.sh
+          bash .github/scripts/test-release-preparation.sh
+          bash .github/scripts/test-release-completion.sh
           bash .github/scripts/test-release-labels.sh
           python3 -m unittest tools/firmware-web-catalog/test_build_catalog.py
 

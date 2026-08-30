@@ -2,26 +2,16 @@
 
 ## Current Coverage
 
-The numeric version calculation is now owned by [the version-source specification](../version-source/SPEC.md) and `release_chain.py`. The label/snapshot path remains active for release intent validation, mainline reconciliation, queue/backfill, and failure context; `Release completion` is an additional completion gate.
+The numeric version calculation is owned by [the version-source specification](../version-source/SPEC.md) and `release_chain.py`. Labels remain the required release-intent gate; after label validation and PR CI, `release_preparation.py` copies that intent into the VERSION-only preparation commit.
 
-- `CI PR` and `CI Main` continue to own firmware, DEVD, Web, and worktree checks.
-- `Release Product` creates one VERSION-only Release Commit per verified source commit, publishes from that commit, and fast-forwards `main` only after asset verification.
-- Recovery reuses the durable `release/product-main` candidate; `type:patch + channel:stable` is the only automatic numeric transition, while minor, major, and RC labels require controlled `exact` before RC promotion can create a new stable Release Commit.
-- The workspace `Cargo.lock` is tracked so all host-tool release matrix builds can honor `cargo ... --locked`.
-- All Ubuntu jobs that build `flux-purr-devd`, including the firmware bundle job, reuse the local Linux serial dependency action to install `pkg-config` and `libudev-dev` before the locked build so `libudev-sys` has its declared system dependency in the clean runner.
-- `.github/quality-gates.json` 声明主分支保护、签名提交、`Validate PR labels`、`Release completion` 及其他 required checks，以及 owner PR 不强制 approval 的 review policy。
-- Release writes use the existing workflow `GITHUB_TOKEN`; the existing `github-actions` integration is the sole ruleset bypass actor, and no new App or GitHub Environment is required.
+- `CI PR` runs the full firmware, DEVD, Web, and worktree matrix for a source head. A prepared VERSION commit receives structural validation only.
+- `Release completion` rejects an ordinary product PR until its prepared commit is present, matches its current labels and base, and its source parent has completed the full PR checks.
+- `CI Main` verifies that a normal merge preserves the prepared tree; `Release Product` builds, tags, publishes, and recovers from that merged SHA without pushing `main`.
+- The workspace `Cargo.lock` remains tracked and every Ubuntu `flux-purr-devd` build uses the shared Linux serial dependency action before `--locked` builds.
+- `.github/quality-gates.json` declares `Validate PR labels`, `Release completion`, and the source checks. The remote ruleset must require those existing checks, retain normal PR protection, and use merge commits for product PRs.
+- The existing workflow `GITHUB_TOKEN` writes only the open PR branch and release tags/assets. No bypass actor, App, secret, variable, or GitHub Environment is used.
 
 ## Validation
 
-- `.github/scripts/test-release-chain.sh`, `.github/scripts/test-release-completion.sh`, and `.github/scripts/test-release-workflows.sh` pass.
-- Release-chain fixtures cover automatic patch staging, exact RC staging, stable promotion, migration, ordinary VERSION rejection, and workflow de-duplication.
-- Workflow static checks cover the manual operation choices and shared Linux serial dependency action.
-- `.github/scripts/check-quality-gates.py` passes.
-- `python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_completion.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py` passes.
-- Existing firmware/web checks pass locally.
-
-## Rollout Notes
-
-- GitHub 远端 branch protection / ruleset 需要按 `.github/quality-gates.json` 对齐。
-- 如果当前自动化工具不能写入 GitHub ruleset，PR 应明确保留远端对齐说明。
+- `.github/scripts/test-release-chain.sh`, `.github/scripts/test-release-preparation.sh`, `.github/scripts/test-release-completion.sh`, and `.github/scripts/test-release-workflows.sh` cover version preparation, intent metadata, gate behavior, and main-write removal.
+- `.github/scripts/check-quality-gates.py` and Python compilation cover the workflow declarations.
