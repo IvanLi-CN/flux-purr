@@ -1691,11 +1691,17 @@ struct UsbRequestInboundWire {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct UsbWifiConfigInboundWire {
-    request_id: Option<String<REQUEST_ID_MAX_LEN>>,
-    op: Option<String<24>>,
-    ssid: Option<String<MEMORY_WIFI_SSID_MAX_LEN>>,
-    password: Option<String<MEMORY_WIFI_PASSWORD_MAX_LEN>>,
+struct UsbWifiConfigHeaderWire<'a> {
+    request_id: Option<&'a str>,
+    op: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbWifiConfigSetInboundWire<'a> {
+    request_id: Option<&'a str>,
+    ssid: Option<&'a str>,
+    password: Option<&'a str>,
     #[serde(default, deserialize_with = "deserialize_static_ipv4_patch")]
     static_ipv4: Option<Option<WifiStaticIpv4Wire>>,
     telemetry_interval_ms: Option<u32>,
@@ -2318,13 +2324,28 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
             })
         }
         "wifi_config" => {
-            let frame = parse_usb_wire::<UsbWifiConfigInboundWire>(trimmed)?;
+            let header = parse_usb_wifi_config_header(trimmed)?;
+            let request_id = bounded_string(header.request_id)?;
+            let op = parse_wifi_config_op(header.op)?;
+            if matches!(op, WifiConfigOp::Clear) {
+                return Ok(UsbFrame::WifiConfig {
+                    request_id,
+                    config: WifiConfigCommand {
+                        op,
+                        ssid: None,
+                        password: None,
+                        static_ipv4: None,
+                        telemetry_interval_ms: None,
+                    },
+                });
+            }
+            let frame = parse_usb_wifi_config_set(trimmed)?;
             Ok(UsbFrame::WifiConfig {
-                request_id: frame.request_id.ok_or(UsbFrameError::MalformedJson)?,
+                request_id: bounded_string(frame.request_id)?,
                 config: WifiConfigCommand {
-                    op: parse_wifi_config_op(frame.op.as_deref())?,
-                    ssid: frame.ssid,
-                    password: frame.password,
+                    op,
+                    ssid: bounded_optional_string(frame.ssid)?,
+                    password: bounded_optional_string(frame.password)?,
                     static_ipv4: frame.static_ipv4,
                     telemetry_interval_ms: frame.telemetry_interval_ms,
                 },
@@ -2457,6 +2478,20 @@ where
         .map_err(|_| UsbFrameError::MalformedJson)
 }
 
+#[inline(never)]
+fn parse_usb_wifi_config_header(line: &str) -> Result<UsbWifiConfigHeaderWire<'_>, UsbFrameError> {
+    serde_json_core::from_str(line)
+        .map(|(frame, _)| frame)
+        .map_err(|_| UsbFrameError::MalformedJson)
+}
+
+#[inline(never)]
+fn parse_usb_wifi_config_set(line: &str) -> Result<UsbWifiConfigSetInboundWire<'_>, UsbFrameError> {
+    serde_json_core::from_str(line)
+        .map(|(frame, _)| frame)
+        .map_err(|_| UsbFrameError::MalformedJson)
+}
+
 pub fn write_usb_frame<'a>(frame: &UsbFrame, out: &'a mut [u8]) -> Result<&'a str, UsbFrameError> {
     let wire = UsbFrameWire::from(frame);
     let written =
@@ -2491,6 +2526,20 @@ fn string<const N: usize>(value: &str) -> String<N> {
     let mut out = String::new();
     let _ = out.push_str(value);
     out
+}
+
+fn bounded_string<const N: usize>(value: Option<&str>) -> Result<String<N>, UsbFrameError> {
+    let value = value.ok_or(UsbFrameError::MalformedJson)?;
+    let mut out = String::new();
+    out.push_str(value)
+        .map_err(|_| UsbFrameError::MalformedJson)?;
+    Ok(out)
+}
+
+fn bounded_optional_string<const N: usize>(
+    value: Option<&str>,
+) -> Result<Option<String<N>>, UsbFrameError> {
+    value.map(|value| bounded_string(Some(value))).transpose()
 }
 
 fn push_str<const N: usize, const C: usize>(values: &mut Vec<String<N>, C>, value: &str) {
@@ -3425,6 +3474,26 @@ mod tests {
         assert!(!json.contains("secret-pass"));
         assert!(!json.contains("autoReconnect"));
         assert!(json.ends_with('\n'));
+    }
+
+    #[test]
+    fn parse_wifi_clear_frame_without_materializing_set_fields() {
+        let frame =
+            parse_usb_frame(r#"{"type":"wifi_config","requestId":"wifi-clear","op":"clear"}"#)
+                .unwrap();
+        assert_eq!(
+            frame,
+            UsbFrame::WifiConfig {
+                request_id: string("wifi-clear"),
+                config: WifiConfigCommand {
+                    op: WifiConfigOp::Clear,
+                    ssid: None,
+                    password: None,
+                    static_ipv4: None,
+                    telemetry_interval_ms: None,
+                },
+            }
+        );
     }
 
     #[test]
