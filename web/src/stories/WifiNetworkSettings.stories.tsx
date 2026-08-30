@@ -297,8 +297,10 @@ export const ReadOnlyLanSnapshot: Story = {
     await expect(canvas.getByRole('textbox', { name: 'WiFi 名称' })).toHaveAttribute('readonly', '')
     await expect(canvas.getByLabelText('密码')).toHaveValue('•••••••••••')
     await expect(canvas.getByLabelText('密码')).toHaveAttribute('readonly', '')
-    await expect(canvas.getByRole('status', { name: 'WiFi 连接状态' })).toHaveTextContent('已连接')
-    expect(canvas.queryByText('-54 dBm')).toBeNull()
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      '已连接-54 dBm'
+    )
+    expect(canvas.queryByRole('textbox', { name: '信号' })).toBeNull()
     expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
     expect(canvas.queryByRole('button', { name: '清除 WiFi' })).toBeNull()
   },

@@ -8092,6 +8092,11 @@
   font-weight: 850;
 }
 
+.industrial-wifi-settings__header output small {
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
 .industrial-wifi-settings__support-message {
   display: flex;
   align-items: flex-start;

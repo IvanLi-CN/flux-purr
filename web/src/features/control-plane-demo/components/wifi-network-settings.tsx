@@ -166,6 +166,7 @@ export function WifiNetworkSettings({
   deviceId,
   networkState = 'disabled',
   savedSsid = null,
+  wifiRssi = null,
   savedPasswordLength = 0,
   readOnly = false,
   disabled = false,
@@ -395,8 +396,11 @@ export function WifiNetworkSettings({
         </span>
         <div>
           <h3>WiFi</h3>
-          <output aria-label="WiFi 连接状态" aria-live="polite">
+          <output aria-label="WiFi 网络状态" aria-live="polite">
             <strong>{stateLabel}</strong>
+            {networkState === 'connected' && wifiRssi != null ? (
+              <small>{wifiRssi} dBm</small>
+            ) : null}
           </output>
         </div>
       </div>
