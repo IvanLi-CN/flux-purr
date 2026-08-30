@@ -1,21 +1,20 @@
-use alloc::string::ToString;
+use alloc::{boxed::Box, string::ToString};
 use heapless::{String, Vec};
 
 use crate::control_plane::{
     THERMAL_TUNING_PROFILE_CANONICAL_HEX_LEN, ThermalTuningCandidateWire,
     ThermalTuningEligibilityWire, ThermalTuningJournalWire, ThermalTuningPhaseWire,
     ThermalTuningPromotionStateWire, ThermalTuningReviewStateWire, ThermalTuningReviewWire,
-    ThermalTuningRunSnapshotWire, ThermalTuningRunStateWire, ThermalTuningRunWire,
-    ThermalTuningTargetDispositionWire, ThermalTuningTargetProgressWire,
-    ThermalTuningTerminalDispositionWire, ThermalTuningTraceEventWire, ThermalTuningTraceKindWire,
-    ThermalTuningTracePageWire,
+    ThermalTuningRunSnapshotWire, ThermalTuningRunStateWire, ThermalTuningTargetDispositionWire,
+    ThermalTuningTargetProgressWire, ThermalTuningTerminalDispositionWire,
+    ThermalTuningTraceEventWire, ThermalTuningTraceKindWire,
 };
 use flux_purr_thermal_tuning_core::{
     CANDIDATE_LADDER_WIDTH, CandidateEvaluation, CandidateGates, CandidateIdentity, CandidatePoint,
-    CandidateProfile, CandidateScore, DecisionEvent, EXECUTION_ORDER_C, Eligibility,
-    HOLD_CONFIRM_SECONDS, MAX_HOLD_PEAK_TO_PEAK_CENTI, MAX_OVERSHOOT_CENTI, Phase, PpsPowerClass,
-    PromotionError, PromotionState, RunState, SampleEvent, TARGET_BUDGET_SECONDS,
-    TargetDisposition, TerminalDisposition, ThermalTuningCore, TraceError, TraceRecord,
+    CandidateProfile, CandidateScore, EXECUTION_ORDER_C, Eligibility, HOLD_CONFIRM_SECONDS,
+    MAX_HOLD_PEAK_TO_PEAK_CENTI, MAX_OVERSHOOT_CENTI, Phase, PpsPowerClass, PromotionError,
+    PromotionState, RunState, SampleEvent, TARGET_BUDGET_SECONDS, TargetDisposition,
+    TerminalDisposition, ThermalTuningCore, TraceError, TraceRecord,
 };
 
 pub const THERMAL_TUNING_TRACE_CAPACITY: usize = 96;
@@ -254,6 +253,47 @@ impl ThermalTuningRuntime {
             candidate_evaluations: [None; CANDIDATE_LADDER_WIDTH],
             candidate_trial_index: 0,
             candidate_trial_started_ms: 0,
+        }
+    }
+
+    /// Initializes the runtime directly in externally allocated storage so
+    /// the fixed-capacity trace ring never transits the MCU's internal stack.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be valid, properly aligned, writable storage for one
+    /// uninitialized `Self`. The storage must not already contain a live value.
+    pub unsafe fn init_in_place(out: *mut Self) {
+        unsafe {
+            ThermalTuningCore::init_in_place(core::ptr::addr_of_mut!((*out).core));
+            core::ptr::addr_of_mut!((*out).arbiter).write(MaintenanceRunArbiter::new());
+            core::ptr::addr_of_mut!((*out).eligibility).write(ThermalTuningEligibility {
+                thermal_model_ready: false,
+                curve_covers_all_targets: false,
+                pps3a_available: false,
+                pps5a_available: false,
+                idle: true,
+                measurement_safe: false,
+            });
+            core::ptr::addr_of_mut!((*out).journal).write(ThermalTuningJournal::default());
+            core::ptr::addr_of_mut!((*out).target_started_ms).write(0);
+            core::ptr::addr_of_mut!((*out).hold_started_ms).write(None);
+            core::ptr::addr_of_mut!((*out).target_min_temp_centi).write(i16::MAX);
+            core::ptr::addr_of_mut!((*out).target_max_temp_centi).write(i16::MIN);
+            core::ptr::addr_of_mut!((*out).last_temp_centi).write(0);
+            core::ptr::addr_of_mut!((*out).max_overshoot_centi).write(0);
+            core::ptr::addr_of_mut!((*out).warmup_complete).write(false);
+            core::ptr::addr_of_mut!((*out).hold_error_sum_centi).write(0);
+            core::ptr::addr_of_mut!((*out).hold_sample_count).write(0);
+            core::ptr::addr_of_mut!((*out).hold_confirm_within_gate).write(true);
+            core::ptr::addr_of_mut!((*out).output_switches).write(0);
+            core::ptr::addr_of_mut!((*out).last_output_permille).write(None);
+            core::ptr::addr_of_mut!((*out).preview_profile).write(None);
+            core::ptr::addr_of_mut!((*out).candidate_ladder).write(None);
+            core::ptr::addr_of_mut!((*out).candidate_evaluations)
+                .write([None; CANDIDATE_LADDER_WIDTH]);
+            core::ptr::addr_of_mut!((*out).candidate_trial_index).write(0);
+            core::ptr::addr_of_mut!((*out).candidate_trial_started_ms).write(0);
         }
     }
 
@@ -608,6 +648,45 @@ impl ThermalTuningRuntime {
         after_sequence: Option<u64>,
         limit: usize,
     ) -> Result<ThermalTuningRunSnapshotWire, ThermalTuningRuntimeError> {
+        self.snapshot_with_events(after_sequence, limit, Box::new(Vec::new()))
+    }
+
+    pub fn snapshot_with_events(
+        &self,
+        after_sequence: Option<u64>,
+        limit: usize,
+        events: Box<
+            Vec<
+                ThermalTuningTraceEventWire,
+                { crate::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX },
+            >,
+        >,
+    ) -> Result<ThermalTuningRunSnapshotWire, ThermalTuningRuntimeError> {
+        let mut snapshot = core::mem::MaybeUninit::<ThermalTuningRunSnapshotWire>::uninit();
+        unsafe {
+            self.snapshot_in_place(snapshot.as_mut_ptr(), after_sequence, limit, events)?;
+            Ok(snapshot.assume_init())
+        }
+    }
+
+    /// Writes a snapshot directly into caller-provided storage.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be valid, properly aligned, writable storage for one
+    /// uninitialized snapshot. The storage must not already contain a live value.
+    pub unsafe fn snapshot_in_place(
+        &self,
+        out: *mut ThermalTuningRunSnapshotWire,
+        after_sequence: Option<u64>,
+        limit: usize,
+        mut events: Box<
+            Vec<
+                ThermalTuningTraceEventWire,
+                { crate::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX },
+            >,
+        >,
+    ) -> Result<(), ThermalTuningRuntimeError> {
         let summary = self.core.summary();
         if self.core.trace_gap()
             || after_sequence.is_some_and(|after| {
@@ -618,38 +697,25 @@ impl ThermalTuningRuntime {
         {
             return Err(ThermalTuningRuntimeError::Trace(TraceError::Gap));
         }
-        let mut page_records = [TraceRecord {
-            sequence: 0,
-            event: flux_purr_thermal_tuning_core::TraceEvent::Decision(DecisionEvent {
-                elapsed_ms: 0,
-                target_c: 0,
-                disposition: TargetDisposition::Pending,
-                score_tracking: 0,
-                score_energy: 0,
-                score_overshoot: 0,
-                score_stability: 0,
-                score_settle_ms: 0,
-                score_hold_mean_absolute_error_centi: 0,
-                score_output_switches: 0,
-                interval_lower_boundary_c: 0,
-                interval_upper_boundary_c: 0,
-                interval_pruned: false,
-                candidate_frozen: false,
-                gates: 0,
-                candidate_hash: [0; 32],
-            }),
-            digest: [0; 32],
-        }; crate::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX];
-        let count = self
-            .core
-            .trace_page(after_sequence, limit, &mut page_records);
-        let mut events = Vec::new();
-        for record in page_records.into_iter().take(count) {
-            let _ = events.push(trace_event_wire(record));
+        events.clear();
+        let first_sequence = summary.first_sequence.unwrap_or(0);
+        let start_sequence = after_sequence
+            .map(|sequence| sequence.saturating_add(1))
+            .unwrap_or(first_sequence)
+            .max(first_sequence);
+        let take = limit.min(crate::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX);
+        let mut digest_through_page = None;
+        if let Some(last_sequence) = summary.last_sequence {
+            for sequence in start_sequence..=last_sequence {
+                if events.len() >= take {
+                    break;
+                }
+                if let Some(record) = self.core.trace_record(sequence) {
+                    digest_through_page = Some(string(&hex(&record.digest)));
+                    let _ = events.push(trace_event_wire(record));
+                }
+            }
         }
-        let digest_through_page = (count > 0)
-            .then(|| page_records[count - 1])
-            .map(|record| string(&hex(&record.digest)));
         let mut accepted = Vec::new();
         let mut failed = Vec::new();
         let mut skipped = Vec::new();
@@ -712,48 +778,56 @@ impl ThermalTuningRuntime {
         {
             review.reason = summary.terminal.map(|value| string(value.as_str()));
         }
-        Ok(ThermalTuningRunSnapshotWire {
-            schema: string("thermal_tuning_run_v1"),
-            run: ThermalTuningRunWire {
-                run_id,
-                state: run_state_wire(summary.state),
-                power_class: summary.power_class.map(Into::into),
-                phase: phase_wire(summary.phase),
-                current_target_c: summary.current_target_c,
-                target_progress: ThermalTuningTargetProgressWire {
+        unsafe {
+            core::ptr::addr_of_mut!((*out).schema).write(string("thermal_tuning_run_v1"));
+            let run = core::ptr::addr_of_mut!((*out).run);
+            core::ptr::addr_of_mut!((*run).run_id).write(run_id);
+            core::ptr::addr_of_mut!((*run).state).write(run_state_wire(summary.state));
+            core::ptr::addr_of_mut!((*run).power_class).write(summary.power_class.map(Into::into));
+            core::ptr::addr_of_mut!((*run).phase).write(phase_wire(summary.phase));
+            core::ptr::addr_of_mut!((*run).current_target_c).write(summary.current_target_c);
+            core::ptr::addr_of_mut!((*run).target_progress).write(
+                ThermalTuningTargetProgressWire {
                     accepted_c: accepted,
                     failed_c: failed,
                     skipped_c: skipped,
                 },
-                terminal_disposition: summary.terminal.map(terminal_wire),
-                eligibility: self
-                    .eligibility
+            );
+            core::ptr::addr_of_mut!((*run).terminal_disposition)
+                .write(summary.terminal.map(terminal_wire));
+            core::ptr::addr_of_mut!((*run).eligibility).write(
+                self.eligibility
                     .wire(self.arbiter.owner(), summary.power_class),
-                review,
-                candidate,
-                journal: ThermalTuningJournalWire {
-                    last_run_id: self
-                        .journal
-                        .last_run_id
-                        .map(|value| string(&value.to_string())),
-                    last_disposition: self.journal.last_disposition.map(terminal_wire),
-                },
-            },
-            page: ThermalTuningTracePageWire {
-                earliest_sequence: summary.first_sequence.unwrap_or(
+            );
+            core::ptr::addr_of_mut!((*run).review).write(review);
+            core::ptr::addr_of_mut!((*run).candidate).write(candidate);
+            core::ptr::addr_of_mut!((*run).journal).write(ThermalTuningJournalWire {
+                last_run_id: self
+                    .journal
+                    .last_run_id
+                    .map(|value| string(&value.to_string())),
+                last_disposition: self.journal.last_disposition.map(terminal_wire),
+            });
+            let page = core::ptr::addr_of_mut!((*out).page);
+            core::ptr::addr_of_mut!((*page).earliest_sequence).write(
+                summary.first_sequence.unwrap_or(
                     summary
                         .last_sequence
                         .map_or(0, |last| last.saturating_add(1)),
                 ),
-                emitted_through: summary.last_sequence,
-                next_after_sequence: summary
+            );
+            core::ptr::addr_of_mut!((*page).emitted_through).write(summary.last_sequence);
+            core::ptr::addr_of_mut!((*page).next_after_sequence).write(
+                summary
                     .last_sequence
                     .map_or(0, |last| last.saturating_add(1)),
-                acknowledged_through: summary.acknowledged_through,
-                digest_through_page,
-                events,
-            },
-        })
+            );
+            core::ptr::addr_of_mut!((*page).acknowledged_through)
+                .write(summary.acknowledged_through);
+            core::ptr::addr_of_mut!((*page).digest_through_page).write(digest_through_page);
+            core::ptr::addr_of_mut!((*page).events).write(events);
+        }
+        Ok(())
     }
 
     fn record_terminal_decision(
@@ -967,6 +1041,7 @@ fn hex_with_capacity<const N: usize>(bytes: &[u8]) -> String<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::MaybeUninit;
     use flux_purr_thermal_tuning_core::TraceEvent;
 
     fn ready() -> ThermalTuningEligibility {
@@ -1017,6 +1092,25 @@ mod tests {
             arbiter.try_acquire(MaintenanceRunOwner::ThermalTuning),
             Ok(())
         );
+    }
+
+    #[test]
+    fn in_place_initialization_matches_the_regular_constructor() {
+        let expected = ThermalTuningRuntime::new();
+        let mut storage = MaybeUninit::<ThermalTuningRuntime>::uninit();
+        unsafe { ThermalTuningRuntime::init_in_place(storage.as_mut_ptr()) };
+        let actual = unsafe { storage.assume_init() };
+
+        assert_eq!(actual.core().summary(), expected.core().summary());
+        assert_eq!(actual.arbiter.owner(), expected.arbiter.owner());
+        assert_eq!(actual.eligibility, expected.eligibility);
+        assert_eq!(actual.journal, expected.journal);
+        assert_eq!(
+            actual.hold_confirm_within_gate,
+            expected.hold_confirm_within_gate
+        );
+        assert_eq!(actual.target_min_temp_centi, expected.target_min_temp_centi);
+        assert_eq!(actual.target_max_temp_centi, expected.target_max_temp_centi);
     }
 
     #[test]

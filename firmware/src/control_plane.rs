@@ -721,7 +721,7 @@ pub struct ThermalTuningTracePageWire {
     pub next_after_sequence: u64,
     pub acknowledged_through: Option<u64>,
     pub digest_through_page: Option<String<THERMAL_TUNING_HASH_HEX_LEN>>,
-    pub events: Vec<ThermalTuningTraceEventWire, THERMAL_TUNING_TRACE_PAGE_MAX>,
+    pub events: Box<Vec<ThermalTuningTraceEventWire, THERMAL_TUNING_TRACE_PAGE_MAX>>,
 }
 
 impl Default for ThermalTuningTracePageWire {
@@ -732,7 +732,7 @@ impl Default for ThermalTuningTracePageWire {
             next_after_sequence: 0,
             acknowledged_through: None,
             digest_through_page: None,
-            events: Vec::new(),
+            events: Box::new(Vec::new()),
         }
     }
 }
@@ -2147,6 +2147,20 @@ struct UsbStatusPayloadWire<'a> {
     status: &'a ControlPlaneStatus,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbResponseFrameWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    #[serde(rename = "requestId")]
+    request_id: &'a String<REQUEST_ID_MAX_LEN>,
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<&'a UsbResponsePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a ApiError>,
+}
+
 // Inbound frames deliberately use a narrow, type-specific parser.  Keeping
 // every optional field in `UsbFrameWire` is convenient for serialization, but
 // makes the first status request materialize every control-plane shape on the
@@ -2738,7 +2752,7 @@ pub enum UsbResponsePayload {
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
     ThermalPlantRun(ThermalPlantRunSnapshotWire),
-    ThermalTuningRun(ThermalTuningRunSnapshotWire),
+    ThermalTuningRun(Box<ThermalTuningRunSnapshotWire>),
     HeaterCurve(HeaterCurveStateWire),
     EepromBytes(Vec<u8, EEPROM_MAINTENANCE_CHUNK_MAX>),
     Ack,
@@ -3211,12 +3225,28 @@ fn parse_calibration_config_op(value: Option<&str>) -> Result<CalibrationConfigO
 mod tests {
     use super::*;
     use crate::{FanCommand, FanPhase, snapshot_at};
+    use core::mem::size_of;
     use std::format;
 
     #[test]
     fn network_failure_states_remain_observable_before_any_reconnect_attempt() {
         assert_ne!(NetworkState::Error, NetworkState::Connecting);
         assert_ne!(NetworkState::Timeout, NetworkState::Connecting);
+    }
+
+    #[test]
+    fn tuning_snapshot_stays_indirect_in_control_plane_enums() {
+        let snapshot_size = size_of::<ThermalTuningRunSnapshotWire>();
+        let payload_size = size_of::<UsbResponsePayload>();
+        let frame_size = size_of::<UsbFrame>();
+        assert!(
+            payload_size < snapshot_size,
+            "payload={payload_size} frame={frame_size} snapshot={snapshot_size}"
+        );
+        assert!(
+            frame_size <= 8 * 1024,
+            "payload={payload_size} frame={frame_size} snapshot={snapshot_size}"
+        );
     }
 
     #[test]

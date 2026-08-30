@@ -33,6 +33,8 @@ use embedded_storage::{ReadStorage, Storage};
 #[cfg(target_arch = "xtensa")]
 use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
 #[cfg(target_arch = "xtensa")]
+use esp_hal::psram::{FlashFreq, PsramConfig, PsramSize, SpiRamFreq};
+#[cfg(target_arch = "xtensa")]
 use esp_hal::rtc_cntl::SocResetReason;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::{
@@ -260,6 +262,9 @@ static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> = MaybeUni
 const RUNTIME_HEAP_SIZE: usize = 8 * 1024;
 
 #[cfg(target_arch = "xtensa")]
+const BOARD_PSRAM_SIZE: usize = 2 * 1024 * 1024;
+
+#[cfg(target_arch = "xtensa")]
 fn init_runtime_heap() {
     // Wi-Fi heap and the USB response buffer share post-boot DRAM2. Keeping
     // the 8 KiB response buffer out of the Embassy task leaves enough primary
@@ -278,6 +283,85 @@ fn init_runtime_heap() {
             RUNTIME_HEAP_SIZE,
             esp_alloc::MemoryCapability::Internal.into(),
         ));
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn try_box_external<T>(value: T) -> Option<Box<T>> {
+    let layout = Layout::new::<T>();
+    // SAFETY: PSRAM is registered before this helper is used. The explicit
+    // capability prevents fallback to internal DRAM.
+    let allocation =
+        unsafe { esp_alloc::HEAP.alloc_caps(esp_alloc::MemoryCapability::External.into(), layout) };
+    if allocation.is_null() {
+        return None;
+    }
+    // SAFETY: the allocation is suitably aligned for T and initialized before
+    // ownership is transferred to Box. The global allocator tracks its region
+    // and will deallocate it back to PSRAM.
+    unsafe {
+        allocation.cast::<T>().write(value);
+        Some(Box::from_raw(allocation.cast::<T>()))
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn try_box_external_uninit<T>() -> Option<Box<MaybeUninit<T>>> {
+    let layout = Layout::new::<T>();
+    let allocation =
+        unsafe { esp_alloc::HEAP.alloc_caps(esp_alloc::MemoryCapability::External.into(), layout) };
+    if allocation.is_null() {
+        return None;
+    }
+    // SAFETY: MaybeUninit has the same layout as T and may own uninitialized
+    // storage until an in-place initializer completes.
+    Some(unsafe { Box::from_raw(allocation.cast::<MaybeUninit<T>>()) })
+}
+
+#[cfg(target_arch = "xtensa")]
+fn try_new_external_tuning_runtime() -> Option<Box<ThermalTuningRuntime>> {
+    let layout = Layout::new::<ThermalTuningRuntime>();
+    let allocation =
+        unsafe { esp_alloc::HEAP.alloc_caps(esp_alloc::MemoryCapability::External.into(), layout) };
+    if allocation.is_null() {
+        return None;
+    }
+    let runtime = allocation.cast::<ThermalTuningRuntime>();
+    // SAFETY: the PSRAM allocation is valid and uninitialized, and the
+    // initializer writes every field without constructing the trace ring on
+    // the internal stack.
+    unsafe {
+        ThermalTuningRuntime::init_in_place(runtime);
+        Some(Box::from_raw(runtime))
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn try_external_tuning_snapshot(
+    runtime: &ThermalTuningRuntime,
+    after_sequence: Option<u64>,
+    limit: usize,
+) -> Result<
+    Option<Box<flux_purr_firmware::control_plane::ThermalTuningRunSnapshotWire>>,
+    flux_purr_firmware::thermal_tuning::ThermalTuningRuntimeError,
+> {
+    let Some(events) = try_box_external(heapless::Vec::<
+        flux_purr_firmware::control_plane::ThermalTuningTraceEventWire,
+        { flux_purr_firmware::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX },
+    >::new()) else {
+        return Ok(None);
+    };
+    let Some(mut snapshot) = try_box_external_uninit::<
+        flux_purr_firmware::control_plane::ThermalTuningRunSnapshotWire,
+    >() else {
+        return Ok(None);
+    };
+    unsafe {
+        runtime.snapshot_in_place(snapshot.as_mut_ptr(), after_sequence, limit, events)?;
+        Ok(Some(Box::from_raw(
+            Box::into_raw(snapshot)
+                .cast::<flux_purr_firmware::control_plane::ThermalTuningRunSnapshotWire>(),
+        )))
     }
 }
 
@@ -11143,13 +11227,19 @@ async fn process_control_line(
                     calibration_runtime_state_to_wire(calibration_runtime_state).job,
                 ),
             ),
-            UsbRequestOp::GetThermalTuningRun => match thermal_tuning_runtime.snapshot(
+            UsbRequestOp::GetThermalTuningRun => match try_external_tuning_snapshot(
+                thermal_tuning_runtime,
                 None,
                 flux_purr_firmware::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX,
             ) {
-                Ok(snapshot) => {
+                Ok(Some(snapshot)) => {
                     usb_response(request_id, UsbResponsePayload::ThermalTuningRun(snapshot))
                 }
+                Ok(None) => usb_error_response(
+                    request_id,
+                    "tuning_psram_unavailable",
+                    "PSRAM could not hold the thermal tuning snapshot.",
+                ),
                 Err(error) => thermal_tuning_error_response(request_id, error),
             },
             UsbRequestOp::GetHeaterCurve => usb_response(
@@ -11703,15 +11793,21 @@ fn process_thermal_tuning_command(
     };
     thermal_tuning_runtime.set_eligibility(eligibility);
     let snapshot_response = |runtime: &ThermalTuningRuntime| {
-        let snapshot = runtime.snapshot(
+        let snapshot = try_external_tuning_snapshot(
+            runtime,
             command.after_sequence,
             usize::from(command.limit.unwrap_or(16))
                 .min(flux_purr_firmware::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX),
         );
         match snapshot {
-            Ok(snapshot) => usb_response(
+            Ok(Some(snapshot)) => usb_response(
                 request_id.clone(),
                 UsbResponsePayload::ThermalTuningRun(snapshot),
+            ),
+            Ok(None) => usb_error_response(
+                request_id.clone(),
+                "tuning_psram_unavailable",
+                "PSRAM could not hold the thermal tuning snapshot.",
             ),
             Err(error) => thermal_tuning_error_response(request_id.clone(), error),
         }
@@ -12420,7 +12516,7 @@ fn lan_frame_response(
             UsbResponsePayload::Calibration(value) => lan_json_response(value),
             UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),
             UsbResponsePayload::ThermalPlantRun(value) => lan_json_response(value),
-            UsbResponsePayload::ThermalTuningRun(value) => lan_json_response(value),
+            UsbResponsePayload::ThermalTuningRun(value) => lan_json_response(value.as_ref()),
             UsbResponsePayload::HeaterCurve(value) => lan_json_response(value),
             UsbResponsePayload::EepromBytes(_) => (
                 404,
@@ -12951,9 +13047,17 @@ where
 #[esp_rtos::main]
 async fn main(_spawner: Spawner) {
     let reset_reason = reset_reason_log_line(esp_hal::system::reset_reason());
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let config = esp_hal::Config::default()
+        .with_cpu_clock(CpuClock::max())
+        .with_psram(PsramConfig {
+            size: PsramSize::Size(BOARD_PSRAM_SIZE),
+            core_clock: None,
+            flash_frequency: FlashFreq::FlashFreq40m,
+            ram_frequency: SpiRamFreq::Freq40m,
+        });
     let peripherals = esp_hal::init(config);
     init_runtime_heap();
+    esp_alloc::psram_allocator!(peripherals.PSRAM, esp_hal::psram);
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
     let status_light_started_ms = Instant::now().as_millis();
@@ -13030,7 +13134,6 @@ async fn main(_spawner: Spawner) {
         left: Input::new(peripherals.GPIO18, input_cfg),
         up: Input::new(peripherals.GPIO21, input_cfg),
     };
-
     let spi = Spi::new(
         peripherals.SPI2,
         SpiConfig::default()
@@ -13050,7 +13153,6 @@ async fn main(_spawner: Spawner) {
 
     let spi_device = ExclusiveDevice::new_no_delay(spi.into_async(), cs)
         .expect("failed to wrap async SPI bus as ExclusiveDevice");
-
     static DRIVER_FB: StaticCell<
         [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
     > = StaticCell::new();
@@ -13525,7 +13627,14 @@ async fn main(_spawner: Spawner) {
     }
     let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
     let mut calibration_runtime_state = CalibrationRuntimeState::default();
-    let mut thermal_tuning_runtime = ThermalTuningRuntime::new();
+    const THERMAL_TUNING_RUNTIME_MAX_HEAP_BYTES: usize = 16 * 1024;
+    const _: () = assert!(
+        core::mem::size_of::<ThermalTuningRuntime>() <= THERMAL_TUNING_RUNTIME_MAX_HEAP_BYTES
+    );
+    // Keep trace and candidate buffers in PSRAM. Failure is fatal because
+    // silently falling back to internal DRAM would violate the board budget.
+    let mut thermal_tuning_runtime =
+        try_new_external_tuning_runtime().expect("PSRAM could not hold the thermal tuning runtime");
     if let Some(journal) = memory_config.thermal_tuning_journal {
         thermal_tuning_runtime.restore_journal(
             journal.run_id,
@@ -13922,7 +14031,7 @@ async fn main(_spawner: Spawner) {
                         &mut flash_storage,
                         &mut calibration_runtime_state,
                         thermal_plant_workspace,
-                        &mut thermal_tuning_runtime,
+                        thermal_tuning_runtime.as_mut(),
                         elapsed_ms,
                         last_pd_observation,
                         &mut heater_power_backend,
@@ -14071,7 +14180,7 @@ async fn main(_spawner: Spawner) {
                 &mut flash_storage,
                 &mut calibration_runtime_state,
                 thermal_plant_workspace,
-                &mut thermal_tuning_runtime,
+                thermal_tuning_runtime.as_mut(),
                 elapsed_ms,
                 last_pd_observation,
                 &mut heater_power_backend,

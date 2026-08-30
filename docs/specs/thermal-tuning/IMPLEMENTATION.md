@@ -17,7 +17,9 @@
 - Firmware owns the live run through `ThermalTuningRuntime` and `MaintenanceRunArbiter`.
   USB JSONL, device LAN HTTP and DEVD expose the same `thermal_tuning_run_v1` snapshot and
   command model. Firmware journals only the compact start/terminal recovery projection;
-  raw trace and candidates remain in RAM.
+  the bounded unacknowledged trace window, candidates and materialized tuning snapshots are
+  explicitly allocated from the board's 2 MiB PSRAM without internal-RAM fallback. Internal
+  RAM retains only real-time control state, pointers and compact metadata.
 - The CLI has explicit `--engine firmware --power-class pps3a|pps5a` product execution and
   retains the independent `--engine host-reference` path plus legacy source/profile flags.
   The firmware runner writes the five-file `thermal-tuning-v2` archive without source or

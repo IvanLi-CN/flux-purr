@@ -23,6 +23,9 @@ CLI 或 `devd` 断连时继续承担设备控制。
   Web Serial 与直连 LAN 三种连接方式。
 - 固件以一个可预测、定长内存、固定点 Rust 核心执行正式多温点调优；同一核心
   可在 native Rust 与 WebAssembly 中回放和验证决策。
+- 固件将调优 trace 重传窗口、候选工作区和分页快照显式分配到板载 2 MiB PSRAM；
+  内部 RAM 只保留实时控制热路径、指针与紧凑状态元数据，且不得在 PSRAM 分配失败时
+  静默回落到内部 RAM。
 - 只支持显式选择的 PPS `pps3a` 与 `pps5a` 调优方案；两种方案分别拥有候选
   profile bank，绝不 `auto` 解析、降级或换类重试。
 - 在设备满足前置条件时，以九个温度点生成可审查的候选 profile，并经过设备侧
@@ -136,6 +139,9 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   `decision` 两种事件。host recorder 必须连续确认已持久化的 sequence 和 rolling
   digest；若未确认事件将被覆盖、sequence 不连续或 digest 不符，设备必须标记
   `trace_gap` 与 `review_incomplete`，而不是静默丢样。
+- 设备端 trace ring 只保存尚未由主机确认持久化的有界重传窗口，不是完整调优历史。
+  当前 capability 发布的 `96` 是经内存与采样节奏验证的容量上限，允许后续固件在保持
+  协议语义和溢出保护的前提下调整；算法正确性不得依赖该数字。
 - `review_complete` 只能由设备验证过连续 host archive acknowledgment 后产生。
   未 seal 的候选、trace gap、取消、硬故障、预算耗尽、reset 中断或失败 run 均不得
   preview 或 save。
@@ -291,8 +297,8 @@ candidate 的 eligible 状态。历史 reference bench diagnostics 可以保留�
 ## 实现前置条件（Definition of Ready）
 
 - 已冻结本规格、ADR 和三个接口契约。
-- `thermal_tuning_run_v1` 所需的 firmware memory budget、trace ring 容量与 EEPROM
-  journal layout 已通过编译期/单元测试预算检查。
+- `thermal_tuning_run_v1` 所需的 firmware memory budget、PSRAM trace ring 容量、
+  控制平面间接快照尺寸与 EEPROM journal layout 已通过编译期/单元测试预算检查。
 - Web Wasm toolchain 能在现有 Vite/Bun 构建中生成受版本锁定的模块。
 - HIL 阶段取得单一精确 MCU 端口和相应主人授权；在此之前只执行 mock、仿真与
   非写入验证。
@@ -338,8 +344,8 @@ candidate 的 eligible 状态。历史 reference bench diagnostics 可以保留�
 
 ## 风险与开放问题
 
-没有待主人决定的产品边界。实施前必须量化并验证以下工程风险：固件 RAM 中 trace
-ring 的可用容量、EEPROM journal 的原子恢复行为、Wasm/native canonical hash 一致性、
+没有待主人决定的产品边界。实施前必须量化并验证以下工程风险：固件 PSRAM 中 trace
+ring 的可用容量、内部 RAM 热路径余量、EEPROM journal 的原子恢复行为、Wasm/native canonical hash 一致性、
 浏览器持久存储配额，以及两个 PPS class 上固定点候选梯度的物理效果。任何需要扩大
 功率等级、恢复外部 source telemetry、删除 host-reference 或增加 Web/CLI 通信的
 变更都需要新的主人确认和 ADR 审查。
@@ -350,8 +356,8 @@ ring 的可用容量、EEPROM journal 的原子恢复行为、Wasm/native canoni
   满足的设备通过 capability/eligibility 显式拒绝。
 - 普通运行时 profile bank 与新的 candidate bank 可以按 `pps3a`/`pps5a` 一一映射，
   而不改变 `auto|65w|100w` 的既有解析语义。
-- CLI 与浏览器均可在各自本机持久化详细记录；设备只承担紧凑摘要和有界未确认
-  trace 缓冲。
+- CLI 与浏览器均可在各自本机持久化详细记录；设备只承担紧凑摘要和位于 PSRAM 的
+  有界未确认 trace 缓冲。
 
 ## Visual Evidence
 

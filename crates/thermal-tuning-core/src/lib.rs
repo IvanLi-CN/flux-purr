@@ -685,6 +685,39 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         }
     }
 
+    /// Initializes a core directly at `out` without materializing the trace
+    /// ring as a temporary value on the caller's stack.
+    ///
+    /// # Safety
+    ///
+    /// `out` must be valid, properly aligned, writable storage for one
+    /// uninitialized `Self`. The storage must not already contain a live value.
+    pub unsafe fn init_in_place(out: *mut Self) {
+        unsafe {
+            core::ptr::addr_of_mut!((*out).run_id).write(0);
+            core::ptr::addr_of_mut!((*out).state).write(RunState::Idle);
+            core::ptr::addr_of_mut!((*out).power_class).write(None);
+            core::ptr::addr_of_mut!((*out).phase).write(Phase::Idle);
+            core::ptr::addr_of_mut!((*out).current_target_index).write(0);
+            core::ptr::addr_of_mut!((*out).dispositions)
+                .write([TargetDisposition::Pending; TARGET_COUNT]);
+            core::ptr::addr_of_mut!((*out).terminal).write(None);
+            core::ptr::addr_of_mut!((*out).candidate).write(None);
+            core::ptr::addr_of_mut!((*out).candidate_identity).write(None);
+            core::ptr::addr_of_mut!((*out).promotion).write(PromotionState::Unavailable);
+            let trace = core::ptr::addr_of_mut!((*out).trace).cast::<Option<TraceRecord>>();
+            for index in 0..TRACE_CAP {
+                trace.add(index).write(None);
+            }
+            core::ptr::addr_of_mut!((*out).first_sequence).write(0);
+            core::ptr::addr_of_mut!((*out).next_sequence).write(0);
+            core::ptr::addr_of_mut!((*out).acknowledged_through).write(None);
+            core::ptr::addr_of_mut!((*out).trace_digest).write([0; 32]);
+            core::ptr::addr_of_mut!((*out).trace_gap).write(false);
+            core::ptr::addr_of_mut!((*out).candidate_frozen_current).write(false);
+        }
+    }
+
     pub fn start(
         &mut self,
         run_id: u64,
@@ -1205,6 +1238,10 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             return None;
         }
         self.trace[(sequence as usize) % TRACE_CAP].filter(|record| record.sequence == sequence)
+    }
+
+    pub fn trace_record(&self, sequence: u64) -> Option<TraceRecord> {
+        self.record_at(sequence)
     }
 
     fn digest_at(&self, sequence: u64) -> Option<[u8; 32]> {
