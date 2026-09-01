@@ -102,8 +102,7 @@ use flux_purr_firmware::control_plane::{
     ThermalPlantRunPhaseWire, ThermalPlantRunSnapshotWire, ThermalPlantRuntimeWire,
     ThermalPlantTracePageWire, ThermalPlantTracePointWire, UsbFrame, UsbFrameError, UsbRequestOp,
     UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
-    network_from_memory, parse_thermal_tuning_run_command, parse_usb_frame,
-    write_thermal_tuning_response, write_usb_frame,
+    network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -122,6 +121,10 @@ use flux_purr_firmware::control_plane::{
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::{
     ThermalTuningPowerClassWire, ThermalTuningRunCommandWire, ThermalTuningRunOpWire,
+};
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::{
+    parse_thermal_tuning_run_command, write_thermal_tuning_response,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
@@ -15986,7 +15989,7 @@ mod tests {
             UsbFrame::Response {
                 request_id,
                 ok,
-                result: Some(UsbResponsePayload::Identity(Box::new(identity))),
+                result: Some(UsbResponsePayload::Identity(identity)),
                 error: None,
             } => {
                 assert_eq!(request_id.as_str(), "boot-id");

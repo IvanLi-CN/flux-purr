@@ -2172,20 +2172,6 @@ struct UsbStatusPayloadWire<'a> {
     status: &'a ControlPlaneStatus,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UsbResponseFrameWire<'a> {
-    #[serde(rename = "type")]
-    frame_type: &'static str,
-    #[serde(rename = "requestId")]
-    request_id: &'a String<REQUEST_ID_MAX_LEN>,
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<&'a UsbResponsePayload>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'a ApiError>,
-}
-
 /// Narrow response wire for firmware-owned thermal tuning.
 ///
 /// `UsbFrame` intentionally supports every control-plane payload and is too
