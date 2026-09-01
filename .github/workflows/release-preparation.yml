@@ -119,6 +119,7 @@ jobs:
 
       - name: Push prepared VERSION commit to the existing pull request
         if: steps.prepare.outputs.prepared == 'created'
+        id: push
         env:
           RELEASE_SHA: ${{ steps.prepare.outputs.release_sha }}
           SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
@@ -127,4 +128,23 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${SOURCE_SHA}"
-          git -C "${RUNNER_TEMP}/release-source" push origin "${RELEASE_SHA}:refs/heads/${HEAD_REF}"
+          source_root="${RUNNER_TEMP}/release-source"
+          payload_path="${RUNNER_TEMP}/prepared-version.json"
+          response_path="${RUNNER_TEMP}/prepared-version-response.json"
+          version_path="${RUNNER_TEMP}/VERSION"
+          git -C "${source_root}" show "${RELEASE_SHA}:VERSION" > "${version_path}"
+          version_content="$(base64 < "${version_path}" | tr -d '\n')"
+          commit_message="$(git -C "${source_root}" show -s --format=%B "${RELEASE_SHA}")"
+          version_blob="$(git -C "${source_root}" rev-parse "${SOURCE_SHA}:VERSION")"
+          jq -n \
+            --arg message "${commit_message}" \
+            --arg content "${version_content}" \
+            --arg branch "${HEAD_REF}" \
+            --arg sha "${version_blob}" \
+            '{message: $message, content: $content, branch: $branch, sha: $sha}' > "${payload_path}"
+          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/VERSION" \
+            --input "${payload_path}" > "${response_path}"
+          prepared_sha="$(jq -r '.commit.sha // empty' "${response_path}")"
+          test -n "${prepared_sha}"
+          test "$(gh api "repos/${GITHUB_REPOSITORY}/commits/${prepared_sha}" --jq '.commit.verification.verified')" = true
+          echo "release_sha=${prepared_sha}" >> "${GITHUB_OUTPUT}"
