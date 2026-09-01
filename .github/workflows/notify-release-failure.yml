@@ -19,7 +19,7 @@ jobs:
     name: Collect release context
     runs-on: ubuntu-latest
     outputs:
-      details: ${{ steps.context.outputs.details }}
+      summary: ${{ steps.context.outputs.summary }}
     steps:
       - name: Checkout release metadata helpers
         uses: actions/checkout@v4
@@ -33,6 +33,8 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           MERGE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         shell: bash
         run: |
           set -euo pipefail
@@ -46,45 +48,29 @@ jobs:
           components="$(printf '%s' "${labels}" | tr ',' '\n' | grep '^component:' | paste -sd, - || true)"
           artifact_names="$(gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --jq '[.artifacts[].name] | join(",")' 2>/dev/null || printf '%s' unknown)"
           candidate_version="$(git show "${MERGE_SHA}:VERSION" 2>/dev/null || printf '%s' unknown)"
-          details="pr_number=${pr_number}; merge_commit_sha=${MERGE_SHA}; type_label=${type_label:-unknown}; channel_label=${channel_label:-unknown}; components=${components:-none}; selected_version=${candidate_version}; artifact_names=${artifact_names}; run_url=${{ github.event.workflow_run.html_url }}; backfill=dispatch Release Product with operation=recover and commit_sha=${MERGE_SHA}"
+          details="pr_number=${pr_number}; merge_commit_sha=${MERGE_SHA}; type_label=${type_label:-unknown}; channel_label=${channel_label:-unknown}; components=${components:-none}; selected_version=${candidate_version}; artifact_names=${artifact_names}; backfill=dispatch Release Product with operation=recover and commit_sha=${MERGE_SHA}"
+          summary="title=Release Product failure; project=${REPOSITORY}; status=${CONCLUSION}; target_sha=${MERGE_SHA}; run_url=${RUN_URL}; ${details}"
           {
-            echo 'details<<EOF'
-            printf '%s\n' "${details}"
+            echo 'summary<<EOF'
+            printf '%s\n' "${summary}"
             echo EOF
           } >> "${GITHUB_OUTPUT}"
 
   notify_failure:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
     needs: release_context
-    uses: IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main
+    permissions:
+      id-token: write
+    uses: IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b
     with:
-      repository: ${{ github.repository }}
-      workflow_name: ${{ github.event.workflow_run.name }}
-      conclusion: ${{ github.event.workflow_run.conclusion }}
-      run_url: ${{ github.event.workflow_run.html_url }}
-      ref_label: "${{ format('branch: {0}', github.event.workflow_run.head_branch || 'unknown') }}"
-      head_sha: ${{ github.event.workflow_run.head_sha }}
-      run_attempt: ${{ github.event.workflow_run.run_attempt }}
-      actor: ${{ github.event.workflow_run.triggering_actor.login || github.event.workflow_run.actor.login || github.actor }}
-      event_name: ${{ github.event.workflow_run.event }}
-      extra_details: ${{ needs.release_context.outputs.details }}
-    secrets:
-      SHOUTRRR_URL: ${{ secrets.SHOUTRRR_URL }}
+      outcome: ${{ github.event.workflow_run.conclusion }}
+      summary: ${{ needs.release_context.outputs.summary }}
 
   smoke_test:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    uses: IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main
+    permissions:
+      id-token: write
+    uses: IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b
     with:
-      alert_kind: "release-alert-smoke"
-      repository: ${{ github.repository }}
-      workflow_name: "Notify failed release"
-      conclusion: "failure"
-      run_url: "${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}"
-      ref_label: "${{ format('branch: {0}', github.ref_name) }}"
-      head_sha: ${{ github.sha }}
-      run_attempt: ${{ github.run_attempt }}
-      actor: ${{ github.actor }}
-      event_name: "workflow_dispatch"
-      extra_details: "manual notifier smoke test; backfill=dispatch Release Product recover"
-    secrets:
-      SHOUTRRR_URL: ${{ secrets.SHOUTRRR_URL }}
+      outcome: failure
+      summary: "title=Release failure notification smoke; project=${{ github.repository }}; status=failure; target_sha=${{ github.sha }}; run_url=${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, github.run_id) }}; manual notifier smoke test; backfill=dispatch Release Product recover"
