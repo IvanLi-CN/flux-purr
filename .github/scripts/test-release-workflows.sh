@@ -20,6 +20,7 @@ notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encod
 assert "Release preparation validation" in ci_pr
 assert "kind=prepared" in ci_pr
 assert "needs: classify" in ci_pr
+assert ci_pr.count("ref: ${{ github.event.pull_request.head.sha || github.sha }}") == 3
 assert "prepared-integration" in ci_main
 assert "git diff --quiet" in ci_main
 assert "Prepare product version" in prepare
