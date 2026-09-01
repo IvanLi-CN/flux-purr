@@ -50,6 +50,13 @@ def git_raw(*args: str, check: bool = True) -> str:
     return result.stdout
 
 
+def is_ancestor(ancestor: str, descendant: str) -> bool:
+    return subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=ROOT,
+    ).returncode == 0
+
+
 def commit_parent(commit: str) -> str:
     parents = git("show", "-s", "--format=%P", commit).split()
     if len(parents) != 1:
@@ -160,7 +167,7 @@ def verify_merged_prepared_release(commit: str) -> dict[str, str]:
     ).returncode != 0:
         return {"prepared": "false", "reason": "merge_tree_differs_from_preparation"}
 
-    source_sha, preparation_sha = parents
+    merge_parent, preparation_sha = parents
     preparation_trailers = trailers(preparation_sha)
     has_source = "Release-Source-SHA" in preparation_trailers
     has_version = "Product-Version" in preparation_trailers
@@ -169,6 +176,11 @@ def verify_merged_prepared_release(commit: str) -> dict[str, str]:
     if not has_source or not has_version:
         raise ReleaseChainError("VERSION preparation commit has incomplete release identity trailers")
 
+    source_sha = preparation_trailers["Release-Source-SHA"]
+    if not is_ancestor(merge_parent, source_sha):
+        raise ReleaseChainError(
+            f"VERSION preparation source {source_sha} is not based on merged main parent {merge_parent}"
+        )
     values = verify_prepared_commit(preparation_sha, source_sha)
     values.update(
         {

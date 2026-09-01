@@ -10,7 +10,7 @@ git -C "${tmp_dir}" config user.name "Release Chain Test"
 git -C "${tmp_dir}" config user.email "release-chain-test@example.invalid"
 cp "${root_dir}/scripts/product-version.py" "${tmp_dir}/product-version.py"
 cp "${root_dir}/.github/scripts/release_chain.py" "${tmp_dir}/release_chain.py"
-cp "${root_dir}/VERSION" "${tmp_dir}/VERSION"
+printf '0.22.0\n' > "${tmp_dir}/VERSION"
 git -C "${tmp_dir}" add .
 git -C "${tmp_dir}" commit -q --signoff -m "source"
 python3 - "${root_dir}" "${tmp_dir}" <<'PY'
@@ -61,6 +61,32 @@ assert merged_values["prepared"] == "true"
 assert merged_values["mergeSha"] == merged_release
 assert merged_values["preparationSha"] == release
 assert merged_values["version"] == "0.22.1"
+
+# A prepared commit is based on the PR source, which may be ahead of the
+# merged main parent. The merge verifier must validate that ancestry instead
+# of requiring the preparation parent to equal the main parent.
+run("git", "checkout", "-q", "-b", "divergent-source", source)
+(tmp / "README").write_text("source change\n", encoding="utf-8")
+run("git", "add", "README")
+run("git", "commit", "--signoff", "-m", "source change")
+divergent_source = run("git", "rev-parse", "HEAD")
+module.stage(Namespace(
+    source_sha=divergent_source,
+    mode="automatic",
+    exact_version=None,
+    expected_channel="stable",
+    intent_type="type:patch",
+    intent_channel="stable",
+    intent_components="none",
+    github_output=None,
+))
+divergent_preparation = run("git", "rev-parse", "HEAD")
+run("git", "checkout", "-q", "-b", "divergent-main", source)
+run("git", "merge", "--no-ff", "--no-edit", divergent_preparation)
+divergent_merge = run("git", "rev-parse", "HEAD")
+divergent_values = module.verify_merged_prepared_release(divergent_merge)
+assert divergent_values["prepared"] == "true"
+assert divergent_values["sourceSha"] == divergent_source
 
 run("git", "checkout", "-q", "-b", "bootstrap-source", merged_release)
 (tmp / "README").write_text("bootstrap workflow change\n", encoding="utf-8")

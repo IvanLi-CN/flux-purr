@@ -66,8 +66,11 @@ jobs:
           git fetch --force origin main --tags
           main_sha="$(git rev-parse origin/main)"
           test -n "${MAIN_INPUT}"
-          test "${MAIN_INPUT}" = "${main_sha}"
-          git checkout --detach "${MAIN_INPUT}"
+          if [ "${EVENT_NAME}" = workflow_run ]; then
+            test "${MAIN_INPUT}" = "${main_sha}"
+          else
+            git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"
+          fi
           preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
           prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
           if [ "${prepared}" != true ]; then
