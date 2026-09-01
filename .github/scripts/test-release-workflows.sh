@@ -15,6 +15,7 @@ completion = (root / ".github/workflows/release-completion.yml").read_text(encod
 quality = (root / ".github/quality-gates.json").read_text(encoding="utf-8")
 label_gate = (root / ".github/workflows/label-gate.yml").read_text(encoding="utf-8")
 release_chain = (root / ".github/scripts/release_chain.py").read_text(encoding="utf-8")
+notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encoding="utf-8")
 
 assert "Release preparation validation" in ci_pr
 assert "kind=prepared" in ci_pr
@@ -55,5 +56,19 @@ assert "Validate PR labels" in quality
 assert "Release completion" in quality
 assert "Validate PR labels" in label_gate
 assert "capture-intent" not in label_gate
+new_notifier = "IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b"
+assert "github-workflows" not in notify
+assert "release-failure-telegram.yml@" not in notify
+assert notify.count(new_notifier) == 2
+assert notify.count("    permissions:\n      id-token: write") == 2
+assert "SHOUTRRR_URL" not in notify
+assert "    secrets:" not in notify
+assert "workflows:\n      - Release Product" in notify
+assert "conclusion == 'failure'" in notify
+assert "types: [completed]" in notify
+assert "branches: [main]" in notify
+assert 'summary: ${{ needs.release_context.outputs.summary }}' in notify
+assert "title=Release Product failure; project=${REPOSITORY}; status=${CONCLUSION}; target_sha=${MERGE_SHA}; run_url=${RUN_URL}" in notify
+assert "title=Release failure notification smoke; project=${{ github.repository }}; status=failure; target_sha=${{ github.sha }}; run_url=" in notify
 print("release workflow fixtures passed")
 PY

@@ -73,7 +73,7 @@ New slug-only topics use `-` in the legacy `ID` column below; their directory sl
 | 223uj | Flux Purr 160×50 前面板 UI 契约 | 已完成 | `223uj-frontpanel-ui-contract/SPEC.md` | 2026-04-21 | Visual baseline retained; runtime truth-source for heater/fan/dashboard is superseded by #q2aw6 |
 | vmekj | Flux Purr S3 GC9D01 异步 SPI 显示 bring-up 与启动后界面轮播 | 已完成 | `vmekj-s3-gc9d01-display-bringup/SPEC.md` | 2026-04-13 | Orientation/colors confirmed; runtime behavior later superseded by #fk3u7 while display bring-up baseline stays canonical |
 | fk3u7 | Flux Purr 前面板五向输入与交互导航 | 已完成 | `fk3u7-frontpanel-input-interaction/SPEC.md` | 2026-04-21 | Key Test mapping + dashboard/menu navigation remain canonical; heater/fan runtime semantics are superseded by #q2aw6 |
-| jb85u | Release 失败 Telegram 告警接入 | 待实现 | `jb85u-release-failure-telegram-alerts/SPEC.md` | 2026-04-12 | Add a repo-local notifier for Release Product and keep a manual Telegram smoke test path |
+| jb85u | Release 失败通知接入 | 已完成 | `jb85u-release-failure-telegram-alerts/SPEC.md` | 2026-09-01 | Oidrune OIDC reusable workflow pinned by SHA, caller-owned release/smoke summaries, and no Telegram secret wiring |
 | q2aw6 | Flux Purr 正式 PID 加热闭环与前面板运行态同步 | 已完成 | `q2aw6-heater-pid-frontpanel-runtime/SPEC.md` | 2026-04-21 | PR #11 |
 | 22222 | Flux Purr Worktree Bootstrap | 已完成 | `22222-worktree-bootstrap/SPEC.md` | 2026-06-24 | Shared hooks + linked worktree auto bootstrap + required smoke gate |
 | v5k2p | 双版本风扇 PCB 方案（5V / 12V） | 已完成 | `v5k2p-dual-fan-pcb-variants/SPEC.md` | 2026-04-10 | PR #6 |
