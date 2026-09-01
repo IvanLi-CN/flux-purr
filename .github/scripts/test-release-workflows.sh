@@ -61,14 +61,29 @@ assert "github-workflows" not in notify
 assert "release-failure-telegram.yml@" not in notify
 assert notify.count(new_notifier) == 2
 assert notify.count("    permissions:\n      id-token: write") == 2
+assert "gateway_url:" not in notify
+assert "oidc_audience:" not in notify
 assert "SHOUTRRR_URL" not in notify
 assert "    secrets:" not in notify
 assert "workflows:\n      - Release Product" in notify
 assert "conclusion == 'failure'" in notify
 assert "types: [completed]" in notify
 assert "branches: [main]" in notify
+assert "outcome: ${{ github.event.workflow_run.conclusion }}" in notify
+assert "outcome: failure" in notify
 assert 'summary: ${{ needs.release_context.outputs.summary }}' in notify
 assert "title=Release Product failure; project=${REPOSITORY}; status=${CONCLUSION}; target_sha=${MERGE_SHA}; run_url=${RUN_URL}" in notify
+for release_context in (
+    "pr_number=${pr_number}",
+    "merge_commit_sha=${MERGE_SHA}",
+    "type_label=${type_label:-unknown}",
+    "channel_label=${channel_label:-unknown}",
+    "components=${components:-none}",
+    "selected_version=${candidate_version}",
+    "artifact_names=${artifact_names}",
+    "backfill=dispatch Release Product with operation=recover and commit_sha=${MERGE_SHA}",
+):
+    assert release_context in notify
 assert "title=Release failure notification smoke; project=${{ github.repository }}; status=failure; target_sha=${{ github.sha }}; run_url=" in notify
 print("release workflow fixtures passed")
 PY
