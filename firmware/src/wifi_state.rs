@@ -18,6 +18,7 @@ pub trait WifiClock {
 pub enum WifiEvent {
     ApplyConfig,
     ClearConfig,
+    CancelProvisioning,
     DisconnectCompleted,
     DisconnectTimedOut,
     DriverConfigured,
@@ -105,6 +106,11 @@ impl WifiProvisioningMachine {
                 self.provisioning_started_at_ms = None;
                 (NetworkState::Disabled, None, WifiEffect::None)
             }
+            WifiEvent::CancelProvisioning => {
+                self.attempts = 0;
+                self.provisioning_started_at_ms = None;
+                (NetworkState::Idle, None, WifiEffect::Disconnect)
+            }
             WifiEvent::ApplyConfig => {
                 self.configuration_generation = self.configuration_generation.wrapping_add(1);
                 self.attempts = 0;
@@ -191,6 +197,9 @@ impl WifiProvisioningMachine {
     const fn accepts(&self, event: WifiEvent) -> bool {
         match event {
             WifiEvent::ApplyConfig | WifiEvent::ClearConfig | WifiEvent::LanStartupFailed => true,
+            WifiEvent::CancelProvisioning => {
+                !matches!(self.state, NetworkState::Disabled | NetworkState::Idle)
+            }
             WifiEvent::DisconnectCompleted | WifiEvent::DisconnectTimedOut => {
                 matches!(self.state, NetworkState::Saving)
             }
@@ -297,6 +306,34 @@ mod tests {
         assert_eq!(first.configuration_generation, 1);
         assert_eq!(second.configuration_generation, 2);
         assert!(second.transition_sequence > first.transition_sequence);
+    }
+
+    #[test]
+    fn cancel_provisioning_stops_the_active_connection_without_clearing_credentials() {
+        let mut machine = WifiProvisioningMachine::new();
+        let accepted = machine.apply(WifiEvent::ApplyConfig);
+        let connecting = machine.apply(WifiEvent::DisconnectCompleted);
+
+        let cancelled = machine.apply(WifiEvent::CancelProvisioning);
+
+        assert!(cancelled.accepted);
+        assert_eq!(cancelled.state, NetworkState::Idle);
+        assert_eq!(cancelled.failure_code, None);
+        assert_eq!(
+            cancelled.configuration_generation,
+            accepted.configuration_generation
+        );
+        assert!(cancelled.transition_sequence > connecting.transition_sequence);
+        assert_eq!(cancelled.effect, WifiEffect::Disconnect);
+
+        let stale_association = machine.apply(WifiEvent::AssociationSucceeded);
+        assert!(!stale_association.accepted);
+        assert_eq!(stale_association.state, NetworkState::Idle);
+
+        let retry = machine.apply(WifiEvent::ApplyConfig);
+        assert!(retry.accepted);
+        assert_eq!(retry.state, NetworkState::Saving);
+        assert!(retry.configuration_generation > cancelled.configuration_generation);
     }
 
     #[test]
@@ -419,6 +456,7 @@ mod tests {
         let events = [
             WifiEvent::ApplyConfig,
             WifiEvent::ClearConfig,
+            WifiEvent::CancelProvisioning,
             WifiEvent::DisconnectCompleted,
             WifiEvent::DisconnectTimedOut,
             WifiEvent::DriverConfigured,

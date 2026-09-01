@@ -95,7 +95,7 @@ export function heaterLockReasonText(reason: HeaterLockReason) {
 
 export function deviceControlBlockReason(
   device: Pick<DeviceTarget, 'severity' | 'leaseState' | 'transportIssue' | 'networkState'> &
-    Partial<Pick<DeviceTarget, 'transport' | 'baseUrl'>>
+    Partial<Pick<DeviceTarget, 'transport' | 'bridgeTransport' | 'baseUrl'>>
 ) {
   if (device.severity === 'offline') {
     return '目标设备当前离线。'
@@ -117,8 +117,11 @@ export function deviceControlBlockReason(
     return device.transportIssue ?? '正在获取 LAN 控制租约，暂时无法下发控制。'
   }
 
+  const isNetworkControlTransport =
+    device.transport === 'wifi' ||
+    (device.transport === 'devd' && device.bridgeTransport === 'wifi')
   const networkState = device.networkState
-  if (networkState && BLOCKED_NETWORK_STATES.has(networkState)) {
+  if (isNetworkControlTransport && networkState && BLOCKED_NETWORK_STATES.has(networkState)) {
     return device.transportIssue ?? '当前传输尚未恢复，暂时无法下发控制。'
   }
 

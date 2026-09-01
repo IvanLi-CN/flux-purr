@@ -208,6 +208,9 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     wifiSsid: probe.network.ssid ?? null,
     wifiRssi: probe.network.wifiRssi ?? null,
     wifiPasswordLength: probe.network.wifiPasswordLength ?? 0,
+    configurationGeneration: probe.network.configurationGeneration,
+    transitionSequence: probe.network.transitionSequence,
+    wifiFailureCode: probe.network.failureCode,
     capabilities: mergeCapabilities(probe.identity.capabilities, [
       'usb_jsonl',
       'status',
@@ -397,6 +400,10 @@ export class WebSerialControlPlaneClient {
       createUsbWifiConfigFrame(requestId, request)
     )
     return receipt.network
+  }
+
+  async getNetwork(): Promise<NetworkSummary> {
+    return this.requestPayload<NetworkSummary>('network', createUsbRequestFrame('get_network'))
   }
 
   async getCalibration(): Promise<CalibrationState> {

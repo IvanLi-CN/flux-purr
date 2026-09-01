@@ -1921,6 +1921,7 @@ pub enum HeaterCurveConfigOp {
 pub enum WifiConfigOp {
     Set,
     Clear,
+    Cancel,
 }
 
 impl WifiConfigOp {
@@ -1928,6 +1929,7 @@ impl WifiConfigOp {
         match self {
             Self::Set => "set",
             Self::Clear => "clear",
+            Self::Cancel => "cancel",
         }
     }
 }
@@ -2180,6 +2182,7 @@ pub struct FlashResult {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct BootObservation {
     reset_count: u8,
+    saw_boot_progress: bool,
     last_stage: Option<String>,
 }
 
@@ -2198,8 +2201,13 @@ impl BootObservation {
             }
         }
         if line.starts_with("boot_stage=") {
-            self.last_stage = Some(line.to_string());
-            return Ok(line == RUNTIME_READY_BOOT_STAGE);
+            if line != RUNTIME_READY_BOOT_STAGE {
+                self.saw_boot_progress = true;
+                self.last_stage = Some(line.to_string());
+            } else if self.saw_boot_progress {
+                self.last_stage = Some(line.to_string());
+            }
+            return Ok(self.saw_boot_progress && line == RUNTIME_READY_BOOT_STAGE);
         }
         let lowercase = line.to_ascii_lowercase();
         if lowercase.contains("guru meditation")
@@ -4079,6 +4087,20 @@ fn mock_network_after_wifi_config(
             if let Some(password) = &payload.password {
                 network.wifi_password_length = password.len() as u8;
             }
+            network.ip = None;
+            network.gateway = None;
+            network.dns.clear();
+            network.wifi_rssi = None;
+            network.last_error = None;
+            network
+        }
+        WifiConfigOp::Cancel => {
+            let mut network = current.clone();
+            // Cancel is a runtime station operation. Stored credentials and
+            // their configuration generation remain unchanged.
+            network.state = NetworkState::Idle;
+            network.transition_sequence = network.transition_sequence.wrapping_add(1);
+            network.failure_code = None;
             network.ip = None;
             network.gateway = None;
             network.dns.clear();
@@ -6481,10 +6503,13 @@ async fn serial_wifi_config(
         SerialRetryPolicy::SingleShot,
     )
     .await?;
-    extract_wifi_config_network(response)
+    extract_wifi_config_network(response, payload.op == WifiConfigOp::Cancel)
 }
 
-fn extract_wifi_config_network(result: Value) -> Result<NetworkSummary, HttpError> {
+fn extract_wifi_config_network(
+    result: Value,
+    accepts_idle_cancellation: bool,
+) -> Result<NetworkSummary, HttpError> {
     let receipt = extract_usb_payload::<UsbWifiConfigReceipt>(result, "wifi")?;
     if receipt.network.configuration_generation == 0 || receipt.network.transition_sequence == 0 {
         return Err(HttpError::new(
@@ -6496,8 +6521,9 @@ fn extract_wifi_config_network(result: Value) -> Result<NetworkSummary, HttpErro
     }
     if matches!(
         receipt.network.state,
-        NetworkState::Idle | NetworkState::Saving | NetworkState::Timeout
-    ) {
+        NetworkState::Saving | NetworkState::Timeout
+    ) || (receipt.network.state == NetworkState::Idle && !accepts_idle_cancellation)
+    {
         return Err(HttpError::new(
             StatusCode::BAD_GATEWAY,
             "invalid_wifi_receipt",
@@ -9237,10 +9263,14 @@ fn record_serial_bridge_error(
 }
 
 fn emit_wifi_config_event(state: &AppState, device_id: &str, payload: &WifiConfigRequest) {
+    let message = match payload.op {
+        WifiConfigOp::Set | WifiConfigOp::Clear => "wifi config accepted",
+        WifiConfigOp::Cancel => "wifi cancellation confirmed",
+    };
     state.emit(event(
         device_id,
         "wifi",
-        "wifi config accepted",
+        message,
         json!({
             "op": payload.op,
             "ssid": payload.ssid,
@@ -12344,49 +12374,82 @@ mod tests {
 
     #[test]
     fn wifi_receipt_rejects_unversioned_and_malformed_network_snapshots() {
-        let unversioned = extract_wifi_config_network(json!({
-            "wifi": {
-                "network": {
-                    "state": "saving",
-                    "ssid": null,
-                    "wifiPasswordLength": 0,
-                    "ip": null,
-                    "gateway": null,
-                    "dns": [],
-                    "wifiRssi": null,
-                    "lastError": null
+        let unversioned = extract_wifi_config_network(
+            json!({
+                "wifi": {
+                    "network": {
+                        "state": "saving",
+                        "ssid": null,
+                        "wifiPasswordLength": 0,
+                        "ip": null,
+                        "gateway": null,
+                        "dns": [],
+                        "wifiRssi": null,
+                        "lastError": null
+                    }
                 }
-            }
-        }))
+            }),
+            false,
+        )
         .unwrap_err();
         assert_eq!(unversioned.error.code, "invalid_wifi_receipt");
 
         let malformed =
-            extract_wifi_config_network(json!({ "wifi": { "network": 42 } })).unwrap_err();
+            extract_wifi_config_network(json!({ "wifi": { "network": 42 } }), false).unwrap_err();
         assert_eq!(malformed.error.code, "usb_payload_decode_failed");
 
-        let non_public = extract_wifi_config_network(json!({
-            "wifi": {
-                "network": {
-                    "state": "saving",
-                    "configurationGeneration": 1,
-                    "transitionSequence": 1,
-                    "ssid": null,
-                    "wifiPasswordLength": 0,
-                    "ip": null,
-                    "gateway": null,
-                    "dns": [],
-                    "wifiRssi": null,
-                    "lastError": null
+        let non_public = extract_wifi_config_network(
+            json!({
+                "wifi": {
+                    "network": {
+                        "state": "saving",
+                        "configurationGeneration": 1,
+                        "transitionSequence": 1,
+                        "ssid": null,
+                        "wifiPasswordLength": 0,
+                        "ip": null,
+                        "gateway": null,
+                        "dns": [],
+                        "wifiRssi": null,
+                        "lastError": null
+                    }
                 }
-            }
-        }))
+            }),
+            false,
+        )
         .unwrap_err();
         assert_eq!(non_public.error.code, "invalid_wifi_receipt");
         assert_eq!(
             non_public.error.message,
             "The device returned a non-public WiFi state."
         );
+    }
+
+    #[test]
+    fn wifi_cancel_receipt_accepts_only_the_confirmed_idle_snapshot() {
+        let receipt = extract_wifi_config_network(
+            json!({
+                "wifi": {
+                    "network": {
+                        "state": "idle",
+                        "configurationGeneration": 4,
+                        "transitionSequence": 12,
+                        "ssid": "FluxPurr-Lab",
+                        "wifiPasswordLength": 11,
+                        "ip": null,
+                        "gateway": null,
+                        "dns": [],
+                        "wifiRssi": null,
+                        "lastError": null
+                    }
+                }
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(receipt.state, NetworkState::Idle);
+        assert_eq!(receipt.ssid.as_deref(), Some("FluxPurr-Lab"));
     }
 
     #[test]
@@ -12550,6 +12613,20 @@ mod tests {
             observation.last_stage.as_deref(),
             Some(RUNTIME_READY_BOOT_STAGE)
         );
+    }
+
+    #[test]
+    fn post_flash_boot_rejects_a_stale_runtime_ready_marker() {
+        let mut observation = BootObservation::default();
+
+        assert!(!observation.observe_line(RUNTIME_READY_BOOT_STAGE).unwrap());
+        assert!(observation.last_stage.is_none());
+        assert!(
+            !observation
+                .observe_line("boot_stage=display_init_complete")
+                .unwrap()
+        );
+        assert!(observation.observe_line(RUNTIME_READY_BOOT_STAGE).unwrap());
     }
 
     #[test]
@@ -13257,6 +13334,47 @@ mod tests {
         assert_eq!(accepted.ssid.as_deref(), Some("FluxPurr-Lab"));
         assert_eq!(accepted.wifi_password_length, 11);
         assert_eq!(accepted.last_error, None);
+    }
+
+    #[test]
+    fn wifi_cancel_receipt_preserves_credentials_and_reports_idle() {
+        let current = NetworkSummary {
+            state: NetworkState::Connecting,
+            configuration_generation: 4,
+            transition_sequence: 11,
+            failure_code: None,
+            ssid: Some("FluxPurr-Lab".to_string()),
+            wifi_password_length: 11,
+            ip: Some("192.168.31.42".to_string()),
+            gateway: Some("192.168.31.1".to_string()),
+            dns: vec!["1.1.1.1".to_string()],
+            wifi_rssi: Some(-48),
+            last_error: None,
+        };
+        let payload = WifiConfigRequest {
+            lease_id: "lease-1".to_string(),
+            op: WifiConfigOp::Cancel,
+            ssid: None,
+            password: None,
+            static_ipv4: None,
+            telemetry_interval_ms: None,
+        };
+
+        let cancelled = mock_network_after_wifi_config(&current, &payload);
+
+        assert_eq!(cancelled.state, NetworkState::Idle);
+        assert_eq!(
+            cancelled.configuration_generation,
+            current.configuration_generation
+        );
+        assert_eq!(
+            cancelled.transition_sequence,
+            current.transition_sequence + 1
+        );
+        assert_eq!(cancelled.ssid, current.ssid);
+        assert_eq!(cancelled.wifi_password_length, current.wifi_password_length);
+        assert_eq!(cancelled.ip, None);
+        assert_eq!(cancelled.wifi_rssi, None);
     }
 
     #[test]

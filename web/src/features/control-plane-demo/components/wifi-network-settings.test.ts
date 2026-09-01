@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   createWifiPasswordMask,
+  formatWifiWaitElapsed,
   isWifiNetworkSettingsDirty,
   isWifiSnapshotOlder,
   resolveWifiSettingsUnavailableReason,
   shouldClearStaleWifiOutcome,
   validateWifiNetworkSettingsDraft,
   wifiConnectionOutcome,
+  wifiFailureReason,
 } from './wifi-network-settings'
 
 describe('WiFi password presentation', () => {
@@ -82,14 +84,16 @@ describe('resolveWifiSettingsUnavailableReason', () => {
 
 describe('wifiConnectionOutcome', () => {
   it('only maps terminal device states to a result message', () => {
-    expect(wifiConnectionOutcome('error')).toBe('WiFi 连接失败，请检查名称和密码。')
+    expect(wifiConnectionOutcome('error')).toBe('WiFi 连接失败：设备未返回具体失败原因。')
     expect(wifiConnectionOutcome('timeout')).toBe('WiFi 连接超时，请检查网络是否可用。')
     expect(wifiConnectionOutcome('connecting')).toBeNull()
   })
 
   it('maps success and terminal failure states', () => {
     expect(wifiConnectionOutcome('connected')).toBe('WiFi 已连接。')
-    expect(wifiConnectionOutcome('error')).toBe('WiFi 连接失败，请检查名称和密码。')
+    expect(wifiConnectionOutcome('error', 'association_rejected')).toBe(
+      'WiFi 连接失败：接入点拒绝认证，请检查 WiFi 名称和密码。'
+    )
     expect(wifiConnectionOutcome('timeout')).toBe('WiFi 连接超时，请检查网络是否可用。')
   })
 
@@ -103,17 +107,46 @@ describe('wifiConnectionOutcome', () => {
   })
 })
 
+describe('WiFi connection diagnostics', () => {
+  it('makes every firmware failure code actionable without exposing credentials', () => {
+    expect(wifiFailureReason('disconnect_timed_out')).toBe('连接完成前设备网络断开。')
+    expect(wifiFailureReason('configuration_failed')).toBe('设备未能应用 WiFi 配置。')
+    expect(wifiFailureReason('association_rejected')).toBe(
+      '接入点拒绝认证，请检查 WiFi 名称和密码。'
+    )
+    expect(wifiFailureReason('association_timed_out')).toBe('等待接入点响应超时。')
+    expect(wifiFailureReason('ipv4_timed_out')).toBe('已连接接入点，但未能获得 IPv4 地址。')
+    expect(wifiFailureReason('station_disconnected')).toBe('设备与接入点断开。')
+    expect(wifiFailureReason('lan_startup_failed')).toBe('设备网络接口启动失败。')
+    expect(wifiFailureReason(null)).toBe('设备未返回具体失败原因。')
+  })
+
+  it('formats elapsed host wait time for the status line', () => {
+    expect(formatWifiWaitElapsed(0)).toBe('0 秒')
+    expect(formatWifiWaitElapsed(9.9)).toBe('9 秒')
+    expect(formatWifiWaitElapsed(10)).toBe('10 秒')
+    expect(formatWifiWaitElapsed(65)).toBe('1 分 05 秒')
+  })
+})
+
 describe('shouldClearStaleWifiOutcome', () => {
   it('clears a terminal failure toast when a newer device phase replaces it', () => {
-    expect(shouldClearStaleWifiOutcome('connecting', 'WiFi 连接失败，请检查名称和密码。')).toBe(
-      true
-    )
+    expect(
+      shouldClearStaleWifiOutcome(
+        'connecting',
+        'WiFi 连接失败：接入点拒绝认证，请检查 WiFi 名称和密码。'
+      )
+    ).toBe(true)
     expect(shouldClearStaleWifiOutcome('connecting', 'WiFi 连接超时，请检查网络是否可用。')).toBe(
       true
     )
     expect(shouldClearStaleWifiOutcome('connecting', 'WiFi 已连接。')).toBe(true)
-    expect(shouldClearStaleWifiOutcome('saving', 'WiFi 连接失败，请检查名称和密码。')).toBe(true)
-    expect(shouldClearStaleWifiOutcome('connected', 'WiFi 连接失败，请检查名称和密码。')).toBe(true)
+    expect(shouldClearStaleWifiOutcome('saving', 'WiFi 连接失败：设备未返回具体失败原因。')).toBe(
+      true
+    )
+    expect(
+      shouldClearStaleWifiOutcome('connected', 'WiFi 连接失败：设备未返回具体失败原因。')
+    ).toBe(true)
   })
 })
 

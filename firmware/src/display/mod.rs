@@ -227,6 +227,25 @@ impl DisplayCanvas {
         }
     }
 
+    /// Initializes an uninitialized canvas directly in its final storage.
+    ///
+    /// This avoids materializing the 16 KiB pixel array on the caller's stack,
+    /// which is essential for the guarded front-panel task stack.
+    ///
+    /// # Safety
+    ///
+    /// `out` must point to writable storage for one `DisplayCanvas`, with no
+    /// aliases for the duration of initialization.
+    pub unsafe fn initialize_black_in_place(out: *mut Self) {
+        // SAFETY: the caller guarantees that `out` is valid writable storage.
+        let pixels = unsafe { core::ptr::addr_of_mut!((*out).pixels) }.cast::<Rgb565>();
+        for index in 0..DISPLAY_PIXELS {
+            // SAFETY: `pixels` addresses the `index`th element of the caller's
+            // writable DisplayCanvas storage.
+            unsafe { pixels.add(index).write(Rgb565::BLACK) };
+        }
+    }
+
     pub fn pixels(&self) -> &[Rgb565] {
         &self.pixels
     }
@@ -672,7 +691,18 @@ fn render_grid(canvas: &mut DisplayCanvas) {
 
 #[cfg(test)]
 mod tests {
+    use core::mem::MaybeUninit;
+
     use super::*;
+
+    #[test]
+    fn canvas_can_be_initialized_directly_in_final_storage() {
+        let mut storage = MaybeUninit::<DisplayCanvas>::uninit();
+        unsafe { DisplayCanvas::initialize_black_in_place(storage.as_mut_ptr()) };
+        let canvas = unsafe { storage.assume_init_mut() };
+
+        assert!(canvas.pixels().iter().all(|pixel| *pixel == Rgb565::BLACK));
+    }
 
     #[test]
     fn startup_scene_renders_corner_markers_and_text() {

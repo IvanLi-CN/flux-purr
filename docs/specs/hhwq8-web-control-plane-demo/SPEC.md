@@ -75,6 +75,7 @@
 - Settings 必须使用链接语义的 workspace tabs 分开展示 live summary/preset temperatures/preset enable、fan policy 和 transport-scoped WiFi settings。
 - Settings 中 preset 温度调整必须在 debounce 后自动保存；不得提供额外提交按钮。
 - WiFi tab 必须根据选中 Device 的 capability 与 transport 隐藏、只读或读写；Web Serial 与 active devd USB lease 可写，WiFi/LAN 与 devd LAN bridge 只读并显示 Alert 原因。
+- WiFi mock 与 live 表单在 10 秒等待后必须将“取消”映射为 Device `wifi_config(op=cancel)`；只有 device-confirmed `idle` 才能显示取消成功，不能用停止本地等待代替设备操作。
 - Update 必须展示 artifact 选择、compatibility verdict、dry-check progress 与结果摘要，但不得呈现为完整 artifact 管理后台。
 - 全局日志必须支持至少 1000 条 mock trace，通过虚拟列表渲染；滚动条仅在 hover/滚动时显示。
 - Storybook 必须提供 default、degraded、gallery、mobile review 与交互 smoke story。
@@ -179,6 +180,7 @@
 - Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
 - Given public Demo build，When 打开 `/?demo=false&uiDemo=true`，Then 始终进入完整 mock-only console，不出现 LAN pairing 页面且不会启动 devd、Web Serial 或 direct LAN。
 - Given Demo Inspector，When 切换 scene、lease/network/artifact 覆盖或模拟动作，Then console 与全局 trace 同步更新，URL 可刷新恢复；选择 Calibration active 时同一校准离开保护生效。
+- Given WiFi 配置等待达到 10 秒，When operator 选择取消，Then mock fixture 与 live Web Serial 都等待 `cancel` receipt 的 `idle` 结果；等待、确认成功与取消失败分别有可辨识状态，且取消不会清空保存的 SSID 或密码掩码。
 
 ## 验收清单（Acceptance checklist）
 

@@ -8080,10 +8080,24 @@
 
 .industrial-wifi-settings__header output {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.42rem;
   margin-top: 0.14rem;
   color: var(--industrial-muted-text);
+}
+
+.industrial-wifi-settings__header output > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  color: var(--industrial-accent);
+}
+
+.industrial-wifi-settings__header output > svg.is-danger {
+  color: var(--industrial-accent);
+}
+
+.industrial-wifi-settings__header output > svg.is-success {
+  color: var(--industrial-green);
 }
 
 .industrial-wifi-settings__header output strong {

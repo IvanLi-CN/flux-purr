@@ -87,6 +87,8 @@ use flux_purr_firmware::control_plane::LanPairingCode;
 #[cfg(test)]
 use flux_purr_firmware::control_plane::ThermalControlProfileCommand;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::WifiConfigOp;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::WifiConfigReceipt;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::hello_frame;
@@ -213,7 +215,9 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> = MaybeUninit::uninit();
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-const RUNTIME_HEAP_SIZE: usize = 64 * 1024;
+// The display canvas is reinitialized before every use and lives in DRAM2 so
+// the ProCPU control task retains enough guarded stack for USB requests.
+const RUNTIME_HEAP_SIZE: usize = 48 * 1024;
 
 #[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
 #[unsafe(link_section = ".dram2_uninit")]
@@ -248,6 +252,10 @@ fn init_runtime_heap() {
 #[unsafe(link_section = ".dram2_uninit")]
 static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_LEN]> =
     MaybeUninit::uninit();
+
+#[cfg(target_arch = "xtensa")]
+#[unsafe(link_section = ".dram2_uninit")]
+static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = MaybeUninit::uninit();
 
 #[cfg(target_arch = "xtensa")]
 struct MemoryIoScratch {
@@ -300,6 +308,18 @@ fn initialize_usb_control_response_buffer() -> &'static mut [u8; USB_CONTROL_TX_
     unsafe {
         (&mut *core::ptr::addr_of_mut!(USB_CONTROL_RESPONSE_BUFFER))
             .write([0; USB_CONTROL_TX_BUFFER_LEN])
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn initialize_display_canvas() -> &'static mut DisplayCanvas {
+    // DRAM2 is retained across software resets, so overwrite the canvas rather
+    // than using StaticCell's one-time initialization marker. Initialize in
+    // place so the 16 KiB canvas never occupies the guarded task stack.
+    unsafe {
+        let canvas = core::ptr::addr_of_mut!(DISPLAY_CANVAS_STORAGE).cast::<DisplayCanvas>();
+        DisplayCanvas::initialize_black_in_place(canvas);
+        &mut *canvas
     }
 }
 
@@ -8111,7 +8131,7 @@ fn usb_runtime_status_with_calibration(
     memory_config: &MemoryConfig,
     calibration: &CalibrationRuntimeState,
     context: UsbRuntimeStatusContext,
-) -> ControlPlaneStatus {
+) -> Box<ControlPlaneStatus> {
     let pd_contract_mv = effective_pd_contract_mv(
         &context.manual_pps,
         context.last_pd_observation,
@@ -8134,7 +8154,7 @@ fn usb_runtime_status_with_calibration(
         .first_pressed()
         .map(|raw_key| FrontPanelKeyMap::default().logical_from_raw(raw_key));
 
-    let mut status = ControlPlaneStatus::from_device_status(
+    let mut status = ControlPlaneStatus::boxed_from_device_status(
         DeviceStatus {
             mode: if context.current_rtd_fault.is_some() {
                 DeviceMode::Fault
@@ -8169,8 +8189,8 @@ fn usb_runtime_status_with_calibration(
         memory_config,
         (context.elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
         ui_state.network.clone(),
-    )
-    .with_runtime_target_temp_c(ui_state.target_temp_c);
+    );
+    status.target_temp_c = ui_state.target_temp_c;
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
     status.rtd_raw_adc_min_mv = context.latest_rtd_raw_adc_min_mv;
     status.rtd_raw_adc_max_mv = context.latest_rtd_raw_adc_max_mv;
@@ -8306,7 +8326,7 @@ fn usb_runtime_status(
     memory_config: &MemoryConfig,
     calibration: &CalibrationRuntimeState,
     context: UsbRuntimeStatusContext,
-) -> ControlPlaneStatus {
+) -> Box<ControlPlaneStatus> {
     usb_runtime_status_with_calibration(ui_state, memory_config, calibration, context)
 }
 
@@ -8315,7 +8335,7 @@ fn usb_runtime_status(
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
     context: UsbRuntimeStatusContext,
-) -> ControlPlaneStatus {
+) -> Box<ControlPlaneStatus> {
     let calibration = context.calibration;
     usb_runtime_status_with_calibration(ui_state, memory_config, &calibration, context)
 }
@@ -10704,8 +10724,8 @@ fn usb_recovery_response_for_phase(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> ControlPlaneStatus {
-    let mut status = ControlPlaneStatus::from_device_status(
+fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Box<ControlPlaneStatus> {
+    let mut status = ControlPlaneStatus::boxed_from_device_status(
         DeviceStatus {
             mode: DeviceMode::Fault,
             voltage_mv: 0,
@@ -11099,14 +11119,46 @@ async fn process_control_line(
             }
         },
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
-            config.apply_to(memory_config);
             #[cfg(feature = "net_http")]
-            let network = flux_purr_firmware::net::apply_wifi_config(memory_config).await;
+            let network = match config.op {
+                WifiConfigOp::Cancel => {
+                    match flux_purr_firmware::net::cancel_wifi_connection().await {
+                        Ok(network) => network,
+                        Err(error) => {
+                            return (
+                                needs_redraw,
+                                usb_error_response(request_id, error.code(), error.message()),
+                            );
+                        }
+                    }
+                }
+                WifiConfigOp::Set | WifiConfigOp::Clear => {
+                    config.apply_to(memory_config);
+                    flux_purr_firmware::net::apply_wifi_config(memory_config).await
+                }
+            };
             #[cfg(not(feature = "net_http"))]
-            let network = network_from_memory(memory_config);
-            apply_memory_config_to_ui(ui_state, memory_config);
-            *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-            needs_redraw = true;
+            let network = match config.op {
+                WifiConfigOp::Cancel => {
+                    return (
+                        needs_redraw,
+                        usb_error_response(
+                            request_id,
+                            "wifi_cancel_unavailable",
+                            "WiFi cancellation is unavailable in this firmware build.",
+                        ),
+                    );
+                }
+                WifiConfigOp::Set | WifiConfigOp::Clear => {
+                    config.apply_to(memory_config);
+                    network_from_memory(memory_config)
+                }
+            };
+            if !matches!(config.op, WifiConfigOp::Cancel) {
+                apply_memory_config_to_ui(ui_state, memory_config);
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                needs_redraw = true;
+            }
             usb_response(
                 request_id,
                 UsbResponsePayload::Wifi(WifiConfigReceipt {
@@ -12221,12 +12273,11 @@ async fn main(_spawner: Spawner) {
     static DRIVER_FB: StaticCell<
         [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
     > = StaticCell::new();
-    static CANVAS: StaticCell<DisplayCanvas> = StaticCell::new();
 
     let driver_framebuffer = DRIVER_FB.init_with(|| {
         [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS]
     });
-    let canvas = CANVAS.init_with(DisplayCanvas::new);
+    let canvas = initialize_display_canvas();
 
     let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
         DISPLAY_PANEL_CONFIG,

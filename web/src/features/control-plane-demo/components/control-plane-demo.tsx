@@ -3022,7 +3022,7 @@ export function ControlPlaneDemo({
   )
 
   const configureWifi = useCallback(
-    async (op: 'set' | 'clear', draft?: WifiNetworkSettingsDraft) => {
+    async (op: 'set' | 'clear' | 'cancel', draft?: WifiNetworkSettingsDraft) => {
       const rejectWifiConfiguration = (detail: string): never => {
         emitEvent(
           visibleDevice.transport === 'serial' ? 'webserial' : 'devd',
@@ -3038,7 +3038,10 @@ export function ControlPlaneDemo({
       }
 
       if (mockOnly && allowDemoControls) {
-        const nextGeneration = (visibleDevice.configurationGeneration ?? 0) + 1
+        const nextGeneration =
+          op === 'cancel'
+            ? (visibleDevice.configurationGeneration ?? 0)
+            : (visibleDevice.configurationGeneration ?? 0) + 1
         const nextSequence = (visibleDevice.transitionSequence ?? 0) + 1
         const network: NetworkSummary =
           op === 'clear'
@@ -3053,13 +3056,18 @@ export function ControlPlaneDemo({
                 lastError: null,
               }
             : {
-                state: 'connected',
-                ssid: draft?.ssid ?? visibleDevice.wifiSsid ?? null,
+                state: op === 'cancel' ? 'idle' : 'connected',
+                ssid:
+                  op === 'cancel'
+                    ? (visibleDevice.wifiSsid ?? null)
+                    : (draft?.ssid ?? visibleDevice.wifiSsid ?? null),
                 wifiRssi: visibleDevice.wifiRssi,
                 wifiPasswordLength:
-                  draft?.password !== undefined
-                    ? draft.password.length
-                    : (visibleDevice.wifiPasswordLength ?? 0),
+                  op === 'cancel'
+                    ? (visibleDevice.wifiPasswordLength ?? 0)
+                    : draft?.password !== undefined
+                      ? draft.password.length
+                      : (visibleDevice.wifiPasswordLength ?? 0),
                 configurationGeneration: nextGeneration,
                 transitionSequence: nextSequence,
                 failureCode: null,
@@ -3071,7 +3079,11 @@ export function ControlPlaneDemo({
         }))
         emitEvent(
           'demo',
-          op === 'set' ? 'simulated WiFi credentials saved' : 'simulated saved WiFi cleared',
+          op === 'set'
+            ? 'simulated WiFi credentials saved'
+            : op === 'clear'
+              ? 'simulated saved WiFi cleared'
+              : 'simulated WiFi connection cancelled',
           'success'
         )
         return network
@@ -3087,17 +3099,6 @@ export function ControlPlaneDemo({
               }
             : {}),
         })
-        setWifiSnapshotsByDevice((current) => ({
-          ...current,
-          [visibleDevice.id]: network,
-        }))
-        emitEvent(
-          'webserial',
-          op === 'set'
-            ? 'wifi configuration submitted through browser Web Serial'
-            : 'saved wifi cleared through browser Web Serial',
-          'success'
-        )
         return network
       }
 
@@ -3135,7 +3136,9 @@ export function ControlPlaneDemo({
           'devd',
           op === 'set'
             ? 'wifi configuration submitted through USB bridge'
-            : 'saved wifi cleared through USB bridge',
+            : op === 'clear'
+              ? 'saved wifi cleared through USB bridge'
+              : 'wifi cancellation submitted through USB bridge',
           'success'
         )
         return network
@@ -3153,6 +3156,8 @@ export function ControlPlaneDemo({
   )
 
   const handleWifiClear = useCallback(() => configureWifi('clear'), [configureWifi])
+
+  const handleWifiCancel = useCallback(() => configureWifi('cancel'), [configureWifi])
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -4636,6 +4641,8 @@ export function ControlPlaneDemo({
                 onSettingsWorkspaceTabChange={setSettingsWorkspaceTab}
                 onWifiSave={handleWifiSave}
                 onWifiClear={handleWifiClear}
+                onWifiCancel={handleWifiCancel}
+                onWifiOperationEvent={(message, tone) => emitEvent('webserial', message, tone)}
                 onManualPpsApply={handleManualPpsApply}
                 onManualPpsClear={handleManualPpsClear}
                 onHeaterHoldToggle={handleHeaterHoldToggle}
@@ -5766,6 +5773,8 @@ function ViewPanel({
   onSettingsWorkspaceTabChange,
   onWifiSave,
   onWifiClear,
+  onWifiCancel,
+  onWifiOperationEvent,
   onManualPpsApply,
   onManualPpsClear,
   onHeaterHoldToggle,
@@ -5806,7 +5815,7 @@ function ViewPanel({
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
   mockOnly: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported' | 'wifiOperationInterruption'>
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -5832,6 +5841,8 @@ function ViewPanel({
   onSettingsWorkspaceTabChange: (tab: SettingsWorkspaceTab) => void | Promise<void>
   onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
   onWifiClear: () => Promise<NetworkSummary>
+  onWifiCancel: () => Promise<NetworkSummary>
+  onWifiOperationEvent: (message: string, tone: EventLogEntry['tone']) => void
   onManualPpsApply: (millivolts: number) => void | Promise<void>
   onManualPpsClear: () => void | Promise<void>
   onHeaterHoldToggle: () => void
@@ -5952,6 +5963,9 @@ function ViewPanel({
         onSettingsWorkspaceTabChange={onSettingsWorkspaceTabChange}
         onWifiSave={onWifiSave}
         onWifiClear={onWifiClear}
+        onWifiCancel={onWifiCancel}
+        onWifiOperationEvent={onWifiOperationEvent}
+        wifiOperationInterruption={webSerial.wifiOperationInterruption}
       />
     )
   }
@@ -7106,6 +7120,9 @@ function SettingsView({
   onSettingsWorkspaceTabChange,
   onWifiSave,
   onWifiClear,
+  onWifiCancel,
+  onWifiOperationEvent,
+  wifiOperationInterruption,
 }: {
   navigation?: ConsoleNavigationAdapter
   device: DeviceTarget
@@ -7122,8 +7139,16 @@ function SettingsView({
   onSettingsWorkspaceTabChange: (tab: SettingsWorkspaceTab) => void | Promise<void>
   onWifiSave: (draft: WifiNetworkSettingsDraft) => Promise<NetworkSummary>
   onWifiClear: () => Promise<NetworkSummary>
+  onWifiCancel: () => Promise<NetworkSummary>
+  onWifiOperationEvent: (message: string, tone: EventLogEntry['tone']) => void
+  wifiOperationInterruption: number
 }) {
   const wifiAccess = resolveWifiSettingsAccess(device)
+  const suppressesRedundantWifiTransportFeedback =
+    settingsWorkspaceTab === 'wifi' &&
+    wifiAccess.mode === 'read-only' &&
+    feedback.title === 'Web Serial unavailable' &&
+    feedback.detail === wifiAccess.reason
 
   return (
     <div className="industrial-view-panel">
@@ -7201,7 +7226,7 @@ function SettingsView({
         <TabsContent value="wifi" className="industrial-calibration-tabs__content">
           {wifiAccess.mode !== 'hidden' ? (
             <WifiNetworkSettings
-              key={`${device.id}-${wifiAccess.mode}`}
+              key={device.id}
               deviceId={device.id}
               networkState={device.networkState}
               savedSsid={device.wifiSsid}
@@ -7213,13 +7238,19 @@ function SettingsView({
               readOnly={wifiAccess.mode === 'read-only'}
               disabled={wifiAccess.mode !== 'read-write'}
               unavailableReason={wifiAccess.reason}
+              transportRecoveryState={device.transportRecoveryState}
+              operationInterruption={wifiOperationInterruption}
               onSave={onWifiSave}
               onClear={onWifiClear}
+              onCancel={onWifiCancel}
+              onOperationEvent={onWifiOperationEvent}
             />
           ) : null}
         </TabsContent>
       </Tabs>
-      <ActionFeedbackPanel feedback={feedback} compact />
+      {suppressesRedundantWifiTransportFeedback ? null : (
+        <ActionFeedbackPanel feedback={feedback} compact />
+      )}
     </div>
   )
 }

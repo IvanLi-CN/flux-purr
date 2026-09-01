@@ -17,6 +17,7 @@ WiFi Provisioning Access is derived from the selected Device's transport, capabi
 - A target without the required WiFi capabilities remains visible only when it has a readable network snapshot. The Console explains whether the block is a firmware capability, unavailable USB control authority, offline state, or the selected WiFi/LAN transport.
 - Password content never leaves the submission form. Read-only views display only the password-presence length as a mask.
 - Demo fixtures derive the same access result from their selected Device target. The Inspector does not own a separate global WiFi read/write switch.
+- A writable USB configuration transport may send `wifi_config(op=cancel)` after a provisioning wait. Cancel is a Device operation, not a host UI state: the Console reports success only after a versioned `NetworkSummary` confirms `idle`. It stops the running station attempt while preserving stored credentials; timeout, driver failure, or transport loss remain failures.
 
 ## Consequences
 

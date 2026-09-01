@@ -44,7 +44,7 @@ All transports expose the same domain model. Field names use `camelCase` on HTTP
 }
 ```
 
-`state`: `disabled | connecting | connected | error` for device-published WiFi facts. `idle`, `saving`, and `timeout` are not valid firmware WiFi summary states; timeout is settled as `error`. `configurationGeneration` changes for every accepted set/clear configuration; `transitionSequence` increases on every accepted state transition. `failureCode` is absent for nonterminal states and is one of `disconnect_timed_out | configuration_failed | association_rejected | association_timed_out | ipv4_timed_out | station_disconnected | lan_startup_failed`. A configuration transaction makes at most three attempts in 30 seconds: disconnect is bounded at 3 seconds, association at 8 seconds per attempt, and IPv4/DHCP at 15 seconds per attempt, with the 30-second transaction deadline taking precedence. Recoverable failures remain `connecting`; once the attempt budget or transaction deadline is exhausted, the device publishes one terminal `error`. The same configuration generation never starts a background recovery; a new set/clear configuration is required.
+`state`: `disabled | idle | connecting | connected | error` for device-published WiFi facts. `saving` and `timeout` are not public firmware WiFi states; timeout is settled as `error`. `idle` means the Device has confirmed that its current WiFi station has stopped while saved credentials remain intact. `configurationGeneration` changes for every accepted set/clear configuration; `transitionSequence` increases on every accepted state transition, including a confirmed cancel. `failureCode` is absent for nonterminal states and is one of `disconnect_timed_out | configuration_failed | association_rejected | association_timed_out | ipv4_timed_out | station_disconnected | lan_startup_failed`. A configuration transaction makes at most three attempts in 30 seconds: disconnect is bounded at 3 seconds, association at 8 seconds per attempt, and IPv4/DHCP at 15 seconds per attempt, with the 30-second transaction deadline taking precedence. Recoverable failures remain `connecting`; once the attempt budget or transaction deadline is exhausted, the device publishes one terminal `error`. The same configuration generation never starts a background recovery; a new set/clear configuration is required.
 
 During firmware boot, before EEPROM/flash restoration and WiFi task startup complete, USB `get_network` and `get_status` return the retryable `startup_busy` error instead of a placeholder `disabled` snapshot. `devd` retries that boundary; clients must not persist or display a network state until a versioned `NetworkSummary` is returned by the running device.
 
@@ -336,7 +336,7 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...`
 - `GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>`
 - `GET /api/v1/devices/:id/events`
-- `PUT /api/v1/devices/:id/wifi`: native `devd` USB provisioning endpoint. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. Its response is a redacted WiFi receipt with the device-published `NetworkSummary`; `devd` must reject an unversioned or malformed receipt. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. Direct LAN and devd LAN bridge targets must not call this endpoint. Browser Web Serial uses the same USB JSONL `wifi_config` frame directly when connected and capable; it does not send credentials over LAN.
+- `PUT /api/v1/devices/:id/wifi`: native `devd` USB provisioning endpoint. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. `set` and `clear` change persisted credentials; `cancel` asks the Device to stop its current WiFi station attempt. A cancel response is successful only when the Device has returned a versioned `NetworkSummary` with `state=idle`; it preserves the saved SSID, password length, and configuration generation while advancing the transition sequence. A timeout or driver failure is returned as an error, never converted into a local success. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. Direct LAN and devd LAN bridge targets must not call this endpoint. Browser Web Serial uses the same USB JSONL `wifi_config` frame directly when connected and capable; it does not send credentials over LAN.
 - `PUT /api/v1/devices/:id/runtime`
 - `PUT /api/v1/devices/:id/calibration`
 - `POST /api/v1/devices/:id/calibration/job`
@@ -575,7 +575,7 @@ Core commands:
 - `flux-purr calibration get|capture|delete|clear|set-slot-fit|set-active-slot|import|export|collect --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode status|exit --device <id>` or `--hardware <saved-id>`
 - `flux-purr calibration-mode voltage|temperature|heater-curve ...`
-- `flux-purr wifi set|clear --device <id> ...`
+- `flux-purr wifi set|clear|cancel --device <id> ...`
 - `flux-purr flash --device <id> [--artifact-id <id>] [--manifest-path <path>]`
 - `flux-purr monitor --device <id>`
 - `flux-purr hardware available|recent|list|save|forget|path`
@@ -678,6 +678,8 @@ The boot-time USB recovery loop may answer identity, but defers network and runt
 
 WiFi automatic reconnect is a fixed firmware policy and is not a request parameter.
 `staticIpv4` is optional: omit it to preserve the stored addressing mode, provide an object to set a static address, or send `null` to clear a previous static address and return to DHCP.
+
+`op` is `set | clear | cancel`. A `cancel` frame contains no SSID, password, static IPv4, or telemetry fields. It stops the running station attempt and waits for the device-confirmed `idle` summary; it does not erase stored credentials, so a reboot or later `set` may begin a new connection attempt.
 
 Responses must redact the password:
 

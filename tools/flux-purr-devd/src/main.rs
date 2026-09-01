@@ -48,6 +48,9 @@ impl Default for ServeArgs {
 
 #[tokio::main]
 async fn main() {
+    #[cfg(unix)]
+    absorb_serial_hangups();
+
     let cli = Cli::parse();
     let args = match cli.command {
         Some(Command::Serve(args)) => args,
@@ -67,6 +70,20 @@ async fn main() {
     axum::serve(listener, app(state))
         .await
         .expect("flux-purr-devd server failed");
+}
+
+#[cfg(unix)]
+fn absorb_serial_hangups() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut hangups = signal(SignalKind::hangup())
+        .expect("failed to register the Flux Purr serial hangup handler");
+    tokio::spawn(async move {
+        // ESP32-S3 USB Serial/JTAG disconnects during a reset or flash can
+        // generate SIGHUP. The serial RPC layer already handles reconnects;
+        // terminating the daemon here aborts the protected flash transaction.
+        while hangups.recv().await.is_some() {}
+    });
 }
 
 fn parse_config(args: ServeArgs) -> AppConfig {

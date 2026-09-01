@@ -425,6 +425,40 @@ impl ControlPlaneStatus {
         uptime_seconds: u32,
         network: NetworkSummary,
     ) -> Self {
+        *Self::boxed_from_device_status(status, memory, uptime_seconds, network)
+    }
+
+    #[inline(never)]
+    pub fn boxed_from_device_status(
+        status: DeviceStatus,
+        memory: &MemoryConfig,
+        uptime_seconds: u32,
+        network: NetworkSummary,
+    ) -> Box<Self> {
+        let mut result = Box::<Self>::new_uninit();
+        // Keep the large destination write in a non-inlinable ABI boundary so
+        // the caller never materializes `ControlPlaneStatus` on its task stack.
+        unsafe {
+            flux_purr_write_control_plane_status(
+                result.as_mut_ptr(),
+                &status,
+                memory,
+                uptime_seconds,
+                &network,
+            );
+        }
+        // SAFETY: `write_device_status` initializes every field before this value is exposed.
+        unsafe { result.assume_init() }
+    }
+
+    #[inline(never)]
+    fn write_device_status(
+        out: *mut Self,
+        status: DeviceStatus,
+        memory: &MemoryConfig,
+        uptime_seconds: u32,
+        network: NetworkSummary,
+    ) {
         let heater_output_percent = status.heater_output_percent.min(100);
         let fan_display_state = if !memory.active_cooling_enabled {
             FanDisplayState::Off
@@ -434,74 +468,109 @@ impl ControlPlaneStatus {
             FanDisplayState::Auto
         };
 
-        Self {
-            mode: status.mode.into(),
-            uptime_seconds,
-            current_temp_c: status.board_temp_centi as f32 / 100.0,
-            target_temp_c: memory.target_temp_c,
-            selected_preset_slot: memory.selected_preset_slot,
-            presets_c: memory.presets_c,
-            heater_enabled: matches!(status.mode, DeviceMode::Sampling),
-            heater_output_percent,
-            heater_physical_output_percent: status.heater_physical_output_percent.min(100),
-            active_cooling_enabled: memory.active_cooling_enabled,
-            fan_display_state,
-            fan_enabled: status.fan_enabled,
-            fan_pwm_permille: status.fan_pwm_permille,
-            voltage_mv: status.voltage_mv,
-            current_ma: status.current_ma,
-            board_temp_centi: status.board_temp_centi,
-            rtd_raw_adc_mv: status.rtd_raw_adc_mv,
-            rtd_raw_adc_min_mv: 0,
-            rtd_raw_adc_max_mv: 0,
-            rtd_raw_adc_spread_mv: 0,
-            vin_raw_adc_mv: status.vin_raw_adc_mv,
-            adc_diagnostics: Box::new(AdcDiagnosticsWire::default()),
-            pd_request_mv: status.pd_request_mv,
-            pd_contract_mv: status.pd_contract_mv,
-            pd_state: status.pd_state.into(),
-            pd_controller: default_pd_controller_wire(),
-            pd_contract_kind: default_pd_contract_kind_wire(),
-            pd_contract_current_ma: 0,
-            pd_contract_power_mw: 0,
-            pd_performance_guaranteed: false,
-            pd_degraded_reason: Some(default_pd_degraded_reason_wire()),
-            manual_pps_enabled: false,
-            manual_pps_mv: None,
-            manual_pps_ma: None,
-            pps_capability_min_mv: None,
-            pps_capability_max_mv: None,
-            pps_capability_max_ma: None,
-            manual_pps_error: None,
-            heater_fault_reason: None,
-            fault_attention_pending: false,
-            heater_lock_reason: None,
-            heater_control_phase: None,
-            heater_error_c: None,
-            heater_control_error_c: None,
-            heater_control_temp_c: None,
-            heater_control_measurement_guarded: false,
-            heater_filtered_temp_c: None,
-            heater_filtered_slope_c_per_s: None,
-            heater_coast_active: false,
-            heater_control_interval_ms: 0,
-            heater_control_cycle_ms: 0,
-            calibration: CalibrationRuntimeStateWire::default(),
-            thermal_control_profile_preview: false,
-            thermal_profile_mode: string(memory.thermal_profile_mode.as_str()),
-            thermal_profile_resolved_bank: string(
-                memory.thermal_profile_mode.default_bank().as_str(),
-            ),
-            thermal_control: ThermalControlRuntimeWire::default(),
-            thermal_plant_model: ThermalPlantRuntimeWire::default(),
-            frontpanel_key: status.frontpanel_key.map(Into::into),
-            network,
+        // SAFETY: callers provide an exclusive uninitialized destination.
+        unsafe {
+            out.write(Self {
+                mode: status.mode.into(),
+                uptime_seconds,
+                current_temp_c: status.board_temp_centi as f32 / 100.0,
+                target_temp_c: memory.target_temp_c,
+                selected_preset_slot: memory.selected_preset_slot,
+                presets_c: memory.presets_c,
+                heater_enabled: matches!(status.mode, DeviceMode::Sampling),
+                heater_output_percent,
+                heater_physical_output_percent: status.heater_physical_output_percent.min(100),
+                active_cooling_enabled: memory.active_cooling_enabled,
+                fan_display_state,
+                fan_enabled: status.fan_enabled,
+                fan_pwm_permille: status.fan_pwm_permille,
+                voltage_mv: status.voltage_mv,
+                current_ma: status.current_ma,
+                board_temp_centi: status.board_temp_centi,
+                rtd_raw_adc_mv: status.rtd_raw_adc_mv,
+                rtd_raw_adc_min_mv: 0,
+                rtd_raw_adc_max_mv: 0,
+                rtd_raw_adc_spread_mv: 0,
+                vin_raw_adc_mv: status.vin_raw_adc_mv,
+                adc_diagnostics: Box::new(AdcDiagnosticsWire::default()),
+                pd_request_mv: status.pd_request_mv,
+                pd_contract_mv: status.pd_contract_mv,
+                pd_state: status.pd_state.into(),
+                pd_controller: default_pd_controller_wire(),
+                pd_contract_kind: default_pd_contract_kind_wire(),
+                pd_contract_current_ma: 0,
+                pd_contract_power_mw: 0,
+                pd_performance_guaranteed: false,
+                pd_degraded_reason: Some(default_pd_degraded_reason_wire()),
+                manual_pps_enabled: false,
+                manual_pps_mv: None,
+                manual_pps_ma: None,
+                pps_capability_min_mv: None,
+                pps_capability_max_mv: None,
+                pps_capability_max_ma: None,
+                manual_pps_error: None,
+                heater_fault_reason: None,
+                fault_attention_pending: false,
+                heater_lock_reason: None,
+                heater_control_phase: None,
+                heater_error_c: None,
+                heater_control_error_c: None,
+                heater_control_temp_c: None,
+                heater_control_measurement_guarded: false,
+                heater_filtered_temp_c: None,
+                heater_filtered_slope_c_per_s: None,
+                heater_coast_active: false,
+                heater_control_interval_ms: 0,
+                heater_control_cycle_ms: 0,
+                calibration: CalibrationRuntimeStateWire::default(),
+                thermal_control_profile_preview: false,
+                thermal_profile_mode: string(memory.thermal_profile_mode.as_str()),
+                thermal_profile_resolved_bank: string(
+                    memory.thermal_profile_mode.default_bank().as_str(),
+                ),
+                thermal_control: ThermalControlRuntimeWire::default(),
+                thermal_plant_model: ThermalPlantRuntimeWire::default(),
+                frontpanel_key: status.frontpanel_key.map(Into::into),
+                network,
+            });
         }
     }
 
     pub fn with_runtime_target_temp_c(mut self, target_temp_c: i16) -> Self {
         self.target_temp_c = target_temp_c;
         self
+    }
+}
+
+/// Writes a complete status snapshot into caller-owned storage.
+///
+/// The status object is intentionally written through an ABI boundary. This
+/// prevents the Xtensa optimizer from lowering a boxed response into a large
+/// return-value temporary on the ProCPU executor stack.
+///
+/// # Safety
+///
+/// `out` must be valid for an exclusive write of one `ControlPlaneStatus`.
+/// `status`, `memory`, and `network` must be valid, aligned pointers to live
+/// values for the duration of this call. None of the pointers may alias `out`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn flux_purr_write_control_plane_status(
+    out: *mut ControlPlaneStatus,
+    status: *const DeviceStatus,
+    memory: *const MemoryConfig,
+    uptime_seconds: u32,
+    network: *const NetworkSummary,
+) {
+    // SAFETY: the caller provides valid, exclusive pointers for the duration
+    // of this synchronous write.
+    unsafe {
+        ControlPlaneStatus::write_device_status(
+            out,
+            *status,
+            &*memory,
+            uptime_seconds,
+            (*network).clone(),
+        );
     }
 }
 
@@ -745,6 +814,7 @@ impl From<WifiStaticIpv4Config> for WifiStaticIpv4Wire {
 pub enum WifiConfigOp {
     Set,
     Clear,
+    Cancel,
 }
 
 impl WifiConfigCommand {
@@ -755,6 +825,7 @@ impl WifiConfigCommand {
                 config.wifi_password.clear();
                 config.wifi_static_ipv4 = None;
             }
+            WifiConfigOp::Cancel => {}
             WifiConfigOp::Set => {
                 config.wifi_ssid.clear();
                 if let Some(ssid) = &self.ssid {
@@ -1547,7 +1618,7 @@ pub enum UsbFrame {
         error: Option<ApiError>,
     },
     Status {
-        status: ControlPlaneStatus,
+        status: Box<ControlPlaneStatus>,
     },
     Log {
         level: String<8>,
@@ -1569,9 +1640,9 @@ struct UsbFrameWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     framing: Option<String<8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    identity: Option<Identity>,
+    identity: Option<Box<Identity>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    capabilities: Option<Vec<String<CAPABILITY_MAX_LEN>, CAPABILITY_COUNT_MAX>>,
+    capabilities: Option<Box<Vec<String<CAPABILITY_MAX_LEN>, CAPABILITY_COUNT_MAX>>>,
     #[serde(rename = "requestId", skip_serializing_if = "Option::is_none")]
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1607,11 +1678,11 @@ struct UsbFrameWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     fault_attention_acknowledged: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    calibration: Option<CalibrationControlCommand>,
+    calibration: Option<Box<CalibrationControlCommand>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_profile_mode: Option<ThermalProfileModeWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    thermal_control_profile: Option<ThermalControlProfileCommand>,
+    thermal_control_profile: Option<Box<ThermalControlProfileCommand>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<CalibrationChannelWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1635,13 +1706,13 @@ struct UsbFrameWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     after_sample: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    state: Option<CalibrationStateWire>,
+    state: Option<Box<CalibrationStateWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     slot: Option<CalibrationSlotIdWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fit: Option<CalibrationSlotFitWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    heater_curve: Option<HeaterCurvePackageWire>,
+    heater_curve: Option<Box<HeaterCurvePackageWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1651,15 +1722,30 @@ struct UsbFrameWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     ok: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<UsbResponsePayload>,
+    result: Option<Box<UsbResponsePayload>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ApiError>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<ControlPlaneStatus>,
+    status: Option<Box<ControlPlaneStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     level: Option<String<8>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String<ERROR_MESSAGE_MAX_LEN>>,
+    message: Option<Box<String<ERROR_MESSAGE_MAX_LEN>>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbStatusResponseWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a String<REQUEST_ID_MAX_LEN>,
+    ok: bool,
+    result: UsbStatusPayloadWire<'a>,
+}
+
+#[derive(Serialize)]
+struct UsbStatusPayloadWire<'a> {
+    status: &'a ControlPlaneStatus,
 }
 
 // Inbound frames deliberately use a narrow, type-specific parser.  Keeping
@@ -1833,8 +1919,8 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
             "hello" => Ok(UsbFrame::Hello {
                 protocol_version: value.protocol_version.ok_or(UsbFrameError::MalformedJson)?,
                 framing: value.framing.ok_or(UsbFrameError::MalformedJson)?,
-                identity: value.identity.ok_or(UsbFrameError::MalformedJson)?,
-                capabilities: value.capabilities.ok_or(UsbFrameError::MalformedJson)?,
+                identity: *value.identity.ok_or(UsbFrameError::MalformedJson)?,
+                capabilities: *value.capabilities.ok_or(UsbFrameError::MalformedJson)?,
             }),
             "request" => Ok(UsbFrame::Request {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
@@ -1862,9 +1948,9 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     manual_pps_mv: value.manual_pps_mv,
                     manual_pps_ma: value.manual_pps_ma,
                     fault_attention_acknowledged: value.fault_attention_acknowledged,
-                    calibration: value.calibration,
+                    calibration: value.calibration.map(|calibration| *calibration),
                     thermal_profile_mode: value.thermal_profile_mode,
-                    thermal_control_profile: value.thermal_control_profile,
+                    thermal_control_profile: value.thermal_control_profile.map(|profile| *profile),
                 },
             }),
             "calibration_config" => Ok(UsbFrame::CalibrationConfig {
@@ -1878,7 +1964,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     observed_mv: value.observed_mv,
                     expected_mv: value.expected_mv,
                     sample_index: value.sample_index,
-                    state: value.state,
+                    state: value.state.map(|state| *state),
                     slot: value.slot,
                     fit: value.fit,
                 },
@@ -1898,7 +1984,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 config: HeaterCurveConfigCommand {
                     op: parse_heater_curve_config_op(value.op.as_deref())?,
-                    package: value.heater_curve,
+                    package: value.heater_curve.map(|curve| *curve),
                 },
             }),
             "heater_curve_save" => Ok(UsbFrame::HeaterCurveSave {
@@ -1907,7 +1993,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
             "response" => Ok(UsbFrame::Response {
                 request_id: value.request_id.ok_or(UsbFrameError::MalformedJson)?,
                 ok: value.ok.ok_or(UsbFrameError::MalformedJson)?,
-                result: value.result,
+                result: value.result.map(|result| *result),
                 error: value.error,
             }),
             "status" => Ok(UsbFrame::Status {
@@ -1915,7 +2001,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
             }),
             "log" => Ok(UsbFrame::Log {
                 level: value.level.ok_or(UsbFrameError::MalformedJson)?,
-                message: value.message.ok_or(UsbFrameError::MalformedJson)?,
+                message: *value.message.ok_or(UsbFrameError::MalformedJson)?,
             }),
             "error" => Ok(UsbFrame::Error {
                 request_id: value.request_id,
@@ -1986,8 +2072,8 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.frame_type = string("hello");
                 wire.protocol_version = Some(protocol_version.clone());
                 wire.framing = Some(framing.clone());
-                wire.identity = Some(identity.clone());
-                wire.capabilities = Some(capabilities.clone());
+                wire.identity = Some(Box::new(identity.clone()));
+                wire.capabilities = Some(Box::new(capabilities.clone()));
             }
             UsbFrame::Request { request_id, op } => {
                 wire.frame_type = string("request");
@@ -2014,9 +2100,9 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.manual_pps_enabled = config.manual_pps_enabled;
                 wire.manual_pps_mv = config.manual_pps_mv;
                 wire.manual_pps_ma = config.manual_pps_ma;
-                wire.calibration = config.calibration;
+                wire.calibration = config.calibration.map(Box::new);
                 wire.thermal_profile_mode = config.thermal_profile_mode;
-                wire.thermal_control_profile = config.thermal_control_profile;
+                wire.thermal_control_profile = config.thermal_control_profile.map(Box::new);
             }
             UsbFrame::CalibrationConfig { request_id, config } => {
                 wire.frame_type = string("calibration_config");
@@ -2029,7 +2115,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.observed_mv = config.observed_mv;
                 wire.expected_mv = config.expected_mv;
                 wire.sample_index = config.sample_index;
-                wire.state = config.state;
+                wire.state = config.state.map(Box::new);
                 wire.slot = config.slot;
                 wire.fit = config.fit;
             }
@@ -2054,7 +2140,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.frame_type = string("heater_curve_config");
                 wire.request_id = Some(request_id.clone());
                 wire.op = Some(string(config.op.as_str()));
-                wire.heater_curve = config.package;
+                wire.heater_curve = config.package.map(Box::new);
             }
             UsbFrame::HeaterCurveSave { request_id } => {
                 wire.frame_type = string("heater_curve_save");
@@ -2084,7 +2170,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.frame_type = string("response");
                 wire.request_id = Some(request_id.clone());
                 wire.ok = Some(*ok);
-                wire.result = result.clone();
+                wire.result = result.clone().map(Box::new);
                 wire.error = error.clone();
             }
             UsbFrame::Status { status } => {
@@ -2094,7 +2180,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             UsbFrame::Log { level, message } => {
                 wire.frame_type = string("log");
                 wire.level = Some(level.clone());
-                wire.message = Some(message.clone());
+                wire.message = Some(Box::new(message.clone()));
             }
             UsbFrame::Error { request_id, error } => {
                 wire.frame_type = string("error");
@@ -2183,6 +2269,7 @@ impl WifiConfigOp {
         match self {
             Self::Set => "set",
             Self::Clear => "clear",
+            Self::Cancel => "cancel",
         }
     }
 }
@@ -2194,7 +2281,7 @@ pub enum UsbResponsePayload {
     Identity(Identity),
     InstallStatus(InstallStatus),
     Network(NetworkSummary),
-    Status(ControlPlaneStatus),
+    Status(Box<ControlPlaneStatus>),
     LanPairingCode(LanPairingCode),
     Wifi(WifiConfigReceipt),
     Calibration(CalibrationStateWire),
@@ -2327,7 +2414,7 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
             let header = parse_usb_wifi_config_header(trimmed)?;
             let request_id = bounded_string(header.request_id)?;
             let op = parse_wifi_config_op(header.op)?;
-            if matches!(op, WifiConfigOp::Clear) {
+            if matches!(op, WifiConfigOp::Clear | WifiConfigOp::Cancel) {
                 return Ok(UsbFrame::WifiConfig {
                     request_id,
                     config: WifiConfigCommand {
@@ -2447,7 +2534,7 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
         "status" => {
             let frame = parse_usb_wire::<UsbStatusInboundWire>(trimmed)?;
             Ok(UsbFrame::Status {
-                status: frame.status.ok_or(UsbFrameError::MalformedJson)?,
+                status: Box::new(frame.status.ok_or(UsbFrameError::MalformedJson)?),
             })
         }
         "log" => {
@@ -2493,9 +2580,40 @@ fn parse_usb_wifi_config_set(line: &str) -> Result<UsbWifiConfigSetInboundWire<'
 }
 
 pub fn write_usb_frame<'a>(frame: &UsbFrame, out: &'a mut [u8]) -> Result<&'a str, UsbFrameError> {
-    let wire = UsbFrameWire::from(frame);
+    if let UsbFrame::Response {
+        request_id,
+        ok: true,
+        result: Some(UsbResponsePayload::Status(status)),
+        error: None,
+    } = frame
+    {
+        return write_usb_status_response_frame(request_id, status.as_ref(), out);
+    }
+
+    write_usb_wire(&UsbFrameWire::from(frame), out)
+}
+
+#[inline(never)]
+fn write_usb_status_response_frame<'a>(
+    request_id: &String<REQUEST_ID_MAX_LEN>,
+    status: &ControlPlaneStatus,
+    out: &'a mut [u8],
+) -> Result<&'a str, UsbFrameError> {
+    write_usb_wire(
+        &UsbStatusResponseWire {
+            frame_type: "response",
+            request_id,
+            ok: true,
+            result: UsbStatusPayloadWire { status },
+        },
+        out,
+    )
+}
+
+#[inline(never)]
+fn write_usb_wire<'a, T: Serialize>(wire: &T, out: &'a mut [u8]) -> Result<&'a str, UsbFrameError> {
     let written =
-        serde_json_core::to_slice(&wire, out).map_err(|_| UsbFrameError::OutputTooSmall)?;
+        serde_json_core::to_slice(wire, out).map_err(|_| UsbFrameError::OutputTooSmall)?;
     if written >= out.len() {
         return Err(UsbFrameError::OutputTooSmall);
     }
@@ -2586,6 +2704,7 @@ fn parse_wifi_config_op(value: Option<&str>) -> Result<WifiConfigOp, UsbFrameErr
     match value {
         Some("set") => Ok(WifiConfigOp::Set),
         Some("clear") => Ok(WifiConfigOp::Clear),
+        Some("cancel") => Ok(WifiConfigOp::Cancel),
         _ => Err(UsbFrameError::MalformedJson),
     }
 }
@@ -2680,6 +2799,13 @@ mod tests {
     }
 
     #[test]
+    fn outbound_status_wire_stays_within_the_frontpanel_stack_budget() {
+        assert!(core::mem::size_of::<UsbResponsePayload>() <= 768);
+        let wire_size = core::mem::size_of::<UsbFrameWire>();
+        assert!(wire_size <= 1_024, "outbound wire is {wire_size} bytes");
+    }
+
+    #[test]
     fn hardware_identity_uses_the_mac_for_every_transport() {
         let identity = Identity::firmware_from_mac([0xa0, 0xf2, 0x62, 0xf2, 0x0d, 0x6c]);
 
@@ -2744,7 +2870,7 @@ mod tests {
         let frame = UsbFrame::Response {
             request_id: string("req-pd"),
             ok: true,
-            result: Some(UsbResponsePayload::Status(status)),
+            result: Some(UsbResponsePayload::Status(Box::new(status))),
             error: None,
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
@@ -2759,6 +2885,10 @@ mod tests {
         assert!(json.contains(r#""rtdRawCodeSpread":4"#));
         assert!(json.len() <= USB_LINE_MAX_LEN);
         assert!(!json.contains("fallback5v"));
+        assert_eq!(
+            parse_usb_frame(json).expect("status response parses"),
+            frame
+        );
     }
 
     #[test]
@@ -2886,7 +3016,7 @@ mod tests {
         let frame = UsbFrame::Response {
             request_id: string("thermal-full"),
             ok: true,
-            result: Some(UsbResponsePayload::Status(status)),
+            result: Some(UsbResponsePayload::Status(Box::new(status))),
             error: None,
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
@@ -3494,6 +3624,27 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn parse_wifi_cancel_frame_without_mutating_persisted_credentials() {
+        let frame =
+            parse_usb_frame(r#"{"type":"wifi_config","requestId":"wifi-cancel","op":"cancel"}"#)
+                .unwrap();
+        let UsbFrame::WifiConfig { config, .. } = frame else {
+            panic!("expected WiFi config frame");
+        };
+        assert_eq!(config.op, WifiConfigOp::Cancel);
+        assert_eq!(config.ssid, None);
+        assert_eq!(config.password, None);
+
+        let mut memory = MemoryConfig::default();
+        memory.wifi_ssid.push_str("FluxPurr-Lab").unwrap();
+        memory.wifi_password.push_str("secret-pass").unwrap();
+        config.apply_to(&mut memory);
+
+        assert_eq!(memory.wifi_ssid.as_str(), "FluxPurr-Lab");
+        assert_eq!(memory.wifi_password.as_str(), "secret-pass");
     }
 
     #[test]
