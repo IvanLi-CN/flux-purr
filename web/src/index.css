@@ -8051,8 +8051,6 @@
   gap: 0.72rem;
   max-width: min(100%, 54rem);
   container-type: inline-size;
-  border-top: 1px solid rgba(96, 111, 132, 0.26);
-  padding-top: 0.82rem;
 }
 
 .industrial-wifi-settings__header {
@@ -8082,10 +8080,24 @@
 
 .industrial-wifi-settings__header output {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.42rem;
   margin-top: 0.14rem;
   color: var(--industrial-muted-text);
+}
+
+.industrial-wifi-settings__header output > svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  color: var(--industrial-accent);
+}
+
+.industrial-wifi-settings__header output > svg.is-danger {
+  color: var(--industrial-accent);
+}
+
+.industrial-wifi-settings__header output > svg.is-success {
+  color: var(--industrial-green);
 }
 
 .industrial-wifi-settings__header output strong {
@@ -8100,6 +8112,9 @@
 }
 
 .industrial-wifi-settings__support-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.42rem;
   margin: -0.3rem 0 -0.08rem 2.62rem;
   color: var(--industrial-muted-text);
   font-size: 0.68rem;
@@ -8107,11 +8122,63 @@
   line-height: 1.35;
 }
 
+.industrial-wifi-settings__support-message svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 auto;
+  margin-top: 0.08rem;
+  color: #9b672d;
+}
+
+.industrial-wifi-settings__snapshot {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.58rem;
+  margin: 0;
+}
+
+.industrial-wifi-settings__snapshot > div {
+  min-width: 0;
+  padding: 0.65rem 0.72rem;
+  border: 1px solid rgba(96, 111, 132, 0.24);
+  border-radius: 7px;
+  background: rgba(239, 244, 248, 0.68);
+}
+
+.industrial-wifi-settings__snapshot dt {
+  color: var(--industrial-muted-text);
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.62rem;
+  font-weight: 800;
+}
+
+.industrial-wifi-settings__snapshot dd {
+  overflow: hidden;
+  margin: 0.22rem 0 0;
+  color: var(--industrial-text);
+  font-size: 0.78rem;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .industrial-wifi-settings__form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end;
   gap: 0.58rem;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.industrial-wifi-settings__form--readonly {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.industrial-wifi-settings__form--readonly [data-slot="input"] {
+  cursor: default;
+  background: rgba(239, 244, 248, 0.68);
 }
 
 .industrial-wifi-settings__field {
@@ -8251,13 +8318,25 @@
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
+  .industrial-wifi-settings__form--readonly {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .industrial-wifi-settings__actions {
     grid-column: span 1;
   }
 }
 
 @media (max-width: 680px) {
+  .industrial-wifi-settings__snapshot {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .industrial-wifi-settings__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-wifi-settings__form--readonly {
     grid-template-columns: minmax(0, 1fr);
   }
 

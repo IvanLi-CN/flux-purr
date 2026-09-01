@@ -1,6 +1,27 @@
 import { controlPlaneScenario, degradedControlPlaneScenario } from './mock-data'
 import type { ControlPlaneScenario, EventLogEntry } from './types'
 
+const demoWifiUsbDevice = {
+  ...controlPlaneScenario.devices[0],
+  id: 'fp-wifi-usb-04',
+  identityId: 'fp-wifi-usb-04',
+  alias: 'USB Config Fixture',
+  location: 'Simulated devd USB',
+  transport: 'devd' as const,
+  bridgeTransport: 'usb' as const,
+  baseUrl: 'devd://demo-wifi-usb',
+  connectionAvailable: true,
+  leaseState: 'active' as const,
+  leaseId: 'demo-wifi-usb-lease',
+  capabilities: ['identity', 'status', 'wifi_config', 'wifi_state_v2', 'monitor'],
+  wifiSsid: 'Flux Purr Lab',
+  wifiRssi: -42,
+  wifiPasswordLength: 12,
+  networkState: 'connected' as const,
+  configurationGeneration: 1,
+  transitionSequence: 1,
+}
+
 export const demoSceneIds = [
   'normal',
   'degraded',
@@ -63,7 +84,7 @@ export function deriveDemoScenario(
         ? 'fp-kit-02'
         : 'fp-lab-01'
 
-  const devices = base.devices.map((device) => {
+  const devices = [...base.devices, demoWifiUsbDevice].map((device) => {
     const fixture =
       device.id === 'fp-kit-02'
         ? { ...device, transport: 'mock' as const, baseUrl: 'mock:simulated-serial-fixture' }

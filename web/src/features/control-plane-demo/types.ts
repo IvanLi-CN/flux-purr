@@ -21,6 +21,7 @@ export interface DeviceTarget {
   bridgeTransport?: 'usb' | 'wifi'
   connectionAvailable?: boolean
   connectionCandidate?: boolean
+  transportRecoveryState?: 'recovering' | 'unavailable'
   severity: DeviceSeverity
   baseUrl: string
   firmware: string

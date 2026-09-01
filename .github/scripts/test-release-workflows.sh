@@ -20,12 +20,18 @@ notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encod
 assert "Release preparation validation" in ci_pr
 assert "kind=prepared" in ci_pr
 assert "needs: classify" in ci_pr
+assert ci_pr.count("ref: ${{ github.event.pull_request.head.sha || github.sha }}") == 3
 assert "prepared-integration" in ci_main
 assert "git diff --quiet" in ci_main
 assert "Prepare product version" in prepare
 assert "workflows: [CI PR, Label Gate]" in prepare
 assert "contents: write" in prepare
 assert "Push prepared VERSION commit to the existing pull request" in prepare
+assert "Sign prepared VERSION commit" in prepare
+assert "RELEASE_GPG_PRIVATE_KEY" in prepare
+assert "commit --amend --no-edit -S --reset-author" in prepare
+assert "repos/${GITHUB_REPOSITORY}/contents/VERSION" not in prepare
+assert "git -C \"${RUNNER_TEMP}/release-source\" push origin" in prepare
 assert "refs/heads/main" not in prepare
 assert "verification_sha" in prepare
 assert "verify-prepared" in prepare

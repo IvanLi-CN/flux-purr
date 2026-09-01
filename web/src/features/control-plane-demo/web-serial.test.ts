@@ -40,6 +40,10 @@ describe('web serial control-plane client', () => {
       targetTempC: 220,
       selectedPresetIndex: 7,
       presetsC: [50, 100, 120, null, 180, 200, 210, 220, 250, 300],
+      networkState: 'connected',
+      configurationGeneration: 3,
+      transitionSequence: 26,
+      wifiFailureCode: null,
     })
     expect(target.capabilities).toContain('usb_jsonl')
     expect(isDirectWebSerialDevice(target)).toBe(true)
@@ -211,6 +215,58 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
+  it('sends WiFi config frames over Web Serial and returns the network payload', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const network = await client.configureWifi({
+      op: 'set',
+      ssid: 'FluxPurr-Lab',
+      password: 'secret-pass',
+    })
+
+    expect(network).toMatchObject({ state: 'saving', ssid: 'FluxPurr-Lab' })
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'wifi_config',
+      op: 'set',
+      ssid: 'FluxPurr-Lab',
+      password: 'secret-pass',
+    })
+
+    await client.configureWifi({ op: 'clear' })
+    expect(fake.requests.at(-1)).toMatchObject({ type: 'wifi_config', op: 'clear' })
+
+    await client.configureWifi({ op: 'cancel' })
+    expect(fake.requests.at(-1)).toMatchObject({ type: 'wifi_config', op: 'cancel' })
+
+    await client.getNetwork()
+    expect(fake.requests.at(-1)).toMatchObject({ type: 'request', op: 'get_network' })
+    await client.disconnect()
+  })
+
+  it('settles an in-flight WiFi write as soon as the serial stream closes', async () => {
+    const fake = new FakeSerial('', (request) =>
+      request.type === 'wifi_config' ? null : responseFor(request)
+    )
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const pending = client.configureWifi({
+      op: 'set',
+      ssid: 'FluxPurr-Lab',
+      password: 'secret-pass',
+    })
+    await vi.waitFor(() => {
+      expect(fake.requests.at(-1)).toMatchObject({ type: 'wifi_config', op: 'set' })
+    })
+
+    fake.closeReadable()
+
+    await expect(pending).rejects.toMatchObject({ code: 'web_serial_stream_closed' })
+    await client.disconnect()
+  })
+
   it('reports firmware boot and reset markers without treating arbitrary serial output as device state', async () => {
     const fake = new FakeSerial()
     const diagnostics: string[] = []
@@ -363,8 +419,13 @@ class FakeSerial implements BrowserSerial {
   readonly requests: Array<Record<string, unknown>> = []
   private readonly port: FakeSerialPort
 
-  constructor(responsePrefix = '') {
-    this.port = new FakeSerialPort(this.requests, undefined, responsePrefix)
+  constructor(
+    responsePrefix = '',
+    responseForRequest: (
+      request: Record<string, unknown>
+    ) => Record<string, unknown> | null = responseFor
+  ) {
+    this.port = new FakeSerialPort(this.requests, undefined, responsePrefix, responseForRequest)
   }
 
   requestPort(): Promise<BrowserSerialPort> {
@@ -373,6 +434,10 @@ class FakeSerial implements BrowserSerial {
 
   emitLine(line: string) {
     this.port.emitLine(line)
+  }
+
+  closeReadable() {
+    this.port.closeReadable()
   }
 }
 
@@ -485,13 +550,24 @@ class FakeSerialPort implements BrowserSerialPort {
   private readonly requests: Array<Record<string, unknown>>
   private readonly onOpen?: () => void
   private readonly responsePrefix: string
+  private readonly responseForRequest: (
+    request: Record<string, unknown>
+  ) => Record<string, unknown> | null
   private writeBuffer = ''
   signalHistory: Array<{ dataTerminalReady?: boolean; requestToSend?: boolean }> = []
 
-  constructor(requests: Array<Record<string, unknown>>, onOpen?: () => void, responsePrefix = '') {
+  constructor(
+    requests: Array<Record<string, unknown>>,
+    onOpen?: () => void,
+    responsePrefix = '',
+    responseForRequest: (
+      request: Record<string, unknown>
+    ) => Record<string, unknown> | null = responseFor
+  ) {
     this.requests = requests
     this.onOpen = onOpen
     this.responsePrefix = responsePrefix
+    this.responseForRequest = responseForRequest
     this.readable = new ReadableStream<Uint8Array>({
       start: (controller) => {
         this.controller = controller
@@ -523,6 +599,10 @@ class FakeSerialPort implements BrowserSerialPort {
     this.controller?.enqueue(this.encoder.encode(`${line}\n`))
   }
 
+  closeReadable() {
+    this.controller?.close()
+  }
+
   private flushRequests() {
     let newlineIndex = this.writeBuffer.indexOf('\n')
     while (newlineIndex >= 0) {
@@ -530,9 +610,12 @@ class FakeSerialPort implements BrowserSerialPort {
       this.writeBuffer = this.writeBuffer.slice(newlineIndex + 1)
       const request = JSON.parse(line) as Record<string, unknown>
       this.requests.push(request)
-      this.controller?.enqueue(
-        this.encoder.encode(`${this.responsePrefix}${JSON.stringify(responseFor(request))}\n`)
-      )
+      const response = this.responseForRequest(request)
+      if (response) {
+        this.controller?.enqueue(
+          this.encoder.encode(`${this.responsePrefix}${JSON.stringify(response)}\n`)
+        )
+      }
       newlineIndex = this.writeBuffer.indexOf('\n')
     }
   }
@@ -801,6 +884,25 @@ function responseFor(request: Record<string, unknown>) {
       },
     }
   }
+  if (request.type === 'wifi_config') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        wifi: {
+          network: {
+            ...network,
+            state: request.op === 'clear' ? 'disabled' : 'saving',
+            ssid: request.op === 'clear' ? null : request.ssid,
+            wifiPasswordLength: request.op === 'clear' ? 0 : String(request.password ?? '').length,
+            configurationGeneration: 1,
+            transitionSequence: 1,
+          },
+        },
+      },
+    }
+  }
   if (request.type === 'calibration_job') {
     return {
       type: 'response',
@@ -888,13 +990,16 @@ const identity = {
 }
 
 const network = {
-  state: 'idle',
-  ssid: null,
+  state: 'connected',
+  ssid: 'FluxPurr-Lab',
   ip: null,
   gateway: null,
   dns: [],
-  wifiRssi: null,
+  wifiRssi: -48,
   lastError: null,
+  configurationGeneration: 3,
+  transitionSequence: 26,
+  failureCode: null,
 }
 
 const baseStatus = {

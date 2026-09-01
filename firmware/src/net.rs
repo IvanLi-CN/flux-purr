@@ -68,6 +68,7 @@ const HTTP_WORKSPACE_COUNT: usize = http_workspace_slot_count(HTTP_ACTIVE_REQUES
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
+const WIFI_DRIVER_TRANSITION_TIMEOUT_SECS: u64 = 3;
 
 type ControlStateMutex = Mutex<CriticalSectionRawMutex, Option<NetHttpState>>;
 type WifiConfigMutex = Mutex<CriticalSectionRawMutex, WifiRuntimeConfig>;
@@ -89,6 +90,12 @@ static CONTROL_REVISION: AtomicU32 = AtomicU32::new(0);
 static PAIRING_CODE_MIRROR: AtomicU32 = AtomicU32::new(0);
 static WIFI_CONFIG: WifiConfigMutex = Mutex::new(WifiRuntimeConfig::empty());
 static WIFI_APPLY_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+// A WiFi cancel receipt is issued only after the station controller has
+// completed `stop_async`. This prevents USB callers from treating a local
+// request as a completed device-side cancellation.
+static WIFI_CANCEL_ACK: Signal<CriticalSectionRawMutex, u32> = Signal::new();
+static WIFI_CANCEL_REQUEST_ID: AtomicU32 = AtomicU32::new(0);
+static WIFI_CANCEL_NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static LAN_RUNTIME: RuntimeStatusMutex = BlockingMutex::new(RefCell::new(LanRuntimeState::empty()));
 static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMachine::new());
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
@@ -209,6 +216,7 @@ impl LanStartupError {
 struct WifiRuntimeConfig {
     ssid: String<MEMORY_WIFI_SSID_MAX_LEN>,
     password: String<MEMORY_WIFI_PASSWORD_MAX_LEN>,
+    connection_enabled: bool,
     auto_reconnect: bool,
     static_ipv4: Option<crate::memory::WifiStaticIpv4Config>,
     hostname: Option<String<32>>,
@@ -233,6 +241,7 @@ impl WifiRuntimeConfig {
         Self {
             ssid: String::new(),
             password: String::new(),
+            connection_enabled: false,
             auto_reconnect: false,
             static_ipv4: None,
             hostname: None,
@@ -243,6 +252,7 @@ impl WifiRuntimeConfig {
         Self {
             ssid: memory.wifi_ssid.clone(),
             password: memory.wifi_password.clone(),
+            connection_enabled: true,
             // Reconnect is a device policy. Legacy EEPROM values are read for
             // migration, but never become a runtime configuration input.
             auto_reconnect: true,
@@ -340,6 +350,58 @@ pub async fn apply_wifi_config(memory: &MemoryConfig) -> NetworkSummary {
         .expect("WiFi configuration events are always accepted");
     WIFI_APPLY_SIGNAL.signal(());
     summary
+}
+
+/// Stops the current station attempt without changing persisted credentials.
+/// A later USB `set` request re-enables the station and starts a new
+/// provisioning transaction.
+pub async fn cancel_wifi_connection() -> Result<NetworkSummary, WifiCancelError> {
+    let mut current = WIFI_CONFIG.lock().await;
+    current.connection_enabled = false;
+    drop(current);
+
+    let request_id = next_wifi_cancel_request_id();
+    WIFI_CANCEL_ACK.reset();
+    WIFI_CANCEL_REQUEST_ID.store(request_id, Ordering::Release);
+    WIFI_APPLY_SIGNAL.signal(());
+
+    match with_timeout(
+        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+        WIFI_CANCEL_ACK.wait(),
+    )
+    .await
+    {
+        Ok(acknowledged) if acknowledged == request_id => Ok(lan_network_summary().await),
+        Ok(_) | Err(_) => Err(WifiCancelError::StopTimedOut),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiCancelError {
+    StopTimedOut,
+}
+
+impl WifiCancelError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::StopTimedOut => "wifi_cancel_timed_out",
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::StopTimedOut => "WiFi station did not confirm cancellation in time.",
+        }
+    }
+}
+
+fn next_wifi_cancel_request_id() -> u32 {
+    loop {
+        let request_id = WIFI_CANCEL_NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        if request_id != 0 {
+            return request_id;
+        }
+    }
 }
 
 /// Publish a failed LAN startup to USB status while keeping the main control
@@ -595,9 +657,38 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
     loop {
         let config = WIFI_CONFIG.lock().await.clone();
         if !config.is_configured() {
-            let _ = controller.stop_async().await;
+            let _ = stop_wifi_station(controller).await;
             if !matches!(wifi_state().await, NetworkState::Disabled) {
                 let _ = publish_wifi_event(&config, ProvisioningEvent::ClearConfig, None).await;
+            }
+            WIFI_APPLY_SIGNAL.wait().await;
+            continue;
+        }
+
+        if !config.connection_enabled {
+            let _ = with_timeout(
+                Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+                controller.disconnect_async(),
+            )
+            .await;
+            let stopped = stop_wifi_station(controller).await;
+            if stopped {
+                if !matches!(wifi_state().await, NetworkState::Idle) {
+                    let _ =
+                        publish_wifi_event(&config, ProvisioningEvent::CancelProvisioning, None)
+                            .await;
+                }
+                let request_id = WIFI_CANCEL_REQUEST_ID.swap(0, Ordering::AcqRel);
+                if request_id != 0 {
+                    WIFI_CANCEL_ACK.signal(request_id);
+                }
+            } else {
+                let _ = progress_wifi_failure(
+                    &config,
+                    ProvisioningEvent::DisconnectTimedOut,
+                    "WiFi station did not stop in time.",
+                )
+                .await;
             }
             WIFI_APPLY_SIGNAL.wait().await;
             continue;
@@ -624,10 +715,18 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
                 .with_password(alloc::string::String::from(config.password.as_str())),
         );
         stack.set_config_v4(net_config(&config).ipv4);
-        if controller.set_config(&client).is_err()
-            || (!matches!(controller.is_started(), Ok(true))
-                && controller.start_async().await.is_err())
-        {
+        let driver_configured = controller.set_config(&client).is_ok();
+        let driver_started = driver_configured
+            && (matches!(controller.is_started(), Ok(true))
+                || matches!(
+                    with_timeout(
+                        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+                        controller.start_async(),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ));
+        if !driver_started {
             let follow_up = progress_wifi_failure(
                 &config,
                 ProvisioningEvent::DriverConfigurationFailed,
@@ -648,12 +747,18 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
         let association_started =
             matches!(controller.is_connected(), Ok(true)) || controller.connect().is_ok();
         let association_timed_out = if association_started {
-            with_timeout(
-                Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
-                stack.wait_link_up(),
+            match select(
+                with_timeout(
+                    Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
+                    stack.wait_link_up(),
+                ),
+                WIFI_APPLY_SIGNAL.wait(),
             )
             .await
-            .is_err()
+            {
+                Either::First(result) => result.is_err(),
+                Either::Second(()) => continue,
+            }
         } else {
             false
         };
@@ -670,11 +775,21 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
             continue;
         }
         let _ = publish_wifi_event(&config, ProvisioningEvent::AssociationSucceeded, None).await;
-        if with_timeout(Duration::from_secs(15), stack.wait_config_up())
-            .await
-            .is_err()
+        let ipv4_timed_out = match select(
+            with_timeout(Duration::from_secs(15), stack.wait_config_up()),
+            WIFI_APPLY_SIGNAL.wait(),
+        )
+        .await
         {
-            let _ = controller.disconnect_async().await;
+            Either::First(result) => result.is_err(),
+            Either::Second(()) => continue,
+        };
+        if ipv4_timed_out {
+            let _ = with_timeout(
+                Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+                controller.disconnect_async(),
+            )
+            .await;
             let follow_up = progress_wifi_failure(
                 &config,
                 ProvisioningEvent::Ipv4TimedOut,
@@ -762,6 +877,21 @@ async fn wifi_task(controller: &'static mut WifiController<'static>, stack: Stac
     }
 }
 
+async fn stop_wifi_station(controller: &mut WifiController<'static>) -> bool {
+    match controller.is_started() {
+        Ok(false) => true,
+        Ok(true) => matches!(
+            with_timeout(
+                Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
+                controller.stop_async(),
+            )
+            .await,
+            Ok(Ok(()))
+        ),
+        Err(_) => false,
+    }
+}
+
 async fn set_network_summary(summary: NetworkSummary) -> NetworkSummary {
     LAN_RUNTIME.lock(|runtime| runtime.borrow_mut().network = Some(summary.clone()));
     summary
@@ -775,8 +905,10 @@ fn network_summary_for_config(config: &WifiRuntimeConfig, state: NetworkState) -
         // A bounded timeout is a settled failure, never a fourth WiFi state.
         NetworkState::Timeout => NetworkState::Error,
         NetworkState::Idle => {
-            if config.is_configured() {
+            if config.is_configured() && config.connection_enabled {
                 NetworkState::Connecting
+            } else if config.is_configured() {
+                NetworkState::Idle
             } else {
                 NetworkState::Disabled
             }
@@ -1562,6 +1694,7 @@ mod tests {
     fn public_wifi_summary_normalizes_internal_states() {
         let mut configured = WifiRuntimeConfig::empty();
         configured.ssid.push_str("FluxPurr-Lab").unwrap();
+        configured.connection_enabled = true;
 
         assert_eq!(
             network_summary_for_config(&configured, NetworkState::Saving).state,
@@ -1578,6 +1711,12 @@ mod tests {
         assert_eq!(
             network_summary_for_config(&WifiRuntimeConfig::empty(), NetworkState::Idle).state,
             NetworkState::Disabled
+        );
+
+        configured.connection_enabled = false;
+        assert_eq!(
+            network_summary_for_config(&configured, NetworkState::Idle).state,
+            NetworkState::Idle
         );
     }
 }

@@ -5,7 +5,16 @@ import '../src/index.css'
 const preview: Preview = {
   parameters: {
     viewport: {
-      options: MINIMAL_VIEWPORTS,
+      options: {
+        ...MINIMAL_VIEWPORTS,
+        fluxPurrMobile: {
+          name: 'Flux Purr mobile',
+          styles: {
+            width: '393px',
+            height: '852px',
+          },
+        },
+      },
     },
     controls: {
       matchers: {

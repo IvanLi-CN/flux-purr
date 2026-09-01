@@ -21,6 +21,9 @@ import { Route as ConsoleDevicesDeviceIdCalibrationIndexRouteImport } from './ro
 import { Route as ConsoleDevicesDeviceIdCalibrationHeaterCurveRouteImport } from './routes/_console.devices.$deviceId.calibration.heater-curve'
 import { Route as ConsoleDevicesDeviceIdCalibrationRtdAdcRouteImport } from './routes/_console.devices.$deviceId.calibration.rtd-adc'
 import { Route as ConsoleDevicesDeviceIdCalibrationVinAdcRouteImport } from './routes/_console.devices.$deviceId.calibration.vin-adc'
+import { Route as ConsoleDevicesDeviceIdSettingsFanRouteImport } from './routes/_console.devices.$deviceId.settings.fan'
+import { Route as ConsoleDevicesDeviceIdSettingsPresetsRouteImport } from './routes/_console.devices.$deviceId.settings.presets'
+import { Route as ConsoleDevicesDeviceIdSettingsWifiRouteImport } from './routes/_console.devices.$deviceId.settings.wifi'
 
 const ConsoleRoute = ConsoleRouteImport.update({
   id: '/_console',
@@ -89,18 +92,39 @@ const ConsoleDevicesDeviceIdCalibrationVinAdcRoute =
     path: '/devices/$deviceId/calibration/vin-adc',
     getParentRoute: () => ConsoleRoute,
   } as any)
+const ConsoleDevicesDeviceIdSettingsFanRoute =
+  ConsoleDevicesDeviceIdSettingsFanRouteImport.update({
+    id: '/fan',
+    path: '/fan',
+    getParentRoute: () => ConsoleDevicesDeviceIdSettingsRoute,
+  } as any)
+const ConsoleDevicesDeviceIdSettingsPresetsRoute =
+  ConsoleDevicesDeviceIdSettingsPresetsRouteImport.update({
+    id: '/presets',
+    path: '/presets',
+    getParentRoute: () => ConsoleDevicesDeviceIdSettingsRoute,
+  } as any)
+const ConsoleDevicesDeviceIdSettingsWifiRoute =
+  ConsoleDevicesDeviceIdSettingsWifiRouteImport.update({
+    id: '/wifi',
+    path: '/wifi',
+    getParentRoute: () => ConsoleDevicesDeviceIdSettingsRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof ConsoleIndexRoute
   '/devices/new': typeof ConsoleDevicesNewRoute
   '/devices/': typeof ConsoleDevicesIndexRoute
   '/devices/$deviceId/overview': typeof ConsoleDevicesDeviceIdOverviewRoute
-  '/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRoute
+  '/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   '/devices/$deviceId/update': typeof ConsoleDevicesDeviceIdUpdateRoute
   '/devices/$deviceId/': typeof ConsoleDevicesDeviceIdIndexRoute
   '/devices/$deviceId/calibration/heater-curve': typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   '/devices/$deviceId/calibration/rtd-adc': typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   '/devices/$deviceId/calibration/vin-adc': typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
+  '/devices/$deviceId/settings/fan': typeof ConsoleDevicesDeviceIdSettingsFanRoute
+  '/devices/$deviceId/settings/presets': typeof ConsoleDevicesDeviceIdSettingsPresetsRoute
+  '/devices/$deviceId/settings/wifi': typeof ConsoleDevicesDeviceIdSettingsWifiRoute
   '/devices/$deviceId/calibration/': typeof ConsoleDevicesDeviceIdCalibrationIndexRoute
 }
 export interface FileRoutesByTo {
@@ -108,12 +132,15 @@ export interface FileRoutesByTo {
   '/devices/new': typeof ConsoleDevicesNewRoute
   '/devices': typeof ConsoleDevicesIndexRoute
   '/devices/$deviceId/overview': typeof ConsoleDevicesDeviceIdOverviewRoute
-  '/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRoute
+  '/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   '/devices/$deviceId/update': typeof ConsoleDevicesDeviceIdUpdateRoute
   '/devices/$deviceId': typeof ConsoleDevicesDeviceIdIndexRoute
   '/devices/$deviceId/calibration/heater-curve': typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   '/devices/$deviceId/calibration/rtd-adc': typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   '/devices/$deviceId/calibration/vin-adc': typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
+  '/devices/$deviceId/settings/fan': typeof ConsoleDevicesDeviceIdSettingsFanRoute
+  '/devices/$deviceId/settings/presets': typeof ConsoleDevicesDeviceIdSettingsPresetsRoute
+  '/devices/$deviceId/settings/wifi': typeof ConsoleDevicesDeviceIdSettingsWifiRoute
   '/devices/$deviceId/calibration': typeof ConsoleDevicesDeviceIdCalibrationIndexRoute
 }
 export interface FileRoutesById {
@@ -123,12 +150,15 @@ export interface FileRoutesById {
   '/_console/devices/new': typeof ConsoleDevicesNewRoute
   '/_console/devices/': typeof ConsoleDevicesIndexRoute
   '/_console/devices/$deviceId/overview': typeof ConsoleDevicesDeviceIdOverviewRoute
-  '/_console/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRoute
+  '/_console/devices/$deviceId/settings': typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   '/_console/devices/$deviceId/update': typeof ConsoleDevicesDeviceIdUpdateRoute
   '/_console/devices/$deviceId/': typeof ConsoleDevicesDeviceIdIndexRoute
   '/_console/devices/$deviceId/calibration/heater-curve': typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
   '/_console/devices/$deviceId/calibration/rtd-adc': typeof ConsoleDevicesDeviceIdCalibrationRtdAdcRoute
   '/_console/devices/$deviceId/calibration/vin-adc': typeof ConsoleDevicesDeviceIdCalibrationVinAdcRoute
+  '/_console/devices/$deviceId/settings/fan': typeof ConsoleDevicesDeviceIdSettingsFanRoute
+  '/_console/devices/$deviceId/settings/presets': typeof ConsoleDevicesDeviceIdSettingsPresetsRoute
+  '/_console/devices/$deviceId/settings/wifi': typeof ConsoleDevicesDeviceIdSettingsWifiRoute
   '/_console/devices/$deviceId/calibration/': typeof ConsoleDevicesDeviceIdCalibrationIndexRoute
 }
 export interface FileRouteTypes {
@@ -144,6 +174,9 @@ export interface FileRouteTypes {
     | '/devices/$deviceId/calibration/heater-curve'
     | '/devices/$deviceId/calibration/rtd-adc'
     | '/devices/$deviceId/calibration/vin-adc'
+    | '/devices/$deviceId/settings/fan'
+    | '/devices/$deviceId/settings/presets'
+    | '/devices/$deviceId/settings/wifi'
     | '/devices/$deviceId/calibration/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -157,6 +190,9 @@ export interface FileRouteTypes {
     | '/devices/$deviceId/calibration/heater-curve'
     | '/devices/$deviceId/calibration/rtd-adc'
     | '/devices/$deviceId/calibration/vin-adc'
+    | '/devices/$deviceId/settings/fan'
+    | '/devices/$deviceId/settings/presets'
+    | '/devices/$deviceId/settings/wifi'
     | '/devices/$deviceId/calibration'
   id:
     | '__root__'
@@ -171,6 +207,9 @@ export interface FileRouteTypes {
     | '/_console/devices/$deviceId/calibration/heater-curve'
     | '/_console/devices/$deviceId/calibration/rtd-adc'
     | '/_console/devices/$deviceId/calibration/vin-adc'
+    | '/_console/devices/$deviceId/settings/fan'
+    | '/_console/devices/$deviceId/settings/presets'
+    | '/_console/devices/$deviceId/settings/wifi'
     | '/_console/devices/$deviceId/calibration/'
   fileRoutesById: FileRoutesById
 }
@@ -264,15 +303,57 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConsoleDevicesDeviceIdCalibrationVinAdcRouteImport
       parentRoute: typeof ConsoleRoute
     }
+    '/_console/devices/$deviceId/settings/fan': {
+      id: '/_console/devices/$deviceId/settings/fan'
+      path: '/fan'
+      fullPath: '/devices/$deviceId/settings/fan'
+      preLoaderRoute: typeof ConsoleDevicesDeviceIdSettingsFanRouteImport
+      parentRoute: typeof ConsoleDevicesDeviceIdSettingsRoute
+    }
+    '/_console/devices/$deviceId/settings/presets': {
+      id: '/_console/devices/$deviceId/settings/presets'
+      path: '/presets'
+      fullPath: '/devices/$deviceId/settings/presets'
+      preLoaderRoute: typeof ConsoleDevicesDeviceIdSettingsPresetsRouteImport
+      parentRoute: typeof ConsoleDevicesDeviceIdSettingsRoute
+    }
+    '/_console/devices/$deviceId/settings/wifi': {
+      id: '/_console/devices/$deviceId/settings/wifi'
+      path: '/wifi'
+      fullPath: '/devices/$deviceId/settings/wifi'
+      preLoaderRoute: typeof ConsoleDevicesDeviceIdSettingsWifiRouteImport
+      parentRoute: typeof ConsoleDevicesDeviceIdSettingsRoute
+    }
   }
 }
+
+interface ConsoleDevicesDeviceIdSettingsRouteChildren {
+  ConsoleDevicesDeviceIdSettingsFanRoute: typeof ConsoleDevicesDeviceIdSettingsFanRoute
+  ConsoleDevicesDeviceIdSettingsPresetsRoute: typeof ConsoleDevicesDeviceIdSettingsPresetsRoute
+  ConsoleDevicesDeviceIdSettingsWifiRoute: typeof ConsoleDevicesDeviceIdSettingsWifiRoute
+}
+
+const ConsoleDevicesDeviceIdSettingsRouteChildren: ConsoleDevicesDeviceIdSettingsRouteChildren =
+  {
+    ConsoleDevicesDeviceIdSettingsFanRoute:
+      ConsoleDevicesDeviceIdSettingsFanRoute,
+    ConsoleDevicesDeviceIdSettingsPresetsRoute:
+      ConsoleDevicesDeviceIdSettingsPresetsRoute,
+    ConsoleDevicesDeviceIdSettingsWifiRoute:
+      ConsoleDevicesDeviceIdSettingsWifiRoute,
+  }
+
+const ConsoleDevicesDeviceIdSettingsRouteWithChildren =
+  ConsoleDevicesDeviceIdSettingsRoute._addFileChildren(
+    ConsoleDevicesDeviceIdSettingsRouteChildren,
+  )
 
 interface ConsoleRouteChildren {
   ConsoleIndexRoute: typeof ConsoleIndexRoute
   ConsoleDevicesNewRoute: typeof ConsoleDevicesNewRoute
   ConsoleDevicesIndexRoute: typeof ConsoleDevicesIndexRoute
   ConsoleDevicesDeviceIdOverviewRoute: typeof ConsoleDevicesDeviceIdOverviewRoute
-  ConsoleDevicesDeviceIdSettingsRoute: typeof ConsoleDevicesDeviceIdSettingsRoute
+  ConsoleDevicesDeviceIdSettingsRoute: typeof ConsoleDevicesDeviceIdSettingsRouteWithChildren
   ConsoleDevicesDeviceIdUpdateRoute: typeof ConsoleDevicesDeviceIdUpdateRoute
   ConsoleDevicesDeviceIdIndexRoute: typeof ConsoleDevicesDeviceIdIndexRoute
   ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute: typeof ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute
@@ -286,7 +367,8 @@ const ConsoleRouteChildren: ConsoleRouteChildren = {
   ConsoleDevicesNewRoute: ConsoleDevicesNewRoute,
   ConsoleDevicesIndexRoute: ConsoleDevicesIndexRoute,
   ConsoleDevicesDeviceIdOverviewRoute: ConsoleDevicesDeviceIdOverviewRoute,
-  ConsoleDevicesDeviceIdSettingsRoute: ConsoleDevicesDeviceIdSettingsRoute,
+  ConsoleDevicesDeviceIdSettingsRoute:
+    ConsoleDevicesDeviceIdSettingsRouteWithChildren,
   ConsoleDevicesDeviceIdUpdateRoute: ConsoleDevicesDeviceIdUpdateRoute,
   ConsoleDevicesDeviceIdIndexRoute: ConsoleDevicesDeviceIdIndexRoute,
   ConsoleDevicesDeviceIdCalibrationHeaterCurveRoute:

@@ -4,6 +4,7 @@ import type {
 } from '@/features/control-plane-demo/calibration-leave-guard'
 
 export type DeviceConsoleView = Exclude<ConsoleView, 'add-device'>
+export type SettingsWorkspaceTab = 'presets' | 'fan' | 'wifi'
 
 export type ConsoleRouteState =
   | { kind: 'add-device' }
@@ -12,6 +13,7 @@ export type ConsoleRouteState =
       deviceId: string
       view: DeviceConsoleView
       calibrationTab?: CalibrationWorkspaceTab
+      settingsTab?: SettingsWorkspaceTab
     }
 
 const calibrationPathToTab = {
@@ -26,6 +28,18 @@ const calibrationTabToPath = {
   vin_adc: 'vin-adc',
 } as const
 
+const settingsPathToTab = {
+  presets: 'presets',
+  fan: 'fan',
+  wifi: 'wifi',
+} as const
+
+const settingsTabToPath = {
+  presets: 'presets',
+  fan: 'fan',
+  wifi: 'wifi',
+} as const
+
 export function parseConsoleRoute(pathname: string): ConsoleRouteState | null {
   if (pathname === '/devices/new') return { kind: 'add-device' }
   const segments = pathname.split('/').filter(Boolean)
@@ -38,8 +52,15 @@ export function parseConsoleRoute(pathname: string): ConsoleRouteState | null {
   }
   if (!deviceId) return null
   const view = segments[2]
-  if ((view === 'overview' || view === 'settings' || view === 'update') && segments.length === 3) {
+  if ((view === 'overview' || view === 'update') && segments.length === 3) {
     return { kind: 'device', deviceId, view: view === 'overview' ? 'dashboard' : view }
+  }
+  if (view === 'settings' && segments.length === 3) {
+    return { kind: 'device', deviceId, view: 'settings', settingsTab: 'presets' }
+  }
+  if (view === 'settings' && segments.length === 4) {
+    const tab = settingsPathToTab[segments[3] as keyof typeof settingsPathToTab]
+    return tab ? { kind: 'device', deviceId, view: 'settings', settingsTab: tab } : null
   }
   if (view === 'calibration' && segments.length === 4) {
     const tab = calibrationPathToTab[segments[3] as keyof typeof calibrationPathToTab]
@@ -54,6 +75,9 @@ export function consoleRoutePath(state: ConsoleRouteState) {
   if (state.view === 'dashboard') return `${base}/overview`
   if (state.view === 'calibration') {
     return `${base}/calibration/${calibrationTabToPath[state.calibrationTab ?? 'heater_curve']}`
+  }
+  if (state.view === 'settings') {
+    return `${base}/settings/${settingsTabToPath[state.settingsTab ?? 'presets']}`
   }
   return `${base}/${state.view}`
 }

@@ -5,6 +5,7 @@ import {
   demoInspectorStateFromSearch,
   deriveDemoScenario,
 } from './demo-inspector-state'
+import { resolveWifiSettingsAccess } from './wifi-settings-access'
 
 describe('Demo Inspector state', () => {
   it('normalizes invalid share state to deterministic defaults', () => {
@@ -56,6 +57,25 @@ describe('Demo Inspector state', () => {
     expect(fixture).toMatchObject({
       transport: 'mock',
       baseUrl: 'mock:simulated-serial-fixture',
+    })
+  })
+
+  it('exposes a writable USB fixture for the public demo', () => {
+    const scenario = deriveDemoScenario(defaultDemoInspectorState)
+    const fixture = scenario.devices.find((device) => device.id === 'fp-wifi-usb-04')
+
+    expect(fixture).toBeDefined()
+    expect(fixture && resolveWifiSettingsAccess(fixture)).toEqual({ mode: 'read-write' })
+  })
+
+  it('keeps the read-only mock snapshot visible with SSID metadata', () => {
+    const scenario = deriveDemoScenario(defaultDemoInspectorState)
+    const fixture = scenario.devices.find((device) => device.id === 'fp-lab-01')
+
+    expect(fixture).toMatchObject({
+      wifiSsid: 'FluxPurr-Lab',
+      wifiRssi: -54,
+      wifiPasswordLength: 12,
     })
   })
 })

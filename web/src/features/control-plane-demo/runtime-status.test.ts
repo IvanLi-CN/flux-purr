@@ -219,6 +219,44 @@ describe('direct LAN lease guard', () => {
     ).toBeNull()
   })
 
+  it('does not block USB runtime controls for a terminal WiFi provisioning outcome', () => {
+    expect(
+      deviceControlBlockReason(
+        makeDevice({ transport: 'serial', networkState: 'timeout', leaseState: 'active' })
+      )
+    ).toBeNull()
+
+    expect(
+      deviceControlBlockReason(
+        makeDevice({
+          transport: 'devd',
+          bridgeTransport: 'usb',
+          networkState: 'error',
+          leaseState: 'active',
+        })
+      )
+    ).toBeNull()
+  })
+
+  it('continues to block network control transports for a terminal network failure', () => {
+    expect(
+      deviceControlBlockReason(
+        makeDevice({ transport: 'wifi', networkState: 'timeout', leaseState: 'active' })
+      )
+    ).toBe('当前传输尚未恢复，暂时无法下发控制。')
+
+    expect(
+      deviceControlBlockReason(
+        makeDevice({
+          transport: 'devd',
+          bridgeTransport: 'wifi',
+          networkState: 'error',
+          leaseState: 'active',
+        })
+      )
+    ).toBe('当前传输尚未恢复，暂时无法下发控制。')
+  })
+
   it('keeps LAN lease acquisition stable across unrelated status refreshes', () => {
     const target = makeDevice({
       id: 'lan-a0f262f20d6c',

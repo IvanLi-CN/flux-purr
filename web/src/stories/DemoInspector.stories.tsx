@@ -2,17 +2,20 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, userEvent, within } from 'storybook/test'
 import { DemoInspector } from '@/features/control-plane-demo/components/demo-inspector'
-import { defaultDemoInspectorState } from '@/features/control-plane-demo/demo-inspector-state'
-import { controlPlaneScenario } from '@/features/control-plane-demo/mock-data'
+import {
+  defaultDemoInspectorState,
+  deriveDemoScenario,
+} from '@/features/control-plane-demo/demo-inspector-state'
 
 function InspectorStory() {
   const [state, setState] = useState(defaultDemoInspectorState)
+  const scenario = deriveDemoScenario(state)
   return (
     <div className="industrial-shell" style={{ minHeight: 740, padding: 24 }}>
       <DemoInspector
         state={state}
-        devices={controlPlaneScenario.devices}
-        selectedDeviceId={controlPlaneScenario.selectedDeviceId}
+        devices={scenario.devices}
+        selectedDeviceId={scenario.selectedDeviceId}
         onStateChange={(partial) => setState((current) => ({ ...current, ...partial }))}
         onSelectDevice={() => undefined}
         onSimulate={() => undefined}
@@ -46,5 +49,8 @@ export const InteractionSmoke: Story = {
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).toBeChecked()
+    await expect(
+      await canvas.findByRole('button', { name: /USB Config Fixture.*WiFi 可配置/ })
+    ).toBeVisible()
   },
 }

@@ -128,6 +128,11 @@ export const InteractionSmoke: Story = {
 }
 
 const webSerialRuntimeWrites: DirectRuntimeConfigRequest[] = []
+const webSerialWifiWrites: Array<{
+  op: 'set' | 'clear' | 'cancel'
+  ssid?: string
+  password?: string
+}> = []
 let webSerialConnectCalls = 0
 let webSerialDisconnectCalls = 0
 const heaterCurveStoryPackage = {
@@ -171,6 +176,7 @@ const legacyWifiStateScenario = {
       ? {
           ...device,
           transport: 'devd' as const,
+          bridgeTransport: 'usb' as const,
           leaseState: 'active' as const,
           leaseId: 'legacy-wifi-state-lease',
         }
@@ -258,14 +264,27 @@ export const LegacyWifiStateProtocol: Story = {
     const canvas = within(canvasElement)
 
     await step(
-      'WiFi configuration remains visible but cannot submit without wifi_state_v2',
+      'WiFi snapshot remains visible but configuration is blocked without wifi_state_v2',
       async () => {
+        await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
         await expect(await canvas.findByRole('heading', { name: 'WiFi' })).toBeVisible()
         await expect(
           await canvas.findByText('当前设备固件需要 WiFi 状态协议更新后才能提交设置。')
         ).toBeVisible()
-        await expect(await canvas.findByRole('textbox', { name: 'WiFi 名称' })).toBeDisabled()
-        await expect(await canvas.findByRole('button', { name: '保存并连接' })).toBeDisabled()
+        await expect(await canvas.findByText('WiFi 名称')).toBeVisible()
+        await expect(await canvas.findByRole('textbox', { name: 'WiFi 名称' })).toHaveValue(
+          'FluxPurr-Lab'
+        )
+        await expect(await canvas.findByRole('textbox', { name: 'WiFi 名称' })).toHaveAttribute(
+          'readonly',
+          ''
+        )
+        await expect(await canvas.findByLabelText('密码')).toHaveAttribute('readonly', '')
+        await expect(
+          await canvas.findByRole('status', { name: 'WiFi 网络状态' })
+        ).toHaveTextContent('已连接-54 dBm')
+        expect(canvas.queryByRole('textbox', { name: '信号' })).toBeNull()
+        expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
       }
     )
   },
@@ -887,6 +906,7 @@ export const LiveWebSerialAddDevice: Story = {
     const canvas = within(canvasElement)
     const documentRoot = within(canvasElement.ownerDocument.body)
     webSerialRuntimeWrites.length = 0
+    webSerialWifiWrites.length = 0
     webSerialConnectCalls = 0
     webSerialDisconnectCalls = 0
 
@@ -973,7 +993,8 @@ export const LiveWebSerialAddDevice: Story = {
     await step('global log remains expanded after switching to settings', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
 
-      await expect(await canvas.findByRole('heading', { name: 'Heat policy' })).toBeVisible()
+      await expect(await canvas.findByRole('tablist', { name: 'Settings' })).toBeVisible()
+      await expect(await canvas.findByRole('tab', { name: '温度预设' })).toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '运行时追踪' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '全部' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '完成' })).toBeVisible()
@@ -1011,12 +1032,29 @@ export const LiveWebSerialAddDevice: Story = {
     )
 
     await step('Settings fan policy keeps the acknowledged operator selection', async () => {
+      await userEvent.click(await canvas.findByRole('tab', { name: '风扇策略' }))
       await userEvent.click(await canvas.findByRole('button', { name: 'OFF' }))
 
       await waitFor(() => {
         expect(canvas.getByRole('button', { name: 'OFF' })).toHaveAttribute('aria-pressed', 'true')
       })
       await expect(await canvas.findByText('flux-purr-s3-001 fan policy is now OFF.')).toBeVisible()
+    })
+
+    await step('Settings WiFi writes through the connected Web Serial transport', async () => {
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.type(await canvas.findByLabelText('密码'), 'serial-secret')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+
+      await waitFor(() => {
+        expect(webSerialWifiWrites.at(-1)).toEqual({
+          op: 'set',
+          ssid: 'FluxPurr-Lab',
+          password: 'serial-secret',
+        })
+      })
+      await expect(await canvas.findByText('已提交，正在等待设备连接。')).toBeVisible()
     })
 
     await step('Add device can choose another Web Serial port after one is connected', async () => {
@@ -1031,6 +1069,277 @@ export const LiveWebSerialAddDevice: Story = {
 
       await waitFor(() => expect(webSerialConnectCalls).toBe(2))
       expect(webSerialDisconnectCalls).toBe(1)
+    })
+  },
+}
+
+export const LiveWebSerialWifiConfigFailure: Story = {
+  name: 'Live / Web Serial WiFi write failure',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: () =>
+        new FakeWebSerialClient(
+          {},
+          {
+            wifiConfigError: new Error('Web Serial WiFi transport lost.'),
+          }
+        ) as unknown as WebSerialControlPlaneClient,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('connects the writable Web Serial target', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await expect(await canvas.findByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await expect(await canvas.findByRole('button', { name: '保存并连接' })).toBeVisible()
+    })
+
+    await step(
+      'write failures surface the reason and downgrade the form to read-only',
+      async () => {
+        await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+        await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+
+        await waitFor(() => {
+          expect(
+            canvas.getAllByText(
+              '浏览器 Web Serial 连接已中断，WiFi 设置未能提交。请重新连接设备后重试。'
+            )
+          ).toHaveLength(1)
+        })
+        expect(canvas.queryByText('Web Serial unavailable')).toBeNull()
+        await expect(await canvas.findByLabelText('WiFi 名称')).toHaveAttribute('readonly')
+        expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
+      }
+    )
+  },
+}
+
+export const LiveWebSerialWifiConfigFailureMobile: Story = {
+  name: 'Live / Web Serial WiFi write failure mobile',
+  args: LiveWebSerialWifiConfigFailure.args,
+  globals: {
+    viewport: { value: 'fluxPurrMobile', isRotated: false },
+  },
+  play: LiveWebSerialWifiConfigFailure.play,
+}
+
+export const LiveWebSerialWifiConfigUnknownFailure: Story = {
+  name: 'Live / Web Serial WiFi unknown error fallback',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: () =>
+        new FakeWebSerialClient(
+          {},
+          {
+            wifiConfigError: new Error('Firmware rejected WiFi configuration: invalid channel.'),
+          }
+        ) as unknown as WebSerialControlPlaneClient,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('preserves an unclassified firmware error for diagnosis', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await expect(await canvas.findByRole('heading', { name: 'Thermal runtime' })).toBeVisible()
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+
+      await expect(
+        await canvas.findByText('Firmware rejected WiFi configuration: invalid channel.', {
+          exact: true,
+        })
+      ).toBeVisible()
+      await expect(canvas.queryByText('Web Serial unavailable')).toBeNull()
+      await expect(await canvas.findByLabelText('WiFi 名称')).toHaveAttribute('readonly')
+      expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
+    })
+  },
+}
+
+export const LiveWebSerialTransportLossDuringWifiWrite: Story = {
+  name: 'Live / Web Serial transport loss during WiFi write',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: (() => {
+        let clientCount = 0
+        const interruptedClient = createInterruptedWifiWriteClient()
+        return () => {
+          clientCount += 1
+          return (clientCount === 1
+            ? interruptedClient
+            : new FakeWebSerialClient()) as unknown as WebSerialControlPlaneClient
+        }
+      })(),
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('starts a WiFi write over the initial Web Serial connection', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+      await expect(await canvas.findByRole('button', { name: '保存中' })).toBeDisabled()
+    })
+
+    await step('recovers the authorized transport and settles the interrupted write', async () => {
+      await waitFor(
+        () =>
+          expect(
+            canvas.getByText('browser Web Serial transport recovered after probe failure')
+          ).toBeVisible(),
+        { timeout: 3_000 }
+      )
+      await expect(canvas.queryByText('Web Serial unavailable')).not.toBeInTheDocument()
+      await expect(canvas.queryByRole('button', { name: '保存中' })).not.toBeInTheDocument()
+      await expect(canvas.getByRole('button', { name: '保存并连接' })).toHaveAttribute(
+        'aria-busy',
+        'false'
+      )
+    })
+  },
+}
+
+export const LiveWebSerialStreamClosedDuringWifiWrite: Story = {
+  name: 'Live / Web Serial stream closes during WiFi write',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: createClosedStreamWifiWriteClientFactory(),
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('submits a WiFi write whose USB reader closes before its receipt', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+    })
+
+    await step('recovers without leaving the form or global feedback unavailable', async () => {
+      await waitFor(
+        () =>
+          expect(
+            canvas.getByText('browser Web Serial transport recovered after probe failure')
+          ).toBeVisible(),
+        { timeout: 3_000 }
+      )
+      await expect(
+        canvas.getByText('browser Web Serial WiFi update interrupted; recovering transport')
+      ).toBeVisible()
+      await expect(canvas.queryByText('Web Serial unavailable')).not.toBeInTheDocument()
+      await expect(canvas.queryByRole('button', { name: '保存中' })).not.toBeInTheDocument()
+      await expect(canvas.getByRole('button', { name: '保存并连接' })).toHaveAttribute(
+        'aria-busy',
+        'false'
+      )
+    })
+  },
+}
+
+export const LiveWebSerialStreamClosesAfterWifiReceipt: Story = {
+  name: 'Live / Web Serial stream closes after WiFi receipt',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: createStreamCloseAfterWifiReceiptClientFactory(),
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('receives a WiFi saving receipt before the USB reader closes', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+      await expect(await canvas.findByText('已提交，正在等待设备连接。')).toBeVisible()
+    })
+
+    await step('does not leave the accepted write stuck in saving after recovery', async () => {
+      await waitFor(
+        () =>
+          expect(
+            canvas.getByText('browser Web Serial transport recovered after probe failure')
+          ).toBeVisible(),
+        { timeout: 3_000 }
+      )
+      await expect(canvas.queryByText('Web Serial unavailable')).not.toBeInTheDocument()
+      await expect(canvas.queryByRole('button', { name: '保存中' })).not.toBeInTheDocument()
+      await expect(
+        canvas.getByText('WiFi 配置传输已中断，设备尚未确认设置；连接恢复后可重新提交。')
+      ).toBeVisible()
+      await expect(canvas.getByLabelText('WiFi 名称')).toHaveValue('FluxPurr-Lab')
+      await expect(canvas.getByRole('button', { name: '保存并连接' })).toBeEnabled()
+    })
+  },
+}
+
+export const LiveWebSerialTransportRecoveryRetries: Story = {
+  name: 'Live / Web Serial transport recovery retries',
+  args: {
+    webSerial: {
+      enabled: true,
+      persistKnownDevices: false,
+      clientFactory: (() => {
+        let clientCount = 0
+        const interruptedClient = createInterruptedWifiWriteClient()
+        return () => {
+          clientCount += 1
+          if (clientCount === 1) {
+            return interruptedClient as unknown as WebSerialControlPlaneClient
+          }
+          if (clientCount === 2) {
+            return createUnavailableWebSerialClient() as unknown as WebSerialControlPlaneClient
+          }
+          return new FakeWebSerialClient() as unknown as WebSerialControlPlaneClient
+        }
+      })(),
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('starts a WiFi write before the original transport is lost', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+      await userEvent.click(await canvas.findByRole('button', { name: /设置/ }))
+      await userEvent.click(await canvas.findByRole('tab', { name: 'WiFi' }))
+      await userEvent.type(await canvas.findByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+      await userEvent.click(await canvas.findByRole('button', { name: '保存并连接' }))
+      await expect(await canvas.findByRole('button', { name: '保存中' })).toBeDisabled()
+    })
+
+    await step('keeps recovering until the authorized device returns', async () => {
+      await waitFor(
+        () =>
+          expect(
+            canvas.getByText('browser Web Serial transport recovered after probe failure')
+          ).toBeVisible(),
+        { timeout: 4_000 }
+      )
+      await expect(canvas.queryByText('Web Serial unavailable')).not.toBeInTheDocument()
+      await expect(canvas.queryByRole('button', { name: '保存中' })).not.toBeInTheDocument()
     })
   },
 }
@@ -1907,6 +2216,7 @@ function createIncompleteRtdSingleSampleScenario(): ControlPlaneScenario {
 
 type FakeWebSerialClientOptions = {
   mutateOnProbe?: (currentStatus: ControlPlaneStatus) => ControlPlaneStatus
+  wifiConfigError?: Error
 }
 
 class HangingWebSerialClient {
@@ -2016,6 +2326,40 @@ class FakeWebSerialClient {
     return Promise.resolve(this.currentStatus satisfies ControlPlaneStatus)
   }
 
+  configureWifi(request: { op: 'set' | 'clear' | 'cancel'; ssid?: string; password?: string }) {
+    if (this.options.wifiConfigError) {
+      return Promise.reject(this.options.wifiConfigError)
+    }
+    webSerialWifiWrites.push(request)
+    const nextNetwork: NetworkSummary = {
+      ...this.currentStatus.network,
+      state: request.op === 'clear' ? 'disabled' : request.op === 'cancel' ? 'idle' : 'saving',
+      ssid:
+        request.op === 'clear'
+          ? null
+          : request.op === 'cancel'
+            ? this.currentStatus.network.ssid
+            : (request.ssid ?? this.currentStatus.network.ssid),
+      wifiPasswordLength:
+        request.op === 'clear'
+          ? 0
+          : request.op === 'cancel'
+            ? this.currentStatus.network.wifiPasswordLength
+            : (request.password?.length ?? this.currentStatus.network.wifiPasswordLength),
+      configurationGeneration:
+        request.op === 'cancel'
+          ? (this.currentStatus.network.configurationGeneration ?? 0)
+          : (this.currentStatus.network.configurationGeneration ?? 0) + 1,
+      transitionSequence: (this.currentStatus.network.transitionSequence ?? 0) + 1,
+    }
+    this.currentStatus = { ...this.currentStatus, network: nextNetwork }
+    return Promise.resolve(nextNetwork)
+  }
+
+  getNetwork() {
+    return Promise.resolve(this.currentStatus.network)
+  }
+
   getHeaterCurve() {
     return Promise.resolve(this.heaterCurve)
   }
@@ -2052,6 +2396,108 @@ class FakeWebSerialClient {
   }
 }
 
+function createInterruptedWifiWriteClient() {
+  let pendingWifiWriteReject: ((reason: Error) => void) | null = null
+  return {
+    connect: () => Promise.resolve(webSerialProbe),
+    probe: () => {
+      if (!pendingWifiWriteReject) {
+        return Promise.resolve(webSerialProbe)
+      }
+      return Promise.reject(new Error('The device has been lost.'))
+    },
+    configureWifi: () =>
+      new Promise<NetworkSummary>((_resolve, reject) => {
+        pendingWifiWriteReject = reject
+      }),
+    disconnect: () => {
+      pendingWifiWriteReject?.(new Error('Web Serial connection closed.'))
+      pendingWifiWriteReject = null
+      return Promise.resolve()
+    },
+  }
+}
+
+function createClosedStreamWifiWriteClientFactory() {
+  let previousClientDisconnected = false
+  let wifiWriteStarted = false
+  const interruptedClient = {
+    connect: () => Promise.resolve(webSerialProbe),
+    probe: () =>
+      wifiWriteStarted
+        ? Promise.reject(
+            new ControlPlaneClientError(
+              'Web Serial stream closed before a USB JSONL response.',
+              'web_serial_stream_closed',
+              true
+            )
+          )
+        : Promise.resolve(webSerialProbe),
+    configureWifi: () => {
+      wifiWriteStarted = true
+      return Promise.reject(
+        new ControlPlaneClientError(
+          'Web Serial stream closed before a USB JSONL response.',
+          'web_serial_stream_closed',
+          true
+        )
+      )
+    },
+    disconnect: () => {
+      previousClientDisconnected = true
+      return Promise.resolve()
+    },
+  }
+  return () =>
+    (previousClientDisconnected
+      ? new FakeWebSerialClient()
+      : interruptedClient) as unknown as WebSerialControlPlaneClient
+}
+
+function createStreamCloseAfterWifiReceiptClientFactory() {
+  let previousClientDisconnected = false
+  let wifiReceiptReturned = false
+  const interruptedClient = {
+    connect: () => Promise.resolve(webSerialProbe),
+    probe: () => Promise.resolve(webSerialProbe),
+    configureWifi: () => {
+      wifiReceiptReturned = true
+      return Promise.resolve({
+        ...webSerialProbe.network,
+        state: 'saving' as const,
+        ssid: 'FluxPurr-Lab',
+        configurationGeneration: 1,
+        transitionSequence: 1,
+      })
+    },
+    getNetwork: () =>
+      wifiReceiptReturned
+        ? Promise.reject(
+            new ControlPlaneClientError(
+              'Web Serial stream closed before a USB JSONL response.',
+              'web_serial_stream_closed',
+              true
+            )
+          )
+        : Promise.resolve(webSerialProbe.network),
+    disconnect: () => {
+      previousClientDisconnected = true
+      return Promise.resolve()
+    },
+  }
+  return () =>
+    (previousClientDisconnected
+      ? new FakeWebSerialClient()
+      : interruptedClient) as unknown as WebSerialControlPlaneClient
+}
+
+function createUnavailableWebSerialClient() {
+  return {
+    connect: () => Promise.reject(new Error('The device has been lost.')),
+    disconnect: () => Promise.resolve(),
+  }
+}
+
 const identity = {
   deviceId: 'flux-purr-s3-001',
   firmwareVersion: '0.1.0',
@@ -2061,7 +2507,15 @@ const identity = {
   apiVersion: '2026-05-29',
   protocolVersion: 'flux-purr.usb.v1',
   hostname: 'flux-purr-s3-001',
-  capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
+  capabilities: [
+    'identity',
+    'status',
+    'network',
+    'usb_jsonl',
+    'wifi_config',
+    'wifi_state_v2',
+    'monitor',
+  ],
 } satisfies Identity
 
 const network = {
@@ -2071,6 +2525,7 @@ const network = {
   gateway: null,
   dns: [],
   wifiRssi: null,
+  wifiPasswordLength: 0,
   lastError: null,
 } satisfies NetworkSummary
 

@@ -9,7 +9,7 @@ test.describe('device-scoped routing', () => {
     await expect(page).toHaveURL(new RegExp(`/devices/${identity}/overview\\?demo=true$`))
 
     await page.getByRole('link', { name: /设置/ }).click()
-    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/settings\\?demo=true$`))
+    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/settings/presets\\?demo=true$`))
     await expect(page.getByRole('link', { name: /设置/ })).toHaveAttribute('aria-current', 'page')
 
     await page.getByRole('link', { name: /校准/ }).click()
@@ -41,7 +41,7 @@ test.describe('device-scoped routing', () => {
   test('keeps an unknown stable identity in the URL and offers recovery', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await page.goto('/devices/missing-device/settings?demo=true')
-    await expect(page).toHaveURL(/\/devices\/missing-device\/settings\?demo=true$/)
+    await expect(page).toHaveURL(/\/devices\/missing-device\/settings\/presets\?demo=true$/)
     await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
     await expect(page.getByRole('status').getByText('连接恢复')).toBeVisible()
     await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
@@ -62,6 +62,13 @@ test.describe('device-scoped routing', () => {
     await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
     await expect(page.getByRole('status').getByText('连接恢复')).toBeVisible()
     await expect(page.getByRole('button', { name: '重试恢复' })).toBeVisible()
+  })
+
+  test('replaces a hidden WiFi deep link with the preset settings route', async ({ page }) => {
+    await page.goto('/devices/fp-demo-03/settings/wifi?demo=true')
+
+    await expect(page).toHaveURL(/\/devices\/fp-demo-03\/settings\/presets\?demo=true$/)
+    await expect(page.getByRole('heading', { name: 'Choose target' })).toBeVisible()
   })
 
   test('pushes one history entry for a calibration tab mouse click', async ({ page }) => {
@@ -91,6 +98,9 @@ test.describe('device-scoped routing', () => {
     await expect(page).toHaveURL(
       new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
     )
+
+    await page.goto(`/devices/${identity}/settings?demo=true`)
+    await expect(page).toHaveURL(new RegExp(`/devices/${identity}/settings/presets\\?demo=true$`))
 
     await page.goto('/?demo=true')
     await expect(page).toHaveURL(new RegExp(`/devices/${identity}/overview\\?demo=true$`))

@@ -16,7 +16,7 @@ Flux Purr supports two mutually exclusive USB-C PD sink board variants without c
 - Both controllers can answer at I2C address `0x22`; an ACK alone is never a valid identity signal.
 - Startup performs only controller-specific register reads. A FUSB302BMPX signature requires two stable `Device ID` reads matching the documented `0x9x` format plus a readable FUSB status bank; this positive signature is selected before any CH224Q-only register is read. Only an absent FUSB signature permits the CH224Q fallback probe.
 - An unstable, invalid, incomplete, or read-failed signature reports `unknown`, performs zero PD writes, and keeps heater output interlocked. A physical shared-address collision cannot be made safe by ACK probing and requires board correction before use.
-- FUSB302B's `GPIO7` interrupt net is reserved for a later event-driven path and shares `GPIO8`/`GPIO9` with the M24C64 EEPROM. Sink initialization retains Rd pull-downs on both CC pins, and the current policy safely polls the PHY; each I2C transfer is serialized and PD waits never retain the bus.
+- FUSB302B's `GPIO7` interrupt net is reserved for a later event-driven path and shares `GPIO8`/`GPIO9` with the M24C64 EEPROM. Sink initialization retains Rd pull-downs on both CC pins, and the current policy safely polls the PHY. EEPROM record writes and their verification must release the shared bus after every bounded chunk and service the FUSB302B before the next chunk; no EEPROM write-cycle delay or success-path flash mirror may starve receive or contract recovery.
 
 ## Contract Policy
 

@@ -857,6 +857,7 @@ test.describe('control plane live devd bridge', () => {
     await expect(page.getByText('Target updated')).toBeVisible()
 
     await page.getByRole('link', { name: /设置/i }).click()
+    await page.getByRole('tab', { name: '风扇策略' }).click()
     await page.getByRole('button', { name: 'OFF' }).click()
     await expect(page.getByText('Fan policy updated', { exact: true })).toBeVisible()
 
@@ -900,6 +901,8 @@ test.describe('control plane live devd bridge', () => {
       .getByRole('navigation', { name: '设备工作区' })
       .getByRole('link', { name: /设置/i })
       .click()
+
+    await page.getByRole('tab', { name: 'WiFi' }).click()
 
     const wifiSettings = page.getByLabel('WiFi 设置')
     await expect(wifiSettings).toBeVisible()
@@ -1000,7 +1003,7 @@ test.describe('control plane live devd bridge', () => {
       page.getByText(
         'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.'
       )
-    ).toHaveCount(2)
+    ).toHaveCount(1)
   })
 
   function wifiRequests() {

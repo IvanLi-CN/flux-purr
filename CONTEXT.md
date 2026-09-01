@@ -220,6 +220,18 @@ _Avoid_: Device firmware, Control Console
 A supported communication path that carries the shared Control Plane.
 _Avoid_: Control Plane
 
+**WiFi Provisioning Access**:
+The Device-specific authority to read or change stored WiFi credentials. It is read-write only through an active USB Configuration Transport and read-only through a WiFi/LAN Transport.
+_Avoid_: WiFi connection, WiFi permission
+
+**USB Configuration Transport**:
+An active Browser Web Serial connection or native `devd` USB bridge that can safely write Device WiFi credentials.
+_Avoid_: WiFi/LAN Transport, generic devd target
+
+**WiFi/LAN Transport**:
+A direct LAN connection or native `devd` bridge over the Device network. It exposes current network facts but is not a WiFi credential write path.
+_Avoid_: WiFi Provisioning Access
+
 **Lease**:
 Temporary exclusive authority to perform mutating Control Plane operations on one Device.
 _Avoid_: Connection, pairing, device ownership

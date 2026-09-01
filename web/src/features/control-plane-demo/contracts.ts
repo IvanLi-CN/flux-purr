@@ -293,10 +293,14 @@ export interface DevdLease {
 
 export interface WifiConfigRequest {
   leaseId: string
-  op: 'set' | 'clear'
+  op: 'set' | 'clear' | 'cancel'
   ssid?: string
   password?: string
   telemetryIntervalMs?: number
+}
+
+export interface WifiConfigReceipt {
+  network: NetworkSummary
 }
 
 export interface RuntimeConfigRequest {
@@ -474,7 +478,7 @@ export interface UsbRequestFrame {
 export interface UsbWifiConfigFrame {
   type: 'wifi_config'
   requestId: string
-  op: 'set' | 'clear'
+  op: 'set' | 'clear' | 'cancel'
   ssid?: string
   password?: string
   telemetryIntervalMs?: number

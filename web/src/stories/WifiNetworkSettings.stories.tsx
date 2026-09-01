@@ -77,7 +77,7 @@ const meta = {
         data-testid="wifi-network-settings-story"
         className="h-screen overflow-hidden bg-[#d6e4ed] p-8"
       >
-        <div className="w-[60rem] border border-[#536171] bg-[#eef1f4] p-4">
+        <div className="w-full max-w-[60rem] border border-[#536171] bg-[#eef1f4] p-4">
           <Story />
         </div>
       </div>
@@ -92,6 +92,7 @@ const meta = {
     transitionSequence: 0,
     onSave: fn(async () => snapshot('connecting', 1, 1)),
     onClear: fn(async () => snapshot('disabled', 1, 2)),
+    onCancel: fn(async () => snapshot('idle', 1, 3)),
   },
 } satisfies Meta<typeof WifiNetworkSettings>
 
@@ -138,6 +139,9 @@ function TraceHarness({ trace }: { trace: NetworkSummary[] }) {
           setClearSnapshot(cleared)
           return cleared
         }}
+        onCancel={async () =>
+          snapshot('idle', current.configurationGeneration, (current.transitionSequence ?? 0) + 1)
+        }
       />
     </>
   )
@@ -176,6 +180,7 @@ function ReceiptHarness() {
           })
         }
         onClear={async () => snapshot('disabled', 6, 21)}
+        onCancel={async () => snapshot('idle', 6, 21)}
       />
     </>
   )
@@ -213,8 +218,47 @@ function PendingClearHarness() {
             setResolveReceipt(() => resolve)
           })
         }
+        onCancel={async () => snapshot('idle', 5, 20)}
       />
     </>
+  )
+}
+
+function WaitingDecisionHarness({
+  mobile = false,
+  cancelAvailableAfterMs,
+}: {
+  mobile?: boolean
+  cancelAvailableAfterMs?: number
+}) {
+  const [networkState, setNetworkState] = useState<NetworkSummary['state']>('idle')
+  const settings = (
+    <WifiNetworkSettings
+      deviceId="serial-001122334455"
+      networkState={networkState}
+      operationTimeoutMs={600_000}
+      cancelAvailableAfterMs={cancelAvailableAfterMs}
+      onSave={() => {
+        setNetworkState('connecting')
+        return new Promise<NetworkSummary>(() => undefined)
+      }}
+      onClear={async () => snapshot('disabled', 2, 2)}
+      onCancel={async () => {
+        setNetworkState('idle')
+        return snapshot('idle', 1, 2)
+      }}
+    />
+  )
+
+  return mobile ? (
+    <div
+      className="w-[393px] max-w-full border border-[#536171] bg-[#d6e4ed] p-5"
+      data-testid="wifi-mobile-waiting-decision"
+    >
+      {settings}
+    </div>
+  ) : (
+    settings
   )
 }
 
@@ -248,6 +292,7 @@ function SameVersionDeviceSnapshotHarness() {
           return next
         }}
         onClear={async () => snapshot('disabled', 1, 6)}
+        onCancel={async () => snapshot('idle', 1, 6)}
       />
     </>
   )
@@ -271,11 +316,40 @@ export const StateGallery: Story = {
             failureCode={value.failureCode}
             onSave={async () => snapshot('connecting', 2, 1)}
             onClear={async () => snapshot('disabled', 2, 2)}
+            onCancel={async () => snapshot('idle', 1, 2)}
           />
         )
       })}
     </div>
   ),
+}
+
+export const ReadOnlyLanSnapshot: Story = {
+  name: 'Read-only / LAN snapshot',
+  args: {
+    networkState: 'connected',
+    savedSsid: 'FluxPurr-Lab',
+    wifiRssi: -54,
+    savedPasswordLength: 11,
+    readOnly: true,
+    unavailableReason: '当前通过 WiFi / LAN 连接，只能查看网络信息；请通过 USB 配置连接修改 WiFi。',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('alert')).toHaveTextContent(
+      '当前通过 WiFi / LAN 连接，只能查看网络信息；请通过 USB 配置连接修改 WiFi。'
+    )
+    await expect(canvas.getByRole('textbox', { name: 'WiFi 名称' })).toHaveValue('FluxPurr-Lab')
+    await expect(canvas.getByRole('textbox', { name: 'WiFi 名称' })).toHaveAttribute('readonly', '')
+    await expect(canvas.getByLabelText('密码')).toHaveValue('•••••••••••')
+    await expect(canvas.getByLabelText('密码')).toHaveAttribute('readonly', '')
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      '已连接-54 dBm'
+    )
+    expect(canvas.queryByRole('textbox', { name: '信号' })).toBeNull()
+    expect(canvas.queryByRole('button', { name: '保存并连接' })).toBeNull()
+    expect(canvas.queryByRole('button', { name: '清除 WiFi' })).toBeNull()
+  },
 }
 
 export const ProvisioningSucceedsAfterTransientRetry: Story = {
@@ -286,13 +360,13 @@ export const ProvisioningSucceedsAfterTransientRetry: Story = {
     await userEvent.type(canvas.getByLabelText('密码'), 'secret-pass')
     await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
     await expect(canvas.getByText('已提交，正在等待设备连接。')).toBeVisible()
-    await expect(canvas.queryByText('WiFi 连接失败，请检查名称和密码。')).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/^WiFi 连接失败：/)).not.toBeInTheDocument()
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
     await expect(canvas.getByText('WiFi 已连接。')).toBeVisible()
     await expect(canvas.getByLabelText('WiFi 名称')).toHaveValue('FluxPurr-Lab')
-    await expect(canvas.queryByText('WiFi 连接失败，请检查名称和密码。')).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/^WiFi 连接失败：/)).not.toBeInTheDocument()
   },
 }
 
@@ -315,6 +389,109 @@ export const WaitsForDeviceReceipt: Story = {
     await expect(clearButton).toBeDisabled()
     await expect(clearButton).toHaveAttribute('aria-busy', 'false')
     await expect(canvas.queryByRole('button', { name: '清除中' })).not.toBeInTheDocument()
+  },
+}
+
+export const PendingSaveCanBeCancelled: Story = {
+  args: {
+    cancelAvailableAfterMs: 25,
+    operationTimeoutMs: 250,
+    onSave: fn(() => new Promise<NetworkSummary>(() => undefined)),
+    onCancel: fn(async () => snapshot('idle', 1, 2)),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+    await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
+    const cancelButton = await canvas.findByRole('button', { name: '取消' })
+    await expect(canvas.getByRole('button', { name: '继续等待' })).toBeEnabled()
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      '连接中已等待 0 秒，可取消或继续等待。'
+    )
+    await userEvent.click(canvas.getByRole('button', { name: '继续等待' }))
+    await expect(canvas.getByText(/继续等待设备响应/)).toBeVisible()
+    await userEvent.click(cancelButton)
+    await expect(canvas.getByText('已取消设备 WiFi 连接。')).toBeVisible()
+    await expect(canvas.queryByText(/设备端操作可能仍在后台继续/)).not.toBeInTheDocument()
+    await expect(canvas.getByRole('button', { name: '保存并连接' })).toBeEnabled()
+  },
+}
+
+export const WaitingDecision: Story = {
+  render: () => <WaitingDecisionHarness />,
+}
+
+export const WaitingDecisionVisible: Story = {
+  render: () => <WaitingDecisionHarness cancelAvailableAfterMs={10_000} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+    await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
+    await expect(
+      await canvas.findByRole('button', { name: '继续等待' }, { timeout: 15_000 })
+    ).toBeEnabled()
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      /连接中已等待 (?:10|1[1-9]|[2-9]\d) 秒，可取消或继续等待。/
+    )
+  },
+}
+
+export const MobileWaitingDecision: Story = {
+  render: () => <WaitingDecisionHarness mobile />,
+}
+
+export const MobileWaitingDecisionVisible: Story = {
+  render: () => <WaitingDecisionHarness mobile cancelAvailableAfterMs={25} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+    await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
+    await expect(await canvas.findByRole('button', { name: '继续等待' })).toBeEnabled()
+    const surface = canvasElement.querySelector<HTMLElement>(
+      '[data-testid="wifi-mobile-waiting-decision"]'
+    )
+    if (!surface) {
+      throw new Error('Mobile WiFi waiting-decision surface was not rendered.')
+    }
+    const surfaceBounds = surface.getBoundingClientRect()
+    for (const control of [
+      canvas.getByLabelText('WiFi 名称'),
+      canvas.getByLabelText('密码'),
+      canvas.getByRole('button', { name: '取消' }),
+      canvas.getByRole('button', { name: '继续等待' }),
+    ]) {
+      const bounds = control.getBoundingClientRect()
+      await expect(bounds.left).toBeGreaterThanOrEqual(surfaceBounds.left)
+      await expect(bounds.right).toBeLessThanOrEqual(surfaceBounds.right)
+    }
+  },
+}
+
+export const PendingSaveTimesOut: Story = {
+  args: {
+    networkState: 'connecting',
+    cancelAvailableAfterMs: 25,
+    operationTimeoutMs: 75,
+    feedbackDismissMs: 20,
+    onSave: fn(() => new Promise<NetworkSummary>(() => undefined)),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+    await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
+    await expect(await canvas.findByText(/设备尚未确认 WiFi 连接结果/)).toBeVisible()
+    await new Promise((resolve) => window.setTimeout(resolve, 50))
+    await expect(canvas.getByText(/设备尚未确认 WiFi 连接结果/)).toBeVisible()
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      '等待设备确认'
+    )
+    await expect(canvas.getByRole('button', { name: '取消' })).toBeEnabled()
+    await expect(canvas.getByRole('button', { name: '继续等待' })).toBeEnabled()
+    await expect(
+      canvas.getByRole('status', { name: 'WiFi 网络状态' }).querySelector('svg.animate-spin')
+    ).not.toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: '取消' }))
+    await expect(canvas.getByText('已取消设备 WiFi 连接。')).toBeVisible()
   },
 }
 
@@ -352,10 +529,40 @@ export const SameVersionDeviceSnapshotCompletes: Story = {
 
 export const TerminalFailure: Story = {
   render: () => <TraceHarness trace={fixtureTrace('invalid_credentials_terminal_error')} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
+    await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
+    await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
+    await expect(
+      canvas.getByText('WiFi 连接失败：接入点拒绝认证，请检查 WiFi 名称和密码。')
+    ).toBeVisible()
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      '连接失败原因：接入点拒绝认证，请检查 WiFi 名称和密码。'
+    )
+  },
 }
 
 export const TerminalTimeout: Story = {
   render: () => <TraceHarness trace={fixtureTrace('ipv4_terminal_timeout')} />,
+}
+
+export const FailureReasonVisible: Story = {
+  args: {
+    networkState: 'error',
+    savedSsid: 'FluxPurr-Lab',
+    savedPasswordLength: 11,
+    configurationGeneration: 3,
+    transitionSequence: 7,
+    failureCode: 'association_rejected',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
+      '连接失败原因：接入点拒绝认证，请检查 WiFi 名称和密码。'
+    )
+    await expect(canvas.queryByText(/dBm/)).not.toBeInTheDocument()
+  },
 }
 
 export const TerminalFailureStaysSettledUntilNewConfiguration: Story = {
@@ -365,13 +572,15 @@ export const TerminalFailureStaysSettledUntilNewConfiguration: Story = {
     await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
     await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
-    await expect(canvas.getByText('WiFi 连接失败，请检查名称和密码。')).toBeVisible()
+    await expect(
+      canvas.getByText('WiFi 连接失败：接入点拒绝认证，请检查 WiFi 名称和密码。')
+    ).toBeVisible()
     await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
     await expect(canvas.getByText('已提交，正在等待设备连接。')).toBeVisible()
-    await expect(canvas.queryByText('WiFi 连接失败，请检查名称和密码。')).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/^WiFi 连接失败：/)).not.toBeInTheDocument()
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
     await expect(canvas.getByText('已连接', { selector: 'strong' })).toBeVisible()
-    await expect(canvas.queryByText('WiFi 连接失败，请检查名称和密码。')).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/^WiFi 连接失败：/)).not.toBeInTheDocument()
     await expect(canvas.getByText('WiFi 已连接。')).toBeVisible()
   },
 }
@@ -391,7 +600,7 @@ export const StaleSnapshotIsIgnored: Story = {
     await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
     await expect(canvas.getByText('已提交，正在等待设备连接。')).toBeVisible()
-    await expect(canvas.queryByText('WiFi 连接失败，请检查名称和密码。')).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/^WiFi 连接失败：/)).not.toBeInTheDocument()
     await userEvent.click(canvas.getByRole('button', { name: '推进设备 trace' }))
     await expect(canvas.getByText('WiFi 已连接。')).toBeVisible()
   },
@@ -486,6 +695,7 @@ export const MobileSavedPasswordLength: Story = {
 export const TransportUnavailable: Story = {
   args: {
     disabled: true,
+    readOnly: true,
     networkState: 'connecting',
     configurationGeneration: 2,
     transitionSequence: 2,
@@ -525,6 +735,7 @@ export const FailureCodeGallery: Story = {
               failureCode={value.failureCode}
               onSave={async () => snapshot('connecting', 11, index + 1)}
               onClear={async () => snapshot('disabled', 11, index + 2)}
+              onCancel={async () => snapshot('idle', 10, index + 2)}
             />
           </div>
         )

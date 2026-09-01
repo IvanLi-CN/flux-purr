@@ -355,6 +355,8 @@ struct RuntimeSetArgs {
 enum WifiCommand {
     Set(WifiSetArgs),
     Clear(TargetSelector),
+    /// Stop the current WiFi station attempt without erasing saved credentials.
+    Cancel(TargetSelector),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1393,6 +1395,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             WifiCommand::Clear(selector) => {
                 let body = json!({"op": WifiConfigOp::Clear});
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::PUT,
+                    "/wifi",
+                    Some(body),
+                )
+                .await?
+            }
+            WifiCommand::Cancel(selector) => {
+                let body = json!({"op": WifiConfigOp::Cancel});
                 request_with_lease(
                     &client,
                     resolve_target(selector, &cli.devd)?,

@@ -2,11 +2,15 @@
 
 > 当前有效规范以本文为准；实现覆盖与当前状态见 `./IMPLEMENTATION.md`，关键演进原因见 `./HISTORY.md`。
 
+## Related ADRs
+
+- [ADR 0003: Transport-scoped WiFi provisioning](../../adr/0003-transport-scoped-wifi-provisioning.md)
+
 ## 背景 / 问题陈述
 
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md` 已沉淀 Web、native USB daemon、USB CDC、WiFi provisioning、firmware flashing 与 monitoring 的长期控制面方案。
 - 本轮 Web demo 不应呈现为管理后台，也不应让用户面对完整 fleet / operations / dashboard 信息墙。
-- 当前需要的是一个轻量固定控制台：Dashboard 显示热控运行态，Settings 做 preset / fan policy 配置，Update 做固件 dry-check，桌面端全局日志可与当前页面同时显示。
+- 当前需要的是一个轻量固定控制台：Dashboard 显示热控运行态，Settings 以 tabs 分开 preset / fan policy / WiFi 配置，Update 做固件 dry-check，桌面端全局日志可与当前页面同时显示。
 
 ## 目标 / 非目标
 
@@ -23,7 +27,7 @@
 ### Non-goals
 
 - 不做管理后台、fleet dashboard、artifact catalog 管理页或全量控制平面配置面。
-- 不实现 native USB daemon、USB CDC、WiFi HTTP、真实 firmware flashing 或真实硬件连接。
+- Mock-only Demo build 不启用 native USB daemon、WiFi HTTP 或真实 firmware flashing；live Web console 复用已有 Browser Web Serial、devd 和 LAN adapters。
 - 不引入后端服务、认证、凭据持久化或真实 artifact catalog。
 - 不使用 hash routing，也不把 transport target ID、设备别名、网络地址或凭据写入 URL。
 - 不替换 `160×50` 前面板 preview 或既有前面板 specs。
@@ -46,7 +50,6 @@
 
 - `firmware/**`
 - native daemon 工具链
-- `docs/interfaces/http-api.md`
 - 真实设备 API 契约变更
 
 ## 需求（Requirements）
@@ -57,7 +60,7 @@
 - Demo 必须始终保持一屏轻工具心智模型；桌面端默认不依赖页面滚动。
 - Demo 必须提供 `Dashboard`、`Settings`、`Update` 三个界面，不得把所有能力堆成一个长页面。
 - 生产 Web App 必须以 TanStack Router 作为页面、设备与校准 workspace tab 的唯一导航真相源。
-- 规范路径必须为 `/devices/:deviceId/overview`、`/devices/:deviceId/settings`、`/devices/:deviceId/update`、`/devices/:deviceId/calibration/heater-curve`、`/devices/:deviceId/calibration/rtd-adc`、`/devices/:deviceId/calibration/vin-adc` 与 `/devices/new`。
+- 规范路径必须为 `/devices/:deviceId/overview`、`/devices/:deviceId/settings/presets`、`/devices/:deviceId/settings/fan`、`/devices/:deviceId/settings/wifi`、`/devices/:deviceId/update`、`/devices/:deviceId/calibration/heater-curve`、`/devices/:deviceId/calibration/rtd-adc`、`/devices/:deviceId/calibration/vin-adc` 与 `/devices/new`；旧 `/devices/:deviceId/settings` 必须 replace 到 presets。
 - `:deviceId` 必须使用稳定物理 `identityId`；transport target ID 只能用于本地连接候选解析。
 - `/` 必须 replace 到当前 variant 最近设备的 overview；没有有效记录时 replace 到 `/devices/new`。`/devices`、`/devices/:deviceId` 与 `/devices/:deviceId/calibration` 必须 replace 到对应规范页。
 - `demo`、`uiDemo`、`demoScene`、`demoLease`、`demoNetwork` 与 `demoArtifact` 必须由 router 作为 typed search 参数验证和规范化；`demo` 与 Inspector state 在站内导航中保留，`uiDemo` 保持 production 根入口专用，不得使用裸 History API 绕过 router 状态。
@@ -69,8 +72,10 @@
 - Dashboard 必须把热板运行状态作为第一层信息，当前温度必须是首要视觉焦点。
 - Dashboard 必须显示目标温度、heater 输出、PD 合约电压、风扇/主动降温状态和最常用的热控辅助动作。
 - Dashboard 的目标温度必须能直接实时调整，不得依赖提交/应用按钮。
-- Settings 必须显示 live summary、preset temperatures、当前 preset 编辑、preset enable switch 与 fan policy 等少量热控配置控件。
+- Settings 必须使用链接语义的 workspace tabs 分开展示 live summary/preset temperatures/preset enable、fan policy 和 transport-scoped WiFi settings。
 - Settings 中 preset 温度调整必须在 debounce 后自动保存；不得提供额外提交按钮。
+- WiFi tab 必须根据选中 Device 的 capability 与 transport 隐藏、只读或读写；Web Serial 与 active devd USB lease 可写，WiFi/LAN 与 devd LAN bridge 只读并显示 Alert 原因。
+- WiFi mock 与 live 表单在 10 秒等待后必须将“取消”映射为 Device `wifi_config(op=cancel)`；只有 device-confirmed `idle` 才能显示取消成功，不能用停止本地等待代替设备操作。
 - Update 必须展示 artifact 选择、compatibility verdict、dry-check progress 与结果摘要，但不得呈现为完整 artifact 管理后台。
 - 全局日志必须支持至少 1000 条 mock trace，通过虚拟列表渲染；滚动条仅在 hover/滚动时显示。
 - Storybook 必须提供 default、degraded、gallery、mobile review 与交互 smoke story。
@@ -175,6 +180,7 @@
 - Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
 - Given public Demo build，When 打开 `/?demo=false&uiDemo=true`，Then 始终进入完整 mock-only console，不出现 LAN pairing 页面且不会启动 devd、Web Serial 或 direct LAN。
 - Given Demo Inspector，When 切换 scene、lease/network/artifact 覆盖或模拟动作，Then console 与全局 trace 同步更新，URL 可刷新恢复；选择 Calibration active 时同一校准离开保护生效。
+- Given WiFi 配置等待达到 10 秒，When operator 选择取消，Then mock fixture 与 live Web Serial 都等待 `cancel` receipt 的 `idle` 结果；等待、确认成功与取消失败分别有可辨识状态，且取消不会清空保存的 SSID 或密码掩码。
 
 ## 验收清单（Acceptance checklist）
 

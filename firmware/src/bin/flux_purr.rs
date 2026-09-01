@@ -87,6 +87,8 @@ use flux_purr_firmware::control_plane::LanPairingCode;
 #[cfg(test)]
 use flux_purr_firmware::control_plane::ThermalControlProfileCommand;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+use flux_purr_firmware::control_plane::WifiConfigOp;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::WifiConfigReceipt;
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 use flux_purr_firmware::control_plane::hello_frame;
@@ -135,10 +137,11 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET,
-    MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS, MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET,
-    PREVIOUS_MEMORY_SLOT_B_OFFSET, PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record,
-    encode_memory_record, select_latest_optional_memory_record,
+    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_RECORD_HEADER_LEN,
+    MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS,
+    MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
+    PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record, encode_memory_record,
+    select_latest_optional_memory_record,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::memory::{
@@ -212,7 +215,9 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static mut RUNTIME_HEAP_STORAGE: MaybeUninit<[u8; RUNTIME_HEAP_SIZE]> = MaybeUninit::uninit();
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-const RUNTIME_HEAP_SIZE: usize = 64 * 1024;
+// The display canvas is reinitialized before every use and lives in DRAM2 so
+// the ProCPU control task retains enough guarded stack for USB requests.
+const RUNTIME_HEAP_SIZE: usize = 48 * 1024;
 
 #[cfg(all(target_arch = "xtensa", not(feature = "net_http")))]
 #[unsafe(link_section = ".dram2_uninit")]
@@ -247,6 +252,10 @@ fn init_runtime_heap() {
 #[unsafe(link_section = ".dram2_uninit")]
 static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_LEN]> =
     MaybeUninit::uninit();
+
+#[cfg(target_arch = "xtensa")]
+#[unsafe(link_section = ".dram2_uninit")]
+static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = MaybeUninit::uninit();
 
 #[cfg(target_arch = "xtensa")]
 struct MemoryIoScratch {
@@ -303,6 +312,18 @@ fn initialize_usb_control_response_buffer() -> &'static mut [u8; USB_CONTROL_TX_
 }
 
 #[cfg(target_arch = "xtensa")]
+fn initialize_display_canvas() -> &'static mut DisplayCanvas {
+    // DRAM2 is retained across software resets, so overwrite the canvas rather
+    // than using StaticCell's one-time initialization marker. Initialize in
+    // place so the 16 KiB canvas never occupies the guarded task stack.
+    unsafe {
+        let canvas = core::ptr::addr_of_mut!(DISPLAY_CANVAS_STORAGE).cast::<DisplayCanvas>();
+        DisplayCanvas::initialize_black_in_place(canvas);
+        &mut *canvas
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 fn reset_reason_log_line(reason: Option<SocResetReason>) -> &'static str {
     match reason {
         Some(SocResetReason::ChipPowerOn) => "reset_reason=chip_power_on\n",
@@ -354,9 +375,27 @@ fn rom_log_line(line: &[u8]) {
 }
 
 #[cfg(target_arch = "xtensa")]
+struct RomPanicWriter;
+
+#[cfg(target_arch = "xtensa")]
+impl core::fmt::Write for RomPanicWriter {
+    fn write_str(&mut self, value: &str) -> core::fmt::Result {
+        rom_log_line(value.as_bytes());
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 #[panic_handler]
-fn panic(_info: &PanicInfo<'_>) -> ! {
+fn panic(info: &PanicInfo<'_>) -> ! {
     rom_log_line(b"panic=firmware_fault\n");
+    if let Some(location) = info.location() {
+        let mut writer = RomPanicWriter;
+        let _ = core::fmt::Write::write_fmt(
+            &mut writer,
+            format_args!("panic_location={}:{}\n", location.file(), location.line()),
+        );
+    }
     esp_hal::rom::ets_delay_us(250_000);
     esp_hal::system::software_reset()
 }
@@ -6270,18 +6309,6 @@ fn load_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn load_memory_record(
-    i2c: &mut I2c<'_, esp_hal::Blocking>,
-    flash: &mut FlashStorage,
-    scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
-    let (eeprom, _) = load_eeprom_memory_record(i2c, scratch);
-    let flash = load_flash_memory_record_with_legacy_migration(flash, scratch);
-    select_latest_optional_memory_record(eeprom, flash)
-}
-
-#[cfg(target_arch = "xtensa")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MemoryCommitError {
     EncodeFailed,
@@ -6344,6 +6371,9 @@ fn memory_record_write_chunk_len(absolute_offset: usize, remaining: usize) -> us
 #[inline(never)]
 async fn write_eeprom_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
     record: &MemoryRecord,
     scratch: &mut MemoryIoScratch,
 ) -> Result<(), MemoryCommitError> {
@@ -6353,10 +6383,10 @@ async fn write_eeprom_memory_record(
         return Err(MemoryCommitError::EncodeFailed);
     };
     let base_offset = memory_slot_offset_for_sequence(record.sequence);
+    service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
     let Some(address) = probe_eeprom_address(i2c) else {
         return Err(MemoryCommitError::WriteAddressNoAck);
     };
-    let mut eeprom = M24c64::with_address(i2c, address);
     let mut written = 0usize;
     while written < record_len {
         let absolute_offset = usize::from(base_offset) + written;
@@ -6365,16 +6395,24 @@ async fn write_eeprom_memory_record(
             info!("memory commit offset overflow");
             return Err(MemoryCommitError::WriteFailed);
         };
-        if let Err(error) = eeprom.write_page(
-            page_offset,
-            &scratch.record_bytes[written..written + chunk_len],
-        ) {
+        let write_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.write_page(
+                page_offset,
+                &scratch.record_bytes[written..written + chunk_len],
+            )
+        };
+        if let Err(error) = write_result {
             let error = memory_commit_error_from_eeprom(error);
             info!("memory commit write failed seq={=u32}", record.sequence);
             return Err(error);
         }
         written += chunk_len;
         EmbassyTimer::after_millis(EEPROM_WRITE_CYCLE_DELAY_MS).await;
+        // FUSB302B shares this bus. Dropping the EEPROM adapter before every
+        // PD poll keeps its receive and contract deadlines serviced throughout
+        // a long record write.
+        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
     }
     info!(
         "memory commit ok seq={=u32} bytes={=u16} slot=0x{=u16:04x}",
@@ -6384,29 +6422,126 @@ async fn write_eeprom_memory_record(
 }
 
 #[cfg(target_arch = "xtensa")]
+async fn service_pd_during_memory_commit(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
+) {
+    let now_ms = elapsed_ms.saturating_add(
+        Instant::now()
+            .as_millis()
+            .saturating_sub(commit_started_at.as_millis()),
+    );
+    let _ = read_pd_status(i2c, pd_port, now_ms).await;
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn verify_eeprom_memory_record(
+    i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
+    record: &MemoryRecord,
+    scratch: &mut MemoryIoScratch,
+) -> Result<MemoryRecord, MemoryCommitError> {
+    service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    };
+    let base_offset = memory_slot_offset_for_sequence(record.sequence);
+    let header_read = {
+        let mut eeprom = M24c64::with_address(&mut *i2c, address);
+        eeprom.read_bytes(
+            base_offset,
+            &mut scratch.record_bytes[..MEMORY_RECORD_HEADER_LEN],
+        )
+    };
+    if header_read.is_err() {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    }
+    service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+
+    let payload_len = usize::from(u16::from_le_bytes([
+        scratch.record_bytes[6],
+        scratch.record_bytes[7],
+    ]));
+    let Some(record_len) = MEMORY_RECORD_HEADER_LEN.checked_add(payload_len) else {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    };
+    if record_len > MEMORY_SLOT_SIZE {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    }
+
+    let mut read = MEMORY_RECORD_HEADER_LEN;
+    while read < record_len {
+        let chunk_len = (record_len - read).min(EEPROM_WRITE_CHUNK_MAX_BYTES);
+        let chunk_offset = base_offset
+            .checked_add(read as u16)
+            .ok_or(MemoryCommitError::VerifyUnreadable)?;
+        let read_result = {
+            let mut eeprom = M24c64::with_address(&mut *i2c, address);
+            eeprom.read_bytes(
+                chunk_offset,
+                &mut scratch.record_bytes[read..read + chunk_len],
+            )
+        };
+        if read_result.is_err() {
+            return Err(MemoryCommitError::VerifyUnreadable);
+        }
+        read += chunk_len;
+        service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+    }
+
+    decode_memory_record(&scratch.record_bytes[..record_len])
+        .map_err(|_| MemoryCommitError::VerifyUnreadable)
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryCommitBackend {
+    Eeprom,
+    Flash,
+}
+
+#[cfg(target_arch = "xtensa")]
 #[inline(never)]
 async fn write_memory_record(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
+    commit_started_at: Instant,
     flash: &mut FlashStorage,
     record: &MemoryRecord,
     scratch: &mut MemoryIoScratch,
-) -> Result<(), MemoryCommitError> {
-    match write_eeprom_memory_record(i2c, record, scratch).await {
+) -> Result<MemoryCommitBackend, MemoryCommitError> {
+    match write_eeprom_memory_record(i2c, pd_port, elapsed_ms, commit_started_at, record, scratch)
+        .await
+    {
         Ok(()) => {
+            // Keep flash recoverable from the newest EEPROM record. A later
+            // EEPROM failure must not restore stale credentials or settings.
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
             if let Err(error) = write_flash_memory_record(flash, record, scratch) {
                 info!(
                     "memory commit flash mirror unavailable reason={=str}",
                     error.code()
                 );
             }
-            Ok(())
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            Ok(MemoryCommitBackend::Eeprom)
         }
         Err(eeprom_error) => {
             info!(
                 "memory commit falling back to flash reason={=str}",
                 eeprom_error.code()
             );
-            write_flash_memory_record(flash, record, scratch).map_err(|_| eeprom_error)
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            let flash_result = write_flash_memory_record(flash, record, scratch);
+            service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+            flash_result
+                .map(|()| MemoryCommitBackend::Flash)
+                .map_err(|_| eeprom_error)
         }
     }
 }
@@ -6415,6 +6550,8 @@ async fn write_memory_record(
 #[inline(never)]
 async fn commit_memory_config_now(
     i2c: &mut I2c<'_, esp_hal::Blocking>,
+    pd_port: &mut PdPort,
+    elapsed_ms: u64,
     flash: &mut FlashStorage,
     memory_sequence: &mut u32,
     memory_config: &MemoryConfig,
@@ -6425,6 +6562,7 @@ async fn commit_memory_config_now(
     let mut expected_config = memory_config.clone();
     expected_config.sanitize();
     let mut last_error = MemoryCommitError::WriteFailed;
+    let commit_started_at = Instant::now();
 
     for attempt in 0..2 {
         let next_sequence = memory_sequence.saturating_add(1 + attempt);
@@ -6432,17 +6570,54 @@ async fn commit_memory_config_now(
             sequence: next_sequence,
             config: expected_config.clone(),
         };
-        if let Err(error) = write_memory_record(i2c, flash, &record, &mut scratch).await {
-            last_error = error;
-            continue;
-        }
-        let Some(verified) = load_memory_record(i2c, flash, &mut scratch) else {
-            info!(
-                "memory commit verify failed seq={=u32} reason=unreadable",
-                next_sequence
-            );
-            last_error = MemoryCommitError::VerifyUnreadable;
-            continue;
+        let backend = match write_memory_record(
+            i2c,
+            pd_port,
+            elapsed_ms,
+            commit_started_at,
+            flash,
+            &record,
+            &mut scratch,
+        )
+        .await
+        {
+            Ok(backend) => backend,
+            Err(error) => {
+                last_error = error;
+                continue;
+            }
+        };
+        let verified = match backend {
+            MemoryCommitBackend::Eeprom => {
+                verify_eeprom_memory_record(
+                    i2c,
+                    pd_port,
+                    elapsed_ms,
+                    commit_started_at,
+                    &record,
+                    &mut scratch,
+                )
+                .await
+            }
+            MemoryCommitBackend::Flash => {
+                service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+                let verified = load_flash_memory_record(flash, &mut scratch)
+                    .ok_or(MemoryCommitError::VerifyUnreadable);
+                service_pd_during_memory_commit(i2c, pd_port, elapsed_ms, commit_started_at).await;
+                verified
+            }
+        };
+        let verified = match verified {
+            Ok(verified) => verified,
+            Err(error) => {
+                info!(
+                    "memory commit verify failed seq={=u32} reason={=str}",
+                    next_sequence,
+                    error.code(),
+                );
+                last_error = error;
+                continue;
+            }
         };
         if verified.sequence != next_sequence || verified.config != expected_config {
             info!(
@@ -7956,7 +8131,7 @@ fn usb_runtime_status_with_calibration(
     memory_config: &MemoryConfig,
     calibration: &CalibrationRuntimeState,
     context: UsbRuntimeStatusContext,
-) -> ControlPlaneStatus {
+) -> Box<ControlPlaneStatus> {
     let pd_contract_mv = effective_pd_contract_mv(
         &context.manual_pps,
         context.last_pd_observation,
@@ -7979,7 +8154,7 @@ fn usb_runtime_status_with_calibration(
         .first_pressed()
         .map(|raw_key| FrontPanelKeyMap::default().logical_from_raw(raw_key));
 
-    let mut status = ControlPlaneStatus::from_device_status(
+    let mut status = ControlPlaneStatus::boxed_from_device_status(
         DeviceStatus {
             mode: if context.current_rtd_fault.is_some() {
                 DeviceMode::Fault
@@ -8014,8 +8189,8 @@ fn usb_runtime_status_with_calibration(
         memory_config,
         (context.elapsed_ms / 1_000).min(u64::from(u32::MAX)) as u32,
         ui_state.network.clone(),
-    )
-    .with_runtime_target_temp_c(ui_state.target_temp_c);
+    );
+    status.target_temp_c = ui_state.target_temp_c;
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
     status.rtd_raw_adc_min_mv = context.latest_rtd_raw_adc_min_mv;
     status.rtd_raw_adc_max_mv = context.latest_rtd_raw_adc_max_mv;
@@ -8151,7 +8326,7 @@ fn usb_runtime_status(
     memory_config: &MemoryConfig,
     calibration: &CalibrationRuntimeState,
     context: UsbRuntimeStatusContext,
-) -> ControlPlaneStatus {
+) -> Box<ControlPlaneStatus> {
     usb_runtime_status_with_calibration(ui_state, memory_config, calibration, context)
 }
 
@@ -8160,7 +8335,7 @@ fn usb_runtime_status(
     ui_state: &FrontPanelUiState,
     memory_config: &MemoryConfig,
     context: UsbRuntimeStatusContext,
-) -> ControlPlaneStatus {
+) -> Box<ControlPlaneStatus> {
     let calibration = context.calibration;
     usb_runtime_status_with_calibration(ui_state, memory_config, &calibration, context)
 }
@@ -10549,8 +10724,8 @@ fn usb_recovery_response_for_phase(
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
-fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> ControlPlaneStatus {
-    let mut status = ControlPlaneStatus::from_device_status(
+fn usb_recovery_status(memory_config: &MemoryConfig, elapsed_ms: u64) -> Box<ControlPlaneStatus> {
+    let mut status = ControlPlaneStatus::boxed_from_device_status(
         DeviceStatus {
             mode: DeviceMode::Fault,
             voltage_mv: 0,
@@ -10944,14 +11119,46 @@ async fn process_control_line(
             }
         },
         Ok(UsbFrame::WifiConfig { request_id, config }) => {
-            config.apply_to(memory_config);
             #[cfg(feature = "net_http")]
-            let network = flux_purr_firmware::net::apply_wifi_config(memory_config).await;
+            let network = match config.op {
+                WifiConfigOp::Cancel => {
+                    match flux_purr_firmware::net::cancel_wifi_connection().await {
+                        Ok(network) => network,
+                        Err(error) => {
+                            return (
+                                needs_redraw,
+                                usb_error_response(request_id, error.code(), error.message()),
+                            );
+                        }
+                    }
+                }
+                WifiConfigOp::Set | WifiConfigOp::Clear => {
+                    config.apply_to(memory_config);
+                    flux_purr_firmware::net::apply_wifi_config(memory_config).await
+                }
+            };
             #[cfg(not(feature = "net_http"))]
-            let network = network_from_memory(memory_config);
-            apply_memory_config_to_ui(ui_state, memory_config);
-            *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-            needs_redraw = true;
+            let network = match config.op {
+                WifiConfigOp::Cancel => {
+                    return (
+                        needs_redraw,
+                        usb_error_response(
+                            request_id,
+                            "wifi_cancel_unavailable",
+                            "WiFi cancellation is unavailable in this firmware build.",
+                        ),
+                    );
+                }
+                WifiConfigOp::Set | WifiConfigOp::Clear => {
+                    config.apply_to(memory_config);
+                    network_from_memory(memory_config)
+                }
+            };
+            if !matches!(config.op, WifiConfigOp::Cancel) {
+                apply_memory_config_to_ui(ui_state, memory_config);
+                *memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
+                needs_redraw = true;
+            }
             usb_response(
                 request_id,
                 UsbResponsePayload::Wifi(WifiConfigReceipt {
@@ -11064,6 +11271,8 @@ async fn process_control_line(
                 if *memory_config != previous_memory_config {
                     if commit_memory_config_now(
                         pd_i2c,
+                        pd_port,
+                        elapsed_ms,
                         flash_storage,
                         memory_sequence,
                         memory_config,
@@ -11181,9 +11390,15 @@ async fn process_control_line(
                         manual_pps,
                     );
                 }
-                if let Err(error) =
-                    commit_memory_config_now(pd_i2c, flash_storage, memory_sequence, memory_config)
-                        .await
+                if let Err(error) = commit_memory_config_now(
+                    pd_i2c,
+                    pd_port,
+                    elapsed_ms,
+                    flash_storage,
+                    memory_sequence,
+                    memory_config,
+                )
+                .await
                 {
                     *memory_config = previous_memory_config;
                     return (
@@ -12058,12 +12273,11 @@ async fn main(_spawner: Spawner) {
     static DRIVER_FB: StaticCell<
         [embedded_graphics::pixelcolor::Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
     > = StaticCell::new();
-    static CANVAS: StaticCell<DisplayCanvas> = StaticCell::new();
 
     let driver_framebuffer = DRIVER_FB.init_with(|| {
         [embedded_graphics::pixelcolor::Rgb565::BLACK; flux_purr_firmware::display::DISPLAY_PIXELS]
     });
-    let canvas = CANVAS.init_with(DisplayCanvas::new);
+    let canvas = initialize_display_canvas();
 
     let mut display: GC9D01<_, _, _, DisplayTimer> = GC9D01::new(
         DISPLAY_PANEL_CONFIG,
@@ -12864,7 +13078,12 @@ async fn main(_spawner: Spawner) {
     }
     log_ui_state(&ui_state);
     #[cfg(feature = "web_serial")]
-    let _ = usb_write_bytes_bounded(&mut usb_serial, RUNTIME_READY_BOOT_STAGE_LINE);
+    {
+        let _ = usb_write_bytes_bounded(&mut usb_serial, RUNTIME_READY_BOOT_STAGE_LINE);
+        // The daemon may attach after early boot framing; repeat the latched
+        // reset cause once JSONL control is ready for post-reset diagnosis.
+        let _ = usb_write_bytes_bounded(&mut usb_serial, reset_reason.as_bytes());
+    }
 
     let runtime_started_ms = Instant::now().as_millis();
     let mut last_control_ms: u64 = 0;
@@ -13611,6 +13830,8 @@ async fn main(_spawner: Spawner) {
                 if thermal_plant_completed {
                     if let Err(error) = commit_memory_config_now(
                         &mut pd_i2c,
+                        &mut pd_port,
+                        elapsed_ms,
                         &mut flash_storage,
                         &mut memory_sequence,
                         &memory_config,
@@ -13832,6 +14053,8 @@ async fn main(_spawner: Spawner) {
             memory_commit_due_ms = None;
             if commit_memory_config_now(
                 &mut pd_i2c,
+                &mut pd_port,
+                elapsed_ms,
                 &mut flash_storage,
                 &mut memory_sequence,
                 &memory_config,
