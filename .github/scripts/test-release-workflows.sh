@@ -36,6 +36,8 @@ assert "refs/heads/main" not in prepare
 assert "verification_sha" in prepare
 assert "verify-prepared" in prepare
 assert "verify-merged-prepared" in release
+assert 'git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"' in release
+assert 'if [ "${EVENT_NAME}" = workflow_run ]; then' in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
 assert "latest_check_outcomes" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
