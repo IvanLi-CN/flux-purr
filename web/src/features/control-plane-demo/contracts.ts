@@ -31,6 +31,7 @@ export interface ThermalTuningTraceCapability {
 
 export interface ThermalTuningCapability {
   id: 'thermal_tuning_run_v1' | string
+  evidenceSchema: 'thermal_tuning_evidence_v2' | string
   supportedPowerClasses: ThermalTuningPowerClass[]
   targetScheduleC: number[]
   physicalTargetsC: number[]
@@ -247,7 +248,12 @@ export type ThermalTuningPromotionState =
   | 'previewed'
   | 'saved'
   | 'expired'
-export type ThermalTuningTraceKind = 'sample' | 'decision'
+export type ThermalTuningTraceKind =
+  | 'sample'
+  | 'phase_transition'
+  | 'candidate_trial'
+  | 'decision'
+  | 'safety'
 export type ThermalTuningTargetDisposition = 'pending' | 'accepted' | 'failed' | 'skipped'
 
 export interface ThermalTuningEligibility {
@@ -281,6 +287,7 @@ export interface ThermalTuningCandidate {
 export interface ThermalTuningJournal {
   lastRunId?: string | null
   lastDisposition?: string | null
+  resetReason?: string | null
 }
 
 export interface ThermalTuningRun {
@@ -302,7 +309,11 @@ export interface ThermalTuningTraceEvent {
   elapsedMs: number
   kind: ThermalTuningTraceKind
   phase?: ThermalTuningPhase | null
+  previousPhase?: ThermalTuningPhase | null
   targetC?: number | null
+  trialIndex?: number | null
+  candidateId?: string | null
+  canonicalCandidatePointHex?: string | null
   temperatureCentiC?: number | null
   vinMv?: number | null
   ppsContractMv?: number | null
@@ -323,6 +334,11 @@ export interface ThermalTuningTraceEvent {
   candidateFrozen?: boolean | null
   gates?: number | null
   candidateHash?: string | null
+  eventReason?: string | null
+  trialStartSequence?: number | null
+  trialEndSequence?: number | null
+  trialStartElapsedMs?: number | null
+  trialEndElapsedMs?: number | null
 }
 
 export interface ThermalTuningTracePage {
@@ -338,6 +354,18 @@ export interface ThermalTuningRunSnapshot {
   schema: 'thermal_tuning_run_v1' | string
   run: ThermalTuningRun
   page: ThermalTuningTracePage
+  hostPromotionReceipts?: ThermalTuningPromotionReceipt[]
+}
+
+export interface ThermalTuningPromotionReceipt {
+  recordedAtUnixMs: number
+  operation: 'preview' | 'discard_preview' | 'save'
+  runId: string
+  candidateId?: string | null
+  candidateHash?: string | null
+  powerClass?: ThermalTuningPowerClass | null
+  outcome: 'device_confirmed'
+  persistentRevision?: number | null
 }
 
 export interface ThermalTuningRunRequest {

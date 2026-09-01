@@ -490,6 +490,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     transitionSequence: record.network.transitionSequence ?? 0,
     wifiFailureCode: record.network.failureCode ?? null,
     capabilities: record.identity.capabilities,
+    thermalTuningEvidenceSchema: record.identity.thermalTuning?.evidenceSchema ?? null,
     networkState: record.network.state,
     leaseState: record.transport === 'mock' ? undefined : 'none',
     transportIssue,

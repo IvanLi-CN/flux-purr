@@ -4,7 +4,8 @@
 
 ## Current Status
 
-- Implementation: firmware, transport, host tooling and Web surface are implemented
+- Implementation: firmware, transport, host tooling and Web surface are in progress; the
+  complete evidence event contract is not yet implemented
 - Lifecycle: active
 - Delivery: local quality gates pass; hardware validation remains authorization-gated
 
@@ -23,7 +24,14 @@
 - The CLI has explicit `--engine firmware --power-class pps3a|pps5a` product execution and
   retains the independent `--engine host-reference` path plus legacy source/profile flags.
   The firmware runner writes the five-file `thermal-tuning-v2` archive without source or
-  external VBUS operations.
+  external VBUS operations. `thermal candidate preview|discard-preview|save` separately
+  revalidates an archived firmware candidate against the Device before RAM preview or a
+  second-confirmed EEPROM save.
+- Firmware now exposes the complete five-kind evidence union (`sample`, `phase_transition`,
+  `candidate_trial`, `decision`, `safety`) with target/trial/candidate identity and canonical
+  candidate bytes. CLI and Web recorders persist the global sequence independently and
+  acknowledge only after durable host commit. Existing bundles made before this evidence
+  contract remain visibly `review_incomplete`; missing fields are never inferred.
 - The Web calibration workspace has a `热控调优` subtab, PPS segmented control, simple
   confirmation, trace acknowledgement/review gates, candidate preview/save/discard and
   IndexedDB plus offline ZIP export. Bridge, Web Serial and direct LAN use separate local

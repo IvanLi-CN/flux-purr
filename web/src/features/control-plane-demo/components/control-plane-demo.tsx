@@ -200,11 +200,7 @@ import {
   createDefaultThermalTuningSnapshot,
   ThermalTuningRunCard,
 } from './thermal-tuning-card'
-import {
-  resolveWifiSettingsUnavailableReason,
-  WifiNetworkSettings,
-  type WifiNetworkSettingsDraft,
-} from './wifi-network-settings'
+import { WifiNetworkSettings, type WifiNetworkSettingsDraft } from './wifi-network-settings'
 
 export interface LanRuntimeDependencies {
   createLease?: typeof createLanLease
@@ -796,6 +792,7 @@ function mergeThermalTuningSnapshots(
   for (const event of next.page.events) events.set(event.sequence, event)
   return {
     ...next,
+    hostPromotionReceipts: next.hostPromotionReceipts ?? previous.hostPromotionReceipts,
     page: {
       ...next.page,
       events: [...events.values()].sort((left, right) => left.sequence - right.sequence),
@@ -1957,7 +1954,8 @@ export function ControlPlaneDemo({
       : createDefaultThermalTuningSnapshot())
   const thermalTuningRunUnsupported =
     visibleDevice.transport !== 'mock' &&
-    !visibleDevice.capabilities.includes('thermal_tuning_run_v1')
+    (!visibleDevice.capabilities.includes('thermal_tuning_run_v1') ||
+      visibleDevice.thermalTuningEvidenceSchema !== 'thermal_tuning_evidence_v2')
   const visibleCalibrationWorkspaceTab =
     navigation?.state.kind === 'device' && navigation.state.view === 'calibration'
       ? (navigation.state.calibrationTab ?? 'heater_curve')
@@ -2768,7 +2766,10 @@ export function ControlPlaneDemo({
     if (activeView !== 'calibration' || visibleDeviceTransport === 'mock') {
       return
     }
-    if (!visibleDevice.capabilities.includes('thermal_tuning_run_v1')) {
+    if (
+      !visibleDevice.capabilities.includes('thermal_tuning_run_v1') ||
+      visibleDevice.thermalTuningEvidenceSchema !== 'thermal_tuning_evidence_v2'
+    ) {
       return
     }
     let cancelled = false
@@ -2807,6 +2808,31 @@ export function ControlPlaneDemo({
       }
       return null
     }
+    const sendRunCommand = async (
+      request: Omit<ThermalTuningRunRequest, 'leaseId'>
+    ): Promise<ThermalTuningRunSnapshot | null> => {
+      if (visibleDeviceIsDirectWebSerial) {
+        return webSerial.configureThermalTuningRun(request)
+      }
+      if (isDirectLanDevice(visibleDevice) && visibleDeviceLeaseId) {
+        const session = loadLanDeviceSession(visibleDevice.baseUrl)
+        if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+        return authorizedLanRequest<ThermalTuningRunSnapshot>(
+          session,
+          'calibration/thermal-tuning/run',
+          'POST',
+          request,
+          visibleDeviceLeaseId
+        )
+      }
+      if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
+        return controlClient.configureThermalTuningRun(devdBaseUrl, visibleDeviceId, {
+          leaseId: visibleDeviceLeaseId,
+          ...request,
+        })
+      }
+      return null
+    }
     const poll = async () => {
       if (cancelled || inFlight) return
       inFlight = true
@@ -2832,8 +2858,45 @@ export function ControlPlaneDemo({
               },
             }
           : next
-        setThermalTuningRunByDevice((current) => ({ ...current, [visibleDeviceId]: merged }))
         await persistThermalTuningSnapshot(visibleDeviceId, merged)
+        let durable = merged
+        const pageThrough = next.page.events.at(-1)?.sequence
+        const pageDigest = next.page.digestThroughPage
+        if (
+          pageThrough != null &&
+          pageDigest &&
+          pageThrough > (merged.run.review.acknowledgedThrough ?? -1)
+        ) {
+          const acknowledged = await sendRunCommand({
+            op: 'ack_trace',
+            runId: merged.run.runId,
+            throughSequence: pageThrough,
+            traceDigest: pageDigest,
+          })
+          if (acknowledged) {
+            durable = mergeThermalTuningSnapshots(merged, acknowledged)
+            await persistThermalTuningSnapshot(visibleDeviceId, durable)
+          }
+        }
+        if (
+          durable.run.state === 'terminal' &&
+          durable.run.review.state === 'awaiting_seal' &&
+          durable.run.review.terminalSequence != null &&
+          durable.run.review.acknowledgedThrough === durable.run.review.terminalSequence &&
+          durable.run.review.traceDigest
+        ) {
+          const sealed = await sendRunCommand({
+            op: 'seal_review',
+            runId: durable.run.runId,
+            throughSequence: durable.run.review.terminalSequence,
+            traceDigest: durable.run.review.traceDigest,
+          })
+          if (sealed) {
+            durable = mergeThermalTuningSnapshots(durable, sealed)
+            await persistThermalTuningSnapshot(visibleDeviceId, durable)
+          }
+        }
+        setThermalTuningRunByDevice((current) => ({ ...current, [visibleDeviceId]: durable }))
       } catch (error) {
         if (error instanceof ControlPlaneClientError && error.code === 'trace_gap') {
           const previous = thermalTuningRunByDevice[visibleDeviceId]
@@ -4655,6 +4718,21 @@ export function ControlPlaneDemo({
           throw new Error('当前设备没有可用的热控调优 transport。')
         }
         const merged = mergeThermalTuningSnapshots(current, next)
+        if (['preview', 'discard_preview', 'save'].includes(request.op)) {
+          merged.hostPromotionReceipts = [
+            ...(current.hostPromotionReceipts ?? []),
+            {
+              recordedAtUnixMs: Date.now(),
+              operation: request.op as 'preview' | 'discard_preview' | 'save',
+              runId: merged.run.runId,
+              candidateId: merged.run.candidate.candidateId,
+              candidateHash: merged.run.candidate.candidateHash,
+              powerClass: merged.run.candidate.powerClass,
+              outcome: 'device_confirmed',
+              persistentRevision: null,
+            },
+          ]
+        }
         setThermalTuningRunByDevice((states) => ({ ...states, [visibleDevice.id]: merged }))
         await persistThermalTuningSnapshot(visibleDevice.id, merged)
         setFeedback({

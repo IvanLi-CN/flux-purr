@@ -78,6 +78,7 @@ export function bridgeProbeToDeviceTarget(
     firmware: probe.identity.firmwareVersion,
     buildId: probe.identity.buildId,
     capabilities: probe.identity.capabilities,
+    thermalTuningEvidenceSchema: probe.identity.thermalTuning?.evidenceSchema ?? null,
     connectionAvailable: true,
     connectionCandidate: false,
     severity: 'nominal',

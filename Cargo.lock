@@ -1744,6 +1744,7 @@ dependencies = [
  "flux-purr-thermal-tuning-core",
  "hex",
  "ipnet",
+ "libc",
  "md-5 0.10.6",
  "mdns-sd-discovery",
  "reqwest",
@@ -1809,6 +1810,8 @@ name = "flux-purr-thermal-tuning-wasm"
 version = "0.1.0"
 dependencies = [
  "flux-purr-thermal-tuning-core",
+ "serde",
+ "serde-wasm-bindgen",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -3295,6 +3298,17 @@ dependencies = [
  "heapless 0.8.0",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "serde-wasm-bindgen"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8302e169f0eddcc139c70f139d19d6467353af16f9fce27e8c30158036a1e16b"
+dependencies = [
+ "js-sys",
+ "serde",
+ "wasm-bindgen",
 ]
 
 [[package]]

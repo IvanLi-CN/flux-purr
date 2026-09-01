@@ -11,9 +11,8 @@ flux-purr thermal tune --engine firmware --power-class pps3a --output-dir <direc
 `--engine firmware` is the normal product mode. It discovers or consumes the existing chosen
 Flux Purr transport, calls only `thermal_tuning_run_v1`, continuously pages/atomically records
 trace events, sends `ack_trace` and `seal_review`, and writes a `thermal-tuning-v2` bundle.
-It may issue preview/save only after the Device reports a review-complete candidate and the
-CLI collects the required simple confirmation. It never prepares an external source, queries
-external VBUS current/voltage/power, or launches a browser.
+The run command never promotes its candidate automatically. It never prepares an external
+source, queries external VBUS current/voltage/power, or launches a browser.
 
 `--power-class` is required and accepts exactly `pps3a` or `pps5a`. It is not an alias for
 `--profile-mode`; `auto`, `65w`, and `100w` are rejected for this command.
@@ -21,6 +20,27 @@ external VBUS current/voltage/power, or launches a browser.
 The CLI remains a normal host process during a run. It does not hand its recorder, report
 ownership, or reference comparison responsibility to `devd`; an interrupted CLI leaves the
 firmware run safe but can make its candidate review-incomplete if the trace buffer expires.
+
+## Firmware Candidate Promotion
+
+```text
+flux-purr thermal candidate preview --device <device> --bundle-dir <directory>
+flux-purr thermal candidate discard-preview --device <device> --bundle-dir <directory>
+flux-purr thermal candidate save --device <device> --bundle-dir <directory> --confirm
+```
+
+These commands accept only the `run.bundle.json` from a firmware `thermal-tuning-v2` archive.
+Before acquiring a Device lease they verify the archived completed/review-complete state,
+`pps3a|pps5a` class, canonical profile bytes and candidate SHA-256. With the lease, they reread
+the Device snapshot and require the exact `runId + candidateId + candidateHash + powerClass`
+identity before issuing any candidate operation.
+
+`preview` writes only the Device RAM bank and leaves heating disabled. `discard-preview` restores
+the prior RAM bank. `save` performs the required preview when the candidate is `ready`, then
+persists that exact `previewed` candidate to the matching EEPROM bank. It has its own simple
+yes/no confirmation, separate from start; non-interactive use requires `--confirm` and never a
+password, token or secret. A `saved` candidate is reported idempotently and no new write is
+issued.
 
 ## Host Reference Engine
 

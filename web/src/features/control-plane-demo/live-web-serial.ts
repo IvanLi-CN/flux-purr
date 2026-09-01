@@ -9,9 +9,9 @@ import type {
   HeaterCurveState,
   NetworkSummary,
   ThermalPlantRunSnapshot,
-  WifiConfigRequest,
   ThermalTuningRunRequest,
   ThermalTuningRunSnapshot,
+  WifiConfigRequest,
 } from './contracts'
 import { rememberKnownWebSerialDevice } from './known-web-serial-devices'
 import { ControlPlaneClientError } from './transport-client'

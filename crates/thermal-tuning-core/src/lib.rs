@@ -11,6 +11,13 @@ pub const CANDIDATE_PROFILE_CANONICAL_BYTES: usize =
     1 + TARGET_COUNT * CANDIDATE_POINT_CANONICAL_BYTES;
 pub const TARGET_BUDGET_SECONDS: u32 = 20 * 60;
 pub const HOLD_CONFIRM_SECONDS: u32 = 60;
+/// A candidate must enter the +/- 3 C confirm band promptly after its own
+/// profile is applied. Ten seconds covers the measured heater transport delay
+/// without admitting a protracted reheat as a settled candidate.
+pub const MAX_DYNAMIC_SETTLE_MS: u32 = 10_000;
+/// Start the 60 second verification only after entering a narrower band than
+/// the acceptance band, leaving room for normal plant transport variation.
+pub const HOLD_CONFIRM_ENTRY_CENTI: i16 = 200;
 pub const MAX_OVERSHOOT_CENTI: i16 = 300;
 pub const MAX_HOLD_PEAK_TO_PEAK_CENTI: i16 = 300;
 pub const CANDIDATE_LADDER_WIDTH: usize = 3;
@@ -226,27 +233,69 @@ pub struct CandidatePoint {
 impl CandidatePoint {
     pub const fn baseline(target_c: i16, class: PpsPowerClass) -> Self {
         let high_power = matches!(class, PpsPowerClass::Pps5a);
+        let high_temperature = high_power && target_c >= 200;
         Self {
             target_c,
             brake_distance_centi_c: if target_c < 120 {
                 450
             } else if target_c < 200 {
                 700
+            } else if high_temperature {
+                // The 5 A HIL plant needs a high steady-state floor, but a
+                // 1.5 C handoff lets residual heat drive a full-off/full-on
+                // cycle. Begin the bounded approach at 2 C instead.
+                200
             } else {
                 1_000
             },
             warmup_power_permille: 1_000,
-            approach_power_permille: if high_power { 360 } else { 320 },
-            approach_floor_power_permille: if high_power { 140 } else { 120 },
-            hold_power_permille: if high_power { 190 } else { 160 },
-            hold_reheat_power_permille: if high_power { 80 } else { 60 },
+            approach_power_permille: if high_temperature {
+                600
+            } else if high_power {
+                360
+            } else {
+                320
+            },
+            approach_floor_power_permille: if high_temperature {
+                450
+            } else if high_power {
+                140
+            } else {
+                120
+            },
+            hold_power_permille: if high_temperature {
+                600
+            } else if high_power {
+                190
+            } else {
+                160
+            },
+            hold_reheat_power_permille: if high_temperature {
+                600
+            } else if high_power {
+                80
+            } else {
+                60
+            },
             hold_entry_centi_c: 90,
             hold_exit_centi_c: 200,
             hold_on_centi_c: 30,
             hold_off_centi_c: 5,
             overshoot_cutoff_centi_c: 25,
-            hold_kp_permille_per_c: if high_power { 140 } else { 120 },
-            hold_ki_permille_per_c_tick: if high_power { 14 } else { 12 },
+            hold_kp_permille_per_c: if high_temperature {
+                40
+            } else if high_power {
+                140
+            } else {
+                120
+            },
+            hold_ki_permille_per_c_tick: if high_temperature {
+                4
+            } else if high_power {
+                14
+            } else {
+                12
+            },
             hold_blend_ticks: 12,
             approach_lead_ticks: 0,
             hold_lead_ticks: 0,
@@ -275,6 +324,47 @@ impl CandidatePoint {
             self.hold_lead_ticks,
         ] {
             put_u16(out, &mut offset, value);
+        }
+    }
+
+    pub fn from_canonical_bytes(bytes: &[u8; CANDIDATE_POINT_CANONICAL_BYTES]) -> Self {
+        let mut offset = 0;
+        let target_c = take_i16(bytes, &mut offset);
+        let brake_distance_centi_c = take_u16(bytes, &mut offset);
+        let warmup_power_permille = take_u16(bytes, &mut offset);
+        let approach_power_permille = take_u16(bytes, &mut offset);
+        let approach_floor_power_permille = take_u16(bytes, &mut offset);
+        let hold_power_permille = take_u16(bytes, &mut offset);
+        let hold_reheat_power_permille = take_u16(bytes, &mut offset);
+        let hold_entry_centi_c = take_u16(bytes, &mut offset);
+        let hold_exit_centi_c = take_u16(bytes, &mut offset);
+        let hold_on_centi_c = take_u16(bytes, &mut offset);
+        let hold_off_centi_c = take_u16(bytes, &mut offset);
+        let overshoot_cutoff_centi_c = take_u16(bytes, &mut offset);
+        let hold_kp_permille_per_c = take_u16(bytes, &mut offset);
+        let hold_ki_permille_per_c_tick = take_u16(bytes, &mut offset);
+        let hold_blend_ticks = take_u16(bytes, &mut offset);
+        let approach_lead_ticks = take_u16(bytes, &mut offset);
+        let hold_lead_ticks = take_u16(bytes, &mut offset);
+
+        Self {
+            target_c,
+            brake_distance_centi_c,
+            warmup_power_permille,
+            approach_power_permille,
+            approach_floor_power_permille,
+            hold_power_permille,
+            hold_reheat_power_permille,
+            hold_entry_centi_c,
+            hold_exit_centi_c,
+            hold_on_centi_c,
+            hold_off_centi_c,
+            overshoot_cutoff_centi_c,
+            hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick,
+            hold_blend_ticks,
+            approach_lead_ticks,
+            hold_lead_ticks,
         }
     }
 
@@ -391,26 +481,61 @@ pub fn candidate_ladder(
     target_c: i16,
     power_class: PpsPowerClass,
 ) -> [CandidatePoint; CANDIDATE_LADDER_WIDTH] {
-    candidate_ladder_from_seed(CandidatePoint::baseline(target_c, power_class))
+    candidate_ladder_from_seed_for_class(
+        CandidatePoint::baseline(target_c, power_class),
+        power_class,
+    )
 }
 
 pub fn candidate_ladder_from_seed(
     seed: CandidatePoint,
 ) -> [CandidatePoint; CANDIDATE_LADDER_WIDTH] {
+    candidate_ladder_from_seed_for_class(seed, PpsPowerClass::Pps3a)
+}
+
+fn candidate_ladder_from_seed_for_class(
+    seed: CandidatePoint,
+    power_class: PpsPowerClass,
+) -> [CandidatePoint; CANDIDATE_LADDER_WIDTH] {
     let baseline = seed;
+    let high_temperature_5a = matches!(power_class, PpsPowerClass::Pps5a) && seed.target_c >= 200;
+    if high_temperature_5a {
+        // At the high end of the 5 A plant, changing the brake distance at
+        // the same time as the steady-state floor makes the three trials
+        // incomparable. Keep the approach geometry fixed and bracket the
+        // observed steady-state demand (600, 650, 700 permille).
+        let mut sustained = baseline;
+        sustained.approach_power_permille = sustained.approach_power_permille.saturating_add(50);
+        sustained.approach_floor_power_permille =
+            sustained.approach_floor_power_permille.saturating_add(50);
+        sustained.hold_power_permille = sustained.hold_power_permille.saturating_add(50);
+        sustained.hold_reheat_power_permille =
+            sustained.hold_reheat_power_permille.saturating_add(50);
+
+        let mut recovery = baseline;
+        recovery.approach_power_permille = recovery.approach_power_permille.saturating_add(100);
+        recovery.approach_floor_power_permille =
+            recovery.approach_floor_power_permille.saturating_add(100);
+        recovery.hold_power_permille = recovery.hold_power_permille.saturating_add(100);
+        recovery.hold_reheat_power_permille =
+            recovery.hold_reheat_power_permille.saturating_add(100);
+        return [baseline, sustained, recovery];
+    }
     let mut conservative = baseline;
     conservative.brake_distance_centi_c = baseline.brake_distance_centi_c.saturating_add(50);
     conservative.approach_power_permille = baseline.approach_power_permille.saturating_sub(20);
     conservative.approach_floor_power_permille =
         baseline.approach_floor_power_permille.saturating_sub(10);
     conservative.hold_power_permille = baseline.hold_power_permille.saturating_sub(10);
+    conservative.hold_reheat_power_permille = conservative.hold_power_permille;
 
     let mut responsive = baseline;
     responsive.brake_distance_centi_c = baseline.brake_distance_centi_c.saturating_sub(50);
     responsive.approach_power_permille = baseline.approach_power_permille.saturating_add(20);
     responsive.approach_floor_power_permille =
         baseline.approach_floor_power_permille.saturating_add(10);
-    responsive.hold_power_permille = baseline.hold_power_permille.saturating_add(10);
+    responsive.hold_power_permille = baseline.hold_power_permille.saturating_add(10).min(1_000);
+    responsive.hold_reheat_power_permille = responsive.hold_power_permille;
     [baseline, conservative, responsive]
 }
 
@@ -488,6 +613,26 @@ impl CandidateProfile {
         }
     }
 
+    pub fn from_canonical_bytes(bytes: &[u8; CANDIDATE_PROFILE_CANONICAL_BYTES]) -> Option<Self> {
+        let power_class = match bytes[0] {
+            3 => PpsPowerClass::Pps3a,
+            5 => PpsPowerClass::Pps5a,
+            _ => return None,
+        };
+        let mut profile = Self::baseline(power_class);
+        for index in 0..TARGET_COUNT {
+            let start = 1 + index * CANDIDATE_POINT_CANONICAL_BYTES;
+            let mut point_bytes = [0u8; CANDIDATE_POINT_CANONICAL_BYTES];
+            point_bytes.copy_from_slice(&bytes[start..start + CANDIDATE_POINT_CANONICAL_BYTES]);
+            let point = CandidatePoint::from_canonical_bytes(&point_bytes);
+            if point.target_c != PHYSICAL_TARGETS_C[index] {
+                return None;
+            }
+            profile.points[index] = point;
+        }
+        Some(profile)
+    }
+
     pub fn hash(self) -> [u8; 32] {
         let mut bytes = [0u8; CANDIDATE_PROFILE_CANONICAL_BYTES];
         self.canonical_bytes(&mut bytes);
@@ -516,6 +661,9 @@ impl CandidateIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SampleEvent {
     pub elapsed_ms: u32,
+    pub target_c: i16,
+    pub trial_index: u8,
+    pub candidate_hash: [u8; 32],
     pub temperature_centi_c: i16,
     pub vin_mv: u16,
     pub pps_contract_mv: u16,
@@ -546,13 +694,54 @@ pub struct DecisionEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateTrialBoundary {
+    Started,
+    Completed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CandidateTrialEvent {
+    pub elapsed_ms: u32,
+    pub target_c: i16,
+    pub trial_index: u8,
+    pub boundary: CandidateTrialBoundary,
+    pub point: CandidatePoint,
+    pub candidate_hash: [u8; 32],
+    pub start_sequence: u64,
+    pub start_elapsed_ms: u32,
+    pub score: CandidateScore,
+    pub gates: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseTransitionEvent {
+    pub elapsed_ms: u32,
+    pub target_c: i16,
+    pub trial_index: u8,
+    pub previous_phase: Phase,
+    pub phase: Phase,
+    pub reason: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafetyEvent {
+    pub elapsed_ms: u32,
+    pub target_c: i16,
+    pub trial_index: u8,
+    pub reason: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceEvent {
     Sample(SampleEvent),
+    PhaseTransition(PhaseTransitionEvent),
+    CandidateTrial(CandidateTrialEvent),
     Decision(DecisionEvent),
+    Safety(SafetyEvent),
 }
 
 impl TraceEvent {
-    fn canonical_bytes(self, sequence: u64, out: &mut [u8; 96]) -> usize {
+    fn canonical_bytes(self, sequence: u64, out: &mut [u8; 128]) -> usize {
         let mut offset = 0;
         put_u64(out, &mut offset, sequence);
         match self {
@@ -560,6 +749,11 @@ impl TraceEvent {
                 out[offset] = 1;
                 offset += 1;
                 put_u32(out, &mut offset, sample.elapsed_ms);
+                put_i16(out, &mut offset, sample.target_c);
+                out[offset] = sample.trial_index;
+                offset += 1;
+                out[offset..offset + 32].copy_from_slice(&sample.candidate_hash);
+                offset += 32;
                 put_i16(out, &mut offset, sample.temperature_centi_c);
                 put_u16(out, &mut offset, sample.vin_mv);
                 put_u16(out, &mut offset, sample.pps_contract_mv);
@@ -597,6 +791,58 @@ impl TraceEvent {
                 put_u16(out, &mut offset, decision.gates);
                 out[offset..offset + 32].copy_from_slice(&decision.candidate_hash);
                 offset + 32
+            }
+            Self::PhaseTransition(transition) => {
+                out[offset] = 3;
+                offset += 1;
+                put_u32(out, &mut offset, transition.elapsed_ms);
+                put_i16(out, &mut offset, transition.target_c);
+                out[offset] = transition.trial_index;
+                offset += 1;
+                out[offset] = phase_byte(transition.previous_phase);
+                offset += 1;
+                out[offset] = phase_byte(transition.phase);
+                offset += 1;
+                put_u16(out, &mut offset, transition.reason);
+                offset
+            }
+            Self::CandidateTrial(trial) => {
+                out[offset] = 4;
+                offset += 1;
+                put_u32(out, &mut offset, trial.elapsed_ms);
+                put_i16(out, &mut offset, trial.target_c);
+                out[offset] = trial.trial_index;
+                offset += 1;
+                out[offset] = match trial.boundary {
+                    CandidateTrialBoundary::Started => 1,
+                    CandidateTrialBoundary::Completed => 2,
+                };
+                offset += 1;
+                let mut point = [0; CANDIDATE_POINT_CANONICAL_BYTES];
+                trial.point.canonical_bytes(&mut point);
+                out[offset..offset + CANDIDATE_POINT_CANONICAL_BYTES].copy_from_slice(&point);
+                offset += CANDIDATE_POINT_CANONICAL_BYTES;
+                out[offset..offset + 32].copy_from_slice(&trial.candidate_hash);
+                offset += 32;
+                put_u64(out, &mut offset, trial.start_sequence);
+                put_u32(out, &mut offset, trial.start_elapsed_ms);
+                put_i32(out, &mut offset, trial.score.max_overshoot_centi);
+                put_i32(out, &mut offset, trial.score.hold_peak_to_peak_centi);
+                put_u32(out, &mut offset, trial.score.settle_ms);
+                put_i32(out, &mut offset, trial.score.hold_mean_absolute_error_centi);
+                put_u16(out, &mut offset, trial.score.output_switches);
+                put_u16(out, &mut offset, trial.gates);
+                offset
+            }
+            Self::Safety(safety) => {
+                out[offset] = 5;
+                offset += 1;
+                put_u32(out, &mut offset, safety.elapsed_ms);
+                put_i16(out, &mut offset, safety.target_c);
+                out[offset] = safety.trial_index;
+                offset += 1;
+                put_u16(out, &mut offset, safety.reason);
+                offset
             }
         }
     }
@@ -828,7 +1074,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             (Some(lower), Some(upper)) => CandidatePoint::interpolate(lower, upper, target_c),
             _ => CandidatePoint::baseline(target_c, power_class),
         };
-        Some(candidate_ladder_from_seed(seed))
+        Some(candidate_ladder_from_seed_for_class(seed, power_class))
     }
 
     pub fn set_phase(&mut self, phase: Phase) -> Result<(), TraceError> {
@@ -847,14 +1093,37 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         self.record(TraceEvent::Decision(decision))
     }
 
+    pub fn record_phase_transition(
+        &mut self,
+        transition: PhaseTransitionEvent,
+    ) -> Result<u64, TraceError> {
+        self.phase = transition.phase;
+        self.record(TraceEvent::PhaseTransition(transition))
+    }
+
+    pub fn record_candidate_trial(
+        &mut self,
+        trial: CandidateTrialEvent,
+    ) -> Result<u64, TraceError> {
+        self.record(TraceEvent::CandidateTrial(trial))
+    }
+
+    pub fn record_safety(&mut self, safety: SafetyEvent) -> Result<u64, TraceError> {
+        self.record(TraceEvent::Safety(safety))
+    }
+
+    pub const fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
     fn record(&mut self, event: TraceEvent) -> Result<u64, TraceError> {
         if self.state != RunState::Running || TRACE_CAP == 0 {
             return Err(TraceError::NotRunning);
         }
         let sequence = self.next_sequence;
-        let mut canonical = [0u8; 96];
+        let mut canonical = [0u8; 128];
         let length = event.canonical_bytes(sequence, &mut canonical);
-        let mut digest_input = [0u8; 128];
+        let mut digest_input = [0u8; 160];
         digest_input[..32].copy_from_slice(&self.trace_digest);
         digest_input[32..32 + length].copy_from_slice(&canonical[..length]);
         let digest = sha256(&digest_input[..32 + length]);
@@ -1315,6 +1584,16 @@ fn put_u16(out: &mut [u8], offset: &mut usize, value: u16) {
     *offset += 2;
 }
 
+fn take_u16(bytes: &[u8], offset: &mut usize) -> u16 {
+    let value = u16::from_le_bytes([bytes[*offset], bytes[*offset + 1]]);
+    *offset += 2;
+    value
+}
+
+fn take_i16(bytes: &[u8], offset: &mut usize) -> i16 {
+    take_u16(bytes, offset) as i16
+}
+
 fn put_i16(out: &mut [u8], offset: &mut usize, value: i16) {
     put_u16(out, offset, value as u16);
 }
@@ -1384,15 +1663,68 @@ mod tests {
         assert_eq!(
             CandidateProfile::baseline(PpsPowerClass::Pps5a).hash(),
             [
-                0x6a, 0xa8, 0x14, 0x94, 0xd0, 0x12, 0xdb, 0x61, 0x46, 0x95, 0x6f, 0xfd, 0x96, 0xa8,
-                0x39, 0x3f, 0x71, 0x03, 0x0b, 0x38, 0x31, 0x15, 0x7d, 0xb7, 0x60, 0xf9, 0x4a, 0xdf,
-                0x85, 0x97, 0x9e, 0x72,
+                0x4a, 0xf7, 0x20, 0x1f, 0x10, 0x98, 0x6b, 0xb1, 0x5d, 0xeb, 0xbc, 0xaa, 0x03, 0x12,
+                0xfa, 0x4a, 0xe5, 0xe9, 0x38, 0x82, 0xf1, 0x90, 0x4b, 0x06, 0x7c, 0x4f, 0x27, 0x9c,
+                0x07, 0x61, 0xb5, 0xf6,
             ]
         );
         assert_eq!(
             CandidateIdentity::from_profile(profile).candidate_id,
             profile.hash()[..16]
         );
+    }
+
+    #[test]
+    fn candidate_profile_canonical_bytes_round_trip_and_reject_invalid_identity() {
+        let profile = CandidateProfile::baseline(PpsPowerClass::Pps5a);
+        let mut canonical = [0u8; CANDIDATE_PROFILE_CANONICAL_BYTES];
+        profile.canonical_bytes(&mut canonical);
+
+        assert_eq!(
+            CandidateProfile::from_canonical_bytes(&canonical),
+            Some(profile)
+        );
+
+        canonical[0] = 4;
+        assert_eq!(CandidateProfile::from_canonical_bytes(&canonical), None);
+
+        profile.canonical_bytes(&mut canonical);
+        canonical[1] = 61;
+        assert_eq!(CandidateProfile::from_canonical_bytes(&canonical), None);
+    }
+
+    #[test]
+    fn pps5a_high_temperature_seed_preserves_high_heat_margin() {
+        let point = CandidatePoint::baseline(240, PpsPowerClass::Pps5a);
+
+        assert_eq!(point.brake_distance_centi_c, 200);
+        assert_eq!(point.approach_power_permille, 600);
+        assert_eq!(point.approach_floor_power_permille, 450);
+        assert_eq!(point.hold_power_permille, 600);
+        assert_eq!(point.hold_reheat_power_permille, 600);
+        assert_eq!(point.hold_kp_permille_per_c, 40);
+        assert_eq!(point.hold_ki_permille_per_c_tick, 4);
+
+        let ladder = candidate_ladder(240, PpsPowerClass::Pps5a);
+        assert_eq!(
+            ladder.map(|candidate| candidate.hold_power_permille),
+            [600, 650, 700]
+        );
+        assert_eq!(
+            ladder.map(|candidate| candidate.approach_power_permille),
+            [600, 650, 700]
+        );
+        assert_eq!(
+            ladder.map(|candidate| candidate.brake_distance_centi_c),
+            [200, 200, 200]
+        );
+    }
+
+    #[test]
+    fn dynamic_settle_window_covers_transport_delay_without_relaxing_confirmation() {
+        assert_eq!(MAX_DYNAMIC_SETTLE_MS, 10_000);
+        assert!(MAX_DYNAMIC_SETTLE_MS < HOLD_CONFIRM_SECONDS * 1_000);
+        assert!(HOLD_CONFIRM_ENTRY_CENTI < MAX_HOLD_PEAK_TO_PEAK_CENTI);
     }
 
     #[test]
@@ -1535,6 +1867,9 @@ mod tests {
             sequence: 0,
             event: TraceEvent::Sample(SampleEvent {
                 elapsed_ms: 0,
+                target_c: 0,
+                trial_index: 0,
+                candidate_hash: [0; 32],
                 temperature_centi_c: 0,
                 vin_mv: 0,
                 pps_contract_mv: 0,
@@ -1554,7 +1889,7 @@ mod tests {
                 assert!(decision.candidate_frozen);
                 assert!(!decision.interval_pruned);
             }
-            TraceEvent::Sample(_) => panic!("expected accepted decision"),
+            _ => panic!("expected accepted decision"),
         }
         match records[1].event {
             TraceEvent::Decision(decision) => {
@@ -1563,7 +1898,7 @@ mod tests {
                 assert!(!decision.candidate_frozen);
                 assert!(decision.interval_pruned);
             }
-            TraceEvent::Sample(_) => panic!("expected failed decision"),
+            _ => panic!("expected failed decision"),
         }
     }
 
@@ -1596,6 +1931,9 @@ mod tests {
         for index in 0..3 {
             core.record_sample(SampleEvent {
                 elapsed_ms: index * 1_000,
+                target_c: 60,
+                trial_index: 0,
+                candidate_hash: [0; 32],
                 temperature_centi_c: 6_000,
                 vin_mv: 20_000,
                 pps_contract_mv: 20_000,
@@ -1617,6 +1955,9 @@ mod tests {
         core.start(12, PpsPowerClass::Pps3a, READY).unwrap();
         core.record_sample(SampleEvent {
             elapsed_ms: 0,
+            target_c: 0,
+            trial_index: 0,
+            candidate_hash: [0; 32],
             temperature_centi_c: 0,
             vin_mv: 0,
             pps_contract_mv: 0,
@@ -1629,9 +1970,9 @@ mod tests {
         assert_eq!(
             core.trace_digest(),
             [
-                0xa9, 0x65, 0xb1, 0x1b, 0x08, 0x71, 0xb0, 0xb0, 0x00, 0x9b, 0xb6, 0x19, 0x95, 0xc2,
-                0x4c, 0x88, 0xa3, 0xcd, 0xd9, 0xb1, 0x6c, 0x9b, 0xb1, 0x93, 0x0b, 0x90, 0x10, 0x06,
-                0x63, 0x2b, 0xf1, 0xd6,
+                0x8d, 0x2c, 0x62, 0x1e, 0xdf, 0x24, 0x46, 0x2b, 0x03, 0x5d, 0xba, 0xc0, 0x97, 0x7b,
+                0xe9, 0x4d, 0x3b, 0x16, 0x58, 0x0a, 0xd6, 0x76, 0x80, 0x39, 0x22, 0xdb, 0x40, 0x9e,
+                0x95, 0x10, 0x4e, 0x35,
             ]
         );
     }
@@ -1642,6 +1983,9 @@ mod tests {
         core.start(8, PpsPowerClass::Pps5a, READY).unwrap();
         core.record_sample(SampleEvent {
             elapsed_ms: 0,
+            target_c: 60,
+            trial_index: 0,
+            candidate_hash: [0; 32],
             temperature_centi_c: 6_000,
             vin_mv: 20_000,
             pps_contract_mv: 20_000,
@@ -1672,6 +2016,9 @@ mod tests {
         core.start(9, PpsPowerClass::Pps3a, READY).unwrap();
         core.record_sample(SampleEvent {
             elapsed_ms: 0,
+            target_c: 60,
+            trial_index: 0,
+            candidate_hash: [0; 32],
             temperature_centi_c: 6_000,
             vin_mv: 20_000,
             pps_contract_mv: 20_000,

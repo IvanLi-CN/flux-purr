@@ -6,6 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use flux_purr_thermal_tuning_core::{
+    CANDIDATE_POINT_CANONICAL_BYTES, CANDIDATE_PROFILE_CANONICAL_BYTES, CandidatePoint,
+    CandidateProfile, TARGET_BUDGET_SECONDS,
+};
 use serde_json::{Map, Value, json};
 
 const UNKNOWN_LEGACY_METADATA: &str = "unknown";
@@ -44,6 +48,11 @@ pub(super) struct ThermalLegacyReportInput {
 pub(super) struct ThermalSelfTestReportInput {
     pub(super) run_dirs: Vec<PathBuf>,
     pub(super) output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ThermalFirmwareReportInput {
+    pub(super) bundle_dir: PathBuf,
 }
 
 pub(super) fn rerender_legacy_preliminary_review_bundle(
@@ -192,6 +201,513 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "tuningTargetsC": bundle.get("tuningTargetsC").cloned().unwrap_or(Value::Null),
     }))
+}
+
+/// Render the canonical, full HTML report in an existing firmware tuning
+/// bundle. The five archive files are authoritative; this only rewrites
+/// `index.html` from their recorded values and never contacts a device.
+pub(super) fn render_firmware_tuning_v2_bundle(
+    input: ThermalFirmwareReportInput,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let bundle_dir = absolute_path(&input.bundle_dir)?;
+    let run_bundle = read_json(&bundle_dir.join("run.bundle.json"))?;
+    if run_bundle.get("schema").and_then(Value::as_str) != Some("thermal-tuning-v2")
+        || run_bundle.get("engine").and_then(Value::as_str) != Some("firmware")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "firmware report requires a thermal-tuning-v2 firmware bundle",
+        )
+        .into());
+    }
+
+    let candidate_bundle = read_json(&bundle_dir.join("thermal-profile.candidate.json"))?;
+    let samples = read_ndjson_values(&bundle_dir.join("samples.ndjson"))?;
+    let decisions = read_ndjson_values(&bundle_dir.join("decision-ledger.ndjson"))?;
+    let data = firmware_report_data(&run_bundle, &candidate_bundle, &samples, &decisions)?;
+    let index_html_path = bundle_dir.join("index.html");
+    fs::write(&index_html_path, render_baseline_html(&data)?)?;
+
+    Ok(json!({
+        "ok": true,
+        "operation": "thermal_report.render_firmware_tuning_v2_bundle",
+        "bundleDir": display_path(&bundle_dir),
+        "indexHtml": display_path(&index_html_path),
+        "runId": run_bundle.get("runId").cloned().unwrap_or(Value::Null),
+        "powerClass": run_bundle.get("powerClass").cloned().unwrap_or(Value::Null),
+        "samples": samples.len(),
+        "decisions": decisions.len(),
+    }))
+}
+
+fn firmware_report_data(
+    run_bundle: &Value,
+    candidate_bundle: &Value,
+    samples: &[Value],
+    decisions: &[Value],
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let power_class = required_string(run_bundle, "powerClass", "firmware bundle")?;
+    let physical_targets = i16_array_field(run_bundle, "physicalTargetsC").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware bundle is missing physicalTargetsC",
+        )
+    })?;
+    let execution_order = i16_array_field(run_bundle, "executionOrderC").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware bundle is missing executionOrderC",
+        )
+    })?;
+    let profile = firmware_candidate_profile(run_bundle, candidate_bundle, &power_class)?;
+    let point_by_target = profile
+        .map(|profile| {
+            profile
+                .points
+                .into_iter()
+                .map(|point| (point.target_c, firmware_candidate_point_json(point)))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let ledger = decisions
+        .iter()
+        .filter(|event| event.get("kind").and_then(Value::as_str) == Some("decision"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let decision_by_target = ledger
+        .iter()
+        .filter_map(|decision| {
+            decision
+                .get("targetC")
+                .and_then(Value::as_i64)
+                .map(|target| (target, decision))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut completed_trials = decisions
+        .iter()
+        .filter(|event| {
+            event.get("kind").and_then(Value::as_str) == Some("candidate_trial")
+                && event.get("eventReason").and_then(Value::as_str) == Some("completed")
+        })
+        .collect::<Vec<_>>();
+    completed_trials.sort_by_key(|event| {
+        (
+            event
+                .get("targetC")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+            event
+                .get("trialIndex")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+        )
+    });
+
+    let mut raw_runs = Vec::new();
+    for target in &physical_targets {
+        let target_trials = completed_trials
+            .iter()
+            .copied()
+            .filter(|event| {
+                event.get("targetC").and_then(Value::as_i64) == Some(i64::from(*target))
+            })
+            .collect::<Vec<_>>();
+        let Some(decision) = decision_by_target.get(&i64::from(*target)).copied() else {
+            continue;
+        };
+        let target = required_i16(decision, "targetC", "decision ledger")?;
+        let result = firmware_result_json(decision);
+        let disposition = decision
+            .get("disposition")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let decision_facts = firmware_decision_facts(decision);
+        let selected_hash = decision.get("candidateHash").and_then(Value::as_str);
+        let mut rounds = Vec::with_capacity(target_trials.len());
+        for trial in target_trials.iter().copied() {
+            let trial_index = required_u64(trial, "trialIndex", "candidate trial")?;
+            let trial_samples = firmware_trial_samples(samples, target, trial_index);
+            let point = firmware_trial_point(trial)?;
+            let selected = selected_hash.is_some()
+                && trial.get("candidateHash").and_then(Value::as_str) == selected_hash;
+            let gates = trial
+                .get("gates")
+                .and_then(Value::as_u64)
+                .unwrap_or_default();
+            rounds.push(json!({
+                "round": trial_index + 1,
+                "attemptType": "firmware",
+                "candidateName": trial.get("candidateId").cloned().unwrap_or(Value::Null),
+                "candidateHash": trial.get("candidateHash").cloned().unwrap_or(Value::Null),
+                "selected": selected,
+                "evidenceValid": gates == 0x3f,
+                "point": point,
+                "pointSource": "firmware_candidate_trial",
+                "samples": trial_samples,
+                "result": firmware_result_json(trial),
+                "firmwareDecision": firmware_decision_facts(trial),
+                "trialStartSequence": trial.get("trialStartSequence").cloned().unwrap_or(Value::Null),
+                "trialEndSequence": trial.get("trialEndSequence").cloned().unwrap_or(Value::Null),
+            }));
+        }
+        let selected_round = rounds
+            .iter()
+            .find(|round| round.get("selected").and_then(Value::as_bool) == Some(true));
+        let point = selected_round
+            .and_then(|round| round.get("point"))
+            .cloned()
+            .or_else(|| point_by_target.get(&target).cloned())
+            .unwrap_or(Value::Null);
+        let target_samples = rounds
+            .iter()
+            .flat_map(|round| {
+                round
+                    .get("samples")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        let started_ms = target_trials
+            .iter()
+            .filter_map(|trial| trial.get("trialStartElapsedMs").and_then(Value::as_u64))
+            .min()
+            .unwrap_or_default();
+        let ended_ms = target_trials
+            .iter()
+            .filter_map(|trial| trial.get("trialEndElapsedMs").and_then(Value::as_u64))
+            .max()
+            .unwrap_or(started_ms);
+        raw_runs.push(json!({
+            "target": target,
+            "targetRole": "tuning",
+            "attemptType": "firmware",
+            "reviewPassed": disposition == "accepted",
+            "reviewOutcome": if disposition == "accepted" { "passed" } else { disposition },
+            "candidateDisposition": disposition,
+            "candidateReady": disposition == "accepted",
+            "timeSpentSeconds": ended_ms.saturating_sub(started_ms) as f64 / 1_000.0,
+            "validTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) == Some(true)).count(),
+            "invalidTestCount": rounds.iter().filter(|round| round.get("evidenceValid").and_then(Value::as_bool) != Some(true)).count(),
+            "roundCount": rounds.len(),
+            "samples": target_samples,
+            "rounds": rounds,
+            "result": result,
+            "firmwareDecision": decision_facts,
+            "point": point,
+            "pointSource": "firmware_candidate",
+            "failures": [],
+        }));
+    }
+
+    let run_by_target = raw_runs
+        .iter()
+        .filter_map(|run| {
+            run.get("target")
+                .and_then(Value::as_i64)
+                .map(|target| (target, run))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let runs = physical_targets
+        .iter()
+        .filter_map(|target| run_by_target.get(&i64::from(*target)).cloned().cloned())
+        .collect::<Vec<_>>();
+    let run = run_bundle.get("run").cloned().unwrap_or(Value::Null);
+    let candidate = candidate_bundle
+        .get("candidate")
+        .cloned()
+        .or_else(|| run_bundle.get("candidate").cloned())
+        .unwrap_or(Value::Null);
+    let terminal = run_bundle
+        .get("terminalDisposition")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let review = run_bundle
+        .get("reviewDisposition")
+        .and_then(Value::as_str)
+        .unwrap_or("incomplete");
+
+    Ok(json!({
+        "reportKind": "firmware_tuning_v2",
+        "omitUnavailableFields": true,
+        "reportCapabilities": {
+            "sourceTelemetry": false,
+            "commandTelemetry": false,
+            "filteredTemperature": false,
+            "controlTemperature": false,
+        },
+        "eyebrow": "Flux Purr / Firmware-owned PPS thermal tuning",
+        "title": format!("Flux Purr {} 固件热控调优报告", power_class.to_ascii_uppercase()),
+        "subtitle": "设备执行九点 PPS 调优。报告保留设备温度、加热输出、阶段、候选参数与决策账本；未采集的外部 Source 遥测不会显示。",
+        "generatedAt": current_unix_millis(),
+        "selectedMode": "firmware",
+        "resolvedBank": power_class,
+        "deviceId": run_bundle.get("deviceId").cloned().unwrap_or(Value::Null),
+        "runId": run_bundle.get("runId").cloned().unwrap_or(Value::Null),
+        "terminalDisposition": terminal,
+        "reviewDisposition": review,
+        "candidate": candidate,
+        "trace": run_bundle.get("trace").cloned().unwrap_or(Value::Null),
+        "tuningBudgetSeconds": TARGET_BUDGET_SECONDS,
+        "tuningTargetsC": physical_targets,
+        "tuningExecutionOrderC": execution_order,
+        "metaItems": [
+            ["运行模式", "firmware"],
+            ["PPS 等级", power_class],
+            ["Run ID", run_bundle.get("runId").cloned().unwrap_or(Value::Null)],
+            ["终态", terminal],
+            ["审查", review],
+            ["候选状态", candidate.get("promotionState").cloned().unwrap_or(Value::Null)],
+        ],
+        "stampItems": [
+            ["DEVICE", run_bundle.get("deviceId").cloned().unwrap_or(Value::Null)],
+            ["REPORT", current_unix_millis()],
+        ],
+        "bundleFiles": [
+            "index.html",
+            "run.bundle.json",
+            "samples.ndjson",
+            "thermal-profile.candidate.json",
+            "decision-ledger.ndjson",
+        ],
+        "runs": runs,
+        "rawRuns": raw_runs,
+        "history": [],
+        "run": run,
+    }))
+}
+
+fn firmware_candidate_profile(
+    run_bundle: &Value,
+    candidate_bundle: &Value,
+    power_class: &str,
+) -> Result<Option<CandidateProfile>, Box<dyn std::error::Error + Send + Sync>> {
+    let candidate = candidate_bundle
+        .get("candidate")
+        .or_else(|| run_bundle.get("candidate"));
+    let Some(canonical_hex) = candidate
+        .and_then(|candidate| candidate.get("canonicalProfileHex"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let bytes = hex::decode(canonical_hex).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("firmware candidate canonicalProfileHex is invalid: {error}"),
+        )
+    })?;
+    let canonical: [u8; CANDIDATE_PROFILE_CANONICAL_BYTES] = bytes.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware candidate canonicalProfileHex has an invalid length",
+        )
+    })?;
+    let profile = CandidateProfile::from_canonical_bytes(&canonical).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware candidate canonicalProfileHex has an invalid class or target order",
+        )
+    })?;
+    if profile.power_class.as_str() != power_class {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "firmware candidate power class does not match the run bundle",
+        )
+        .into());
+    }
+    if let Some(expected_hash) = candidate
+        .and_then(|candidate| candidate.get("candidateHash"))
+        .and_then(Value::as_str)
+    {
+        let actual_hash = hex::encode(profile.hash());
+        if actual_hash != expected_hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "firmware candidate hash does not match canonicalProfileHex",
+            )
+            .into());
+        }
+    }
+    Ok(Some(profile))
+}
+
+fn firmware_candidate_point_json(point: flux_purr_thermal_tuning_core::CandidatePoint) -> Value {
+    json!({
+        "targetTempC": point.target_c,
+        "brakeDistanceCentiC": point.brake_distance_centi_c,
+        "warmupPowerPermille": point.warmup_power_permille,
+        "approachPowerPermille": point.approach_power_permille,
+        "approachFloorPowerPermille": point.approach_floor_power_permille,
+        "holdPowerPermille": point.hold_power_permille,
+        "holdReheatPowerPermille": point.hold_reheat_power_permille,
+        "holdEntryCentiC": point.hold_entry_centi_c,
+        "holdExitCentiC": point.hold_exit_centi_c,
+        "holdOnCentiC": point.hold_on_centi_c,
+        "holdOffCentiC": point.hold_off_centi_c,
+        "overshootCutoffCentiC": point.overshoot_cutoff_centi_c,
+        "holdKpPermillePerC": point.hold_kp_permille_per_c,
+        "holdKiPermillePerCTick": point.hold_ki_permille_per_c_tick,
+        "holdBlendTicks": point.hold_blend_ticks,
+        "approachLeadTicks": point.approach_lead_ticks,
+        "holdLeadTicks": point.hold_lead_ticks,
+    })
+}
+
+fn firmware_trial_samples(samples: &[Value], target_c: i16, trial_index: u64) -> Vec<Value> {
+    let raw = samples
+        .iter()
+        .filter(|sample| sample.get("kind").and_then(Value::as_str) == Some("sample"))
+        .filter(|sample| sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target_c)))
+        .filter(|sample| sample.get("trialIndex").and_then(Value::as_u64) == Some(trial_index))
+        .collect::<Vec<_>>();
+    let started_ms = raw
+        .first()
+        .and_then(|sample| sample.get("elapsedMs"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    raw.into_iter()
+        .map(|sample| {
+            let elapsed_ms = sample.get("elapsedMs").and_then(Value::as_u64).unwrap_or(started_ms);
+            let firmware_phase = sample.get("phase").and_then(Value::as_str).unwrap_or("sample");
+            json!({
+                "t": elapsed_ms.saturating_sub(started_ms) as f64 / 1_000.0,
+                "temp": sample.get("temperatureCentiC").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
+                "output": sample.get("heaterOutputPermille").and_then(Value::as_i64).map(|value| value as f64 / 10.0),
+                "requestV": sample.get("ppsContractMv").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
+                "vinV": sample.get("vinMv").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
+                "ppsContractCurrentA": sample.get("ppsContractMa").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
+                "phase": report_phase(firmware_phase),
+                "firmwarePhase": firmware_phase,
+                "measurementValid": sample.get("measurementValid").cloned().unwrap_or(Value::Null),
+                "sequence": sample.get("sequence").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect()
+}
+
+fn firmware_trial_point(trial: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let encoded = required_string(trial, "canonicalCandidatePointHex", "candidate trial")?;
+    let bytes = hex::decode(encoded).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("candidate trial point is not canonical hex: {error}"),
+        )
+    })?;
+    let canonical: [u8; CANDIDATE_POINT_CANONICAL_BYTES] = bytes.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "candidate trial point has an invalid canonical length",
+        )
+    })?;
+    Ok(firmware_candidate_point_json(
+        CandidatePoint::from_canonical_bytes(&canonical),
+    ))
+}
+
+fn firmware_result_json(decision: &Value) -> Value {
+    json!({
+        "stopReason": decision.get("disposition").cloned().unwrap_or(Value::Null),
+        "maxOvershootC": decision.get("scoreOvershoot").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
+        "holdPeakToPeakC": decision.get("scoreStability").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
+        "scoreSettleMs": decision.get("scoreSettleMs").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn firmware_decision_facts(decision: &Value) -> Value {
+    json!({
+        "gates": decision.get("gates").cloned().unwrap_or(Value::Null),
+        "candidateFrozen": decision.get("candidateFrozen").cloned().unwrap_or(Value::Null),
+        "intervalLowerBoundaryC": decision.get("intervalLowerBoundaryC").cloned().unwrap_or(Value::Null),
+        "intervalUpperBoundaryC": decision.get("intervalUpperBoundaryC").cloned().unwrap_or(Value::Null),
+        "intervalPruned": decision.get("intervalPruned").cloned().unwrap_or(Value::Null),
+        "scoreTracking": decision.get("scoreTracking").cloned().unwrap_or(Value::Null),
+        "scoreEnergy": decision.get("scoreEnergy").cloned().unwrap_or(Value::Null),
+        "scoreHoldMeanAbsoluteErrorCenti": decision
+            .get("scoreHoldMeanAbsoluteErrorCenti")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "scoreOutputSwitches": decision.get("scoreOutputSwitches").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn report_phase(phase: &str) -> &'static str {
+    match phase {
+        "scout" => "warmup",
+        "retune" => "approach",
+        "hold_confirm" => "hold",
+        _ => "cooldown_wait",
+    }
+}
+
+fn read_ndjson_values(path: &Path) -> Result<Vec<Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let handle = fs::File::open(path)?;
+    let mut values = Vec::new();
+    for (index, line) in BufReader::new(handle).lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        values.push(serde_json::from_str(&line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}:{} contains invalid NDJSON: {error}",
+                    path.display(),
+                    index + 1
+                ),
+            )
+        })?);
+    }
+    Ok(values)
+}
+
+fn required_string<'a>(
+    value: &'a Value,
+    field: &str,
+    context: &str,
+) -> Result<&'a str, Box<dyn std::error::Error + Send + Sync>> {
+    value.get(field).and_then(Value::as_str).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{context} is missing {field}"),
+        )
+        .into()
+    })
+}
+
+fn required_i16(
+    value: &Value,
+    field: &str,
+    context: &str,
+) -> Result<i16, Box<dyn std::error::Error + Send + Sync>> {
+    value
+        .get(field)
+        .and_then(Value::as_i64)
+        .and_then(|value| i16::try_from(value).ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{context} is missing or has an invalid {field}"),
+            )
+            .into()
+        })
+}
+
+fn required_u64(
+    value: &Value,
+    field: &str,
+    context: &str,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    value.get(field).and_then(Value::as_u64).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{context} is missing or has an invalid {field}"),
+        )
+        .into()
+    })
 }
 
 /// Adapt a completed raw self-test into the canonical HTML evidence bundle.
@@ -1860,8 +2376,8 @@ fn escape_report_html_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ThermalLegacyReportInput, ThermalSelfTestReportInput, render_baseline_html,
-        render_self_test_evidence_bundle, report_identity,
+        ThermalLegacyReportInput, ThermalSelfTestReportInput, firmware_report_data,
+        render_baseline_html, render_self_test_evidence_bundle, report_identity,
         rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
         sanitize_point, tuning_workflow, write_preliminary_review_bundle,
     };
@@ -1869,12 +2385,102 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use std::{env, fs, path::Path};
 
+    #[test]
+    fn firmware_report_reconstructs_candidate_trial_rounds() {
+        let point = flux_purr_thermal_tuning_core::CandidatePoint::baseline(
+            60,
+            flux_purr_thermal_tuning_core::PpsPowerClass::Pps5a,
+        );
+        let mut canonical = [0; flux_purr_thermal_tuning_core::CANDIDATE_POINT_CANONICAL_BYTES];
+        point.canonical_bytes(&mut canonical);
+        let run_bundle = json!({
+            "powerClass": "pps5a",
+            "physicalTargetsC": [60, 80, 100, 120, 140, 160, 180, 220, 240],
+            "executionOrderC": [60, 240, 140, 100, 80, 120, 180, 160, 220],
+            "runId": "run-1",
+            "terminalDisposition": "completed",
+            "reviewDisposition": "complete",
+            "candidate": {"candidateId": "selected", "promotionState": "ready"},
+            "run": {"state": "terminal"}
+        });
+        let samples = vec![json!({
+            "sequence": 2,
+            "elapsedMs": 1_000,
+            "kind": "sample",
+            "targetC": 60,
+            "trialIndex": 0,
+            "candidateHash": "aa",
+            "temperatureCentiC": 5_950,
+            "vinMv": 19_800,
+            "ppsContractMv": 20_000,
+            "ppsContractMa": 5_000,
+            "heaterOutputPermille": 240,
+            "measurementValid": true,
+            "phase": "hold_confirm"
+        })];
+        let decisions = vec![
+            json!({"sequence": 0, "elapsedMs": 0, "kind": "phase_transition", "targetC": 60, "trialIndex": 0}),
+            json!({
+                "sequence": 3,
+                "elapsedMs": 2_000,
+                "kind": "candidate_trial",
+                "eventReason": "completed",
+                "targetC": 60,
+                "trialIndex": 0,
+                "candidateId": "trial-0",
+                "candidateHash": "aa",
+                "canonicalCandidatePointHex": hex::encode(canonical),
+                "trialStartSequence": 1,
+                "trialEndSequence": 3,
+                "trialStartElapsedMs": 0,
+                "trialEndElapsedMs": 2_000,
+                "scoreOvershoot": 25,
+                "scoreStability": 80,
+                "scoreSettleMs": 1_500,
+                "scoreHoldMeanAbsoluteErrorCenti": 20,
+                "scoreOutputSwitches": 2,
+                "gates": 63
+            }),
+            json!({
+                "sequence": 4,
+                "elapsedMs": 2_100,
+                "kind": "decision",
+                "targetC": 60,
+                "disposition": "accepted",
+                "candidateHash": "aa",
+                "scoreOvershoot": 25,
+                "scoreStability": 80,
+                "scoreSettleMs": 1_500,
+                "gates": 63
+            }),
+        ];
+
+        let report = firmware_report_data(&run_bundle, &json!({}), &samples, &decisions)
+            .expect("reconstruct firmware evidence");
+
+        assert_eq!(report["rawRuns"][0]["roundCount"], 1);
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["selected"], true);
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["evidenceValid"], true);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["point"]["targetTempC"],
+            60
+        );
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["samples"][0]["requestV"],
+            20.0
+        );
+    }
+
     fn embedded_report_data(bundle_dir: &Path) -> serde_json::Value {
         let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
         let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let data_end = html[data_start..]
-            .find(";\n  const COLORS")
+        let colors_start = html[data_start..]
+            .find("const COLORS")
             .expect("embedded data terminator")
+            + data_start;
+        let data_end = html[data_start..colors_start]
+            .rfind(';')
+            .expect("embedded data assignment terminator")
             + data_start;
         serde_json::from_str(&html[data_start..data_end]).expect("valid embedded report data")
     }
@@ -2106,9 +2712,13 @@ mod tests {
         assert!(!html.contains("</script><script>alert('x')</script>"));
         assert!(html.contains("\\u0026lt;/script\\u0026gt;"));
         let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let data_end = html[data_start..]
-            .find(";\n  const COLORS")
+        let colors_start = html[data_start..]
+            .find("const COLORS")
             .expect("embedded data terminator")
+            + data_start;
+        let data_end = html[data_start..colors_start]
+            .rfind(';')
+            .expect("embedded data assignment terminator")
             + data_start;
         let decoded: Value = serde_json::from_str(&html[data_start..data_end]).expect("valid JSON");
         assert_eq!(

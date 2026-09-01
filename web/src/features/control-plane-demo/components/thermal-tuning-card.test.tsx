@@ -24,7 +24,8 @@ describe('thermal tuning calibration surface', () => {
     expect(markup).toContain('PPS 5A')
     expect(markup).not.toContain('source')
     expect(markup).not.toContain('VBUS')
-    expect(markup).toMatch(/disabled=""[^>]*>.*确认 trace/s)
+    expect(markup).not.toContain('确认 trace')
+    expect(markup).not.toContain('封存审查')
   })
 
   it('keeps mock lifecycle explicit and requires review before save', () => {
@@ -51,7 +52,7 @@ describe('thermal tuning calibration surface', () => {
     const markup = renderToStaticMarkup(
       createElement(ThermalTuningRunCard, { snapshot: canceled, onCommand: () => undefined })
     )
-    expect(markup).toMatch(/disabled=""[^>]*>.*封存审查/s)
+    expect(markup).not.toContain('封存审查')
   })
 
   it('marks trace gaps as review incomplete', () => {

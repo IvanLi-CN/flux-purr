@@ -220,6 +220,7 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
       'status',
       'monitor',
     ]),
+    thermalTuningEvidenceSchema: probe.identity.thermalTuning?.evidenceSchema ?? null,
     networkState: probe.network.state,
     leaseState: 'active',
   }

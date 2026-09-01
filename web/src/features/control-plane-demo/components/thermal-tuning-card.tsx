@@ -231,18 +231,6 @@ export function ThermalTuningRunCard({
   const candidateHash = snapshot.run.candidate.candidateHash
   const candidateProfileHex = snapshot.run.candidate.canonicalProfileHex
   const candidatePowerClass = snapshot.run.candidate.powerClass
-  const traceAckThrough = snapshot.page.events.at(-1)?.sequence
-  const hasUnacknowledgedTrace =
-    traceAckThrough != null &&
-    snapshot.page.digestThroughPage != null &&
-    (snapshot.page.acknowledgedThrough == null ||
-      traceAckThrough > snapshot.page.acknowledgedThrough)
-  const canSealReview =
-    pending == null &&
-    snapshot.run.state === 'terminal' &&
-    snapshot.run.terminalDisposition === 'completed' &&
-    snapshot.run.review.state === 'awaiting_seal' &&
-    !health.reviewIncomplete
 
   useEffect(() => {
     let cancelled = false
@@ -291,7 +279,10 @@ export function ThermalTuningRunCard({
           <AlertTriangle aria-hidden="true" />
           <div>
             <h2>固件不支持热控调优</h2>
-            <p>设备未发布 thermal_tuning_run_v1 capability，当前页面不会启用备用算法。</p>
+            <p>
+              设备未发布 thermal_tuning_run_v1 与
+              thermal_tuning_evidence_v2，当前页面不会启用备用算法。
+            </p>
           </div>
         </div>
       </article>
@@ -505,30 +496,6 @@ export function ThermalTuningRunCard({
             {pending === 'start' ? '启动中…' : `开始 ${powerClassLabel[powerClass]}`}
           </Button>
         )}
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={!canSealReview}
-          onClick={() => void command({ op: 'seal_review', runId: snapshot.run.runId })}
-        >
-          <CheckCircle2 aria-hidden="true" /> 封存审查
-        </Button>
-        <Button
-          type="button"
-          variant="secondary"
-          disabled={pending != null || health.reviewIncomplete || !hasUnacknowledgedTrace}
-          onClick={() =>
-            void command({
-              op: 'ack_trace',
-              runId: snapshot.run.runId,
-              afterSequence: traceAckThrough,
-              throughSequence: traceAckThrough,
-              traceDigest: snapshot.page.digestThroughPage ?? undefined,
-            })
-          }
-        >
-          <CheckCircle2 aria-hidden="true" /> 确认 trace
-        </Button>
         <Button
           type="button"
           variant="secondary"

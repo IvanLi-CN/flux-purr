@@ -12,7 +12,7 @@ files are UTF-8 and self-contained: `index.html` must render without network acc
 | `run.bundle.json` | Run identity, device/firmware identity, selected power class, terminal/review dispositions, capability, canonical metadata and file digests |
 | `samples.ndjson` | Every archived `sample` trace event in global sequence order |
 | `thermal-profile.candidate.json` | Canonical candidate profile, candidate ID/hash, bank, promotion state and preview/save receipts when present |
-| `decision-ledger.ndjson` | Every archived `decision` event in global sequence order |
+| `decision-ledger.ndjson` | Every archived non-sample trace event in global sequence order |
 
 The five files are mandatory even for a failed or review-incomplete run. Incomplete reports
 carry their available contiguous events and explicit integrity disposition; they never invent
@@ -57,16 +57,25 @@ external VBUS measurements, browser pairing secrets or CLI credentials.
 ## NDJSON Event Rules
 
 Each line represents one canonical event and includes `sequence`, `elapsedMs`, `kind`,
-`targetC` when applicable, and a fixed-point payload. `samples.ndjson` contains only
-`kind="sample"`; `decision-ledger.ndjson` contains only `kind="decision"`. The union must
-cover every integer sequence from `firstSequence` through `lastSequence` when
-`trace.complete=true`.
+`targetC` when applicable, and a fixed-point payload. The five allowed event kinds are
+`sample`, `phase_transition`, `candidate_trial`, `decision`, and `safety`.
+`samples.ndjson` contains the sample events; `decision-ledger.ndjson`
+contains the non-sample events in sequence order. The union must cover every integer sequence
+from `firstSequence` through `lastSequence` when `trace.complete=true`.
+The two files do not have independent sequence spaces. A renderer merges them by `sequence`
+before checking digest coverage, paired candidate-trial boundaries, nine-target coverage and
+terminal seal.
 
-Sample payload fields are device-local `temperatureCentiC`, `vinMv`, `ppsContractMv`,
-`ppsContractMa`, `heaterOutputPermille`, measurement validity and core phase. Decision payload
-fields include candidate canonical bytes/hash, score vector, hard-gate outcomes, interval
-dependency/freeze result and terminal reason. Fields are emitted in canonical JSON ordering for
-digest verification; report renderers must not use display-rounded values for replay.
+Sample payload fields are device-local `targetC`, `trialIndex`, candidate identity/reference,
+`temperatureCentiC`, `vinMv`, `ppsContractMv`, `ppsContractMa`, `heaterOutputPermille`,
+measurement validity and core phase. Candidate-trial payloads contain complete canonical
+candidate bytes, trial boundaries and sample range. Decision payload fields include candidate
+canonical bytes/hash, the complete score vector, every hard-gate outcome, interval
+dependency/freeze result and terminal reason. Safety payloads are required when those
+transitions occur. Post-seal preview/discard/save responses are stored as promotion receipts in
+`thermal-profile.candidate.json` and are not part of the sealed sequence range. Fields are
+emitted in canonical JSON ordering for digest
+verification; report renderers must not use display-rounded values for replay.
 
 ## Candidate File
 

@@ -114,6 +114,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
         'monitor',
         'thermal_tuning_run_v1',
       ],
+      thermalTuningEvidenceSchema: 'thermal_tuning_evidence_v2',
     },
     {
       id: 'fp-kit-02',

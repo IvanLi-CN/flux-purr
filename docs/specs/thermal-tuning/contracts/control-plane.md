@@ -8,6 +8,7 @@
 ```json
 {
   "id": "thermal_tuning_run_v1",
+  "evidenceSchema": "thermal_tuning_evidence_v2",
   "supportedPowerClasses": ["pps3a", "pps5a"],
   "targetScheduleC": [60, 240, 140, 100, 80, 120, 180, 160, 220],
   "physicalTargetsC": [60, 80, 100, 120, 140, 160, 180, 220, 240],
@@ -23,6 +24,10 @@
 
 `bufferCapacity` 是设备实际固定容量，且大于零。缺少 capability 或 detail 的设备不
 支持本协议；客户端必须显示不兼容，不能从 `thermalProfileMode` 推断支持性。
+`evidenceSchema` 必须精确为 `thermal_tuning_evidence_v2`，表示设备会输出本合同定义的
+完整 sample、phase transition、candidate trial、decision 与 safety 证据。缺少该值或
+值不匹配时，客户端可以只读归档设备实际返回的数据，但不得将 run 标记为 review
+complete、生成可保存候选或声称报告与正式调优报告等价。
 
 ## Transport Mapping
 
@@ -80,7 +85,8 @@ approval token 或额外身份步骤。
     },
     "journal": {
       "lastRunId": "opaque|null",
-      "lastDisposition": "interrupted_reset|null"
+      "lastDisposition": "interrupted_reset|null",
+      "resetReason": "system_brownout|null"
     }
   },
   "page": {
@@ -98,15 +104,33 @@ approval token 或额外身份步骤。
 The terminal journal is a compact recovery projection, never a substitute for raw events.
 
 Every page event has a global `sequence`, monotonic `elapsedMs`, canonical `kind`, and
-fixed-point payload. `sample` payloads contain only `temperatureCentiC`, `vinMv`,
-`ppsContractMv`, `ppsContractMa`, `heaterOutputPermille`, measurement validity and phase;
-they must not contain external VBUS measurements. `decision` payloads contain the
-canonical candidate/score/gate/target state needed to reconstruct the ledger.
+fixed-point payload. The allowed kinds are `sample`, `phase_transition`, `candidate_trial`,
+`decision`, and `safety`.
+
+`sample` payloads contain `targetC`, `trialIndex`, candidate identity/parameter reference,
+`temperatureCentiC`, `vinMv`, `ppsContractMv`, `ppsContractMa`, `heaterOutputPermille`,
+measurement validity and phase. They must not contain external VBUS measurements.
+`phase_transition` records old/new phase and reason. `candidate_trial` records the complete
+canonical fixed-point candidate, trial index, start/end sequence and time, and sample range.
+`decision` records the complete candidate/score/gate/target state, freeze and interval result.
+`safety` records a safety fault and disarm reason. Preview, discard and save occur after terminal
+trace sealing, so their normal command responses carry applied hash, persistent revision and
+outcome. Hosts append those responses to the candidate file as post-seal promotion receipts;
+they are never inserted into the sealed trace or its rolling digest.
+The union of these events is the only source from which the host report may reconstruct a run;
+renderers must reject a completed/candidate-ready report when any required event is absent.
 
 `emittedThrough` is the latest event emitted by the Device, `nextAfterSequence` is the cursor
 for the next page, and `digestThroughPage` is the canonical rolling digest at the last returned
 event. An empty page has `digestThroughPage: null`. The Device retains enough per-event digest
 state in its bounded buffer to validate an `ack_trace` before that event is evicted.
+
+The buffer is a PSRAM-backed unacknowledged retransmission window, not whole-run storage.
+CLI persists sample and non-sample events into the two NDJSON files and completes filesystem
+data synchronization before ack. Web merges the global sequence into its run record and waits
+for the IndexedDB read-write transaction to complete before ack. Normal clients perform this
+automatically for every page; acknowledgement is not a user action. DEVD only proxies these
+reads and commands and never becomes the recorder.
 
 If `afterSequence` predates `earliestSequence - 1`, the response has error `trace_gap` and
 includes the available range. A client must permanently mark that archive incomplete;

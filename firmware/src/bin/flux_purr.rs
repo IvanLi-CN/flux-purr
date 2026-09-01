@@ -6,10 +6,7 @@ use core::fmt::Write as _;
 #[cfg(target_arch = "xtensa")]
 extern crate alloc;
 #[cfg(target_arch = "xtensa")]
-use alloc::{
-    alloc::{Layout, alloc},
-    boxed::Box,
-};
+use alloc::{alloc::Layout, boxed::Box};
 #[cfg(any(target_arch = "xtensa", test))]
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
@@ -29,9 +26,9 @@ use embedded_hal::pwm::SetDutyCycle;
 #[cfg(target_arch = "xtensa")]
 use embedded_hal_bus::spi::ExclusiveDevice;
 #[cfg(target_arch = "xtensa")]
-use embedded_storage::{ReadStorage, Storage};
+use embedded_storage::nor_flash::NorFlash;
 #[cfg(target_arch = "xtensa")]
-use esp_bootloader_esp_idf::partitions::{PARTITION_TABLE_MAX_LEN, read_partition_table};
+use esp_bootloader_esp_idf::partitions::PARTITION_TABLE_MAX_LEN;
 #[cfg(target_arch = "xtensa")]
 use esp_hal::psram::{FlashFreq, PsramConfig, PsramSize, SpiRamFreq};
 #[cfg(target_arch = "xtensa")]
@@ -105,7 +102,8 @@ use flux_purr_firmware::control_plane::{
     ThermalPlantRunPhaseWire, ThermalPlantRunSnapshotWire, ThermalPlantRuntimeWire,
     ThermalPlantTracePageWire, ThermalPlantTracePointWire, UsbFrame, UsbFrameError, UsbRequestOp,
     UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
-    network_from_memory, parse_usb_frame, write_usb_frame,
+    network_from_memory, parse_thermal_tuning_run_command, parse_usb_frame,
+    write_thermal_tuning_response, write_usb_frame,
 };
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
@@ -143,7 +141,7 @@ use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
 #[cfg(target_arch = "xtensa")]
 use flux_purr_firmware::memory::{
     EepromError, LEGACY_MEMORY_SLOT_A_OFFSET, LEGACY_MEMORY_SLOT_B_OFFSET, LEGACY_MEMORY_SLOT_SIZE,
-    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24c64, MEMORY_RECORD_HEADER_LEN,
+    M24C64_CAPACITY_BYTES, M24C64_I2C_ADDRESS, M24C64_PAGE_SIZE, M24c64, MEMORY_RECORD_HEADER_LEN,
     MEMORY_SLOT_A_OFFSET, MEMORY_SLOT_B_OFFSET, MEMORY_SLOT_SIZE, MEMORY_WRITE_DEBOUNCE_MS,
     MemoryRecord, PREVIOUS_MEMORY_SLOT_A_OFFSET, PREVIOUS_MEMORY_SLOT_B_OFFSET,
     PREVIOUS_MEMORY_SLOT_SIZE, decode_memory_record, encode_memory_record,
@@ -370,11 +368,46 @@ fn try_external_tuning_snapshot(
 static mut USB_CONTROL_RESPONSE_BUFFER: MaybeUninit<[u8; USB_CONTROL_TX_BUFFER_LEN]> =
     MaybeUninit::uninit();
 
+/// A thermal-tuning response keeps the snapshot indirect in PSRAM so the
+/// front-panel control task never materializes the large generic `UsbFrame`.
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+struct ThermalTuningUsbResponse {
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    snapshot: Option<Box<flux_purr_firmware::control_plane::ThermalTuningRunSnapshotWire>>,
+    error: Option<ApiError>,
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn thermal_tuning_usb_snapshot(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    snapshot: Box<flux_purr_firmware::control_plane::ThermalTuningRunSnapshotWire>,
+) -> ThermalTuningUsbResponse {
+    ThermalTuningUsbResponse {
+        request_id,
+        snapshot: Some(snapshot),
+        error: None,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn thermal_tuning_usb_error(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    code: &str,
+    message: &str,
+) -> ThermalTuningUsbResponse {
+    ThermalTuningUsbResponse {
+        request_id,
+        snapshot: None,
+        error: Some(ApiError::new(code, message, false)),
+    }
+}
+
 #[cfg(target_arch = "xtensa")]
 #[unsafe(link_section = ".dram2_uninit")]
 static mut DISPLAY_CANVAS_STORAGE: MaybeUninit<DisplayCanvas> = MaybeUninit::uninit();
 
 #[cfg(target_arch = "xtensa")]
+#[repr(align(4))]
 struct MemoryIoScratch {
     record_bytes: [u8; MEMORY_SLOT_SIZE],
     partition_table: [u8; PARTITION_TABLE_MAX_LEN],
@@ -402,9 +435,11 @@ impl Drop for MemoryIoScratch {
 #[cfg(target_arch = "xtensa")]
 fn try_allocate_memory_io_scratch() -> Option<Box<MemoryIoScratch>> {
     let layout = Layout::new::<MemoryIoScratch>();
-    // SAFETY: the global allocator is initialized before any configuration I/O.
-    // A null allocation is handled as a regular unavailable-workspace result.
-    let allocation = unsafe { alloc(layout) };
+    // I2C reads use this buffer as a transfer target, so it must remain in
+    // internal RAM. The thermal-tuning PSRAM allocator must not move DMA-facing
+    // configuration I/O into external memory.
+    let allocation =
+        unsafe { esp_alloc::HEAP.alloc_caps(esp_alloc::MemoryCapability::Internal.into(), layout) };
     if allocation.is_null() {
         return None;
     }
@@ -600,6 +635,8 @@ const HEATER_ADJUSTABLE_MIN_MV: u16 = 12_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const FUSB302B_INITIAL_PPS_REQUEST_MV: u16 = HEATER_ADJUSTABLE_MIN_MV;
 #[cfg(any(target_arch = "xtensa", test))]
+const THERMAL_TUNING_PPS_RAMP_STEP_MV: u16 = 500;
+#[cfg(any(target_arch = "xtensa", test))]
 const HEATER_ADJUSTABLE_MAX_MV: u16 = 28_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const CH224Q_ADJUSTABLE_REQUEST_MIN_MV: u16 = 5_000;
@@ -638,6 +675,8 @@ const DISPLAY_RUNTIME_MIN_REFRESH_INTERVAL_MS: u64 = 1_000;
 const USB_CONTROL_LINE_CAPACITY: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 const USB_CONTROL_TX_BUFFER_LEN: usize = flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+const USB_THERMAL_TUNING_TRACE_PAGE_MAX: usize = 8;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -789,6 +828,18 @@ const FLASH_MEMORY_SLOT_B_OFFSET: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE;
 const FLASH_MEMORY_REGION_SIZE: u32 = FLASH_MEMORY_ERASE_SECTOR_SIZE * 2;
 #[cfg(any(target_arch = "xtensa", test))]
 const FLASH_MEMORY_PARTITION_LABEL: &str = "flux_cfg";
+#[cfg(any(target_arch = "xtensa", test))]
+const PARTITION_TABLE_ENTRY_LEN: usize = 32;
+#[cfg(any(target_arch = "xtensa", test))]
+const PARTITION_TABLE_ENTRY_MAGIC: [u8; 2] = [0xaa, 0x50];
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_PARTITION_TABLE_OFFSET: u32 = 0x8000;
+#[cfg(test)]
+const FLASH_PARTITION_TABLE_LEN: usize = 0x0c00;
+#[cfg(any(target_arch = "xtensa", test))]
+const FLASH_MEMORY_MAPPED_BASE: usize = 0x4200_0000;
+#[cfg(any(target_arch = "xtensa", test))]
+const BOARD_FLASH_SIZE_BYTES: usize = 4 * 1024 * 1024;
 // Firmware releases predating the LAN app partition expansion stored the
 // flash fallback immediately after the former 1 MiB factory app partition.
 // New firmware reads these two sectors as a migration source until the next
@@ -3366,6 +3417,11 @@ fn temp_c_to_centi_c(temp_c: f32) -> i32 {
         scaled - 0.5
     };
     rounded.clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_tuning_temperature_centi_c(temp_c: f32) -> i16 {
+    temp_c_to_centi_c(temp_c).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -6214,67 +6270,101 @@ const fn flash_memory_slot_offset_for_sequence(sequence: u32) -> u32 {
     }
 }
 
-#[cfg(target_arch = "xtensa")]
-#[inline(never)]
-fn load_flash_memory_record(
-    flash: &mut FlashStorage,
-    scratch: &mut MemoryIoScratch,
-) -> Option<MemoryRecord> {
-    let Ok(table) = read_partition_table(flash, &mut scratch.partition_table) else {
-        info!("flash memory restore skipped: partition table unavailable");
-        return None;
-    };
-
-    for index in 0..table.len() {
-        let Ok(entry) = table.get_partition(index) else {
-            continue;
-        };
-        if entry.is_read_only()
-            || entry.raw_type() != 1
-            || entry.label_as_str() != FLASH_MEMORY_PARTITION_LABEL
-            || entry.len() < FLASH_MEMORY_REGION_SIZE
+#[cfg(any(target_arch = "xtensa", test))]
+fn flash_memory_partition_from_table(table: &[u8]) -> Option<(u32, u32)> {
+    for entry in table.chunks_exact(PARTITION_TABLE_ENTRY_LEN) {
+        if entry[..2] != PARTITION_TABLE_ENTRY_MAGIC {
+            return None;
+        }
+        let label = &entry[12..28];
+        if entry[2] != 1
+            || !label.starts_with(FLASH_MEMORY_PARTITION_LABEL.as_bytes())
+            || !label[FLASH_MEMORY_PARTITION_LABEL.len()..]
+                .iter()
+                .all(|byte| matches!(*byte, 0 | 0xff))
+            || u32::from_le_bytes(entry[28..32].try_into().expect("partition flags are fixed")) & 1
+                != 0
         {
             continue;
         }
-        let mut region = entry.as_embedded_storage(flash);
-        let slot_a = region
-            .read(FLASH_MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
-            .map(|_| decode_memory_record(&scratch.record_bytes))
-            .ok()
-            .and_then(Result::ok);
-        let slot_b = region
-            .read(FLASH_MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
-            .map(|_| decode_memory_record(&scratch.record_bytes))
-            .ok()
-            .and_then(Result::ok);
-        let selected = select_latest_optional_memory_record(slot_a, slot_b);
-        if let Some(record) = &selected {
-            info!(
-                "flash memory restore ok label={=str} seq={=u32}",
-                entry.label_as_str(),
-                record.sequence,
-            );
+        let offset = u32::from_le_bytes(entry[4..8].try_into().expect("partition offset is fixed"));
+        let length =
+            u32::from_le_bytes(entry[8..12].try_into().expect("partition length is fixed"));
+        if length >= FLASH_MEMORY_REGION_SIZE {
+            return Some((offset, length));
         }
-        return selected;
     }
-
-    info!("flash memory restore skipped: no writable flux_cfg partition");
     None
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn mapped_flash_address(offset: u32, length: usize) -> Option<usize> {
+    let offset = usize::try_from(offset).ok()?;
+    let end = offset.checked_add(length)?;
+    (end <= BOARD_FLASH_SIZE_BYTES).then_some(FLASH_MEMORY_MAPPED_BASE + offset)
+}
+
+#[cfg(target_arch = "xtensa")]
+fn read_mapped_flash(offset: u32, bytes: &mut [u8]) -> Result<(), ()> {
+    let address = mapped_flash_address(offset, bytes.len()).ok_or(())?;
+    // The SPI flash remains memory-mapped after boot. This path avoids the
+    // ROM read driver's temporary sector buffer on the runtime task stack.
+    unsafe {
+        core::ptr::copy_nonoverlapping(address as *const u8, bytes.as_mut_ptr(), bytes.len());
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+fn load_flash_memory_record(
+    _flash: &mut FlashStorage,
+    scratch: &mut MemoryIoScratch,
+) -> Option<MemoryRecord> {
+    if read_mapped_flash(FLASH_PARTITION_TABLE_OFFSET, &mut scratch.partition_table).is_err() {
+        info!("flash memory restore skipped: partition table unavailable");
+        return None;
+    }
+    let Some((partition_offset, _)) = flash_memory_partition_from_table(&scratch.partition_table)
+    else {
+        info!("flash memory restore skipped: no writable flux_cfg partition");
+        return None;
+    };
+    let slot_a = read_mapped_flash(
+        partition_offset + FLASH_MEMORY_SLOT_A_OFFSET,
+        &mut scratch.record_bytes,
+    )
+    .map(|_| decode_memory_record(&scratch.record_bytes))
+    .ok()
+    .and_then(Result::ok);
+    let slot_b = read_mapped_flash(
+        partition_offset + FLASH_MEMORY_SLOT_B_OFFSET,
+        &mut scratch.record_bytes,
+    )
+    .map(|_| decode_memory_record(&scratch.record_bytes))
+    .ok()
+    .and_then(Result::ok);
+    let selected = select_latest_optional_memory_record(slot_a, slot_b);
+    if let Some(record) = &selected {
+        info!(
+            "flash memory restore ok label=flux_cfg seq={=u32}",
+            record.sequence
+        );
+    }
+    selected
 }
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
 fn load_legacy_flash_memory_record(
-    flash: &mut FlashStorage,
+    _flash: &mut FlashStorage,
     scratch: &mut MemoryIoScratch,
 ) -> Option<MemoryRecord> {
-    let slot_a = flash
-        .read(LEGACY_FLASH_MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
+    let slot_a = read_mapped_flash(LEGACY_FLASH_MEMORY_SLOT_A_OFFSET, &mut scratch.record_bytes)
         .map(|_| decode_memory_record(&scratch.record_bytes))
         .ok()
         .and_then(Result::ok);
-    let slot_b = flash
-        .read(LEGACY_FLASH_MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
+    let slot_b = read_mapped_flash(LEGACY_FLASH_MEMORY_SLOT_B_OFFSET, &mut scratch.record_bytes)
         .map(|_| decode_memory_record(&scratch.record_bytes))
         .ok()
         .and_then(Result::ok);
@@ -6324,51 +6414,42 @@ fn write_flash_memory_record(
         info!("flash memory commit encode failed");
         return Err(MemoryCommitError::EncodeFailed);
     };
-    let Ok(table) = read_partition_table(flash, &mut scratch.partition_table) else {
+    if read_mapped_flash(FLASH_PARTITION_TABLE_OFFSET, &mut scratch.partition_table).is_err() {
         info!("flash memory commit skipped: partition table unavailable");
         return Err(MemoryCommitError::FlashUnavailable);
-    };
-
-    for index in 0..table.len() {
-        let Ok(entry) = table.get_partition(index) else {
-            continue;
-        };
-        if entry.is_read_only()
-            || entry.raw_type() != 1
-            || entry.label_as_str() != FLASH_MEMORY_PARTITION_LABEL
-            || entry.len() < FLASH_MEMORY_REGION_SIZE
-        {
-            continue;
-        }
-        let absolute_offset = flash_memory_slot_offset_for_sequence(record.sequence);
-        let mut region = entry.as_embedded_storage(flash);
-        // Storage::write performs a read-modify-erase-write for the selected sector,
-        // so unaligned record payloads are valid and the other 4KiB slot stays intact.
-        if Storage::write(
-            &mut region,
-            absolute_offset,
-            &scratch.record_bytes[..record_len],
-        )
-        .map_err(|_| MemoryCommitError::FlashWriteFailed)
-        .is_err()
-        {
-            info!(
-                "flash memory commit write failed seq={=u32}",
-                record.sequence
-            );
-            return Err(MemoryCommitError::FlashWriteFailed);
-        }
-        info!(
-            "flash memory commit ok label={=str} seq={=u32} bytes={=u16}",
-            entry.label_as_str(),
-            record.sequence,
-            record_len as u16,
-        );
-        return Ok(());
     }
-
-    info!("flash memory commit skipped: no writable flux_cfg partition");
-    Err(MemoryCommitError::FlashUnavailable)
+    let Some((partition_offset, _)) = flash_memory_partition_from_table(&scratch.partition_table)
+    else {
+        info!("flash memory commit skipped: no writable flux_cfg partition");
+        return Err(MemoryCommitError::FlashUnavailable);
+    };
+    let absolute_offset = partition_offset + flash_memory_slot_offset_for_sequence(record.sequence);
+    let write_len = (record_len + 3) & !3;
+    // Each persisted record owns a complete erase sector. Direct NorFlash
+    // access keeps the sector staging buffer out of the startup task stack.
+    NorFlash::erase(
+        flash,
+        absolute_offset,
+        absolute_offset + FLASH_MEMORY_ERASE_SECTOR_SIZE,
+    )
+    .map_err(|_| MemoryCommitError::FlashWriteFailed)?;
+    NorFlash::write(flash, absolute_offset, &scratch.record_bytes[..write_len])
+        .map_err(|_| MemoryCommitError::FlashWriteFailed)?;
+    let Some(mapped_address) = mapped_flash_address(absolute_offset, record_len) else {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    };
+    // The ROM writer is complete before this direct mapped comparison. Keep
+    // verification bounded to the encoded record, not a second 4 KiB buffer.
+    let programmed =
+        unsafe { core::slice::from_raw_parts(mapped_address as *const u8, record_len) };
+    if programmed != &scratch.record_bytes[..record_len] {
+        return Err(MemoryCommitError::VerifyMismatch);
+    }
+    info!(
+        "flash memory commit ok label=flux_cfg seq={=u32} bytes={=u16}",
+        record.sequence, record_len as u16,
+    );
+    Ok(())
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -6382,7 +6463,7 @@ fn load_eeprom_memory_record(
         return (None, false);
     };
 
-    let mut eeprom = M24c64::with_address(i2c, address);
+    let mut eeprom = M24c64::with_address(&mut *i2c, address);
     let mut contains_data = false;
     let mut selected = None;
     for (offset, length) in [
@@ -6541,6 +6622,27 @@ async fn write_eeprom_memory_record(
         "memory commit ok seq={=u32} bytes={=u16} slot=0x{=u16:04x}",
         record.sequence, record_len as u16, base_offset,
     );
+    // A page-sized readback keeps the EEPROM transport target in internal RAM
+    // without materializing another complete MemoryRecord on the main stack.
+    let mut verified = 0usize;
+    let mut readback = [0u8; M24C64_PAGE_SIZE];
+    let Some(address) = probe_eeprom_address(i2c) else {
+        return Err(MemoryCommitError::VerifyUnreadable);
+    };
+    let mut eeprom = M24c64::with_address(i2c, address);
+    while verified < record_len {
+        let chunk_len = (record_len - verified).min(readback.len());
+        let offset = base_offset
+            .checked_add(verified as u16)
+            .ok_or(MemoryCommitError::VerifyUnreadable)?;
+        eeprom
+            .read_bytes(offset, &mut readback[..chunk_len])
+            .map_err(|_| MemoryCommitError::VerifyUnreadable)?;
+        if readback[..chunk_len] != scratch.record_bytes[verified..verified + chunk_len] {
+            return Err(MemoryCommitError::VerifyMismatch);
+        }
+        verified += chunk_len;
+    }
     Ok(())
 }
 
@@ -6682,17 +6784,26 @@ async fn commit_memory_config_now(
     let Some(mut scratch) = try_allocate_memory_io_scratch() else {
         return Err(MemoryCommitError::EncodeFailed);
     };
-    let mut expected_config = memory_config.clone();
-    expected_config.sanitize();
+    let Some(mut record) = try_box_external_uninit::<MemoryRecord>() else {
+        return Err(MemoryCommitError::EncodeFailed);
+    };
+    // MemoryConfig contains the calibration and profile banks. Construct it
+    // directly in PSRAM so the deferred journal write never adds full config
+    // copies to the front-panel task stack.
+    unsafe {
+        let record_ptr = record.as_mut_ptr();
+        core::ptr::addr_of_mut!((*record_ptr).sequence).write(0);
+        core::ptr::addr_of_mut!((*record_ptr).config).write(MemoryConfig::default());
+        (*record_ptr).config.clone_from(memory_config);
+        (*record_ptr).config.sanitize();
+    }
+    let mut record = unsafe { Box::from_raw(Box::into_raw(record).cast::<MemoryRecord>()) };
     let mut last_error = MemoryCommitError::WriteFailed;
     let commit_started_at = Instant::now();
 
     for attempt in 0..2 {
         let next_sequence = memory_sequence.saturating_add(1 + attempt);
-        let record = MemoryRecord {
-            sequence: next_sequence,
-            config: expected_config.clone(),
-        };
+        record.sequence = next_sequence;
         let backend = match write_memory_record(
             i2c,
             pd_port,
@@ -6742,12 +6853,12 @@ async fn commit_memory_config_now(
                 continue;
             }
         };
-        if verified.sequence != next_sequence || verified.config != expected_config {
+        if verified.sequence != next_sequence || verified.config != record.config {
             info!(
                 "memory commit verify failed seq={=u32} read_seq={=u32} config_match={=bool}",
                 next_sequence,
                 verified.sequence,
-                verified.config == expected_config,
+                verified.config == record.config,
             );
             last_error = MemoryCommitError::VerifyMismatch;
             continue;
@@ -7492,6 +7603,34 @@ fn manual_pps_request_required(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn manual_pps_request_voltage(
+    manual_pps: ManualPpsState,
+    controller: ControllerKind,
+    observation: Option<PdStatusObservation>,
+) -> Option<u16> {
+    let target_mv = manual_pps.target_mv?;
+    if manual_pps.owner != ManualPpsOwner::ThermalTuning || controller != ControllerKind::Fusb302b {
+        return Some(target_mv);
+    }
+
+    let confirmed_mv = manual_pps.applied_mv.or_else(|| {
+        observation.and_then(|observation| {
+            (observation.contract.kind == ContractKind::Pps)
+                .then_some(observation.contract.voltage_mv)
+        })
+    });
+    Some(confirmed_mv.map_or(target_mv, |current_mv| {
+        if current_mv < target_mv {
+            current_mv
+                .saturating_add(THERMAL_TUNING_PPS_RAMP_STEP_MV)
+                .min(target_mv)
+        } else {
+            target_mv
+        }
+    }))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn sync_manual_pps_backend_request(backend: &mut HeaterPowerBackend, target_mv: u16, now_ms: u64) {
     let HeaterPowerBackend::PpsMos {
         pps_min_mv,
@@ -7578,22 +7717,27 @@ where
             return true;
         }
         if manual_pps_request_required(*manual_pps, pd_port.controller_kind(), pd_observation) {
+            let request_mv =
+                manual_pps_request_voltage(*manual_pps, pd_port.controller_kind(), pd_observation)
+                    .expect("manual PPS target was checked above");
             match request_pd_adjustable_voltage(
                 i2c,
                 pd_port,
-                target_mv,
+                request_mv,
                 ch224q::AdjustableVoltageMode::Pps,
                 true,
             )
             .await
             {
                 PdContractRequestState::Confirmed => {
-                    manual_pps.applied_mv = Some(target_mv);
-                    sync_manual_pps_backend_request(backend, target_mv, now_ms);
-                    manual_pps_request_changed = true;
+                    manual_pps.applied_mv = Some(request_mv);
+                    if request_mv == target_mv {
+                        sync_manual_pps_backend_request(backend, target_mv, now_ms);
+                        manual_pps_request_changed = true;
+                    }
                     info!(
-                        "manual pps override applied mv={=u16} ma={=u16}",
-                        target_mv, target_ma
+                        "manual pps override applied mv={=u16} target_mv={=u16} ma={=u16}",
+                        request_mv, target_mv, target_ma
                     );
                 }
                 PdContractRequestState::Pending => {
@@ -10525,6 +10669,36 @@ fn usb_write_response_frame(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn usb_write_thermal_tuning_response(
+    usb: &mut RawUsbSerialJtag,
+    response: &ThermalTuningUsbResponse,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+) {
+    if let Ok(line) = write_thermal_tuning_response(
+        &response.request_id,
+        response.snapshot.as_deref(),
+        response.error.as_ref(),
+        tx_buf,
+    ) {
+        let _ = usb.write_response_bytes(line.as_bytes());
+    } else {
+        let fallback = thermal_tuning_usb_error(
+            response.request_id.clone(),
+            "tuning_response_too_large",
+            "Thermal tuning response exceeded the USB frame budget.",
+        );
+        if let Ok(line) = write_thermal_tuning_response(
+            &fallback.request_id,
+            fallback.snapshot.as_deref(),
+            fallback.error.as_ref(),
+            tx_buf,
+        ) {
+            let _ = usb.write_response_bytes(line.as_bytes());
+        }
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn usb_write_frame_to<T: UsbControlTx>(
     tx: &mut T,
     frame: &UsbFrame,
@@ -10696,7 +10870,7 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(hardware_identity()),
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
             UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
                 request_id,
@@ -10939,7 +11113,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(hardware_identity()),
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
             UsbRequestOp::GetInstallStatus => usb_response(
                 request_id,
@@ -11135,7 +11309,7 @@ async fn process_control_line(
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(hardware_identity()),
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
             UsbRequestOp::GetInstallStatus => usb_response(
                 request_id,
@@ -11562,24 +11736,11 @@ async fn process_control_line(
                 last_heater_duty,
             )),
         ),
-        Ok(UsbFrame::ThermalTuningRun { command }) => {
-            let (tuning_needs_redraw, response) = process_thermal_tuning_command(
-                command,
-                thermal_tuning_runtime,
-                ui_state,
-                memory_config,
-                memory_commit_due_ms,
-                *memory_sequence,
-                *calibration_runtime_state,
-                manual_pps,
-                current_rtd_fault,
-                latest_status_temp_c,
-                elapsed_ms,
-                thermal_control_profile_preview,
-            );
-            needs_redraw |= tuning_needs_redraw;
-            response
-        }
+        Ok(UsbFrame::ThermalTuningRun { command }) => usb_error_response(
+            command.request_id,
+            "thermal_tuning_dispatch_required",
+            "Thermal tuning must use the dedicated PSRAM response path.",
+        ),
         Ok(UsbFrame::HeaterCurveConfig { request_id, config }) => {
             if thermal_tuning_runtime.owner() == MaintenanceRunOwner::ThermalTuning {
                 usb_error_response(
@@ -11765,6 +11926,29 @@ async fn process_control_line(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn thermal_tuning_snapshot_response(
+    request_id: &heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    after_sequence: Option<u64>,
+    limit: Option<u16>,
+    runtime: &ThermalTuningRuntime,
+) -> ThermalTuningUsbResponse {
+    let snapshot = try_external_tuning_snapshot(
+        runtime,
+        after_sequence,
+        usize::from(limit.unwrap_or(16)).min(USB_THERMAL_TUNING_TRACE_PAGE_MAX),
+    );
+    match snapshot {
+        Ok(Some(snapshot)) => thermal_tuning_usb_snapshot(request_id.clone(), snapshot),
+        Ok(None) => thermal_tuning_usb_error(
+            request_id.clone(),
+            "tuning_psram_unavailable",
+            "PSRAM could not hold the thermal tuning snapshot.",
+        ),
+        Err(error) => thermal_tuning_usb_error_response(request_id.clone(), error),
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 fn process_thermal_tuning_command(
     command: ThermalTuningRunCommandWire,
     thermal_tuning_runtime: &mut ThermalTuningRuntime,
@@ -11778,8 +11962,10 @@ fn process_thermal_tuning_command(
     latest_status_temp_c: f32,
     elapsed_ms: u64,
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
-) -> (bool, UsbFrame) {
+) -> (bool, ThermalTuningUsbResponse) {
     let request_id = command.request_id.clone();
+    let usb_error_response =
+        |request_id, code, message| thermal_tuning_usb_error(request_id, code, message);
     let eligibility = ThermalTuningEligibility {
         thermal_model_ready: thermal_plant_projection_for_runtime(memory_config).is_some(),
         curve_covers_all_targets: has_calibrated_heater_resistance_curve(memory_config),
@@ -11792,25 +11978,29 @@ fn process_thermal_tuning_command(
         measurement_safe: current_rtd_fault.is_none() && latest_status_temp_c.is_finite(),
     };
     thermal_tuning_runtime.set_eligibility(eligibility);
-    let snapshot_response = |runtime: &ThermalTuningRuntime| {
-        let snapshot = try_external_tuning_snapshot(
-            runtime,
-            command.after_sequence,
-            usize::from(command.limit.unwrap_or(16))
-                .min(flux_purr_firmware::control_plane::THERMAL_TUNING_TRACE_PAGE_MAX),
+    if matches!(
+        command.op,
+        ThermalTuningRunOpWire::Preview
+            | ThermalTuningRunOpWire::DiscardPreview
+            | ThermalTuningRunOpWire::Save
+    ) {
+        return process_thermal_tuning_candidate_command(
+            command,
+            thermal_tuning_runtime,
+            ui_state,
+            memory_config,
+            memory_commit_due_ms,
+            elapsed_ms,
+            thermal_control_profile_preview,
         );
-        match snapshot {
-            Ok(Some(snapshot)) => usb_response(
-                request_id.clone(),
-                UsbResponsePayload::ThermalTuningRun(snapshot),
-            ),
-            Ok(None) => usb_error_response(
-                request_id.clone(),
-                "tuning_psram_unavailable",
-                "PSRAM could not hold the thermal tuning snapshot.",
-            ),
-            Err(error) => thermal_tuning_error_response(request_id.clone(), error),
-        }
+    }
+    let snapshot_response = |runtime: &ThermalTuningRuntime| {
+        thermal_tuning_snapshot_response(
+            &request_id,
+            command.after_sequence,
+            command.limit,
+            runtime,
+        )
     };
 
     let mut needs_redraw = false;
@@ -11869,7 +12059,7 @@ fn process_thermal_tuning_command(
                 }
                 Err(error) => {
                     release_thermal_tuning_pps(manual_pps);
-                    thermal_tuning_error_response(request_id, error)
+                    thermal_tuning_usb_error_response(request_id, error)
                 }
             }
         }
@@ -11891,7 +12081,7 @@ fn process_thermal_tuning_command(
                     needs_redraw = true;
                     snapshot_response(thermal_tuning_runtime)
                 }
-                Err(error) => thermal_tuning_error_response(request_id, error),
+                Err(error) => thermal_tuning_usb_error_response(request_id, error),
             }
         }
         ThermalTuningRunOpWire::AckTrace => {
@@ -11927,7 +12117,7 @@ fn process_thermal_tuning_command(
             };
             match thermal_tuning_runtime.ack_trace(through_sequence, digest) {
                 Ok(()) => snapshot_response(thermal_tuning_runtime),
-                Err(error) => thermal_tuning_error_response(request_id, error),
+                Err(error) => thermal_tuning_usb_error_response(request_id, error),
             }
         }
         ThermalTuningRunOpWire::SealReview => {
@@ -11963,123 +12153,90 @@ fn process_thermal_tuning_command(
             };
             match thermal_tuning_runtime.seal_review(through_sequence, digest) {
                 Ok(()) => snapshot_response(thermal_tuning_runtime),
-                Err(error) => thermal_tuning_error_response(request_id, error),
+                Err(error) => thermal_tuning_usb_error_response(request_id, error),
             }
         }
+        ThermalTuningRunOpWire::Preview
+        | ThermalTuningRunOpWire::DiscardPreview
+        | ThermalTuningRunOpWire::Save => thermal_tuning_usb_error(
+            request_id,
+            "thermal_tuning_dispatch_error",
+            "Candidate commands must use the dedicated tuning handler.",
+        ),
+    };
+    (needs_redraw, response)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[inline(never)]
+fn process_thermal_tuning_candidate_command(
+    command: ThermalTuningRunCommandWire,
+    thermal_tuning_runtime: &mut ThermalTuningRuntime,
+    ui_state: &mut FrontPanelUiState,
+    memory_config: &mut MemoryConfig,
+    memory_commit_due_ms: &mut Option<u64>,
+    elapsed_ms: u64,
+    thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
+) -> (bool, ThermalTuningUsbResponse) {
+    let request_id = command.request_id.clone();
+    let error_response =
+        |code, message| thermal_tuning_usb_error(request_id.clone(), code, message);
+    let Some(identity) = thermal_tuning_candidate_identity(&command) else {
+        return (
+            false,
+            error_response(
+                "candidate_mismatch",
+                "candidateId, candidateHash and powerClass are required.",
+            ),
+        );
+    };
+    let Some(power_class) = command.power_class.and_then(core_power_class) else {
+        return (
+            false,
+            error_response("candidate_mismatch", "powerClass must be pps3a or pps5a."),
+        );
+    };
+    let Some(run_id) = command
+        .run_id
+        .as_deref()
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return (
+            false,
+            error_response("candidate_mismatch", "runId is invalid."),
+        );
+    };
+    let snapshot_response = |runtime: &ThermalTuningRuntime| {
+        thermal_tuning_snapshot_response(
+            &request_id,
+            command.after_sequence,
+            command.limit,
+            runtime,
+        )
+    };
+    match command.op {
         ThermalTuningRunOpWire::Preview => {
-            let Some(identity) = thermal_tuning_candidate_identity(&command) else {
-                return (
-                    false,
-                    usb_error_response(
-                        request_id,
-                        "candidate_mismatch",
-                        "candidateId, candidateHash and powerClass are required.",
-                    ),
-                );
-            };
-            let Some(power_class) = command.power_class.and_then(core_power_class) else {
-                return (
-                    false,
-                    usb_error_response(
-                        request_id,
-                        "candidate_mismatch",
-                        "powerClass must be pps3a or pps5a.",
-                    ),
-                );
-            };
-            let Some(run_id) = command
-                .run_id
-                .as_deref()
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
-                return (
-                    false,
-                    usb_error_response(request_id, "candidate_mismatch", "runId is invalid."),
-                );
-            };
             match thermal_tuning_runtime.preview(run_id, identity, power_class) {
                 Ok(profile) => {
                     *thermal_control_profile_preview = Some(ThermalControlProfile::from(
                         thermal_tuning_profile_config(profile),
                     ));
                     ui_state.heater_enabled = false;
-                    needs_redraw = true;
-                    snapshot_response(thermal_tuning_runtime)
+                    (true, snapshot_response(thermal_tuning_runtime))
                 }
-                Err(error) => thermal_tuning_error_response(request_id, error),
+                Err(error) => (false, thermal_tuning_usb_error_response(request_id, error)),
             }
         }
         ThermalTuningRunOpWire::DiscardPreview => {
-            let Some(identity) = thermal_tuning_candidate_identity(&command) else {
-                return (
-                    false,
-                    usb_error_response(
-                        request_id,
-                        "candidate_mismatch",
-                        "candidateId, candidateHash and powerClass are required.",
-                    ),
-                );
-            };
-            let Some(power_class) = command.power_class.and_then(core_power_class) else {
-                return (
-                    false,
-                    usb_error_response(
-                        request_id,
-                        "candidate_mismatch",
-                        "powerClass must be pps3a or pps5a.",
-                    ),
-                );
-            };
-            let Some(run_id) = command
-                .run_id
-                .as_deref()
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
-                return (
-                    false,
-                    usb_error_response(request_id, "candidate_mismatch", "runId is invalid."),
-                );
-            };
             match thermal_tuning_runtime.discard_preview(run_id, identity, power_class) {
                 Ok(()) => {
                     *thermal_control_profile_preview = None;
-                    needs_redraw = true;
-                    snapshot_response(thermal_tuning_runtime)
+                    (true, snapshot_response(thermal_tuning_runtime))
                 }
-                Err(error) => thermal_tuning_error_response(request_id, error),
+                Err(error) => (false, thermal_tuning_usb_error_response(request_id, error)),
             }
         }
         ThermalTuningRunOpWire::Save => {
-            let Some(identity) = thermal_tuning_candidate_identity(&command) else {
-                return (
-                    false,
-                    usb_error_response(
-                        request_id,
-                        "candidate_mismatch",
-                        "candidateId, candidateHash and powerClass are required.",
-                    ),
-                );
-            };
-            let Some(power_class) = command.power_class.and_then(core_power_class) else {
-                return (
-                    false,
-                    usb_error_response(
-                        request_id,
-                        "candidate_mismatch",
-                        "powerClass must be pps3a or pps5a.",
-                    ),
-                );
-            };
-            let Some(run_id) = command
-                .run_id
-                .as_deref()
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
-                return (
-                    false,
-                    usb_error_response(request_id, "candidate_mismatch", "runId is invalid."),
-                );
-            };
             match thermal_tuning_runtime.save(run_id, identity, power_class) {
                 Ok(profile) => {
                     *memory_config.thermal_profile_mut(match power_class {
@@ -12091,14 +12248,20 @@ fn process_thermal_tuning_command(
                     ui_state.heater_enabled = false;
                     *memory_commit_due_ms =
                         Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-                    needs_redraw = true;
-                    snapshot_response(thermal_tuning_runtime)
+                    (true, snapshot_response(thermal_tuning_runtime))
                 }
-                Err(error) => thermal_tuning_error_response(request_id, error),
+                Err(error) => (false, thermal_tuning_usb_error_response(request_id, error)),
             }
         }
-    };
-    (needs_redraw, response)
+        _ => (
+            false,
+            thermal_tuning_usb_error(
+                request_id,
+                "thermal_tuning_dispatch_error",
+                "A non-candidate command reached the candidate handler.",
+            ),
+        ),
+    }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -12159,6 +12322,18 @@ fn thermal_tuning_run_id_matches(runtime: &ThermalTuningRuntime, run_id: Option<
     run_id
         .and_then(|value| value.parse::<u64>().ok())
         .is_some_and(|value| runtime.core().run_id() == value)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_tuning_contract_request_pending(
+    manual_pps: &ManualPpsState,
+    target_contract: (u16, u16),
+) -> bool {
+    manual_pps.enabled
+        && manual_pps.owner == ManualPpsOwner::ThermalTuning
+        && manual_pps.target_mv == Some(target_contract.0)
+        && manual_pps.target_ma == Some(target_contract.1)
+        && manual_pps.applied_mv != Some(target_contract.0)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -12257,11 +12432,10 @@ fn thermal_tuning_terminal_disposition_from_code(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn thermal_tuning_error_response(
-    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+fn thermal_tuning_runtime_error_details(
     error: ThermalTuningRuntimeError,
-) -> UsbFrame {
-    let (code, message) = match error {
+) -> (&'static str, &'static str) {
+    match error {
         ThermalTuningRuntimeError::Busy => {
             ("tuning_busy", "Another maintenance run owns the device.")
         }
@@ -12312,7 +12486,24 @@ fn thermal_tuning_error_response(
             "candidate_expired",
             "The candidate is no longer available in RAM.",
         ),
-    };
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn thermal_tuning_usb_error_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    error: ThermalTuningRuntimeError,
+) -> ThermalTuningUsbResponse {
+    let (code, message) = thermal_tuning_runtime_error_details(error);
+    thermal_tuning_usb_error(request_id, code, message)
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn thermal_tuning_error_response(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+    error: ThermalTuningRuntimeError,
+) -> UsbFrame {
+    let (code, message) = thermal_tuning_runtime_error_details(error);
     usb_error_response(request_id, code, message)
 }
 
@@ -12484,6 +12675,28 @@ fn lan_error_json(code: &str, message: &str) -> heapless::String<LAN_HTTP_BODY_M
         r#"{{"error":{{"code":"{code}","message":"{message}"}}}}"#
     );
     body
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+fn lan_thermal_tuning_response(
+    response: &ThermalTuningUsbResponse,
+) -> (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>) {
+    if let Some(snapshot) = response.snapshot.as_deref() {
+        return lan_json_response(snapshot);
+    }
+    if let Some(error) = response.error.as_ref() {
+        return (
+            lan_error_status(error.code.as_str()),
+            lan_error_json(error.code.as_str(), error.message.as_str()),
+        );
+    }
+    (
+        500,
+        lan_error_json(
+            "thermal_tuning_response_invalid",
+            "Thermal tuning response did not contain a snapshot or error.",
+        ),
+    )
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
@@ -13640,6 +13853,14 @@ async fn main(_spawner: Spawner) {
             journal.run_id,
             thermal_tuning_terminal_disposition_from_code(journal.disposition),
         );
+        if recovered_thermal_tuning_run {
+            thermal_tuning_runtime.set_reset_interruption_reason(
+                reset_reason
+                    .trim()
+                    .strip_prefix("reset_reason=")
+                    .unwrap_or("unknown"),
+            );
+        }
     }
     static THERMAL_PLANT_WORKSPACE: StaticCell<CalibrationThermalPlantWorkspace> =
         StaticCell::new();
@@ -14015,65 +14236,99 @@ async fn main(_spawner: Spawner) {
         loop {
             match usb_serial.read_byte() {
                 Ok(b'\n') => {
-                    let (control_needs_redraw, response) = process_control_line(
-                        usb_rx_line.as_str(),
-                        &mut controller,
-                        &mut ui_state,
-                        &mut memory_config,
-                        &mut preview_heater_curve,
-                        &mut memory_commit_due_ms,
-                        &mut memory_sequence,
-                        persistence_source,
-                        persistence_record_state,
-                        &mut pd_i2c,
-                        pd_port.controller_kind(),
-                        &mut pd_port,
-                        &mut flash_storage,
-                        &mut calibration_runtime_state,
-                        thermal_plant_workspace,
-                        thermal_tuning_runtime.as_mut(),
-                        elapsed_ms,
-                        last_pd_observation,
-                        &mut heater_power_backend,
-                        &mut heater_controller,
-                        last_pid_snapshot,
-                        &mut manual_pps_state,
-                        fan_command,
-                        current_rtd_fault,
-                        &mut overtemp_attention_acknowledged,
-                        &mut attention_pending_after_fault_clear,
-                        &mut overtemp_forced_fan_active,
-                        &mut next_attention_reminder_ms,
-                        &mut buzzer,
-                        &mut thermal_control_profile_preview,
-                        last_raw_state,
-                        latest_display_temp_c,
-                        latest_temp_c,
-                        control_measurement_guarded,
-                        latest_rtd_raw_adc_mv,
-                        latest_rtd_raw_adc_min_mv,
-                        latest_rtd_raw_adc_max_mv,
-                        latest_vin_raw_adc_mv,
-                        latest_vin_mv,
-                        last_heater_duty,
-                        heater_control_timing,
-                    )
-                    .await;
-                    needs_redraw |= control_needs_redraw;
-                    needs_redraw |= disarm_pending_thermal_plant_output(
-                        &mut calibration_runtime_state,
-                        &mut heater_power_backend,
-                        &mut manual_pps_state,
-                        &mut pd_i2c,
-                        &mut pd_port,
-                        &mut heater_pwm,
-                        &mut hold_pps_governor,
-                        &mut ui_state,
-                        &mut last_heater_duty,
-                        latest_vin_mv,
-                    )
-                    .await;
-                    usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
+                    if let Ok(Some(command)) =
+                        parse_thermal_tuning_run_command(usb_rx_line.as_str())
+                    {
+                        let (tuning_needs_redraw, response) = process_thermal_tuning_command(
+                            command,
+                            thermal_tuning_runtime.as_mut(),
+                            &mut ui_state,
+                            &mut memory_config,
+                            &mut memory_commit_due_ms,
+                            memory_sequence,
+                            calibration_runtime_state,
+                            &mut manual_pps_state,
+                            current_rtd_fault,
+                            latest_display_temp_c,
+                            elapsed_ms,
+                            &mut thermal_control_profile_preview,
+                        );
+                        needs_redraw |= tuning_needs_redraw;
+                        needs_redraw |= disarm_pending_thermal_plant_output(
+                            &mut calibration_runtime_state,
+                            &mut heater_power_backend,
+                            &mut manual_pps_state,
+                            &mut pd_i2c,
+                            &mut pd_port,
+                            &mut heater_pwm,
+                            &mut hold_pps_governor,
+                            &mut ui_state,
+                            &mut last_heater_duty,
+                            latest_vin_mv,
+                        )
+                        .await;
+                        usb_write_thermal_tuning_response(&mut usb_serial, &response, usb_tx_buf);
+                    } else {
+                        let (control_needs_redraw, response) = process_control_line(
+                            usb_rx_line.as_str(),
+                            &mut controller,
+                            &mut ui_state,
+                            &mut memory_config,
+                            &mut preview_heater_curve,
+                            &mut memory_commit_due_ms,
+                            &mut memory_sequence,
+                            persistence_source,
+                            persistence_record_state,
+                            &mut pd_i2c,
+                            pd_port.controller_kind(),
+                            &mut pd_port,
+                            &mut flash_storage,
+                            &mut calibration_runtime_state,
+                            thermal_plant_workspace,
+                            thermal_tuning_runtime.as_mut(),
+                            elapsed_ms,
+                            last_pd_observation,
+                            &mut heater_power_backend,
+                            &mut heater_controller,
+                            last_pid_snapshot,
+                            &mut manual_pps_state,
+                            fan_command,
+                            current_rtd_fault,
+                            &mut overtemp_attention_acknowledged,
+                            &mut attention_pending_after_fault_clear,
+                            &mut overtemp_forced_fan_active,
+                            &mut next_attention_reminder_ms,
+                            &mut buzzer,
+                            &mut thermal_control_profile_preview,
+                            last_raw_state,
+                            latest_display_temp_c,
+                            latest_temp_c,
+                            control_measurement_guarded,
+                            latest_rtd_raw_adc_mv,
+                            latest_rtd_raw_adc_min_mv,
+                            latest_rtd_raw_adc_max_mv,
+                            latest_vin_raw_adc_mv,
+                            latest_vin_mv,
+                            last_heater_duty,
+                            heater_control_timing,
+                        )
+                        .await;
+                        needs_redraw |= control_needs_redraw;
+                        needs_redraw |= disarm_pending_thermal_plant_output(
+                            &mut calibration_runtime_state,
+                            &mut heater_power_backend,
+                            &mut manual_pps_state,
+                            &mut pd_i2c,
+                            &mut pd_port,
+                            &mut heater_pwm,
+                            &mut hold_pps_governor,
+                            &mut ui_state,
+                            &mut last_heater_duty,
+                            latest_vin_mv,
+                        )
+                        .await;
+                        usb_write_response_frame(&mut usb_serial, &response, usb_tx_buf);
+                    }
                     usb_rx_line.clear();
                 }
                 Ok(b'\r') => {}
@@ -14164,6 +14419,45 @@ async fn main(_spawner: Spawner) {
                     continue;
                 }
             };
+            if let Ok(Some(command)) = parse_thermal_tuning_run_command(line.as_str()) {
+                let (tuning_needs_redraw, response) = process_thermal_tuning_command(
+                    command,
+                    thermal_tuning_runtime.as_mut(),
+                    &mut ui_state,
+                    &mut memory_config,
+                    &mut memory_commit_due_ms,
+                    memory_sequence,
+                    calibration_runtime_state,
+                    &mut manual_pps_state,
+                    current_rtd_fault,
+                    latest_display_temp_c,
+                    elapsed_ms,
+                    &mut thermal_control_profile_preview,
+                );
+                needs_redraw |= tuning_needs_redraw;
+                needs_redraw |= disarm_pending_thermal_plant_output(
+                    &mut calibration_runtime_state,
+                    &mut heater_power_backend,
+                    &mut manual_pps_state,
+                    &mut pd_i2c,
+                    &mut pd_port,
+                    &mut heater_pwm,
+                    &mut hold_pps_governor,
+                    &mut ui_state,
+                    &mut last_heater_duty,
+                    latest_vin_mv,
+                )
+                .await;
+                let (status, body) = lan_thermal_tuning_response(&response);
+                flux_purr_firmware::net::respond_to_command(
+                    response_slot,
+                    request_id,
+                    status,
+                    body,
+                    is_mutation,
+                );
+                continue;
+            }
             let (control_needs_redraw, response) = process_control_line(
                 line.as_str(),
                 &mut controller,
@@ -14674,20 +14968,31 @@ async fn main(_spawner: Spawner) {
                     .target_ma
                     .filter(|_| manual_pps_state.enabled)
                     .unwrap_or(power_class_ma);
-                let sample = ThermalTuningSample {
-                    elapsed_ms: elapsed_ms.min(u64::from(u32::MAX)) as u32,
-                    temperature_centi_c: latest_temp_i16,
-                    vin_mv: latest_vin_mv.min(u32::from(u16::MAX)) as u16,
-                    pps_contract_mv: heater_power_backend.pd_contract_mv(),
-                    pps_contract_ma: contract_ma,
-                    heater_output_permille: u16::from(last_heater_duty).saturating_mul(10),
-                    measurement_valid: current_rtd_fault.is_none() && latest_temp_c.is_finite(),
-                };
-                if let Err(error) = thermal_tuning_runtime.tick(sample) {
-                    warn!(
-                        "thermal tuning tick rejected reason={=str}",
-                        thermal_tuning_runtime_error_label(error)
-                    );
+                let contract_request_pending = thermal_tuning_runtime
+                    .core()
+                    .power_class()
+                    .is_some_and(|class| {
+                        thermal_tuning_contract_request_pending(
+                            &manual_pps_state,
+                            class.nominal_contract(),
+                        )
+                    });
+                if !contract_request_pending {
+                    let sample = ThermalTuningSample {
+                        elapsed_ms: elapsed_ms.min(u64::from(u32::MAX)) as u32,
+                        temperature_centi_c: thermal_tuning_temperature_centi_c(latest_temp_c),
+                        vin_mv: latest_vin_mv.min(u32::from(u16::MAX)) as u16,
+                        pps_contract_mv: heater_power_backend.pd_contract_mv(),
+                        pps_contract_ma: contract_ma,
+                        heater_output_permille: u16::from(last_heater_duty).saturating_mul(10),
+                        measurement_valid: current_rtd_fault.is_none() && latest_temp_c.is_finite(),
+                    };
+                    if let Err(error) = thermal_tuning_runtime.tick(sample) {
+                        warn!(
+                            "thermal tuning tick rejected reason={=str}",
+                            thermal_tuning_runtime_error_label(error)
+                        );
+                    }
                 }
                 if thermal_tuning_runtime.core().state()
                     == flux_purr_thermal_tuning_core::RunState::Terminal
@@ -14843,9 +15148,9 @@ async fn main(_spawner: Spawner) {
             );
             if thermal_tuning_runtime.core().state()
                 == flux_purr_thermal_tuning_core::RunState::Running
-                && current_rtd_fault.is_none()
             {
-                desired_heater_enabled = true;
+                desired_heater_enabled =
+                    thermal_tuning_runtime.heater_output_permitted() && current_rtd_fault.is_none();
             }
             desired_heater_enabled = consume_thermal_plant_completion_disarm(
                 &mut calibration_runtime_state,
@@ -15566,7 +15871,7 @@ mod tests {
         request_id.push_str("response-write").unwrap();
         let response = usb_response(
             request_id,
-            UsbResponsePayload::Identity(Identity::firmware_default()),
+            UsbResponsePayload::Identity(Box::new(Identity::firmware_default())),
         );
         let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
 
@@ -15605,7 +15910,7 @@ mod tests {
         request_id.push_str("confirmed-response").unwrap();
         let response = usb_response(
             request_id,
-            UsbResponsePayload::Identity(Identity::firmware_default()),
+            UsbResponsePayload::Identity(Box::new(Identity::firmware_default())),
         );
         let mut tx = ConfirmingUsbTx {
             response: std::vec::Vec::new(),
@@ -15681,7 +15986,7 @@ mod tests {
             UsbFrame::Response {
                 request_id,
                 ok,
-                result: Some(UsbResponsePayload::Identity(identity)),
+                result: Some(UsbResponsePayload::Identity(Box::new(identity))),
                 error: None,
             } => {
                 assert_eq!(request_id.as_str(), "boot-id");
@@ -21022,6 +21327,20 @@ mod tests {
     }
 
     #[test]
+    fn flash_memory_partition_parser_uses_the_compiled_writable_partition() {
+        assert_eq!(FLASH_PARTITION_TABLE_OFFSET, 0x8000);
+        assert_eq!(
+            mapped_flash_address(FLASH_PARTITION_TABLE_OFFSET, FLASH_PARTITION_TABLE_LEN),
+            Some(FLASH_MEMORY_MAPPED_BASE + 0x8000)
+        );
+        assert_eq!(mapped_flash_address(0x3f_ffff, 2), None);
+        assert_eq!(
+            flash_memory_partition_from_table(include_bytes!("../../partitions.bin")),
+            Some((0x210000, 0x2000))
+        );
+    }
+
+    #[test]
     fn thermal_control_profile_interpolates_between_target_points() {
         let profile = ThermalControlProfile {
             settings: ThermalControlProfileSettings::default(),
@@ -22402,6 +22721,12 @@ mod tests {
     }
 
     #[test]
+    fn thermal_tuning_samples_use_centi_celsius_not_display_celsius() {
+        assert_eq!(thermal_tuning_temperature_centi_c(60.0), 6_000);
+        assert_eq!(thermal_tuning_temperature_centi_c(60.29), 6_029);
+    }
+
+    #[test]
     fn rtd_uses_nominal_regulator_feedback_divider_supply() {
         let expected_temperature_c = 31.0;
         let resistance_ohms = pt1000_resistance_ohms_at(expected_temperature_c);
@@ -23716,6 +24041,76 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn thermal_tuning_waits_only_for_its_initial_pps_contract_transition() {
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            owner: ManualPpsOwner::ThermalTuning,
+            target_mv: Some(20_000),
+            target_ma: Some(5_000),
+            applied_mv: None,
+            ..ManualPpsState::default()
+        };
+
+        assert!(thermal_tuning_contract_request_pending(
+            &manual_pps,
+            (20_000, 5_000)
+        ));
+
+        manual_pps.applied_mv = Some(20_000);
+        assert!(!thermal_tuning_contract_request_pending(
+            &manual_pps,
+            (20_000, 5_000)
+        ));
+
+        manual_pps.fail(ManualPpsError::WriteFailed);
+        assert!(!thermal_tuning_contract_request_pending(
+            &manual_pps,
+            (20_000, 5_000)
+        ));
+    }
+
+    #[test]
+    fn thermal_tuning_ramps_a_fusb302b_pps_contract_before_heating() {
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            owner: ManualPpsOwner::ThermalTuning,
+            target_mv: Some(20_000),
+            target_ma: Some(5_000),
+            ..ManualPpsState::default()
+        };
+        let observation = PdStatusObservation {
+            status_raw: 1 << 3,
+            status: Status::from_register(1 << 3),
+            current_raw: 0,
+            current_ma: 5_000,
+            contract_voltage_mv: Some(12_000),
+            contract: Contract {
+                kind: ContractKind::Pps,
+                object_position: 2,
+                voltage_mv: 12_000,
+                current_ma: 5_000,
+            },
+        };
+
+        assert_eq!(
+            manual_pps_request_voltage(manual_pps, ControllerKind::Fusb302b, Some(observation)),
+            Some(12_500)
+        );
+
+        manual_pps.applied_mv = Some(19_500);
+        assert_eq!(
+            manual_pps_request_voltage(manual_pps, ControllerKind::Fusb302b, Some(observation)),
+            Some(20_000)
+        );
+
+        manual_pps.owner = ManualPpsOwner::Calibration;
+        assert_eq!(
+            manual_pps_request_voltage(manual_pps, ControllerKind::Fusb302b, Some(observation)),
+            Some(20_000)
+        );
     }
 
     #[test]

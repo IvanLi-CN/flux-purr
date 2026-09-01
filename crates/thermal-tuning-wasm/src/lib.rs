@@ -1,7 +1,8 @@
 use flux_purr_thermal_tuning_core::{
-    CANDIDATE_PROFILE_CANONICAL_BYTES, CandidateProfile, EXECUTION_ORDER_C, PHYSICAL_TARGETS_C,
-    PpsPowerClass, sha256,
+    CANDIDATE_POINT_CANONICAL_BYTES, CANDIDATE_PROFILE_CANONICAL_BYTES, CandidatePoint,
+    CandidateProfile, EXECUTION_ORDER_C, PHYSICAL_TARGETS_C, PpsPowerClass, sha256,
 };
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -50,6 +51,62 @@ pub fn verify_candidate_profile(
         PpsPowerClass::Pps5a => 5,
     };
     canonical[0] == expected_marker && hex(&sha256(&canonical)) == expected_hash
+}
+
+#[wasm_bindgen]
+pub fn decode_candidate_point(canonical_point_hex: &str) -> Result<JsValue, JsValue> {
+    let canonical = decode_hex::<CANDIDATE_POINT_CANONICAL_BYTES>(canonical_point_hex)
+        .ok_or_else(|| JsValue::from_str("candidate point canonical hex is invalid"))?;
+    serde_wasm_bindgen::to_value(&CandidatePointWire::from(
+        CandidatePoint::from_canonical_bytes(&canonical),
+    ))
+    .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidatePointWire {
+    target_temp_c: i16,
+    brake_distance_centi_c: u16,
+    warmup_power_permille: u16,
+    approach_power_permille: u16,
+    approach_floor_power_permille: u16,
+    hold_power_permille: u16,
+    hold_reheat_power_permille: u16,
+    hold_entry_centi_c: u16,
+    hold_exit_centi_c: u16,
+    hold_on_centi_c: u16,
+    hold_off_centi_c: u16,
+    overshoot_cutoff_centi_c: u16,
+    hold_kp_permille_per_c: u16,
+    hold_ki_permille_per_c_tick: u16,
+    hold_blend_ticks: u16,
+    approach_lead_ticks: u16,
+    hold_lead_ticks: u16,
+}
+
+impl From<CandidatePoint> for CandidatePointWire {
+    fn from(point: CandidatePoint) -> Self {
+        Self {
+            target_temp_c: point.target_c,
+            brake_distance_centi_c: point.brake_distance_centi_c,
+            warmup_power_permille: point.warmup_power_permille,
+            approach_power_permille: point.approach_power_permille,
+            approach_floor_power_permille: point.approach_floor_power_permille,
+            hold_power_permille: point.hold_power_permille,
+            hold_reheat_power_permille: point.hold_reheat_power_permille,
+            hold_entry_centi_c: point.hold_entry_centi_c,
+            hold_exit_centi_c: point.hold_exit_centi_c,
+            hold_on_centi_c: point.hold_on_centi_c,
+            hold_off_centi_c: point.hold_off_centi_c,
+            overshoot_cutoff_centi_c: point.overshoot_cutoff_centi_c,
+            hold_kp_permille_per_c: point.hold_kp_permille_per_c,
+            hold_ki_permille_per_c_tick: point.hold_ki_permille_per_c_tick,
+            hold_blend_ticks: point.hold_blend_ticks,
+            approach_lead_ticks: point.approach_lead_ticks,
+            hold_lead_ticks: point.hold_lead_ticks,
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

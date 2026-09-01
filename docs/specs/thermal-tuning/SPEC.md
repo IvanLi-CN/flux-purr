@@ -26,6 +26,15 @@ CLI 或 `devd` 断连时继续承担设备控制。
 - 固件将调优 trace 重传窗口、候选工作区和分页快照显式分配到板载 2 MiB PSRAM；
   内部 RAM 只保留实时控制热路径、指针与紧凑状态元数据，且不得在 PSRAM 分配失败时
   静默回落到内部 RAM。
+- PSRAM trace ring 只保存尚未被主机确认的有界重传窗口，不保存整场报告。设备按全局
+  `sequence` 分页传出事件；CLI 将 sample 原子追加到 `samples.ndjson`、将其余事件原子
+  追加到 `decision-ledger.ndjson` 并完成 `sync_data`，Web 将页面与既有 sequence 合并后
+  完成 IndexedDB read-write transaction。只有持久化成功的连续页面才可携带该页 rolling
+  digest 发送 `ack_trace`，设备校验成功后才可回收对应 PSRAM 事件。
+- CLI 与 Web 各自独立承担主机记录器职责，二者不通信；DEVD 只转发分页与 command，
+  不缓存、补写或解释 trace。主机断连直至 ring 淘汰、主机持久化失败或任何 sequence
+  缺口都会永久将该 run 标记为 `trace_gap/review_incomplete`。固件继续完成安全状态机，
+  但不得 seal、preview 或 save 该 run 的候选。
 - 只支持显式选择的 PPS `pps3a` 与 `pps5a` 调优方案；两种方案分别拥有候选
   profile bank，绝不 `auto` 解析、降级或换类重试。
 - 在设备满足前置条件时，以九个温度点生成可审查的候选 profile，并经过设备侧
@@ -109,7 +118,8 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
 
 ### MUST
 
-- 设备必须在 capability 中发布 `thermal_tuning_run_v1`，并列出可用的
+- 设备必须在 capability 中发布 `thermal_tuning_run_v1` 与精确的
+  `evidenceSchema=thermal_tuning_evidence_v2`，并列出可用的
   `pps3a` / `pps5a` 等级、固定目标集合、trace buffer 参数和候选 promotion
   支持。Web 只在该 capability 存在时激活新 tab 的操作。
 - 每个调优开始请求必须显式携带 `powerClass: "pps3a" | "pps5a"`。不得接受
@@ -135,10 +145,20 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   bytes 的字典序作为最终 tie-breaker。
 - 固件必须仅将 device-local 温度、VIN、PPS 合同元数据、heater 控制输出和安全
   事件用作生产决策与证据。PPS 合同电流只是安全 ceiling，不得伪装为实测电流。
-- 调优 trace 必须是全局单调 sequence 的有界分页事件流，包含 `sample` 与
-  `decision` 两种事件。host recorder 必须连续确认已持久化的 sequence 和 rolling
-  digest；若未确认事件将被覆盖、sequence 不连续或 digest 不符，设备必须标记
+- 调优 trace 必须是全局单调 sequence 的有界分页事件流，至少包含
+  `sample`、`phase_transition`、`candidate_trial`、`decision` 和 `safety` 五种事件。
+  preview/discard/save 发生在 terminal trace seal 之后，其设备响应必须由 host recorder
+  作为 post-seal promotion receipt 原子追加到 candidate 文件，不得并入已封存 rolling
+  digest。host recorder 必须连续确认已持久化的 sequence 和
+  rolling digest；若未确认事件将被覆盖、sequence 不连续或 digest 不符，设备必须标记
   `trace_gap` 与 `review_incomplete`，而不是静默丢样。
+- 除明确排除的外部 VBUS/source 电压、电流、功率外，正式报告必须保留旧报告中所有
+  可以从设备或 host recorder 真实获得的调优证据。每个 sample 必须携带目标、候选
+  identity、trial 编号、阶段、时间、温度、VIN、PPS 合同、加热输出和测量有效性；每个
+  candidate trial 必须携带完整固定点参数、起止 sequence/时间和样本范围；每个 decision
+  必须携带完整 score vector、每个 gate、freeze、interval prune、disposition 和失败原因。
+  缺失字段必须以结构化 unavailable 标识呈现，禁止用相邻事件推断、显示空占位或静默
+  删除来伪造完整性。
 - 设备端 trace ring 只保存尚未由主机确认持久化的有界重传窗口，不是完整调优历史。
   当前 capability 发布的 `96` 是经内存与采样节奏验证的容量上限，允许后续固件在保持
   协议语义和溢出保护的前提下调整；算法正确性不得依赖该数字。
@@ -305,6 +325,11 @@ candidate 的 eligible 状态。历史 reference bench diagnostics 可以保留�
 
 ## 非功能性验收 / 质量门槛
 
+- `thermal-tuning-v2` 的 report bundle 必须能从事件 union 重建九个目标、每个候选
+  trial、每个阶段转换、每个 decision、每个安全收口，并从 post-seal receipts 重建每个
+  preview/discard/save 操作；报告
+  renderer 必须逐字段校验这一覆盖，任何缺失都只能输出 `review_incomplete`，不能输出
+  completed/candidate-ready 的完整报告。
 - 核心在 `no_std`、native 与 Wasm 三个 target 上运行相同 golden vector，禁止使用
   target-dependent floating-point 作为决策输入。
 - firmware、USB JSONL、LAN HTTP、DEVD adapter、CLI、Web 和 report parser 都必须
