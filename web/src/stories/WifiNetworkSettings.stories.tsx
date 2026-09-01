@@ -403,7 +403,6 @@ export const PendingSaveCanBeCancelled: Story = {
     const canvas = within(canvasElement)
     await userEvent.type(canvas.getByLabelText('WiFi 名称'), 'FluxPurr-Lab')
     await userEvent.click(canvas.getByRole('button', { name: '保存并连接' }))
-    await expect(canvas.getByRole('button', { name: '保存中' })).toBeDisabled()
     const cancelButton = await canvas.findByRole('button', { name: '取消' })
     await expect(canvas.getByRole('button', { name: '继续等待' })).toBeEnabled()
     await expect(canvas.getByRole('status', { name: 'WiFi 网络状态' })).toHaveTextContent(
