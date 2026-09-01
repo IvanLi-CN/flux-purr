@@ -620,12 +620,12 @@ impl CandidateProfile {
             _ => return None,
         };
         let mut profile = Self::baseline(power_class);
-        for index in 0..TARGET_COUNT {
+        for (index, target_c) in PHYSICAL_TARGETS_C.iter().copied().enumerate() {
             let start = 1 + index * CANDIDATE_POINT_CANONICAL_BYTES;
             let mut point_bytes = [0u8; CANDIDATE_POINT_CANONICAL_BYTES];
             point_bytes.copy_from_slice(&bytes[start..start + CANDIDATE_POINT_CANONICAL_BYTES]);
             let point = CandidatePoint::from_canonical_bytes(&point_bytes);
-            if point.target_c != PHYSICAL_TARGETS_C[index] {
+            if point.target_c != target_c {
                 return None;
             }
             profile.points[index] = point;
@@ -1723,8 +1723,10 @@ mod tests {
     #[test]
     fn dynamic_settle_window_covers_transport_delay_without_relaxing_confirmation() {
         assert_eq!(MAX_DYNAMIC_SETTLE_MS, 10_000);
-        assert!(MAX_DYNAMIC_SETTLE_MS < HOLD_CONFIRM_SECONDS * 1_000);
-        assert!(HOLD_CONFIRM_ENTRY_CENTI < MAX_HOLD_PEAK_TO_PEAK_CENTI);
+        let dynamic_settle_ms = core::hint::black_box(MAX_DYNAMIC_SETTLE_MS);
+        let hold_confirm_entry_centi = core::hint::black_box(HOLD_CONFIRM_ENTRY_CENTI);
+        assert!(dynamic_settle_ms < HOLD_CONFIRM_SECONDS * 1_000);
+        assert!(hold_confirm_entry_centi < MAX_HOLD_PEAK_TO_PEAK_CENTI);
     }
 
     #[test]
