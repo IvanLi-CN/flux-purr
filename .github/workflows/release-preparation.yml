@@ -117,34 +117,50 @@ jobs:
           fi
           python3 .github/scripts/release_preparation.py "${args[@]}"
 
+      - name: Sign prepared VERSION commit
+        if: steps.prepare.outputs.prepared == 'created'
+        env:
+          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${RELEASE_GPG_PRIVATE_KEY}"
+          export GNUPGHOME="${RUNNER_TEMP}/release-gpg"
+          mkdir -p "${GNUPGHOME}"
+          chmod 700 "${GNUPGHOME}"
+          printf '%s' "${RELEASE_GPG_PRIVATE_KEY}" | gpg --batch --import
+          signing_key="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')"
+          signing_uid="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "uid" { print $10; exit }')"
+          signing_email="$(printf '%s' "${signing_uid}" | sed -n 's/.*<\([^>]*\)>.*/\1/p')"
+          signing_name="$(printf '%s' "${signing_uid}" | sed 's/ <.*//')"
+          test -n "${signing_key}"
+          test -n "${signing_email}"
+          test -n "${signing_name}"
+          gpg_wrapper="${RUNNER_TEMP}/release-gpg-wrapper"
+          cat > "${gpg_wrapper}" <<'EOF'
+          #!/usr/bin/env bash
+          exec gpg --batch --yes --pinentry-mode loopback --passphrase "${RELEASE_GPG_PASSPHRASE}" "$@"
+          EOF
+          chmod 700 "${gpg_wrapper}"
+          source_root="${RUNNER_TEMP}/release-source"
+          git -C "${source_root}" config user.name "${signing_name}"
+          git -C "${source_root}" config user.email "${signing_email}"
+          git -C "${source_root}" config user.signingkey "${signing_key}"
+          git -C "${source_root}" config gpg.program "${gpg_wrapper}"
+          git -C "${source_root}" commit --amend --no-edit -S --reset-author
+          git -C "${source_root}" verify-commit HEAD
+
       - name: Push prepared VERSION commit to the existing pull request
         if: steps.prepare.outputs.prepared == 'created'
-        id: push
         env:
-          RELEASE_SHA: ${{ steps.prepare.outputs.release_sha }}
           SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         shell: bash
         run: |
           set -euo pipefail
           test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${SOURCE_SHA}"
-          source_root="${RUNNER_TEMP}/release-source"
-          payload_path="${RUNNER_TEMP}/prepared-version.json"
-          response_path="${RUNNER_TEMP}/prepared-version-response.json"
-          version_path="${RUNNER_TEMP}/VERSION"
-          git -C "${source_root}" show "${RELEASE_SHA}:VERSION" > "${version_path}"
-          version_content="$(base64 < "${version_path}" | tr -d '\n')"
-          commit_message="$(git -C "${source_root}" show -s --format=%B "${RELEASE_SHA}")"
-          version_blob="$(git -C "${source_root}" rev-parse "${SOURCE_SHA}:VERSION")"
-          jq -n \
-            --arg message "${commit_message}" \
-            --arg content "${version_content}" \
-            --arg branch "${HEAD_REF}" \
-            --arg sha "${version_blob}" \
-            '{message: $message, content: $content, branch: $branch, sha: $sha}' > "${payload_path}"
-          gh api --method PUT "repos/${GITHUB_REPOSITORY}/contents/VERSION" \
-            --input "${payload_path}" > "${response_path}"
-          prepared_sha="$(jq -r '.commit.sha // empty' "${response_path}")"
-          test -n "${prepared_sha}"
+          prepared_sha="$(git -C "${RUNNER_TEMP}/release-source" rev-parse HEAD)"
+          test "$(git -C "${RUNNER_TEMP}/release-source" show -s --format=%P "${prepared_sha}")" = "${SOURCE_SHA}"
+          git -C "${RUNNER_TEMP}/release-source" push origin "${prepared_sha}:refs/heads/${HEAD_REF}"
           test "$(gh api "repos/${GITHUB_REPOSITORY}/commits/${prepared_sha}" --jq '.commit.verification.verified')" = true
-          echo "release_sha=${prepared_sha}" >> "${GITHUB_OUTPUT}"
