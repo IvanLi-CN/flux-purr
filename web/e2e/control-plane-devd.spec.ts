@@ -1003,7 +1003,7 @@ test.describe('control plane live devd bridge', () => {
       page.getByText(
         'Authorized serial port /dev/cu.usbmodem21231401 is missing. Observed alternate Espressif serial ports: /dev/cu.usbmodem212101, /dev/cu.usbmodem212201.'
       )
-    ).toHaveCount(2)
+    ).toHaveCount(1)
   })
 
   function wifiRequests() {
