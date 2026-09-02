@@ -95,15 +95,17 @@ const meta = {
   decorators: [
     (Story) => (
       <div
+        data-visual-evidence-surface
         style={{
           width: 'min(100vw - 2rem, 72rem)',
           boxSizing: 'border-box',
           padding: '24px',
-          borderRadius: '12px',
-          background: '#556274',
+          background: '#edf2f6',
         }}
       >
-        <Story />
+        <div data-visual-evidence-target>
+          <Story />
+        </div>
       </div>
     ),
   ],
