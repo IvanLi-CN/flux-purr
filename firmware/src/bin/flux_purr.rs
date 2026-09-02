@@ -14241,6 +14241,12 @@ async fn main(_spawner: Spawner) {
         if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
             needs_redraw = true;
         }
+        // Settle a finished one-shot before cadence requests decide whether to replay it.
+        let buzzer_tick = buzzer.tick(elapsed_ms);
+        if let Some(decision) = buzzer_tick.deferred_start {
+            log_buzzer_decision(decision);
+        }
+
         if maybe_play_protection_alarm(
             is_overtemp_fault(current_rtd_fault),
             &mut next_protection_alarm_ms,
@@ -14260,15 +14266,11 @@ async fn main(_spawner: Spawner) {
             info!("fault attention reminder -> chirp");
         }
 
-        let buzzer_tick = buzzer.tick(elapsed_ms);
-        if let Some(decision) = buzzer_tick.deferred_start {
-            log_buzzer_decision(decision);
-        }
         apply_buzzer_output(
             &mut mcpwm.timer2,
             &mut buzzer_pwm,
             &pwm_clock_cfg,
-            buzzer_tick.output,
+            buzzer.output(),
             &mut buzzer_output_applied,
             &mut buzzer_timer_frequency_hz,
         );
@@ -22365,6 +22367,24 @@ mod tests {
         assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
         assert_eq!(next_protection_alarm_ms, Some(11_000));
         assert_eq!(buzzer.output().frequency_hz, Some(2_300));
+    }
+
+    #[test]
+    fn protection_alarm_replays_after_a_late_tick() {
+        let mut next_protection_alarm_ms = Some(1_000);
+        let mut buzzer = BuzzerArbiter::new();
+        let _ = buzzer.activate_protection(BuzzerCueSource::ThermalProtection, 0);
+
+        assert_eq!(buzzer.tick(1_000).output.frequency_hz, None);
+        assert!(maybe_play_protection_alarm(
+            true,
+            &mut next_protection_alarm_ms,
+            &mut buzzer,
+            1_000,
+        ));
+        assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
+        assert_eq!(buzzer.output().frequency_hz, Some(2_300));
+        assert_eq!(next_protection_alarm_ms, Some(2_000));
     }
 
     #[test]
