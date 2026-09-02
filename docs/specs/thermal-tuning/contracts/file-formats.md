@@ -121,7 +121,7 @@ warmup, approach and hold-confirm phases when present. `cooldown_wait` remains i
 trace and candidate audit, but does not occupy the primary response chart. The renderer must
 never concatenate trial-local clocks or draw a segment across a candidate boundary.
 
-Every candidate must independently satisfy the `target-5°C` cooldown precondition before its
+Every candidate must independently satisfy the `target-15°C` cooldown precondition before its
 `candidate_trial` start boundary and `scout` phase. Its settle score starts at that boundary;
 inter-candidate cooldown samples remain in the target trace but are outside the candidate sample
 range. A report must not imply that a candidate which starts in `hold_confirm` was independently

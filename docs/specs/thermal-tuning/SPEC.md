@@ -159,7 +159,7 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   identity、trial 编号、阶段、时间、温度、VIN、PPS 合同、加热输出和测量有效性；每个
   candidate trial 必须携带完整固定点参数、起止 sequence/时间和样本范围；每个 decision
   必须携带完整 score vector、每个 gate、freeze、interval prune、disposition 和失败原因。
-  每轮候选的 `candidate_trial` 起点只能在本轮 `cooldown_wait` 满足 `target-5°C` 预条件、
+  每轮候选的 `candidate_trial` 起点只能在本轮 `cooldown_wait` 满足 `target-15°C` 预条件、
   即将进入 `scout` 后记录；此前的冷却 sample 仍是完整 target trace 的安全证据，但不属于
   该候选的评分样本范围，也不得计入它的 dynamic settle。
   每个候选都必须从自己的起点完成至少 5 秒 `scout` 预热，并在该候选的 `scout` 样本中观察到
@@ -243,7 +243,7 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
 
 每个 target 的每一个候选 trial 都独立经过 `cooldown_wait`、`scout`、`retune` 和
 `hold_confirm`，然后才可参加 `accepted|failed|skipped` 的 target 决策。完成一个候选后，
-下一个候选必须重新回到 `cooldown_wait`，直到温度不高于 `target-5°C` 才开始它自己的
+下一个候选必须重新回到 `cooldown_wait`，直到温度不高于 `target-15°C` 才开始它自己的
 `scout`、warmup、approach 与 dynamic settle；不得从上一候选的 hold 或 retune 直接继续。
 `scout` 从该候选的 `candidate_trial` 起点单独计时，至少持续 5 秒；它不得复用 target 或前一
 候选已经消耗的 scout 时间。

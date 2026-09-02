@@ -27,6 +27,10 @@ pub const THERMAL_TUNING_TRACE_CAPACITY: usize = 1_024;
 /// sustain without overrunning its PSRAM-backed ring.
 pub const THERMAL_TUNING_TRACE_SAMPLE_INTERVAL_MS: u32 = 500;
 pub const THERMAL_TUNING_RUN_ID_MAX_LEN: usize = 32;
+/// Each candidate must demonstrate a visible, independent warmup response.
+/// Cooling only five degrees below its target made later candidates look like
+/// they inherited the preceding hold, even though they entered `scout` again.
+pub const CANDIDATE_WARMUP_ENTRY_DELTA_CENTI: i16 = 1_500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaintenanceRunOwner {
@@ -524,7 +528,8 @@ impl ThermalTuningRuntime {
         }
         match phase {
             Phase::CooldownWait
-                if sample.temperature_centi_c <= target_centi.saturating_sub(500) =>
+                if sample.temperature_centi_c
+                    <= target_centi.saturating_sub(CANDIDATE_WARMUP_ENTRY_DELTA_CENTI) =>
             {
                 self.transition_phase(sample.elapsed_ms, Phase::Scout, 2)?;
                 if !self.candidate_trial_active {
@@ -1592,10 +1597,10 @@ mod tests {
             .tick(sample_with_output(67_000, 6_000, 3_250, 0))
             .unwrap();
         runtime
-            .tick(sample_with_output(68_000, 5_500, 3_250, 0))
+            .tick(sample_with_output(68_000, 4_500, 3_250, 0))
             .unwrap();
         runtime
-            .tick(sample_with_output(73_000, 5_500, 3_250, 1_000))
+            .tick(sample_with_output(73_000, 4_500, 3_250, 1_000))
             .unwrap();
         runtime
             .tick(sample_with_output(74_000, 5_900, 3_250, 100))
@@ -1604,10 +1609,10 @@ mod tests {
             .tick(sample_with_output(134_000, 6_000, 3_250, 0))
             .unwrap();
         runtime
-            .tick(sample_with_output(135_000, 5_500, 3_250, 0))
+            .tick(sample_with_output(135_000, 4_500, 3_250, 0))
             .unwrap();
         runtime
-            .tick(sample_with_output(140_000, 5_500, 3_250, 1_000))
+            .tick(sample_with_output(140_000, 4_500, 3_250, 1_000))
             .unwrap();
         runtime
             .tick(sample_with_output(141_000, 5_900, 3_250, 100))
@@ -1658,19 +1663,31 @@ mod tests {
         runtime
             .tick(sample_with_output(68_000, 5_500, 3_250, 0))
             .unwrap();
+        assert_eq!(runtime.core().phase(), Phase::CooldownWait);
+        assert!(!runtime.heater_output_permitted());
+
+        runtime
+            .tick(sample_with_output(69_000, 4_600, 3_250, 0))
+            .unwrap();
+        assert_eq!(runtime.core().phase(), Phase::CooldownWait);
+        assert!(!runtime.heater_output_permitted());
+
+        runtime
+            .tick(sample_with_output(70_000, 4_500, 3_250, 0))
+            .unwrap();
         assert_eq!(runtime.core().phase(), Phase::Scout);
         assert!(runtime.heater_output_permitted());
         assert!(runtime.candidate_trial_active);
-        assert_eq!(runtime.candidate_trial_started_ms, 68_000);
+        assert_eq!(runtime.candidate_trial_started_ms, 70_000);
         assert!(!runtime.warmup_complete);
 
         runtime
-            .tick(sample_with_output(72_999, 5_500, 3_250, 0))
+            .tick(sample_with_output(74_999, 4_500, 3_250, 0))
             .unwrap();
         assert_eq!(runtime.core().phase(), Phase::Scout);
         assert!(!runtime.warmup_complete);
         runtime
-            .tick(sample_with_output(73_000, 5_500, 3_250, 360))
+            .tick(sample_with_output(75_000, 4_500, 3_250, 360))
             .unwrap();
         assert_eq!(runtime.core().phase(), Phase::Retune);
         assert!(runtime.warmup_complete);
