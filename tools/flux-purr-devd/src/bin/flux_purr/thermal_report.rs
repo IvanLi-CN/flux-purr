@@ -2910,7 +2910,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_report_template_preserves_full_target_trajectory_and_adopted_round() {
+    fn firmware_report_template_starts_response_at_heating_and_defaults_adopted_round() {
         assert!(REPORT_TEMPLATE.contains("samplesForCharts()"));
         assert!(REPORT_TEMPLATE.contains("adopted=rounds.find(round=>round.selected)"));
         assert!(
@@ -2918,9 +2918,12 @@ mod tests {
         );
         assert!(
             REPORT_TEMPLATE
-                .contains("function samplesForCharts(){{return samplesForRun(currentRun());}}")
+                .contains("const firstHeating=samples.findIndex(sample=>sample.firmwarePhase!=='cooldown_wait'&&sample.phase!=='cooldown_wait');")
         );
-        assert!(REPORT_TEMPLATE.contains("完整设备轨迹：包含冷却、预热、逼近与确认"));
+        assert!(REPORT_TEMPLATE.contains("const start=samples[firstHeating].t;"));
+        assert!(REPORT_TEMPLATE.contains("return samples.slice(firstHeating).map("));
+        assert!(REPORT_TEMPLATE.contains("t:sample.t-start"));
+        assert!(REPORT_TEMPLATE.contains("加热响应：从首次加热阶段开始"));
         assert!(REPORT_TEMPLATE.contains("trialBoundaryBefore"));
         assert!(REPORT_TEMPLATE.contains("Y0=options.yMin??"));
         assert!(REPORT_TEMPLATE.contains("PPS 合同电流"));

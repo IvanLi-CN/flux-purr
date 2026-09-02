@@ -161,9 +161,10 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   删除来伪造完整性。
 - 报告的目标卡、验收指标和候选详情必须引用同一个 candidate trial。存在 adopted trial
   时，候选详情默认显示该 trial，并明确显示其试验编号和 adopted 状态；其余 trial 必须
-  保留为可切换的独立视图。每个目标的主温度响应图必须使用该 target 的完整设备轨迹，包含
-  `cooldown_wait`、`scout`、`retune` 和 `hold_confirm` 的已存档 sample；不得因 adopted trial 从目标附近开始而隐藏之前的冷却、预热或逼近过程。
-  该完整轨迹必须按设备全局 `elapsedMs` 严格递增排序，且在 trial 边界断开折线，禁止拼接每个 trial 从零开始的本地时间轴。
+  保留为可切换的独立视图。每个目标的主温度响应图必须使用该 target 已存档 sample 中从第一条
+  非 `cooldown_wait` 事件开始的设备轨迹，包含 `scout`、`retune` 和 `hold_confirm`；它不得因 adopted trial 从目标附近开始而隐藏预热或逼近过程。
+  主图的时间零点是这一首次加热 sample；`cooldown_wait` 作为安全预条件必须保留在 trace 和候选审查中，但不得占用主响应图。
+  加热轨迹必须按设备全局 `elapsedMs` 严格递增排序，且在 trial 边界断开折线，禁止拼接每个 trial 从零开始的本地时间轴。
 - 报告绘图必须保持物理量纲。温度、加热输出、VIN/PPS 合同电压和 PPS 合同电流不得
   通过隐藏倍率共用同一数值轴；不同量纲使用独立图或明确标注的独立轴。`heaterOutputPermille`
   显示为 `0–100%`，其显式坐标范围不得扩展到负值。PPS 合同电流必须标注为合同安全

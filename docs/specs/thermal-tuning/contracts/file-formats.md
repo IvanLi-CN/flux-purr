@@ -103,12 +103,14 @@ trial. When an adopted trial exists, it is the default candidate detail and the 
 its trial number and adopted state. Other executed trials remain individually selectable so a
 rejected candidate cannot be mistaken for the adopted result.
 
-The primary target response chart is a complete device trajectory, not a selected-candidate
-chart. It orders every archived sample for that target by the Device-global `elapsedMs`,
-includes the cooldown, warmup, approach and hold-confirm phases when present, and breaks every
-line at a `trialIndex` transition. Selecting an adopted candidate must not hide earlier
-cooldown, warmup or approach samples. It must never concatenate trial-local clocks or draw a
-segment across a candidate boundary.
+The primary target response chart is a heating-response trajectory, not a selected-candidate
+chart. It orders archived samples for that target by the Device-global `elapsedMs`, starts at
+the first sample outside `cooldown_wait`, includes warmup, approach and hold-confirm phases
+when present, and breaks every line at a `trialIndex` transition. Its displayed time origin is
+that first heating sample. Selecting an adopted candidate must not hide earlier warmup or
+approach samples. `cooldown_wait` remains in the archived trace and candidate audit, but does
+not occupy the primary response chart. The renderer must never concatenate trial-local clocks
+or draw a segment across a candidate boundary.
 
 Charts preserve physical dimensions: temperature, heater output, voltage and current use
 separate plots or explicitly labelled independent axes. A renderer must not use a hidden
