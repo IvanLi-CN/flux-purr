@@ -86,4 +86,4 @@ New slug-only topics use `-` in the legacy `ID` column below; their directory sl
 | jt8r2 | Flux Purr ADC 校准控制面 | 已完成 | `jt8r2-adc-calibration-control-plane/SPEC.md` | 2026-06-02 | RTD/VIN ADC calibration with persisted draft/active packages |
 | web-firmware-install-recovery | Flux Purr Web 固件安装与恢复 | 待实现 | `web-firmware-install-recovery/SPEC.md` | 2026-08-15 | Unified devd and Browser Web Serial firmware workbench |
 | - | Flux Purr 单一产品版本源 | 已实现 | `version-source/SPEC.md` | 2026-08-29 | Root `VERSION`, PR-local preparation, one-product-merge/one-release sequencing, and the release-completion gate |
-| - | Flux Purr 蜂鸣器单输出 Cue 仲裁 | 待实现 | `buzzer-cue-arbitration/SPEC.md` | 2026-09-02 | Single-output priority, safety suppression, and coalesced feedback contract; [ADR 0006](../adr/0006-single-output-buzzer-cue-arbitration.md) |
+| - | Flux Purr 蜂鸣器单输出 Cue 仲裁 | 已完成 | `buzzer-cue-arbitration/SPEC.md` | 2026-09-02 | Single-output priority, safety suppression, coalesced feedback, and host-side verification; [ADR 0006](../adr/0006-single-output-buzzer-cue-arbitration.md) |

@@ -105,11 +105,12 @@
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
   - fixed one-shot cues cover `ui_input / heater_on / heater_off / active_cooling_on / active_cooling_off / heater_reject`
-  - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions use the generic `ui_input` prompt cue
+  - accepted menu navigation, child-page enter/exit, preset edits, and other non-toggle frontpanel actions submit the generic `ui_input` feedback cue to the single-output arbiter
   - buzzer attention has only two owner-facing states: active thermal runaway and thermal-runaway acknowledgement pending
   - active thermal runaway (`temp >= 420°C`) replays the protection cue every `1s`; after temperature returns below `420°C`, an unacknowledged alert replays the reminder cue every `10s`
   - front-panel input or CLI/app runtime acknowledgement clears pending attention and the forced-fan latch, but cannot silence or clear active absolute overtemperature protection
-  - retriggering the same cue always restarts logical playback from the first note; when that note uses the active carrier frequency, GPIO48 retains its MCPWM phase across duty-zero silence gaps. A different next audible frequency must reconfigure the timer so a previous frequency stage cannot continue
+  - the arbiter selects `thermal protection > thermal attention reminder > feedback`; feedback never interrupts an active cue, repeats of pending `ui_input` coalesce, and the latest specialized feedback replaces older pending feedback
+  - each cue selected for playback starts from its first note. GPIO48 retains its MCPWM phase across duty-zero silence gaps when the selected next tone uses the active carrier frequency; a different next audible frequency must reconfigure the timer so a previous frequency stage cannot continue
 - PD policy:
   - default build requests `20 V` from `CH224Q`
   - optional `pd-request-12v` / `pd-request-28v` features switch the boot request to `12 V` / `28 V`
