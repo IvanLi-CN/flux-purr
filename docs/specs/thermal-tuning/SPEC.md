@@ -100,6 +100,8 @@ permille。既有 heater PID 可以继续使用浮点实现；它必须把规范
 固件拥有 live run。CLI、浏览器或 `devd` 断连不取消 run；固件继续执行安全控制、
 调度和终态收口。设备复位、掉电或启动失败则立即 disarm，写入
 `interrupted_reset` 恢复摘要，不续跑，也不保留可 preview/save 的候选。
+启动时已处于按下电平的前面板输入必须先被同步为既有状态；其释放不得合成任何用户
+手势，更不得重新 arm heater。
 
 CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生成报告；Web
 启动的 run 由浏览器的持久记录器记录并生成同构报告。两者没有通信路径。`devd`

@@ -13993,6 +13993,8 @@ async fn main(_spawner: Spawner) {
         FrontPanelKeyMap::default(),
         FrontPanelInputTimings::default(),
     );
+    let initial_raw_state = inputs.sample();
+    controller.prime_raw_state(initial_raw_state, 0);
     let mut ui_state = FrontPanelUiState::new(runtime_mode);
     ui_state.eeprom_data_incompatible = eeprom_data_incompatible;
     ui_state.pd_contract_mv =
@@ -14091,7 +14093,7 @@ async fn main(_spawner: Spawner) {
     let mut cooling_disabled_lock_armed = true;
     let mut fan_policy_state = FanPolicyState::Disabled;
     let mut last_fan_command: Option<FanHardwareCommand> = None;
-    let mut last_raw_state = FrontPanelRawState::default();
+    let mut last_raw_state = initial_raw_state;
     ui_state.set_raw_state(last_raw_state);
     let mut initial_fan_decision = fan_policy_decision(
         latest_display_temp_i16,
