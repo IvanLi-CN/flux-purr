@@ -128,7 +128,7 @@ use flux_purr_firmware::control_plane::{
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::frontpanel::{
     FRONTPANEL_PRESET_COUNT, FRONTPANEL_TARGET_TEMP_MAX_C, FRONTPANEL_TARGET_TEMP_MIN_C,
-    FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRuntimeMode,
+    FanDisplayState, FrontPanelKeyMap, FrontPanelRawState, FrontPanelRoute, FrontPanelRuntimeMode,
     FrontPanelUiState, HeaterLockReason,
 };
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
@@ -195,8 +195,7 @@ use flux_purr_firmware::{
     display::{DISPLAY_PANEL_CONFIG, DisplayCanvas, SceneId, render_scene},
     frontpanel::{
         FRONTPANEL_DEBOUNCE_MS, FRONTPANEL_DOUBLE_CLICK_MS, FrontPanelInputController,
-        FrontPanelInputTimings, FrontPanelRoute, KeyGesture, RawFrontPanelKey,
-        render::render_frontpanel_ui,
+        FrontPanelInputTimings, KeyGesture, RawFrontPanelKey, render::render_frontpanel_ui,
     },
 };
 #[cfg(target_arch = "xtensa")]
@@ -2706,15 +2705,24 @@ fn overtemp_forced_fan_state(
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
+    observation.is_some_and(|observation| observation.status.pd_active)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 fn next_heater_lock_reason(
     heater_fault: Option<HeaterFaultReason>,
     cooling_disabled_lock_latched: bool,
     thermal_model_heater_allowed: bool,
+    pd_contract_ready: bool,
 ) -> Option<HeaterLockReason> {
     if heater_fault == Some(HeaterFaultReason::OverTemp) {
         Some(HeaterLockReason::HardOvertemp)
     } else if cooling_disabled_lock_latched {
         Some(HeaterLockReason::CoolingDisabledOvertemp)
+    } else if !pd_contract_ready {
+        Some(HeaterLockReason::PdContractUnavailable)
     } else if !thermal_model_heater_allowed {
         Some(HeaterLockReason::ThermalModelMissingForSourceClass)
     } else {
@@ -4165,15 +4173,17 @@ fn reconcile_runtime_heater_enabled(
     cooling_disabled_lock_latched: bool,
     heater_fault_latched: bool,
     thermal_model_heater_allowed: bool,
+    pd_contract_ready: bool,
 ) -> bool {
     let calibration_runtime_state = calibration_runtime_state.borrow();
     if calibration_runtime_state.mode == CalibrationMode::Off {
-        return current_heater_enabled && thermal_model_heater_allowed;
+        return current_heater_enabled && thermal_model_heater_allowed && pd_contract_ready;
     }
 
     let calibration_heater_allowed = !is_sensor_fault(current_rtd_fault)
         && !cooling_disabled_lock_latched
-        && !heater_fault_latched;
+        && !heater_fault_latched
+        && pd_contract_ready;
     if calibration_runtime_state.mode == CalibrationMode::ThermalPlant
         && calibration_runtime_state.job.status != CalibrationJobStatus::Running
     {
@@ -5795,6 +5805,7 @@ fn fusb302b_adjustable_power_capabilities(
 enum PdPort {
     Ch224q(Address),
     Fusb302b(Fusb302bRuntime),
+    Unavailable,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -5803,6 +5814,7 @@ impl PdPort {
         match self {
             Self::Ch224q(_) => ControllerKind::Ch224q,
             Self::Fusb302b(_) => ControllerKind::Fusb302b,
+            Self::Unavailable => ControllerKind::Unknown,
         }
     }
 }
@@ -12205,6 +12217,7 @@ async fn request_pd_fixed_voltage(
                 .request_fixed_voltage(i2c, request.millivolts(), Instant::now().as_millis())
                 .await
         }
+        PdPort::Unavailable => false,
     }
 }
 
@@ -12236,6 +12249,7 @@ async fn request_pd_adjustable_voltage(
                 PdContractRequestState::Failed
             }
         }
+        PdPort::Unavailable => PdContractRequestState::Failed,
     }
 }
 
@@ -12266,6 +12280,7 @@ async fn read_pd_status(
                 contract,
             })
         }
+        PdPort::Unavailable => None,
     }
 }
 
@@ -12280,6 +12295,7 @@ fn read_pd_power_capabilities(
         PdPort::Fusb302b(runtime) => runtime
             .source_capabilities()
             .and_then(fusb302b_adjustable_power_capabilities),
+        PdPort::Unavailable => None,
     }
 }
 
@@ -12315,6 +12331,7 @@ async fn await_pd_ready(
             }
             None
         }
+        PdPort::Unavailable => None,
     }
 }
 
@@ -12738,114 +12755,36 @@ async fn main(_spawner: Spawner) {
                     "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
                     device_id,
                 );
-                #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
-                run_usb_buzzer_recovery_control_loop(
-                    &mut usb_serial,
-                    &mut usb_rx_line,
-                    usb_tx_buf,
-                    &usb_boot_memory_config,
-                    StatusLightState::HeaterInterlocked,
-                    &mut mcpwm.timer2,
-                    &mut buzzer_pwm,
-                    &pwm_clock_cfg,
-                )
-                .await;
-
-                #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
+                PdPort::Unavailable
+            } else {
                 #[cfg(feature = "web_serial")]
-                run_usb_recovery_control_loop(
-                    &mut usb_serial,
-                    &mut usb_rx_line,
-                    usb_tx_buf,
-                    &usb_boot_memory_config,
-                    StatusLightState::HeaterInterlocked,
-                    UsbRecoveryPhase::BeforePersistentState,
-                )
-                .await;
-
-                #[cfg(not(feature = "web_serial"))]
-                panic!("FUSB302B PHY initialization failed");
+                let _ =
+                    usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
+                info!(
+                    "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
+                    device_id,
+                    DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
+                    MAX_HEATER_CONTRACT_MA,
+                );
+                PdPort::Fusb302b(runtime)
             }
-            #[cfg(feature = "web_serial")]
-            let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_phy_init_complete\n");
-            info!(
-                "fusb302b selected device_id=0x{=u8:02x} policy=pps target_mv={=u16} max_current_ma={=u16}",
-                device_id,
-                DEFAULT_PD_VOLTAGE_REQUEST.millivolts(),
-                MAX_HEATER_CONTRACT_MA,
-            );
-            PdPort::Fusb302b(runtime)
         }
         DetectedPdController::Ch224q => {
             #[cfg(feature = "web_serial")]
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_ch224q_detected\n");
-            let Some(address) =
-                request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await
-            else {
-                warn!(
-                    "CH224Q fixed-PD request failed; entering recovery before outputs initialize"
-                );
-                #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
-                run_usb_buzzer_recovery_control_loop(
-                    &mut usb_serial,
-                    &mut usb_rx_line,
-                    usb_tx_buf,
-                    &usb_boot_memory_config,
-                    StatusLightState::HeaterInterlocked,
-                    &mut mcpwm.timer2,
-                    &mut buzzer_pwm,
-                    &pwm_clock_cfg,
-                )
-                .await;
-
-                #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
-                #[cfg(feature = "web_serial")]
-                run_usb_recovery_control_loop(
-                    &mut usb_serial,
-                    &mut usb_rx_line,
-                    usb_tx_buf,
-                    &usb_boot_memory_config,
-                    StatusLightState::HeaterInterlocked,
-                    UsbRecoveryPhase::BeforePersistentState,
-                )
-                .await;
-
-                #[cfg(not(feature = "web_serial"))]
-                panic!("CH224Q fixed-PD request failed");
-            };
-            PdPort::Ch224q(address)
+            match request_ch224q_voltage(&mut pd_i2c, DEFAULT_PD_VOLTAGE_REQUEST).await {
+                Some(address) => PdPort::Ch224q(address),
+                None => {
+                    warn!("CH224Q fixed-PD request failed; continuing with heater interlocked");
+                    PdPort::Unavailable
+                }
+            }
         }
         DetectedPdController::Unknown => {
             #[cfg(feature = "web_serial")]
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
             warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
-            #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
-            run_usb_buzzer_recovery_control_loop(
-                &mut usb_serial,
-                &mut usb_rx_line,
-                usb_tx_buf,
-                &usb_boot_memory_config,
-                StatusLightState::HeaterInterlocked,
-                &mut mcpwm.timer2,
-                &mut buzzer_pwm,
-                &pwm_clock_cfg,
-            )
-            .await;
-
-            #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
-            #[cfg(feature = "web_serial")]
-            run_usb_recovery_control_loop(
-                &mut usb_serial,
-                &mut usb_rx_line,
-                usb_tx_buf,
-                &usb_boot_memory_config,
-                StatusLightState::HeaterInterlocked,
-                UsbRecoveryPhase::BeforePersistentState,
-            )
-            .await;
-
-            #[cfg(not(feature = "web_serial"))]
-            panic!("PD controller identity is ambiguous or unreadable");
+            PdPort::Unavailable
         }
     };
     let mut flash_storage = FlashStorage::new();
@@ -12855,51 +12794,14 @@ async fn main(_spawner: Spawner) {
         set_status_light_state(StatusLightState::Booting);
     })
     .await;
-    let fusb302b_contract_pending =
-        initial_pd_observation.is_none() && matches!(&pd_port, PdPort::Fusb302b(_));
-    if initial_pd_observation.is_none() && !fusb302b_contract_pending {
+    let mut pd_contract_ready = startup_pd_contract_ready(initial_pd_observation);
+    if !pd_contract_ready {
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
-        warn!("PD contract was not ready before outputs initialize; holding heater interlocked");
-        #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
-        run_usb_buzzer_recovery_control_loop(
-            &mut usb_serial,
-            &mut usb_rx_line,
-            usb_tx_buf,
-            &usb_boot_memory_config,
-            StatusLightState::HeaterInterlocked,
-            &mut mcpwm.timer2,
-            &mut buzzer_pwm,
-            &pwm_clock_cfg,
-        )
-        .await;
-
-        #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
-        #[cfg(feature = "web_serial")]
-        run_usb_recovery_control_loop(
-            &mut usb_serial,
-            &mut usb_rx_line,
-            usb_tx_buf,
-            &usb_boot_memory_config,
-            StatusLightState::HeaterInterlocked,
-            UsbRecoveryPhase::BeforePersistentState,
-        )
-        .await;
-
-        #[cfg(not(feature = "web_serial"))]
-        panic!("PD contract was not ready");
-    }
-    if fusb302b_contract_pending {
-        #[cfg(feature = "web_serial")]
-        let _ = usb_write_bytes_bounded(
-            &mut usb_serial,
-            b"boot_stage=pd_contract_pending_interlocked\n",
-        );
         warn!(
-            "fusb302b PD contract is pending; continuing with heater interlocked while runtime polling retries"
+            "PD contract was not ready before outputs initialize; continuing with heater interlocked"
         );
-    }
-    if !fusb302b_contract_pending {
+    } else {
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_ready\n");
     }
@@ -13369,6 +13271,7 @@ async fn main(_spawner: Spawner) {
                 calibration_runtime_state,
                 manual_pps_state,
             ),
+            pd_contract_ready,
         ),
         0,
     );
@@ -13414,8 +13317,13 @@ async fn main(_spawner: Spawner) {
         booting: initial_status_light_elapsed_ms < STATUS_LIGHT_BOOT_DURATION_MS,
         thermal_runaway: is_overtemp_fault(current_rtd_fault),
         sensor_fault: is_sensor_fault(current_rtd_fault),
-        heater_interlocked: ui_state.heater_lock_reason
-            == Some(HeaterLockReason::ThermalModelMissingForSourceClass),
+        heater_interlocked: matches!(
+            ui_state.heater_lock_reason,
+            Some(
+                HeaterLockReason::PdContractUnavailable
+                    | HeaterLockReason::ThermalModelMissingForSourceClass
+            )
+        ),
         heater_enabled: ui_state.heater_enabled,
         fan_enabled: fan_command.enabled,
         ..StatusLightInputs::default()
@@ -14154,6 +14062,16 @@ async fn main(_spawner: Spawner) {
                 last_pd_status_log_key = pd_status_log_key(current_pd_observation);
             }
             last_pd_observation = current_pd_observation;
+            let current_pd_contract_ready = startup_pd_contract_ready(current_pd_observation);
+            if pd_contract_ready != current_pd_contract_ready {
+                pd_contract_ready = current_pd_contract_ready;
+                needs_redraw = true;
+                if pd_contract_ready {
+                    info!("PD contract became ready; released startup heater interlock");
+                } else {
+                    info!("PD contract became unavailable; heater interlocked");
+                }
+            }
             if pd_port.controller_kind() == ControllerKind::Fusb302b
                 && matches!(
                     heater_power_backend,
@@ -14251,11 +14169,12 @@ async fn main(_spawner: Spawner) {
                 calibration_live_rtd_temp_c,
                 latest_temp_c,
             );
-            let force_thermal_plant_output_off = thermal_plant_output_must_be_off(
-                calibration_runtime_state,
-                thermal_plant_was_running,
-                calibration_output_temp_c,
-            );
+            let force_thermal_plant_output_off = !pd_contract_ready
+                || thermal_plant_output_must_be_off(
+                    calibration_runtime_state,
+                    thermal_plant_was_running,
+                    calibration_output_temp_c,
+                );
             needs_redraw |= disarm_pending_thermal_plant_output(
                 &mut calibration_runtime_state,
                 &mut heater_power_backend,
@@ -14288,6 +14207,7 @@ async fn main(_spawner: Spawner) {
                     calibration_runtime_state,
                     manual_pps_state,
                 ),
+                pd_contract_ready,
             );
             desired_heater_enabled = consume_thermal_plant_completion_disarm(
                 &mut calibration_runtime_state,
@@ -14572,6 +14492,7 @@ async fn main(_spawner: Spawner) {
                     calibration_runtime_state,
                     manual_pps_state,
                 ),
+                pd_contract_ready,
             ),
             elapsed_ms,
         ) {
@@ -14632,8 +14553,13 @@ async fn main(_spawner: Spawner) {
             thermal_runaway_attention_pending: attention_pending_after_fault_clear,
             sensor_fault: is_sensor_fault(current_rtd_fault),
             cooling_disabled_overtemp: cooling_disabled_lock_latched,
-            heater_interlocked: ui_state.heater_lock_reason
-                == Some(HeaterLockReason::ThermalModelMissingForSourceClass),
+            heater_interlocked: matches!(
+                ui_state.heater_lock_reason,
+                Some(
+                    HeaterLockReason::PdContractUnavailable
+                        | HeaterLockReason::ThermalModelMissingForSourceClass
+                )
+            ),
             calibration_active: calibration_runtime_state.mode != CalibrationMode::Off,
             heater_enabled: ui_state.heater_enabled,
             fan_enabled: fan_command.enabled,
@@ -22950,9 +22876,60 @@ mod tests {
             false,
             false,
             true,
+            true,
         );
 
         assert!(desired);
+    }
+
+    #[test]
+    fn pd_unavailable_startup_enters_dashboard_with_heater_locked() {
+        let pd_contract_ready = startup_pd_contract_ready(None);
+        let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+
+        assert_eq!(state.route, FrontPanelRoute::Dashboard);
+        assert!(!pd_contract_ready);
+        assert_eq!(
+            next_heater_lock_reason(None, false, true, pd_contract_ready),
+            Some(HeaterLockReason::PdContractUnavailable)
+        );
+        assert!(!reconcile_runtime_heater_enabled(
+            true,
+            CalibrationRuntimeState::default(),
+            None,
+            false,
+            false,
+            true,
+            pd_contract_ready,
+        ));
+    }
+
+    #[test]
+    fn pd_contract_loss_relocks_an_armed_heater() {
+        let calibration = CalibrationRuntimeState::default();
+
+        assert!(reconcile_runtime_heater_enabled(
+            true,
+            calibration,
+            None,
+            false,
+            false,
+            true,
+            true,
+        ));
+        assert!(!reconcile_runtime_heater_enabled(
+            true,
+            calibration,
+            None,
+            false,
+            false,
+            true,
+            false,
+        ));
+        assert_eq!(
+            next_heater_lock_reason(None, false, true, false),
+            Some(HeaterLockReason::PdContractUnavailable)
+        );
     }
 
     #[test]
@@ -22967,6 +22944,7 @@ mod tests {
             None,
             false,
             false,
+            true,
             true,
         );
 
@@ -22996,6 +22974,7 @@ mod tests {
             None,
             false,
             false,
+            true,
             true,
         ));
     }
@@ -23053,7 +23032,7 @@ mod tests {
             ..CalibrationRuntimeState::default()
         };
         let mut desired_heater_enabled =
-            reconcile_runtime_heater_enabled(true, calibration, None, false, false, true);
+            reconcile_runtime_heater_enabled(true, calibration, None, false, false, true, true);
         desired_heater_enabled =
             consume_thermal_plant_completion_disarm(&mut calibration, desired_heater_enabled);
         assert!(!desired_heater_enabled);
@@ -23063,6 +23042,7 @@ mod tests {
             None,
             false,
             false,
+            true,
             true,
         ));
     }

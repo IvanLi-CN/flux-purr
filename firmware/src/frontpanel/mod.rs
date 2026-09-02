@@ -576,6 +576,7 @@ impl FanDisplayState {
 pub enum HeaterLockReason {
     CoolingDisabledOvertemp,
     HardOvertemp,
+    PdContractUnavailable,
     ThermalModelMissingForSourceClass,
 }
 
@@ -584,6 +585,7 @@ impl HeaterLockReason {
         match self {
             Self::CoolingDisabledOvertemp => "cooling-disabled-overtemp",
             Self::HardOvertemp => "hard-overtemp",
+            Self::PdContractUnavailable => "pd-contract-unavailable",
             Self::ThermalModelMissingForSourceClass => "thermal_model_missing_for_source_class",
         }
     }

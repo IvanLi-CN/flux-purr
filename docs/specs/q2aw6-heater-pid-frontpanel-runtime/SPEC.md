@@ -158,6 +158,7 @@
 ### Core flows
 
 - 启动后先请求 feature-selected 固定 PD 电压（默认 `20V`），随后读取 CH224Q status 与 power data。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
+- PD 控制器未识别、启动合同未就绪或运行中合同丢失时，设备仍必须完成 Front Panel Dashboard 与 runtime-ready；`heater_enabled`、校准加热和 `GPIO47` 必须保持关闭，并以 `pd-contract-unavailable` 报告 heater lock。只有后续观测到 ready contract 才能解除该 lock，不能靠保留的 heater arm 自动绕过。
 - 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端在所选 APDO 的最小到最大电压范围内表达该控制量；`R(T)` 参与 `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)` 的 heater-watt 估算，但不形成电压天花板。只有不具备合格 PPS APDO或关键调压失败时才进入 fixed-PD + `GPIO47` PWM fallback，并按其协商电流合同钳制 duty。
 - Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / active cooling / menu 语义不受 hold-repeat 影响。
 - 用户双击中键后，切换的是“主动降温”策略位，而不是直接强制 fan GPIO。
@@ -169,7 +170,7 @@
 - 当 heater 已 arm 但实时 heater 输出为 `0%` 时，`100<T<=350°C` 的普通加热期风扇脉冲必须关闭；当实时 heater 输出大于 `0%` 时，该区间的最低电压脉冲周期为 `5s`，占空比必须为 cooling-disabled 脉冲的两倍并封顶 `50%`。
 - 当 `active_cooling_enabled=false` 且 `temp > 350°C` 时，heater 必须被强制关断并锁住；用户重新开启风扇策略或手动重新使能 heater 后才允许退出该锁态。
 - 当 `active_cooling_enabled=false` 且 `temp > 360°C` 时，真实风扇输出升级为全速，但 Dashboard fan line 仍保持 `OFF`。
-- PD 状态只做观测：即使 PD 丢失或降档，也不自动清空 `heater_enabled`。但 PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
+- PD ready 是 heater 授权前提：合同不可用时必须撤销 heater arm 并将物理输出归零；较低但 ready 的合同仍可按后端限额降级运行。PPS/AVS 调压写入失败会把 heater 后端降级到固定 PD PWM fallback。
 - 手动 PPS 覆盖激活期间，自动 heater backend 不再写 CH224Q 电压；固定 PD fallback 仍可继续使用 `GPIO47` PWM duty，`pps-mos` 仍可继续由 PID/MOS gate 表达加热输出。
 - 温度达到 `420°C` 时，runtime 进入 `热失控`：立即将 heater 输出归零，并每隔 `1s` 播放一次热失控提示。用户可以通过前面板输入或 runtime/CLI/app 的 `faultAttentionAcknowledged` 确认收到告警；确认后停止待确认锁定与强制风扇状态，但温度仍为 `>=420°C` 时，绝对过温保护、停热和 `1s` 热失控提示不得解除。温度回到 `<420°C` 后，若告警已确认则恢复一般状态；若尚未确认则进入 `热失控待确认`，每 `10s` 蜂鸣提醒一次，并拒绝任何 heater arm 请求。强制风扇期间沿用现有主动降温包线：`>60°C` 全速、`40~60°C` 为 `50%`；温度 `<40°C` 或收到告警确认时结束强制风扇状态，两者任一先发生即可。风扇状态解除不等于自动重新 arm heater。
 - 前面板 RGB 指示灯必须复用相同的安全真相源：热失控显示红色急闪，已回落但待确认的热失控显示红色单闪；`SensorShort / SensorOpen / AdcReadFailed` 显示紫色双闪，散热关闭过温 lock 显示黄色三闪。普通状态不得覆盖这些灯语。
@@ -193,7 +194,7 @@
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `FrontPanelUiState.fan_display_state` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard 风扇三态真相源 |
-| `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `cooling-disabled-overtemp` / `hard-overtemp` |
+| `FrontPanelUiState.heater_lock_reason` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | `pd-contract-unavailable` / `cooling-disabled-overtemp` / `hard-overtemp` |
 | `FrontPanelUiState.dashboard_warning_visible` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | SET 行告警闪烁相位 |
 | `FrontPanelUiState.manual_pps_enabled` | Rust state model | internal | New | None | firmware | runtime / preview / render tests | Dashboard `PPS*` 调试覆盖提示 |
 | `ThermalControlProfile` | USB/devd runtime config + persistent memory config | external | New | `docs/interfaces/http-api.md` | firmware / devd | CLI / devd / Web Serial | RAM preview 与 persistent saved profile，最多 10 个点；每点同时携带 power baseline 与 damping 字段 |

@@ -81,6 +81,7 @@
   - on FUSB302B boards, each bounded EEPROM page write releases the shared I2C bus and services PD before the next page; a successful EEPROM save does not synchronously mirror to flash
   - `heater_enabled`, live temperatures, fan runtime output, fault latch, route/menu state, and buzzer reminders are never restored from EEPROM
 - Heater control:
+  - PD controller detection, a ready PD contract, and later contract continuity gate heating only: the Front Panel Dashboard and USB runtime remain available for diagnostics when PD is unavailable, while `heaterLockReason=pd-contract-unavailable` holds `GPIO47` and calibration heat at `0%`
   - the control loop runs at `20 Hz` and produces a normalized `0..100%` equivalent heat-power request; profile tick based parameters retain their `1 s` reference scale
   - the controller uses model-assisted ramp/soak plus hold PI trimming: far from target it uses an approach power, inside the target-specific brake distance it ramps toward hold power, and in hold it trims around hold power with a small PI term
   - optional `ThermalControlProfile` preview is RAM-only and can tune up to 10 target points; saved profiles persist all 10 fully materialized point-local parameter sets in redundant `2 KiB` records, while historical `1 KiB` records remain readable; missing points fall back to conservative defaults, and interpolated targets use linear interpolation
