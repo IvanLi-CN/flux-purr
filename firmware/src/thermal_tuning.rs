@@ -12,10 +12,10 @@ use flux_purr_thermal_tuning_core::{
     CANDIDATE_LADDER_WIDTH, CandidateEvaluation, CandidateGates, CandidateIdentity, CandidatePoint,
     CandidateProfile, CandidateScore, CandidateTrialBoundary, CandidateTrialEvent,
     EXECUTION_ORDER_C, Eligibility, HOLD_CONFIRM_ENTRY_CENTI, HOLD_CONFIRM_SECONDS,
-    MAX_DYNAMIC_SETTLE_MS, MAX_HOLD_PEAK_TO_PEAK_CENTI, MAX_OVERSHOOT_CENTI, Phase,
-    PhaseTransitionEvent, PpsPowerClass, PromotionError, PromotionState, RunState, SafetyEvent,
-    SampleEvent, TARGET_BUDGET_SECONDS, TargetDisposition, TerminalDisposition, ThermalTuningCore,
-    TraceError, TraceRecord,
+    MAX_HOLD_PEAK_TO_PEAK_CENTI, MAX_OVERSHOOT_CENTI, Phase, PhaseTransitionEvent, PpsPowerClass,
+    PromotionError, PromotionState, RunState, SafetyEvent, SampleEvent, TARGET_BUDGET_SECONDS,
+    TargetDisposition, TerminalDisposition, ThermalTuningCore, TraceError, TraceRecord,
+    dynamic_settle_limit_ms,
 };
 
 /// The unacknowledged trace window lives wholly in PSRAM. At the 500 ms
@@ -228,6 +228,7 @@ pub struct ThermalTuningRuntime {
     candidate_trial_index: usize,
     candidate_trial_active: bool,
     candidate_trial_started_ms: u32,
+    candidate_trial_start_temp_centi: i16,
     candidate_trial_start_sequence: u64,
     last_trace_sample_ms: Option<u32>,
 }
@@ -271,6 +272,7 @@ impl ThermalTuningRuntime {
             candidate_trial_index: 0,
             candidate_trial_active: false,
             candidate_trial_started_ms: 0,
+            candidate_trial_start_temp_centi: 0,
             candidate_trial_start_sequence: 0,
             last_trace_sample_ms: None,
         }
@@ -316,6 +318,7 @@ impl ThermalTuningRuntime {
             core::ptr::addr_of_mut!((*out).candidate_trial_index).write(0);
             core::ptr::addr_of_mut!((*out).candidate_trial_active).write(false);
             core::ptr::addr_of_mut!((*out).candidate_trial_started_ms).write(0);
+            core::ptr::addr_of_mut!((*out).candidate_trial_start_temp_centi).write(0);
             core::ptr::addr_of_mut!((*out).candidate_trial_start_sequence).write(0);
             core::ptr::addr_of_mut!((*out).last_trace_sample_ms).write(None);
         }
@@ -533,7 +536,7 @@ impl ThermalTuningRuntime {
             {
                 self.transition_phase(sample.elapsed_ms, Phase::Scout, 2)?;
                 if !self.candidate_trial_active {
-                    self.activate_candidate_trial(sample.elapsed_ms)?;
+                    self.activate_candidate_trial(sample.elapsed_ms, sample.temperature_centi_c)?;
                 }
             }
             Phase::Scout
@@ -590,7 +593,11 @@ impl ThermalTuningRuntime {
                     let gates = CandidateGates {
                         warmup_complete: self.warmup_complete,
                         stage_complete: true,
-                        dynamic_settle: settle_ms <= MAX_DYNAMIC_SETTLE_MS,
+                        dynamic_settle: settle_ms
+                            <= dynamic_settle_limit_ms(
+                                target_c,
+                                self.candidate_trial_start_temp_centi,
+                            ),
                         overshoot: self.max_overshoot_centi <= MAX_OVERSHOOT_CENTI,
                         hold_peak_to_peak: peak_to_peak <= MAX_HOLD_PEAK_TO_PEAK_CENTI,
                         hold_confirm: error <= MAX_HOLD_PEAK_TO_PEAK_CENTI
@@ -966,8 +973,13 @@ impl ThermalTuningRuntime {
         Ok(())
     }
 
-    fn activate_candidate_trial(&mut self, now_ms: u32) -> Result<(), ThermalTuningRuntimeError> {
+    fn activate_candidate_trial(
+        &mut self,
+        now_ms: u32,
+        start_temp_centi: i16,
+    ) -> Result<(), ThermalTuningRuntimeError> {
         self.candidate_trial_started_ms = now_ms;
+        self.candidate_trial_start_temp_centi = start_temp_centi;
         self.candidate_trial_active = true;
         self.record_candidate_trial_started(now_ms)
     }
@@ -1055,6 +1067,7 @@ impl ThermalTuningRuntime {
 
     fn reset_candidate_window(&mut self) {
         self.candidate_trial_active = false;
+        self.candidate_trial_start_temp_centi = 0;
         self.warmup_complete = false;
         self.hold_started_ms = None;
         self.target_min_temp_centi = i16::MAX;

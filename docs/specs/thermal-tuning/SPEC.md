@@ -140,7 +140,10 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   上限为 20 分钟。核心不得有用户可调、会绕开此预算的无限 round 路径。
 - 候选晋级必须满足 candidate-local 的实际非零 `warmup`、完整 stage、动态 full-speed-to-stable settle
   gate、`maxOvershootC <= 3.0`、`holdPeakToPeakC <= 3.0`，再完成 60 秒 hold
-  confirm。所有门槛计算使用固定点；临界低裕量候选必须确认，不得直接 accepted。
+  confirm。动态 settle 的固定点上限为 `max(12_000ms, 2ms * max(0, targetCentiC -
+  candidateStartTempCentiC))`，只从该 candidate 的 `scout` 起点计算；它必须小于
+  60 秒 hold confirm，且绝不可复用上一 candidate 的温度或时间。所有门槛计算使用固定点；
+  临界低裕量候选必须确认，不得直接 accepted。
 - 核心必须以确定性的有界 perturbation ladder 生成 candidate。通过硬门槛的候选
   使用固定点字典序评分：最大正超调、hold 峰峰值、full-speed-to-stable settle
   时间、60 秒 hold 平均绝对误差、控制输出切换次数。并列时使用参数 canonical

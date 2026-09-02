@@ -129,6 +129,10 @@ validated from the required precondition.
 The candidate-local `scout` interval lasts at least five seconds from that boundary and must
 contain its own nonzero actual heater-output sample to satisfy `warmup_complete`. Cooling or a previous
 candidate may not contribute warmup, overshoot, or output-switch scoring to the next candidate.
+The candidate-local settle limit is encoded by the stable contract formula
+`max(12_000ms, 2ms * max(0, targetCentiC - candidateStartTempCentiC))`; the first `scout`
+sample is the evidence source for `candidateStartTempCentiC`. This limit remains below the
+60-second confirmation interval and is not a report-side inference.
 
 Charts preserve physical dimensions: temperature, heater output, voltage and current use
 separate plots or explicitly labelled independent axes. A renderer must not use a hidden

@@ -14,10 +14,30 @@ pub const CANDIDATE_PROFILE_CANONICAL_BYTES: usize =
     1 + TARGET_COUNT * CANDIDATE_POINT_CANONICAL_BYTES;
 pub const TARGET_BUDGET_SECONDS: u32 = 20 * 60;
 pub const HOLD_CONFIRM_SECONDS: u32 = 60;
-/// A candidate must enter the +/- 3 C confirm band promptly after its own
-/// profile is applied. Ten seconds covers the measured heater transport delay
-/// without admitting a protracted reheat as a settled candidate.
-pub const MAX_DYNAMIC_SETTLE_MS: u32 = 10_000;
+/// A short local warmup must still settle promptly. Longer ramps receive a
+/// deterministic allowance proportional to their measured starting delta.
+pub const MIN_DYNAMIC_SETTLE_MS: u32 = 12_000;
+pub const DYNAMIC_SETTLE_MS_PER_CENTI_C: u32 = 2;
+
+/// Bound the time from a candidate-local scout boundary to entering hold.
+///
+/// The allowance is fixed-point and shared by firmware, native verification
+/// and Wasm. A 15 C reheat retains the 12 second ceiling, while a legitimate
+/// cold-to-240 C ramp gets enough time to enter the same hold gate without
+/// treating slow oscillation as a successful settle.
+pub const fn dynamic_settle_limit_ms(target_c: i16, trial_start_temp_centi_c: i16) -> u32 {
+    let delta_centi_c = (target_c as i32) * 100 - (trial_start_temp_centi_c as i32);
+    let scaled = if delta_centi_c > 0 {
+        (delta_centi_c as u32).saturating_mul(DYNAMIC_SETTLE_MS_PER_CENTI_C)
+    } else {
+        0
+    };
+    if scaled > MIN_DYNAMIC_SETTLE_MS {
+        scaled
+    } else {
+        MIN_DYNAMIC_SETTLE_MS
+    }
+}
 /// Start the 60 second verification only after entering a narrower band than
 /// the acceptance band, leaving room for normal plant transport variation.
 pub const HOLD_CONFIRM_ENTRY_CENTI: i16 = 200;
@@ -237,9 +257,16 @@ impl CandidatePoint {
     pub const fn baseline(target_c: i16, class: PpsPowerClass) -> Self {
         let high_power = matches!(class, PpsPowerClass::Pps5a);
         let high_temperature = high_power && target_c >= 200;
+        // The retained host-reference implementation established this low
+        // temperature 5 A seed on the same delayed plant. A 4.5 C handoff
+        // leaves full-power residual energy unaccounted for; begin approach
+        // 13.1 C early and bracket that conservative seed in the ladder.
+        let low_temperature_5a = high_power && target_c <= 60;
         Self {
             target_c,
-            brake_distance_centi_c: if target_c < 120 {
+            brake_distance_centi_c: if low_temperature_5a {
+                1_310
+            } else if target_c < 120 {
                 450
             } else if target_c < 200 {
                 700
@@ -252,56 +279,68 @@ impl CandidatePoint {
                 1_000
             },
             warmup_power_permille: 1_000,
-            approach_power_permille: if high_temperature {
+            approach_power_permille: if low_temperature_5a {
+                590
+            } else if high_temperature {
                 600
             } else if high_power {
                 360
             } else {
                 320
             },
-            approach_floor_power_permille: if high_temperature {
+            approach_floor_power_permille: if low_temperature_5a {
+                510
+            } else if high_temperature {
                 450
             } else if high_power {
                 140
             } else {
                 120
             },
-            hold_power_permille: if high_temperature {
+            hold_power_permille: if low_temperature_5a {
+                60
+            } else if high_temperature {
                 600
             } else if high_power {
                 190
             } else {
                 160
             },
-            hold_reheat_power_permille: if high_temperature {
+            hold_reheat_power_permille: if low_temperature_5a {
+                60
+            } else if high_temperature {
                 600
             } else if high_power {
                 80
             } else {
                 60
             },
-            hold_entry_centi_c: 90,
-            hold_exit_centi_c: 200,
+            hold_entry_centi_c: if low_temperature_5a { 200 } else { 90 },
+            hold_exit_centi_c: if low_temperature_5a { 540 } else { 200 },
             hold_on_centi_c: 30,
-            hold_off_centi_c: 5,
-            overshoot_cutoff_centi_c: 25,
-            hold_kp_permille_per_c: if high_temperature {
+            hold_off_centi_c: if low_temperature_5a { 120 } else { 5 },
+            overshoot_cutoff_centi_c: if low_temperature_5a { 150 } else { 25 },
+            hold_kp_permille_per_c: if low_temperature_5a {
+                8
+            } else if high_temperature {
                 40
             } else if high_power {
                 140
             } else {
                 120
             },
-            hold_ki_permille_per_c_tick: if high_temperature {
+            hold_ki_permille_per_c_tick: if low_temperature_5a {
+                2
+            } else if high_temperature {
                 4
             } else if high_power {
                 14
             } else {
                 12
             },
-            hold_blend_ticks: 12,
-            approach_lead_ticks: 0,
-            hold_lead_ticks: 0,
+            hold_blend_ticks: if low_temperature_5a { 1 } else { 12 },
+            approach_lead_ticks: if low_temperature_5a { 4 } else { 0 },
+            hold_lead_ticks: if low_temperature_5a { 2 } else { 0 },
         }
     }
 
@@ -1690,9 +1729,9 @@ mod tests {
         assert_eq!(
             CandidateProfile::baseline(PpsPowerClass::Pps5a).hash(),
             [
-                0x4a, 0xf7, 0x20, 0x1f, 0x10, 0x98, 0x6b, 0xb1, 0x5d, 0xeb, 0xbc, 0xaa, 0x03, 0x12,
-                0xfa, 0x4a, 0xe5, 0xe9, 0x38, 0x82, 0xf1, 0x90, 0x4b, 0x06, 0x7c, 0x4f, 0x27, 0x9c,
-                0x07, 0x61, 0xb5, 0xf6,
+                0x09, 0xa5, 0xbe, 0x84, 0x7e, 0x90, 0x92, 0x21, 0xc7, 0x9e, 0x27, 0x06, 0x49, 0x96,
+                0x06, 0x0d, 0xe8, 0x3b, 0x57, 0x24, 0x75, 0xeb, 0xca, 0xf1, 0xd5, 0x1b, 0x3d, 0xd3,
+                0x0a, 0x6c, 0xad, 0xb6,
             ]
         );
         assert_eq!(
@@ -1748,12 +1787,41 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_settle_window_covers_transport_delay_without_relaxing_confirmation() {
-        assert_eq!(MAX_DYNAMIC_SETTLE_MS, 10_000);
-        let dynamic_settle_ms = core::hint::black_box(MAX_DYNAMIC_SETTLE_MS);
+    fn dynamic_settle_window_scales_only_with_the_candidate_local_climb() {
+        let local_reheat = dynamic_settle_limit_ms(60, 4_500);
+        let cold_high_target = dynamic_settle_limit_ms(240, 6_100);
         let hold_confirm_entry_centi = core::hint::black_box(HOLD_CONFIRM_ENTRY_CENTI);
-        assert!(dynamic_settle_ms < HOLD_CONFIRM_SECONDS * 1_000);
+
+        assert_eq!(local_reheat, MIN_DYNAMIC_SETTLE_MS);
+        assert_eq!(cold_high_target, 35_800);
+        assert!(cold_high_target < HOLD_CONFIRM_SECONDS * 1_000);
         assert!(hold_confirm_entry_centi < MAX_HOLD_PEAK_TO_PEAK_CENTI);
+    }
+
+    #[test]
+    fn pps5a_low_temperature_seed_matches_the_verified_conservative_reference() {
+        let point = CandidatePoint::baseline(60, PpsPowerClass::Pps5a);
+
+        assert_eq!(point.brake_distance_centi_c, 1_310);
+        assert_eq!(point.approach_power_permille, 590);
+        assert_eq!(point.approach_floor_power_permille, 510);
+        assert_eq!(point.hold_power_permille, 60);
+        assert_eq!(point.hold_reheat_power_permille, 60);
+        assert_eq!(point.hold_entry_centi_c, 200);
+        assert_eq!(point.hold_exit_centi_c, 540);
+        assert_eq!(point.hold_off_centi_c, 120);
+        assert_eq!(point.overshoot_cutoff_centi_c, 150);
+        assert_eq!(point.hold_kp_permille_per_c, 8);
+        assert_eq!(point.hold_ki_permille_per_c_tick, 2);
+        assert_eq!(point.hold_blend_ticks, 1);
+        assert_eq!(point.approach_lead_ticks, 4);
+        assert_eq!(point.hold_lead_ticks, 2);
+
+        assert_eq!(
+            candidate_ladder(60, PpsPowerClass::Pps5a)
+                .map(|candidate| candidate.brake_distance_centi_c),
+            [1_310, 1_360, 1_260]
+        );
     }
 
     #[test]

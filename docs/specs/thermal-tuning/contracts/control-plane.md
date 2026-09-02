@@ -121,6 +121,10 @@ Each candidate's `scout` interval is timed from its own start boundary and lasts
 seconds. Its `warmup_complete` gate may only be satisfied by a nonzero actual heater-output
 sample inside that candidate's `scout` interval; neither cooldown nor a prior candidate contributes scoring
 measurements or warmup state.
+Its dynamic-settle score uses the fixed-point limit
+`max(12_000ms, 2ms * max(0, targetCentiC - candidateStartTempCentiC))`, where
+`candidateStartTempCentiC` is the measurement which admitted that same `scout` boundary. The
+limit is less than the 60 second hold-confirm interval and is not host-configurable.
 `decision` records the complete candidate/score/gate/target state, freeze and interval result.
 `safety` records a safety fault and disarm reason. Preview, discard and save occur after terminal
 trace sealing, so their normal command responses carry applied hash, persistent revision and
