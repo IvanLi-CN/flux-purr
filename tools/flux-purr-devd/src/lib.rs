@@ -31,11 +31,12 @@ use axum::{
 use serde::{Deserialize, Deserializer, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 use std::sync::Once;
-#[cfg(test)]
-use tokio::sync::mpsc;
-use tokio::{process::Command, sync::broadcast};
+use tokio::{
+    process::Command,
+    sync::{broadcast, mpsc},
+};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
@@ -85,7 +86,6 @@ const ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_sec
 // A recovery write may erase the application range. Connection retries happen
 // before writes begin, but a started protected transaction is never replayed
 // automatically against the hardware.
-#[cfg(test)]
 const ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS: usize = 1;
 const ROM_SECURITY_PROBE_ATTEMPTS: usize = 6;
 const FRONT_PANEL_PRESET_COUNT: usize = 10;
@@ -6925,7 +6925,6 @@ fn config_copy_requires_transfer(copy: firmware_bundle::ConfigCopyPlan) -> bool 
 }
 
 #[derive(Debug, Clone)]
-#[cfg(test)]
 struct BundleFlashSegment {
     address: u32,
     length: u32,
@@ -6933,7 +6932,6 @@ struct BundleFlashSegment {
     bytes: Vec<u8>,
 }
 
-#[cfg(test)]
 fn prepare_bundle_flash_segments(
     bundle: &firmware_bundle::FirmwareBundle,
 ) -> Result<Vec<BundleFlashSegment>, HttpError> {
@@ -6976,45 +6974,129 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
     let proof = progress.require(proof.ok_or_else(|| {
         HttpError::internal("USB-JTAG recovery execution is missing its preflight proof")
     }))?;
-    let security = progress.require(probe_native_rom_security(state, port_path, false).await)?;
-    progress.require(security.validate_for_flash())?;
-    let digest = firmware_preflight_digest(
-        &proof.request,
-        &proof.device_id,
+    let segments = progress.require(prepare_bundle_flash_segments(bundle))?;
+    let _serial_rpc = progress.require(
+        acquire_serial_rpc_with_timeout(state.serial_rpc.clone(), SERIAL_RPC_TIMEOUT).await,
+    )?;
+    progress.require(drop_cached_serial_session(
+        &state.serial_sessions,
         port_path,
-        &security.rom_mac,
-        &proof.bundle_sha256,
-        None,
+    ))?;
+
+    progress.stage_started("erase", json!({}));
+    progress.stage_completed("erase", json!({ "scope": "bundle_ranges" }));
+    let total_bytes = segments
+        .iter()
+        .map(|segment| u64::from(segment.length))
+        .sum::<u64>();
+    progress.stage_started(
+        "write_segments",
+        json!({ "completedUnits": 0, "totalUnits": total_bytes, "unit": "bytes" }),
     );
-    if security.rom_mac != proof.approval.rom_mac || digest != proof.approval.preflight_digest {
-        return Err(progress.fail(HttpError::forbidden(
-            "approval_mismatch",
-            "The target or preflight facts changed; run preflight again.",
-        )));
+
+    let (events, mut event_rx) = mpsc::unbounded_channel();
+    let writer_port = port_path.to_string();
+    let writer_proof = proof.clone();
+    let writer = tokio::task::spawn_blocking(move || {
+        flash_bundle_with_single_usb_serial_jtag_session(
+            &writer_port,
+            &segments,
+            Some(writer_proof),
+            events,
+        )
+    });
+    let write_result = writer
+        .await
+        .map_err(|error| {
+            HttpError::internal(&format!("USB-JTAG recovery writer task failed: {error}"))
+        })
+        .and_then(|result| {
+            result.map_err(|error| {
+                HttpError::internal(&format!("USB-JTAG recovery writer failed: {error}"))
+            })
+        });
+
+    let mut completed_bytes = 0_u64;
+    let mut verified_segments = 0_u64;
+    let mut write_completed = false;
+    let mut md5_started = false;
+    let mut reset_started = false;
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            SingleSessionFlashEvent::RomConnected
+            | SingleSessionFlashEvent::ExecutionProofVerified
+            | SingleSessionFlashEvent::RangePreparationCompleted => {}
+            SingleSessionFlashEvent::SegmentWritten { length } => {
+                completed_bytes = completed_bytes.saturating_add(u64::from(length));
+                progress.stage_progress(
+                    "write_segments",
+                    json!({
+                        "completedUnits": completed_bytes,
+                        "totalUnits": total_bytes,
+                        "unit": "bytes",
+                    }),
+                );
+            }
+            SingleSessionFlashEvent::WriteCompleted => {
+                write_completed = true;
+                progress.stage_completed(
+                    "write_segments",
+                    json!({
+                        "completedUnits": completed_bytes,
+                        "totalUnits": total_bytes,
+                        "unit": "bytes",
+                    }),
+                );
+                progress.stage_started(
+                    "rom_md5",
+                    json!({ "completedUnits": 0, "totalUnits": 3, "unit": "segments" }),
+                );
+                md5_started = true;
+            }
+            SingleSessionFlashEvent::SegmentMd5Verified => {
+                verified_segments = verified_segments.saturating_add(1);
+                progress.stage_progress(
+                    "rom_md5",
+                    json!({ "completedUnits": verified_segments, "totalUnits": 3, "unit": "segments" }),
+                );
+            }
+            SingleSessionFlashEvent::Md5Completed => {
+                progress.stage_completed(
+                    "rom_md5",
+                    json!({ "completedUnits": verified_segments, "totalUnits": 3, "unit": "segments" }),
+                );
+                progress.stage_started("reset", json!({}));
+                reset_started = true;
+            }
+            SingleSessionFlashEvent::ResetCompleted => {
+                progress.stage_completed("reset", json!({}));
+                reset_started = false;
+            }
+        }
     }
-    // `write-bin` receives all boot-critical images in one invocation. It
-    // therefore keeps the ROM transport open through FactoryApp, while the
-    // generic transaction retains per-range MD5 and runtime verification.
-    Box::pin(run_bundle_flash_transaction(
-        state,
-        bundle,
-        FirmwareOperation::InstallRecovery,
-        port_path,
-        None,
-        None,
-        progress,
-    ))
-    .await
+
+    match progress.require(write_result) {
+        Ok(receipt) if receipt.verified_segments == 3 && write_completed && md5_started => {
+            if reset_started {
+                return Err(progress.fail(HttpError::internal(
+                    "USB-JTAG recovery completed without a reset receipt.",
+                )));
+            }
+            Ok(())
+        }
+        Ok(_) => Err(progress.fail(HttpError::internal(
+            "USB-JTAG recovery receipt was incomplete.",
+        ))),
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
 struct SingleSessionFlashReceipt {
     verified_segments: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(test)]
 enum SingleSessionFlashEvent {
     RomConnected,
     ExecutionProofVerified,
@@ -7027,14 +7109,12 @@ enum SingleSessionFlashEvent {
 }
 
 #[derive(Debug)]
-#[cfg(test)]
 struct SingleSessionFlashProgress {
     segment_lengths: HashMap<u32, u32>,
     current_length: Option<u32>,
     events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
 }
 
-#[cfg(test)]
 impl SingleSessionFlashProgress {
     fn new(
         segments: &[BundleFlashSegment],
@@ -7051,7 +7131,6 @@ impl SingleSessionFlashProgress {
     }
 }
 
-#[cfg(test)]
 impl espflash::target::ProgressCallbacks for SingleSessionFlashProgress {
     fn init(&mut self, address: u32, _total: usize) {
         self.current_length = self.segment_lengths.get(&address).copied();
@@ -7070,7 +7149,6 @@ impl espflash::target::ProgressCallbacks for SingleSessionFlashProgress {
     }
 }
 
-#[cfg(test)]
 fn flash_bundle_with_single_usb_serial_jtag_session(
     port_path: &str,
     segments: &[BundleFlashSegment],
@@ -7109,7 +7187,6 @@ fn flash_bundle_with_single_usb_serial_jtag_session(
     ))
 }
 
-#[cfg(test)]
 fn flash_bundle_with_single_usb_serial_jtag_session_once(
     port_path: &str,
     segments: &[BundleFlashSegment],
@@ -7162,7 +7239,6 @@ fn flash_bundle_with_single_usb_serial_jtag_session_once(
     })
 }
 
-#[cfg(test)]
 fn connect_single_session_rom_flasher(
     port_path: &str,
 ) -> Result<espflash::flasher::Flasher, String> {
@@ -7211,7 +7287,6 @@ fn connect_single_session_rom_flasher(
     ))
 }
 
-#[cfg(test)]
 fn recovery_rom_reset_modes() -> [espflash::connection::ResetBeforeOperation; 6] {
     use espflash::connection::ResetBeforeOperation;
 
@@ -7228,7 +7303,7 @@ fn recovery_rom_reset_modes() -> [espflash::connection::ResetBeforeOperation; 6]
     ]
 }
 
-#[cfg(all(test, unix))]
+#[cfg(unix)]
 fn ignore_sigpipe_for_in_process_espflash() {
     static SIGPIPE_IGNORED: Once = Once::new();
     SIGPIPE_IGNORED.call_once(|| {
@@ -7241,7 +7316,7 @@ fn ignore_sigpipe_for_in_process_espflash() {
     });
 }
 
-#[cfg(all(test, not(unix)))]
+#[cfg(not(unix))]
 fn ignore_sigpipe_for_in_process_espflash() {}
 
 fn build_checksum_md5_args(
@@ -7462,7 +7537,6 @@ fn read_rom_security_info(
     })
 }
 
-#[cfg(test)]
 fn verify_recovery_execution_proof(
     port_path: &str,
     flasher: &mut espflash::flasher::Flasher,
