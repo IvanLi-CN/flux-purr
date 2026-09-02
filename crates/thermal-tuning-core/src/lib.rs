@@ -1,5 +1,8 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 use sha2::{Digest, Sha256};
 
 pub const CORE_SCHEMA: &str = "thermal_tuning_core_v1";
@@ -993,7 +996,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         self.candidate_identity = Some(CandidateIdentity::from_profile(profile));
         self.candidate = Some(profile);
         self.promotion = PromotionState::AwaitingReview;
-        self.trace = core::array::from_fn(|_| None);
+        self.clear_trace();
         self.first_sequence = 0;
         self.next_sequence = 0;
         self.acknowledged_through = None;
@@ -1118,6 +1121,16 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
 
     pub const fn next_sequence(&self) -> u64 {
         self.next_sequence
+    }
+
+    fn clear_trace(&mut self) {
+        // `start` runs against firmware-owned PSRAM. Assigning a freshly
+        // constructed `[Option<TraceRecord>; TRACE_CAP]` here would first put
+        // the whole ring on the control task stack. Clear each external slot
+        // in place instead.
+        for slot in &mut self.trace {
+            *slot = None;
+        }
     }
 
     fn record(&mut self, event: TraceEvent) -> Result<u64, TraceError> {
@@ -1627,6 +1640,8 @@ fn put_u64(out: &mut [u8], offset: &mut usize, value: u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::boxed::Box;
+
     use super::*;
 
     const READY: Eligibility = Eligibility {
@@ -1986,6 +2001,37 @@ mod tests {
         assert_eq!(core.ack_trace(0, record.digest), Ok(()));
         assert_eq!(core.ack_trace(0, record.digest), Ok(()));
         assert_eq!(core.ack_trace(0, [7; 32]), Err(TraceError::DigestMismatch));
+    }
+
+    #[test]
+    fn large_trace_restart_clears_records_without_reconstructing_the_ring() {
+        let mut storage = Box::<ThermalTuningCore<1_024>>::new_uninit();
+        unsafe { ThermalTuningCore::init_in_place(storage.as_mut_ptr()) };
+        let mut core = unsafe { storage.assume_init() };
+
+        core.start(9, PpsPowerClass::Pps5a, READY).unwrap();
+        core.record_sample(SampleEvent {
+            elapsed_ms: 0,
+            target_c: 60,
+            trial_index: 0,
+            candidate_hash: [0; 32],
+            temperature_centi_c: 2_500,
+            vin_mv: 20_000,
+            pps_contract_mv: 20_000,
+            pps_contract_ma: 5_000,
+            heater_output_permille: 0,
+            measurement_valid: true,
+            phase: Phase::Scout,
+        })
+        .unwrap();
+        core.finish(TerminalDisposition::Cancelled).unwrap();
+
+        core.start(10, PpsPowerClass::Pps5a, READY).unwrap();
+
+        assert_eq!(core.summary().first_sequence, None);
+        assert_eq!(core.summary().last_sequence, None);
+        assert!(!core.trace_gap());
+        assert_eq!(core.trace_record(0), None);
     }
 
     #[test]
