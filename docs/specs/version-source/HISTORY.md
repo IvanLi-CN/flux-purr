@@ -10,7 +10,8 @@
 
 ## Replacements / Background
 
-- `VERSION=0.22.0` 是 Version File migration baseline。普通 patch 在同一 PR 上准备 `0.22.1`；exact intent 在准备提交中锁定所给文本，之后的每个产品 PR 都有独立版本边界。
+- `VERSION=0.23.0` 是当前 Version File migration baseline。历史 `v0.23.0` tag/release 指向旧的孤立发布边界，只保留为审计记录；首个完整新链路普通 patch 在同一 PR 上准备 `0.23.1`。exact intent 在准备提交中锁定所给文本，之后的每个产品 PR 都有独立版本边界。
+- Candidate tag names are reserved before VERSION preparation. A foreign owner is a hard failure; recovery may reuse only the exact merged-main owner. This preserves the historical `v0.23.0` identity without retagging or rewriting it.
 - 一产品 PR 一版本要求 VERSION-only 准备提交在正常 protected merge 前完成；该顺序替代了发布后直接写入 `main` 的设计。
 - 自动 patch、受控 exact、main-merge recovery 与既有 `GITHUB_TOKEN` 权限边界由 ADR 0005 固化；Label Gate 继续只保存发布意图，不参与数字版本计算。
 
@@ -20,3 +21,4 @@
 - `./IMPLEMENTATION.md`
 - [ADR 0003](../../adr/0003-version-file-is-the-product-version-source.md)
 - [ADR 0004](../../adr/0004-release-commit-version-control.md)
+- [ADR 0006](../../adr/0006-tag-reservation-and-legacy-release-reconciliation.md)

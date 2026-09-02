@@ -46,6 +46,7 @@
 
 - [0003-version-file-is-the-product-version-source](../../adr/0003-version-file-is-the-product-version-source.md)
 - [0005-pr-local-version-preparation](../../adr/0005-pr-local-version-preparation.md)
+- [0006-tag-reservation-and-legacy-release-reconciliation](../../adr/0006-tag-reservation-and-legacy-release-reconciliation.md)
 
 ## 需求（Requirements）
 
@@ -54,6 +55,7 @@
 - 根目录必须存在 UTF-8 的 `VERSION`，其内容必须符合 [Version File contract](./contracts/version-file.md)。它是 build、run、bundle、manifest 与 release 的唯一产品版本输入；唯一迁移例外是首次建立已发布基线的文件创建。
 - 普通开发模式必须只读 `VERSION`，并显示 `nextPatch(VERSION)-dev.<short-sha>`。`short-sha` 仅区分同一开发版本的源修订，不参与产品版本计算。
 - 普通发布模式必须从 PR 源提交的 `VERSION` 计算 `nextPatch(VERSION)`，在该同一 PR 分支创建只修改 `VERSION` 的准备提交，并从文件重新读取精确版本。Git tag 必须是 `v` 加该文件内容，并指向正常合并后的 `main` 提交。
+- 准备提交前必须对 `v<version>` 执行 tag reservation。名称已存在时准备必须失败，且失败前不得写入 `VERSION`、创建提交或推送 PR 分支；只有 recovery 明确证明既有 tag 精确指向目标 merged `main` SHA 时才可复用。
 - 每个通过完整 PR CI 且 release intent 启用的产品源提交必须单独发布。准备提交必须在 PR 合并前完成；多个源提交不得共用一个产品版本。`type:docs`/`type:skip` 明确表示不发布产品资产。
 - 准备提交必须以已验证源提交为唯一父提交，diff 只能包含 `VERSION`，并带 `Release-Source-SHA`、`Product-Version` 和冻结 label intent metadata。该 metadata 只用于顺序验证与审计，不是版本输入。
 - Release controller 必须从正常合并后的 `main` 提交构建、tag、发布并验证完整资产；它绝不向 `main` push。发布失败时不得压缩、重算或替换版本；recovery 只能继续同一个 main SHA。
@@ -84,7 +86,7 @@
 
 1. 解析 root `VERSION`，不修改该文件。
 2. 读取当前 commit 的短 SHA 作为 build qualifier。
-3. 对稳定 `VERSION=0.22.0`，所有开发产物显示 `0.22.1-dev.<short-sha>`。
+3. 对稳定 `VERSION=0.23.0`，所有开发产物显示 `0.23.1-dev.<short-sha>`。
 4. 生成的版本进入 firmware identity、local firmware bundle、`devd` health/CLI 和 Web build metadata；它不写回源码树。
 
 #### 普通发布
@@ -131,13 +133,13 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given `VERSION` contains `0.22.0` and source SHA is `abcdef0...`,
+- Given `VERSION` contains `0.23.0` and source SHA is `abcdef0...`,
   When a development build runs,
-  Then every product build identity reports `0.22.1-dev.abcdef0` and `VERSION` is byte-for-byte unchanged.
+  Then every product build identity reports `0.23.1-dev.abcdef0` and `VERSION` is byte-for-byte unchanged.
 
-- Given a verified product PR source whose base `VERSION` is `0.22.0`,
+- Given a verified product PR source whose base `VERSION` is `0.23.0`,
   When version preparation runs,
-  Then it appends exactly one child preparation commit with `VERSION=0.22.1`; after the normal merge, it builds and verifies assets from that merge and tags it `v0.22.1`.
+  Then it appends exactly one child preparation commit with `VERSION=0.23.1`; after the normal merge, it builds and verifies assets from that merge and tags it `v0.23.1`.
 
 - Given product merge A has a failed release,
   When recovery runs,
@@ -153,7 +155,7 @@
 
 - Given a partial product release for main merge M,
   When recovery targets M,
-  Then it republishes only M's identity and fails on any existing tag or manifest mismatch.
+  Then it republishes only M's identity when an existing tag points exactly at M, and fails on a foreign tag or manifest mismatch.
 
 ## 验收清单（Acceptance checklist）
 
@@ -202,7 +204,7 @@ None.
 - 风险：`main` 必须将产品 PR 以 merge commit 合入，且 `Release completion` 必须列为远端 required check；否则 workflow 无法证明受保护 merge 保留了准备提交。此配置不授予 bypass 或新增身份。
 - 风险：发布失败后 VERSION 已在 `main` 锁定。recovery 失败时不得准备下一产品版本；不得用合并多个提交来绕过。
 - 假设：`type:docs` 和 `type:skip` 明确表示不生成产品版本；其余产品 PR 各自获得独立版本边界。
-- 假设：迁移基线为 `VERSION=0.22.0`。已发布但未合入 main 的历史候选只作审计记录，不得成为下一版本的计算输入。
+- 迁移边界：根 `VERSION=0.23.0`，历史 `v0.23.0` tag/release 保持不可变且仅作审计记录；首个完整新链路发布是一次正常 patch PR 的 `0.23.1`，不得追溯重发 `0.23.0`。
 
 ## 参考（References）
 

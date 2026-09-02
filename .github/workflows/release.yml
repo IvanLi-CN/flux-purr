@@ -56,6 +56,7 @@ jobs:
           WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion || 'success' }}
           WORKFLOW_EVENT: ${{ github.event.workflow_run.event || 'workflow_dispatch' }}
           MAIN_INPUT: ${{ github.event.workflow_run.head_sha || inputs.commit_sha }}
+          OPERATION: ${{ inputs.operation || 'publish' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -71,6 +72,7 @@ jobs:
           else
             git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"
           fi
+          test "${OPERATION}" = publish || test "${OPERATION}" = recover
           preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
           prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
           if [ "${prepared}" != true ]; then
@@ -83,6 +85,11 @@ jobs:
           version="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
           preparation_sha="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
           test "$(python3 scripts/product-version.py --mode release --source-sha "${MAIN_INPUT}")" = "${version}"
+          tag_args=(verify-tag --version "${version}" --expected-sha "${MAIN_INPUT}")
+          if [ "${OPERATION}" = recover ]; then
+            tag_args+=(--allow-existing)
+          fi
+          python3 .github/scripts/release_chain.py "${tag_args[@]}"
           {
             echo "enabled=true"
             echo "release_sha=${MAIN_INPUT}"
@@ -131,6 +138,7 @@ jobs:
           FLUX_PURR_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           PRODUCT_VERSION: ${{ steps.release.outputs.version }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
+          OPERATION: ${{ inputs.operation || 'publish' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -187,14 +195,21 @@ jobs:
         env:
           RELEASE_SHA: ${{ steps.release.outputs.source_sha }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
+          PRODUCT_VERSION: ${{ steps.release.outputs.version }}
+          OPERATION: ${{ inputs.operation || 'publish' }}
         run: |
           set -euo pipefail
-          if git show-ref --tags --verify --quiet "refs/tags/${PRODUCT_TAG}"; then
-            test "$(git rev-list -n1 "refs/tags/${PRODUCT_TAG}")" = "${RELEASE_SHA}"
-          else
+          tag_args=(verify-tag --version "${PRODUCT_VERSION}" --expected-sha "${RELEASE_SHA}")
+          if [ "${OPERATION}" = recover ]; then
+            tag_args+=(--allow-existing)
+          fi
+          tag_json="$(python3 .github/scripts/release_chain.py "${tag_args[@]}")"
+          tag_status="$(printf '%s' "${tag_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
+          if [ "${tag_status}" = available ]; then
             git tag -a "${PRODUCT_TAG}" "${RELEASE_SHA}" -m "${PRODUCT_TAG}"
             git push origin "${PRODUCT_TAG}"
           fi
+          python3 .github/scripts/release_chain.py "${tag_args[@]}"
 
       - name: Publish and verify release assets
         if: steps.release.outputs.enabled == 'true'

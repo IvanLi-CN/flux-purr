@@ -42,6 +42,10 @@ a new bypass actor, credential, secret, variable, or GitHub Environment.
 - `Release Product` builds, tags, publishes, and verifies from the merged
   `main` commit. Its `sourceSha`, manifest, tag target, and build identity all
   refer to that commit. It performs no push to `main`.
+- Before a preparation commit is written, the release controller reserves the
+  derived `v<version>` name. Any existing tag blocks preparation. A recovery
+  may reuse a tag only after proving that it points to the same merged `main`
+  commit; it never changes the version calculation.
 - If publication fails after merge, `main/VERSION` remains the committed exact
   version. Recovery accepts that same merged SHA and may only republish that
   identity. It cannot calculate a successor version or change `VERSION`.

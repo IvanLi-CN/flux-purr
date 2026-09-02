@@ -174,6 +174,14 @@ _Avoid_: Product Release Version, PR label, release channel
 The VERSION-only preparation commit appended to a verified product PR. Its normal protected merge carries the Product Release Version into `main`.
 _Avoid_: Feature commit, product tag, direct main write
 
+**Tag Reservation**:
+The ownership gate for the `v< Product Release Version >` name. It must pass before a preparation commit is written; an existing tag is reusable only when an explicit recovery proves that it points to the same merged `main` commit.
+_Avoid_: Tag-derived version, retagging, tag overwrite
+
+**Migration Reconciliation Release**:
+The first normal product release after an historical tag or release is preserved as audit history but cannot be associated with the current `main` chain. It establishes the next patch boundary without rewriting or reissuing the historical release.
+_Avoid_: Retroactive release, history rewrite, release compression
+
 **Release Repair PR**:
 A PR that restores the release pipeline without changing the already-approved product source or creating a new Product Release Version.
 _Avoid_: Product patch, feature release

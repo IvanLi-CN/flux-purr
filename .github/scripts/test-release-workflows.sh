@@ -36,10 +36,16 @@ assert "refs/heads/main" not in prepare
 assert "verification_sha" in prepare
 assert "verify-prepared" in prepare
 assert "verify-merged-prepared" in release
+assert "verify-tag" in release
+assert release.index("verify-tag") < release.index("Checkout merged product source")
+assert "--allow-existing" in release
+assert "git push origin \"${PRODUCT_TAG}\"" in release
+assert "git fetch --force --tags origin" in prepare
 assert 'git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"' in release
 assert 'if [ "${EVENT_NAME}" = workflow_run ]; then' in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
+assert "def verify_tag" in release_chain
 assert "latest_check_outcomes" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
 assert "latest_check_outcomes" in (root / ".github/scripts/release_completion.py").read_text(encoding="utf-8")
 assert "no_prepared_product_merge" in release_chain

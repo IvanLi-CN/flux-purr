@@ -33,6 +33,32 @@ def run(*args):
 
 source = run("git", "rev-parse", "HEAD")
 assert (tmp / "VERSION").read_text(encoding="utf-8") == "0.22.0\n"
+
+# A candidate tag owned by another commit must be rejected before VERSION is
+# written or a preparation commit is created.
+run("git", "tag", "v0.22.1", source)
+before_head = run("git", "rev-parse", "HEAD")
+before_count = int(run("git", "rev-list", "--count", "HEAD"))
+try:
+    module.stage(Namespace(
+        source_sha=source,
+        mode="automatic",
+        exact_version=None,
+        expected_channel="stable",
+        intent_type="type:patch",
+        intent_channel="stable",
+        intent_components="none",
+        github_output=None,
+    ))
+except module.ReleaseChainError:
+    pass
+else:
+    raise AssertionError("occupied product tag must block preparation")
+assert run("git", "rev-parse", "HEAD") == before_head
+assert int(run("git", "rev-list", "--count", "HEAD")) == before_count
+assert (tmp / "VERSION").read_text(encoding="utf-8") == "0.22.0\n"
+run("git", "tag", "-d", "v0.22.1")
+
 module.stage(Namespace(
     source_sha=source,
     mode="automatic",
@@ -46,9 +72,12 @@ module.stage(Namespace(
 release = run("git", "rev-parse", "HEAD")
 values = module.verify_release_commit(release, source, "0.22.1")
 assert values["tag"] == "v0.22.1"
+run("git", "tag", "v0.22.1", release)
+assert module.verify_tag(values["version"], release, allow_existing=True)["status"] == "matching"
 assert module.verify_prepared_commit(release, source, "0.22.1")["action"] == "automatic"
 assert module.diff_names(release) == ["VERSION"]
 assert module.commit_parent(release) == source
+run("git", "tag", "-d", "v0.22.1")
 
 # A normal PR merge can have a tree identical to its second parent.  It must
 # not become a product release unless that parent is a verified preparation.
