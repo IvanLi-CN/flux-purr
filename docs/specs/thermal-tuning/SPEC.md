@@ -157,19 +157,29 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   identity、trial 编号、阶段、时间、温度、VIN、PPS 合同、加热输出和测量有效性；每个
   candidate trial 必须携带完整固定点参数、起止 sequence/时间和样本范围；每个 decision
   必须携带完整 score vector、每个 gate、freeze、interval prune、disposition 和失败原因。
+  每轮候选的 `candidate_trial` 起点只能在本轮 `cooldown_wait` 满足 `target-5°C` 预条件、
+  即将进入 `scout` 后记录；此前的冷却 sample 仍是完整 target trace 的安全证据，但不属于
+  该候选的评分样本范围，也不得计入它的 dynamic settle。
+  每个候选都必须从自己的起点完成至少 5 秒 `scout` 预热，并在该候选的 `scout` 样本中观察到
+  100% heater output 才能满足 warmup gate；冷却样本或前一候选的输出绝不能满足这一 gate，
+  也不能贡献下一候选的 overshoot 或 output-switch score。
   缺失字段必须以结构化 unavailable 标识呈现，禁止用相邻事件推断、显示空占位或静默
   删除来伪造完整性。
 - 报告的目标卡、验收指标和候选详情必须引用同一个 candidate trial。存在 adopted trial
   时，候选详情默认显示该 trial，并明确显示其试验编号和 adopted 状态；其余 trial 必须
   保留为可切换的独立视图。目标卡必须显式标明采用 trial 的编号/总数，且其通过结论、
-  overshoot、峰峰值与 settle 只能描述该 adopted trial，不能以“有效测试”或未限定指标
-  暗示所有可见曲线均通过。每个目标的主温度响应图是所有候选 trial 的概览：每段曲线
-  必须有可见的 trial 边界，并能在同一视区辨认试验编号、`rejected|passed|adopted`
-  状态、overshoot、峰峰值和 gate 掩码。主图不得把 rejected trial 的轨迹、峰值或任何
-  指标视觉上归因于 adopted target card；采用候选必须仍有独立、默认选中的详情视图。主图必须使用该 target 已存档 sample 中从第一条
-  非 `cooldown_wait` 事件开始的设备轨迹，包含 `scout`、`retune` 和 `hold_confirm`；它不得因 adopted trial 从目标附近开始而隐藏预热或逼近过程。
-  主图的时间零点是这一首次加热 sample；`cooldown_wait` 作为安全预条件必须保留在 trace 和候选审查中，但不得占用主响应图。
-  加热轨迹必须按设备全局 `elapsedMs` 严格递增排序，且在 trial 边界断开折线，禁止拼接每个 trial 从零开始的本地时间轴。
+  overshoot 与峰峰值只能描述该 adopted trial，不能以“有效测试”或未限定指标暗示所有
+  可见曲线均通过；终态 decision 的 `scoreSettleMs` 必须标作“目标评分 settle”，而
+  candidate trial 自己的 `scoreSettleMs` 必须标作“候选试验 settle”，不得把这两个
+  不同起点的时长当作同一指标。整个目标跨 trial 的 elapsed 可以单列为“目标总耗时”。
+  每个目标的主温度响应图显示一个选中的候选 trial；试验切换控件
+  必须提供试验编号、`rejected|passed|adopted` 状态、overshoot、峰峰值和
+  gate 掩码。主图、控制图、设备电气图与详情默认显示 adopted trial，也必须随该控件同步
+  切换到任一独立 trial；不得默认叠加全量 trial、不得把 rejected trial 的轨迹、峰值或任何
+  指标视觉上归因于 adopted target card。每个独立 trial 从第一条非 `cooldown_wait` 事件
+  开始，包含其实际存在的 `scout`、`retune` 和 `hold_confirm`；`cooldown_wait` 作为安全
+  预条件必须保留在 trace 和候选审查中，但不得占用主响应图。每个试验时间轴必须按设备全局
+  `elapsedMs` 严格递增，且不得拼接多个 trial 的本地时间轴。
 - 报告绘图必须保持物理量纲。温度、加热输出、VIN/PPS 合同电压和 PPS 合同电流不得
   通过隐藏倍率共用同一数值轴；不同量纲使用独立图或明确标注的独立轴。`heaterOutputPermille`
   显示为 `0–100%`，其显式坐标范围不得扩展到负值。PPS 合同电流必须标注为合同安全
@@ -221,10 +231,14 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
 
 ### 固件调优状态机
 
-每个 target 依次经过 `cooldown_wait`、`scout`、`retune`、`hold_confirm` 和
-`accepted|failed|skipped`。核心在进入 target 时只从最近两侧 accepted boundary
-做线性插值得到 seed；没有两侧边界时使用该等级的已持久 baseline。它不能把某个
-point 的最终参数回写到另一个 point。
+每个 target 的每一个候选 trial 都独立经过 `cooldown_wait`、`scout`、`retune` 和
+`hold_confirm`，然后才可参加 `accepted|failed|skipped` 的 target 决策。完成一个候选后，
+下一个候选必须重新回到 `cooldown_wait`，直到温度不高于 `target-5°C` 才开始它自己的
+`scout`、warmup、approach 与 dynamic settle；不得从上一候选的 hold 或 retune 直接继续。
+`scout` 从该候选的 `candidate_trial` 起点单独计时，至少持续 5 秒；它不得复用 target 或前一
+候选已经消耗的 scout 时间。
+核心在进入 target 时只从最近两侧 accepted boundary 做线性插值得到 seed；没有两侧边界时
+使用该等级的已持久 baseline。它不能把某个 point 的最终参数回写到另一个 point。
 
 任何 PPS 合同丢失、温度测量失效、固件 heater safety、运行时硬故障、操作取消或
 target budget 耗尽都按明确 terminal/target disposition 收口。取消与硬故障立即

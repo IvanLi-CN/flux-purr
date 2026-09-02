@@ -111,7 +111,14 @@ fixed-point payload. The allowed kinds are `sample`, `phase_transition`, `candid
 `temperatureCentiC`, `vinMv`, `ppsContractMv`, `ppsContractMa`, `heaterOutputPermille`,
 measurement validity and phase. They must not contain external VBUS measurements.
 `phase_transition` records old/new phase and reason. `candidate_trial` records the complete
-canonical fixed-point candidate, trial index, start/end sequence and time, and sample range.
+canonical fixed-point candidate, trial index, start/end sequence and time, and sample range. A
+candidate trial starts only after its `cooldown_wait` precondition has reached `target-5°C` and
+the firmware enters `scout`; prior cooldown samples remain target-level safety evidence and are
+outside that candidate trial's sample range and dynamic-settle score.
+Each candidate's `scout` interval is timed from its own start boundary and lasts at least five
+seconds. Its `warmup_complete` gate may only be satisfied by a 100% heater-output sample inside
+that candidate's `scout` interval; neither cooldown nor a prior candidate contributes scoring
+measurements or warmup state.
 `decision` records the complete candidate/score/gate/target state, freeze and interval result.
 `safety` records a safety fault and disarm reason. Preview, discard and save occur after terminal
 trace sealing, so their normal command responses carry applied hash, persistent revision and

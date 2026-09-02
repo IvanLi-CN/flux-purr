@@ -219,6 +219,7 @@ pub struct ThermalTuningRuntime {
     candidate_ladder: Option<[CandidatePoint; CANDIDATE_LADDER_WIDTH]>,
     candidate_evaluations: [Option<CandidateEvaluation>; CANDIDATE_LADDER_WIDTH],
     candidate_trial_index: usize,
+    candidate_trial_active: bool,
     candidate_trial_started_ms: u32,
     candidate_trial_start_sequence: u64,
     last_trace_sample_ms: Option<u32>,
@@ -261,6 +262,7 @@ impl ThermalTuningRuntime {
             candidate_ladder: None,
             candidate_evaluations: [None; CANDIDATE_LADDER_WIDTH],
             candidate_trial_index: 0,
+            candidate_trial_active: false,
             candidate_trial_started_ms: 0,
             candidate_trial_start_sequence: 0,
             last_trace_sample_ms: None,
@@ -305,6 +307,7 @@ impl ThermalTuningRuntime {
             core::ptr::addr_of_mut!((*out).candidate_evaluations)
                 .write([None; CANDIDATE_LADDER_WIDTH]);
             core::ptr::addr_of_mut!((*out).candidate_trial_index).write(0);
+            core::ptr::addr_of_mut!((*out).candidate_trial_active).write(false);
             core::ptr::addr_of_mut!((*out).candidate_trial_started_ms).write(0);
             core::ptr::addr_of_mut!((*out).candidate_trial_start_sequence).write(0);
             core::ptr::addr_of_mut!((*out).last_trace_sample_ms).write(None);
@@ -393,7 +396,7 @@ impl ThermalTuningRuntime {
         self.last_trace_sample_ms = None;
         self.preview_profile = None;
         self.record_phase_transition(now_ms, Phase::Idle, Phase::CooldownWait, 1)?;
-        self.begin_candidate_trial(now_ms)?;
+        self.prepare_candidate_trials()?;
         Ok(())
     }
 
@@ -423,6 +426,7 @@ impl ThermalTuningRuntime {
         self.candidate_ladder = None;
         self.candidate_evaluations = [None; CANDIDATE_LADDER_WIDTH];
         self.candidate_trial_index = 0;
+        self.candidate_trial_active = false;
     }
 
     pub fn tick(&mut self, sample: ThermalTuningSample) -> Result<(), ThermalTuningRuntimeError> {
@@ -484,7 +488,6 @@ impl ThermalTuningRuntime {
             self.last_trace_sample_ms = Some(sample.elapsed_ms);
         }
         self.last_temp_centi = sample.temperature_centi_c;
-        self.warmup_complete |= sample.heater_output_permille >= 1_000;
         let target_centi = target_c.saturating_mul(100);
         if sample.elapsed_ms.saturating_sub(self.target_started_ms) >= TARGET_BUDGET_SECONDS * 1_000
         {
@@ -496,26 +499,40 @@ impl ThermalTuningRuntime {
         let error = target_centi
             .saturating_sub(sample.temperature_centi_c)
             .abs();
-        self.max_overshoot_centi = self.max_overshoot_centi.max(
-            sample
-                .temperature_centi_c
-                .saturating_sub(target_centi)
-                .max(0),
-        );
-        if self
-            .last_output_permille
-            .is_some_and(|previous| previous != sample.heater_output_permille)
-        {
-            self.output_switches = self.output_switches.saturating_add(1);
+        // Candidate scoring begins only after its cooldown boundary. Samples
+        // captured while cooling remain target-level safety evidence.
+        if self.candidate_trial_active && phase != Phase::CooldownWait {
+            self.warmup_complete |= sample.heater_output_permille >= 1_000;
+            self.max_overshoot_centi = self.max_overshoot_centi.max(
+                sample
+                    .temperature_centi_c
+                    .saturating_sub(target_centi)
+                    .max(0),
+            );
+            if self
+                .last_output_permille
+                .is_some_and(|previous| previous != sample.heater_output_permille)
+            {
+                self.output_switches = self.output_switches.saturating_add(1);
+            }
+            self.last_output_permille = Some(sample.heater_output_permille);
         }
-        self.last_output_permille = Some(sample.heater_output_permille);
         match phase {
             Phase::CooldownWait
                 if sample.temperature_centi_c <= target_centi.saturating_sub(500) =>
             {
                 self.transition_phase(sample.elapsed_ms, Phase::Scout, 2)?;
+                if !self.candidate_trial_active {
+                    self.activate_candidate_trial(sample.elapsed_ms)?;
+                }
             }
-            Phase::Scout if sample.elapsed_ms.saturating_sub(self.target_started_ms) >= 5_000 => {
+            Phase::Scout
+                if self.candidate_trial_active
+                    && sample
+                        .elapsed_ms
+                        .saturating_sub(self.candidate_trial_started_ms)
+                        >= 5_000 =>
+            {
                 self.transition_phase(sample.elapsed_ms, Phase::Retune, 3)?;
             }
             Phase::Retune if error <= HOLD_CONFIRM_ENTRY_CENTI => {
@@ -552,11 +569,13 @@ impl ThermalTuningRuntime {
                     } else {
                         (self.hold_error_sum_centi / i64::from(self.hold_sample_count)) as i32
                     };
+                    let candidate_trial_started_ms = self
+                        .candidate_trial_active
+                        .then_some(self.candidate_trial_started_ms)
+                        .ok_or(ThermalTuningRuntimeError::NotActive)?;
                     let settle_ms = self.hold_started_ms.map_or(
-                        sample
-                            .elapsed_ms
-                            .saturating_sub(self.candidate_trial_started_ms),
-                        |started| started.saturating_sub(self.candidate_trial_started_ms),
+                        sample.elapsed_ms.saturating_sub(candidate_trial_started_ms),
+                        |started| started.saturating_sub(candidate_trial_started_ms),
                     );
                     let gates = CandidateGates {
                         warmup_complete: self.warmup_complete,
@@ -588,9 +607,8 @@ impl ThermalTuningRuntime {
                         self.core
                             .set_current_target_candidate(ladder[self.candidate_trial_index])?
                             .ok_or(ThermalTuningRuntimeError::NotActive)?;
-                        self.reset_candidate_window(sample.elapsed_ms);
-                        self.transition_phase(sample.elapsed_ms, Phase::Retune, 5)?;
-                        self.record_candidate_trial_started(sample.elapsed_ms)?;
+                        self.reset_candidate_window();
+                        self.transition_phase(sample.elapsed_ms, Phase::CooldownWait, 5)?;
                         return Ok(());
                     }
                     let evaluations = core::array::from_fn(|index| {
@@ -625,7 +643,7 @@ impl ThermalTuningRuntime {
                                 6,
                             )?;
                             self.reset_target_window(sample.elapsed_ms);
-                            self.begin_candidate_trial(sample.elapsed_ms)?;
+                            self.prepare_candidate_trials()?;
                         }
                         return Ok(());
                     }
@@ -649,7 +667,7 @@ impl ThermalTuningRuntime {
                             6,
                         )?;
                         self.reset_target_window(sample.elapsed_ms);
-                        self.begin_candidate_trial(sample.elapsed_ms)?;
+                        self.prepare_candidate_trials()?;
                     } else {
                         self.finish_terminal(
                             self.core.terminal().unwrap_or(TerminalDisposition::Failed),
@@ -916,9 +934,10 @@ impl ThermalTuningRuntime {
         self.candidate_ladder = None;
         self.candidate_evaluations = [None; CANDIDATE_LADDER_WIDTH];
         self.candidate_trial_index = 0;
+        self.candidate_trial_active = false;
     }
 
-    fn begin_candidate_trial(&mut self, now_ms: u32) -> Result<(), ThermalTuningRuntimeError> {
+    fn prepare_candidate_trials(&mut self) -> Result<(), ThermalTuningRuntimeError> {
         let ladder = self
             .core
             .candidate_ladder_for_current_target()
@@ -926,12 +945,17 @@ impl ThermalTuningRuntime {
         self.candidate_ladder = Some(ladder);
         self.candidate_evaluations = [None; CANDIDATE_LADDER_WIDTH];
         self.candidate_trial_index = 0;
-        self.candidate_trial_started_ms = now_ms;
         self.core
             .set_current_target_candidate(ladder[0])?
             .ok_or(ThermalTuningRuntimeError::NotActive)?;
-        self.record_candidate_trial_started(now_ms)?;
+        self.reset_candidate_window();
         Ok(())
+    }
+
+    fn activate_candidate_trial(&mut self, now_ms: u32) -> Result<(), ThermalTuningRuntimeError> {
+        self.candidate_trial_started_ms = now_ms;
+        self.candidate_trial_active = true;
+        self.record_candidate_trial_started(now_ms)
     }
 
     fn record_candidate_trial_started(
@@ -1015,8 +1039,9 @@ impl ThermalTuningRuntime {
         Ok(())
     }
 
-    fn reset_candidate_window(&mut self, now_ms: u32) {
-        self.candidate_trial_started_ms = now_ms;
+    fn reset_candidate_window(&mut self) {
+        self.candidate_trial_active = false;
+        self.warmup_complete = false;
         self.hold_started_ms = None;
         self.target_min_temp_centi = i16::MAX;
         self.target_max_temp_centi = i16::MIN;
@@ -1030,8 +1055,7 @@ impl ThermalTuningRuntime {
 
     fn reset_target_window(&mut self, now_ms: u32) {
         self.target_started_ms = now_ms;
-        self.warmup_complete = false;
-        self.reset_candidate_window(now_ms);
+        self.reset_candidate_window();
     }
 }
 
@@ -1486,11 +1510,10 @@ mod tests {
             digest: [0; 32],
         }; 8];
         let count = runtime.core().trace_page(None, 8, &mut page);
-        assert_eq!(count, 4);
+        assert_eq!(count, 3);
         assert!(matches!(page[0].event, TraceEvent::PhaseTransition(_)));
-        assert!(matches!(page[1].event, TraceEvent::CandidateTrial(_)));
-        assert!(matches!(page[2].event, TraceEvent::Safety(_)));
-        assert!(matches!(page[3].event, TraceEvent::Decision(_)));
+        assert!(matches!(page[1].event, TraceEvent::Safety(_)));
+        assert!(matches!(page[2].event, TraceEvent::Decision(_)));
     }
 
     #[test]
@@ -1560,16 +1583,28 @@ mod tests {
             .tick(sample_with_output(67_000, 6_000, 3_250, 0))
             .unwrap();
         runtime
-            .tick(sample_with_output(68_000, 6_000, 3_250, 0))
+            .tick(sample_with_output(68_000, 5_500, 3_250, 0))
             .unwrap();
         runtime
-            .tick(sample_with_output(128_000, 6_000, 3_250, 0))
+            .tick(sample_with_output(73_000, 5_500, 3_250, 1_000))
             .unwrap();
         runtime
-            .tick(sample_with_output(129_000, 6_000, 3_250, 0))
+            .tick(sample_with_output(74_000, 5_900, 3_250, 100))
             .unwrap();
         runtime
-            .tick(sample_with_output(189_000, 6_000, 3_250, 0))
+            .tick(sample_with_output(134_000, 6_000, 3_250, 0))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(135_000, 5_500, 3_250, 0))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(140_000, 5_500, 3_250, 1_000))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(141_000, 5_900, 3_250, 100))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(201_000, 6_000, 3_250, 0))
             .unwrap();
 
         assert!(runtime.core().summary().accepted[0]);
@@ -1577,10 +1612,58 @@ mod tests {
         assert!(!runtime.heater_output_permitted());
 
         runtime
-            .tick(sample_with_output(190_000, 6_000, 3_250, 0))
+            .tick(sample_with_output(202_000, 6_000, 3_250, 0))
             .unwrap();
         assert_eq!(runtime.core().phase(), Phase::Scout);
         assert!(runtime.heater_output_permitted());
+    }
+
+    #[test]
+    fn every_candidate_restarts_from_the_cooldown_precondition() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.set_eligibility(ready());
+        runtime.start(8, PpsPowerClass::Pps3a, 0).unwrap();
+
+        runtime
+            .tick(sample_with_output(0, 2_500, 3_250, 1_000))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(5_000, 5_000, 3_250, 1_000))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(6_000, 5_900, 3_250, 500))
+            .unwrap();
+        runtime
+            .tick(sample_with_output(66_000, 6_000, 3_250, 0))
+            .unwrap();
+
+        assert_eq!(runtime.core().phase(), Phase::CooldownWait);
+        assert!(!runtime.heater_output_permitted());
+
+        runtime
+            .tick(sample_with_output(67_000, 6_000, 3_250, 0))
+            .unwrap();
+        assert_eq!(runtime.core().phase(), Phase::CooldownWait);
+        assert!(!runtime.heater_output_permitted());
+
+        runtime
+            .tick(sample_with_output(68_000, 5_500, 3_250, 0))
+            .unwrap();
+        assert_eq!(runtime.core().phase(), Phase::Scout);
+        assert!(runtime.heater_output_permitted());
+        assert!(runtime.candidate_trial_active);
+        assert_eq!(runtime.candidate_trial_started_ms, 68_000);
+        assert!(!runtime.warmup_complete);
+
+        runtime
+            .tick(sample_with_output(72_999, 5_500, 3_250, 1_000))
+            .unwrap();
+        assert_eq!(runtime.core().phase(), Phase::Scout);
+        runtime
+            .tick(sample_with_output(73_000, 5_500, 3_250, 1_000))
+            .unwrap();
+        assert_eq!(runtime.core().phase(), Phase::Retune);
+        assert!(runtime.warmup_complete);
     }
 
     #[test]
@@ -1609,7 +1692,7 @@ mod tests {
             .unwrap();
 
         assert!(!runtime.core().summary().accepted[0]);
-        assert_eq!(runtime.core().phase(), Phase::Retune);
+        assert_eq!(runtime.core().phase(), Phase::CooldownWait);
     }
 
     #[test]

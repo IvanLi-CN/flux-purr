@@ -327,7 +327,13 @@ fn firmware_report_data(
         let mut rounds = Vec::with_capacity(target_trials.len());
         for trial in target_trials.iter().copied() {
             let trial_index = required_u64(trial, "trialIndex", "candidate trial")?;
-            let trial_samples = firmware_trial_samples(samples, target, trial_index);
+            let trial_samples = firmware_trial_samples(
+                samples,
+                target,
+                trial_index,
+                trial.get("trialStartSequence").and_then(Value::as_u64),
+                trial.get("trialEndSequence").and_then(Value::as_u64),
+            );
             let point = firmware_trial_point(trial)?;
             let selected = selected_hash.is_some()
                 && trial.get("candidateHash").and_then(Value::as_str) == selected_hash;
@@ -550,12 +556,34 @@ fn firmware_candidate_point_json(point: flux_purr_thermal_tuning_core::Candidate
     })
 }
 
-fn firmware_trial_samples(samples: &[Value], target_c: i16, trial_index: u64) -> Vec<Value> {
+fn firmware_trial_samples(
+    samples: &[Value],
+    target_c: i16,
+    trial_index: u64,
+    trial_start_sequence: Option<u64>,
+    trial_end_sequence: Option<u64>,
+) -> Vec<Value> {
     let mut raw = samples
         .iter()
         .filter(|sample| sample.get("kind").and_then(Value::as_str) == Some("sample"))
         .filter(|sample| sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target_c)))
         .filter(|sample| sample.get("trialIndex").and_then(Value::as_u64) == Some(trial_index))
+        .filter(|sample| {
+            trial_start_sequence.is_none_or(|start| {
+                sample
+                    .get("sequence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|sequence| sequence > start)
+            })
+        })
+        .filter(|sample| {
+            trial_end_sequence.is_none_or(|end| {
+                sample
+                    .get("sequence")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|sequence| sequence < end)
+            })
+        })
         .collect::<Vec<_>>();
     raw.sort_by_key(|sample| {
         sample
@@ -2522,12 +2550,12 @@ mod tests {
                 "vinMv": 20_000,
                 "ppsContractMv": 20_000,
                 "ppsContractMa": 5_000,
-                "heaterOutputPermille": 160,
+                "heaterOutputPermille": 0,
                 "measurementValid": true,
-                "phase": "hold_confirm"
+                "phase": "cooldown_wait"
             }),
             json!({
-                "sequence": 6,
+                "sequence": 7,
                 "elapsedMs": 4_000,
                 "kind": "sample",
                 "targetC": 60,
@@ -2566,7 +2594,15 @@ mod tests {
                 "gates": 3
             }),
             json!({
-                "sequence": 7,
+                "sequence": 6,
+                "elapsedMs": 3_500,
+                "kind": "candidate_trial",
+                "eventReason": "started",
+                "targetC": 60,
+                "trialIndex": 1
+            }),
+            json!({
+                "sequence": 8,
                 "elapsedMs": 4_100,
                 "kind": "candidate_trial",
                 "eventReason": "completed",
@@ -2575,9 +2611,9 @@ mod tests {
                 "candidateId": "trial-1",
                 "candidateHash": "bb",
                 "canonicalCandidatePointHex": hex::encode(canonical),
-                "trialStartSequence": 5,
-                "trialEndSequence": 7,
-                "trialStartElapsedMs": 3_000,
+                "trialStartSequence": 6,
+                "trialEndSequence": 8,
+                "trialStartElapsedMs": 3_500,
                 "trialEndElapsedMs": 4_100,
                 "scoreOvershoot": 45,
                 "scoreStability": 87,
@@ -2587,7 +2623,7 @@ mod tests {
                 "gates": 63
             }),
             json!({
-                "sequence": 8,
+                "sequence": 9,
                 "elapsedMs": 4_200,
                 "kind": "decision",
                 "targetC": 60,
@@ -2595,7 +2631,7 @@ mod tests {
                 "candidateHash": "bb",
                 "scoreOvershoot": 45,
                 "scoreStability": 87,
-                "scoreSettleMs": 1_500,
+                "scoreSettleMs": 4_200,
                 "gates": 63
             }),
         ];
@@ -2605,6 +2641,19 @@ mod tests {
 
         assert_eq!(report["rawRuns"][0]["roundCount"], 2);
         assert_eq!(report["rawRuns"][0]["rounds"][1]["selected"], true);
+        assert_eq!(
+            report["rawRuns"][0]["result"]["maxOvershootC"],
+            report["rawRuns"][0]["rounds"][1]["result"]["maxOvershootC"]
+        );
+        assert_eq!(
+            report["rawRuns"][0]["result"]["holdPeakToPeakC"],
+            report["rawRuns"][0]["rounds"][1]["result"]["holdPeakToPeakC"]
+        );
+        assert_eq!(report["rawRuns"][0]["result"]["scoreSettleMs"], 4_200);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][1]["result"]["scoreSettleMs"],
+            1_500
+        );
         assert_eq!(report["rawRuns"][0]["rounds"][0]["selected"], false);
         assert_eq!(report["rawRuns"][0]["rounds"][0]["evidenceValid"], false);
         assert_eq!(
@@ -2659,7 +2708,8 @@ mod tests {
         assert_eq!(target_samples[1]["trialBoundaryBefore"], false);
         assert_eq!(target_samples[0]["phase"], "warmup");
         assert_eq!(target_samples[1]["phase"], "approach");
-        assert_eq!(target_samples[2]["phase"], "hold");
+        assert_eq!(target_samples[2]["phase"], "cooldown_wait");
+        assert_eq!(target_samples[3]["phase"], "hold");
         assert_eq!(
             report["rawRuns"][0]["rounds"][1]["samples"]
                 .as_array()
@@ -2667,7 +2717,7 @@ mod tests {
                 .iter()
                 .map(|sample| sample["t"].as_f64().expect("round second"))
                 .collect::<Vec<_>>(),
-            vec![0.0, 1.0]
+            vec![0.0]
         );
     }
 
@@ -2928,7 +2978,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_report_template_distinguishes_rejected_and_adopted_candidate_trials() {
+    fn firmware_report_template_defaults_to_adopted_trial_and_allows_switching() {
         assert!(REPORT_TEMPLATE.contains("samplesForCharts()"));
         assert!(REPORT_TEMPLATE.contains("adopted=rounds.find(round=>round.selected)"));
         assert!(
@@ -2941,17 +2991,31 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("const start=samples[firstHeating].t;"));
         assert!(REPORT_TEMPLATE.contains("return samples.slice(firstHeating).map("));
         assert!(REPORT_TEMPLATE.contains("t:sample.t-start"));
-        assert!(REPORT_TEMPLATE.contains("主图保留所有候选的加热轨迹"));
+        assert!(REPORT_TEMPLATE.contains("默认选择统计卡片对应的"));
         assert!(REPORT_TEMPLATE.contains("采用候选指标：过冲"));
+        assert!(REPORT_TEMPLATE.contains("目标评分 settle"));
+        assert!(REPORT_TEMPLATE.contains("候选试验 settle"));
         assert!(
             REPORT_TEMPLATE
                 .contains("候选 <strong>${{context.passed}}/${{context.total}} 通过</strong>")
         );
-        assert!(REPORT_TEMPLATE.contains("候选试验概览"));
+        assert!(REPORT_TEMPLATE.contains(
+            "${{active}}°C · 候选试验 ${{selected?.round??'—'}}/${{rounds.length}} 温度响应"
+        ));
         assert!(REPORT_TEMPLATE.contains("temperatureTrialLegend"));
         assert!(REPORT_TEMPLATE.contains("trialState(round)"));
         assert!(REPORT_TEMPLATE.contains("TRIAL_COLORS"));
         assert!(REPORT_TEMPLATE.contains("trialBoundaries"));
+        assert!(REPORT_TEMPLATE.contains("selectedTrialSamples()"));
+        assert!(REPORT_TEMPLATE.contains("data-round"));
+        assert!(REPORT_TEMPLATE.contains("activeRoundByRun.set(runKey(currentRun())"));
+        assert!(REPORT_TEMPLATE.contains("aria-pressed"));
+        assert!(REPORT_TEMPLATE.contains("trialLegend.onkeydown"));
+        assert!(REPORT_TEMPLATE.contains("selectTrialRound(round)"));
+        assert!(REPORT_TEMPLATE.contains("scope=firmwareReport&&selected?selected:run"));
+        assert!(
+            REPORT_TEMPLATE.contains("const adoptedResult=context?.adopted?.result||targetResult")
+        );
         assert!(REPORT_TEMPLATE.contains("未通过全部 gate，不能作为采用候选"));
         assert!(REPORT_TEMPLATE.contains("trialBoundaryBefore"));
         assert!(REPORT_TEMPLATE.contains("Y0=options.yMin??"));
