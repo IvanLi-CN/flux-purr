@@ -2558,12 +2558,12 @@ mod tests {
                 "trialEndSequence": 4,
                 "trialStartElapsedMs": 0,
                 "trialEndElapsedMs": 2_000,
-                "scoreOvershoot": 25,
-                "scoreStability": 80,
+                "scoreOvershoot": 383,
+                "scoreStability": 711,
                 "scoreSettleMs": 1_500,
                 "scoreHoldMeanAbsoluteErrorCenti": 20,
                 "scoreOutputSwitches": 2,
-                "gates": 63
+                "gates": 3
             }),
             json!({
                 "sequence": 7,
@@ -2579,8 +2579,8 @@ mod tests {
                 "trialEndSequence": 7,
                 "trialStartElapsedMs": 3_000,
                 "trialEndElapsedMs": 4_100,
-                "scoreOvershoot": 25,
-                "scoreStability": 80,
+                "scoreOvershoot": 45,
+                "scoreStability": 87,
                 "scoreSettleMs": 1_500,
                 "scoreHoldMeanAbsoluteErrorCenti": 20,
                 "scoreOutputSwitches": 2,
@@ -2593,8 +2593,8 @@ mod tests {
                 "targetC": 60,
                 "disposition": "accepted",
                 "candidateHash": "bb",
-                "scoreOvershoot": 25,
-                "scoreStability": 80,
+                "scoreOvershoot": 45,
+                "scoreStability": 87,
                 "scoreSettleMs": 1_500,
                 "gates": 63
             }),
@@ -2605,7 +2605,25 @@ mod tests {
 
         assert_eq!(report["rawRuns"][0]["roundCount"], 2);
         assert_eq!(report["rawRuns"][0]["rounds"][1]["selected"], true);
-        assert_eq!(report["rawRuns"][0]["rounds"][0]["evidenceValid"], true);
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["selected"], false);
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["evidenceValid"], false);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["result"]["maxOvershootC"],
+            3.83
+        );
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["result"]["holdPeakToPeakC"],
+            7.11
+        );
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["result"]["gates"], 3);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][1]["result"]["maxOvershootC"],
+            0.45
+        );
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][1]["result"]["holdPeakToPeakC"],
+            0.87
+        );
         assert_eq!(
             report["rawRuns"][0]["rounds"][0]["point"]["targetTempC"],
             60
@@ -2618,7 +2636,7 @@ mod tests {
             report["rawRuns"][0]["rounds"][0]["result"]["stopReason"],
             "completed"
         );
-        assert_eq!(report["rawRuns"][0]["rounds"][0]["result"]["gates"], 63);
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["result"]["gates"], 3);
         assert_eq!(
             report["rawRuns"][0]["rounds"][0]["samples"][0]["candidateHash"],
             "aa"
@@ -2910,7 +2928,7 @@ mod tests {
     }
 
     #[test]
-    fn firmware_report_template_starts_response_at_heating_and_defaults_adopted_round() {
+    fn firmware_report_template_distinguishes_rejected_and_adopted_candidate_trials() {
         assert!(REPORT_TEMPLATE.contains("samplesForCharts()"));
         assert!(REPORT_TEMPLATE.contains("adopted=rounds.find(round=>round.selected)"));
         assert!(
@@ -2923,7 +2941,18 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("const start=samples[firstHeating].t;"));
         assert!(REPORT_TEMPLATE.contains("return samples.slice(firstHeating).map("));
         assert!(REPORT_TEMPLATE.contains("t:sample.t-start"));
-        assert!(REPORT_TEMPLATE.contains("加热响应：从首次加热阶段开始"));
+        assert!(REPORT_TEMPLATE.contains("主图保留所有候选的加热轨迹"));
+        assert!(REPORT_TEMPLATE.contains("采用候选指标：过冲"));
+        assert!(
+            REPORT_TEMPLATE
+                .contains("候选 <strong>${{context.passed}}/${{context.total}} 通过</strong>")
+        );
+        assert!(REPORT_TEMPLATE.contains("候选试验概览"));
+        assert!(REPORT_TEMPLATE.contains("temperatureTrialLegend"));
+        assert!(REPORT_TEMPLATE.contains("trialState(round)"));
+        assert!(REPORT_TEMPLATE.contains("TRIAL_COLORS"));
+        assert!(REPORT_TEMPLATE.contains("trialBoundaries"));
+        assert!(REPORT_TEMPLATE.contains("未通过全部 gate，不能作为采用候选"));
         assert!(REPORT_TEMPLATE.contains("trialBoundaryBefore"));
         assert!(REPORT_TEMPLATE.contains("Y0=options.yMin??"));
         assert!(REPORT_TEMPLATE.contains("PPS 合同电流"));

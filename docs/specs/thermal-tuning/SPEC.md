@@ -161,7 +161,12 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   删除来伪造完整性。
 - 报告的目标卡、验收指标和候选详情必须引用同一个 candidate trial。存在 adopted trial
   时，候选详情默认显示该 trial，并明确显示其试验编号和 adopted 状态；其余 trial 必须
-  保留为可切换的独立视图。每个目标的主温度响应图必须使用该 target 已存档 sample 中从第一条
+  保留为可切换的独立视图。目标卡必须显式标明采用 trial 的编号/总数，且其通过结论、
+  overshoot、峰峰值与 settle 只能描述该 adopted trial，不能以“有效测试”或未限定指标
+  暗示所有可见曲线均通过。每个目标的主温度响应图是所有候选 trial 的概览：每段曲线
+  必须有可见的 trial 边界，并能在同一视区辨认试验编号、`rejected|passed|adopted`
+  状态、overshoot、峰峰值和 gate 掩码。主图不得把 rejected trial 的轨迹、峰值或任何
+  指标视觉上归因于 adopted target card；采用候选必须仍有独立、默认选中的详情视图。主图必须使用该 target 已存档 sample 中从第一条
   非 `cooldown_wait` 事件开始的设备轨迹，包含 `scout`、`retune` 和 `hold_confirm`；它不得因 adopted trial 从目标附近开始而隐藏预热或逼近过程。
   主图的时间零点是这一首次加热 sample；`cooldown_wait` 作为安全预条件必须保留在 trace 和候选审查中，但不得占用主响应图。
   加热轨迹必须按设备全局 `elapsedMs` 严格递增排序，且在 trial 边界断开折线，禁止拼接每个 trial 从零开始的本地时间轴。

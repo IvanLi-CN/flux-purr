@@ -100,17 +100,23 @@ both report and UI.
 
 The target-card verdict, displayed hard metrics and candidate detail describe one candidate
 trial. When an adopted trial exists, it is the default candidate detail and the report labels
-its trial number and adopted state. Other executed trials remain individually selectable so a
-rejected candidate cannot be mistaken for the adopted result.
+its trial number and adopted state. Its target card must state the adopted trial number over
+the executed-trial count, and the verdict, overshoot, peak-to-peak and settle fields must be
+explicitly labelled as adopted-candidate metrics. Other executed trials remain individually
+selectable so a rejected candidate cannot be mistaken for the adopted result.
 
-The primary target response chart is a heating-response trajectory, not a selected-candidate
-chart. It orders archived samples for that target by the Device-global `elapsedMs`, starts at
-the first sample outside `cooldown_wait`, includes warmup, approach and hold-confirm phases
-when present, and breaks every line at a `trialIndex` transition. Its displayed time origin is
-that first heating sample. Selecting an adopted candidate must not hide earlier warmup or
-approach samples. `cooldown_wait` remains in the archived trace and candidate audit, but does
-not occupy the primary response chart. The renderer must never concatenate trial-local clocks
-or draw a segment across a candidate boundary.
+The primary target response chart is an all-candidate heating-response overview, not a
+selected-candidate chart. It orders archived samples for that target by the Device-global
+`elapsedMs`, starts at the first sample outside `cooldown_wait`, includes warmup, approach and
+hold-confirm phases when present, and breaks every line at a `trialIndex` transition. Every
+trial boundary must be visibly marked, and the same view must expose each trial number,
+`rejected|passed|adopted` disposition, overshoot, peak-to-peak and gate mask. The chart title
+or subtitle must state that it contains every candidate trial; it must not visually associate a
+rejected trajectory with the adopted target-card verdict. Its displayed time origin is that
+first heating sample. Selecting an adopted candidate must not hide earlier warmup or approach
+samples. `cooldown_wait` remains in the archived trace and candidate audit, but does not occupy
+the primary response chart. The renderer must never concatenate trial-local clocks or draw a
+segment across a candidate boundary.
 
 Charts preserve physical dimensions: temperature, heater output, voltage and current use
 separate plots or explicitly labelled independent axes. A renderer must not use a hidden
