@@ -83,6 +83,9 @@ const FLASH_CONFIG_LABEL: &str = "flux_cfg";
 const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(1);
+// Match the supported `espflash write-bin` transport: ESP32-S3 requires the
+// flash stub for a reliable multi-segment application write over USB-JTAG.
+const USB_JTAG_SINGLE_SESSION_USE_STUB: bool = true;
 // A recovery write may erase the application range. Connection retries happen
 // before writes begin, but a started protected transaction is never replayed
 // automatically against the hardware.
@@ -7210,7 +7213,7 @@ fn flash_bundle_with_single_usb_serial_jtag_session_once(
     let mut progress = SingleSessionFlashProgress::new(segments, events.clone());
     flasher
         .write_bins_to_flash(&images, &mut progress)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:?}"))?;
     let _ = events.send(SingleSessionFlashEvent::WriteCompleted);
 
     for segment in segments {
@@ -7269,11 +7272,18 @@ fn connect_single_session_rom_flasher(
         })();
         match connection {
             // The approved recovery bundle explicitly covers the bootloader,
-            // partition table, and application ranges. Keeping the session in
-            // ROM mode lets ESP32-S3 erase and program only those ranges while
-            // retaining unrelated flash contents and avoiding the USB serial
-            // JTAG stub handshake.
-            Ok(connection) => match Flasher::connect(connection, false, true, false, None, None) {
+            // Keep the ROM transport and its flash stub alive through the
+            // bootloader, partition table, and application write. This is the
+            // same supported data path as `espflash write-bin`, without a
+            // process boundary before ROM MD5 verification.
+            Ok(connection) => match Flasher::connect(
+                connection,
+                USB_JTAG_SINGLE_SESSION_USE_STUB,
+                true,
+                true,
+                None,
+                None,
+            ) {
                 Ok(flasher) => return Ok(flasher),
                 Err(error) => attempts.push(format!("{reset_mode:?}: {error}")),
             },
