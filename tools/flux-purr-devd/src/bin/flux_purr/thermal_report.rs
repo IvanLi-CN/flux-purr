@@ -2494,7 +2494,7 @@ mod tests {
                 "ppsContractMa": 5_000,
                 "heaterOutputPermille": 240,
                 "measurementValid": true,
-                "phase": "hold_confirm"
+                "phase": "scout"
             }),
             json!({
                 "sequence": 3,
@@ -2509,7 +2509,7 @@ mod tests {
                 "ppsContractMa": 5_000,
                 "heaterOutputPermille": 180,
                 "measurementValid": true,
-                "phase": "hold_confirm"
+                "phase": "retune"
             }),
             json!({
                 "sequence": 5,
@@ -2639,6 +2639,9 @@ mod tests {
         );
         assert_eq!(target_samples[2]["trialBoundaryBefore"], true);
         assert_eq!(target_samples[1]["trialBoundaryBefore"], false);
+        assert_eq!(target_samples[0]["phase"], "warmup");
+        assert_eq!(target_samples[1]["phase"], "approach");
+        assert_eq!(target_samples[2]["phase"], "hold");
         assert_eq!(
             report["rawRuns"][0]["rounds"][1]["samples"]
                 .as_array()
@@ -2907,9 +2910,17 @@ mod tests {
     }
 
     #[test]
-    fn firmware_report_template_keeps_trial_and_unit_boundaries_explicit() {
+    fn firmware_report_template_preserves_full_target_trajectory_and_adopted_round() {
         assert!(REPORT_TEMPLATE.contains("samplesForCharts()"));
-        assert!(REPORT_TEMPLATE.contains("当前显示候选试验"));
+        assert!(REPORT_TEMPLATE.contains("adopted=rounds.find(round=>round.selected)"));
+        assert!(
+            REPORT_TEMPLATE.contains("activeRoundByRun.set(key,(adopted||rounds.at(-1)).round)")
+        );
+        assert!(
+            REPORT_TEMPLATE
+                .contains("function samplesForCharts(){{return samplesForRun(currentRun());}}")
+        );
+        assert!(REPORT_TEMPLATE.contains("完整设备轨迹：包含冷却、预热、逼近与确认"));
         assert!(REPORT_TEMPLATE.contains("trialBoundaryBefore"));
         assert!(REPORT_TEMPLATE.contains("Y0=options.yMin??"));
         assert!(REPORT_TEMPLATE.contains("PPS 合同电流"));

@@ -98,14 +98,17 @@ both report and UI.
 
 ## Report Rendering
 
-The target-card verdict, displayed hard metrics and default response chart describe one
-candidate trial. When an adopted trial exists, it is the default and the report labels its
-trial number and adopted state. Other executed trials remain individually selectable so a
+The target-card verdict, displayed hard metrics and candidate detail describe one candidate
+trial. When an adopted trial exists, it is the default candidate detail and the report labels
+its trial number and adopted state. Other executed trials remain individually selectable so a
 rejected candidate cannot be mistaken for the adopted result.
 
-A renderer that offers a target-level multi-trial overview orders samples by the Device-global
-`elapsedMs` and breaks every line at a `trialIndex` transition. It must never concatenate
-trial-local clocks or draw a segment across a candidate boundary.
+The primary target response chart is a complete device trajectory, not a selected-candidate
+chart. It orders every archived sample for that target by the Device-global `elapsedMs`,
+includes the cooldown, warmup, approach and hold-confirm phases when present, and breaks every
+line at a `trialIndex` transition. Selecting an adopted candidate must not hide earlier
+cooldown, warmup or approach samples. It must never concatenate trial-local clocks or draw a
+segment across a candidate boundary.
 
 Charts preserve physical dimensions: temperature, heater output, voltage and current use
 separate plots or explicitly labelled independent axes. A renderer must not use a hidden
