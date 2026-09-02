@@ -90,6 +90,10 @@ _Avoid_: Playback queue, event log
 The Device state for active thermal runaway or an unacknowledged cleared runaway, during which only its safety cue may be emitted.
 _Avoid_: Measurement fault, general error
 
+**Developer Buzzer Diagnostic**:
+A feature-gated native-USB diagnostic that submits only fixed Feedback Cue requests or fixed arbitration scenarios through Cue Arbitration. It cannot choose PWM parameters or create an Audible Safety State.
+_Avoid_: Product control, raw buzzer driver
+
 ## Measurement
 
 **RTD**:

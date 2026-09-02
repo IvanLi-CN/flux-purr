@@ -5,12 +5,12 @@
 ## Context and Scope
 
 - Context: `GPIO48` 上的单一 PWM 输出只能在任一时刻驱动一个 Buzzer Cue；多个独立请求必须经确定性仲裁后才可到达该输出。
-- In scope: cue 请求的优先级、抢占、单槽合并、安全状态抑制、调度语义与诊断边界。
-- Out of scope: cue 的具体音高/时长设计、蜂鸣器硬件拓扑、PWM 载波生成、Control Plane 外部 API、测温 fault 的安全策略。
+- In scope: cue 请求的优先级、抢占、单槽合并、安全状态抑制、调度语义与诊断边界，以及 feature-gated 的开发蜂鸣器诊断。
+- Out of scope: cue 的具体音高/时长设计、蜂鸣器硬件拓扑、PWM 载波生成、产品 Control Plane API、原始 PWM 参数控制、测温 fault 的安全策略。
 
 ## Terms and Interfaces
 
-- `Buzzer Cue`、`Cue Request`、`Cue Arbitration`、`Protection Cue`、`Attention Reminder`、`Feedback Cue`、`Pending Feedback` 与 `Audible Safety State`：见根目录 `CONTEXT.md`。
+- `Buzzer Cue`、`Cue Request`、`Cue Arbitration`、`Protection Cue`、`Attention Reminder`、`Feedback Cue`、`Pending Feedback`、`Audible Safety State` 与 `Developer Buzzer Diagnostic`：见根目录 `CONTEXT.md`。
 - Interface: 固件内部的 cue 仲裁边界接收携带语义来源的 Cue Request，并返回 `selected`、`preempted`、`queued`、`coalesced` 或 `dropped` 的仲裁结果。
 - Interface: 仅 cue 仲裁边界可启动或停止底层播放控制器；底层控制器继续输出已选 cue 的 tone/rest 步骤。
 
@@ -54,7 +54,13 @@
 ### REQ-BUZZER-ARBITRATION-007
 
 - 仲裁层 MUST 为每个 Cue Request 产生带语义来源、请求 cue 和仲裁结果的固件诊断记录。
-- 诊断记录 MUST 不新增 Control Plane 产品 API、持久化状态或凭据表面。
+- 生产固件与产品 Control Plane MUST 不新增蜂鸣器诊断 API、持久化状态或凭据表面。
+
+### REQ-BUZZER-ARBITRATION-008
+
+- 开发固件在显式启用 `buzzer-debug` feature 后，MUST 通过 native USB JSONL 与受 lease 保护的 `devd` 端点提供 `Developer Buzzer Diagnostic`；能力必须由 `buzzer_debug` identity capability 明确声明，且不得经 LAN 或产品 Web 控制面暴露。
+- 该诊断 MUST 只接受固定 Feedback Cue，或固定 `feedback_coalesce` / `feedback_replace` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交为 `DeveloperDebug` 来源；它不得暴露频率、占空比、原始步骤、Protection Cue、Attention Reminder 或持久化控制。
+- 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 trace MUST 只记录本诊断的仲裁结果，不得改变安全状态。
 
 ## Verification
 
@@ -98,7 +104,13 @@
 
 - Method: 固件诊断记录断言。
 - covers: `REQ-BUZZER-ARBITRATION-007`
-- Pass condition: 每个仲裁结果均包含来源、cue 和 disposition，且没有新的对外或持久化字段。
+- Pass condition: 每个仲裁结果均包含来源、cue 和 disposition，且生产固件没有新的对外或持久化字段。
+
+### VER-BUZZER-ARBITRATION-008
+
+- Method: feature-gated 固件 USB frame 与 `devd` request 验证测试。
+- covers: `REQ-BUZZER-ARBITRATION-008`
+- Pass condition: 只有声明 capability 的开发固件可接收固定 cue/scenario 请求；请求无法携带原始 PWM 或安全 cue 参数，并在热安全 interlock 存在时被拒绝。
 
 ## Related ADRs
 

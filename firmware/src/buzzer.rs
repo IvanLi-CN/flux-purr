@@ -1,4 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "snake_case"))]
 pub enum BuzzerCueId {
     UiInput,
     HeaterOn,
@@ -32,12 +34,16 @@ impl BuzzerCueId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "snake_case"))]
 pub enum BuzzerCueSource {
     Startup,
     FrontPanel,
     RuntimeControl,
     ThermalProtection,
     ThermalAttention,
+    #[cfg(feature = "buzzer-debug")]
+    DeveloperDebug,
 }
 
 impl BuzzerCueSource {
@@ -48,11 +54,15 @@ impl BuzzerCueSource {
             Self::RuntimeControl => "runtime_control",
             Self::ThermalProtection => "thermal_protection",
             Self::ThermalAttention => "thermal_attention",
+            #[cfg(feature = "buzzer-debug")]
+            Self::DeveloperDebug => "developer_debug",
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "snake_case"))]
 pub enum BuzzerDecisionDisposition {
     Started,
     Preempted,
@@ -78,6 +88,8 @@ impl BuzzerDecisionDisposition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "buzzer-debug", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "buzzer-debug", serde(rename_all = "camelCase"))]
 pub struct BuzzerDecision {
     pub source: BuzzerCueSource,
     pub cue: BuzzerCueId,
@@ -590,6 +602,220 @@ impl BuzzerArbiter {
     }
 }
 
+#[cfg(feature = "buzzer-debug")]
+pub const BUZZER_DEBUG_TRACE_CAPACITY: usize = 8;
+
+/// Feedback-only cue selection exposed by the development USB diagnostic surface.
+///
+/// Protection and attention cues deliberately do not appear here: only the real
+/// thermal state machine may enter or clear an audible safety state.
+#[cfg(feature = "buzzer-debug")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugFeedbackCue {
+    UiInput,
+    HeaterOn,
+    HeaterOff,
+    ActiveCoolingOn,
+    ActiveCoolingOff,
+    HeaterReject,
+    ActiveCoolingReject,
+}
+
+#[cfg(feature = "buzzer-debug")]
+impl BuzzerDebugFeedbackCue {
+    pub const fn cue_id(self) -> BuzzerCueId {
+        match self {
+            Self::UiInput => BuzzerCueId::UiInput,
+            Self::HeaterOn => BuzzerCueId::HeaterOn,
+            Self::HeaterOff => BuzzerCueId::HeaterOff,
+            Self::ActiveCoolingOn => BuzzerCueId::ActiveCoolingOn,
+            Self::ActiveCoolingOff => BuzzerCueId::ActiveCoolingOff,
+            Self::HeaterReject => BuzzerCueId::HeaterReject,
+            Self::ActiveCoolingReject => BuzzerCueId::ActiveCoolingReject,
+        }
+    }
+}
+
+#[cfg(feature = "buzzer-debug")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugScenario {
+    FeedbackCoalesce,
+    FeedbackReplace,
+}
+
+#[cfg(feature = "buzzer-debug")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugSessionState {
+    Idle,
+    Running,
+    Complete,
+}
+
+#[cfg(feature = "buzzer-debug")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuzzerDebugSessionError {
+    Busy,
+}
+
+#[cfg(feature = "buzzer-debug")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugTraceEvent {
+    pub elapsed_ms: u32,
+    pub decision: BuzzerDecision,
+}
+
+#[cfg(feature = "buzzer-debug")]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugStatus {
+    pub state: BuzzerDebugSessionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<BuzzerDebugScenario>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_cue: Option<BuzzerCueId>,
+    pub trace: heapless::Vec<BuzzerDebugTraceEvent, BUZZER_DEBUG_TRACE_CAPACITY>,
+}
+
+#[cfg(feature = "buzzer-debug")]
+pub struct BuzzerDebugSession {
+    state: BuzzerDebugSessionState,
+    scenario: Option<BuzzerDebugScenario>,
+    started_at_ms: u64,
+    next_action: u8,
+    trace: heapless::Vec<BuzzerDebugTraceEvent, BUZZER_DEBUG_TRACE_CAPACITY>,
+}
+
+#[cfg(feature = "buzzer-debug")]
+impl Default for BuzzerDebugSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "buzzer-debug")]
+impl BuzzerDebugSession {
+    pub const fn new() -> Self {
+        Self {
+            state: BuzzerDebugSessionState::Idle,
+            scenario: None,
+            started_at_ms: 0,
+            next_action: 0,
+            trace: heapless::Vec::new(),
+        }
+    }
+
+    pub fn status(&self, active_cue: Option<BuzzerCueId>) -> BuzzerDebugStatus {
+        BuzzerDebugStatus {
+            state: self.state,
+            scenario: self.scenario,
+            active_cue,
+            trace: self.trace.clone(),
+        }
+    }
+
+    pub fn trigger_feedback(
+        &mut self,
+        arbiter: &mut BuzzerArbiter,
+        cue: BuzzerDebugFeedbackCue,
+        now_ms: u64,
+    ) -> BuzzerDecision {
+        let decision =
+            arbiter.request_feedback(BuzzerCueSource::DeveloperDebug, cue.cue_id(), now_ms);
+        self.record(now_ms, decision);
+        decision
+    }
+
+    pub fn start_scenario(
+        &mut self,
+        arbiter: &mut BuzzerArbiter,
+        scenario: BuzzerDebugScenario,
+        now_ms: u64,
+    ) -> Result<heapless::Vec<BuzzerDecision, 3>, BuzzerDebugSessionError> {
+        if self.state == BuzzerDebugSessionState::Running {
+            return Err(BuzzerDebugSessionError::Busy);
+        }
+        self.state = BuzzerDebugSessionState::Running;
+        self.scenario = Some(scenario);
+        self.started_at_ms = now_ms;
+        self.next_action = 0;
+        self.trace.clear();
+        Ok(self.advance(arbiter, now_ms))
+    }
+
+    pub fn advance(
+        &mut self,
+        arbiter: &mut BuzzerArbiter,
+        now_ms: u64,
+    ) -> heapless::Vec<BuzzerDecision, 3> {
+        let mut decisions = heapless::Vec::new();
+        let Some(scenario) = self.scenario else {
+            return decisions;
+        };
+        let elapsed_ms = now_ms.saturating_sub(self.started_at_ms);
+
+        while let Some((due_ms, cue)) = scenario_action(scenario, self.next_action) {
+            if elapsed_ms < due_ms {
+                break;
+            }
+            self.next_action = self.next_action.saturating_add(1);
+            let decision = self.trigger_feedback(arbiter, cue, now_ms);
+            let _ = decisions.push(decision);
+        }
+
+        if elapsed_ms >= scenario_duration_ms(scenario) {
+            self.state = BuzzerDebugSessionState::Complete;
+        }
+        decisions
+    }
+
+    pub fn record_deferred_start(&mut self, now_ms: u64, decision: BuzzerDecision) {
+        if decision.source == BuzzerCueSource::DeveloperDebug {
+            self.record(now_ms, decision);
+        }
+    }
+
+    fn record(&mut self, now_ms: u64, decision: BuzzerDecision) {
+        let elapsed_ms = now_ms
+            .saturating_sub(self.started_at_ms)
+            .min(u64::from(u32::MAX)) as u32;
+        if self.trace.len() == BUZZER_DEBUG_TRACE_CAPACITY {
+            let _ = self.trace.remove(0);
+        }
+        let _ = self.trace.push(BuzzerDebugTraceEvent {
+            elapsed_ms,
+            decision,
+        });
+    }
+}
+
+#[cfg(feature = "buzzer-debug")]
+const fn scenario_action(
+    scenario: BuzzerDebugScenario,
+    action: u8,
+) -> Option<(u64, BuzzerDebugFeedbackCue)> {
+    match (scenario, action) {
+        (BuzzerDebugScenario::FeedbackCoalesce, 0) => Some((0, BuzzerDebugFeedbackCue::UiInput)),
+        (BuzzerDebugScenario::FeedbackCoalesce, 1) => Some((15, BuzzerDebugFeedbackCue::UiInput)),
+        (BuzzerDebugScenario::FeedbackCoalesce, 2) => Some((30, BuzzerDebugFeedbackCue::UiInput)),
+        (BuzzerDebugScenario::FeedbackReplace, 0) => Some((0, BuzzerDebugFeedbackCue::UiInput)),
+        (BuzzerDebugScenario::FeedbackReplace, 1) => Some((15, BuzzerDebugFeedbackCue::UiInput)),
+        (BuzzerDebugScenario::FeedbackReplace, 2) => Some((30, BuzzerDebugFeedbackCue::HeaterOn)),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "buzzer-debug")]
+const fn scenario_duration_ms(scenario: BuzzerDebugScenario) -> u64 {
+    match scenario {
+        BuzzerDebugScenario::FeedbackCoalesce => 250,
+        BuzzerDebugScenario::FeedbackReplace => 350,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +841,91 @@ mod tests {
         assert_eq!(finished.duty_percent, 0);
         assert!(finished.generation > 1);
         assert_eq!(controller.active_cue(), None);
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
+    fn debug_coalesce_scenario_records_the_single_pending_feedback_path() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerDebugSession::new();
+
+        let started = session
+            .start_scenario(&mut arbiter, BuzzerDebugScenario::FeedbackCoalesce, 0)
+            .expect("the idle debug session starts");
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].disposition, BuzzerDecisionDisposition::Started);
+        assert_eq!(
+            session.status(arbiter.active_cue()).trace[0]
+                .decision
+                .disposition,
+            BuzzerDecisionDisposition::Started
+        );
+
+        let queued = session.advance(&mut arbiter, 15);
+        assert_eq!(queued[0].disposition, BuzzerDecisionDisposition::Queued);
+        let coalesced = session.advance(&mut arbiter, 30);
+        assert_eq!(
+            coalesced[0].disposition,
+            BuzzerDecisionDisposition::Coalesced
+        );
+
+        let deferred = arbiter
+            .tick(45)
+            .deferred_start
+            .expect("pending feedback starts");
+        session.record_deferred_start(45, deferred);
+        let status = session.status(arbiter.active_cue());
+        assert_eq!(status.trace.len(), 4);
+        assert_eq!(
+            status.trace[3].decision.disposition,
+            BuzzerDecisionDisposition::Started
+        );
+        assert_eq!(status.trace[3].decision.cue, BuzzerCueId::UiInput);
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
+    fn debug_replace_scenario_records_the_latest_specialized_feedback() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerDebugSession::new();
+
+        session
+            .start_scenario(&mut arbiter, BuzzerDebugScenario::FeedbackReplace, 0)
+            .expect("the idle debug session starts");
+        assert_eq!(
+            session.advance(&mut arbiter, 15)[0].disposition,
+            BuzzerDecisionDisposition::Queued
+        );
+        assert_eq!(
+            session.advance(&mut arbiter, 30)[0].disposition,
+            BuzzerDecisionDisposition::Replaced
+        );
+
+        let deferred = arbiter.tick(45).deferred_start.expect("replacement starts");
+        session.record_deferred_start(45, deferred);
+        let status = session.status(arbiter.active_cue());
+        assert_eq!(status.trace[2].decision.cue, BuzzerCueId::HeaterOn);
+        assert_eq!(
+            status.trace[2].decision.disposition,
+            BuzzerDecisionDisposition::Replaced
+        );
+        assert_eq!(status.trace[3].decision.cue, BuzzerCueId::HeaterOn);
+        assert_eq!(
+            status.trace[3].decision.disposition,
+            BuzzerDecisionDisposition::Started
+        );
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
+    fn debug_feedback_is_dropped_while_real_protection_is_active() {
+        let mut arbiter = BuzzerArbiter::new();
+        let mut session = BuzzerDebugSession::new();
+        let _ = arbiter.activate_protection(BuzzerCueSource::ThermalProtection, 0);
+
+        let decision = session.trigger_feedback(&mut arbiter, BuzzerDebugFeedbackCue::UiInput, 10);
+        assert_eq!(decision.disposition, BuzzerDecisionDisposition::Dropped);
+        assert_eq!(arbiter.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
     }
 
     #[test]

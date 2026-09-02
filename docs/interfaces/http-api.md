@@ -338,6 +338,7 @@ Native serial discovery is constrained to the configured authorized port. If tha
 - `GET /api/v1/devices/:id/events`
 - `PUT /api/v1/devices/:id/wifi`: native `devd` USB provisioning endpoint. Submission requires `wifi_config`, `wifi_state_v2`, and an active USB lease. `set` and `clear` change persisted credentials; `cancel` asks the Device to stop its current WiFi station attempt. A cancel response is successful only when the Device has returned a versioned `NetworkSummary` with `state=idle`; it preserves the saved SSID, password length, and configuration generation while advancing the transition sequence. A timeout or driver failure is returned as an error, never converted into a local success. The browser retains the password through waiting and terminal failure. On device-confirmed `connected`, it clears only the password and displays the confirmed `NetworkSummary.ssid`; on `disabled`, it clears both fields. Direct LAN and devd LAN bridge targets must not call this endpoint. Browser Web Serial uses the same USB JSONL `wifi_config` frame directly when connected and capable; it does not send credentials over LAN.
 - `PUT /api/v1/devices/:id/runtime`
+- `POST /api/v1/devices/:id/buzzer-debug`: development-only native USB endpoint. It requires an active native-serial lease and firmware identity capability `buzzer_debug`; production firmware, LAN targets, and the product Web control surface do not expose it.
 - `PUT /api/v1/devices/:id/calibration`
 - `POST /api/v1/devices/:id/calibration/job`
 - `GET /api/v1/devices/:id/heater-curve?lease_id=...`
@@ -406,6 +407,18 @@ Mutating device endpoints require a valid lease. `bind`, `connect`, `disconnect`
 ```
 
 All runtime fields are optional except `leaseId`; the response is the updated `Status`. Status temperature fields `boardTempCenti` and `currentTempC` preserve the firmware RTD measurement at `0.01°C` resolution; front-panel rounding to `0.1°C` does not reduce API precision. `manualPpsEnabled=false` clears the debug override. Enabling manual PPS requires `manualPpsMv` within the selected controller's advertised PPS capability, on a `100mV` step; `manualPpsMa` must be within its advertised APDO current capability and on a `50mA` step. FUSB302BMPX accepts manual PPS within its advertised `5V..21V` capability and rejects AVS requests. `runtime_config.calibration` controls the owner-facing calibration modes and requires FUSB302BMPX to hold a qualifying PPS contract. `thermalControlProfile` is legacy-record compatibility only and cannot arm production heating. Current remains read-only contract metadata. `manualPpsMa` does not operate a direct VBUS-current register.
+
+`POST /api/v1/devices/:id/buzzer-debug` body:
+
+```json
+{
+  "leaseId": "lease-001",
+  "op": "run",
+  "buzzerScenario": "feedback_replace"
+}
+```
+
+`op` is exactly one of `trigger`, `run`, or `status`. `trigger` requires `buzzerCue` from `ui_input | heater_on | heater_off | active_cooling_on | active_cooling_off | heater_reject | active_cooling_reject`; `run` requires `buzzerScenario=feedback_coalesce|feedback_replace`; `status` accepts neither field. The endpoint serializes the matching USB JSONL frame and returns `{ state, scenario?, activeCue?, trace[] }`, where `trace` has at most eight `DeveloperDebug` arbitration decisions. Firmware rejects `trigger` and `run` while heating, a measurement fault, a thermal latch, or attention acknowledgement is pending. It never accepts frequency, duty cycle, raw cue steps, or safety cues.
 
 `PUT /api/v1/devices/:id/calibration` body:
 
@@ -563,6 +576,9 @@ Core commands:
 - `flux-purr identity --device <id>` or `--hardware <saved-id>`
 - `flux-purr status --device <id>` or `--hardware <saved-id>`
 - `flux-purr runtime get|set --device <id> ...`
+- `flux-purr buzzer test --device <id> --cue ui-input|heater-on|heater-off|active-cooling-on|active-cooling-off|heater-reject|active-cooling-reject`
+- `flux-purr buzzer test --device <id> --scenario feedback-coalesce|feedback-replace`
+- `flux-purr buzzer test --device <id> --status`
 - `flux-purr pd pps set --volts <decimal> --device <id>` or `--hardware <saved-id>`
 - `flux-purr pd pps clear --device <id>` or `--hardware <saved-id>`
 - `flux-purr thermal profile preview|clear-preview|save|clear-saved --device <id>` or `--hardware <saved-id>`

@@ -35,6 +35,7 @@ esp32c3 = []
 host-preview = []
 frontpanel-key-test = []
 web_serial = []
+buzzer-debug = ["web_serial"]
 net_http = [
     "web_serial",
     "dep:embassy-net",

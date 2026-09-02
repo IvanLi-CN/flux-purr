@@ -36,6 +36,11 @@ there is no mixing and no direct caller preemption.
 - The lower-level controller still owns cue steps, silence, and PWM carrier
   preservation. Arbiter decision logs identify the request source, cue, and
   selected disposition without creating a new product API or persistent state.
+- A non-default `buzzer-debug` firmware feature may expose a native-USB/devd
+  diagnostic after declaring the `buzzer_debug` identity capability. It can
+  submit only fixed feedback cues or fixed arbitration scenarios as a
+  `DeveloperDebug` source, is rejected while thermal safety is active, and
+  cannot set PWM parameters, emit safety cues, persist state, or use LAN.
 
 ## Consequences
 

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 use flux_purr_devd::{
     DEFAULT_DEVD_URL, FirmwareArtifact, FirmwareArtifactCatalog, WifiConfigOp,
     hardware_registry_path,
@@ -53,6 +53,10 @@ enum Command {
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
+    },
+    Buzzer {
+        #[command(subcommand)]
+        command: BuzzerCommand,
     },
     Pd {
         #[command(subcommand)]
@@ -293,6 +297,72 @@ impl ThermalSelfTestEvaluationMode {
 enum RuntimeCommand {
     Get(TargetSelector),
     Set(RuntimeSetArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum BuzzerCommand {
+    #[command(
+        about = "Run a development-only buzzer arbitration diagnostic through a USB/devd lease."
+    )]
+    Test(BuzzerTestArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("buzzer_action")
+        .required(true)
+        .multiple(false)
+        .args(["cue", "scenario", "status"])
+))]
+struct BuzzerTestArgs {
+    #[command(flatten)]
+    target: TargetSelector,
+    #[arg(long, value_enum)]
+    cue: Option<BuzzerCueArg>,
+    #[arg(long, value_enum)]
+    scenario: Option<BuzzerScenarioArg>,
+    #[arg(long)]
+    status: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BuzzerCueArg {
+    UiInput,
+    HeaterOn,
+    HeaterOff,
+    ActiveCoolingOn,
+    ActiveCoolingOff,
+    HeaterReject,
+    ActiveCoolingReject,
+}
+
+impl BuzzerCueArg {
+    const fn wire_value(self) -> &'static str {
+        match self {
+            Self::UiInput => "ui_input",
+            Self::HeaterOn => "heater_on",
+            Self::HeaterOff => "heater_off",
+            Self::ActiveCoolingOn => "active_cooling_on",
+            Self::ActiveCoolingOff => "active_cooling_off",
+            Self::HeaterReject => "heater_reject",
+            Self::ActiveCoolingReject => "active_cooling_reject",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BuzzerScenarioArg {
+    FeedbackCoalesce,
+    FeedbackReplace,
+}
+
+impl BuzzerScenarioArg {
+    const fn wire_value(self) -> &'static str {
+        match self {
+            Self::FeedbackCoalesce => "feedback_coalesce",
+            Self::FeedbackReplace => "feedback_replace",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -1341,6 +1411,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let resolved = resolve_target(args.target.clone(), &cli.devd)?;
                 let body = runtime_body(&client, &resolved, args).await?;
                 request_with_lease(&client, resolved, Method::PUT, "/runtime", Some(body)).await?
+            }
+        },
+        Command::Buzzer { command } => match command {
+            BuzzerCommand::Test(args) => {
+                let BuzzerTestArgs {
+                    target,
+                    cue,
+                    scenario,
+                    status,
+                } = args;
+                buzzer_test(
+                    &client,
+                    resolve_target(target, &cli.devd)?,
+                    cue,
+                    scenario,
+                    status,
+                )
+                .await?
             }
         },
         Command::Pd { command } => match command {
@@ -9837,6 +9925,69 @@ async fn runtime_body(
         return Err("runtime set requires at least one field".into());
     }
     Ok(Value::Object(body))
+}
+
+async fn buzzer_test(
+    client: &Client,
+    resolved: ResolvedUsbTarget,
+    cue: Option<BuzzerCueArg>,
+    scenario: Option<BuzzerScenarioArg>,
+    status: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (op, cue, scenario, wait_for_completion) = match (cue, scenario, status) {
+        (Some(cue), None, false) => ("trigger", Some(cue.wire_value()), None, false),
+        (None, Some(scenario), false) => ("run", None, Some(scenario.wire_value()), true),
+        (None, None, true) => ("status", None, None, false),
+        _ => {
+            return Err(
+                "buzzer test requires exactly one of --cue, --scenario, or --status".into(),
+            );
+        }
+    };
+    let lease = create_lease(client, &resolved).await?;
+    let heartbeat = spawn_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let result = async {
+        let mut result = request_leased(
+            client,
+            &resolved,
+            &lease.lease_id,
+            Method::POST,
+            "/buzzer-debug",
+            Some(json!({
+                "op": op,
+                "buzzerCue": cue,
+                "buzzerScenario": scenario,
+            })),
+        )
+        .await?;
+        if wait_for_completion {
+            let deadline = StdInstant::now() + Duration::from_secs(2);
+            while result.get("state").and_then(Value::as_str) == Some("running") {
+                if StdInstant::now() >= deadline {
+                    return Err("buzzer debug scenario did not complete within 2 seconds".into());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                result = request_leased(
+                    client,
+                    &resolved,
+                    &lease.lease_id,
+                    Method::POST,
+                    "/buzzer-debug",
+                    Some(json!({"op": "status"})),
+                )
+                .await?;
+            }
+        }
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(result)
+    }
+    .await;
+    let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    let value = result?;
+    if let Some(id) = resolved.hardware_id.as_deref() {
+        let _ = remember_usb(id, &resolved.device, &resolved.devd);
+    }
+    Ok(value)
 }
 
 fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {

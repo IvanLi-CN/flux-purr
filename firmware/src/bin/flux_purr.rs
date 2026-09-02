@@ -76,12 +76,16 @@ use flux_purr_firmware::adapters::pd::{
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use flux_purr_firmware::buzzer::BuzzerDebugSession;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::BuzzerOutput;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{
     BuzzerArbiter, BuzzerCueId, BuzzerCueSource, BuzzerDecision, BuzzerDecisionDisposition,
 };
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use flux_purr_firmware::control_plane::BuzzerDebugOp;
 #[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
 use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
@@ -10552,7 +10556,7 @@ fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> UsbFrame {
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(hardware_identity()),
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
             UsbRequestOp::GetInstallStatus => usb_error_response_with_retryable(
                 request_id,
@@ -10783,7 +10787,7 @@ fn usb_recovery_response(line: &str, memory_config: &MemoryConfig, elapsed_ms: u
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(hardware_identity()),
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
             UsbRequestOp::GetInstallStatus => usb_response(
                 request_id,
@@ -10914,6 +10918,7 @@ async fn process_control_line(
     overtemp_forced_fan_active: &mut bool,
     next_attention_reminder_ms: &mut Option<u64>,
     buzzer: &mut BuzzerArbiter,
+    #[cfg(feature = "buzzer-debug")] buzzer_debug: &mut BuzzerDebugSession,
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
@@ -10967,7 +10972,7 @@ async fn process_control_line(
         Ok(UsbFrame::Request { request_id, op }) => match op {
             UsbRequestOp::GetIdentity => usb_response(
                 request_id,
-                UsbResponsePayload::Identity(hardware_identity()),
+                UsbResponsePayload::Identity(Box::new(hardware_identity())),
             ),
             UsbRequestOp::GetInstallStatus => usb_response(
                 request_id,
@@ -11266,6 +11271,69 @@ async fn process_control_line(
             }
             needs_redraw = true;
             response
+        }
+        #[cfg(feature = "buzzer-debug")]
+        Ok(UsbFrame::BuzzerDebug {
+            request_id,
+            command,
+        }) => {
+            if !command.is_valid() {
+                usb_error_response(
+                    request_id,
+                    "invalid_buzzer_debug_command",
+                    "buzzer_debug requires exactly the fields for its operation.",
+                )
+            } else if command.op != BuzzerDebugOp::Status
+                && (ui_state.heater_enabled
+                    || current_rtd_fault.is_some()
+                    || heater_controller.fault_latched().is_some()
+                    || *attention_pending_after_fault_clear)
+            {
+                usb_error_response(
+                    request_id,
+                    "buzzer_debug_interlocked",
+                    "Buzzer debug requires heater-off with no active or pending thermal fault.",
+                )
+            } else {
+                match command.op {
+                    BuzzerDebugOp::Status => UsbFrame::BuzzerDebugResponse {
+                        request_id,
+                        status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+                    },
+                    BuzzerDebugOp::Trigger => {
+                        let decision = buzzer_debug.trigger_feedback(
+                            buzzer,
+                            command.cue.expect("validated debug trigger cue"),
+                            elapsed_ms,
+                        );
+                        log_buzzer_decision(decision);
+                        UsbFrame::BuzzerDebugResponse {
+                            request_id,
+                            status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+                        }
+                    }
+                    BuzzerDebugOp::Run => match buzzer_debug.start_scenario(
+                        buzzer,
+                        command.scenario.expect("validated debug scenario"),
+                        elapsed_ms,
+                    ) {
+                        Ok(decisions) => {
+                            for decision in decisions {
+                                log_buzzer_decision(decision);
+                            }
+                            UsbFrame::BuzzerDebugResponse {
+                                request_id,
+                                status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+                            }
+                        }
+                        Err(_) => usb_error_response(
+                            request_id,
+                            "buzzer_debug_busy",
+                            "A buzzer debug scenario is already running.",
+                        ),
+                    },
+                }
+            }
         }
         Ok(UsbFrame::CalibrationConfig { request_id, config }) => {
             if ui_state.eeprom_data_incompatible {
@@ -13045,6 +13113,8 @@ async fn main(_spawner: Spawner) {
         &mut last_fan_command,
     );
     let mut buzzer = BuzzerArbiter::new();
+    #[cfg(feature = "buzzer-debug")]
+    let mut buzzer_debug = BuzzerDebugSession::new();
     let mut last_fault_present = is_overtemp_fault(current_rtd_fault);
     let mut overtemp_attention_acknowledged = false;
     let mut attention_pending_after_fault_clear = false;
@@ -13176,6 +13246,8 @@ async fn main(_spawner: Spawner) {
                         &mut overtemp_forced_fan_active,
                         &mut next_attention_reminder_ms,
                         &mut buzzer,
+                        #[cfg(feature = "buzzer-debug")]
+                        &mut buzzer_debug,
                         &mut thermal_control_profile_preview,
                         last_raw_state,
                         latest_display_temp_c,
@@ -13324,6 +13396,8 @@ async fn main(_spawner: Spawner) {
                 &mut overtemp_forced_fan_active,
                 &mut next_attention_reminder_ms,
                 &mut buzzer,
+                #[cfg(feature = "buzzer-debug")]
+                &mut buzzer_debug,
                 &mut thermal_control_profile_preview,
                 last_raw_state,
                 latest_display_temp_c,
@@ -14241,10 +14315,17 @@ async fn main(_spawner: Spawner) {
         if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
             needs_redraw = true;
         }
+        #[cfg(feature = "buzzer-debug")]
+        for decision in buzzer_debug.advance(&mut buzzer, elapsed_ms) {
+            log_buzzer_decision(decision);
+        }
+
         // Settle a finished one-shot before cadence requests decide whether to replay it.
         let buzzer_tick = buzzer.tick(elapsed_ms);
         if let Some(decision) = buzzer_tick.deferred_start {
             log_buzzer_decision(decision);
+            #[cfg(feature = "buzzer-debug")]
+            buzzer_debug.record_deferred_start(elapsed_ms, decision);
         }
 
         if maybe_play_protection_alarm(
@@ -14628,7 +14709,7 @@ mod tests {
         request_id.push_str("response-write").unwrap();
         let response = usb_response(
             request_id,
-            UsbResponsePayload::Identity(Identity::firmware_default()),
+            UsbResponsePayload::Identity(Box::new(Identity::firmware_default())),
         );
         let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
 
@@ -14667,7 +14748,7 @@ mod tests {
         request_id.push_str("confirmed-response").unwrap();
         let response = usb_response(
             request_id,
-            UsbResponsePayload::Identity(Identity::firmware_default()),
+            UsbResponsePayload::Identity(Box::new(Identity::firmware_default())),
         );
         let mut tx = ConfirmingUsbTx {
             response: std::vec::Vec::new(),

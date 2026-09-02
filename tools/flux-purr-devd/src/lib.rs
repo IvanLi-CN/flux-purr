@@ -1725,6 +1725,76 @@ pub struct RuntimeConfigRequest {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugOp {
+    Trigger,
+    Run,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugFeedbackCue {
+    UiInput,
+    HeaterOn,
+    HeaterOff,
+    ActiveCoolingOn,
+    ActiveCoolingOff,
+    HeaterReject,
+    ActiveCoolingReject,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugScenario {
+    FeedbackCoalesce,
+    FeedbackReplace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugRequest {
+    pub lease_id: String,
+    pub op: BuzzerDebugOp,
+    pub cue: Option<BuzzerDebugFeedbackCue>,
+    pub scenario: Option<BuzzerDebugScenario>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuzzerDebugSessionState {
+    Idle,
+    Running,
+    Complete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugDecision {
+    pub source: String,
+    pub cue: String,
+    pub disposition: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugTraceEvent {
+    pub elapsed_ms: u32,
+    pub decision: BuzzerDebugDecision,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugStatus {
+    pub state: BuzzerDebugSessionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scenario: Option<BuzzerDebugScenario>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_cue: Option<String>,
+    pub trace: Vec<BuzzerDebugTraceEvent>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ThermalControlProfileOp {
     Preview,
     ClearPreview,
@@ -1999,6 +2069,19 @@ struct UsbRuntimeConfigWire<'a> {
     thermal_profile_mode: Option<&'a String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thermal_control_profile: Option<&'a ThermalControlProfileRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsbBuzzerDebugWire<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    request_id: &'a str,
+    op: BuzzerDebugOp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buzzer_cue: Option<BuzzerDebugFeedbackCue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buzzer_scenario: Option<BuzzerDebugScenario>,
 }
 
 #[cfg(test)]
@@ -2584,6 +2667,10 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/api/v1/devices/{device_id}/runtime",
             put(configure_runtime),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/buzzer-debug",
+            post(configure_buzzer_debug),
         )
         .route(
             "/api/v1/devices/{device_id}/calibration",
@@ -4324,6 +4411,61 @@ async fn configure_runtime(
     Ok(Json(status))
 }
 
+async fn configure_buzzer_debug(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<BuzzerDebugRequest>,
+) -> Result<Json<BuzzerDebugStatus>, HttpError> {
+    validate_buzzer_debug_request(&payload)?;
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        state_lock
+            .devices
+            .get(&device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?
+            .clone()
+    };
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "Buzzer debug is available only through a native USB serial lease.",
+        ));
+    }
+    if !target
+        .identity
+        .capabilities
+        .iter()
+        .any(|capability| capability == "buzzer_debug")
+    {
+        return Err(HttpError::bad_request(
+            "buzzer_debug_unavailable",
+            "The connected firmware does not declare the buzzer_debug capability.",
+        ));
+    }
+
+    let status = match serial_buzzer_debug(&state, &target, &payload).await {
+        Ok(status) => status,
+        Err(error) => {
+            record_serial_bridge_error(&state, &device_id, "buzzer_debug", &error);
+            return Err(error);
+        }
+    };
+    state.emit(event(
+        &device_id,
+        "buzzer_debug",
+        "buzzer debug command completed",
+        json!({
+            "op": payload.op,
+            "cue": payload.cue,
+            "scenario": payload.scenario,
+            "state": status.state,
+            "traceLength": status.trace.len(),
+        }),
+    ));
+    Ok(Json(status))
+}
+
 fn apply_mock_calibration_runtime_config(
     status: &mut ControlPlaneStatus,
     calibration: &CalibrationControlRequest,
@@ -4447,6 +4589,22 @@ fn validate_runtime_config(payload: &RuntimeConfigRequest) -> Result<(), HttpErr
         validate_thermal_control_profile_request(thermal_control_profile)?;
     }
     Ok(())
+}
+
+fn validate_buzzer_debug_request(payload: &BuzzerDebugRequest) -> Result<(), HttpError> {
+    let valid = match payload.op {
+        BuzzerDebugOp::Trigger => payload.cue.is_some() && payload.scenario.is_none(),
+        BuzzerDebugOp::Run => payload.cue.is_none() && payload.scenario.is_some(),
+        BuzzerDebugOp::Status => payload.cue.is_none() && payload.scenario.is_none(),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(HttpError::bad_request(
+            "invalid_buzzer_debug_command",
+            "buzzer debug requires exactly the fields for its operation.",
+        ))
+    }
 }
 
 fn validate_thermal_control_profile_request(
@@ -6676,6 +6834,33 @@ async fn serial_runtime_config(
         }
         Err(error) => Err(error),
     }
+}
+
+async fn serial_buzzer_debug(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &BuzzerDebugRequest,
+) -> Result<BuzzerDebugStatus, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-buzzer-debug", now_millis());
+    let request = serde_json::to_string(&UsbBuzzerDebugWire {
+        frame_type: "buzzer_debug",
+        request_id: &request_id,
+        op: payload.op,
+        buzzer_cue: payload.cue,
+        buzzer_scenario: payload.scenario,
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB buzzer debug request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    extract_usb_payload(result, "buzzer_debug")
 }
 
 async fn serial_calibration_get(
@@ -10326,6 +10511,77 @@ mod tests {
     }
 
     #[test]
+    fn usb_buzzer_debug_wire_only_serializes_fixed_cue_or_scenario_requests() {
+        let wire = UsbBuzzerDebugWire {
+            frame_type: "buzzer_debug",
+            request_id: "buzzer-1",
+            op: BuzzerDebugOp::Run,
+            buzzer_cue: None,
+            buzzer_scenario: Some(BuzzerDebugScenario::FeedbackReplace),
+        };
+        let json = serde_json::to_value(wire).unwrap();
+
+        assert_eq!(json["type"], "buzzer_debug");
+        assert_eq!(json["op"], "run");
+        assert_eq!(json["buzzerScenario"], "feedback_replace");
+        assert!(json.get("buzzerCue").is_none());
+        assert!(json.get("frequencyHz").is_none());
+        assert!(json.get("dutyPercent").is_none());
+    }
+
+    #[test]
+    fn buzzer_debug_request_validation_accepts_only_the_operation_shape() {
+        let valid = BuzzerDebugRequest {
+            lease_id: "lease-1".to_string(),
+            op: BuzzerDebugOp::Trigger,
+            cue: Some(BuzzerDebugFeedbackCue::UiInput),
+            scenario: None,
+        };
+        assert!(validate_buzzer_debug_request(&valid).is_ok());
+
+        let invalid = BuzzerDebugRequest {
+            scenario: Some(BuzzerDebugScenario::FeedbackCoalesce),
+            ..valid
+        };
+        let error = validate_buzzer_debug_request(&invalid).unwrap_err();
+        assert_eq!(error.error.code, "invalid_buzzer_debug_command");
+    }
+
+    #[tokio::test]
+    async fn buzzer_debug_rejects_firmware_without_the_development_capability() {
+        let state = AppState::test();
+        let device_id = "native-buzzer-debug-test";
+        {
+            let mut state_lock = state.lock().unwrap();
+            state_lock.devices.insert(
+                device_id.to_string(),
+                DeviceRecord::native_serial_placeholder(
+                    device_id,
+                    "Native buzzer debug target".to_string(),
+                    "/dev/null".to_string(),
+                ),
+            );
+        }
+        let lease = state.lease_device(device_id).unwrap();
+
+        let error = configure_buzzer_debug(
+            State(state),
+            AxumPath(device_id.to_string()),
+            Json(BuzzerDebugRequest {
+                lease_id: lease.lease_id,
+                op: BuzzerDebugOp::Status,
+                cue: None,
+                scenario: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "buzzer_debug_unavailable");
+    }
+
+    #[test]
     fn real_flash_args_flash_elf_and_hard_reset() {
         let artifact = FirmwareArtifact {
             artifact_id: "test-artifact".to_string(),
@@ -12659,6 +12915,22 @@ mod tests {
         assert!(status.heater_enabled);
         assert!(!status.active_cooling_enabled);
         assert!(status.adc_diagnostics.is_none());
+    }
+
+    #[test]
+    fn usb_response_decoder_extracts_buzzer_debug_payload() {
+        let payload = decode_usb_response_line(
+            br#"{"type":"response","requestId":"buzzer-1","ok":true,"result":{"buzzer_debug":{"state":"complete","scenario":"feedback_replace","activeCue":"heater_on","trace":[{"elapsedMs":30,"decision":{"source":"developer_debug","cue":"heater_on","disposition":"replaced"}}]}}}"#,
+            "buzzer-1",
+        )
+        .unwrap()
+        .unwrap();
+
+        let status = extract_usb_payload::<BuzzerDebugStatus>(payload, "buzzer_debug").unwrap();
+        assert_eq!(status.state, BuzzerDebugSessionState::Complete);
+        assert_eq!(status.scenario, Some(BuzzerDebugScenario::FeedbackReplace));
+        assert_eq!(status.active_cue.as_deref(), Some("heater_on"));
+        assert_eq!(status.trace[0].decision.disposition, "replaced");
     }
 
     #[test]
