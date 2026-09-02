@@ -39,6 +39,7 @@ assert "verify-merged-prepared" in release
 assert "verify-tag" in release
 assert release.index("verify-tag") < release.index("Checkout merged product source")
 assert "--allow-existing" in release
+assert 'python3 .github/scripts/release_chain.py verify-tag \\\n            --version "${PRODUCT_VERSION}" \\\n            --expected-sha "${RELEASE_SHA}" \\\n            --allow-existing' in release
 assert "git push origin \"${PRODUCT_TAG}\"" in release
 assert "git fetch --force --tags origin" in prepare
 assert 'git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"' in release

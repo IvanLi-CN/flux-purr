@@ -209,7 +209,12 @@ jobs:
             git tag -a "${PRODUCT_TAG}" "${RELEASE_SHA}" -m "${PRODUCT_TAG}"
             git push origin "${PRODUCT_TAG}"
           fi
-          python3 .github/scripts/release_chain.py "${tag_args[@]}"
+          # The post-create check must accept the tag only when it resolves to
+          # this release SHA; a foreign owner remains rejected by verify_tag.
+          python3 .github/scripts/release_chain.py verify-tag \
+            --version "${PRODUCT_VERSION}" \
+            --expected-sha "${RELEASE_SHA}" \
+            --allow-existing
 
       - name: Publish and verify release assets
         if: steps.release.outputs.enabled == 'true'
