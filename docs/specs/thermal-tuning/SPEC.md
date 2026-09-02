@@ -138,14 +138,17 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   细分，但不阻止已经满足边界的独立区间。
 - 每个 target 的单调预算从 cooldown wait 开始，覆盖 scout、retune 和 confirm，
   上限为 20 分钟。核心不得有用户可调、会绕开此预算的无限 round 路径。
-- 候选晋级必须满足 candidate-local 的实际非零 `warmup`、完整 stage、动态 full-speed-to-stable settle
-  gate、`maxOvershootC <= 3.0`、`holdPeakToPeakC <= 3.0`，再完成 60 秒 hold
-  confirm。动态 settle 的固定点上限为 `max(12_000ms, 2ms * max(0, targetCentiC -
-  candidateStartTempCentiC))`，只从该 candidate 的 `scout` 起点计算；它必须小于
-  60 秒 hold confirm，且绝不可复用上一 candidate 的温度或时间。所有门槛计算使用固定点；
-  临界低裕量候选必须确认，不得直接 accepted。
+- 候选晋级必须满足 candidate-local 的实际非零 `warmup`、完整 PID `approach -> hold`
+  stage、`maxOvershootC <= 3.0`、`holdPeakToPeakC <= 3.0`，再完成 60 秒 hold
+  confirm。预热只受独立安全 deadline 约束，不参与 candidate score 或 gate：deadline 固定为
+  `15_000ms + 4ms * max(0, targetCentiC - candidateStartTempCentiC)`，其中 start 是该候选
+  进入 `scout` 的实际温度。deadline 到期前必须观察到实际 PID `approach`，否则以安全失败
+  disarm。`scoreSettleMs` 只从首个实际 PID `approach` sample 计至首个实际 PID `hold`
+  sample。逼近时间上限唯一服从主加热控制器既有 `approachMaxTicks` 行为；调优 core、协议和
+  报告不得修改、替换或另设 competing approach limit。所有门槛计算使用固定点；临界低裕量候选
+  必须确认，不得直接 accepted。
 - 核心必须以确定性的有界 perturbation ladder 生成 candidate。通过硬门槛的候选
-  使用固定点字典序评分：最大正超调、hold 峰峰值、full-speed-to-stable settle
+  使用固定点字典序评分：最大正超调、hold 峰峰值、PID `approach -> hold` 时长
   时间、60 秒 hold 平均绝对误差、控制输出切换次数。并列时使用参数 canonical
   bytes 的字典序作为最终 tie-breaker。
 - 固件必须仅将 device-local 温度、VIN、PPS 合同元数据、heater 控制输出和安全
@@ -159,7 +162,7 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   `trace_gap` 与 `review_incomplete`，而不是静默丢样。
 - 除明确排除的外部 VBUS/source 电压、电流、功率外，正式报告必须保留旧报告中所有
   可以从设备或 host recorder 真实获得的调优证据。每个 sample 必须携带目标、候选
-  identity、trial 编号、阶段、时间、温度、VIN、PPS 合同、加热输出和测量有效性；每个
+  identity、trial 编号、调优阶段、PID heater phase、时间、温度、VIN、PPS 合同、加热输出和测量有效性；每个
   candidate trial 必须携带完整固定点参数、起止 sequence/时间和样本范围。canonical
   candidate 必须覆盖每个会影响设备加热输出的 point-local 字段，包括 warmup power/re-entry、
   brake、approach power/floor/damping/tail、hold power/reheat、entry/exit/on/off/cutoff、PI
@@ -167,18 +170,19 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   必须携带完整 score vector、每个 gate、freeze、interval prune、disposition 和失败原因。
   每轮候选的 `candidate_trial` 起点只能在本轮 `cooldown_wait` 满足 `target-15°C` 预条件、
   即将进入 `scout` 后记录；此前的冷却 sample 仍是完整 target trace 的安全证据，但不属于
-  该候选的评分样本范围，也不得计入它的 dynamic settle。
-  每个候选都必须从自己的起点完成至少 5 秒 `scout` 预热，并在该候选的 `scout` 样本中观察到
-  非零实际 heater output 才能满足 warmup gate；冷却样本或前一候选的输出绝不能满足这一 gate，
-  也不能贡献下一候选的 overshoot 或 output-switch score。
+  该候选的评分样本范围，也不得计入它的 PID `approach -> hold` 时长。
+  每个候选从自己的起点开始预热，并在该候选的 `scout` 样本中观察到非零实际 heater output；预热
+  不设最小时间，只适用 candidate-local deadline。首次实际 PID `approach` 与首次实际 PID `hold`
+  sample 是 approach timing 的唯一边界。冷却样本或前一候选的输出绝不能满足这一 warmup 证据，
+  也不能贡献下一候选的 overshoot、output-switch 或 approach score。
   缺失字段必须以结构化 unavailable 标识呈现，禁止用相邻事件推断、显示空占位或静默
   删除来伪造完整性。
 - 报告的目标卡、验收指标和候选详情必须引用同一个 candidate trial。存在 adopted trial
   时，候选详情默认显示该 trial，并明确显示其试验编号和 adopted 状态；其余 trial 必须
   保留为可切换的独立视图。目标卡必须显式标明采用 trial 的编号/总数，且其通过结论、
   overshoot 与峰峰值只能描述该 adopted trial，不能以“有效测试”或未限定指标暗示所有
-  可见曲线均通过；终态 decision 的 `scoreSettleMs` 必须标作“目标评分 settle”，而
-  candidate trial 自己的 `scoreSettleMs` 必须标作“候选试验 settle”，不得把这两个
+  可见曲线均通过；终态 decision 的 `scoreSettleMs` 必须标作“目标评分 approach”，而
+  candidate trial 自己的 `scoreSettleMs` 必须标作“候选试验 approach”，不得把这两个
   不同起点的时长当作同一指标。整个目标跨 trial 的 elapsed 可以单列为“目标总耗时”。
   每个目标的主温度响应图显示一个选中的候选 trial；试验切换控件
   必须提供试验编号、`rejected|passed|adopted` 状态、overshoot、峰峰值和
@@ -250,9 +254,10 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
 每个 target 的每一个候选 trial 都独立经过 `cooldown_wait`、`scout`、`retune` 和
 `hold_confirm`，然后才可参加 `accepted|failed|skipped` 的 target 决策。完成一个候选后，
 下一个候选必须重新回到 `cooldown_wait`，直到温度不高于 `target-15°C` 才开始它自己的
-`scout`、warmup、approach 与 dynamic settle；不得从上一候选的 hold 或 retune 直接继续。
-`scout` 从该候选的 `candidate_trial` 起点单独计时，至少持续 5 秒；它不得复用 target 或前一
-候选已经消耗的 scout 时间。
+`scout` 预热、PID `approach` 与 `hold`；不得从上一候选的 hold 或 retune 直接继续。
+`scout` 从该候选的 `candidate_trial` 起点单独计时，只受与 candidateStartTempCentiC 的差值相关的
+独立预热安全 deadline 约束；它不得复用 target 或前一候选已经消耗的 scout 时间，也不得进入
+`scoreSettleMs`。
 核心在进入 target 时只从最近两侧 accepted boundary 做线性插值得到 seed；没有两侧边界时
 使用该等级的已持久 baseline。它不能把某个 point 的最终参数回写到另一个 point。
 

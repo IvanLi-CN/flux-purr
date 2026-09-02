@@ -319,6 +319,7 @@ export interface ThermalTuningTraceEvent {
   ppsContractMv?: number | null
   ppsContractMa?: number | null
   heaterOutputPermille?: number | null
+  heaterPhase?: 'warmup' | 'approach' | 'hold' | null
   measurementValid?: boolean | null
   disposition?: ThermalTuningTargetDisposition | null
   scoreTracking?: number | null

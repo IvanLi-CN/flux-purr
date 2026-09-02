@@ -16,28 +16,6 @@ pub const TARGET_BUDGET_SECONDS: u32 = 20 * 60;
 pub const HOLD_CONFIRM_SECONDS: u32 = 60;
 /// A short local warmup must still settle promptly. Longer ramps receive a
 /// deterministic allowance proportional to their measured starting delta.
-pub const MIN_DYNAMIC_SETTLE_MS: u32 = 12_000;
-pub const DYNAMIC_SETTLE_MS_PER_CENTI_C: u32 = 2;
-
-/// Bound the time from a candidate-local scout boundary to entering hold.
-///
-/// The allowance is fixed-point and shared by firmware, native verification
-/// and Wasm. A 15 C reheat retains the 12 second ceiling, while a legitimate
-/// cold-to-240 C ramp gets enough time to enter the same hold gate without
-/// treating slow oscillation as a successful settle.
-pub const fn dynamic_settle_limit_ms(target_c: i16, trial_start_temp_centi_c: i16) -> u32 {
-    let delta_centi_c = (target_c as i32) * 100 - (trial_start_temp_centi_c as i32);
-    let scaled = if delta_centi_c > 0 {
-        (delta_centi_c as u32).saturating_mul(DYNAMIC_SETTLE_MS_PER_CENTI_C)
-    } else {
-        0
-    };
-    if scaled > MIN_DYNAMIC_SETTLE_MS {
-        scaled
-    } else {
-        MIN_DYNAMIC_SETTLE_MS
-    }
-}
 /// Start the 60 second verification only after entering a narrower band than
 /// the acceptance band, leaving room for normal plant transport variation.
 pub const HOLD_CONFIRM_ENTRY_CENTI: i16 = 200;
@@ -47,10 +25,9 @@ pub const CANDIDATE_LADDER_WIDTH: usize = 3;
 
 pub const GATE_WARMUP_COMPLETE: u16 = 1 << 0;
 pub const GATE_STAGE_COMPLETE: u16 = 1 << 1;
-pub const GATE_DYNAMIC_SETTLE: u16 = 1 << 2;
-pub const GATE_OVERSHOOT: u16 = 1 << 3;
-pub const GATE_HOLD_PEAK_TO_PEAK: u16 = 1 << 4;
-pub const GATE_HOLD_CONFIRM: u16 = 1 << 5;
+pub const GATE_OVERSHOOT: u16 = 1 << 2;
+pub const GATE_HOLD_PEAK_TO_PEAK: u16 = 1 << 3;
+pub const GATE_HOLD_CONFIRM: u16 = 1 << 4;
 
 pub const PHYSICAL_TARGETS_C: [i16; TARGET_COUNT] = [60, 80, 100, 120, 140, 160, 180, 220, 240];
 pub const EXECUTION_ORDER_C: [i16; TARGET_COUNT] = [60, 240, 140, 100, 80, 120, 180, 160, 220];
@@ -507,7 +484,6 @@ pub struct CandidateScore {
 pub struct CandidateGates {
     pub warmup_complete: bool,
     pub stage_complete: bool,
-    pub dynamic_settle: bool,
     pub overshoot: bool,
     pub hold_peak_to_peak: bool,
     pub hold_confirm: bool,
@@ -517,7 +493,6 @@ impl CandidateGates {
     pub const fn mask(self) -> u16 {
         gate_bit(self.warmup_complete, GATE_WARMUP_COMPLETE)
             | gate_bit(self.stage_complete, GATE_STAGE_COMPLETE)
-            | gate_bit(self.dynamic_settle, GATE_DYNAMIC_SETTLE)
             | gate_bit(self.overshoot, GATE_OVERSHOOT)
             | gate_bit(self.hold_peak_to_peak, GATE_HOLD_PEAK_TO_PEAK)
             | gate_bit(self.hold_confirm, GATE_HOLD_CONFIRM)
@@ -526,7 +501,6 @@ impl CandidateGates {
     pub const fn passes(self) -> bool {
         self.warmup_complete
             && self.stage_complete
-            && self.dynamic_settle
             && self.overshoot
             && self.hold_peak_to_peak
             && self.hold_confirm
@@ -759,6 +733,16 @@ pub struct SampleEvent {
     pub heater_output_permille: u16,
     pub measurement_valid: bool,
     pub phase: Phase,
+    pub heater_phase: HeaterPhase,
+}
+
+/// The actual heater controller phase, recorded independently from the
+/// tuning workflow phase so approach timing remains auditable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaterPhase {
+    Warmup,
+    Approach,
+    Hold,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -850,6 +834,8 @@ impl TraceEvent {
                 out[offset] = u8::from(sample.measurement_valid);
                 offset += 1;
                 out[offset] = phase_byte(sample.phase);
+                offset += 1;
+                out[offset] = heater_phase_byte(sample.heater_phase);
                 offset + 1
             }
             Self::Decision(decision) => {
@@ -1689,6 +1675,14 @@ fn phase_byte(value: Phase) -> u8 {
     }
 }
 
+const fn heater_phase_byte(value: HeaterPhase) -> u8 {
+    match value {
+        HeaterPhase::Warmup => 1,
+        HeaterPhase::Approach => 2,
+        HeaterPhase::Hold => 3,
+    }
+}
+
 fn put_u16(out: &mut [u8], offset: &mut usize, value: u16) {
     out[*offset..*offset + 2].copy_from_slice(&value.to_le_bytes());
     *offset += 2;
@@ -1833,18 +1827,6 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_settle_window_scales_only_with_the_candidate_local_climb() {
-        let local_reheat = dynamic_settle_limit_ms(60, 4_500);
-        let cold_high_target = dynamic_settle_limit_ms(240, 6_100);
-        let hold_confirm_entry_centi = core::hint::black_box(HOLD_CONFIRM_ENTRY_CENTI);
-
-        assert_eq!(local_reheat, MIN_DYNAMIC_SETTLE_MS);
-        assert_eq!(cold_high_target, 35_800);
-        assert!(cold_high_target < HOLD_CONFIRM_SECONDS * 1_000);
-        assert!(hold_confirm_entry_centi < MAX_HOLD_PEAK_TO_PEAK_CENTI);
-    }
-
-    #[test]
     fn pps5a_low_temperature_seed_brackets_the_measured_conservative_control() {
         let point = CandidatePoint::baseline(60, PpsPowerClass::Pps5a);
 
@@ -1888,7 +1870,6 @@ mod tests {
         let gates = CandidateGates {
             warmup_complete: true,
             stage_complete: true,
-            dynamic_settle: true,
             overshoot: true,
             hold_peak_to_peak: true,
             hold_confirm: true,
@@ -1946,7 +1927,6 @@ mod tests {
         let gates = CandidateGates {
             warmup_complete: true,
             stage_complete: true,
-            dynamic_settle: true,
             overshoot: true,
             hold_peak_to_peak: true,
             hold_confirm: true,
@@ -1987,7 +1967,6 @@ mod tests {
         let gates = CandidateGates {
             warmup_complete: true,
             stage_complete: true,
-            dynamic_settle: true,
             overshoot: true,
             hold_peak_to_peak: true,
             hold_confirm: true,
@@ -2029,6 +2008,7 @@ mod tests {
                 heater_output_permille: 0,
                 measurement_valid: false,
                 phase: Phase::Idle,
+                heater_phase: HeaterPhase::Warmup,
             }),
             digest: [0; 32],
         };
@@ -2093,6 +2073,7 @@ mod tests {
                 heater_output_permille: 500,
                 measurement_valid: true,
                 phase: Phase::Scout,
+                heater_phase: HeaterPhase::Warmup,
             })
             .unwrap();
         }
@@ -2117,6 +2098,7 @@ mod tests {
             heater_output_permille: 0,
             measurement_valid: true,
             phase: Phase::Scout,
+            heater_phase: HeaterPhase::Warmup,
         })
         .unwrap();
         let record = core.trace_record(0).unwrap();
@@ -2145,6 +2127,7 @@ mod tests {
             heater_output_permille: 0,
             measurement_valid: true,
             phase: Phase::Scout,
+            heater_phase: HeaterPhase::Warmup,
         })
         .unwrap();
         core.finish(TerminalDisposition::Cancelled).unwrap();
@@ -2173,14 +2156,15 @@ mod tests {
             heater_output_permille: 0,
             measurement_valid: false,
             phase: Phase::Idle,
+            heater_phase: HeaterPhase::Warmup,
         })
         .unwrap();
         assert_eq!(
             core.trace_digest(),
             [
-                0x8d, 0x2c, 0x62, 0x1e, 0xdf, 0x24, 0x46, 0x2b, 0x03, 0x5d, 0xba, 0xc0, 0x97, 0x7b,
-                0xe9, 0x4d, 0x3b, 0x16, 0x58, 0x0a, 0xd6, 0x76, 0x80, 0x39, 0x22, 0xdb, 0x40, 0x9e,
-                0x95, 0x10, 0x4e, 0x35,
+                0x8e, 0x06, 0xb3, 0x55, 0x7b, 0x7f, 0xe4, 0x85, 0xe4, 0x4a, 0xe5, 0x91, 0x51, 0x25,
+                0xc1, 0x9e, 0x49, 0xed, 0xb9, 0x8b, 0x93, 0x01, 0xc9, 0xdc, 0x53, 0x10, 0x1d, 0x52,
+                0x8f, 0x57, 0x43, 0xbb,
             ]
         );
     }
@@ -2201,6 +2185,7 @@ mod tests {
             heater_output_permille: 800,
             measurement_valid: true,
             phase: Phase::CooldownWait,
+            heater_phase: HeaterPhase::Warmup,
         })
         .unwrap();
         core.finish(TerminalDisposition::Completed).unwrap();
@@ -2234,6 +2219,7 @@ mod tests {
             heater_output_permille: 1_000,
             measurement_valid: true,
             phase: Phase::Scout,
+            heater_phase: HeaterPhase::Warmup,
         })
         .unwrap();
         core.finish(TerminalDisposition::Completed).unwrap();

@@ -3432,6 +3432,17 @@ fn thermal_tuning_temperature_centi_c(temp_c: f32) -> i16 {
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn thermal_tuning_heater_phase(
+    phase: HeaterControlPhase,
+) -> flux_purr_thermal_tuning_core::HeaterPhase {
+    match phase {
+        HeaterControlPhase::Warmup => flux_purr_thermal_tuning_core::HeaterPhase::Warmup,
+        HeaterControlPhase::Approach => flux_purr_thermal_tuning_core::HeaterPhase::Approach,
+        HeaterControlPhase::Hold => flux_purr_thermal_tuning_core::HeaterPhase::Hold,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 fn temp_c_to_whole_c(temp_c: f32) -> i16 {
     let rounded = if temp_c >= 0.0 {
         temp_c + 0.5
@@ -14993,6 +15004,7 @@ async fn main(_spawner: Spawner) {
                         pps_contract_ma: contract_ma,
                         heater_output_permille: u16::from(last_heater_duty).saturating_mul(10),
                         measurement_valid: current_rtd_fault.is_none() && latest_temp_c.is_finite(),
+                        heater_phase: thermal_tuning_heater_phase(last_pid_snapshot.phase),
                     };
                     if let Err(error) = thermal_tuning_runtime.tick(sample) {
                         warn!(

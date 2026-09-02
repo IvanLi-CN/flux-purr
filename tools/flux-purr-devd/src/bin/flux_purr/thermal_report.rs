@@ -347,7 +347,7 @@ fn firmware_report_data(
                 "candidateName": trial.get("candidateId").cloned().unwrap_or(Value::Null),
                 "candidateHash": trial.get("candidateHash").cloned().unwrap_or(Value::Null),
                 "selected": selected,
-                "evidenceValid": gates == 0x3f,
+                "evidenceValid": gates & 0x1f == 0x1f,
                 "point": point,
                 "pointSource": "firmware_candidate_trial",
                 "samples": trial_samples,
@@ -650,6 +650,7 @@ fn firmware_sample_json(sample: &Value, started_ms: u64, trial_boundary_before: 
         "ppsContractCurrentA": sample.get("ppsContractMa").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
         "phase": report_phase(firmware_phase),
         "firmwarePhase": firmware_phase,
+        "heaterPhase": sample.get("heaterPhase").cloned().unwrap_or(Value::Null),
         "trialBoundaryBefore": trial_boundary_before,
         "measurementValid": sample.get("measurementValid").cloned().unwrap_or(Value::Null),
         "sequence": sample.get("sequence").cloned().unwrap_or(Value::Null),
@@ -2570,7 +2571,8 @@ mod tests {
                 "ppsContractMa": 5_000,
                 "heaterOutputPermille": 140,
                 "measurementValid": true,
-                "phase": "hold_confirm"
+                "phase": "hold_confirm",
+                "heaterPhase": "hold"
             }),
         ];
         let decisions = vec![
@@ -2635,7 +2637,7 @@ mod tests {
                 "scoreOvershoot": 45,
                 "scoreStability": 87,
                 "scoreSettleMs": 4_200,
-                "gates": 63
+                "gates": 31
             }),
         ];
 
@@ -2659,6 +2661,11 @@ mod tests {
         );
         assert_eq!(report["rawRuns"][0]["rounds"][0]["selected"], false);
         assert_eq!(report["rawRuns"][0]["rounds"][0]["evidenceValid"], false);
+        assert_eq!(report["rawRuns"][0]["rounds"][1]["evidenceValid"], true);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][1]["samples"][0]["heaterPhase"],
+            "hold"
+        );
         assert_eq!(
             report["rawRuns"][0]["rounds"][0]["result"]["maxOvershootC"],
             3.83
@@ -2996,8 +3003,8 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("t:sample.t-start"));
         assert!(REPORT_TEMPLATE.contains("默认选择统计卡片对应的"));
         assert!(REPORT_TEMPLATE.contains("采用候选指标：过冲"));
-        assert!(REPORT_TEMPLATE.contains("目标评分 settle"));
-        assert!(REPORT_TEMPLATE.contains("候选试验 settle"));
+        assert!(REPORT_TEMPLATE.contains("目标评分 approach"));
+        assert!(REPORT_TEMPLATE.contains("候选试验 approach"));
         assert!(
             REPORT_TEMPLATE
                 .contains("候选 <strong>${{context.passed}}/${{context.total}} 通过</strong>")

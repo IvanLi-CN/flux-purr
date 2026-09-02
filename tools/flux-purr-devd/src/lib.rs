@@ -83,6 +83,12 @@ const FLASH_CONFIG_LABEL: &str = "flux_cfg";
 const ESPFLASH_COMMAND_TIMEOUT: Duration = Duration::from_secs(180);
 const ESPFLASH_USB_RESET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const ESPFLASH_SINGLE_SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_secs(1);
+// The serialport builder defaults to a zero-duration read timeout.  That is
+// appropriate for the runtime JSONL worker, but it can leave an in-process
+// ROM writer blocked forever after a USB-JTAG disconnect.  espflash retries
+// timed-out ROM packets itself, so give its single-session transport a finite
+// I/O deadline.
+const ESPFLASH_SINGLE_SESSION_IO_TIMEOUT: Duration = Duration::from_secs(1);
 // Match the supported `espflash write-bin` transport: ESP32-S3 requires the
 // flash stub for a reliable multi-segment application write over USB-JTAG.
 const USB_JTAG_SINGLE_SESSION_USE_STUB: bool = true;
@@ -7304,6 +7310,7 @@ fn connect_single_session_rom_flasher(
             let usb_info = usb_info_for_authorized_port(port_path)?;
             let serial = serialport::new(port_path, DEFAULT_BAUD_RATE)
                 .flow_control(FlowControl::None)
+                .timeout(ESPFLASH_SINGLE_SESSION_IO_TIMEOUT)
                 .open_native()
                 .map_err(|error| error.to_string())?;
             Ok(Connection::new(
@@ -8939,6 +8946,10 @@ fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
     port_path.starts_with("/dev/cu.usbmodem")
 }
 
+fn requires_protected_firmware_bundle(port_path: &str) -> bool {
+    is_esp_usb_serial_jtag_port(port_path)
+}
+
 fn recovery_uses_single_rom_session(
     operation: FirmwareOperation,
     transport: DeviceTransport,
@@ -9370,6 +9381,13 @@ async fn flash_device(
             }
         }
     };
+
+    if requires_protected_firmware_bundle(&port_path) {
+        return Err(HttpError::bad_request(
+            "firmware_bundle_required",
+            "USB Serial/JTAG firmware writes must use the protected firmware-bundle operation.",
+        ));
+    }
 
     let verification = verify_artifact(&payload.artifact, state.config.artifact_root.as_deref())
         .map_err(sanitize_io_error)?;
@@ -11894,6 +11912,16 @@ mod tests {
     }
 
     #[test]
+    fn usb_serial_jtag_raw_flash_requires_the_protected_bundle_flow() {
+        assert!(requires_protected_firmware_bundle(
+            "/dev/cu.usbmodem2111401"
+        ));
+        assert!(!requires_protected_firmware_bundle(
+            "/dev/cu.usbserial-unrelated"
+        ));
+    }
+
+    #[test]
     fn broken_pipe_is_an_espflash_connection_failure() {
         assert!(espflash_connection_failure_text(
             "IO error while using serial port: Broken pipe"
@@ -13692,7 +13720,7 @@ mod tests {
             ..AppConfig::default()
         });
         let mut native = DeviceRecord::mock("serial-test", DeviceTransport::NativeSerial);
-        native.port_path = Some("/dev/cu.usbmodem21221401".to_string());
+        native.port_path = Some("/dev/cu.usbserial-legacy-test".to_string());
         {
             let mut inner = state.lock().unwrap();
             inner.devices.insert(native.id.clone(), native);

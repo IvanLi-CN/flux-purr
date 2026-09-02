@@ -6,3 +6,10 @@ members = [
   "crates/thermal-tuning-wasm",
   "tools/flux-purr-devd",
 ]
+exclude = ["third_party/serialport-4.9.0"]
+
+# macOS USB Serial/JTAG can block indefinitely in serialport's tcdrain-based
+# flush. The local patch is limited to that path and keeps all other ports on
+# the upstream implementation.
+[patch.crates-io]
+serialport = { path = "third_party/serialport-4.9.0" }

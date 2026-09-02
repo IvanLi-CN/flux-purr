@@ -103,8 +103,8 @@ trial. When an adopted trial exists, it is the default candidate detail and the 
 its trial number and adopted state. Its target card must state the adopted trial number over
 the executed-trial count, and its verdict, overshoot and peak-to-peak fields must be explicitly
 labelled as adopted-candidate metrics. `DecisionEvent.scoreSettleMs` is a target-scoped decision
-score and must be labelled as `目标评分 settle`; `CandidateTrialEvent.scoreSettleMs` is local to
-the candidate trial and must be labelled as `候选试验 settle`. A renderer must not substitute one
+score and must be labelled as `目标评分 approach`; `CandidateTrialEvent.scoreSettleMs` is local to
+the candidate trial and must be labelled as `候选试验 approach`. A renderer must not substitute one
 for the other or present them as the same metric. Other executed trials remain individually
 selectable so a rejected candidate cannot be mistaken for the adopted result. Target-wide elapsed
 time may be shown separately as target duration.
@@ -122,17 +122,17 @@ trace and candidate audit, but does not occupy the primary response chart. The r
 never concatenate trial-local clocks or draw a segment across a candidate boundary.
 
 Every candidate must independently satisfy the `target-15°C` cooldown precondition before its
-`candidate_trial` start boundary and `scout` phase. Its settle score starts at that boundary;
-inter-candidate cooldown samples remain in the target trace but are outside the candidate sample
-range. A report must not imply that a candidate which starts in `hold_confirm` was independently
-validated from the required precondition.
-The candidate-local `scout` interval lasts at least five seconds from that boundary and must
-contain its own nonzero actual heater-output sample to satisfy `warmup_complete`. Cooling or a previous
-candidate may not contribute warmup, overshoot, or output-switch scoring to the next candidate.
-The candidate-local settle limit is encoded by the stable contract formula
-`max(12_000ms, 2ms * max(0, targetCentiC - candidateStartTempCentiC))`; the first `scout`
-sample is the evidence source for `candidateStartTempCentiC`. This limit remains below the
-60-second confirmation interval and is not a report-side inference.
+`candidate_trial` start boundary and `scout` phase. Inter-candidate cooldown samples remain in the
+target trace but are outside the candidate sample range. A report must not imply that a candidate
+which starts in `hold_confirm` was independently validated from the required precondition.
+The candidate-local `scout` interval is preheat evidence, not scored time. It has no minimum
+duration: it must contain its own nonzero actual heater-output sample and reach actual PID
+`approach` before its independent fixed-point safety deadline
+`15_000ms + 4ms * max(0, targetCentiC - candidateStartTempCentiC)`. Cooling or a previous
+candidate may not contribute warmup, overshoot, output-switch, or approach scoring to the next
+candidate. `scoreSettleMs` starts at the first actual PID `approach` sample and ends at the first
+actual PID `hold` sample. Its maximum remains the existing main-controller `approachMaxTicks`
+behavior; the report neither changes it nor adds a separate approach threshold.
 
 Charts preserve physical dimensions: temperature, heater output, voltage and current use
 separate plots or explicitly labelled independent axes. A renderer must not use a hidden

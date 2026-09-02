@@ -45,7 +45,7 @@ const runningSnapshot: ThermalTuningRunSnapshot = {
         targetC: 140,
         disposition: 'accepted',
         scoreTracking: 92,
-        gates: 63,
+        gates: 31,
       },
     ],
   },

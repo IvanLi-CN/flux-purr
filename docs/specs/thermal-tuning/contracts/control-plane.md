@@ -111,20 +111,22 @@ fixed-point payload. The allowed kinds are `sample`, `phase_transition`, `candid
 
 `sample` payloads contain `targetC`, `trialIndex`, candidate identity/parameter reference,
 `temperatureCentiC`, `vinMv`, `ppsContractMv`, `ppsContractMa`, `heaterOutputPermille`,
-measurement validity and phase. They must not contain external VBUS measurements.
+measurement validity, tuning `phase`, and actual PID `heaterPhase` (`warmup|approach|hold`). They
+must not contain external VBUS measurements.
 `phase_transition` records old/new phase and reason. `candidate_trial` records the complete
 canonical fixed-point candidate, trial index, start/end sequence and time, and sample range. A
 candidate trial starts only after its `cooldown_wait` precondition has reached `target-15°C` and
 the firmware enters `scout`; prior cooldown samples remain target-level safety evidence and are
-outside that candidate trial's sample range and dynamic-settle score.
-Each candidate's `scout` interval is timed from its own start boundary and lasts at least five
-seconds. Its `warmup_complete` gate may only be satisfied by a nonzero actual heater-output
-sample inside that candidate's `scout` interval; neither cooldown nor a prior candidate contributes scoring
-measurements or warmup state.
-Its dynamic-settle score uses the fixed-point limit
-`max(12_000ms, 2ms * max(0, targetCentiC - candidateStartTempCentiC))`, where
-`candidateStartTempCentiC` is the measurement which admitted that same `scout` boundary. The
-limit is less than the 60 second hold-confirm interval and is not host-configurable.
+outside that candidate trial's sample range and approach score.
+Each candidate's `scout` interval is preheat evidence with no minimum duration. It must observe a
+nonzero actual heater-output sample and then actual PID `heaterPhase: "approach"` before the
+independent fixed-point safety deadline
+`15_000ms + 4ms * max(0, targetCentiC - candidateStartTempCentiC)`, where
+`candidateStartTempCentiC` is the measurement which admitted that same `scout` boundary.
+`scoreSettleMs` starts at the first actual PID `heaterPhase: "approach"` sample and ends at the
+first actual PID `heaterPhase: "hold"` sample. Its upper limit remains the existing main
+controller `approachMaxTicks` behavior; this protocol neither modifies it nor adds another
+approach threshold.
 `decision` records the complete candidate/score/gate/target state, freeze and interval result.
 `safety` records a safety fault and disarm reason. Preview, discard and save occur after terminal
 trace sealing, so their normal command responses carry applied hash, persistent revision and

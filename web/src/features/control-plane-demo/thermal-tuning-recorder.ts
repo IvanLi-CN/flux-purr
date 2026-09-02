@@ -208,7 +208,7 @@ function firmwareReportData(
         candidateName: trial.candidateId ?? null,
         candidateHash: trial.candidateHash ?? null,
         selected: trial.candidateHash === decision.candidateHash,
-        evidenceValid: trial.gates === 0x3f,
+        evidenceValid: trial.gates != null && (trial.gates & 0x1f) === 0x1f,
         point: candidatePoint(trial.canonicalCandidatePointHex),
         pointSource: 'firmware_candidate_trial',
         samples: trialSamples.map((sample) => ({
@@ -220,6 +220,7 @@ function firmwareReportData(
           ppsContractCurrentA: sample.ppsContractMa == null ? null : sample.ppsContractMa / 1_000,
           phase: reportPhase(sample.phase),
           firmwarePhase: sample.phase,
+          heaterPhase: sample.heaterPhase,
           measurementValid: sample.measurementValid,
           sequence: sample.sequence,
         })),

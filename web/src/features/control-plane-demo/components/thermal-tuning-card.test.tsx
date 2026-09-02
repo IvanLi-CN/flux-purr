@@ -1,6 +1,7 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import type { ThermalTuningRunSnapshot } from '../contracts'
 import {
   buildThermalTuningBundle,
   thermalTuningRunStorageKey,
@@ -98,5 +99,76 @@ describe('thermal tuning calibration surface', () => {
     ])
     expect(files['run.bundle.json']).toContain('thermal-tuning-v2')
     expect(thermalTuningRunStorageKey('fp-1', 'run-1')).toBe('fp-1:run-1')
+  })
+
+  it('archives the actual PID phase and accepts both current and archived pass masks', () => {
+    const idle = createDefaultThermalTuningSnapshot()
+    const snapshot: ThermalTuningRunSnapshot = {
+      ...idle,
+      run: {
+        ...idle.run,
+        runId: 'run-phase-audit',
+        state: 'terminal',
+        powerClass: 'pps5a',
+        terminalDisposition: 'completed',
+      },
+      page: {
+        ...idle.page,
+        emittedThrough: 3,
+        events: [
+          {
+            sequence: 0,
+            elapsedMs: 0,
+            kind: 'candidate_trial',
+            eventReason: 'started',
+            targetC: 60,
+            trialIndex: 0,
+            candidateHash: 'candidate-60',
+            canonicalCandidatePointHex: '00',
+          },
+          {
+            sequence: 1,
+            elapsedMs: 500,
+            kind: 'sample',
+            phase: 'scout',
+            heaterPhase: 'warmup',
+            targetC: 60,
+            trialIndex: 0,
+            candidateHash: 'candidate-60',
+            temperatureCentiC: 4500,
+            heaterOutputPermille: 1000,
+            measurementValid: true,
+          },
+          {
+            sequence: 2,
+            elapsedMs: 1000,
+            kind: 'candidate_trial',
+            eventReason: 'completed',
+            targetC: 60,
+            trialIndex: 0,
+            candidateHash: 'candidate-60',
+            canonicalCandidatePointHex: '00',
+            trialStartSequence: 0,
+            trialEndSequence: 2,
+            trialStartElapsedMs: 0,
+            trialEndElapsedMs: 1000,
+            gates: 31,
+          },
+          {
+            sequence: 3,
+            elapsedMs: 1000,
+            kind: 'decision',
+            targetC: 60,
+            candidateHash: 'candidate-60',
+            disposition: 'accepted',
+            gates: 63,
+          },
+        ],
+      },
+    }
+
+    const files = buildThermalTuningBundle('fp-1', snapshot)
+    expect(files['index.html']).toContain('"heaterPhase":"warmup"')
+    expect(files['index.html']).toContain('"evidenceValid":true')
   })
 })

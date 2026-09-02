@@ -520,6 +520,14 @@ pub enum ThermalTuningPhaseWire {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ThermalTuningHeaterPhaseWire {
+    Warmup,
+    Approach,
+    Hold,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThermalTuningTerminalDispositionWire {
     Completed,
     Failed,
@@ -701,6 +709,8 @@ pub struct ThermalTuningTraceEventWire {
     pub elapsed_ms: u32,
     pub kind: ThermalTuningTraceKindWire,
     pub phase: Option<ThermalTuningPhaseWire>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heater_phase: Option<ThermalTuningHeaterPhaseWire>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_phase: Option<ThermalTuningPhaseWire>,
     pub target_c: Option<i16>,
@@ -3374,6 +3384,7 @@ mod tests {
                     elapsed_ms: sequence as u32 * 1_000,
                     kind: ThermalTuningTraceKindWire::Sample,
                     phase: Some(ThermalTuningPhaseWire::Scout),
+                    heater_phase: Some(ThermalTuningHeaterPhaseWire::Warmup),
                     previous_phase: None,
                     target_c: Some(240),
                     trial_index: Some(0),
