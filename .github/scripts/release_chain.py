@@ -50,6 +50,37 @@ def git_raw(*args: str, check: bool = True) -> str:
     return result.stdout
 
 
+def tag_target(tag: str) -> str | None:
+    """Return the peeled commit for a local tag, or None when it is absent."""
+    ref = f"refs/tags/{tag}"
+    if subprocess.run(
+        ["git", "show-ref", "--tags", "--verify", "--quiet", ref],
+        cwd=ROOT,
+    ).returncode != 0:
+        return None
+    return git("rev-parse", f"{ref}^{{commit}}")
+
+
+def verify_tag(
+    version: str, expected_sha: str | None = None, allow_existing: bool = False
+) -> dict[str, str]:
+    """Reserve a product tag name, optionally accepting an exact recovery owner."""
+    PRODUCT_VERSION.parse_version(version)
+    tag = f"v{version}"
+    target = tag_target(tag)
+    if target is None:
+        return {"tag": tag, "status": "available"}
+    expected = git("rev-parse", f"{expected_sha}^{{commit}}") if expected_sha else None
+    if allow_existing and expected and target == expected:
+        return {"tag": tag, "status": "matching", "target": target}
+    owner = target if target else "unknown"
+    expected_text = f"; expected {expected}" if expected else ""
+    raise ReleaseChainError(
+        f"product tag {tag} is already owned by commit {owner}{expected_text}; "
+        "only an exact recovery may reuse an existing tag"
+    )
+
+
 def is_ancestor(ancestor: str, descendant: str) -> bool:
     return subprocess.run(
         ["git", "merge-base", "--is-ancestor", ancestor, descendant],
@@ -244,6 +275,7 @@ def stage(args: argparse.Namespace) -> None:
         version_channel = "rc" if PRODUCT_VERSION.parse_version(version)["prerelease"] else "stable"
         if version_channel != intent_channel:
             raise ReleaseChainError("VERSION channel does not match the frozen release intent")
+    verify_tag(version)
     (ROOT / "VERSION").write_text(version + "\n", encoding="utf-8")
     if git("diff", "--name-only") != "VERSION":
         raise ReleaseChainError("staging a VERSION preparation commit may modify only VERSION")
@@ -302,6 +334,7 @@ def promote(args: argparse.Namespace) -> None:
     stable_version = f"{parsed['major']}.{parsed['minor']}.{parsed['patch']}"
     if args.exact_version and args.exact_version != stable_version:
         raise ReleaseChainError("promotion version must remove only the RC prerelease")
+    verify_tag(stable_version)
     (ROOT / "VERSION").write_text(stable_version + "\n", encoding="utf-8")
     if git("diff", "--name-only") != "VERSION":
         raise ReleaseChainError("promotion VERSION preparation commit may modify only VERSION")
@@ -344,6 +377,12 @@ def check_merged_prepared_release(args: argparse.Namespace) -> None:
     print(json.dumps(values, sort_keys=True))
 
 
+def check_tag(args: argparse.Namespace) -> None:
+    values = verify_tag(args.version, args.expected_sha, args.allow_existing)
+    write_github_output(values, args.github_output)
+    print(json.dumps(values, sort_keys=True))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -369,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
     verify_merged_parser = sub.add_parser("verify-merged-prepared")
     verify_merged_parser.add_argument("--commit", default="HEAD")
     verify_merged_parser.add_argument("--github-output")
+    tag_parser = sub.add_parser("verify-tag")
+    tag_parser.add_argument("--version", required=True)
+    tag_parser.add_argument("--expected-sha")
+    tag_parser.add_argument("--allow-existing", action="store_true")
+    tag_parser.add_argument("--github-output")
     promote_parser = sub.add_parser("promote")
     promote_parser.add_argument("--commit", required=True)
     promote_parser.add_argument("--exact-version")
@@ -383,6 +427,8 @@ def main(argv: list[str] | None = None) -> int:
             check_prepared_commit(args)
         elif args.command == "verify-merged-prepared":
             check_merged_prepared_release(args)
+        elif args.command == "verify-tag":
+            check_tag(args)
         else:
             promote(args)
         return 0

@@ -15,7 +15,8 @@
 - `Label Gate` remains the required label validation. `Prepare product version` waits for that check and the full PR matrix, then writes a VERSION-only commit to the same PR branch with immutable source and label-intent trailers. It does not create a PR and does not write `main`.
 - `Release completion` admits only a prepared product PR after it rechecks the prepared source commit's complete CI results. A normal merge commit carries the prepared tree into `main`; `CI Main` validates that relation and `Release Product` verifies both the merge relation and the preparation trailers before it builds, tags, publishes, deploys, and recovers from the merged main SHA. A non-product merge is a successful release skip, not a failed release.
 - `CI Main` does not upload deployable Web artifacts. `Release Product` builds the production and public-demo archives once, publishes and verifies them, then deploys each exact archive once to its corresponding EdgeOne project. Release markers make recovery idempotent.
-- No workflow bypass, App, secret, variable, or GitHub Environment is required. The workflow token writes only the already-open PR branch and the product tag/release assets.
+- Tag reservation is enforced before preparation and again before release assets are built. A foreign existing tag fails closed; recovery may reuse only a tag pointing at the exact merged main SHA.
+- The active signed-commit ruleset requires the existing release signing credential for the preparation commit. This implementation adds no App, secret, variable, Environment, bypass, or replacement credential.
 
 ## Required Repository Settings
 
@@ -28,6 +29,7 @@
 - A publication failure after the protected merge leaves the exact `VERSION` in `main`.
 - `Release Product` recovery takes that same merged SHA and verifies the tag, manifest, and assets before republishing. It cannot calculate a new version or modify `VERSION`.
 - A historical candidate that was tagged but never merged into `main` is audit-only. It cannot be used as a future version input or recovered by the new main-merge flow.
+- The historical `v0.23.0` tag/release remains immutable and audit-only. The first complete release on this chain is the normal `0.23.1` migration reconciliation release.
 
 ## Validation
 

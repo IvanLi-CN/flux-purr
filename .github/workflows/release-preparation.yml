@@ -80,6 +80,7 @@ jobs:
           head_ref="$(jq -r '.head.ref' "${RUNNER_TEMP}/pull-request.json")"
           git check-ref-format --branch "${head_ref}" >/dev/null
           jq '.labels' "${RUNNER_TEMP}/pull-request.json" > "${RUNNER_TEMP}/labels.json"
+          git fetch --force --tags origin
           git fetch --no-tags origin "${source_sha}" "${base_sha}"
           git worktree add --detach "${RUNNER_TEMP}/release-source" "${source_sha}"
           verification_sha="${source_sha}"

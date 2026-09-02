@@ -16,6 +16,7 @@ printf '%s\n' 'source' >> "${tmp_dir}/README"
 git -C "${tmp_dir}" add README
 git -C "${tmp_dir}" commit -q --signoff -m source
 source="$(git -C "${tmp_dir}" rev-parse HEAD)"
+git -C "${tmp_dir}" tag v0.22.1 "${base}"
 
 python3 - "${root_dir}" "${tmp_dir}" "${base}" "${source}" <<'PY'
 import importlib.util
@@ -43,6 +44,21 @@ checks.write_text(json.dumps({"check_runs": [
     {"name": "Web checks", "conclusion": "success", "completed_at": "2026-08-30T03:48:37Z"},
     {"name": "Worktree bootstrap", "conclusion": "success", "completed_at": "2026-08-30T03:43:38Z"},
 ]}), encoding="utf-8")
+
+before_head = module.git(repo, "rev-parse", "HEAD")
+before_count = int(module.git(repo, "rev-list", "--count", "HEAD"))
+assert module.main([
+    "--repo-root", str(repo),
+    "--source-sha", source,
+    "--base-sha", base,
+    "--labels-json", str(labels),
+    "--checks-json", str(checks),
+    "--mode", "automatic",
+]) == 1
+assert module.git(repo, "rev-parse", "HEAD") == before_head
+assert int(module.git(repo, "rev-list", "--count", "HEAD")) == before_count
+assert (repo / "VERSION").read_text(encoding="utf-8") == "0.22.0\n"
+module.git(repo, "tag", "-d", "v0.22.1")
 
 assert module.main([
     "--repo-root", str(repo),
