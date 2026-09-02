@@ -96,6 +96,23 @@ the five required root files, with no dependency on a server or CLI process. Sto
 transaction failure or detected gap forces `reviewDisposition=incomplete` and is visible in
 both report and UI.
 
+## Report Rendering
+
+The target-card verdict, displayed hard metrics and default response chart describe one
+candidate trial. When an adopted trial exists, it is the default and the report labels its
+trial number and adopted state. Other executed trials remain individually selectable so a
+rejected candidate cannot be mistaken for the adopted result.
+
+A renderer that offers a target-level multi-trial overview orders samples by the Device-global
+`elapsedMs` and breaks every line at a `trialIndex` transition. It must never concatenate
+trial-local clocks or draw a segment across a candidate boundary.
+
+Charts preserve physical dimensions: temperature, heater output, voltage and current use
+separate plots or explicitly labelled independent axes. A renderer must not use a hidden
+multiplier to overlay distinct units. Device-reported `ppsContractMa` is shown only as the
+PPS contract safety ceiling, not as external VBUS-current telemetry. Heater output is bounded
+to the physical `0–100%` range.
+
 ## Legacy Import
 
 `thermal-profile.accepted.json` remains an import-only compatibility artifact for historical

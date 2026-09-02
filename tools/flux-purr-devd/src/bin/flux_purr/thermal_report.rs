@@ -359,17 +359,11 @@ fn firmware_report_data(
             .cloned()
             .or_else(|| point_by_target.get(&target).cloned())
             .unwrap_or(Value::Null);
-        let target_samples = rounds
-            .iter()
-            .flat_map(|round| {
-                round
-                    .get("samples")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-            })
-            .collect::<Vec<_>>();
+        // A target summary is a chronological device timeline, not a
+        // concatenation of each trial's local clock. Concatenating those
+        // clocks produces a non-monotonic X axis and canvas joins between
+        // unrelated candidate trials.
+        let target_samples = firmware_target_samples(samples, target);
         let started_ms = target_trials
             .iter()
             .filter_map(|trial| trial.get("trialStartElapsedMs").and_then(Value::as_u64))
@@ -557,57 +551,100 @@ fn firmware_candidate_point_json(point: flux_purr_thermal_tuning_core::Candidate
 }
 
 fn firmware_trial_samples(samples: &[Value], target_c: i16, trial_index: u64) -> Vec<Value> {
-    let raw = samples
+    let mut raw = samples
         .iter()
         .filter(|sample| sample.get("kind").and_then(Value::as_str) == Some("sample"))
         .filter(|sample| sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target_c)))
         .filter(|sample| sample.get("trialIndex").and_then(Value::as_u64) == Some(trial_index))
         .collect::<Vec<_>>();
+    raw.sort_by_key(|sample| {
+        sample
+            .get("elapsedMs")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    });
     let started_ms = raw
         .first()
         .and_then(|sample| sample.get("elapsedMs"))
         .and_then(Value::as_u64)
         .unwrap_or_default();
     raw.into_iter()
+        .map(|sample| firmware_sample_json(sample, started_ms, false))
+        .collect()
+}
+
+fn firmware_target_samples(samples: &[Value], target_c: i16) -> Vec<Value> {
+    let mut raw = samples
+        .iter()
+        .filter(|sample| sample.get("kind").and_then(Value::as_str) == Some("sample"))
+        .filter(|sample| sample.get("targetC").and_then(Value::as_i64) == Some(i64::from(target_c)))
+        .collect::<Vec<_>>();
+    raw.sort_by_key(|sample| {
+        sample
+            .get("elapsedMs")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    });
+    let started_ms = raw
+        .first()
+        .and_then(|sample| sample.get("elapsedMs"))
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let mut previous_trial = None;
+    raw.into_iter()
         .map(|sample| {
-            let elapsed_ms = sample.get("elapsedMs").and_then(Value::as_u64).unwrap_or(started_ms);
-            let firmware_phase = sample.get("phase").and_then(Value::as_str).unwrap_or("sample");
-            json!({
-                "t": elapsed_ms.saturating_sub(started_ms) as f64 / 1_000.0,
-                "temp": sample.get("temperatureCentiC").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
-                "output": sample.get("heaterOutputPermille").and_then(Value::as_i64).map(|value| value as f64 / 10.0),
-                "requestV": sample.get("ppsContractMv").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
-                "vinV": sample.get("vinMv").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
-                "ppsContractCurrentA": sample.get("ppsContractMa").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
-                "phase": report_phase(firmware_phase),
-                "firmwarePhase": firmware_phase,
-                "measurementValid": sample.get("measurementValid").cloned().unwrap_or(Value::Null),
-                "sequence": sample.get("sequence").cloned().unwrap_or(Value::Null),
-                "elapsedMs": sample.get("elapsedMs").cloned().unwrap_or(Value::Null),
-                "targetC": sample.get("targetC").cloned().unwrap_or(Value::Null),
-                "trialIndex": sample.get("trialIndex").cloned().unwrap_or(Value::Null),
-                "candidateId": sample.get("candidateId").cloned().unwrap_or(Value::Null),
-                "candidateHash": sample.get("candidateHash").cloned().unwrap_or(Value::Null),
-                "heaterOutputPermille": sample.get("heaterOutputPermille").cloned().unwrap_or(Value::Null),
-                "temperatureCentiC": sample.get("temperatureCentiC").cloned().unwrap_or(Value::Null),
-                "ppsContractMv": sample.get("ppsContractMv").cloned().unwrap_or(Value::Null),
-                "ppsContractMa": sample.get("ppsContractMa").cloned().unwrap_or(Value::Null),
-                "vinMv": sample.get("vinMv").cloned().unwrap_or(Value::Null),
-                "gates": sample.get("gates").cloned().unwrap_or(Value::Null),
-                "disposition": sample.get("disposition").cloned().unwrap_or(Value::Null),
-                "scoreOvershoot": sample.get("scoreOvershoot").cloned().unwrap_or(Value::Null),
-                "scoreStability": sample.get("scoreStability").cloned().unwrap_or(Value::Null),
-                "scoreSettleMs": sample.get("scoreSettleMs").cloned().unwrap_or(Value::Null),
-                "scoreHoldMeanAbsoluteErrorCenti": sample.get("scoreHoldMeanAbsoluteErrorCenti").cloned().unwrap_or(Value::Null),
-                "scoreOutputSwitches": sample.get("scoreOutputSwitches").cloned().unwrap_or(Value::Null),
-                "scoreTracking": sample.get("scoreTracking").cloned().unwrap_or(Value::Null),
-                "scoreEnergy": sample.get("scoreEnergy").cloned().unwrap_or(Value::Null),
-                "intervalLowerBoundaryC": sample.get("intervalLowerBoundaryC").cloned().unwrap_or(Value::Null),
-                "intervalUpperBoundaryC": sample.get("intervalUpperBoundaryC").cloned().unwrap_or(Value::Null),
-                "intervalPruned": sample.get("intervalPruned").cloned().unwrap_or(Value::Null),
-            })
+            let trial_index = sample.get("trialIndex").and_then(Value::as_u64);
+            let trial_boundary_before = previous_trial.is_some() && previous_trial != trial_index;
+            previous_trial = trial_index;
+            firmware_sample_json(sample, started_ms, trial_boundary_before)
         })
         .collect()
+}
+
+fn firmware_sample_json(sample: &Value, started_ms: u64, trial_boundary_before: bool) -> Value {
+    let elapsed_ms = sample
+        .get("elapsedMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(started_ms);
+    let firmware_phase = sample
+        .get("phase")
+        .and_then(Value::as_str)
+        .unwrap_or("sample");
+    json!({
+        "t": elapsed_ms.saturating_sub(started_ms) as f64 / 1_000.0,
+        "temp": sample.get("temperatureCentiC").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
+        "output": sample.get("heaterOutputPermille").and_then(Value::as_i64).map(|value| value as f64 / 10.0),
+        "requestV": sample.get("ppsContractMv").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
+        "vinV": sample.get("vinMv").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
+        "ppsContractCurrentA": sample.get("ppsContractMa").and_then(Value::as_i64).map(|value| value as f64 / 1_000.0),
+        "phase": report_phase(firmware_phase),
+        "firmwarePhase": firmware_phase,
+        "trialBoundaryBefore": trial_boundary_before,
+        "measurementValid": sample.get("measurementValid").cloned().unwrap_or(Value::Null),
+        "sequence": sample.get("sequence").cloned().unwrap_or(Value::Null),
+        "elapsedMs": sample.get("elapsedMs").cloned().unwrap_or(Value::Null),
+        "targetC": sample.get("targetC").cloned().unwrap_or(Value::Null),
+        "trialIndex": sample.get("trialIndex").cloned().unwrap_or(Value::Null),
+        "candidateId": sample.get("candidateId").cloned().unwrap_or(Value::Null),
+        "candidateHash": sample.get("candidateHash").cloned().unwrap_or(Value::Null),
+        "heaterOutputPermille": sample.get("heaterOutputPermille").cloned().unwrap_or(Value::Null),
+        "temperatureCentiC": sample.get("temperatureCentiC").cloned().unwrap_or(Value::Null),
+        "ppsContractMv": sample.get("ppsContractMv").cloned().unwrap_or(Value::Null),
+        "ppsContractMa": sample.get("ppsContractMa").cloned().unwrap_or(Value::Null),
+        "vinMv": sample.get("vinMv").cloned().unwrap_or(Value::Null),
+        "gates": sample.get("gates").cloned().unwrap_or(Value::Null),
+        "disposition": sample.get("disposition").cloned().unwrap_or(Value::Null),
+        "scoreOvershoot": sample.get("scoreOvershoot").cloned().unwrap_or(Value::Null),
+        "scoreStability": sample.get("scoreStability").cloned().unwrap_or(Value::Null),
+        "scoreSettleMs": sample.get("scoreSettleMs").cloned().unwrap_or(Value::Null),
+        "scoreHoldMeanAbsoluteErrorCenti": sample.get("scoreHoldMeanAbsoluteErrorCenti").cloned().unwrap_or(Value::Null),
+        "scoreOutputSwitches": sample.get("scoreOutputSwitches").cloned().unwrap_or(Value::Null),
+        "scoreTracking": sample.get("scoreTracking").cloned().unwrap_or(Value::Null),
+        "scoreEnergy": sample.get("scoreEnergy").cloned().unwrap_or(Value::Null),
+        "intervalLowerBoundaryC": sample.get("intervalLowerBoundaryC").cloned().unwrap_or(Value::Null),
+        "intervalUpperBoundaryC": sample.get("intervalUpperBoundaryC").cloned().unwrap_or(Value::Null),
+        "intervalPruned": sample.get("intervalPruned").cloned().unwrap_or(Value::Null),
+    })
 }
 
 fn firmware_trial_point(trial: &Value) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -2415,10 +2452,11 @@ fn escape_report_html_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        ThermalLegacyReportInput, ThermalSelfTestReportInput, firmware_report_data,
-        render_baseline_html, render_self_test_evidence_bundle, report_identity,
-        rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
-        sanitize_point, tuning_workflow, write_preliminary_review_bundle,
+        REPORT_TEMPLATE, ThermalLegacyReportInput, ThermalSelfTestReportInput,
+        firmware_report_data, render_baseline_html, render_self_test_evidence_bundle,
+        report_identity, rerender_legacy_preliminary_review_bundle,
+        sanitize_non_finite_json_numbers, sanitize_point, tuning_workflow,
+        write_preliminary_review_bundle,
     };
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2442,25 +2480,72 @@ mod tests {
             "candidate": {"candidateId": "selected", "promotionState": "ready"},
             "run": {"state": "terminal"}
         });
-        let samples = vec![json!({
-            "sequence": 2,
-            "elapsedMs": 1_000,
-            "kind": "sample",
-            "targetC": 60,
-            "trialIndex": 0,
-            "candidateHash": "aa",
-            "temperatureCentiC": 5_950,
-            "vinMv": 19_800,
-            "ppsContractMv": 20_000,
-            "ppsContractMa": 5_000,
-            "heaterOutputPermille": 240,
-            "measurementValid": true,
-            "phase": "hold_confirm"
-        })];
+        let samples = vec![
+            json!({
+                "sequence": 2,
+                "elapsedMs": 1_000,
+                "kind": "sample",
+                "targetC": 60,
+                "trialIndex": 0,
+                "candidateHash": "aa",
+                "temperatureCentiC": 5_950,
+                "vinMv": 19_800,
+                "ppsContractMv": 20_000,
+                "ppsContractMa": 5_000,
+                "heaterOutputPermille": 240,
+                "measurementValid": true,
+                "phase": "hold_confirm"
+            }),
+            json!({
+                "sequence": 3,
+                "elapsedMs": 2_000,
+                "kind": "sample",
+                "targetC": 60,
+                "trialIndex": 0,
+                "candidateHash": "aa",
+                "temperatureCentiC": 6_000,
+                "vinMv": 19_900,
+                "ppsContractMv": 20_000,
+                "ppsContractMa": 5_000,
+                "heaterOutputPermille": 180,
+                "measurementValid": true,
+                "phase": "hold_confirm"
+            }),
+            json!({
+                "sequence": 5,
+                "elapsedMs": 3_000,
+                "kind": "sample",
+                "targetC": 60,
+                "trialIndex": 1,
+                "candidateHash": "bb",
+                "temperatureCentiC": 6_010,
+                "vinMv": 20_000,
+                "ppsContractMv": 20_000,
+                "ppsContractMa": 5_000,
+                "heaterOutputPermille": 160,
+                "measurementValid": true,
+                "phase": "hold_confirm"
+            }),
+            json!({
+                "sequence": 6,
+                "elapsedMs": 4_000,
+                "kind": "sample",
+                "targetC": 60,
+                "trialIndex": 1,
+                "candidateHash": "bb",
+                "temperatureCentiC": 6_020,
+                "vinMv": 20_100,
+                "ppsContractMv": 20_000,
+                "ppsContractMa": 5_000,
+                "heaterOutputPermille": 140,
+                "measurementValid": true,
+                "phase": "hold_confirm"
+            }),
+        ];
         let decisions = vec![
             json!({"sequence": 0, "elapsedMs": 0, "kind": "phase_transition", "targetC": 60, "trialIndex": 0}),
             json!({
-                "sequence": 3,
+                "sequence": 4,
                 "elapsedMs": 2_000,
                 "kind": "candidate_trial",
                 "eventReason": "completed",
@@ -2470,7 +2555,7 @@ mod tests {
                 "candidateHash": "aa",
                 "canonicalCandidatePointHex": hex::encode(canonical),
                 "trialStartSequence": 1,
-                "trialEndSequence": 3,
+                "trialEndSequence": 4,
                 "trialStartElapsedMs": 0,
                 "trialEndElapsedMs": 2_000,
                 "scoreOvershoot": 25,
@@ -2481,12 +2566,33 @@ mod tests {
                 "gates": 63
             }),
             json!({
-                "sequence": 4,
-                "elapsedMs": 2_100,
+                "sequence": 7,
+                "elapsedMs": 4_100,
+                "kind": "candidate_trial",
+                "eventReason": "completed",
+                "targetC": 60,
+                "trialIndex": 1,
+                "candidateId": "trial-1",
+                "candidateHash": "bb",
+                "canonicalCandidatePointHex": hex::encode(canonical),
+                "trialStartSequence": 5,
+                "trialEndSequence": 7,
+                "trialStartElapsedMs": 3_000,
+                "trialEndElapsedMs": 4_100,
+                "scoreOvershoot": 25,
+                "scoreStability": 80,
+                "scoreSettleMs": 1_500,
+                "scoreHoldMeanAbsoluteErrorCenti": 20,
+                "scoreOutputSwitches": 2,
+                "gates": 63
+            }),
+            json!({
+                "sequence": 8,
+                "elapsedMs": 4_200,
                 "kind": "decision",
                 "targetC": 60,
                 "disposition": "accepted",
-                "candidateHash": "aa",
+                "candidateHash": "bb",
                 "scoreOvershoot": 25,
                 "scoreStability": 80,
                 "scoreSettleMs": 1_500,
@@ -2497,8 +2603,8 @@ mod tests {
         let report = firmware_report_data(&run_bundle, &json!({}), &samples, &decisions)
             .expect("reconstruct firmware evidence");
 
-        assert_eq!(report["rawRuns"][0]["roundCount"], 1);
-        assert_eq!(report["rawRuns"][0]["rounds"][0]["selected"], true);
+        assert_eq!(report["rawRuns"][0]["roundCount"], 2);
+        assert_eq!(report["rawRuns"][0]["rounds"][1]["selected"], true);
         assert_eq!(report["rawRuns"][0]["rounds"][0]["evidenceValid"], true);
         assert_eq!(
             report["rawRuns"][0]["rounds"][0]["point"]["targetTempC"],
@@ -2520,6 +2626,27 @@ mod tests {
         assert_eq!(
             report["rawRuns"][0]["rounds"][0]["samples"][0]["temperatureCentiC"],
             5_950
+        );
+        let target_samples = report["rawRuns"][0]["samples"]
+            .as_array()
+            .expect("target samples");
+        assert_eq!(
+            target_samples
+                .iter()
+                .map(|sample| sample["t"].as_f64().expect("timeline second"))
+                .collect::<Vec<_>>(),
+            vec![0.0, 1.0, 2.0, 3.0]
+        );
+        assert_eq!(target_samples[2]["trialBoundaryBefore"], true);
+        assert_eq!(target_samples[1]["trialBoundaryBefore"], false);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][1]["samples"]
+                .as_array()
+                .expect("round samples")
+                .iter()
+                .map(|sample| sample["t"].as_f64().expect("round second"))
+                .collect::<Vec<_>>(),
+            vec![0.0, 1.0]
         );
     }
 
@@ -2777,6 +2904,18 @@ mod tests {
             decoded,
             json!({"label": "&lt;/script&gt;&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;&amp;\u{2028}\u{2029}"})
         );
+    }
+
+    #[test]
+    fn firmware_report_template_keeps_trial_and_unit_boundaries_explicit() {
+        assert!(REPORT_TEMPLATE.contains("samplesForCharts()"));
+        assert!(REPORT_TEMPLATE.contains("当前显示候选试验"));
+        assert!(REPORT_TEMPLATE.contains("trialBoundaryBefore"));
+        assert!(REPORT_TEMPLATE.contains("Y0=options.yMin??"));
+        assert!(REPORT_TEMPLATE.contains("PPS 合同电流"));
+        assert!(REPORT_TEMPLATE.contains("不是外部 VBUS 实测电流"));
+        assert!(REPORT_TEMPLATE.contains("#targetTabs{{display:grid"));
+        assert!(REPORT_TEMPLATE.contains(".panel{{background:var(--paper)"));
     }
 
     #[test]

@@ -159,6 +159,14 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   必须携带完整 score vector、每个 gate、freeze、interval prune、disposition 和失败原因。
   缺失字段必须以结构化 unavailable 标识呈现，禁止用相邻事件推断、显示空占位或静默
   删除来伪造完整性。
+- 报告的目标卡、验收指标和默认图必须引用同一个 candidate trial。存在 adopted trial
+  时，目标图默认显示该 trial，并明确显示其试验编号和 adopted 状态；其余 trial 必须
+  保留为可切换的独立视图。若报告额外提供跨 trial 概览，必须按设备全局 `elapsedMs`
+  严格递增排序，且在 trial 边界断开折线，禁止拼接每个 trial 从零开始的本地时间轴。
+- 报告绘图必须保持物理量纲。温度、加热输出、VIN/PPS 合同电压和 PPS 合同电流不得
+  通过隐藏倍率共用同一数值轴；不同量纲使用独立图或明确标注的独立轴。`heaterOutputPermille`
+  显示为 `0–100%`，其显式坐标范围不得扩展到负值。PPS 合同电流必须标注为合同安全
+  ceiling，不能表示为外部 VBUS 的实测电流。
 - 设备端 trace ring 只保存尚未由主机确认持久化的有界重传窗口，不是完整调优历史。
   当前 capability 发布的 `96` 是经内存与采样节奏验证的容量上限，允许后续固件在保持
   协议语义和溢出保护的前提下调整；算法正确性不得依赖该数字。
