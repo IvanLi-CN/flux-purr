@@ -127,7 +127,7 @@ inter-candidate cooldown samples remain in the target trace but are outside the 
 range. A report must not imply that a candidate which starts in `hold_confirm` was independently
 validated from the required precondition.
 The candidate-local `scout` interval lasts at least five seconds from that boundary and must
-contain its own 100% heater-output sample to satisfy `warmup_complete`. Cooling or a previous
+contain its own nonzero actual heater-output sample to satisfy `warmup_complete`. Cooling or a previous
 candidate may not contribute warmup, overshoot, or output-switch scoring to the next candidate.
 
 Charts preserve physical dimensions: temperature, heater output, voltage and current use

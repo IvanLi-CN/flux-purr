@@ -136,7 +136,7 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   细分，但不阻止已经满足边界的独立区间。
 - 每个 target 的单调预算从 cooldown wait 开始，覆盖 scout、retune 和 confirm，
   上限为 20 分钟。核心不得有用户可调、会绕开此预算的无限 round 路径。
-- 候选晋级必须满足 `warmup=100%`、完整 stage、动态 full-speed-to-stable settle
+- 候选晋级必须满足 candidate-local 的实际非零 `warmup`、完整 stage、动态 full-speed-to-stable settle
   gate、`maxOvershootC <= 3.0`、`holdPeakToPeakC <= 3.0`，再完成 60 秒 hold
   confirm。所有门槛计算使用固定点；临界低裕量候选必须确认，不得直接 accepted。
 - 核心必须以确定性的有界 perturbation ladder 生成 candidate。通过硬门槛的候选
@@ -161,7 +161,7 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   即将进入 `scout` 后记录；此前的冷却 sample 仍是完整 target trace 的安全证据，但不属于
   该候选的评分样本范围，也不得计入它的 dynamic settle。
   每个候选都必须从自己的起点完成至少 5 秒 `scout` 预热，并在该候选的 `scout` 样本中观察到
-  100% heater output 才能满足 warmup gate；冷却样本或前一候选的输出绝不能满足这一 gate，
+  非零实际 heater output 才能满足 warmup gate；冷却样本或前一候选的输出绝不能满足这一 gate，
   也不能贡献下一候选的 overshoot 或 output-switch score。
   缺失字段必须以结构化 unavailable 标识呈现，禁止用相邻事件推断、显示空占位或静默
   删除来伪造完整性。

@@ -501,8 +501,10 @@ impl ThermalTuningRuntime {
             .abs();
         // Candidate scoring begins only after its cooldown boundary. Samples
         // captured while cooling remain target-level safety evidence.
+        if self.candidate_trial_active && phase == Phase::Scout {
+            self.warmup_complete |= sample.heater_output_permille > 0;
+        }
         if self.candidate_trial_active && phase != Phase::CooldownWait {
-            self.warmup_complete |= sample.heater_output_permille >= 1_000;
             self.max_overshoot_centi = self.max_overshoot_centi.max(
                 sample
                     .temperature_centi_c
@@ -1656,11 +1658,12 @@ mod tests {
         assert!(!runtime.warmup_complete);
 
         runtime
-            .tick(sample_with_output(72_999, 5_500, 3_250, 1_000))
+            .tick(sample_with_output(72_999, 5_500, 3_250, 0))
             .unwrap();
         assert_eq!(runtime.core().phase(), Phase::Scout);
+        assert!(!runtime.warmup_complete);
         runtime
-            .tick(sample_with_output(73_000, 5_500, 3_250, 1_000))
+            .tick(sample_with_output(73_000, 5_500, 3_250, 360))
             .unwrap();
         assert_eq!(runtime.core().phase(), Phase::Retune);
         assert!(runtime.warmup_complete);

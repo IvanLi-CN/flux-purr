@@ -116,8 +116,8 @@ candidate trial starts only after its `cooldown_wait` precondition has reached `
 the firmware enters `scout`; prior cooldown samples remain target-level safety evidence and are
 outside that candidate trial's sample range and dynamic-settle score.
 Each candidate's `scout` interval is timed from its own start boundary and lasts at least five
-seconds. Its `warmup_complete` gate may only be satisfied by a 100% heater-output sample inside
-that candidate's `scout` interval; neither cooldown nor a prior candidate contributes scoring
+seconds. Its `warmup_complete` gate may only be satisfied by a nonzero actual heater-output
+sample inside that candidate's `scout` interval; neither cooldown nor a prior candidate contributes scoring
 measurements or warmup state.
 `decision` records the complete candidate/score/gate/target state, freeze and interval result.
 `safety` records a safety fault and disarm reason. Preview, discard and save occur after terminal
