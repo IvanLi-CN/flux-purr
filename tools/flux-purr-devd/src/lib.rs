@@ -120,7 +120,14 @@ static EVENT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SerialRetryPolicy {
     ReadOnly,
+    Idempotent,
     SingleShot,
+}
+
+impl SerialRetryPolicy {
+    fn allows_reset_retry(self) -> bool {
+        matches!(self, Self::ReadOnly | Self::Idempotent)
+    }
 }
 
 #[cfg(unix)]
@@ -7963,14 +7970,20 @@ async fn serial_thermal_tuning_exchange(
         port_path,
         request_id,
         request,
-        if payload.get("op").and_then(Value::as_str) == Some("get") {
-            SerialRetryPolicy::ReadOnly
-        } else {
-            SerialRetryPolicy::SingleShot
-        },
+        thermal_tuning_retry_policy(payload.get("op").and_then(Value::as_str)),
     )
     .await?;
     extract_usb_payload(result, "thermal_tuning_run")
+}
+
+fn thermal_tuning_retry_policy(operation: Option<&str>) -> SerialRetryPolicy {
+    match operation {
+        Some("get") => SerialRetryPolicy::ReadOnly,
+        // The firmware accepts an exact repeated acknowledgement as a no-op.
+        // No state-changing tuning operation shares that retry privilege.
+        Some("ack_trace") => SerialRetryPolicy::Idempotent,
+        _ => SerialRetryPolicy::SingleShot,
+    }
 }
 
 async fn serial_calibration_job_config(
@@ -8393,10 +8406,10 @@ fn serial_exchange_blocking(
                         emit_serial_log_line(state, events, device_id, &line);
                         if serial_line_is_usb_reset_marker(&line) {
                             // Opening an ESP32-S3 USB Serial/JTAG port can itself
-                            // trigger this reset. Keep the fd open so the firmware
-                            // can complete its startup and answer the request; an
-                            // actual I/O failure below remains the reopen signal.
-                            retry_after_runtime_ready = true;
+                            // trigger this reset. Only requests whose duplicate is
+                            // defined as harmless may be sent again once the
+                            // runtime-ready marker arrives.
+                            retry_after_runtime_ready |= retry_policy.allows_reset_retry();
                         } else if should_retry_request_after_runtime_ready(
                             retry_after_runtime_ready,
                             &line,
@@ -8559,7 +8572,7 @@ async fn observe_post_flash_boot(
 
 fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
     match retry_policy {
-        SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
+        SerialRetryPolicy::ReadOnly | SerialRetryPolicy::Idempotent => SERIAL_READ_ONLY_RPC_TIMEOUT,
         SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
     }
 }
@@ -10283,7 +10296,8 @@ fn espflash_connection_failure_text(output: &str) -> bool {
         || output.contains("no such device or address")
         // USB Serial/JTAG reset can briefly remove the exact authorized
         // device node before macOS recreates it at the same path.
-        || output.contains("no such file or directory")
+        || output.contains("error while connecting to device: no such file or directory")
+        || output.contains("failed to connect to the device: no such file or directory")
         || output.contains("broken pipe")
 }
 
@@ -11755,6 +11769,9 @@ mod tests {
         ));
         assert!(espflash_connection_failure_text(
             "Error while connecting to device: No such file or directory (os error 2)"
+        ));
+        assert!(!espflash_connection_failure_text(
+            "cp: /tmp/flux_cfg-source.bin: No such file or directory"
         ));
         assert!(!espflash_connection_failure_text(
             "Image verification failed after flash"
@@ -14476,9 +14493,42 @@ mod tests {
             SERIAL_READ_ONLY_RPC_TIMEOUT
         );
         assert_eq!(
+            serial_rpc_timeout(SerialRetryPolicy::Idempotent),
+            SERIAL_READ_ONLY_RPC_TIMEOUT
+        );
+        assert_eq!(
             serial_rpc_timeout(SerialRetryPolicy::SingleShot),
             SERIAL_RPC_TIMEOUT
         );
+    }
+
+    #[test]
+    fn thermal_tuning_only_retries_idempotent_requests_after_a_usb_reset() {
+        assert_eq!(
+            thermal_tuning_retry_policy(Some("get")),
+            SerialRetryPolicy::ReadOnly
+        );
+        assert_eq!(
+            thermal_tuning_retry_policy(Some("ack_trace")),
+            SerialRetryPolicy::Idempotent
+        );
+        for operation in [
+            "start",
+            "cancel",
+            "seal_review",
+            "preview",
+            "discard_preview",
+            "save",
+        ] {
+            assert_eq!(
+                thermal_tuning_retry_policy(Some(operation)),
+                SerialRetryPolicy::SingleShot,
+                "{operation} must remain single-shot",
+            );
+        }
+        assert!(SerialRetryPolicy::ReadOnly.allows_reset_retry());
+        assert!(SerialRetryPolicy::Idempotent.allows_reset_retry());
+        assert!(!SerialRetryPolicy::SingleShot.allows_reset_retry());
     }
 
     #[test]

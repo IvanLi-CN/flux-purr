@@ -3822,19 +3822,17 @@ async fn run_firmware_tuning_session(
             &page,
             contiguous_trace_archive_through(&recorded_sequences)?,
         )? {
-            snapshot = request_leased(
+            snapshot = firmware_tuning_ack_trace(
                 client,
                 resolved,
                 lease_id,
-                Method::POST,
-                "/calibration/thermal-tuning/run",
-                Some(json!({
+                json!({
                     "op": "ack_trace",
                     "runId": snapshot.pointer("/run/runId").cloned().unwrap_or(Value::Null),
                     "afterSequence": through,
                     "throughSequence": through,
                     "traceDigest": digest,
-                })),
+                }),
             )
             .await?;
         }
@@ -3953,6 +3951,37 @@ async fn firmware_tuning_snapshot(
         }
     }
     Err(last_error.expect("firmware tuning retry loop preserves the final error"))
+}
+
+async fn firmware_tuning_ack_trace(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    acknowledgement: Value,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match request_leased(
+            client,
+            resolved,
+            lease_id,
+            Method::POST,
+            "/calibration/thermal-tuning/run",
+            Some(acknowledgement.clone()),
+        )
+        .await
+        {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error)
+                if retryable_firmware_tuning_transport_error(error.as_ref()) && attempt < 2 =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("firmware tuning acknowledgement retry preserves the final error"))
 }
 
 fn validate_firmware_tuning_identity(
