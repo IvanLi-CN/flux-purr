@@ -414,11 +414,11 @@ All runtime fields are optional except `leaseId`; the response is the updated `S
 {
   "leaseId": "lease-001",
   "op": "run",
-  "buzzerScenario": "feedback_replace"
+  "scenario": "feedback_replace"
 }
 ```
 
-`op` is exactly one of `trigger`, `run`, or `status`. `trigger` requires `buzzerCue` from `ui_input | heater_on | heater_off | active_cooling_on | active_cooling_off | heater_reject | active_cooling_reject`; `run` requires `buzzerScenario=feedback_coalesce|feedback_replace`; `status` accepts neither field. The endpoint serializes the matching USB JSONL frame and returns `{ state, scenario?, activeCue?, trace[] }`, where `trace` has at most eight `DeveloperDebug` arbitration decisions. Firmware rejects `trigger` and `run` while heating, a measurement fault, a thermal latch, or attention acknowledgement is pending. It never accepts frequency, duty cycle, raw cue steps, or safety cues.
+`op` is exactly one of `trigger`, `run`, or `status`. `trigger` requires `cue` from `ui_input | heater_on | heater_off | active_cooling_on | active_cooling_off | heater_reject | active_cooling_reject`; `run` requires `scenario=feedback_coalesce|feedback_replace`; `status` accepts neither field. The endpoint serializes the matching USB JSONL frame and returns `{ state, scenario?, activeCue?, trace[] }`, where `trace` has at most eight `DeveloperDebug` arbitration decisions. Firmware rejects `trigger` and `run` while heating, a measurement fault, a thermal latch, or attention acknowledgement is pending. A `buzzer-debug` build that reaches pre-runtime recovery after display initialization continues to accept this feedback-only interface with GPIO47 held low; it never initializes a heater output. The endpoint never accepts frequency, duty cycle, raw cue steps, or safety cues.
 
 `PUT /api/v1/devices/:id/calibration` body:
 

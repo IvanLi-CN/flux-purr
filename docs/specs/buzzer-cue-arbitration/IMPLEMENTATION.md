@@ -15,7 +15,7 @@
 - `ProtectionAlarm` 保留既有四步音型，但已是 `300ms` non-looping one-shot；thermal scheduler 在活动热失控期间每秒请求重放。
 - 启动恢复、热失控状态机、两个 cadence scheduler、runtime-control 和前面板反馈均使用仲裁请求，并用来源、cue 与 disposition 记录固件诊断。
 - GPIO48 的 PWM 输出、静音 duty 归零和同频载波复用仍由既有硬件输出路径负责。
-- `buzzer-debug` 是非默认开发 feature。它经 native USB JSONL 与 `devd` lease 提交固定 feedback cue 或固定仲裁场景，返回最多八条 `DeveloperDebug` 决策 trace；生产构建不声明此 capability，LAN 与产品 Web 控制面也没有此端点。
+- `buzzer-debug` 是非默认开发 feature。它经 native USB JSONL 与 `devd` lease 提交固定 feedback cue 或固定仲裁场景，返回最多八条 `DeveloperDebug` 决策 trace；显示初始化完成后的 runtime 前恢复路径仍提供此 feedback-only 诊断并保持 GPIO47 低电平，不初始化 heater PWM。生产构建不声明此 capability，LAN 与产品 Web 控制面也没有此端点。
 
 ## Coverage / rollout summary
 

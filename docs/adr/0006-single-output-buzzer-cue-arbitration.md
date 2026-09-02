@@ -40,7 +40,10 @@ there is no mixing and no direct caller preemption.
   diagnostic after declaring the `buzzer_debug` identity capability. It can
   submit only fixed feedback cues or fixed arbitration scenarios as a
   `DeveloperDebug` source, is rejected while thermal safety is active, and
-  cannot set PWM parameters, emit safety cues, persist state, or use LAN.
+  cannot set PWM parameters, emit safety cues, persist state, or use LAN. If
+  display initialization has completed but runtime startup enters recovery,
+  the development diagnostic remains available with GPIO47 held low and no
+  heater PWM initialized.
 
 ## Consequences
 

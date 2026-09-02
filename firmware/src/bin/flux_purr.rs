@@ -76,7 +76,7 @@ use flux_purr_firmware::adapters::pd::{
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
 use flux_purr_firmware::buzzer::BuzzerDebugSession;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::BuzzerOutput;
@@ -84,7 +84,7 @@ use flux_purr_firmware::buzzer::BuzzerOutput;
 use flux_purr_firmware::buzzer::{
     BuzzerArbiter, BuzzerCueId, BuzzerCueSource, BuzzerDecision, BuzzerDecisionDisposition,
 };
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
 use flux_purr_firmware::control_plane::BuzzerDebugOp;
 #[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
 use flux_purr_firmware::control_plane::EepromMaintenanceOp;
@@ -10692,6 +10692,154 @@ fn poll_usb_early_control(
     }
 }
 
+#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
+fn usb_buzzer_recovery_response(
+    line: &str,
+    memory_config: &MemoryConfig,
+    elapsed_ms: u64,
+    buzzer: &mut BuzzerArbiter,
+    buzzer_debug: &mut BuzzerDebugSession,
+) -> UsbFrame {
+    let Ok(UsbFrame::BuzzerDebug {
+        request_id,
+        command,
+    }) = parse_usb_frame(line)
+    else {
+        return usb_recovery_response_for_phase(
+            line,
+            memory_config,
+            elapsed_ms,
+            UsbRecoveryPhase::BeforePersistentState,
+        );
+    };
+
+    if !command.is_valid() {
+        return usb_error_response(
+            request_id,
+            "invalid_buzzer_debug_command",
+            "buzzer_debug requires exactly the fields for its operation.",
+        );
+    }
+
+    match command.op {
+        BuzzerDebugOp::Status => UsbFrame::BuzzerDebugResponse {
+            request_id,
+            status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+        },
+        BuzzerDebugOp::Trigger => {
+            log_buzzer_decision(buzzer_debug.trigger_feedback(
+                buzzer,
+                command.cue.expect("validated debug trigger cue"),
+                elapsed_ms,
+            ));
+            UsbFrame::BuzzerDebugResponse {
+                request_id,
+                status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+            }
+        }
+        BuzzerDebugOp::Run => match buzzer_debug.start_scenario(
+            buzzer,
+            command.scenario.expect("validated debug scenario"),
+            elapsed_ms,
+        ) {
+            Ok(decisions) => {
+                for decision in decisions {
+                    log_buzzer_decision(decision);
+                }
+                UsbFrame::BuzzerDebugResponse {
+                    request_id,
+                    status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+                }
+            }
+            Err(_) => usb_error_response(
+                request_id,
+                "buzzer_debug_busy",
+                "A buzzer debug scenario is already running.",
+            ),
+        },
+    }
+}
+
+#[cfg(all(
+    target_arch = "xtensa",
+    feature = "web_serial",
+    feature = "buzzer-debug"
+))]
+async fn run_usb_buzzer_recovery_control_loop<'a, PWM>(
+    usb: &mut RawUsbSerialJtag,
+    rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
+    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
+    memory_config: &MemoryConfig,
+    status_light_state: StatusLightState,
+    buzzer_timer: &mut esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'a>>,
+    buzzer_pwm: &mut PWM,
+    peripheral_clock: &PeripheralClockConfig,
+) -> !
+where
+    PWM: SetDutyCycle,
+{
+    set_status_light_state(status_light_state);
+    let mut elapsed_ms = 0_u64;
+    let mut buzzer = BuzzerArbiter::new();
+    let mut buzzer_debug = BuzzerDebugSession::new();
+    let mut output_applied = BuzzerHardwareState::default();
+    let mut timer_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
+    apply_buzzer_output(
+        buzzer_timer,
+        buzzer_pwm,
+        peripheral_clock,
+        buzzer.tick(0).output,
+        &mut output_applied,
+        &mut timer_frequency_hz,
+    );
+
+    info!("buzzer debug recovery active: heater output remains held low");
+    loop {
+        loop {
+            match usb.read_byte() {
+                Ok(b'\n') => {
+                    let response = usb_buzzer_recovery_response(
+                        rx_line.as_str(),
+                        memory_config,
+                        elapsed_ms,
+                        &mut buzzer,
+                        &mut buzzer_debug,
+                    );
+                    usb_write_response_frame(usb, &response, tx_buf);
+                    rx_line.clear();
+                }
+                Ok(b'\r') => {}
+                Ok(byte) => {
+                    if rx_line.push(char::from(byte)).is_err() {
+                        rx_line.clear();
+                    }
+                }
+                Err(nb::Error::WouldBlock) => break,
+                Err(_) => break,
+            }
+        }
+
+        EmbassyTimer::after_millis(20).await;
+        elapsed_ms = elapsed_ms.saturating_add(20);
+        for decision in buzzer_debug.advance(&mut buzzer, elapsed_ms) {
+            log_buzzer_decision(decision);
+        }
+        let buzzer_tick = buzzer.tick(elapsed_ms);
+        if let Some(decision) = buzzer_tick.deferred_start {
+            log_buzzer_decision(decision);
+            buzzer_debug.record_deferred_start(elapsed_ms, decision);
+        }
+        apply_buzzer_output(
+            buzzer_timer,
+            buzzer_pwm,
+            peripheral_clock,
+            buzzer_tick.output,
+            &mut output_applied,
+            &mut timer_frequency_hz,
+        );
+    }
+}
+
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 async fn run_usb_recovery_control_loop(
     usb: &mut RawUsbSerialJtag,
@@ -12462,6 +12610,39 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
+    #[cfg(feature = "buzzer-debug")]
+    let mut heater_safe = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
+    #[cfg(feature = "buzzer-debug")]
+    heater_safe.set_low();
+    #[cfg(feature = "buzzer-debug")]
+    let pwm_clock_cfg =
+        PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
+            .expect("failed to derive MCPWM peripheral clock");
+    #[cfg(feature = "buzzer-debug")]
+    let mut mcpwm = McPwm::new(peripherals.MCPWM0, pwm_clock_cfg);
+    #[cfg(feature = "buzzer-debug")]
+    mcpwm.operator2.set_timer(&mcpwm.timer2);
+    #[cfg(feature = "buzzer-debug")]
+    let mut buzzer_pwm = mcpwm
+        .operator2
+        .with_pin_a(peripherals.GPIO48, PwmPinConfig::UP_ACTIVE_HIGH);
+    #[cfg(feature = "buzzer-debug")]
+    let buzzer_timer_cfg = pwm_clock_cfg
+        .timer_clock_with_frequency(
+            BUZZER_PWM_PERIOD_TICKS,
+            PwmWorkingMode::Increase,
+            Rate::from_hz(BUZZER_IDLE_FREQUENCY_HZ),
+        )
+        .expect("failed to derive buzzer PWM timer clock");
+    #[cfg(feature = "buzzer-debug")]
+    mcpwm.timer2.start(buzzer_timer_cfg);
+    #[cfg(feature = "buzzer-debug")]
+    let _ = buzzer_pwm.set_duty_cycle_percent(0);
+    #[cfg(feature = "buzzer-debug")]
+    info!(
+        "buzzer debug armed before PD: gpio48 silent period_ticks={=u16}",
+        BUZZER_PWM_PERIOD_TICKS,
+    );
     info!("scene={=str}", SceneId::StartupCalibration.label());
     for _ in 0..45 {
         #[cfg(feature = "web_serial")]
@@ -12480,6 +12661,9 @@ async fn main(_spawner: Spawner) {
     );
 
     if runtime_mode == FrontPanelRuntimeMode::KeyTest {
+        #[cfg(feature = "buzzer-debug")]
+        let mut _heater_safe = heater_safe;
+        #[cfg(not(feature = "buzzer-debug"))]
         let mut _heater_safe = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
         _heater_safe.set_low();
         let mut _fan_enable_safe =
@@ -12491,6 +12675,20 @@ async fn main(_spawner: Spawner) {
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
         match run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await {
             Err(()) => {
+                #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
+                run_usb_buzzer_recovery_control_loop(
+                    &mut usb_serial,
+                    &mut usb_rx_line,
+                    usb_tx_buf,
+                    &usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    &mut mcpwm.timer2,
+                    &mut buzzer_pwm,
+                    &pwm_clock_cfg,
+                )
+                .await;
+
+                #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
                     &mut usb_serial,
@@ -12540,6 +12738,20 @@ async fn main(_spawner: Spawner) {
                     "fusb302b identified device_id=0x{=u8:02x} but PHY initialization failed; holding heater interlocked",
                     device_id,
                 );
+                #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
+                run_usb_buzzer_recovery_control_loop(
+                    &mut usb_serial,
+                    &mut usb_rx_line,
+                    usb_tx_buf,
+                    &usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    &mut mcpwm.timer2,
+                    &mut buzzer_pwm,
+                    &pwm_clock_cfg,
+                )
+                .await;
+
+                #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
                     &mut usb_serial,
@@ -12573,6 +12785,20 @@ async fn main(_spawner: Spawner) {
                 warn!(
                     "CH224Q fixed-PD request failed; entering recovery before outputs initialize"
                 );
+                #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
+                run_usb_buzzer_recovery_control_loop(
+                    &mut usb_serial,
+                    &mut usb_rx_line,
+                    usb_tx_buf,
+                    &usb_boot_memory_config,
+                    StatusLightState::HeaterInterlocked,
+                    &mut mcpwm.timer2,
+                    &mut buzzer_pwm,
+                    &pwm_clock_cfg,
+                )
+                .await;
+
+                #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
                     &mut usb_serial,
@@ -12593,6 +12819,20 @@ async fn main(_spawner: Spawner) {
             #[cfg(feature = "web_serial")]
             let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_identity_unknown\n");
             warn!("PD controller identity is ambiguous or unreadable; holding heater interlocked");
+            #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
+            run_usb_buzzer_recovery_control_loop(
+                &mut usb_serial,
+                &mut usb_rx_line,
+                usb_tx_buf,
+                &usb_boot_memory_config,
+                StatusLightState::HeaterInterlocked,
+                &mut mcpwm.timer2,
+                &mut buzzer_pwm,
+                &pwm_clock_cfg,
+            )
+            .await;
+
+            #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
             #[cfg(feature = "web_serial")]
             run_usb_recovery_control_loop(
                 &mut usb_serial,
@@ -12621,6 +12861,20 @@ async fn main(_spawner: Spawner) {
         #[cfg(feature = "web_serial")]
         let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=pd_contract_not_ready\n");
         warn!("PD contract was not ready before outputs initialize; holding heater interlocked");
+        #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
+        run_usb_buzzer_recovery_control_loop(
+            &mut usb_serial,
+            &mut usb_rx_line,
+            usb_tx_buf,
+            &usb_boot_memory_config,
+            StatusLightState::HeaterInterlocked,
+            &mut mcpwm.timer2,
+            &mut buzzer_pwm,
+            &pwm_clock_cfg,
+        )
+        .await;
+
+        #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
         #[cfg(feature = "web_serial")]
         run_usb_recovery_control_loop(
             &mut usb_serial,
@@ -12722,9 +12976,11 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
+    #[cfg(not(feature = "buzzer-debug"))]
     let pwm_clock_cfg =
         PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
             .expect("failed to derive MCPWM peripheral clock");
+    #[cfg(not(feature = "buzzer-debug"))]
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, pwm_clock_cfg);
 
     mcpwm.operator0.set_timer(&mcpwm.timer0);
@@ -12759,6 +13015,12 @@ async fn main(_spawner: Spawner) {
     );
 
     mcpwm.operator1.set_timer(&mcpwm.timer1);
+    #[cfg(feature = "buzzer-debug")]
+    let mut heater_pwm = mcpwm.operator1.with_pin_a(
+        heater_safe.into_peripheral_output(),
+        PwmPinConfig::UP_ACTIVE_HIGH,
+    );
+    #[cfg(not(feature = "buzzer-debug"))]
     let mut heater_pwm = mcpwm
         .operator1
         .with_pin_a(peripherals.GPIO47, PwmPinConfig::UP_ACTIVE_HIGH);
@@ -12772,10 +13034,13 @@ async fn main(_spawner: Spawner) {
     mcpwm.timer1.start(heater_timer_cfg);
     let _ = heater_pwm.set_duty_cycle_percent(0);
 
+    #[cfg(not(feature = "buzzer-debug"))]
     mcpwm.operator2.set_timer(&mcpwm.timer2);
+    #[cfg(not(feature = "buzzer-debug"))]
     let mut buzzer_pwm = mcpwm
         .operator2
         .with_pin_a(peripherals.GPIO48, PwmPinConfig::UP_ACTIVE_HIGH);
+    #[cfg(not(feature = "buzzer-debug"))]
     let buzzer_timer_cfg = pwm_clock_cfg
         .timer_clock_with_frequency(
             BUZZER_PWM_PERIOD_TICKS,
@@ -12783,7 +13048,9 @@ async fn main(_spawner: Spawner) {
             Rate::from_hz(BUZZER_IDLE_FREQUENCY_HZ),
         )
         .expect("failed to derive buzzer PWM timer clock");
+    #[cfg(not(feature = "buzzer-debug"))]
     mcpwm.timer2.start(buzzer_timer_cfg);
+    #[cfg(not(feature = "buzzer-debug"))]
     let _ = buzzer_pwm.set_duty_cycle_percent(0);
     info!(
         "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
@@ -14546,6 +14813,30 @@ mod tests {
             configured_frequency_hz,
             fast_repeat_tone
         ));
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    #[test]
+    fn recovery_mode_accepts_feedback_only_buzzer_debug() {
+        let mut buzzer = BuzzerArbiter::new();
+        let mut buzzer_debug = BuzzerDebugSession::new();
+        let response = usb_buzzer_recovery_response(
+            r#"{"type":"buzzer_debug","requestId":"buzzer-recovery-1","op":"trigger","buzzerCue":"ui_input"}"#,
+            &MemoryConfig::default(),
+            0,
+            &mut buzzer,
+            &mut buzzer_debug,
+        );
+
+        let UsbFrame::BuzzerDebugResponse { status, .. } = response else {
+            panic!("recovery buzzer request returns a buzzer status response");
+        };
+        assert_eq!(status.active_cue, Some(BuzzerCueId::UiInput));
+        assert_eq!(status.trace.len(), 1);
+        assert_eq!(
+            status.trace[0].decision.disposition,
+            BuzzerDecisionDisposition::Started
+        );
     }
 
     struct FakeUsbTx {

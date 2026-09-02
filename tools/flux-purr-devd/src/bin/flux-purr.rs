@@ -9953,11 +9953,7 @@ async fn buzzer_test(
             &lease.lease_id,
             Method::POST,
             "/buzzer-debug",
-            Some(json!({
-                "op": op,
-                "buzzerCue": cue,
-                "buzzerScenario": scenario,
-            })),
+            Some(buzzer_debug_body(op, cue, scenario)),
         )
         .await?;
         if wait_for_completion {
@@ -9973,7 +9969,7 @@ async fn buzzer_test(
                     &lease.lease_id,
                     Method::POST,
                     "/buzzer-debug",
-                    Some(json!({"op": "status"})),
+                    Some(buzzer_debug_body("status", None, None)),
                 )
                 .await?;
             }
@@ -9988,6 +9984,14 @@ async fn buzzer_test(
         let _ = remember_usb(id, &resolved.device, &resolved.devd);
     }
     Ok(value)
+}
+
+fn buzzer_debug_body(op: &str, cue: Option<&str>, scenario: Option<&str>) -> Value {
+    json!({
+        "op": op,
+        "cue": cue,
+        "scenario": scenario,
+    })
 }
 
 fn parse_pps_volts(value: &str) -> Result<u16, Box<dyn std::error::Error + Send + Sync>> {
@@ -16204,5 +16208,16 @@ mod tests {
 
         let cleared = super::wifi_set_body("Ivan".to_string(), Some(String::new()), None, None);
         assert_eq!(cleared["password"], "");
+    }
+
+    #[test]
+    fn buzzer_test_uses_the_devd_request_field_names() {
+        let body = super::buzzer_debug_body("trigger", Some("ui_input"), None);
+
+        assert_eq!(body["op"], "trigger");
+        assert_eq!(body["cue"], "ui_input");
+        assert!(body["scenario"].is_null());
+        assert!(body.get("buzzerCue").is_none());
+        assert!(body.get("buzzerScenario").is_none());
     }
 }

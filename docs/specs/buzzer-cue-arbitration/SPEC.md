@@ -61,6 +61,7 @@
 - 开发固件在显式启用 `buzzer-debug` feature 后，MUST 通过 native USB JSONL 与受 lease 保护的 `devd` 端点提供 `Developer Buzzer Diagnostic`；能力必须由 `buzzer_debug` identity capability 明确声明，且不得经 LAN 或产品 Web 控制面暴露。
 - 该诊断 MUST 只接受固定 Feedback Cue，或固定 `feedback_coalesce` / `feedback_replace` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交为 `DeveloperDebug` 来源；它不得暴露频率、占空比、原始步骤、Protection Cue、Attention Reminder 或持久化控制。
 - 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 trace MUST 只记录本诊断的仲裁结果，不得改变安全状态。
+- 在显示初始化完成后进入 runtime 前恢复状态的开发构建，MUST 继续提供该 feedback-only 诊断，同时 GPIO47 MUST 保持低电平，且不得初始化 heater PWM。
 
 ## Verification
 
