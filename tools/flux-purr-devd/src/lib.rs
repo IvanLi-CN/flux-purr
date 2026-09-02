@@ -2571,6 +2571,7 @@ fn firmware_operation_diagnostic(error: &ApiError) -> Option<String> {
     details
         .get("stderr")
         .and_then(Value::as_str)
+        .or_else(|| details.get("diagnostic").and_then(Value::as_str))
         .or_else(|| {
             details
                 .get("attempts")
@@ -7011,11 +7012,19 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
     let write_result = writer
         .await
         .map_err(|error| {
-            HttpError::internal(&format!("USB-JTAG recovery writer task failed: {error}"))
+            HttpError::internal_with_details(
+                "usb_jtag_recovery_writer_failed",
+                "USB-JTAG recovery writer task failed.",
+                json!({ "diagnostic": error.to_string() }),
+            )
         })
         .and_then(|result| {
             result.map_err(|error| {
-                HttpError::internal(&format!("USB-JTAG recovery writer failed: {error}"))
+                HttpError::internal_with_details(
+                    "usb_jtag_recovery_writer_failed",
+                    "USB-JTAG recovery writer failed before all bundle segments were verified.",
+                    json!({ "diagnostic": error }),
+                )
             })
         });
 
