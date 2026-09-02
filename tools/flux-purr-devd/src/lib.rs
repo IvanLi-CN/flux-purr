@@ -10281,6 +10281,9 @@ fn espflash_connection_failure_text(output: &str) -> bool {
     output.contains("failed to connect to the device")
         || output.contains("error while connecting to device")
         || output.contains("no such device or address")
+        // USB Serial/JTAG reset can briefly remove the exact authorized
+        // device node before macOS recreates it at the same path.
+        || output.contains("no such file or directory")
         || output.contains("broken pipe")
 }
 
@@ -12101,6 +12104,9 @@ mod tests {
     fn transient_usb_jtag_connection_errors_are_retryable() {
         assert!(espflash_connection_failure_text(
             "Error while connecting to device: No such device or address"
+        ));
+        assert!(espflash_connection_failure_text(
+            "Error while connecting to device: No such file or directory (os error 2)"
         ));
     }
 
