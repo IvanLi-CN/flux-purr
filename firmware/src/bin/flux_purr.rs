@@ -3144,10 +3144,8 @@ fn acknowledge_overtemp_attention(
     *attention_pending_after_fault_clear = false;
     *forced_fan_active = false;
     *next_attention_reminder_ms = None;
-    if !overtemp_active {
-        if let Some(decision) = buzzer.clear_attention() {
-            log_buzzer_decision(decision);
-        }
+    if !overtemp_active && let Some(decision) = buzzer.clear_attention() {
+        log_buzzer_decision(decision);
     }
     true
 }
