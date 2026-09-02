@@ -583,6 +583,28 @@ fn firmware_trial_samples(samples: &[Value], target_c: i16, trial_index: u64) ->
                 "firmwarePhase": firmware_phase,
                 "measurementValid": sample.get("measurementValid").cloned().unwrap_or(Value::Null),
                 "sequence": sample.get("sequence").cloned().unwrap_or(Value::Null),
+                "elapsedMs": sample.get("elapsedMs").cloned().unwrap_or(Value::Null),
+                "targetC": sample.get("targetC").cloned().unwrap_or(Value::Null),
+                "trialIndex": sample.get("trialIndex").cloned().unwrap_or(Value::Null),
+                "candidateId": sample.get("candidateId").cloned().unwrap_or(Value::Null),
+                "candidateHash": sample.get("candidateHash").cloned().unwrap_or(Value::Null),
+                "heaterOutputPermille": sample.get("heaterOutputPermille").cloned().unwrap_or(Value::Null),
+                "temperatureCentiC": sample.get("temperatureCentiC").cloned().unwrap_or(Value::Null),
+                "ppsContractMv": sample.get("ppsContractMv").cloned().unwrap_or(Value::Null),
+                "ppsContractMa": sample.get("ppsContractMa").cloned().unwrap_or(Value::Null),
+                "vinMv": sample.get("vinMv").cloned().unwrap_or(Value::Null),
+                "gates": sample.get("gates").cloned().unwrap_or(Value::Null),
+                "disposition": sample.get("disposition").cloned().unwrap_or(Value::Null),
+                "scoreOvershoot": sample.get("scoreOvershoot").cloned().unwrap_or(Value::Null),
+                "scoreStability": sample.get("scoreStability").cloned().unwrap_or(Value::Null),
+                "scoreSettleMs": sample.get("scoreSettleMs").cloned().unwrap_or(Value::Null),
+                "scoreHoldMeanAbsoluteErrorCenti": sample.get("scoreHoldMeanAbsoluteErrorCenti").cloned().unwrap_or(Value::Null),
+                "scoreOutputSwitches": sample.get("scoreOutputSwitches").cloned().unwrap_or(Value::Null),
+                "scoreTracking": sample.get("scoreTracking").cloned().unwrap_or(Value::Null),
+                "scoreEnergy": sample.get("scoreEnergy").cloned().unwrap_or(Value::Null),
+                "intervalLowerBoundaryC": sample.get("intervalLowerBoundaryC").cloned().unwrap_or(Value::Null),
+                "intervalUpperBoundaryC": sample.get("intervalUpperBoundaryC").cloned().unwrap_or(Value::Null),
+                "intervalPruned": sample.get("intervalPruned").cloned().unwrap_or(Value::Null),
             })
         })
         .collect()
@@ -608,11 +630,28 @@ fn firmware_trial_point(trial: &Value) -> Result<Value, Box<dyn std::error::Erro
 }
 
 fn firmware_result_json(decision: &Value) -> Value {
+    let stop_reason = decision
+        .get("disposition")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            decision
+                .get("eventReason")
+                .cloned()
+                .filter(|value| !value.is_null())
+        })
+        .unwrap_or(Value::Null);
     json!({
-        "stopReason": decision.get("disposition").cloned().unwrap_or(Value::Null),
+        "stopReason": stop_reason,
         "maxOvershootC": decision.get("scoreOvershoot").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
         "holdPeakToPeakC": decision.get("scoreStability").and_then(Value::as_i64).map(|value| value as f64 / 100.0),
         "scoreSettleMs": decision.get("scoreSettleMs").cloned().unwrap_or(Value::Null),
+        "scoreTracking": decision.get("scoreTracking").cloned().unwrap_or(Value::Null),
+        "scoreEnergy": decision.get("scoreEnergy").cloned().unwrap_or(Value::Null),
+        "scoreHoldMeanAbsoluteErrorCenti": decision.get("scoreHoldMeanAbsoluteErrorCenti").cloned().unwrap_or(Value::Null),
+        "scoreOutputSwitches": decision.get("scoreOutputSwitches").cloned().unwrap_or(Value::Null),
+        "gates": decision.get("gates").cloned().unwrap_or(Value::Null),
+        "candidateFrozen": decision.get("candidateFrozen").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -2468,6 +2507,19 @@ mod tests {
         assert_eq!(
             report["rawRuns"][0]["rounds"][0]["samples"][0]["requestV"],
             20.0
+        );
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["result"]["stopReason"],
+            "completed"
+        );
+        assert_eq!(report["rawRuns"][0]["rounds"][0]["result"]["gates"], 63);
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["samples"][0]["candidateHash"],
+            "aa"
+        );
+        assert_eq!(
+            report["rawRuns"][0]["rounds"][0]["samples"][0]["temperatureCentiC"],
+            5_950
         );
     }
 
