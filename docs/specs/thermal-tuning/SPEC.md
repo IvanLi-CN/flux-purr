@@ -160,7 +160,10 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
 - 除明确排除的外部 VBUS/source 电压、电流、功率外，正式报告必须保留旧报告中所有
   可以从设备或 host recorder 真实获得的调优证据。每个 sample 必须携带目标、候选
   identity、trial 编号、阶段、时间、温度、VIN、PPS 合同、加热输出和测量有效性；每个
-  candidate trial 必须携带完整固定点参数、起止 sequence/时间和样本范围；每个 decision
+  candidate trial 必须携带完整固定点参数、起止 sequence/时间和样本范围。canonical
+  candidate 必须覆盖每个会影响设备加热输出的 point-local 字段，包括 warmup power/re-entry、
+  brake、approach power/floor/damping/tail、hold power/reheat、entry/exit/on/off/cutoff、PI
+  与 lead/blend；固件不得以默认值替换这些候选字段。每个 decision
   必须携带完整 score vector、每个 gate、freeze、interval prune、disposition 和失败原因。
   每轮候选的 `candidate_trial` 起点只能在本轮 `cooldown_wait` 满足 `target-15°C` 预条件、
   即将进入 `scout` 后记录；此前的冷却 sample 仍是完整 target trace 的安全证据，但不属于

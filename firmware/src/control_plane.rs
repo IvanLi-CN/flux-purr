@@ -40,6 +40,8 @@ pub const THERMAL_TUNING_HASH_HEX_LEN: usize = 64;
 pub const THERMAL_TUNING_ID_HEX_LEN: usize = 32;
 pub const THERMAL_TUNING_PROFILE_CANONICAL_HEX_LEN: usize =
     flux_purr_thermal_tuning_core::CANDIDATE_PROFILE_CANONICAL_BYTES * 2;
+pub const THERMAL_TUNING_POINT_CANONICAL_HEX_LEN: usize =
+    flux_purr_thermal_tuning_core::CANDIDATE_POINT_CANONICAL_BYTES * 2;
 pub const THERMAL_TUNING_CAPABILITY_ID_MAX_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -707,7 +709,7 @@ pub struct ThermalTuningTraceEventWire {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_id: Option<String<THERMAL_TUNING_ID_HEX_LEN>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canonical_candidate_point_hex: Option<String<68>>,
+    pub canonical_candidate_point_hex: Option<String<THERMAL_TUNING_POINT_CANONICAL_HEX_LEN>>,
     pub temperature_centi_c: Option<i16>,
     pub vin_mv: Option<u16>,
     pub pps_contract_mv: Option<u16>,

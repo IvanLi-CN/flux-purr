@@ -8,8 +8,8 @@ use sha2::{Digest, Sha256};
 pub const CORE_SCHEMA: &str = "thermal_tuning_core_v1";
 pub const TARGET_COUNT: usize = 9;
 pub const TRACE_EVENT_CAPACITY: usize = 96;
-// One target temperature plus sixteen point-local fixed-point parameters.
-pub const CANDIDATE_POINT_CANONICAL_BYTES: usize = 2 + (16 * 2);
+// One target temperature plus every point-local fixed-point control parameter.
+pub const CANDIDATE_POINT_CANONICAL_BYTES: usize = 2 + (19 * 2);
 pub const CANDIDATE_PROFILE_CANONICAL_BYTES: usize =
     1 + TARGET_COUNT * CANDIDATE_POINT_CANONICAL_BYTES;
 pub const TARGET_BUDGET_SECONDS: u32 = 20 * 60;
@@ -237,8 +237,11 @@ pub struct CandidatePoint {
     pub target_c: i16,
     pub brake_distance_centi_c: u16,
     pub warmup_power_permille: u16,
+    pub warmup_reenter_centi_c: u16,
     pub approach_power_permille: u16,
     pub approach_floor_power_permille: u16,
+    pub approach_damping_exponent_permille: u16,
+    pub approach_tail_window_centi_c: u16,
     pub hold_power_permille: u16,
     pub hold_reheat_power_permille: u16,
     pub hold_entry_centi_c: u16,
@@ -257,15 +260,14 @@ impl CandidatePoint {
     pub const fn baseline(target_c: i16, class: PpsPowerClass) -> Self {
         let high_power = matches!(class, PpsPowerClass::Pps5a);
         let high_temperature = high_power && target_c >= 200;
-        // The retained host-reference implementation established this low
-        // temperature 5 A seed on the same delayed plant. A 4.5 C handoff
-        // leaves full-power residual energy unaccounted for; begin approach
-        // 13.1 C early and bracket that conservative seed in the ladder.
+        // The measured 5 A low-temperature plant retains substantial energy
+        // after its warmup phase. Begin braking early and make the full-speed
+        // portion itself bounded; the ladder below then brackets this seed.
         let low_temperature_5a = high_power && target_c <= 60;
         Self {
             target_c,
             brake_distance_centi_c: if low_temperature_5a {
-                1_310
+                1_800
             } else if target_c < 120 {
                 450
             } else if target_c < 200 {
@@ -278,9 +280,10 @@ impl CandidatePoint {
             } else {
                 1_000
             },
-            warmup_power_permille: 1_000,
+            warmup_power_permille: if low_temperature_5a { 750 } else { 1_000 },
+            warmup_reenter_centi_c: if low_temperature_5a { 1_000 } else { 400 },
             approach_power_permille: if low_temperature_5a {
-                590
+                450
             } else if high_temperature {
                 600
             } else if high_power {
@@ -289,7 +292,7 @@ impl CandidatePoint {
                 320
             },
             approach_floor_power_permille: if low_temperature_5a {
-                510
+                260
             } else if high_temperature {
                 450
             } else if high_power {
@@ -297,6 +300,8 @@ impl CandidatePoint {
             } else {
                 120
             },
+            approach_damping_exponent_permille: if low_temperature_5a { 1_800 } else { 1_000 },
+            approach_tail_window_centi_c: 0,
             hold_power_permille: if low_temperature_5a {
                 60
             } else if high_temperature {
@@ -350,8 +355,11 @@ impl CandidatePoint {
         for value in [
             self.brake_distance_centi_c,
             self.warmup_power_permille,
+            self.warmup_reenter_centi_c,
             self.approach_power_permille,
             self.approach_floor_power_permille,
+            self.approach_damping_exponent_permille,
+            self.approach_tail_window_centi_c,
             self.hold_power_permille,
             self.hold_reheat_power_permille,
             self.hold_entry_centi_c,
@@ -374,8 +382,11 @@ impl CandidatePoint {
         let target_c = take_i16(bytes, &mut offset);
         let brake_distance_centi_c = take_u16(bytes, &mut offset);
         let warmup_power_permille = take_u16(bytes, &mut offset);
+        let warmup_reenter_centi_c = take_u16(bytes, &mut offset);
         let approach_power_permille = take_u16(bytes, &mut offset);
         let approach_floor_power_permille = take_u16(bytes, &mut offset);
+        let approach_damping_exponent_permille = take_u16(bytes, &mut offset);
+        let approach_tail_window_centi_c = take_u16(bytes, &mut offset);
         let hold_power_permille = take_u16(bytes, &mut offset);
         let hold_reheat_power_permille = take_u16(bytes, &mut offset);
         let hold_entry_centi_c = take_u16(bytes, &mut offset);
@@ -393,8 +404,11 @@ impl CandidatePoint {
             target_c,
             brake_distance_centi_c,
             warmup_power_permille,
+            warmup_reenter_centi_c,
             approach_power_permille,
             approach_floor_power_permille,
+            approach_damping_exponent_permille,
+            approach_tail_window_centi_c,
             hold_power_permille,
             hold_reheat_power_permille,
             hold_entry_centi_c,
@@ -432,6 +446,10 @@ impl CandidatePoint {
                 upper.brake_distance_centi_c,
             ),
             warmup_power_permille: lerp(lower.warmup_power_permille, upper.warmup_power_permille),
+            warmup_reenter_centi_c: lerp(
+                lower.warmup_reenter_centi_c,
+                upper.warmup_reenter_centi_c,
+            ),
             approach_power_permille: lerp(
                 lower.approach_power_permille,
                 upper.approach_power_permille,
@@ -439,6 +457,14 @@ impl CandidatePoint {
             approach_floor_power_permille: lerp(
                 lower.approach_floor_power_permille,
                 upper.approach_floor_power_permille,
+            ),
+            approach_damping_exponent_permille: lerp(
+                lower.approach_damping_exponent_permille,
+                upper.approach_damping_exponent_permille,
+            ),
+            approach_tail_window_centi_c: lerp(
+                lower.approach_tail_window_centi_c,
+                upper.approach_tail_window_centi_c,
             ),
             hold_power_permille: lerp(lower.hold_power_permille, upper.hold_power_permille),
             hold_reheat_power_permille: lerp(
@@ -562,6 +588,26 @@ fn candidate_ladder_from_seed_for_class(
         recovery.hold_reheat_power_permille =
             recovery.hold_reheat_power_permille.saturating_add(100);
         return [baseline, sustained, recovery];
+    }
+    if matches!(power_class, PpsPowerClass::Pps5a) && seed.target_c <= 60 {
+        // Keep the low-temperature 5 A trials meaningfully distinct. A small
+        // +/- 0.5 C brake change cannot identify a delayed, high-power plant.
+        let mut conservative = baseline;
+        conservative.brake_distance_centi_c = 2_150;
+        conservative.warmup_power_permille = 650;
+        conservative.approach_power_permille = 340;
+        conservative.approach_floor_power_permille = 180;
+        conservative.approach_damping_exponent_permille = 2_100;
+        conservative.approach_lead_ticks = 10;
+
+        let mut responsive = baseline;
+        responsive.brake_distance_centi_c = 1_500;
+        responsive.warmup_power_permille = 820;
+        responsive.approach_power_permille = 520;
+        responsive.approach_floor_power_permille = 340;
+        responsive.approach_damping_exponent_permille = 1_500;
+        responsive.approach_lead_ticks = 7;
+        return [baseline, conservative, responsive];
     }
     let mut conservative = baseline;
     conservative.brake_distance_centi_c = baseline.brake_distance_centi_c.saturating_add(50);
@@ -1717,9 +1763,9 @@ mod tests {
         assert_eq!(
             profile.hash(),
             [
-                0x4e, 0xdb, 0x92, 0xa2, 0xf1, 0x0a, 0x2f, 0x0c, 0x7f, 0xd8, 0xa5, 0xa1, 0xa4, 0xc0,
-                0xb2, 0xe0, 0xc2, 0xee, 0xda, 0xb2, 0x68, 0xe1, 0xed, 0x9b, 0xf5, 0xa5, 0x12, 0x80,
-                0x56, 0x3f, 0xaf, 0x9f,
+                0xe9, 0x8f, 0xec, 0x4f, 0xfc, 0x42, 0xd3, 0x5d, 0x22, 0x78, 0x65, 0xd4, 0xc2, 0x8a,
+                0x55, 0x09, 0xd3, 0xd7, 0x18, 0x43, 0xac, 0x86, 0xda, 0x75, 0x4c, 0xa9, 0x6e, 0xc2,
+                0xdb, 0x07, 0x12, 0x9e,
             ]
         );
         assert_ne!(
@@ -1729,9 +1775,9 @@ mod tests {
         assert_eq!(
             CandidateProfile::baseline(PpsPowerClass::Pps5a).hash(),
             [
-                0x09, 0xa5, 0xbe, 0x84, 0x7e, 0x90, 0x92, 0x21, 0xc7, 0x9e, 0x27, 0x06, 0x49, 0x96,
-                0x06, 0x0d, 0xe8, 0x3b, 0x57, 0x24, 0x75, 0xeb, 0xca, 0xf1, 0xd5, 0x1b, 0x3d, 0xd3,
-                0x0a, 0x6c, 0xad, 0xb6,
+                0xcf, 0x74, 0x33, 0xca, 0x34, 0x20, 0xd9, 0xc7, 0x9a, 0x29, 0xdd, 0xbd, 0xd4, 0x88,
+                0xed, 0x65, 0xa3, 0xd0, 0xd0, 0x4a, 0x78, 0x41, 0xc3, 0xe5, 0xa3, 0x69, 0xfb, 0xd6,
+                0xd6, 0xab, 0x1e, 0x1e,
             ]
         );
         assert_eq!(
@@ -1799,12 +1845,16 @@ mod tests {
     }
 
     #[test]
-    fn pps5a_low_temperature_seed_matches_the_verified_conservative_reference() {
+    fn pps5a_low_temperature_seed_brackets_the_measured_conservative_control() {
         let point = CandidatePoint::baseline(60, PpsPowerClass::Pps5a);
 
-        assert_eq!(point.brake_distance_centi_c, 1_310);
-        assert_eq!(point.approach_power_permille, 590);
-        assert_eq!(point.approach_floor_power_permille, 510);
+        assert_eq!(point.brake_distance_centi_c, 1_800);
+        assert_eq!(point.warmup_power_permille, 750);
+        assert_eq!(point.warmup_reenter_centi_c, 1_000);
+        assert_eq!(point.approach_power_permille, 450);
+        assert_eq!(point.approach_floor_power_permille, 260);
+        assert_eq!(point.approach_damping_exponent_permille, 1_800);
+        assert_eq!(point.approach_tail_window_centi_c, 0);
         assert_eq!(point.hold_power_permille, 60);
         assert_eq!(point.hold_reheat_power_permille, 60);
         assert_eq!(point.hold_entry_centi_c, 200);
@@ -1820,7 +1870,12 @@ mod tests {
         assert_eq!(
             candidate_ladder(60, PpsPowerClass::Pps5a)
                 .map(|candidate| candidate.brake_distance_centi_c),
-            [1_310, 1_360, 1_260]
+            [1_800, 2_150, 1_500]
+        );
+        assert_eq!(
+            candidate_ladder(60, PpsPowerClass::Pps5a)
+                .map(|candidate| candidate.warmup_power_permille),
+            [750, 650, 820]
         );
     }
 

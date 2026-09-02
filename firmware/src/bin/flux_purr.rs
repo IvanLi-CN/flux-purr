@@ -1628,7 +1628,7 @@ fn interpolate_thermal_control_target(
     if lower.target_temp_c >= upper.target_temp_c {
         return ThermalControlTarget {
             brake_distance_c: lower.brake_distance_centi_c as f32 / 100.0,
-            warmup_power_permille: 1_000,
+            warmup_power_permille: lower.warmup_power_permille,
             warmup_reenter_error_c: f32::from(lower.warmup_reenter_centi_c) / 100.0,
             approach_power_permille: lower.approach_power_permille,
             approach_floor_power_permille: lower.approach_floor_power_permille,
@@ -1691,7 +1691,11 @@ fn interpolate_thermal_control_target(
         |value: u16| (f32::from(value) * low_temp_hold_scale + 0.5).clamp(0.0, 1_000.0) as u16;
     ThermalControlTarget {
         brake_distance_c: f32::from(interpolated_brake_distance) / 100.0,
-        warmup_power_permille: 1_000,
+        warmup_power_permille: lerp_u16(
+            lower.warmup_power_permille,
+            upper.warmup_power_permille,
+            1_000,
+        ),
         warmup_reenter_error_c: f32::from(lerp_u16(
             lower.warmup_reenter_centi_c,
             upper.warmup_reenter_centi_c,
@@ -12339,7 +12343,7 @@ fn thermal_tuning_contract_request_pending(
         && manual_pps.applied_mv != Some(target_contract.0)
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 fn thermal_tuning_profile_config(
     profile: flux_purr_thermal_tuning_core::CandidateProfile,
 ) -> ThermalControlProfileConfig {
@@ -12356,13 +12360,11 @@ fn thermal_tuning_profile_config(
             target_temp_c: point.target_c,
             brake_distance_centi_c: point.brake_distance_centi_c,
             warmup_power_permille: point.warmup_power_permille,
-            warmup_reenter_centi_c: ThermalControlProfileSettingsConfig::default()
-                .warmup_reenter_centi_c,
+            warmup_reenter_centi_c: point.warmup_reenter_centi_c,
             approach_power_permille: point.approach_power_permille,
             approach_floor_power_permille: point.approach_floor_power_permille,
-            approach_damping_exponent_permille:
-                THERMAL_CONTROL_PROFILE_APPROACH_DAMPING_EXPONENT_PERMILLE_DEFAULT,
-            approach_tail_window_centi_c: 0,
+            approach_damping_exponent_permille: point.approach_damping_exponent_permille,
+            approach_tail_window_centi_c: point.approach_tail_window_centi_c,
             hold_power_permille: point.hold_power_permille,
             hold_reheat_power_permille: point.hold_reheat_power_permille,
             hold_entry_centi_c: point.hold_entry_centi_c,
@@ -15594,6 +15596,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thermal_tuning_candidate_profile_maps_every_output_field_into_pid() {
+        let profile = flux_purr_thermal_tuning_core::CandidateProfile::baseline(
+            flux_purr_thermal_tuning_core::PpsPowerClass::Pps5a,
+        );
+        let point = profile.points[0];
+        let mapped = ThermalControlProfile::from(thermal_tuning_profile_config(profile));
+        let control = mapped.control_target(60);
+
+        assert_eq!(control.warmup_power_permille, point.warmup_power_permille);
+        assert_eq!(
+            (control.warmup_reenter_error_c * 100.0) as u16,
+            point.warmup_reenter_centi_c
+        );
+        assert_eq!(
+            control.approach_power_permille,
+            point.approach_power_permille
+        );
+        assert_eq!(
+            control.approach_floor_power_permille,
+            point.approach_floor_power_permille
+        );
+        assert_eq!(
+            (control.approach_damping_exponent * 1_000.0) as u16,
+            point.approach_damping_exponent_permille
+        );
+        assert_eq!(
+            (control.approach_tail_window_c * 100.0) as u16,
+            point.approach_tail_window_centi_c
+        );
+    }
 
     #[test]
     fn fusb302b_initial_pps_request_matches_the_idle_voltage() {

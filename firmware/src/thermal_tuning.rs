@@ -1349,9 +1349,10 @@ fn string<const N: usize>(value: &str) -> String<N> {
     output
 }
 
-// Candidate points are 34 bytes, so their canonical hex needs 68 characters.
+// Canonical point bytes carry every point-local PID input.
 // Keep one shared capacity for digests (64 chars), ids (32 chars), and points.
-const HEX_STRING_CAPACITY: usize = 68;
+const HEX_STRING_CAPACITY: usize =
+    flux_purr_thermal_tuning_core::CANDIDATE_POINT_CANONICAL_BYTES * 2;
 
 fn hex(bytes: &[u8]) -> String<HEX_STRING_CAPACITY> {
     hex_with_capacity(bytes)
