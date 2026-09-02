@@ -360,6 +360,7 @@ struct FirmwareApproval {
     bundle_sha256: String,
     operation: FirmwareOperation,
     allow_downgrade: bool,
+    source_partition_hash: Option<String>,
     preflight_digest: String,
     expires_at: Instant,
 }
@@ -6229,12 +6230,39 @@ async fn firmware_operation(
     let transport = target.transport;
     let mut current_version = target.identity.firmware_version.clone();
     let mut status = target.status.clone();
-    // A recovery write over USB Serial/JTAG must keep its ROM ownership from
-    // execution-time proof through the final MD5 checks. Reopening the ROM
-    // loader after a separate proof probe can leave this transport unable to
-    // synchronize even though the preflight itself succeeded.
+    // A USB Serial/JTAG transaction must not reopen a proven ROM connection
+    // before it starts the writer. The preflight token binds the exact port,
+    // ROM MAC, artifact, and partition layout for five minutes.
     let recovery_uses_single_rom_session =
         recovery_uses_single_rom_session(payload.operation, transport, &port_path);
+    let usb_update_reuses_preflight_evidence = usb_update_reuses_preflight_evidence(
+        payload.operation,
+        transport,
+        &port_path,
+        payload.dry_run,
+    );
+    let pending_approval = if payload.dry_run {
+        None
+    } else {
+        let token = progress.require(payload.approval_token.as_deref().ok_or_else(|| {
+            HttpError::forbidden(
+                "approval_required",
+                "Execution requires a current single-use approval token.",
+            )
+        }))?;
+        let approval = state
+            .lock()?
+            .firmware_approvals
+            .get(token)
+            .cloned()
+            .ok_or_else(|| {
+                HttpError::forbidden(
+                    "approval_invalid",
+                    "The approval token is invalid or already used.",
+                )
+            });
+        Some(progress.require(approval)?)
+    };
 
     // An update preserves an existing Flux Purr installation, so it must stop
     // heat and use fresh runtime facts from this exact serial target before it
@@ -6282,9 +6310,12 @@ async fn firmware_operation(
         progress.stage_started("rom_reset", json!({}));
     }
 
-    let security = if recovery_uses_single_rom_session && !payload.dry_run {
-        // `verify_recovery_execution_proof` reads these same facts from the
-        // actual writer session before it can erase or program a range.
+    let security = if (recovery_uses_single_rom_session || usb_update_reuses_preflight_evidence)
+        && !payload.dry_run
+    {
+        // Recovery reads its proof in the writer session. A same-layout USB
+        // update instead consumes the short-lived proof minted by preflight;
+        // it has already been bound to the exact port and ROM MAC.
         None
     } else {
         Some(match transport {
@@ -6319,7 +6350,11 @@ async fn firmware_operation(
         async {
             let mut source_partition_hash = None;
             if payload.operation == FirmwareOperation::Update {
-                if transport == DeviceTransport::NativeSerial {
+                if usb_update_reuses_preflight_evidence {
+                    source_partition_hash = pending_approval
+                        .as_ref()
+                        .and_then(|approval| approval.source_partition_hash.clone());
+                } else if transport == DeviceTransport::NativeSerial {
                     let source_hash = probe_native_partition_hash(&state, &port_path).await?;
                     if !firmware_bundle::source_partition_hash_supported(
                         &source_hash,
@@ -6389,6 +6424,7 @@ async fn firmware_operation(
                     bundle_sha256: bundle.bundle_sha256.clone(),
                     operation: payload.operation,
                     allow_downgrade: payload.allow_downgrade,
+                    source_partition_hash: source_partition_hash.clone(),
                     preflight_digest,
                     expires_at: Instant::now() + Duration::from_secs(5 * 60),
                 },
@@ -6433,7 +6469,9 @@ async fn firmware_operation(
         || approval.bundle_sha256 != bundle.bundle_sha256
         || approval.operation != payload.operation
         || approval.allow_downgrade != payload.allow_downgrade
-        || (!recovery_uses_single_rom_session && {
+        || (usb_update_reuses_preflight_evidence
+            && approval.source_partition_hash != source_partition_hash)
+        || (!recovery_uses_single_rom_session && !usb_update_reuses_preflight_evidence && {
             let security = security
                 .as_ref()
                 .expect("non-recovery execution performs a ROM security probe");
@@ -6670,23 +6708,28 @@ async fn run_bundle_flash_transaction(
             firmware_bundle::config_copy_plan(source_partition_hash, &bundle.manifest.migrations)
                 .map_err(bundle_http_error),
         )?;
-        let path = workspace.path().join("preserved-flux-cfg.bin");
-        let args = build_bundle_read_flash_args(
-            &common,
-            initial_reset,
-            copy.source_address,
-            copy.length,
-            &path,
-        );
-        progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
-        let bytes =
-            progress.require(fs::read(&path).map_err(|error| {
+        if !config_copy_requires_transfer(copy) {
+            // The factory image ends immediately before this partition, so
+            // retaining its same-address bytes needs no ROM read or rewrite.
+            None
+        } else {
+            let path = workspace.path().join("preserved-flux-cfg.bin");
+            let args = build_bundle_read_flash_args(
+                &common,
+                initial_reset,
+                copy.source_address,
+                copy.length,
+                &path,
+            );
+            progress.require(require_bundle_espflash_success(&program, &args, port_path).await)?;
+            let bytes = progress.require(fs::read(&path).map_err(|error| {
                 HttpError::internal(&format!("failed to stage flux_cfg: {error}"))
             }))?;
-        if bytes.len() as u64 != copy.length {
-            return Err(progress.fail(HttpError::internal("flux_cfg staging length differs.")));
+            if bytes.len() as u64 != copy.length {
+                return Err(progress.fail(HttpError::internal("flux_cfg staging length differs.")));
+            }
+            Some((path, bytes, copy))
         }
-        Some((path, bytes, copy))
     } else {
         None
     };
@@ -6856,6 +6899,22 @@ fn uses_single_usb_serial_jtag_bundle_write(operation: FirmwareOperation, port_p
         operation,
         FirmwareOperation::Update | FirmwareOperation::InstallRecovery
     ) && is_esp_usb_serial_jtag_port(port_path)
+}
+
+fn usb_update_reuses_preflight_evidence(
+    operation: FirmwareOperation,
+    transport: DeviceTransport,
+    port_path: &str,
+    dry_run: bool,
+) -> bool {
+    !dry_run
+        && operation == FirmwareOperation::Update
+        && transport == DeviceTransport::NativeSerial
+        && is_esp_usb_serial_jtag_port(port_path)
+}
+
+fn config_copy_requires_transfer(copy: firmware_bundle::ConfigCopyPlan) -> bool {
+    copy.source_address != copy.target_address
 }
 
 #[derive(Debug, Clone)]
@@ -12121,6 +12180,24 @@ mod tests {
     }
 
     #[test]
+    fn same_address_bundle_config_needs_no_rom_transfer() {
+        assert!(!config_copy_requires_transfer(
+            firmware_bundle::ConfigCopyPlan {
+                source_address: 0x210000,
+                target_address: 0x210000,
+                length: 0x2000,
+            }
+        ));
+        assert!(config_copy_requires_transfer(
+            firmware_bundle::ConfigCopyPlan {
+                source_address: 0x110000,
+                target_address: 0x210000,
+                length: 0x2000,
+            }
+        ));
+    }
+
+    #[test]
     fn bundle_flash_commands_keep_usb_serial_jtag_in_loader_until_final_reset() {
         let common = vec![
             "--chip".to_string(),
@@ -15168,6 +15245,30 @@ mod tests {
             FirmwareOperation::Update,
             DeviceTransport::NativeSerial,
             "/dev/cu.usbmodem2111401",
+        ));
+        assert!(usb_update_reuses_preflight_evidence(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+            false,
+        ));
+        assert!(!usb_update_reuses_preflight_evidence(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+            true,
+        ));
+        assert!(!usb_update_reuses_preflight_evidence(
+            FirmwareOperation::InstallRecovery,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbmodem2111401",
+            false,
+        ));
+        assert!(!usb_update_reuses_preflight_evidence(
+            FirmwareOperation::Update,
+            DeviceTransport::NativeSerial,
+            "/dev/cu.usbserial-unrelated",
+            false,
         ));
     }
 
