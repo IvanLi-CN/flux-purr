@@ -786,7 +786,7 @@ export function useLiveWebSerialScenario(
   )
 
   const getThermalTuningRun = useCallback(
-    async (afterSequence?: number, limit = 16) => {
+    async (afterSequence?: number, limit = 8) => {
       const client = await requireClient()
       try {
         const snapshot = await client.getThermalTuningRun(afterSequence, limit)

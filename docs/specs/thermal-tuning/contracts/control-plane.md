@@ -22,8 +22,10 @@
 }
 ```
 
-`bufferCapacity` 是设备实际固定容量，且大于零。缺少 capability 或 detail 的设备不
-支持本协议；客户端必须显示不兼容，不能从 `thermalProfileMode` 推断支持性。
+`bufferCapacity` 是设备实际固定容量。正式固件必须发布 `1024`，并将该未确认窗口完整
+放在 PSRAM；缺少 PSRAM 或无法分配完整窗口时不得启动调优。每次 read response 最多包含
+`8` 个 `events`，无论请求来自 USB JSONL、LAN 还是 DEVD Bridge。缺少 capability 或 detail
+的设备不支持本协议；客户端必须显示不兼容，不能从 `thermalProfileMode` 推断支持性。
 `evidenceSchema` 必须精确为 `thermal_tuning_evidence_v2`，表示设备会输出本合同定义的
 完整 sample、phase transition、candidate trial、decision 与 safety 证据。缺少该值或
 值不匹配时，客户端可以只读归档设备实际返回的数据，但不得将 run 标记为 review
@@ -139,9 +141,13 @@ for the IndexedDB read-write transaction to complete before ack. Normal clients 
 automatically for every page; acknowledgement is not a user action. DEVD only proxies these
 reads and commands and never becomes the recorder.
 
-If `afterSequence` predates `earliestSequence - 1`, the response has error `trace_gap` and
-includes the available range. A client must permanently mark that archive incomplete;
-it must not fill the missing range with interpolated data.
+If a non-gapped run receives an `afterSequence` that predates `earliestSequence - 1`, the
+response has error `trace_gap` and includes the available range. Once the Device itself has
+latched `trace_gap`, `get` instead returns a normal snapshot with its active or terminal
+`runId`, `review.state: "incomplete"`, `review.reason: "trace_gap"`, and the readable tail page.
+The host archives that tail without ack/seal and, if `run.state` remains `running`, sends
+`cancel` using the supplied runId before draining to an empty page. It then exports an incomplete
+five-file bundle; it must not fill the missing range with interpolated data.
 
 ## Commands
 
@@ -188,8 +194,10 @@ sending it.
 
 The client sends this only after atomically persisting every event from the previous ack
 through `throughSequence`. Firmware accepts only the next contiguous range and matching
-canonical rolling digest. It retains no host filesystem or browser data. Failure to keep up
-before ring-buffer eviction sets `trace_gap`; no later ack can clear it.
+canonical rolling digest. Repeating the exact last acknowledged `(throughSequence, traceDigest)`
+is idempotent, while repeating that sequence with a different digest is rejected. It retains no
+host filesystem or browser data. Failure to keep up before ring-buffer eviction sets `trace_gap`;
+no later ack can clear it.
 
 ### `seal_review`
 

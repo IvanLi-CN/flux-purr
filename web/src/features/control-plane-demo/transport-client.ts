@@ -312,8 +312,9 @@ export function createControlPlaneHttpClient(
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-plant/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`
       )
     },
-    getThermalTuningRun(devdBaseUrl, deviceId, leaseId, afterSequence, limit = 16) {
-      const cursor = `${afterSequence === undefined ? '' : `&afterSequence=${encodeURIComponent(String(afterSequence))}`}&limit=${encodeURIComponent(String(limit))}`
+    getThermalTuningRun(devdBaseUrl, deviceId, leaseId, afterSequence, limit = 8) {
+      const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), 8)
+      const cursor = `${afterSequence === undefined ? '' : `&afterSequence=${encodeURIComponent(String(afterSequence))}`}&limit=${encodeURIComponent(String(pageLimit))}`
       return requestJson<ThermalTuningRunSnapshot>(
         fetcher,
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-tuning/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`

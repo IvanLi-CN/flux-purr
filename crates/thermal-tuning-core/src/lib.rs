@@ -903,6 +903,7 @@ pub struct ThermalTuningCore<const TRACE_CAP: usize = TRACE_EVENT_CAPACITY> {
     first_sequence: u64,
     next_sequence: u64,
     acknowledged_through: Option<u64>,
+    acknowledged_digest: Option<[u8; 32]>,
     trace_digest: [u8; 32],
     trace_gap: bool,
     candidate_frozen_current: bool,
@@ -925,6 +926,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             first_sequence: 0,
             next_sequence: 0,
             acknowledged_through: None,
+            acknowledged_digest: None,
             trace_digest: [0; 32],
             trace_gap: false,
             candidate_frozen_current: false,
@@ -958,6 +960,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             core::ptr::addr_of_mut!((*out).first_sequence).write(0);
             core::ptr::addr_of_mut!((*out).next_sequence).write(0);
             core::ptr::addr_of_mut!((*out).acknowledged_through).write(None);
+            core::ptr::addr_of_mut!((*out).acknowledged_digest).write(None);
             core::ptr::addr_of_mut!((*out).trace_digest).write([0; 32]);
             core::ptr::addr_of_mut!((*out).trace_gap).write(false);
             core::ptr::addr_of_mut!((*out).candidate_frozen_current).write(false);
@@ -994,6 +997,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         self.first_sequence = 0;
         self.next_sequence = 0;
         self.acknowledged_through = None;
+        self.acknowledged_digest = None;
         self.trace_digest = [0; 32];
         self.trace_gap = false;
         self.candidate_frozen_current = false;
@@ -1375,6 +1379,13 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         if self.trace_gap {
             return Err(TraceError::Gap);
         }
+        if self.acknowledged_through == Some(through_sequence) {
+            return if self.acknowledged_digest == Some(digest) {
+                Ok(())
+            } else {
+                Err(TraceError::DigestMismatch)
+            };
+        }
         let first = self.first_sequence;
         let last = self.next_sequence.checked_sub(1).ok_or(TraceError::Range)?;
         let expected = self
@@ -1387,6 +1398,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
             return Err(TraceError::DigestMismatch);
         }
         self.acknowledged_through = Some(through_sequence);
+        self.acknowledged_digest = Some(digest);
         Ok(())
     }
 
@@ -1404,7 +1416,7 @@ impl<const TRACE_CAP: usize> ThermalTuningCore<TRACE_CAP> {
         }
         let terminal_sequence = self.next_sequence.checked_sub(1).ok_or(TraceError::Range)?;
         if self.acknowledged_through == Some(through_sequence) {
-            if self.digest_at(through_sequence) != Some(digest) {
+            if self.acknowledged_digest != Some(digest) {
                 self.promotion = PromotionState::Unavailable;
                 return Err(TraceError::DigestMismatch);
             }
@@ -1949,6 +1961,31 @@ mod tests {
         assert!(core.trace_gap());
         core.finish(TerminalDisposition::Completed).unwrap();
         assert_eq!(core.seal_review(2, [0; 32]), Err(TraceError::Gap));
+    }
+
+    #[test]
+    fn repeated_ack_of_the_same_persisted_page_is_idempotent() {
+        let mut core = ThermalTuningCore::<4>::new();
+        core.start(8, PpsPowerClass::Pps3a, READY).unwrap();
+        core.record_sample(SampleEvent {
+            elapsed_ms: 0,
+            target_c: 60,
+            trial_index: 0,
+            candidate_hash: [0; 32],
+            temperature_centi_c: 2_500,
+            vin_mv: 20_000,
+            pps_contract_mv: 20_000,
+            pps_contract_ma: 3_250,
+            heater_output_permille: 0,
+            measurement_valid: true,
+            phase: Phase::Scout,
+        })
+        .unwrap();
+        let record = core.trace_record(0).unwrap();
+
+        assert_eq!(core.ack_trace(0, record.digest), Ok(()));
+        assert_eq!(core.ack_trace(0, record.digest), Ok(()));
+        assert_eq!(core.ack_trace(0, [7; 32]), Err(TraceError::DigestMismatch));
     }
 
     #[test]

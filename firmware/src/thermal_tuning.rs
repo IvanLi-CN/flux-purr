@@ -18,7 +18,10 @@ use flux_purr_thermal_tuning_core::{
     TraceError, TraceRecord,
 };
 
-pub const THERMAL_TUNING_TRACE_CAPACITY: usize = 96;
+/// The unacknowledged trace window lives wholly in PSRAM. At the 500 ms
+/// sample interval, 1,024 entries provide more than eight minutes of sample
+/// retention before accounting for the sparse phase and decision records.
+pub const THERMAL_TUNING_TRACE_CAPACITY: usize = 1_024;
 /// The heater controller evaluates every 50 ms, while the USB JSONL review
 /// trace is intentionally sampled at a rate the acknowledged transport can
 /// sustain without overrunning its PSRAM-backed ring.
@@ -778,8 +781,9 @@ impl ThermalTuningRuntime {
         >,
     ) -> Result<(), ThermalTuningRuntimeError> {
         let summary = self.core.summary();
-        if self.core.trace_gap()
-            || after_sequence.is_some_and(|after| {
+        let trace_gap = self.core.trace_gap();
+        if !trace_gap
+            && after_sequence.is_some_and(|after| {
                 summary
                     .first_sequence
                     .is_some_and(|first| after.saturating_add(1) < first)
@@ -789,6 +793,9 @@ impl ThermalTuningRuntime {
         }
         events.clear();
         let first_sequence = summary.first_sequence.unwrap_or(0);
+        // A trace gap makes promotion permanently unavailable, but the host
+        // still needs a snapshot with the active run id to archive the tail
+        // and safely cancel an otherwise live heater operation.
         let start_sequence = after_sequence
             .map(|sequence| sequence.saturating_add(1))
             .unwrap_or(first_sequence)
@@ -1731,5 +1738,34 @@ mod tests {
         );
         assert_eq!(runtime.owner(), MaintenanceRunOwner::None);
         assert_eq!(runtime.core().candidate(), None);
+    }
+
+    #[test]
+    fn trace_gap_snapshot_retains_run_identity_and_available_tail() {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime.set_eligibility(ready());
+        runtime.start(55, PpsPowerClass::Pps5a, 0).unwrap();
+        for index in 0..=THERMAL_TUNING_TRACE_CAPACITY {
+            runtime
+                .tick(sample(
+                    index as u32 * THERMAL_TUNING_TRACE_SAMPLE_INTERVAL_MS,
+                    2_500,
+                    5_000,
+                ))
+                .unwrap();
+        }
+
+        assert!(runtime.core().trace_gap());
+        let snapshot = runtime.snapshot(Some(0), 8).unwrap();
+
+        assert_eq!(snapshot.run.run_id.as_str(), "55");
+        assert_eq!(snapshot.run.state, ThermalTuningRunStateWire::Running);
+        assert_eq!(
+            snapshot.run.review.state,
+            ThermalTuningReviewStateWire::Incomplete
+        );
+        assert_eq!(snapshot.run.review.reason.as_deref(), Some("trace_gap"));
+        assert!(!snapshot.page.events.is_empty());
+        assert!(snapshot.page.earliest_sequence > 1);
     }
 }

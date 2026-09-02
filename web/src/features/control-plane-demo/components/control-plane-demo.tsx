@@ -2777,12 +2777,12 @@ export function ControlPlaneDemo({
     let timer: number | null = null
     const readPage = async (afterSequence?: number) => {
       if (visibleDeviceIsDirectWebSerial) {
-        return webSerial.getThermalTuningRun(afterSequence, 32)
+        return webSerial.getThermalTuningRun(afterSequence, 8)
       }
       if (isDirectLanDevice(visibleDevice) && visibleDeviceLeaseId) {
         const session = loadLanDeviceSession(visibleDevice.baseUrl)
         if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
-        const suffix = `${afterSequence === undefined ? '?' : `?afterSequence=${afterSequence}&`}limit=32`
+        const suffix = `${afterSequence === undefined ? '?' : `?afterSequence=${afterSequence}&`}limit=8`
         return authorizedLanRequest<ThermalTuningRunSnapshot>(
           session,
           `calibration/thermal-tuning/run${suffix}`,
@@ -2803,7 +2803,7 @@ export function ControlPlaneDemo({
           visibleDeviceId,
           visibleDeviceLeaseId,
           afterSequence,
-          32
+          8
         )
       }
       return null

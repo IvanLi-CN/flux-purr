@@ -20,6 +20,10 @@ source, queries external VBUS current/voltage/power, or launches a browser.
 The CLI remains a normal host process during a run. It does not hand its recorder, report
 ownership, or reference comparison responsibility to `devd`; an interrupted CLI leaves the
 firmware run safe but can make its candidate review-incomplete if the trace buffer expires.
+The runner reads at most eight events per page, retries a short USB/bridge read failure a bounded
+number of times, and treats a Device `trace_gap` as a safety workflow: archive the returned tail,
+do not ack or seal it, cancel a still-running run with its returned runId, drain the remaining
+tail, and write an explicit incomplete five-file bundle.
 
 ## Firmware Candidate Promotion
 

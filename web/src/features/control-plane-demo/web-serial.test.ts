@@ -431,7 +431,7 @@ describe('web serial control-plane client', () => {
       type: 'thermal_tuning_run',
       op: 'get',
       afterSequence: 7,
-      limit: 24,
+      limit: 8,
     })
     expect(fake.requests.at(-1)).toMatchObject({
       type: 'thermal_tuning_run',
@@ -452,7 +452,7 @@ describe('web serial control-plane client', () => {
     expect(fake.requests.at(-1)).toMatchObject({
       type: 'thermal_tuning_run',
       op: 'get',
-      limit: 16,
+      limit: 8,
     })
     expect(fake.requests.at(-1)).not.toHaveProperty('afterSequence')
 

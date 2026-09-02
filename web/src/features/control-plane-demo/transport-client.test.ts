@@ -71,7 +71,7 @@ describe('control-plane transport client', () => {
     await client.getThermalTuningRun('http://127.0.0.1:30080', 'mock-fp-lab-01', 'lease-1')
 
     expect(fetcher).toHaveBeenCalledWith(
-      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run?lease_id=lease-1&limit=16',
+      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run?lease_id=lease-1&limit=8',
       undefined
     )
   })
@@ -1366,7 +1366,7 @@ describe('control-plane transport client', () => {
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run?lease_id=lease-1&afterSequence=7&limit=24',
+      'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-tuning/run?lease_id=lease-1&afterSequence=7&limit=8',
       undefined
     )
     expect(fetcher).toHaveBeenNthCalledWith(

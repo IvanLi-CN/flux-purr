@@ -3741,17 +3741,15 @@ async fn run_firmware_tuning_session(
     // snapshots can never cause an already-acknowledged range to be replayed.
     let mut after_sequence = contiguous_trace_archive_through(&recorded_sequences)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(9 * 1_200 + 180);
-    let mut snapshot = request_leased(
+    let mut snapshot = firmware_tuning_snapshot(
         client,
         resolved,
         lease_id,
-        Method::GET,
-        "/calibration/thermal-tuning/run?limit=16",
-        None,
+        "/calibration/thermal-tuning/run?limit=8",
     )
     .await?;
     let run_state = snapshot.pointer("/run/state").and_then(Value::as_str);
-    if run_state != Some("running") {
+    if run_state != Some("running") && !firmware_tuning_trace_gap(&snapshot) {
         return Err("firmware thermal tuning is busy without a resumable running run".into());
     }
     if snapshot.pointer("/run/powerClass").and_then(Value::as_str) != Some(power_class.as_str()) {
@@ -3799,6 +3797,26 @@ async fn run_firmware_tuning_session(
         if let Some(through) = page_through {
             after_sequence = Some(through);
         }
+        let state = snapshot
+            .get("run")
+            .and_then(|run| run.get("state"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        if firmware_tuning_trace_gap(&snapshot) {
+            if state == "running" && !cancellation_requested {
+                cancellation_requested = true;
+                snapshot =
+                    cancel_firmware_tuning_run(client, resolved, lease_id, &snapshot).await?;
+                continue;
+            }
+            if page_events.is_empty() {
+                break;
+            }
+            let suffix = firmware_tuning_trace_suffix(after_sequence);
+            snapshot = firmware_tuning_snapshot(client, resolved, lease_id, &suffix).await?;
+            continue;
+        }
         if let Some((through, digest)) = firmware_trace_page_acknowledgement(
             &snapshot,
             &page,
@@ -3820,11 +3838,6 @@ async fn run_firmware_tuning_session(
             )
             .await?;
         }
-        let state = snapshot
-            .get("run")
-            .and_then(|run| run.get("state"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
         let emitted_through = snapshot
             .pointer("/page/emittedThrough")
             .and_then(Value::as_u64);
@@ -3833,19 +3846,15 @@ async fn run_firmware_tuning_session(
             .and_then(Value::as_u64);
         let trace_caught_up =
             emitted_through.is_none_or(|emitted| acknowledged_through == Some(emitted));
-        if matches!(state, "terminal" | "idle") && trace_caught_up {
+        if matches!(state.as_str(), "terminal" | "idle") && trace_caught_up {
             break;
         }
         if tokio::time::Instant::now() >= deadline {
             return Err("firmware thermal tuning exceeded its bounded host wait window".into());
         }
-        let suffix = after_sequence.map_or_else(
-            || "/calibration/thermal-tuning/run?limit=16".to_string(),
-            |sequence| format!("/calibration/thermal-tuning/run?afterSequence={sequence}&limit=16"),
-        );
+        let suffix = firmware_tuning_trace_suffix(after_sequence);
         if cancellation_requested {
-            snapshot =
-                request_leased(client, resolved, lease_id, Method::GET, &suffix, None).await?;
+            snapshot = firmware_tuning_snapshot(client, resolved, lease_id, &suffix).await?;
             continue;
         }
         let poll_delay = if page_events.is_empty() {
@@ -3862,10 +3871,10 @@ async fn run_firmware_tuning_session(
                 // exclusive archive cursor before processing another page, or a
                 // duplicate acknowledgement would violate the device's strict
                 // contiguous-ack contract.
-                snapshot = request_leased(client, resolved, lease_id, Method::GET, &suffix, None).await?;
+                snapshot = firmware_tuning_snapshot(client, resolved, lease_id, &suffix).await?;
             }
             _ = tokio::time::sleep(poll_delay) => {
-                snapshot = request_leased(client, resolved, lease_id, Method::GET, &suffix, None).await?;
+                snapshot = firmware_tuning_snapshot(client, resolved, lease_id, &suffix).await?;
             }
         }
     }
@@ -3895,6 +3904,55 @@ async fn run_firmware_tuning_session(
         }
     }
     Ok((snapshot, samples, decisions))
+}
+
+fn firmware_tuning_trace_suffix(after_sequence: Option<u64>) -> String {
+    after_sequence.map_or_else(
+        || "/calibration/thermal-tuning/run?limit=8".to_string(),
+        |sequence| format!("/calibration/thermal-tuning/run?afterSequence={sequence}&limit=8"),
+    )
+}
+
+fn firmware_tuning_trace_gap(snapshot: &Value) -> bool {
+    snapshot
+        .pointer("/run/review/reason")
+        .and_then(Value::as_str)
+        == Some("trace_gap")
+        || snapshot
+            .pointer("/run/review/state")
+            .and_then(Value::as_str)
+            == Some("incomplete")
+}
+
+fn retryable_firmware_tuning_transport_error(error: &dyn std::fmt::Display) -> bool {
+    let message = error.to_string();
+    message.contains("HTTP 502")
+        || message.contains("HTTP 503")
+        || message.contains("HTTP 504")
+        || message.contains("usb_response_timeout")
+        || message.contains("serial_rpc_timeout")
+}
+
+async fn firmware_tuning_snapshot(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    suffix: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match request_leased(client, resolved, lease_id, Method::GET, suffix, None).await {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error)
+                if retryable_firmware_tuning_transport_error(error.as_ref()) && attempt < 2 =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.expect("firmware tuning retry loop preserves the final error"))
 }
 
 fn validate_firmware_tuning_identity(
@@ -15545,6 +15603,40 @@ mod tests {
         let error = contiguous_trace_archive_through(&archive).unwrap_err();
 
         assert!(error.to_string().contains("expected sequence 2, found 3"));
+    }
+
+    #[test]
+    fn firmware_trace_gap_snapshot_is_recognized_and_uses_eight_event_pages() {
+        let snapshot = json!({
+            "run": {
+                "review": {"state": "incomplete", "reason": "trace_gap"}
+            }
+        });
+
+        assert!(firmware_tuning_trace_gap(&snapshot));
+        assert_eq!(
+            firmware_tuning_trace_suffix(Some(47)),
+            "/calibration/thermal-tuning/run?afterSequence=47&limit=8"
+        );
+        assert!(!firmware_tuning_trace_gap(&json!({
+            "run": {"review": {"state": "recording", "reason": null}}
+        })));
+    }
+
+    #[test]
+    fn firmware_trace_read_retries_only_transient_bridge_errors() {
+        assert!(retryable_firmware_tuning_transport_error(
+            &"HTTP 502 usb_response_timeout"
+        ));
+        assert!(retryable_firmware_tuning_transport_error(
+            &"HTTP 504 serial_rpc_timeout"
+        ));
+        assert!(!retryable_firmware_tuning_transport_error(
+            &"HTTP 409 lease required"
+        ));
+        assert!(!retryable_firmware_tuning_transport_error(
+            &"HTTP 400 trace_gap"
+        ));
     }
 
     #[test]

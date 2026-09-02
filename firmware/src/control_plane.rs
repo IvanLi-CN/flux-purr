@@ -32,7 +32,9 @@ pub const REQUEST_ID_MAX_LEN: usize = 48;
 pub const ERROR_CODE_MAX_LEN: usize = 48;
 pub const ERROR_MESSAGE_MAX_LEN: usize = 160;
 pub const EEPROM_MAINTENANCE_CHUNK_MAX: usize = 32;
-pub const THERMAL_TUNING_TRACE_PAGE_MAX: usize = 16;
+/// Eight maximally populated tuning events fit in the shared 8 KiB USB JSONL
+/// response budget. LAN and USB therefore expose the same page boundary.
+pub const THERMAL_TUNING_TRACE_PAGE_MAX: usize = 8;
 pub const THERMAL_TUNING_TARGET_COUNT: usize = 9;
 pub const THERMAL_TUNING_HASH_HEX_LEN: usize = 64;
 pub const THERMAL_TUNING_ID_HEX_LEN: usize = 32;
@@ -3432,7 +3434,7 @@ mod tests {
             tuning.target_schedule_c,
             [60, 240, 140, 100, 80, 120, 180, 160, 220]
         );
-        assert_eq!(tuning.trace.buffer_capacity, 96);
+        assert_eq!(tuning.trace.buffer_capacity, 1_024);
         assert!(tuning.candidate_promotion);
         #[cfg(feature = "web_serial")]
         {

@@ -187,8 +187,16 @@ CLI 启动的 run 由 CLI **Tuning Host Runner** 记录本机详细 trace 并生
   显示为 `0–100%`，其显式坐标范围不得扩展到负值。PPS 合同电流必须标注为合同安全
   ceiling，不能表示为外部 VBUS 的实测电流。
 - 设备端 trace ring 只保存尚未由主机确认持久化的有界重传窗口，不是完整调优历史。
-  当前 capability 发布的 `96` 是经内存与采样节奏验证的容量上限，允许后续固件在保持
-  协议语义和溢出保护的前提下调整；算法正确性不得依赖该数字。
+  当前正式固件必须在 PSRAM 中提供恰好 `1024` 条事件容量；按 500 ms sample 节奏，
+  该窗口覆盖至少八分钟的连续 sample，并容纳其间的稀疏状态/决策事件。它不得占用内部
+  RAM，也不得在 PSRAM 不可用时降级为更小容量或启动调优。所有 transport 每次 read
+  最多返回 `8` 条事件，以保持 USB JSONL、LAN 和 DEVD 的同构响应上界。
+- 主机遇到永久 `trace_gap` 时，设备仍必须返回成功的 snapshot，其中包含 active/terminal
+  `runId`、`review.state=incomplete`、`review.reason=trace_gap` 与可读尾部 page。记录器必须
+  先归档该尾部，不得发送 ack 或 seal；若 run 仍在运行，必须使用该 runId 发送 `cancel` 并继续
+  归档至空 page，随后导出五文件的 incomplete bundle。不得因 trace gap 隐藏 runId、让加热任务
+  因无法取消而继续运行，或伪造连续 trace。短暂 transport 失败必须有限重试，exactly repeated
+  `ack_trace(throughSequence, traceDigest)` 必须幂等；相同 sequence 但不同 digest 必须失败。
 - `review_complete` 只能由设备验证过连续 host archive acknowledgment 后产生。
   未 seal 的候选、trace gap、取消、硬故障、预算耗尽、reset 中断或失败 run 均不得
   preview 或 save。
@@ -250,13 +258,17 @@ disarm；普通失败 point 的区间裁剪不影响其它合法子区间。核�
 ### Trace 记录、确认与断连
 
 每个 `sample` 或 `decision` 事件有唯一递增 `sequence`，并按 canonical bytes
-并入 rolling digest。设备维护固定容量未确认 ring buffer、最早可读 sequence、
-最近确认 sequence 和当前 digest。host 读取 page 后持久化事件，再发送连续
-`ack_trace`；设备只接受从上一次确认连续前进且 digest 匹配的 ack。
+并入 rolling digest。设备在 PSRAM 维护恰好 1024 条未确认 ring buffer、最早可读
+sequence、最近确认 sequence 和当前 digest；一次 page 最多 8 条事件。host 读取 page 后
+持久化事件，再发送连续 `ack_trace`；设备只接受从上一次确认连续前进且 digest 匹配的 ack。
+主机因响应丢失重发同一 `(throughSequence, traceDigest)` 时，该 ack 必须幂等；同一 sequence
+携带不同 digest 必须失败。
 
 CLI、浏览器或 `devd` 断连不会影响调优控制。只要 host 在 buffer 覆盖前重新读取
 并确认全部事件，run 仍可得到 review-complete；否则设备永久标记
-`trace_gap/review_incomplete`。host 完整确认到 terminal sequence 后发送
+`trace_gap/review_incomplete`。发生 gap 的 snapshot 仍携带 runId 与可读的 ring tail，
+记录器归档尾部但不确认，并在 run 尚运行时发送 cancel，直到得到 terminal/空页；由此产生的
+五文件 bundle 必须明确为 incomplete。host 完整确认到 terminal sequence 后发送
 `seal_review`，设备以其紧凑 digest 和 sequence 验证完整性，并仅在当前 boot 的
 RAM 中标记 candidate 可 promotion。浏览器页面关闭、CLI 退出或浏览器 storage
 失败不会使设备不安全，但可能使 candidate 不可 promotion。

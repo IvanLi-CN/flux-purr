@@ -474,13 +474,14 @@ export class WebSerialControlPlaneClient {
     }))
   }
 
-  async getThermalTuningRun(afterSequence?: number, limit = 16): Promise<ThermalTuningRunSnapshot> {
+  async getThermalTuningRun(afterSequence?: number, limit = 8): Promise<ThermalTuningRunSnapshot> {
+    const pageLimit = Math.min(Math.max(Math.trunc(limit), 1), 8)
     return this.requestPayload<ThermalTuningRunSnapshot>('thermal_tuning_run', (requestId) => ({
       type: 'thermal_tuning_run',
       requestId,
       op: 'get',
       ...(afterSequence === undefined ? {} : { afterSequence }),
-      limit,
+      limit: pageLimit,
     }))
   }
 

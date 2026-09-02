@@ -13843,7 +13843,7 @@ async fn main(_spawner: Spawner) {
     }
     let mut manual_pps_state = ManualPpsState::from_capabilities(power_data_capabilities);
     let mut calibration_runtime_state = CalibrationRuntimeState::default();
-    const THERMAL_TUNING_RUNTIME_MAX_HEAP_BYTES: usize = 16 * 1024;
+    const THERMAL_TUNING_RUNTIME_MAX_HEAP_BYTES: usize = 192 * 1024;
     const _: () = assert!(
         core::mem::size_of::<ThermalTuningRuntime>() <= THERMAL_TUNING_RUNTIME_MAX_HEAP_BYTES
     );
