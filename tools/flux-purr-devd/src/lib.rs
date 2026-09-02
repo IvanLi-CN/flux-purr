@@ -376,7 +376,7 @@ struct FirmwareApproval {
 }
 
 #[derive(Debug, Clone)]
-struct RecoveryExecutionProof {
+struct FirmwareExecutionProof {
     approval: FirmwareApproval,
     request: FirmwareOperationRequest,
     device_id: String,
@@ -6526,7 +6526,16 @@ async fn firmware_operation(
     }
     progress.stage_completed("authorization", json!({}));
 
-    let recovery_proof = recovery_uses_single_rom_session.then(|| RecoveryExecutionProof {
+    let single_session_execution = progress.require(
+        uses_single_usb_serial_jtag_bundle_session(
+            payload.operation,
+            &port_path,
+            source_partition_hash.as_deref(),
+            &bundle.manifest.migrations,
+        )
+        .map_err(bundle_http_error),
+    )?;
+    let execution_proof = single_session_execution.then(|| FirmwareExecutionProof {
         approval: approval.clone(),
         request: payload.clone(),
         device_id: device_id.clone(),
@@ -6539,7 +6548,7 @@ async fn firmware_operation(
         payload.operation,
         &port_path,
         source_partition_hash.as_deref(),
-        recovery_proof,
+        execution_proof,
         &mut progress,
     )
     .await?;
@@ -6652,15 +6661,15 @@ async fn run_bundle_flash_transaction(
     operation: FirmwareOperation,
     port_path: &str,
     source_partition_hash: Option<&str>,
-    recovery_proof: Option<RecoveryExecutionProof>,
+    execution_proof: Option<FirmwareExecutionProof>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
-    if recovery_proof.is_some() {
-        return run_usb_serial_jtag_recovery_flash_transaction(
+    if execution_proof.is_some() {
+        return run_usb_serial_jtag_single_session_flash_transaction(
             state,
             bundle,
             port_path,
-            recovery_proof,
+            execution_proof,
             progress,
         )
         .await;
@@ -6912,6 +6921,28 @@ fn uses_single_usb_serial_jtag_bundle_write(operation: FirmwareOperation, port_p
     ) && is_esp_usb_serial_jtag_port(port_path)
 }
 
+fn uses_single_usb_serial_jtag_bundle_session(
+    operation: FirmwareOperation,
+    port_path: &str,
+    source_partition_hash: Option<&str>,
+    migrations: &[String],
+) -> Result<bool, firmware_bundle::BundleError> {
+    if !uses_single_usb_serial_jtag_bundle_write(operation, port_path) {
+        return Ok(false);
+    }
+    if operation == FirmwareOperation::InstallRecovery {
+        return Ok(true);
+    }
+    let source_partition_hash = source_partition_hash.ok_or_else(|| {
+        firmware_bundle::BundleError::Contract(
+            "same-session update requires an approved source layout".into(),
+        )
+    })?;
+    Ok(!config_copy_requires_transfer(
+        firmware_bundle::config_copy_plan(source_partition_hash, migrations)?,
+    ))
+}
+
 fn usb_update_reuses_preflight_evidence(
     operation: FirmwareOperation,
     transport: DeviceTransport,
@@ -6968,15 +6999,15 @@ fn prepare_bundle_flash_segments(
         .collect()
 }
 
-async fn run_usb_serial_jtag_recovery_flash_transaction(
+async fn run_usb_serial_jtag_single_session_flash_transaction(
     state: &AppState,
     bundle: &firmware_bundle::FirmwareBundle,
     port_path: &str,
-    proof: Option<RecoveryExecutionProof>,
+    proof: Option<FirmwareExecutionProof>,
     progress: &mut FirmwareOperationProgress,
 ) -> Result<(), HttpError> {
     let proof = progress.require(proof.ok_or_else(|| {
-        HttpError::internal("USB-JTAG recovery execution is missing its preflight proof")
+        HttpError::internal("USB-JTAG single-session execution is missing its preflight proof")
     }))?;
     let segments = progress.require(prepare_bundle_flash_segments(bundle))?;
     let _serial_rpc = progress.require(
@@ -6987,8 +7018,6 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
         port_path,
     ))?;
 
-    progress.stage_started("erase", json!({}));
-    progress.stage_completed("erase", json!({ "scope": "bundle_ranges" }));
     let total_bytes = segments
         .iter()
         .map(|segment| u64::from(segment.length))
@@ -7013,20 +7042,25 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
         .await
         .map_err(|error| {
             HttpError::internal_with_details(
-                "usb_jtag_recovery_writer_failed",
-                "USB-JTAG recovery writer task failed.",
+                "usb_jtag_single_session_writer_failed",
+                "USB-JTAG single-session writer task failed.",
                 json!({ "diagnostic": error.to_string() }),
             )
         })
         .and_then(|result| {
             result.map_err(|error| {
                 HttpError::internal_with_details(
-                    "usb_jtag_recovery_writer_failed",
-                    "USB-JTAG recovery writer failed before all bundle segments were verified.",
+                    "usb_jtag_single_session_writer_failed",
+                    "USB-JTAG single-session writer failed before all bundle segments were verified.",
                     json!({ "diagnostic": error }),
                 )
             })
         });
+
+    if proof.request.operation == FirmwareOperation::InstallRecovery {
+        progress.stage_started("erase", json!({}));
+        progress.stage_completed("erase", json!({ "scope": "bundle_ranges" }));
+    }
 
     let mut completed_bytes = 0_u64;
     let mut verified_segments = 0_u64;
@@ -7061,7 +7095,7 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
                 );
                 progress.stage_started(
                     "rom_md5",
-                    json!({ "completedUnits": 0, "totalUnits": 3, "unit": "segments" }),
+                    json!({ "completedUnits": 0, "totalUnits": bundle.manifest.segments.len(), "unit": "segments" }),
                 );
                 md5_started = true;
             }
@@ -7069,13 +7103,13 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
                 verified_segments = verified_segments.saturating_add(1);
                 progress.stage_progress(
                     "rom_md5",
-                    json!({ "completedUnits": verified_segments, "totalUnits": 3, "unit": "segments" }),
+                    json!({ "completedUnits": verified_segments, "totalUnits": bundle.manifest.segments.len(), "unit": "segments" }),
                 );
             }
             SingleSessionFlashEvent::Md5Completed => {
                 progress.stage_completed(
                     "rom_md5",
-                    json!({ "completedUnits": verified_segments, "totalUnits": 3, "unit": "segments" }),
+                    json!({ "completedUnits": verified_segments, "totalUnits": bundle.manifest.segments.len(), "unit": "segments" }),
                 );
                 progress.stage_started("reset", json!({}));
                 reset_started = true;
@@ -7088,16 +7122,20 @@ async fn run_usb_serial_jtag_recovery_flash_transaction(
     }
 
     match progress.require(write_result) {
-        Ok(receipt) if receipt.verified_segments == 3 && write_completed && md5_started => {
+        Ok(receipt)
+            if receipt.verified_segments == bundle.manifest.segments.len() as u64
+                && write_completed
+                && md5_started =>
+        {
             if reset_started {
                 return Err(progress.fail(HttpError::internal(
-                    "USB-JTAG recovery completed without a reset receipt.",
+                    "USB-JTAG single-session write completed without a reset receipt.",
                 )));
             }
             Ok(())
         }
         Ok(_) => Err(progress.fail(HttpError::internal(
-            "USB-JTAG recovery receipt was incomplete.",
+            "USB-JTAG single-session receipt was incomplete.",
         ))),
         Err(error) => Err(error),
     }
@@ -7164,7 +7202,7 @@ impl espflash::target::ProgressCallbacks for SingleSessionFlashProgress {
 fn flash_bundle_with_single_usb_serial_jtag_session(
     port_path: &str,
     segments: &[BundleFlashSegment],
-    proof: Option<RecoveryExecutionProof>,
+    proof: Option<FirmwareExecutionProof>,
     events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
 ) -> Result<SingleSessionFlashReceipt, String> {
     let mut failures = Vec::new();
@@ -7194,7 +7232,7 @@ fn flash_bundle_with_single_usb_serial_jtag_session(
         }
     }
     Err(format!(
-        "single-session recovery failed after {ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS} complete attempts: {}",
+        "single-session firmware write failed after {ESPFLASH_SINGLE_SESSION_FLASH_ATTEMPTS} complete attempts: {}",
         failures.join(" | ")
     ))
 }
@@ -7202,7 +7240,7 @@ fn flash_bundle_with_single_usb_serial_jtag_session(
 fn flash_bundle_with_single_usb_serial_jtag_session_once(
     port_path: &str,
     segments: &[BundleFlashSegment],
-    proof: Option<RecoveryExecutionProof>,
+    proof: Option<FirmwareExecutionProof>,
     events: mpsc::UnboundedSender<SingleSessionFlashEvent>,
 ) -> Result<SingleSessionFlashReceipt, String> {
     use espflash::image_format::Segment;
@@ -7211,7 +7249,7 @@ fn flash_bundle_with_single_usb_serial_jtag_session_once(
     let mut flasher = connect_single_session_rom_flasher(port_path)?;
     let _ = events.send(SingleSessionFlashEvent::RomConnected);
     if let Some(proof) = proof.as_ref() {
-        verify_recovery_execution_proof(port_path, &mut flasher, proof)?;
+        verify_firmware_execution_proof(port_path, &mut flasher, proof)?;
         let _ = events.send(SingleSessionFlashEvent::ExecutionProofVerified);
     }
     let _ = events.send(SingleSessionFlashEvent::RangePreparationCompleted);
@@ -7556,10 +7594,10 @@ fn read_rom_security_info(
     })
 }
 
-fn verify_recovery_execution_proof(
+fn verify_firmware_execution_proof(
     port_path: &str,
     flasher: &mut espflash::flasher::Flasher,
-    proof: &RecoveryExecutionProof,
+    proof: &FirmwareExecutionProof,
 ) -> Result<(), String> {
     let security = read_rom_security_info(flasher)?;
     security
@@ -7571,10 +7609,10 @@ fn verify_recovery_execution_proof(
         port_path,
         &security.rom_mac,
         &proof.bundle_sha256,
-        None,
+        proof.approval.source_partition_hash.as_deref(),
     );
     if security.rom_mac != proof.approval.rom_mac || digest != proof.approval.preflight_digest {
-        return Err("execution-time ROM facts do not match the approved recovery target".into());
+        return Err("execution-time ROM facts do not match the approved firmware target".into());
     }
     Ok(())
 }
@@ -15419,6 +15457,46 @@ mod tests {
             "/dev/cu.usbserial-unrelated",
             false,
         ));
+    }
+
+    #[test]
+    fn same_layout_usb_jtag_update_uses_the_single_session_writer() {
+        assert!(
+            uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::Update,
+                "/dev/cu.usbmodem2111401",
+                Some(firmware_bundle::CURRENT_PARTITION_TABLE_SHA256),
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(
+            uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::InstallRecovery,
+                "/dev/cu.usbmodem2111401",
+                None,
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(
+            !uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::Update,
+                "/dev/cu.usbserial-unrelated",
+                Some(firmware_bundle::CURRENT_PARTITION_TABLE_SHA256),
+                &[],
+            )
+            .unwrap()
+        );
+        assert!(
+            uses_single_usb_serial_jtag_bundle_session(
+                FirmwareOperation::Update,
+                "/dev/cu.usbmodem2111401",
+                None,
+                &[],
+            )
+            .is_err()
+        );
     }
 
     #[test]
