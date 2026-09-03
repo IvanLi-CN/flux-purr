@@ -158,7 +158,7 @@
 ### Core flows
 
 - 启动后先请求 feature-selected 固定 PD 电压（默认 `20V`），随后读取 CH224Q status 与 power data。若 PPS APDO 覆盖 `20V`，heater 后端进入 `pps-mos`；否则进入 `fixed-pd-pwm-fallback`。
-- PD 控制器未识别、启动合同未就绪或运行中合同丢失时，设备仍必须完成 Front Panel Dashboard 与 runtime-ready；`heater_enabled`、校准加热和 `GPIO47` 必须保持关闭，并以 `pd-contract-unavailable` 报告 heater lock。启动合同未就绪时，Dashboard 前必须重新初始化面板并完成两次完整 Dashboard SPI flush，避免校准首屏残留；只有后续观测到 ready contract 才能解除该 lock，不能靠保留的 heater arm 自动绕过。带 `buzzer_debug` capability 的开发 build 必须以可选 status 字段回传当前 route、最后完成 flush 的 route 与累计完成次数；它们是传输回执，不能当作 LCD 像素读回。
+- PD 控制器未识别、启动合同未就绪或运行中合同丢失时，设备仍必须完成 Front Panel Dashboard 与 runtime-ready；`heater_enabled`、校准加热和 `GPIO47` 必须保持关闭，并以 `pd-contract-unavailable` 报告 heater lock。App runtime 在首次显示初始化后直接呈现 Dashboard，并在启动测量完成后只做一次完整 Dashboard SPI flush，不得因为 PD 超时再次初始化面板或保留校准首屏；只有 KeyTest runtime 渲染校准场景。只有后续观测到 ready contract 才能解除 heater lock，不能靠保留的 heater arm 自动绕过。带 `buzzer_debug` capability 的开发 build 必须以可选 status 字段回传当前 route、最后完成 flush 的 route 与累计完成次数；它们是传输回执，不能当作 LCD 像素读回。
 - 用户短按中键后，heater 进入 arm 状态；若无 fault-latch，则控制器按 `target_temp_c - current_temp_c` 输出 `0..100%` 控制量。`pps-mos` 后端在所选 APDO 的最小到最大电压范围内表达该控制量；`R(T)` 参与 `Pmax(T)=min(Vsource^2/R(T), Vsource*Isource)` 的 heater-watt 估算，但不形成电压天花板。只有不具备合格 PPS APDO或关键调压失败时才进入 fixed-PD + `GPIO47` PWM fallback，并按其协商电流合同钳制 duty。
 - Dashboard 上/下短按和 hold-repeat 都只调整 `target_temp_c`，每次事件步进 `1°C` 并继续 clamp 到 `0~400°C`；中键 heater / active cooling / menu 语义不受 hold-repeat 影响。
 - 用户双击中键后，切换的是“主动降温”策略位，而不是直接强制 fan GPIO。

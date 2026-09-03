@@ -2752,28 +2752,18 @@ fn startup_pd_contract_ready(observation: Option<PdStatusObservation>) -> bool {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StartupFrontPanelPresentationPlan {
-    reinitialize_panel: bool,
-    flush_count: u8,
+enum StartupFrontPanelPresentation {
+    Dashboard,
+    Calibration,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-const fn startup_frontpanel_presentation_plan(
-    pd_contract_ready: bool,
-) -> StartupFrontPanelPresentationPlan {
-    if pd_contract_ready {
-        StartupFrontPanelPresentationPlan {
-            reinitialize_panel: false,
-            flush_count: 1,
-        }
-    } else {
-        // The panel has been showing the calibration scene while PD discovery
-        // times out. Reset it before committing the normal runtime frame so a
-        // stale startup scene cannot survive the interlocked transition.
-        StartupFrontPanelPresentationPlan {
-            reinitialize_panel: true,
-            flush_count: 2,
-        }
+const fn startup_frontpanel_presentation(
+    runtime_mode: FrontPanelRuntimeMode,
+) -> StartupFrontPanelPresentation {
+    match runtime_mode {
+        FrontPanelRuntimeMode::App => StartupFrontPanelPresentation::Dashboard,
+        FrontPanelRuntimeMode::KeyTest => StartupFrontPanelPresentation::Calibration,
     }
 }
 
@@ -12102,7 +12092,6 @@ async fn present_initial_frontpanel_ui<'a, BUS, DC, RST>(
     display: &mut GC9D01<'a, BUS, DC, RST, DisplayTimer>,
     canvas: &mut DisplayCanvas,
     state: &FrontPanelUiState,
-    pd_contract_ready: bool,
 ) -> bool
 where
     BUS: embedded_hal_async::spi::SpiDevice,
@@ -12111,33 +12100,18 @@ where
     BUS::Error: core::fmt::Debug + embedded_hal::spi::Error,
     DC::Error: core::fmt::Debug,
 {
-    let plan = startup_frontpanel_presentation_plan(pd_contract_ready);
-    if plan.reinitialize_panel {
-        info!("frontpanel runtime recovery: reinitializing after PD startup timeout");
-        if !matches!(
-            with_timeout(DISPLAY_IO_TIMEOUT, display.init()).await,
-            Ok(Ok(()))
-        ) {
-            warn!("frontpanel runtime recovery: panel reinitialization failed");
-            return false;
-        }
+    if !matches!(
+        with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, state)).await,
+        Ok(Ok(()))
+    ) {
+        warn!("frontpanel runtime presentation failed");
+        return false;
     }
 
-    for pass in 1..=plan.flush_count {
-        if !matches!(
-            with_timeout(DISPLAY_IO_TIMEOUT, flush_ui(display, canvas, state)).await,
-            Ok(Ok(()))
-        ) {
-            warn!("frontpanel runtime presentation failed pass={=u8}", pass);
-            return false;
-        }
-        info!(
-            "frontpanel startup presentation complete route={=str} pass={=u8}",
-            route_label(state.route),
-            pass,
-        );
-    }
-
+    info!(
+        "frontpanel startup presentation complete route={=str}",
+        route_label(state.route)
+    );
     true
 }
 
@@ -12579,6 +12553,7 @@ async fn main(_spawner: Spawner) {
         ))
         .expect("failed to spawn status-light task");
     let runtime_mode = FrontPanelRuntimeMode::compile_time_default();
+    let startup_ui_state = FrontPanelUiState::new(runtime_mode);
     #[cfg(feature = "web_serial")]
     let mut usb_serial = RawUsbSerialJtag::new(peripherals.USB_DEVICE);
     #[cfg(feature = "web_serial")]
@@ -12710,7 +12685,12 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_init_complete\n");
-    render_scene(SceneId::StartupCalibration, canvas);
+    match startup_frontpanel_presentation(runtime_mode) {
+        StartupFrontPanelPresentation::Dashboard => render_frontpanel_ui(canvas, &startup_ui_state),
+        StartupFrontPanelPresentation::Calibration => {
+            render_scene(SceneId::StartupCalibration, canvas)
+        }
+    }
     display.write_area(
         0,
         0,
@@ -13457,19 +13437,17 @@ async fn main(_spawner: Spawner) {
     });
     set_status_light_state(initial_status_light_state);
     #[cfg(feature = "web_serial")]
-    if !pd_contract_ready {
-        let _ = usb_write_bytes_bounded(
-            &mut usb_serial,
-            b"boot_stage=display_dashboard_recovery_start\n",
-        );
-    }
+    let _ = usb_write_bytes_bounded(
+        &mut usb_serial,
+        b"boot_stage=display_runtime_presentation_start\n",
+    );
     let initial_frontpanel_ui_ready =
-        present_initial_frontpanel_ui(&mut display, canvas, &ui_state, pd_contract_ready).await;
+        present_initial_frontpanel_ui(&mut display, canvas, &ui_state).await;
     #[cfg(feature = "web_serial")]
-    if initial_frontpanel_ui_ready && !pd_contract_ready {
+    if initial_frontpanel_ui_ready {
         let _ = usb_write_bytes_bounded(
             &mut usb_serial,
-            b"boot_stage=display_dashboard_recovery_complete\n",
+            b"boot_stage=display_runtime_presentation_complete\n",
         );
     }
     if !initial_frontpanel_ui_ready {
@@ -23021,12 +22999,17 @@ mod tests {
     fn pd_unavailable_startup_enters_dashboard_with_heater_locked() {
         let pd_contract_ready = startup_pd_contract_ready(None);
         let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
-        let presentation = startup_frontpanel_presentation_plan(pd_contract_ready);
 
         assert_eq!(state.route, FrontPanelRoute::Dashboard);
         assert!(!pd_contract_ready);
-        assert!(presentation.reinitialize_panel);
-        assert_eq!(presentation.flush_count, 2);
+        assert_eq!(
+            startup_frontpanel_presentation(FrontPanelRuntimeMode::App),
+            StartupFrontPanelPresentation::Dashboard
+        );
+        assert_eq!(
+            startup_frontpanel_presentation(FrontPanelRuntimeMode::KeyTest),
+            StartupFrontPanelPresentation::Calibration
+        );
         assert_eq!(
             next_heater_lock_reason(None, false, true, pd_contract_ready),
             Some(HeaterLockReason::PdContractUnavailable)

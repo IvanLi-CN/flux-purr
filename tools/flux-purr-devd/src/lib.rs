@@ -8532,6 +8532,18 @@ pub fn verify_artifact(
 pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<FirmwareArtifact>> {
     let candidates = [
         (
+            "local-esp32s3-release-buzzer-debug",
+            "Local ESP32-S3 release (buzzer debug)",
+            "firmware/target/buzzer-debug/xtensa-esp32s3-none-elf/release/flux-purr",
+            "release + web_serial + net_http + buzzer-debug",
+            vec![
+                "web_serial".to_string(),
+                "net_http".to_string(),
+                "buzzer-debug".to_string(),
+            ],
+            "elf",
+        ),
+        (
             "local-esp32s3-release",
             "Local ESP32-S3 release",
             "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
@@ -10490,6 +10502,32 @@ mod tests {
         assert_eq!(artifacts[0].files[0].size, 22);
         assert_eq!(artifacts[0].files[0].flash_address, None);
         assert!(artifacts[0].files[0].sha256.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn artifact_catalog_exposes_debug_firmware_separately() {
+        let dir = tempdir().unwrap();
+        let debug_path = dir
+            .path()
+            .join("firmware/target/buzzer-debug/xtensa-esp32s3-none-elf/release");
+        fs::create_dir_all(&debug_path).unwrap();
+        fs::write(debug_path.join("flux-purr"), b"debug-firmware-image").unwrap();
+
+        let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(
+            artifacts[0].artifact_id,
+            "local-esp32s3-release-buzzer-debug"
+        );
+        assert_eq!(
+            artifacts[0].features,
+            ["web_serial", "net_http", "buzzer-debug"]
+        );
+        assert_eq!(
+            artifacts[0].files[0].path,
+            "firmware/target/buzzer-debug/xtensa-esp32s3-none-elf/release/flux-purr"
+        );
     }
 
     #[test]
