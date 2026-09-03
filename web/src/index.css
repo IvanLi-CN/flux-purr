@@ -10239,3 +10239,22 @@
     }
   }
 }
+
+@media (max-width: 759px) {
+  .industrial-console .industrial-calibration-tabs__list {
+    display: grid;
+    width: 100%;
+    min-height: 0;
+    height: auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    justify-self: stretch;
+    gap: 0.28rem;
+  }
+
+  .industrial-console .industrial-calibration-tab {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+    padding-inline: 0.35rem;
+  }
+}
