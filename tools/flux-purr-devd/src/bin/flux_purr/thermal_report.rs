@@ -2456,8 +2456,7 @@ fn render_baseline_html(data: &Value) -> Result<String, Box<dyn std::error::Erro
         .replace('>', "\\u003e")
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
-    let template = REPORT_TEMPLATE.replace("{{", "{").replace("}}", "}");
-    Ok(template.replace(DATA_PLACEHOLDER, &data_json))
+    Ok(REPORT_TEMPLATE.replace(DATA_PLACEHOLDER, &data_json))
 }
 
 fn escape_report_html_value(value: &Value) -> Value {
@@ -2733,14 +2732,13 @@ mod tests {
 
     fn embedded_report_data(bundle_dir: &Path) -> serde_json::Value {
         let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
-        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let colors_start = html[data_start..]
-            .find("const COLORS")
+        let data_start = html
+            .find("<script id=\"thermal-report-data\" type=\"application/json\">")
+            .expect("embedded data")
+            + "<script id=\"thermal-report-data\" type=\"application/json\">".len();
+        let data_end = html[data_start..]
+            .find("</script>")
             .expect("embedded data terminator")
-            + data_start;
-        let data_end = html[data_start..colors_start]
-            .rfind(';')
-            .expect("embedded data assignment terminator")
             + data_start;
         serde_json::from_str(&html[data_start..data_end]).expect("valid embedded report data")
     }
@@ -2971,14 +2969,16 @@ mod tests {
 
         assert!(!html.contains("</script><script>alert('x')</script>"));
         assert!(html.contains("\\u0026lt;/script\\u0026gt;"));
-        let data_start = html.find("const DATA=").expect("embedded data") + "const DATA=".len();
-        let colors_start = html[data_start..]
-            .find("const COLORS")
+        assert!(html.contains("<script id=\"thermal-report-data\" type=\"application/json\">"));
+        assert!(!html.contains("__THERMAL_REPORT_DATA__"));
+        assert!(!html.contains("{{"));
+        let data_start = html
+            .find("<script id=\"thermal-report-data\" type=\"application/json\">")
+            .expect("embedded data")
+            + "<script id=\"thermal-report-data\" type=\"application/json\">".len();
+        let data_end = html[data_start..]
+            .find("</script>")
             .expect("embedded data terminator")
-            + data_start;
-        let data_end = html[data_start..colors_start]
-            .rfind(';')
-            .expect("embedded data assignment terminator")
             + data_start;
         let decoded: Value = serde_json::from_str(&html[data_start..data_end]).expect("valid JSON");
         assert_eq!(
@@ -3007,11 +3007,13 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("候选试验 approach"));
         assert!(
             REPORT_TEMPLATE
-                .contains("候选 <strong>${{context.passed}}/${{context.total}} 通过</strong>")
+                .contains("候选 <strong>${context.passed}/${context.total} 通过</strong>")
         );
-        assert!(REPORT_TEMPLATE.contains(
-            "${{active}}°C · 候选试验 ${{selected?.round??'—'}}/${{rounds.length}} 温度响应"
-        ));
+        assert!(
+            REPORT_TEMPLATE.contains(
+                "${active}°C · 候选试验 ${selected?.round??'—'}/${rounds.length} 温度响应"
+            )
+        );
         assert!(REPORT_TEMPLATE.contains("temperatureTrialLegend"));
         assert!(REPORT_TEMPLATE.contains("trialState(round)"));
         assert!(REPORT_TEMPLATE.contains("TRIAL_COLORS"));
@@ -3031,8 +3033,11 @@ mod tests {
         assert!(REPORT_TEMPLATE.contains("Y0=options.yMin??"));
         assert!(REPORT_TEMPLATE.contains("PPS 合同电流"));
         assert!(REPORT_TEMPLATE.contains("不是外部 VBUS 实测电流"));
-        assert!(REPORT_TEMPLATE.contains("#targetTabs{{display:grid"));
-        assert!(REPORT_TEMPLATE.contains(".panel{{background:var(--paper)"));
+        assert!(REPORT_TEMPLATE.contains("#targetTabs{display:grid"));
+        assert!(REPORT_TEMPLATE.contains(".panel{background:var(--paper)"));
+        assert!(REPORT_TEMPLATE.contains("id=\"thermal-report-data\""));
+        assert!(REPORT_TEMPLATE.contains("rawData.startsWith('{')"));
+        assert!(REPORT_TEMPLATE.contains("报告模板"));
     }
 
     #[test]
