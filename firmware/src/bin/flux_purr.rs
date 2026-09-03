@@ -3431,7 +3431,7 @@ fn thermal_tuning_temperature_centi_c(temp_c: f32) -> i16 {
     temp_c_to_centi_c(temp_c).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(target_arch = "xtensa")]
 fn thermal_tuning_heater_phase(
     phase: HeaterControlPhase,
 ) -> flux_purr_thermal_tuning_core::HeaterPhase {
