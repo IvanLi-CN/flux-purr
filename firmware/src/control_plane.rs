@@ -3,9 +3,9 @@ use heapless::{String, Vec};
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[cfg(all(test, feature = "buzzer-debug"))]
-use crate::buzzer::{BuzzerCueId, BuzzerDebugSessionState};
+use crate::buzzer::BuzzerDebugSessionState;
 #[cfg(feature = "buzzer-debug")]
-use crate::buzzer::{BuzzerDebugFeedbackCue, BuzzerDebugScenario, BuzzerDebugStatus};
+use crate::buzzer::{BuzzerCueId, BuzzerDebugScenario, BuzzerDebugStatus};
 use crate::{
     DeviceMode, DeviceStatus, PdState,
     frontpanel::{FRONTPANEL_PRESET_COUNT, FrontPanelKey, HeaterLockReason},
@@ -296,15 +296,6 @@ pub struct ControlPlaneStatus {
     #[serde(default)]
     pub thermal_plant_model: ThermalPlantRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
-    #[cfg(feature = "buzzer-debug")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frontpanel_route: Option<String<ERROR_CODE_MAX_LEN>>,
-    #[cfg(feature = "buzzer-debug")]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frontpanel_presented_route: Option<String<ERROR_CODE_MAX_LEN>>,
-    #[cfg(feature = "buzzer-debug")]
-    #[serde(default)]
-    pub frontpanel_presentation_count: u32,
     pub network: NetworkSummary,
 }
 
@@ -546,12 +537,6 @@ impl ControlPlaneStatus {
                 thermal_control: ThermalControlRuntimeWire::default(),
                 thermal_plant_model: ThermalPlantRuntimeWire::default(),
                 frontpanel_key: status.frontpanel_key.map(Into::into),
-                #[cfg(feature = "buzzer-debug")]
-                frontpanel_route: None,
-                #[cfg(feature = "buzzer-debug")]
-                frontpanel_presented_route: None,
-                #[cfg(feature = "buzzer-debug")]
-                frontpanel_presentation_count: 0,
                 network,
             });
         }
@@ -920,6 +905,7 @@ pub struct RuntimeConfigCommand {
 pub enum BuzzerDebugOp {
     Trigger,
     Run,
+    Stop,
     Status,
 }
 
@@ -929,6 +915,7 @@ impl BuzzerDebugOp {
         match self {
             Self::Trigger => "trigger",
             Self::Run => "run",
+            Self::Stop => "stop",
             Self::Status => "status",
         }
     }
@@ -938,8 +925,9 @@ impl BuzzerDebugOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuzzerDebugCommand {
     pub op: BuzzerDebugOp,
-    pub cue: Option<BuzzerDebugFeedbackCue>,
+    pub cue: Option<BuzzerCueId>,
     pub scenario: Option<BuzzerDebugScenario>,
+    pub repeat: bool,
 }
 
 #[cfg(feature = "buzzer-debug")]
@@ -948,7 +936,9 @@ impl BuzzerDebugCommand {
         match self.op {
             BuzzerDebugOp::Trigger => self.cue.is_some() && self.scenario.is_none(),
             BuzzerDebugOp::Run => self.cue.is_none() && self.scenario.is_some(),
-            BuzzerDebugOp::Status => self.cue.is_none() && self.scenario.is_none(),
+            BuzzerDebugOp::Stop | BuzzerDebugOp::Status => {
+                self.cue.is_none() && self.scenario.is_none() && !self.repeat
+            }
         }
     }
 }
@@ -1755,10 +1745,13 @@ struct UsbFrameWire {
     thermal_control_profile: Option<Box<ThermalControlProfileCommand>>,
     #[cfg(feature = "buzzer-debug")]
     #[serde(skip_serializing_if = "Option::is_none")]
-    buzzer_cue: Option<BuzzerDebugFeedbackCue>,
+    buzzer_cue: Option<BuzzerCueId>,
     #[cfg(feature = "buzzer-debug")]
     #[serde(skip_serializing_if = "Option::is_none")]
     buzzer_scenario: Option<BuzzerDebugScenario>,
+    #[cfg(feature = "buzzer-debug")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repeat: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     channel: Option<CalibrationChannelWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1912,8 +1905,9 @@ struct UsbRuntimeConfigInboundWire {
 struct UsbBuzzerDebugInboundWire {
     request_id: Option<String<REQUEST_ID_MAX_LEN>>,
     op: Option<BuzzerDebugOp>,
-    buzzer_cue: Option<BuzzerDebugFeedbackCue>,
+    buzzer_cue: Option<BuzzerCueId>,
     buzzer_scenario: Option<BuzzerDebugScenario>,
+    repeat: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2065,6 +2059,7 @@ impl TryFrom<UsbFrameWire> for UsbFrame {
                     op: parse_buzzer_debug_op(value.op.as_deref())?,
                     cue: value.buzzer_cue,
                     scenario: value.buzzer_scenario,
+                    repeat: value.repeat.unwrap_or(false),
                 },
             }),
             "calibration_config" => Ok(UsbFrame::CalibrationConfig {
@@ -2156,6 +2151,8 @@ impl From<&UsbFrame> for UsbFrameWire {
             buzzer_cue: None,
             #[cfg(feature = "buzzer-debug")]
             buzzer_scenario: None,
+            #[cfg(feature = "buzzer-debug")]
+            repeat: None,
             channel: None,
             reference_temp_c: None,
             reference_vin_mv: None,
@@ -2232,6 +2229,7 @@ impl From<&UsbFrame> for UsbFrameWire {
                 wire.op = Some(string(command.op.as_str()));
                 wire.buzzer_cue = command.cue;
                 wire.buzzer_scenario = command.scenario;
+                wire.repeat = command.repeat.then_some(true);
             }
             #[cfg(feature = "buzzer-debug")]
             UsbFrame::BuzzerDebugResponse { .. } => {
@@ -2600,6 +2598,7 @@ pub fn parse_usb_frame(line: &str) -> Result<UsbFrame, UsbFrameError> {
                     op: frame.op.ok_or(UsbFrameError::MalformedJson)?,
                     cue: frame.buzzer_cue,
                     scenario: frame.buzzer_scenario,
+                    repeat: frame.repeat.unwrap_or(false),
                 },
             })
         }
@@ -2883,6 +2882,7 @@ fn parse_buzzer_debug_op(value: Option<&str>) -> Result<BuzzerDebugOp, UsbFrameE
     match value {
         Some("trigger") => Ok(BuzzerDebugOp::Trigger),
         Some("run") => Ok(BuzzerDebugOp::Run),
+        Some("stop") => Ok(BuzzerDebugOp::Stop),
         Some("status") => Ok(BuzzerDebugOp::Status),
         _ => Err(UsbFrameError::MalformedJson),
     }
@@ -4137,7 +4137,7 @@ mod tests {
 
     #[cfg(feature = "buzzer-debug")]
     #[test]
-    fn buzzer_debug_frames_are_fixed_feedback_requests_with_a_bounded_trace() {
+    fn buzzer_debug_frames_accept_production_cues_and_a_bounded_trace() {
         let request = parse_usb_frame(
             r#"{"type":"buzzer_debug","requestId":"buzzer-1","op":"run","buzzerScenario":"feedback_replace"}"#,
         )
@@ -4150,6 +4150,7 @@ mod tests {
                     op: BuzzerDebugOp::Run,
                     cue: None,
                     scenario: Some(BuzzerDebugScenario::FeedbackReplace),
+                    repeat: false,
                 },
             }
         );
@@ -4159,14 +4160,34 @@ mod tests {
             status: Box::new(BuzzerDebugStatus {
                 state: BuzzerDebugSessionState::Complete,
                 scenario: Some(BuzzerDebugScenario::FeedbackReplace),
+                cue: None,
+                repeat: false,
                 active_cue: Some(BuzzerCueId::HeaterOn),
                 trace: heapless::Vec::new(),
+                output_trace: heapless::Vec::new(),
             }),
         };
         let mut out = [0u8; USB_LINE_MAX_LEN];
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.contains(r#""buzzer_debug""#));
         assert!(json.contains(r#""feedback_replace""#));
+
+        let protection = parse_usb_frame(
+            r#"{"type":"buzzer_debug","requestId":"buzzer-protection","op":"trigger","buzzerCue":"protection_alarm","repeat":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            protection,
+            UsbFrame::BuzzerDebug {
+                request_id: string("buzzer-protection"),
+                command: BuzzerDebugCommand {
+                    op: BuzzerDebugOp::Trigger,
+                    cue: Some(BuzzerCueId::ProtectionAlarm),
+                    scenario: None,
+                    repeat: true,
+                },
+            }
+        );
 
         let invalid = parse_usb_frame(
             r#"{"type":"buzzer_debug","requestId":"buzzer-2","op":"trigger","buzzerScenario":"feedback_replace"}"#,

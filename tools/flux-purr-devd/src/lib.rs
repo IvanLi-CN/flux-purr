@@ -1740,12 +1740,13 @@ pub struct RuntimeConfigRequest {
 pub enum BuzzerDebugOp {
     Trigger,
     Run,
+    Stop,
     Status,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum BuzzerDebugFeedbackCue {
+pub enum BuzzerDebugCue {
     UiInput,
     HeaterOn,
     HeaterOff,
@@ -1753,6 +1754,8 @@ pub enum BuzzerDebugFeedbackCue {
     ActiveCoolingOff,
     HeaterReject,
     ActiveCoolingReject,
+    ProtectionAlarm,
+    AttentionReminder,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1767,8 +1770,10 @@ pub enum BuzzerDebugScenario {
 pub struct BuzzerDebugRequest {
     pub lease_id: String,
     pub op: BuzzerDebugOp,
-    pub cue: Option<BuzzerDebugFeedbackCue>,
+    pub cue: Option<BuzzerDebugCue>,
     pub scenario: Option<BuzzerDebugScenario>,
+    #[serde(default)]
+    pub repeat: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1796,13 +1801,31 @@ pub struct BuzzerDebugTraceEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct BuzzerDebugOutputTraceEvent {
+    pub elapsed_ms: u32,
+    pub requested_frequency_hz: Option<u32>,
+    pub applied_frequency_hz: u32,
+    pub duty_percent: u8,
+    pub generation: u32,
+    pub timer_prescaler: u8,
+    pub timer_period_ticks: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct BuzzerDebugStatus {
     pub state: BuzzerDebugSessionState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scenario: Option<BuzzerDebugScenario>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cue: Option<BuzzerDebugCue>,
+    #[serde(default)]
+    pub repeat: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_cue: Option<String>,
     pub trace: Vec<BuzzerDebugTraceEvent>,
+    #[serde(default)]
+    pub output_trace: Vec<BuzzerDebugOutputTraceEvent>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2091,9 +2114,10 @@ struct UsbBuzzerDebugWire<'a> {
     request_id: &'a str,
     op: BuzzerDebugOp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    buzzer_cue: Option<BuzzerDebugFeedbackCue>,
+    buzzer_cue: Option<BuzzerDebugCue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     buzzer_scenario: Option<BuzzerDebugScenario>,
+    repeat: bool,
 }
 
 #[cfg(test)]
@@ -4607,7 +4631,9 @@ fn validate_buzzer_debug_request(payload: &BuzzerDebugRequest) -> Result<(), Htt
     let valid = match payload.op {
         BuzzerDebugOp::Trigger => payload.cue.is_some() && payload.scenario.is_none(),
         BuzzerDebugOp::Run => payload.cue.is_none() && payload.scenario.is_some(),
-        BuzzerDebugOp::Status => payload.cue.is_none() && payload.scenario.is_none(),
+        BuzzerDebugOp::Stop | BuzzerDebugOp::Status => {
+            payload.cue.is_none() && payload.scenario.is_none() && !payload.repeat
+        }
     };
     if valid {
         Ok(())
@@ -6861,6 +6887,7 @@ async fn serial_buzzer_debug(
         op: payload.op,
         buzzer_cue: payload.cue,
         buzzer_scenario: payload.scenario,
+        repeat: payload.repeat,
     })
     .map_err(|_| HttpError::internal("failed to encode USB buzzer debug request"))?;
     let result = serial_exchange(
@@ -10568,6 +10595,7 @@ mod tests {
             op: BuzzerDebugOp::Run,
             buzzer_cue: None,
             buzzer_scenario: Some(BuzzerDebugScenario::FeedbackReplace),
+            repeat: false,
         };
         let json = serde_json::to_value(wire).unwrap();
 
@@ -10584,8 +10612,9 @@ mod tests {
         let valid = BuzzerDebugRequest {
             lease_id: "lease-1".to_string(),
             op: BuzzerDebugOp::Trigger,
-            cue: Some(BuzzerDebugFeedbackCue::UiInput),
+            cue: Some(BuzzerDebugCue::UiInput),
             scenario: None,
+            repeat: false,
         };
         assert!(validate_buzzer_debug_request(&valid).is_ok());
 
@@ -10622,6 +10651,7 @@ mod tests {
                 op: BuzzerDebugOp::Status,
                 cue: None,
                 scenario: None,
+                repeat: false,
             }),
         )
         .await
@@ -12970,7 +13000,7 @@ mod tests {
     #[test]
     fn usb_response_decoder_extracts_buzzer_debug_payload() {
         let payload = decode_usb_response_line(
-            br#"{"type":"response","requestId":"buzzer-1","ok":true,"result":{"buzzer_debug":{"state":"complete","scenario":"feedback_replace","activeCue":"heater_on","trace":[{"elapsedMs":30,"decision":{"source":"developer_debug","cue":"heater_on","disposition":"replaced"}}]}}}"#,
+            br#"{"type":"response","requestId":"buzzer-1","ok":true,"result":{"buzzer_debug":{"state":"complete","scenario":"feedback_replace","activeCue":"heater_on","trace":[{"elapsedMs":30,"decision":{"source":"developer_debug","cue":"heater_on","disposition":"replaced"}}],"outputTrace":[{"elapsedMs":90,"requestedFrequencyHz":1680,"appliedFrequencyHz":1739,"dutyPercent":50,"generation":2,"timerPrescaler":22,"timerPeriodTicks":999}]}}}"#,
             "buzzer-1",
         )
         .unwrap()
@@ -12981,6 +13011,7 @@ mod tests {
         assert_eq!(status.scenario, Some(BuzzerDebugScenario::FeedbackReplace));
         assert_eq!(status.active_cue.as_deref(), Some("heater_on"));
         assert_eq!(status.trace[0].decision.disposition, "replaced");
+        assert_eq!(status.output_trace[0].applied_frequency_hz, 1_739);
     }
 
     #[test]

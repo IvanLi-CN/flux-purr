@@ -12,20 +12,21 @@
 
 - `Buzzer Cue`、`Cue Request`、`Cue Arbitration`、`Protection Cue`、`Attention Reminder`、`Feedback Cue`、`Pending Feedback`、`Audible Safety State` 与 `Developer Buzzer Diagnostic`：见根目录 `CONTEXT.md`。
 - Interface: 固件内部的 cue 仲裁边界接收携带语义来源的 Cue Request，并返回 `selected`、`preempted`、`queued`、`coalesced` 或 `dropped` 的仲裁结果。
-- Interface: 仅 cue 仲裁边界可启动或停止底层播放控制器；底层控制器继续输出已选 cue 的 tone/rest 步骤。
+- Interface: priority-2 software-interrupt executor 中的专用蜂鸣器时序任务是 `BuzzerArbiter`、底层播放控制器和 GPIO48 PWM 写入的唯一拥有者；业务模块只提交 Cue Request。
 
 ## Requirements
 
 ### REQ-BUZZER-ARBITRATION-001
 
 - 系统 MUST 在单一 cue 仲裁边界中选择 GPIO48 的唯一活动 cue；任何业务调用方不得直接替换底层正在播放的 cue。
+- 专用蜂鸣器时序任务 MUST 独占仲裁器、cue 步进和 GPIO48 duty 写入；它 MUST 运行在独立于业务主循环的 priority-2 software-interrupt executor 中，并在 cue step deadline 或 Cue Request 到达时运行；业务主循环不得推进 cue 或直接写 GPIO48。
 - Inputs: 前面板、运行时控制和 thermal attention 发出的 Cue Request，及其语义来源。
 - Outputs: 单一活动 cue、至多一个 Pending Feedback，以及可诊断的仲裁结果。
 
 ### REQ-BUZZER-ARBITRATION-002
 
 - 系统 MUST 以 `ProtectionAlarm > AttentionReminder > FeedbackCue` 的优先级仲裁请求。
-- `ProtectionAlarm` MUST 保留其既有内部 tone/rest 模式，但作为 non-looping one-shot 在热失控进入时立即播放，并在活动热失控期间以一秒节奏重播。
+- `ProtectionAlarm` MUST 保留其既有四步 tone/rest 节奏，并以固定 `2300Hz` 载波作为 non-looping one-shot 在热失控进入时立即播放；活动热失控期间以一秒节奏重播。
 - 活动 `ProtectionAlarm` MUST 立即抢占较低优先级 cue，并清除 Pending Feedback。
 
 ### REQ-BUZZER-ARBITRATION-003
@@ -50,6 +51,7 @@
 
 - 仲裁层 MUST 不改变已选 cue 内部的 tone/rest 顺序。
 - 底层 PWM 输出 MUST 继续保持 boot/idle 静音、GPIO48 独占，以及跨 duty-zero 静音间隙复用相同频率载波的既有契约。
+- 时序任务迟到时 MUST 先输出尚未实际写入的下一 step；它不得在一次 tick 中跳过 tone/rest step，尤其不得丢失短静音间隙。
 
 ### REQ-BUZZER-ARBITRATION-007
 
@@ -59,9 +61,9 @@
 ### REQ-BUZZER-ARBITRATION-008
 
 - 开发固件在显式启用 `buzzer-debug` feature 后，MUST 通过 native USB JSONL 与受 lease 保护的 `devd` 端点提供 `Developer Buzzer Diagnostic`；能力必须由 `buzzer_debug` identity capability 明确声明，且不得经 LAN 或产品 Web 控制面暴露。
-- 该诊断 MUST 只接受固定 Feedback Cue，或固定 `feedback_coalesce` / `feedback_replace` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交为 `DeveloperDebug` 来源；它不得暴露频率、占空比、原始步骤、Protection Cue、Attention Reminder 或持久化控制。
-- 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 trace MUST 只记录本诊断的仲裁结果，不得改变安全状态。
-- 在显示初始化完成后进入 runtime 前恢复状态的开发构建，MUST 继续提供该 feedback-only 诊断，同时 GPIO47 MUST 保持低电平，且不得初始化 heater PWM。
+- 该诊断 MUST 只接受生产 `BuzzerCueId` 或固定 `feedback_coalesce` / `feedback_replace` 仲裁场景，并且仍 MUST 通过 `BuzzerArbiter` 提交。`ProtectionAlarm` MUST 复用 production `ProtectionAlarmCadence` 和已存在的安全请求接口；`AttentionReminder` MUST 复用其十秒 cadence。它不得暴露频率、占空比、原始步骤或持久化控制。
+- 诊断触发 MUST 在加热、测温 fault、热保护 latch 或未确认的 thermal attention 存在时拒绝；返回的有限 decision trace MUST 只记录本诊断会话的仲裁结果。调试 build 还 MUST 返回由 GPIO48 所属 MCPWM timer2 只读寄存器得到的有限 output trace：每一项关联已请求的 cue 输出、timer `prescaler` / `period` 推导的实际 carrier、duty 与 generation，且只在同一 real-time 时序任务实际应用输出后记录。静音项的逻辑频率为 `null`，但 carrier 按普通固件的 duty-zero 复用合同保留。重复播放只能由显式 `repeat` 请求开始，并且 MUST 由显式 `stop` 请求结束。
+- `buzzer-debug` feature MUST 在标准运行时初始化、主循环、GPIO48 输出应用与 cue pattern 之上添加该受控测试会话；它不得使用恢复模式、替代传感器输入、替代 heater/GPIO 初始化或独立 PWM 路径。
 
 ## Verification
 
@@ -75,7 +77,7 @@
 
 - Method: 覆盖活动 `ProtectionAlarm` 与普通 cue 请求的确定性时序测试。
 - covers: `REQ-BUZZER-ARBITRATION-002`
-- Pass condition: 普通 cue 请求不会改变保护 cue 的后续步骤；保护 cue 保持 one-shot 且按一秒节奏重新开始。
+- Pass condition: 普通 cue 请求不会改变保护 cue 的后续步骤；保护 cue 保持固定载波 one-shot 且按一秒节奏重新开始。
 
 ### VER-BUZZER-ARBITRATION-003
 
@@ -97,9 +99,9 @@
 
 ### VER-BUZZER-ARBITRATION-006
 
-- Method: 既有 cue 步骤与 PWM 载波复用回归测试。
+- Method: cue step deadline、迟到 tick 与 PWM 载波复用回归测试。
 - covers: `REQ-BUZZER-ARBITRATION-006`
-- Pass condition: cue 内部频率序列保持，静音阶段只关闭 duty，相同下一频率不重配载波。
+- Pass condition: cue 内部频率序列保持，迟到 tick 仍依次输出 tone/rest，静音阶段只关闭 duty，相同下一频率不重配载波。
 
 ### VER-BUZZER-ARBITRATION-007
 
@@ -111,7 +113,7 @@
 
 - Method: feature-gated 固件 USB frame 与 `devd` request 验证测试。
 - covers: `REQ-BUZZER-ARBITRATION-008`
-- Pass condition: 只有声明 capability 的开发固件可接收固定 cue/scenario 请求；请求无法携带原始 PWM 或安全 cue 参数，并在热安全 interlock 存在时被拒绝。
+- Pass condition: 只有声明 capability 的开发固件可接收 production cue/scenario 请求；`protection_alarm --repeat` 与运行时共用一秒 cadence，请求无法携带原始 PWM 参数，并在真实热安全 interlock 存在时被拒绝。
 
 ## Related ADRs
 

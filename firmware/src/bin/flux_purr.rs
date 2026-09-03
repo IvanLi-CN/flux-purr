@@ -10,8 +10,8 @@ use alloc::{
     alloc::{Layout, alloc},
     boxed::Box,
 };
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-use core::sync::atomic::AtomicU32;
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use core::cell::RefCell;
 #[cfg(any(target_arch = "xtensa", test))]
 use core::sync::atomic::{AtomicU8, AtomicU16, Ordering};
 #[cfg(target_arch = "xtensa")]
@@ -22,6 +22,14 @@ use defmt::{info, warn};
 use embassy_embedded_hal::adapter::BlockingAsync;
 #[cfg(target_arch = "xtensa")]
 use embassy_executor::Spawner;
+#[cfg(target_arch = "xtensa")]
+use embassy_futures::select::{Either, Either3, select, select3};
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
+#[cfg(target_arch = "xtensa")]
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+};
 #[cfg(target_arch = "xtensa")]
 use embassy_time::{Duration, Instant, Timer as EmbassyTimer, with_timeout};
 #[cfg(target_arch = "xtensa")]
@@ -45,9 +53,10 @@ use esp_hal::{
     efuse::{AdcCalibUnit, Efuse},
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout},
+    interrupt::{Priority, software::SoftwareInterruptControl},
     mcpwm::{
         McPwm, PeripheralClockConfig,
-        operator::PwmPinConfig,
+        operator::{PwmPin, PwmPinConfig},
         timer::{CounterDirection, PwmWorkingMode},
     },
     spi::{
@@ -58,6 +67,8 @@ use esp_hal::{
     timer::timg::TimerGroup,
     usb_serial_jtag::UsbSerialJtag,
 };
+#[cfg(target_arch = "xtensa")]
+use esp_rtos::embassy::InterruptExecutor;
 #[cfg(target_arch = "xtensa")]
 use esp_storage::FlashStorage;
 #[cfg(test)]
@@ -78,16 +89,18 @@ use flux_purr_firmware::adapters::pd::{
 };
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::board::s3_frontpanel;
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-use flux_purr_firmware::buzzer::BuzzerDebugSession;
+#[cfg(target_arch = "xtensa")]
+use flux_purr_firmware::buzzer::BuzzerDecision;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::BuzzerOutput;
+#[cfg(test)]
+use flux_purr_firmware::buzzer::PROTECTION_ALARM_INTERVAL_MS;
 #[cfg(any(target_arch = "xtensa", test))]
 use flux_purr_firmware::buzzer::{
-    BuzzerArbiter, BuzzerCueId, BuzzerCueSource, BuzzerDecision, BuzzerDecisionDisposition,
+    BuzzerArbiter, BuzzerCueId, BuzzerCueSource, ProtectionAlarmCadence,
 };
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-use flux_purr_firmware::control_plane::BuzzerDebugOp;
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use flux_purr_firmware::buzzer::{BuzzerDebugSession, BuzzerDebugSessionState, BuzzerDebugStatus};
 #[cfg(any(test, all(target_arch = "xtensa", feature = "web_serial")))]
 use flux_purr_firmware::control_plane::EepromMaintenanceOp;
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
@@ -113,6 +126,8 @@ use flux_purr_firmware::control_plane::{
     UsbResponsePayload, calibration_state_from_memory, heater_curve_state_from_memory,
     network_from_memory, parse_usb_frame, write_usb_frame,
 };
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+use flux_purr_firmware::control_plane::{BuzzerDebugCommand, BuzzerDebugOp};
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 use flux_purr_firmware::control_plane::{
     CalibrationChannelWire, CalibrationConfigCommand, CalibrationConfigOp,
@@ -568,12 +583,11 @@ const FAN_PWM_PERIOD_TICKS: u16 = 99;
 const HEATER_PWM_PERIOD_TICKS: u16 = 1_599;
 #[cfg(any(target_arch = "xtensa", test))]
 const HEATER_WARMUP_SOFT_START_MS: u64 = 1_000;
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_PWM_PERIOD_TICKS: u16 = 999;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_IDLE_FREQUENCY_HZ: u32 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
-const BUZZER_PROTECTION_ALARM_INTERVAL_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 const BUZZER_ATTENTION_REMINDER_INTERVAL_MS: u64 = 10_000;
 #[cfg(target_arch = "xtensa")]
@@ -731,7 +745,7 @@ fn runtime_mode_label(mode: FrontPanelRuntimeMode) -> &'static str {
     }
 }
 
-#[cfg(any(target_arch = "xtensa", all(test, feature = "buzzer-debug")))]
+#[cfg(target_arch = "xtensa")]
 fn route_label(route: FrontPanelRoute) -> &'static str {
     match route {
         FrontPanelRoute::KeyTest => "key-test",
@@ -741,45 +755,6 @@ fn route_label(route: FrontPanelRoute) -> &'static str {
         FrontPanelRoute::ActiveCooling => "active-cooling",
         FrontPanelRoute::WifiInfo => "wifi-info",
         FrontPanelRoute::DeviceInfo => "device-info",
-    }
-}
-
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-static FRONTPANEL_PRESENTED_ROUTE: AtomicU8 = AtomicU8::new(0);
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-static FRONTPANEL_PRESENTATION_COUNT: AtomicU32 = AtomicU32::new(0);
-
-#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
-fn record_frontpanel_presentation(route: FrontPanelRoute) -> u32 {
-    let route_code = match route {
-        FrontPanelRoute::KeyTest => 1,
-        FrontPanelRoute::Dashboard => 2,
-        FrontPanelRoute::Menu => 3,
-        FrontPanelRoute::PresetTemp => 4,
-        FrontPanelRoute::ActiveCooling => 5,
-        FrontPanelRoute::WifiInfo => 6,
-        FrontPanelRoute::DeviceInfo => 7,
-    };
-    FRONTPANEL_PRESENTED_ROUTE.store(route_code, Ordering::Release);
-    FRONTPANEL_PRESENTATION_COUNT.fetch_add(1, Ordering::AcqRel) + 1
-}
-
-#[cfg(all(target_arch = "xtensa", not(feature = "buzzer-debug")))]
-fn record_frontpanel_presentation(_route: FrontPanelRoute) -> u32 {
-    0
-}
-
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-fn presented_frontpanel_route_label() -> Option<&'static str> {
-    match FRONTPANEL_PRESENTED_ROUTE.load(Ordering::Acquire) {
-        1 => Some("key-test"),
-        2 => Some("dashboard"),
-        3 => Some("menu"),
-        4 => Some("preset-temp"),
-        5 => Some("active-cooling"),
-        6 => Some("wifi-info"),
-        7 => Some("device-info"),
-        _ => None,
     }
 }
 
@@ -1787,6 +1762,11 @@ fn buzzer_timer_reconfiguration_needed(
     next_state
         .frequency_hz
         .is_some_and(|frequency_hz| frequency_hz != configured_frequency_hz)
+}
+
+#[cfg(any(test, all(target_arch = "xtensa", feature = "buzzer-debug")))]
+fn mcpwm_timer_frequency_hz(prescaler: u8, period_ticks: u16) -> u32 {
+    MCPWM_PERIPHERAL_CLOCK_HZ / (u32::from(prescaler) + 1) / (u32::from(period_ticks) + 1)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -3121,21 +3101,85 @@ fn should_clear_runtime_fault_latch(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+trait BuzzerCueSink {
+    fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, now_ms: u64);
+    fn activate_protection(&mut self, source: BuzzerCueSource, now_ms: u64);
+    fn request_protection_replay(&mut self, source: BuzzerCueSource, now_ms: u64);
+    fn enter_attention_pending(&mut self);
+    fn clear_attention(&mut self);
+    fn request_attention_reminder(&mut self, source: BuzzerCueSource, now_ms: u64);
+}
+
+#[cfg(test)]
+impl BuzzerCueSink for BuzzerArbiter {
+    fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, now_ms: u64) {
+        let _ = BuzzerArbiter::request_feedback(self, source, cue, now_ms);
+    }
+
+    fn activate_protection(&mut self, source: BuzzerCueSource, now_ms: u64) {
+        let _ = BuzzerArbiter::activate_protection(self, source, now_ms);
+    }
+
+    fn request_protection_replay(&mut self, source: BuzzerCueSource, now_ms: u64) {
+        let _ = BuzzerArbiter::request_protection_replay(self, source, now_ms);
+    }
+
+    fn enter_attention_pending(&mut self) {
+        let _ = BuzzerArbiter::enter_attention_pending(self);
+    }
+
+    fn clear_attention(&mut self) {
+        let _ = BuzzerArbiter::clear_attention(self);
+    }
+
+    fn request_attention_reminder(&mut self, source: BuzzerCueSource, now_ms: u64) {
+        let _ = BuzzerArbiter::request_attention_reminder(self, source, now_ms);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+impl BuzzerCueSink for BuzzerRuntime {
+    fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, now_ms: u64) {
+        BuzzerRuntime::request_feedback(self, source, cue, now_ms);
+    }
+
+    fn activate_protection(&mut self, source: BuzzerCueSource, now_ms: u64) {
+        BuzzerRuntime::activate_protection(self, source, now_ms);
+    }
+
+    fn request_protection_replay(&mut self, source: BuzzerCueSource, now_ms: u64) {
+        BuzzerRuntime::request_protection_replay(self, source, now_ms);
+    }
+
+    fn enter_attention_pending(&mut self) {
+        self.enter_attention_pending();
+    }
+
+    fn clear_attention(&mut self) {
+        self.clear_attention();
+    }
+
+    fn request_attention_reminder(&mut self, source: BuzzerCueSource, now_ms: u64) {
+        BuzzerRuntime::request_attention_reminder(self, source, now_ms);
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 struct FaultAttentionState<'a> {
     last_fault_present: &'a mut bool,
     attention_acknowledged: &'a mut bool,
     attention_pending_after_fault_clear: &'a mut bool,
     forced_fan_active: &'a mut bool,
-    next_protection_alarm_ms: &'a mut Option<u64>,
+    protection_alarm: &'a mut ProtectionAlarmCadence,
     next_attention_reminder_ms: &'a mut Option<u64>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn update_fault_attention_state(
+fn update_fault_attention_state<B: BuzzerCueSink>(
     fault_present: bool,
     state: FaultAttentionState<'_>,
     current_temp_c: i16,
-    buzzer: &mut BuzzerArbiter,
+    buzzer: &mut B,
     now_ms: u64,
 ) -> bool {
     let FaultAttentionState {
@@ -3143,7 +3187,7 @@ fn update_fault_attention_state(
         attention_acknowledged,
         attention_pending_after_fault_clear,
         forced_fan_active,
-        next_protection_alarm_ms,
+        protection_alarm,
         next_attention_reminder_ms,
     } = state;
     let mut changed = false;
@@ -3152,23 +3196,19 @@ fn update_fault_attention_state(
         *attention_acknowledged = false;
         *attention_pending_after_fault_clear = false;
         *forced_fan_active = true;
-        *next_protection_alarm_ms =
-            Some(now_ms.saturating_add(BUZZER_PROTECTION_ALARM_INTERVAL_MS));
         *next_attention_reminder_ms = None;
-        log_buzzer_decision(buzzer.activate_protection(BuzzerCueSource::ThermalProtection, now_ms));
+        protection_alarm.arm(now_ms);
+        buzzer.activate_protection(BuzzerCueSource::ThermalProtection, now_ms);
         changed = true;
     } else if !fault_present && *last_fault_present {
         *attention_pending_after_fault_clear = !*attention_acknowledged;
-        *next_protection_alarm_ms = None;
+        protection_alarm.clear();
         *next_attention_reminder_ms = attention_pending_after_fault_clear
             .then_some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
-        let decision = if *attention_pending_after_fault_clear {
-            buzzer.enter_attention_pending()
+        if *attention_pending_after_fault_clear {
+            buzzer.enter_attention_pending();
         } else {
-            buzzer.clear_attention()
-        };
-        if let Some(decision) = decision {
-            log_buzzer_decision(decision);
+            buzzer.clear_attention();
         }
         changed = true;
     }
@@ -3194,13 +3234,13 @@ fn overtemp_attention_requires_ack(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn acknowledge_overtemp_attention(
+fn acknowledge_overtemp_attention<B: BuzzerCueSink>(
     overtemp_active: bool,
     attention_acknowledged: &mut bool,
     attention_pending_after_fault_clear: &mut bool,
     forced_fan_active: &mut bool,
     next_attention_reminder_ms: &mut Option<u64>,
-    buzzer: &mut BuzzerArbiter,
+    buzzer: &mut B,
 ) -> bool {
     if !overtemp_attention_requires_ack(
         overtemp_active,
@@ -3214,31 +3254,23 @@ fn acknowledge_overtemp_attention(
     *attention_pending_after_fault_clear = false;
     *forced_fan_active = false;
     *next_attention_reminder_ms = None;
-    if !overtemp_active && let Some(decision) = buzzer.clear_attention() {
-        log_buzzer_decision(decision);
+    if !overtemp_active {
+        buzzer.clear_attention();
     }
     true
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn maybe_play_protection_alarm(
+fn maybe_play_protection_alarm<B: BuzzerCueSink>(
     fault_present: bool,
-    next_protection_alarm_ms: &mut Option<u64>,
-    buzzer: &mut BuzzerArbiter,
+    protection_alarm: &mut ProtectionAlarmCadence,
+    buzzer: &mut B,
     now_ms: u64,
 ) -> bool {
-    if !fault_present {
-        *next_protection_alarm_ms = None;
+    if !protection_alarm.replay_due(fault_present, now_ms) {
         return false;
     }
-    if !next_protection_alarm_ms.is_some_and(|next| now_ms >= next) {
-        return false;
-    }
-
-    log_buzzer_decision(
-        buzzer.request_protection_replay(BuzzerCueSource::ThermalProtection, now_ms),
-    );
-    *next_protection_alarm_ms = Some(now_ms.saturating_add(BUZZER_PROTECTION_ALARM_INTERVAL_MS));
+    buzzer.request_protection_replay(BuzzerCueSource::ThermalProtection, now_ms);
     true
 }
 
@@ -3272,11 +3304,11 @@ fn should_clear_attention_ack_suppression(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn maybe_play_attention_reminder(
+fn maybe_play_attention_reminder<B: BuzzerCueSink>(
     attention_pending_after_fault_clear: bool,
     fault_present: bool,
     next_attention_reminder_ms: &mut Option<u64>,
-    buzzer: &mut BuzzerArbiter,
+    buzzer: &mut B,
     now_ms: u64,
 ) -> bool {
     if !attention_pending_after_fault_clear || fault_present {
@@ -3284,9 +3316,7 @@ fn maybe_play_attention_reminder(
     }
 
     if next_attention_reminder_ms.is_some_and(|next| now_ms >= next) {
-        log_buzzer_decision(
-            buzzer.request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms),
-        );
+        buzzer.request_attention_reminder(BuzzerCueSource::ThermalAttention, now_ms);
         *next_attention_reminder_ms =
             Some(now_ms.saturating_add(BUZZER_ATTENTION_REMINDER_INTERVAL_MS));
         return true;
@@ -3296,21 +3326,18 @@ fn maybe_play_attention_reminder(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-fn maybe_play_frontpanel_ui_input_feedback(
+fn maybe_play_frontpanel_ui_input_feedback<B: BuzzerCueSink>(
     interaction_handled: bool,
     specialized_feedback_played: bool,
-    buzzer: &mut BuzzerArbiter,
+    buzzer: &mut B,
     now_ms: u64,
 ) -> bool {
     if !interaction_handled || specialized_feedback_played {
         return false;
     }
 
-    let decision =
-        buzzer.request_feedback(BuzzerCueSource::FrontPanel, BuzzerCueId::UiInput, now_ms);
-    let accepted = decision.disposition != BuzzerDecisionDisposition::Dropped;
-    log_buzzer_decision(decision);
-    accepted
+    buzzer.request_feedback(BuzzerCueSource::FrontPanel, BuzzerCueId::UiInput, now_ms);
+    true
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -3322,9 +3349,6 @@ fn log_buzzer_decision(decision: BuzzerDecision) {
         decision.disposition.label(),
     );
 }
-
-#[cfg(test)]
-fn log_buzzer_decision(_: BuzzerDecision) {}
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn temp_c_to_deci_c(temp_c: f32) -> i16 {
@@ -8028,7 +8052,8 @@ fn apply_buzzer_output<'a, PWM>(
     output: BuzzerOutput,
     last_state: &mut BuzzerHardwareState,
     configured_frequency_hz: &mut u32,
-) where
+) -> bool
+where
     PWM: SetDutyCycle,
 {
     let next_state = BuzzerHardwareState {
@@ -8037,7 +8062,7 @@ fn apply_buzzer_output<'a, PWM>(
         generation: output.generation,
     };
     if *last_state == next_state {
-        return;
+        return false;
     }
 
     if buzzer_timer_reconfiguration_needed(*configured_frequency_hz, next_state) {
@@ -8066,6 +8091,385 @@ fn apply_buzzer_output<'a, PWM>(
         next_state.generation,
     );
     *last_state = next_state;
+    true
+}
+
+#[cfg(target_arch = "xtensa")]
+const BUZZER_COMMAND_CAPACITY: usize = 32;
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone)]
+enum BuzzerRuntimeCommand {
+    Feedback {
+        source: BuzzerCueSource,
+        cue: BuzzerCueId,
+    },
+    ProtectionReplay {
+        source: BuzzerCueSource,
+    },
+    RequestAttentionReminder {
+        source: BuzzerCueSource,
+    },
+    #[cfg(feature = "buzzer-debug")]
+    Debug(BuzzerDebugCommand),
+}
+
+#[cfg(target_arch = "xtensa")]
+#[derive(Debug, Clone, Copy)]
+enum BuzzerSafetyCommand {
+    ActivateProtection { source: BuzzerCueSource },
+    EnterAttentionPending,
+    ClearAttention,
+}
+
+#[cfg(target_arch = "xtensa")]
+static BUZZER_COMMANDS: Channel<
+    CriticalSectionRawMutex,
+    BuzzerRuntimeCommand,
+    BUZZER_COMMAND_CAPACITY,
+> = Channel::new();
+
+#[cfg(target_arch = "xtensa")]
+static BUZZER_SAFETY_COMMAND: Signal<CriticalSectionRawMutex, BuzzerSafetyCommand> = Signal::new();
+
+// GPIO48 transitions have 25-80 ms deadlines. Keep their sole owner out of the
+// thread-mode executor, where display or control work can otherwise defer a cue
+// transition until the next cooperative poll.
+#[cfg(target_arch = "xtensa")]
+static BUZZER_REALTIME_EXECUTOR: StaticCell<InterruptExecutor<1>> = StaticCell::new();
+
+/// Runtime callers submit cue requests. The dedicated task owns arbitration,
+/// cue progression, and every GPIO48 PWM write.
+#[cfg(target_arch = "xtensa")]
+#[derive(Default)]
+struct BuzzerRuntime;
+
+#[cfg(target_arch = "xtensa")]
+impl BuzzerRuntime {
+    fn submit(command: BuzzerRuntimeCommand) {
+        if BUZZER_COMMANDS.try_send(command).is_err() {
+            // Feedback is best effort, but this capacity is intentionally far
+            // larger than one front-panel/control-loop iteration can produce.
+            warn!("buzzer command mailbox full");
+        }
+    }
+
+    fn request_feedback(&mut self, source: BuzzerCueSource, cue: BuzzerCueId, _: u64) {
+        Self::submit(BuzzerRuntimeCommand::Feedback { source, cue });
+    }
+
+    fn activate_protection(&mut self, source: BuzzerCueSource, _: u64) {
+        BUZZER_SAFETY_COMMAND.signal(BuzzerSafetyCommand::ActivateProtection { source });
+    }
+
+    fn request_protection_replay(&mut self, source: BuzzerCueSource, _: u64) {
+        Self::submit(BuzzerRuntimeCommand::ProtectionReplay { source });
+    }
+
+    fn enter_attention_pending(&mut self) {
+        BUZZER_SAFETY_COMMAND.signal(BuzzerSafetyCommand::EnterAttentionPending);
+    }
+
+    fn clear_attention(&mut self) {
+        BUZZER_SAFETY_COMMAND.signal(BuzzerSafetyCommand::ClearAttention);
+    }
+
+    fn request_attention_reminder(&mut self, source: BuzzerCueSource, _: u64) {
+        Self::submit(BuzzerRuntimeCommand::RequestAttentionReminder { source });
+    }
+
+    #[cfg(feature = "buzzer-debug")]
+    fn submit_debug(command: BuzzerDebugCommand) {
+        Self::submit(BuzzerRuntimeCommand::Debug(command));
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+type BuzzerDebugStatusMutex = BlockingMutex<CriticalSectionRawMutex, RefCell<BuzzerDebugStatus>>;
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+static BUZZER_DEBUG_STATUS: BuzzerDebugStatusMutex =
+    BlockingMutex::new(RefCell::new(BuzzerDebugStatus {
+        state: BuzzerDebugSessionState::Idle,
+        scenario: None,
+        cue: None,
+        repeat: false,
+        active_cue: None,
+        trace: heapless::Vec::new(),
+        output_trace: heapless::Vec::new(),
+    }));
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+fn buzzer_debug_status() -> BuzzerDebugStatus {
+    BUZZER_DEBUG_STATUS.lock(|status| status.borrow().clone())
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+fn publish_buzzer_debug_status(
+    session: &BuzzerDebugSession,
+    arbiter: &BuzzerArbiter,
+    output_trace: &BuzzerDebugOutputTrace,
+) {
+    let mut status = session.status(arbiter.active_cue());
+    status.output_trace = output_trace.events.clone();
+    BUZZER_DEBUG_STATUS.lock(|published| *published.borrow_mut() = status);
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+struct BuzzerDebugOutputTrace {
+    started_at_ms: u64,
+    events: heapless::Vec<
+        flux_purr_firmware::buzzer::BuzzerDebugOutputTraceEvent,
+        { flux_purr_firmware::buzzer::BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY },
+    >,
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+impl BuzzerDebugOutputTrace {
+    const fn new() -> Self {
+        Self {
+            started_at_ms: 0,
+            events: heapless::Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, now_ms: u64) {
+        self.started_at_ms = now_ms;
+        self.events.clear();
+    }
+
+    fn record(&mut self, now_ms: u64, output: BuzzerOutput) {
+        // The buzzer task exclusively owns timer2 writes. This direct PAC
+        // access reads CFG0 only, after `apply_buzzer_output` has completed.
+        let cfg0 = unsafe { (&*esp_hal::peripherals::MCPWM0::PTR).timer(2).cfg0().read() };
+        let timer_prescaler = cfg0.prescale().bits();
+        let timer_period_ticks = cfg0.period().bits();
+        if self.events.len() == flux_purr_firmware::buzzer::BUZZER_DEBUG_OUTPUT_TRACE_CAPACITY {
+            let _ = self.events.remove(0);
+        }
+        let _ = self
+            .events
+            .push(flux_purr_firmware::buzzer::BuzzerDebugOutputTraceEvent {
+                elapsed_ms: now_ms
+                    .saturating_sub(self.started_at_ms)
+                    .min(u64::from(u32::MAX)) as u32,
+                requested_frequency_hz: output.frequency_hz,
+                applied_frequency_hz: mcpwm_timer_frequency_hz(timer_prescaler, timer_period_ticks),
+                duty_percent: output.duty_percent.min(100),
+                generation: output.generation,
+                timer_prescaler,
+                timer_period_ticks,
+            });
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn apply_buzzer_command(
+    command: BuzzerRuntimeCommand,
+    arbiter: &mut BuzzerArbiter,
+    now_ms: u64,
+    #[cfg(feature = "buzzer-debug")] debug: &mut BuzzerDebugSession,
+) {
+    let decision = match command {
+        BuzzerRuntimeCommand::Feedback { source, cue } => {
+            Some(arbiter.request_feedback(source, cue, now_ms))
+        }
+        BuzzerRuntimeCommand::ProtectionReplay { source } => {
+            Some(arbiter.request_protection_replay(source, now_ms))
+        }
+        BuzzerRuntimeCommand::RequestAttentionReminder { source } => {
+            Some(arbiter.request_attention_reminder(source, now_ms))
+        }
+        #[cfg(feature = "buzzer-debug")]
+        BuzzerRuntimeCommand::Debug(command) => {
+            apply_buzzer_debug_command(debug, arbiter, command, now_ms);
+            None
+        }
+    };
+    if let Some(decision) = decision {
+        log_buzzer_decision(decision);
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn apply_buzzer_safety_command(
+    command: BuzzerSafetyCommand,
+    arbiter: &mut BuzzerArbiter,
+    now_ms: u64,
+) {
+    let decision = match command {
+        BuzzerSafetyCommand::ActivateProtection { source } => {
+            Some(arbiter.activate_protection(source, now_ms))
+        }
+        BuzzerSafetyCommand::EnterAttentionPending => arbiter.enter_attention_pending(),
+        BuzzerSafetyCommand::ClearAttention => arbiter.clear_attention(),
+    };
+    if let Some(decision) = decision {
+        log_buzzer_decision(decision);
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "buzzer-debug"))]
+fn apply_buzzer_debug_command(
+    debug: &mut BuzzerDebugSession,
+    arbiter: &mut BuzzerArbiter,
+    command: BuzzerDebugCommand,
+    now_ms: u64,
+) {
+    match command.op {
+        BuzzerDebugOp::Status => return,
+        BuzzerDebugOp::Trigger => {
+            let cue = command.cue.expect("validated debug trigger cue");
+            if command.repeat
+                || matches!(
+                    cue,
+                    BuzzerCueId::ProtectionAlarm | BuzzerCueId::AttentionReminder
+                )
+            {
+                match debug.start_playback(arbiter, cue, command.repeat, now_ms) {
+                    Ok(decisions) => {
+                        for decision in decisions {
+                            log_buzzer_decision(decision);
+                        }
+                    }
+                    Err(_) => warn!("buzzer debug command ignored while a session is active"),
+                }
+            } else {
+                let decision = debug.trigger_feedback(arbiter, cue, now_ms);
+                log_buzzer_decision(decision);
+            }
+        }
+        BuzzerDebugOp::Run => match debug.start_scenario(
+            arbiter,
+            command.scenario.expect("validated debug scenario"),
+            now_ms,
+        ) {
+            Ok(decisions) => {
+                for decision in decisions {
+                    log_buzzer_decision(decision);
+                }
+            }
+            Err(_) => warn!("buzzer debug command ignored while a session is active"),
+        },
+        BuzzerDebugOp::Stop => {
+            if let Some(decision) = debug.stop_playback(arbiter, now_ms) {
+                log_buzzer_decision(decision);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[embassy_executor::task]
+async fn run_buzzer_task(
+    mut buzzer_timer: esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'static>>,
+    mut buzzer_pwm: PwmPin<'static, esp_hal::peripherals::MCPWM0<'static>, 2, true>,
+    peripheral_clock: PeripheralClockConfig,
+) -> ! {
+    let mut arbiter = BuzzerArbiter::new();
+    let mut applied = BuzzerHardwareState::default();
+    let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
+    #[cfg(feature = "buzzer-debug")]
+    let mut debug = BuzzerDebugSession::new();
+    #[cfg(feature = "buzzer-debug")]
+    let mut output_trace = BuzzerDebugOutputTrace::new();
+
+    loop {
+        let now_ms = Instant::now().as_millis();
+        #[cfg(feature = "buzzer-debug")]
+        for decision in debug.advance(&mut arbiter, now_ms) {
+            log_buzzer_decision(decision);
+        }
+
+        let tick = arbiter.tick(now_ms);
+        if let Some(decision) = tick.deferred_start {
+            log_buzzer_decision(decision);
+            #[cfg(feature = "buzzer-debug")]
+            debug.record_deferred_start(now_ms, decision);
+        }
+        #[cfg(feature = "buzzer-debug")]
+        debug.settle_after_tick(&mut arbiter);
+        let output = arbiter.output();
+        let _output_changed = apply_buzzer_output(
+            &mut buzzer_timer,
+            &mut buzzer_pwm,
+            &peripheral_clock,
+            output,
+            &mut applied,
+            &mut configured_frequency_hz,
+        );
+        #[cfg(feature = "buzzer-debug")]
+        if _output_changed {
+            output_trace.record(now_ms, output);
+        }
+        #[cfg(feature = "buzzer-debug")]
+        publish_buzzer_debug_status(&debug, &arbiter, &output_trace);
+
+        let next_deadline_ms = arbiter.next_transition_ms();
+        #[cfg(feature = "buzzer-debug")]
+        let next_deadline_ms = match debug.next_deadline_ms() {
+            Some(debug_deadline_ms) => Some(match next_deadline_ms {
+                Some(deadline_ms) => deadline_ms.min(debug_deadline_ms),
+                None => debug_deadline_ms,
+            }),
+            None => next_deadline_ms,
+        };
+
+        enum BuzzerTaskWake {
+            Command(BuzzerRuntimeCommand),
+            Safety(BuzzerSafetyCommand),
+        }
+
+        let wake = if let Some(deadline_ms) = next_deadline_ms {
+            let delay_ms = deadline_ms
+                .saturating_sub(Instant::now().as_millis())
+                .max(1);
+            match select3(
+                BUZZER_COMMANDS.receive(),
+                BUZZER_SAFETY_COMMAND.wait(),
+                EmbassyTimer::after_millis(delay_ms),
+            )
+            .await
+            {
+                Either3::First(command) => Some(BuzzerTaskWake::Command(command)),
+                Either3::Second(command) => Some(BuzzerTaskWake::Safety(command)),
+                Either3::Third(_) => None,
+            }
+        } else {
+            match select(BUZZER_COMMANDS.receive(), BUZZER_SAFETY_COMMAND.wait()).await {
+                Either::First(command) => Some(BuzzerTaskWake::Command(command)),
+                Either::Second(command) => Some(BuzzerTaskWake::Safety(command)),
+            }
+        };
+
+        if let Some(wake) = wake {
+            let now_ms = Instant::now().as_millis();
+            match wake {
+                BuzzerTaskWake::Command(command) => {
+                    #[cfg(feature = "buzzer-debug")]
+                    if matches!(
+                        &command,
+                        BuzzerRuntimeCommand::Debug(BuzzerDebugCommand {
+                            op: BuzzerDebugOp::Trigger | BuzzerDebugOp::Run,
+                            ..
+                        })
+                    ) {
+                        output_trace.reset(now_ms);
+                    }
+                    apply_buzzer_command(
+                        command,
+                        &mut arbiter,
+                        now_ms,
+                        #[cfg(feature = "buzzer-debug")]
+                        &mut debug,
+                    )
+                }
+                BuzzerTaskWake::Safety(command) => {
+                    apply_buzzer_safety_command(command, &mut arbiter, now_ms)
+                }
+            }
+        }
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -8418,14 +8822,6 @@ fn usb_runtime_status_with_calibration(
         )
     };
     status.thermal_plant_model = thermal_plant_runtime_wire(memory_config);
-    #[cfg(feature = "buzzer-debug")]
-    {
-        status.frontpanel_route = Some(error_code_string(route_label(ui_state.route)));
-        status.frontpanel_presented_route =
-            presented_frontpanel_route_label().map(error_code_string);
-        status.frontpanel_presentation_count =
-            FRONTPANEL_PRESENTATION_COUNT.load(Ordering::Acquire);
-    }
     status
 }
 
@@ -10770,154 +11166,6 @@ fn poll_usb_early_control(
     }
 }
 
-#[cfg(all(any(target_arch = "xtensa", test), feature = "buzzer-debug"))]
-fn usb_buzzer_recovery_response(
-    line: &str,
-    memory_config: &MemoryConfig,
-    elapsed_ms: u64,
-    buzzer: &mut BuzzerArbiter,
-    buzzer_debug: &mut BuzzerDebugSession,
-) -> UsbFrame {
-    let Ok(UsbFrame::BuzzerDebug {
-        request_id,
-        command,
-    }) = parse_usb_frame(line)
-    else {
-        return usb_recovery_response_for_phase(
-            line,
-            memory_config,
-            elapsed_ms,
-            UsbRecoveryPhase::BeforePersistentState,
-        );
-    };
-
-    if !command.is_valid() {
-        return usb_error_response(
-            request_id,
-            "invalid_buzzer_debug_command",
-            "buzzer_debug requires exactly the fields for its operation.",
-        );
-    }
-
-    match command.op {
-        BuzzerDebugOp::Status => UsbFrame::BuzzerDebugResponse {
-            request_id,
-            status: Box::new(buzzer_debug.status(buzzer.active_cue())),
-        },
-        BuzzerDebugOp::Trigger => {
-            log_buzzer_decision(buzzer_debug.trigger_feedback(
-                buzzer,
-                command.cue.expect("validated debug trigger cue"),
-                elapsed_ms,
-            ));
-            UsbFrame::BuzzerDebugResponse {
-                request_id,
-                status: Box::new(buzzer_debug.status(buzzer.active_cue())),
-            }
-        }
-        BuzzerDebugOp::Run => match buzzer_debug.start_scenario(
-            buzzer,
-            command.scenario.expect("validated debug scenario"),
-            elapsed_ms,
-        ) {
-            Ok(decisions) => {
-                for decision in decisions {
-                    log_buzzer_decision(decision);
-                }
-                UsbFrame::BuzzerDebugResponse {
-                    request_id,
-                    status: Box::new(buzzer_debug.status(buzzer.active_cue())),
-                }
-            }
-            Err(_) => usb_error_response(
-                request_id,
-                "buzzer_debug_busy",
-                "A buzzer debug scenario is already running.",
-            ),
-        },
-    }
-}
-
-#[cfg(all(
-    target_arch = "xtensa",
-    feature = "web_serial",
-    feature = "buzzer-debug"
-))]
-async fn run_usb_buzzer_recovery_control_loop<'a, PWM>(
-    usb: &mut RawUsbSerialJtag,
-    rx_line: &mut heapless::String<USB_CONTROL_LINE_CAPACITY>,
-    tx_buf: &mut [u8; USB_CONTROL_TX_BUFFER_LEN],
-    memory_config: &MemoryConfig,
-    status_light_state: StatusLightState,
-    buzzer_timer: &mut esp_hal::mcpwm::timer::Timer<2, esp_hal::peripherals::MCPWM0<'a>>,
-    buzzer_pwm: &mut PWM,
-    peripheral_clock: &PeripheralClockConfig,
-) -> !
-where
-    PWM: SetDutyCycle,
-{
-    set_status_light_state(status_light_state);
-    let mut elapsed_ms = 0_u64;
-    let mut buzzer = BuzzerArbiter::new();
-    let mut buzzer_debug = BuzzerDebugSession::new();
-    let mut output_applied = BuzzerHardwareState::default();
-    let mut timer_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
-    apply_buzzer_output(
-        buzzer_timer,
-        buzzer_pwm,
-        peripheral_clock,
-        buzzer.tick(0).output,
-        &mut output_applied,
-        &mut timer_frequency_hz,
-    );
-
-    info!("buzzer debug recovery active: heater output remains held low");
-    loop {
-        loop {
-            match usb.read_byte() {
-                Ok(b'\n') => {
-                    let response = usb_buzzer_recovery_response(
-                        rx_line.as_str(),
-                        memory_config,
-                        elapsed_ms,
-                        &mut buzzer,
-                        &mut buzzer_debug,
-                    );
-                    usb_write_response_frame(usb, &response, tx_buf);
-                    rx_line.clear();
-                }
-                Ok(b'\r') => {}
-                Ok(byte) => {
-                    if rx_line.push(char::from(byte)).is_err() {
-                        rx_line.clear();
-                    }
-                }
-                Err(nb::Error::WouldBlock) => break,
-                Err(_) => break,
-            }
-        }
-
-        EmbassyTimer::after_millis(20).await;
-        elapsed_ms = elapsed_ms.saturating_add(20);
-        for decision in buzzer_debug.advance(&mut buzzer, elapsed_ms) {
-            log_buzzer_decision(decision);
-        }
-        let buzzer_tick = buzzer.tick(elapsed_ms);
-        if let Some(decision) = buzzer_tick.deferred_start {
-            log_buzzer_decision(decision);
-            buzzer_debug.record_deferred_start(elapsed_ms, decision);
-        }
-        apply_buzzer_output(
-            buzzer_timer,
-            buzzer_pwm,
-            peripheral_clock,
-            buzzer_tick.output,
-            &mut output_applied,
-            &mut timer_frequency_hz,
-        );
-    }
-}
-
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 async fn run_usb_recovery_control_loop(
     usb: &mut RawUsbSerialJtag,
@@ -11143,8 +11391,7 @@ async fn process_control_line(
     attention_pending_after_fault_clear: &mut bool,
     overtemp_forced_fan_active: &mut bool,
     next_attention_reminder_ms: &mut Option<u64>,
-    buzzer: &mut BuzzerArbiter,
-    #[cfg(feature = "buzzer-debug")] buzzer_debug: &mut BuzzerDebugSession,
+    buzzer: &mut BuzzerRuntime,
     thermal_control_profile_preview: &mut Option<ThermalControlProfile>,
     last_raw_state: FrontPanelRawState,
     latest_status_temp_c: f32,
@@ -11461,11 +11708,11 @@ async fn process_control_line(
             }
             if heater_rearm_requested && (overtemp_active || *attention_pending_after_fault_clear) {
                 config.heater_enabled = Some(false);
-                log_buzzer_decision(buzzer.request_feedback(
+                buzzer.request_feedback(
                     BuzzerCueSource::RuntimeControl,
                     BuzzerCueId::HeaterReject,
                     elapsed_ms,
-                ));
+                );
                 info!("heater runtime arm rejected by overtemp attention state");
             }
             if should_clear_runtime_fault_latch(
@@ -11524,40 +11771,47 @@ async fn process_control_line(
                 match command.op {
                     BuzzerDebugOp::Status => UsbFrame::BuzzerDebugResponse {
                         request_id,
-                        status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+                        status: Box::new(buzzer_debug_status()),
                     },
                     BuzzerDebugOp::Trigger => {
-                        let decision = buzzer_debug.trigger_feedback(
-                            buzzer,
-                            command.cue.expect("validated debug trigger cue"),
-                            elapsed_ms,
-                        );
-                        log_buzzer_decision(decision);
-                        UsbFrame::BuzzerDebugResponse {
-                            request_id,
-                            status: Box::new(buzzer_debug.status(buzzer.active_cue())),
-                        }
-                    }
-                    BuzzerDebugOp::Run => match buzzer_debug.start_scenario(
-                        buzzer,
-                        command.scenario.expect("validated debug scenario"),
-                        elapsed_ms,
-                    ) {
-                        Ok(decisions) => {
-                            for decision in decisions {
-                                log_buzzer_decision(decision);
-                            }
+                        let status = buzzer_debug_status();
+                        if status.state == BuzzerDebugSessionState::Running {
+                            usb_error_response(
+                                request_id,
+                                "buzzer_debug_busy",
+                                "A buzzer debug scenario is already running.",
+                            )
+                        } else {
+                            BuzzerRuntime::submit_debug(command);
                             UsbFrame::BuzzerDebugResponse {
                                 request_id,
-                                status: Box::new(buzzer_debug.status(buzzer.active_cue())),
+                                status: Box::new(status),
                             }
                         }
-                        Err(_) => usb_error_response(
+                    }
+                    BuzzerDebugOp::Run => {
+                        let status = buzzer_debug_status();
+                        if status.state != BuzzerDebugSessionState::Running {
+                            BuzzerRuntime::submit_debug(command);
+                            UsbFrame::BuzzerDebugResponse {
+                                request_id,
+                                status: Box::new(status),
+                            }
+                        } else {
+                            usb_error_response(
+                                request_id,
+                                "buzzer_debug_busy",
+                                "A buzzer debug scenario is already running.",
+                            )
+                        }
+                    }
+                    BuzzerDebugOp::Stop => {
+                        BuzzerRuntime::submit_debug(command);
+                        UsbFrame::BuzzerDebugResponse {
                             request_id,
-                            "buzzer_debug_busy",
-                            "A buzzer debug scenario is already running.",
-                        ),
-                    },
+                            status: Box::new(buzzer_debug_status()),
+                        }
+                    }
                 }
             }
         }
@@ -12078,11 +12332,9 @@ where
 {
     present_ui(display, canvas, state)?;
     display.flush().await?;
-    let presentation_count = record_frontpanel_presentation(state.route);
     info!(
-        "frontpanel presentation committed route={=str} count={=u32}",
-        route_label(state.route),
-        presentation_count,
+        "frontpanel presentation committed route={=str}",
+        route_label(state.route)
     );
     Ok(())
 }
@@ -12540,6 +12792,12 @@ async fn main(_spawner: Spawner) {
     init_runtime_heap();
     let timg0 = TimerGroup::new(peripherals.TIMG0);
     esp_rtos::start(timg0.timer0);
+    let software_interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    let buzzer_realtime_spawner = BUZZER_REALTIME_EXECUTOR
+        .init(InterruptExecutor::new(
+            software_interrupts.software_interrupt1,
+        ))
+        .start(Priority::Priority2);
     let status_light_started_ms = Instant::now().as_millis();
     let status_light_red = Output::new(peripherals.GPIO39, Level::High, OutputConfig::default());
     let status_light_green = Output::new(peripherals.GPIO38, Level::High, OutputConfig::default());
@@ -12734,39 +12992,6 @@ async fn main(_spawner: Spawner) {
     }
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=display_flush_complete\n");
-    #[cfg(feature = "buzzer-debug")]
-    let mut heater_safe = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
-    #[cfg(feature = "buzzer-debug")]
-    heater_safe.set_low();
-    #[cfg(feature = "buzzer-debug")]
-    let pwm_clock_cfg =
-        PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
-            .expect("failed to derive MCPWM peripheral clock");
-    #[cfg(feature = "buzzer-debug")]
-    let mut mcpwm = McPwm::new(peripherals.MCPWM0, pwm_clock_cfg);
-    #[cfg(feature = "buzzer-debug")]
-    mcpwm.operator2.set_timer(&mcpwm.timer2);
-    #[cfg(feature = "buzzer-debug")]
-    let mut buzzer_pwm = mcpwm
-        .operator2
-        .with_pin_a(peripherals.GPIO48, PwmPinConfig::UP_ACTIVE_HIGH);
-    #[cfg(feature = "buzzer-debug")]
-    let buzzer_timer_cfg = pwm_clock_cfg
-        .timer_clock_with_frequency(
-            BUZZER_PWM_PERIOD_TICKS,
-            PwmWorkingMode::Increase,
-            Rate::from_hz(BUZZER_IDLE_FREQUENCY_HZ),
-        )
-        .expect("failed to derive buzzer PWM timer clock");
-    #[cfg(feature = "buzzer-debug")]
-    mcpwm.timer2.start(buzzer_timer_cfg);
-    #[cfg(feature = "buzzer-debug")]
-    let _ = buzzer_pwm.set_duty_cycle_percent(0);
-    #[cfg(feature = "buzzer-debug")]
-    info!(
-        "buzzer debug armed before PD: gpio48 silent period_ticks={=u16}",
-        BUZZER_PWM_PERIOD_TICKS,
-    );
     info!("scene={=str}", SceneId::StartupCalibration.label());
     for _ in 0..45 {
         #[cfg(feature = "web_serial")]
@@ -12785,9 +13010,6 @@ async fn main(_spawner: Spawner) {
     );
 
     if runtime_mode == FrontPanelRuntimeMode::KeyTest {
-        #[cfg(feature = "buzzer-debug")]
-        let mut _heater_safe = heater_safe;
-        #[cfg(not(feature = "buzzer-debug"))]
         let mut _heater_safe = Output::new(peripherals.GPIO47, Level::Low, OutputConfig::default());
         _heater_safe.set_low();
         let mut _fan_enable_safe =
@@ -12799,20 +13021,6 @@ async fn main(_spawner: Spawner) {
         info!("key-test runtime ready: gpio47/gpio35/gpio36 held safe-off without PD/RTD bring-up");
         match run_key_test_runtime(&mut display, canvas, inputs, status_light_started_ms).await {
             Err(()) => {
-                #[cfg(all(feature = "web_serial", feature = "buzzer-debug"))]
-                run_usb_buzzer_recovery_control_loop(
-                    &mut usb_serial,
-                    &mut usb_rx_line,
-                    usb_tx_buf,
-                    &usb_boot_memory_config,
-                    StatusLightState::HeaterInterlocked,
-                    &mut mcpwm.timer2,
-                    &mut buzzer_pwm,
-                    &pwm_clock_cfg,
-                )
-                .await;
-
-                #[cfg(all(feature = "web_serial", not(feature = "buzzer-debug")))]
                 #[cfg(feature = "web_serial")]
                 run_usb_recovery_control_loop(
                     &mut usb_serial,
@@ -12985,11 +13193,9 @@ async fn main(_spawner: Spawner) {
     #[cfg(feature = "web_serial")]
     let _ = usb_write_bytes_bounded(&mut usb_serial, b"boot_stage=outputs_init_start\n");
     let mut fan_enable = Output::new(peripherals.GPIO35, Level::Low, OutputConfig::default());
-    #[cfg(not(feature = "buzzer-debug"))]
     let pwm_clock_cfg =
         PeripheralClockConfig::with_frequency(Rate::from_hz(MCPWM_PERIPHERAL_CLOCK_HZ))
             .expect("failed to derive MCPWM peripheral clock");
-    #[cfg(not(feature = "buzzer-debug"))]
     let mut mcpwm = McPwm::new(peripherals.MCPWM0, pwm_clock_cfg);
 
     mcpwm.operator0.set_timer(&mcpwm.timer0);
@@ -13024,12 +13230,6 @@ async fn main(_spawner: Spawner) {
     );
 
     mcpwm.operator1.set_timer(&mcpwm.timer1);
-    #[cfg(feature = "buzzer-debug")]
-    let mut heater_pwm = mcpwm.operator1.with_pin_a(
-        heater_safe.into_peripheral_output(),
-        PwmPinConfig::UP_ACTIVE_HIGH,
-    );
-    #[cfg(not(feature = "buzzer-debug"))]
     let mut heater_pwm = mcpwm
         .operator1
         .with_pin_a(peripherals.GPIO47, PwmPinConfig::UP_ACTIVE_HIGH);
@@ -13043,13 +13243,10 @@ async fn main(_spawner: Spawner) {
     mcpwm.timer1.start(heater_timer_cfg);
     let _ = heater_pwm.set_duty_cycle_percent(0);
 
-    #[cfg(not(feature = "buzzer-debug"))]
     mcpwm.operator2.set_timer(&mcpwm.timer2);
-    #[cfg(not(feature = "buzzer-debug"))]
     let mut buzzer_pwm = mcpwm
         .operator2
         .with_pin_a(peripherals.GPIO48, PwmPinConfig::UP_ACTIVE_HIGH);
-    #[cfg(not(feature = "buzzer-debug"))]
     let buzzer_timer_cfg = pwm_clock_cfg
         .timer_clock_with_frequency(
             BUZZER_PWM_PERIOD_TICKS,
@@ -13057,14 +13254,15 @@ async fn main(_spawner: Spawner) {
             Rate::from_hz(BUZZER_IDLE_FREQUENCY_HZ),
         )
         .expect("failed to derive buzzer PWM timer clock");
-    #[cfg(not(feature = "buzzer-debug"))]
     mcpwm.timer2.start(buzzer_timer_cfg);
-    #[cfg(not(feature = "buzzer-debug"))]
     let _ = buzzer_pwm.set_duty_cycle_percent(0);
     info!(
         "buzzer runtime armed: gpio48 default=silent period_ticks={=u16}",
         BUZZER_PWM_PERIOD_TICKS,
     );
+    buzzer_realtime_spawner
+        .spawn(run_buzzer_task(mcpwm.timer2, buzzer_pwm, pwm_clock_cfg))
+        .expect("failed to spawn realtime buzzer task");
     let mut last_pd_observation = initial_pd_observation;
     if let Some(PdStatusObservation {
         status_raw,
@@ -13389,9 +13587,7 @@ async fn main(_spawner: Spawner) {
         fan_command,
         &mut last_fan_command,
     );
-    let mut buzzer = BuzzerArbiter::new();
-    #[cfg(feature = "buzzer-debug")]
-    let mut buzzer_debug = BuzzerDebugSession::new();
+    let mut buzzer = BuzzerRuntime;
     let mut last_fault_present = is_overtemp_fault(current_rtd_fault);
     let mut overtemp_attention_acknowledged = false;
     let mut attention_pending_after_fault_clear = false;
@@ -13401,22 +13597,12 @@ async fn main(_spawner: Spawner) {
     let mut suppress_attention_ack_event_seen = false;
     let mut suppress_attention_ack_clear_delay_ms = FRONTPANEL_DEBOUNCE_MS;
     let mut suppress_attention_ack_clear_after_ms: Option<u64> = None;
-    let mut next_protection_alarm_ms: Option<u64> = None;
+    let mut protection_alarm = ProtectionAlarmCadence::new();
     let mut next_attention_reminder_ms: Option<u64> = None;
-    let mut buzzer_output_applied = BuzzerHardwareState::default();
-    let mut buzzer_timer_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
     if last_fault_present {
-        log_buzzer_decision(buzzer.activate_protection(BuzzerCueSource::Startup, 0));
-        next_protection_alarm_ms = Some(BUZZER_PROTECTION_ALARM_INTERVAL_MS);
+        protection_alarm.arm(0);
+        buzzer.activate_protection(BuzzerCueSource::Startup, 0);
     }
-    apply_buzzer_output(
-        &mut mcpwm.timer2,
-        &mut buzzer_pwm,
-        &pwm_clock_cfg,
-        buzzer.tick(0).output,
-        &mut buzzer_output_applied,
-        &mut buzzer_timer_frequency_hz,
-    );
     let initial_status_light_elapsed_ms = Instant::now()
         .as_millis()
         .saturating_sub(status_light_started_ms);
@@ -13534,8 +13720,6 @@ async fn main(_spawner: Spawner) {
                         &mut overtemp_forced_fan_active,
                         &mut next_attention_reminder_ms,
                         &mut buzzer,
-                        #[cfg(feature = "buzzer-debug")]
-                        &mut buzzer_debug,
                         &mut thermal_control_profile_preview,
                         last_raw_state,
                         latest_display_temp_c,
@@ -13684,8 +13868,6 @@ async fn main(_spawner: Spawner) {
                 &mut overtemp_forced_fan_active,
                 &mut next_attention_reminder_ms,
                 &mut buzzer,
-                #[cfg(feature = "buzzer-debug")]
-                &mut buzzer_debug,
                 &mut thermal_control_profile_preview,
                 last_raw_state,
                 latest_display_temp_c,
@@ -13862,7 +14044,7 @@ async fn main(_spawner: Spawner) {
             }
             let mut specialized_feedback_played = false;
             if ui_state.active_cooling_enabled != active_cooling_enabled_before {
-                log_buzzer_decision(buzzer.request_feedback(
+                buzzer.request_feedback(
                     BuzzerCueSource::FrontPanel,
                     if ui_state.active_cooling_enabled {
                         BuzzerCueId::ActiveCoolingOn
@@ -13870,7 +14052,7 @@ async fn main(_spawner: Spawner) {
                         BuzzerCueId::ActiveCoolingOff
                     },
                     elapsed_ms,
-                ));
+                );
                 info!(
                     "active cooling policy -> {=str}",
                     if ui_state.active_cooling_enabled {
@@ -13895,39 +14077,39 @@ async fn main(_spawner: Spawner) {
                     if heater_controller.fault_latched().is_some() {
                         if let Some(reason) = current_rtd_fault {
                             ui_state.heater_enabled = false;
-                            log_buzzer_decision(buzzer.request_feedback(
+                            buzzer.request_feedback(
                                 BuzzerCueSource::FrontPanel,
                                 BuzzerCueId::HeaterReject,
                                 elapsed_ms,
-                            ));
+                            );
                             specialized_feedback_played = true;
                             needs_redraw = true;
                             info!("heater re-arm blocked reason={=str}", reason.label(),);
                         } else {
                             heater_controller.clear_fault_latch();
-                            log_buzzer_decision(buzzer.request_feedback(
+                            buzzer.request_feedback(
                                 BuzzerCueSource::FrontPanel,
                                 BuzzerCueId::HeaterOn,
                                 elapsed_ms,
-                            ));
+                            );
                             specialized_feedback_played = true;
                             info!("heater re-arm -> cleared latched fault");
                         }
                     } else {
-                        log_buzzer_decision(buzzer.request_feedback(
+                        buzzer.request_feedback(
                             BuzzerCueSource::FrontPanel,
                             BuzzerCueId::HeaterOn,
                             elapsed_ms,
-                        ));
+                        );
                         specialized_feedback_played = true;
                         info!("heater arm -> on");
                     }
                 } else {
-                    log_buzzer_decision(buzzer.request_feedback(
+                    buzzer.request_feedback(
                         BuzzerCueSource::FrontPanel,
                         BuzzerCueId::HeaterOff,
                         elapsed_ms,
-                    ));
+                    );
                     specialized_feedback_played = true;
                     info!("heater arm -> off");
                 }
@@ -14141,7 +14323,7 @@ async fn main(_spawner: Spawner) {
                     attention_acknowledged: &mut overtemp_attention_acknowledged,
                     attention_pending_after_fault_clear: &mut attention_pending_after_fault_clear,
                     forced_fan_active: &mut overtemp_forced_fan_active,
-                    next_protection_alarm_ms: &mut next_protection_alarm_ms,
+                    protection_alarm: &mut protection_alarm,
                     next_attention_reminder_ms: &mut next_attention_reminder_ms,
                 },
                 latest_display_temp_i16,
@@ -14616,22 +14798,9 @@ async fn main(_spawner: Spawner) {
         if ui_state.apply_network_summary(flux_purr_firmware::net::lan_network_summary().await) {
             needs_redraw = true;
         }
-        #[cfg(feature = "buzzer-debug")]
-        for decision in buzzer_debug.advance(&mut buzzer, elapsed_ms) {
-            log_buzzer_decision(decision);
-        }
-
-        // Settle a finished one-shot before cadence requests decide whether to replay it.
-        let buzzer_tick = buzzer.tick(elapsed_ms);
-        if let Some(decision) = buzzer_tick.deferred_start {
-            log_buzzer_decision(decision);
-            #[cfg(feature = "buzzer-debug")]
-            buzzer_debug.record_deferred_start(elapsed_ms, decision);
-        }
-
         if maybe_play_protection_alarm(
             is_overtemp_fault(current_rtd_fault),
-            &mut next_protection_alarm_ms,
+            &mut protection_alarm,
             &mut buzzer,
             elapsed_ms,
         ) {
@@ -14647,15 +14816,6 @@ async fn main(_spawner: Spawner) {
         ) {
             info!("fault attention reminder -> chirp");
         }
-
-        apply_buzzer_output(
-            &mut mcpwm.timer2,
-            &mut buzzer_pwm,
-            &pwm_clock_cfg,
-            buzzer.output(),
-            &mut buzzer_output_applied,
-            &mut buzzer_timer_frequency_hz,
-        );
 
         let status_light_elapsed_ms = Instant::now()
             .as_millis()
@@ -14785,6 +14945,16 @@ mod tests {
     }
 
     #[test]
+    fn buzzer_timer_readback_distinguishes_the_heater_on_tone_steps() {
+        assert_eq!(mcpwm_timer_frequency_hz(31, BUZZER_PWM_PERIOD_TICKS), 1_250);
+        assert_eq!(mcpwm_timer_frequency_hz(22, BUZZER_PWM_PERIOD_TICKS), 1_739);
+        assert_ne!(
+            mcpwm_timer_frequency_hz(31, BUZZER_PWM_PERIOD_TICKS),
+            mcpwm_timer_frequency_hz(22, BUZZER_PWM_PERIOD_TICKS)
+        );
+    }
+
+    #[test]
     fn buzzer_timer_keeps_the_carrier_through_ui_input_silence() {
         let silent_state = BuzzerHardwareState {
             frequency_hz: None,
@@ -14854,28 +15024,50 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "buzzer-debug")]
     #[test]
-    fn recovery_mode_accepts_feedback_only_buzzer_debug() {
+    fn protection_alarm_reuses_one_carrier_through_its_pulses_and_replay() {
         let mut buzzer = BuzzerArbiter::new();
-        let mut buzzer_debug = BuzzerDebugSession::new();
-        let response = usb_buzzer_recovery_response(
-            r#"{"type":"buzzer_debug","requestId":"buzzer-recovery-1","op":"trigger","buzzerCue":"ui_input"}"#,
-            &MemoryConfig::default(),
-            0,
-            &mut buzzer,
-            &mut buzzer_debug,
-        );
-
-        let UsbFrame::BuzzerDebugResponse { status, .. } = response else {
-            panic!("recovery buzzer request returns a buzzer status response");
+        let mut cadence = ProtectionAlarmCadence::new();
+        let mut configured_frequency_hz = BUZZER_IDLE_FREQUENCY_HZ;
+        let hardware_state = |output: BuzzerOutput| BuzzerHardwareState {
+            frequency_hz: output.frequency_hz,
+            duty_percent: output.duty_percent,
+            generation: output.generation,
         };
-        assert_eq!(status.active_cue, Some(BuzzerCueId::UiInput));
-        assert_eq!(status.trace.len(), 1);
-        assert_eq!(
-            status.trace[0].decision.disposition,
-            BuzzerDecisionDisposition::Started
-        );
+
+        let _ = cadence.enter(&mut buzzer, 0);
+        let first_pulse = hardware_state(buzzer.output());
+        assert_eq!(first_pulse.frequency_hz, Some(2_300));
+        assert!(buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            first_pulse
+        ));
+        configured_frequency_hz = first_pulse.frequency_hz.unwrap();
+
+        let first_rest = hardware_state(buzzer.tick(90).output);
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            first_rest
+        ));
+        let second_pulse = hardware_state(buzzer.tick(130).output);
+        assert_eq!(second_pulse.frequency_hz, Some(2_300));
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            second_pulse
+        ));
+        let _ = buzzer.tick(220);
+        let _ = buzzer.tick(300);
+
+        let replay = cadence
+            .tick(true, &mut buzzer, PROTECTION_ALARM_INTERVAL_MS)
+            .expect("active protection replays at the production cadence");
+        assert_eq!(replay.cue, BuzzerCueId::ProtectionAlarm);
+        let replay_pulse = hardware_state(buzzer.output());
+        assert_eq!(replay_pulse.frequency_hz, Some(2_300));
+        assert!(!buzzer_timer_reconfiguration_needed(
+            configured_frequency_hz,
+            replay_pulse
+        ));
     }
 
     struct FakeUsbTx {
@@ -22586,7 +22778,7 @@ mod tests {
         let mut attention_acknowledged = false;
         let mut attention_pending = false;
         let mut forced_fan_active = false;
-        let mut next_protection_alarm_ms = None;
+        let mut protection_alarm = ProtectionAlarmCadence::new();
         let mut next_reminder_ms = None;
         let mut buzzer = BuzzerArbiter::new();
 
@@ -22597,7 +22789,7 @@ mod tests {
                 attention_acknowledged: &mut attention_acknowledged,
                 attention_pending_after_fault_clear: &mut attention_pending,
                 forced_fan_active: &mut forced_fan_active,
-                next_protection_alarm_ms: &mut next_protection_alarm_ms,
+                protection_alarm: &mut protection_alarm,
                 next_attention_reminder_ms: &mut next_reminder_ms,
             },
             100,
@@ -22606,7 +22798,7 @@ mod tests {
         ));
         assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
         assert!(!attention_pending);
-        assert_eq!(next_protection_alarm_ms, Some(4_000));
+        assert_eq!(protection_alarm.next_replay_ms(), Some(4_000));
         assert_eq!(next_reminder_ms, None);
         assert!(forced_fan_active);
 
@@ -22617,7 +22809,7 @@ mod tests {
                 attention_acknowledged: &mut attention_acknowledged,
                 attention_pending_after_fault_clear: &mut attention_pending,
                 forced_fan_active: &mut forced_fan_active,
-                next_protection_alarm_ms: &mut next_protection_alarm_ms,
+                protection_alarm: &mut protection_alarm,
                 next_attention_reminder_ms: &mut next_reminder_ms,
             },
             100,
@@ -22626,7 +22818,7 @@ mod tests {
         ));
         assert_eq!(buzzer.active_cue(), None);
         assert!(attention_pending);
-        assert_eq!(next_protection_alarm_ms, None);
+        assert_eq!(protection_alarm.next_replay_ms(), None);
         assert_eq!(
             next_reminder_ms,
             Some(8_000 + BUZZER_ATTENTION_REMINDER_INTERVAL_MS)
@@ -22653,7 +22845,7 @@ mod tests {
         let mut acknowledged = false;
         let mut pending = false;
         let mut forced_fan = false;
-        let mut next_alarm_ms = None;
+        let mut protection_alarm = ProtectionAlarmCadence::new();
         let mut next_reminder_ms = None;
         let mut buzzer = BuzzerArbiter::new();
 
@@ -22664,7 +22856,7 @@ mod tests {
                 attention_acknowledged: &mut acknowledged,
                 attention_pending_after_fault_clear: &mut pending,
                 forced_fan_active: &mut forced_fan,
-                next_protection_alarm_ms: &mut next_alarm_ms,
+                protection_alarm: &mut protection_alarm,
                 next_attention_reminder_ms: &mut next_reminder_ms,
             },
             420,
@@ -22691,7 +22883,7 @@ mod tests {
                 attention_acknowledged: &mut acknowledged,
                 attention_pending_after_fault_clear: &mut pending,
                 forced_fan_active: &mut forced_fan,
-                next_protection_alarm_ms: &mut next_alarm_ms,
+                protection_alarm: &mut protection_alarm,
                 next_attention_reminder_ms: &mut next_reminder_ms,
             },
             100,
@@ -22708,7 +22900,7 @@ mod tests {
         let mut acknowledged = false;
         let mut pending = false;
         let mut forced_fan = true;
-        let mut next_alarm_ms = Some(1_000);
+        let mut protection_alarm = ProtectionAlarmCadence::new();
         let mut next_reminder_ms = None;
         let mut buzzer = BuzzerArbiter::new();
 
@@ -22719,7 +22911,7 @@ mod tests {
                 attention_acknowledged: &mut acknowledged,
                 attention_pending_after_fault_clear: &mut pending,
                 forced_fan_active: &mut forced_fan,
-                next_protection_alarm_ms: &mut next_alarm_ms,
+                protection_alarm: &mut protection_alarm,
                 next_attention_reminder_ms: &mut next_reminder_ms,
             },
             39,
@@ -22755,47 +22947,53 @@ mod tests {
 
     #[test]
     fn protection_alarm_replays_at_one_second_cadence_as_one_shots() {
-        let mut next_protection_alarm_ms = Some(10_000);
+        let mut protection_alarm = ProtectionAlarmCadence::new();
         let mut buzzer = BuzzerArbiter::new();
-        let _ = buzzer.activate_protection(BuzzerCueSource::ThermalProtection, 0);
+        let _ = protection_alarm.enter(&mut buzzer, 0);
 
+        let _ = buzzer.tick(90);
+        let _ = buzzer.tick(130);
+        let _ = buzzer.tick(220);
         assert_eq!(buzzer.tick(300).output.frequency_hz, None);
 
         assert!(!maybe_play_protection_alarm(
             true,
-            &mut next_protection_alarm_ms,
+            &mut protection_alarm,
             &mut buzzer,
-            9_999,
+            999,
         ));
         assert_eq!(buzzer.active_cue(), None);
 
         assert!(maybe_play_protection_alarm(
             true,
-            &mut next_protection_alarm_ms,
+            &mut protection_alarm,
             &mut buzzer,
-            10_000,
+            1_000,
         ));
         assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
-        assert_eq!(next_protection_alarm_ms, Some(11_000));
+        assert_eq!(protection_alarm.next_replay_ms(), Some(2_000));
         assert_eq!(buzzer.output().frequency_hz, Some(2_300));
     }
 
     #[test]
     fn protection_alarm_replays_after_a_late_tick() {
-        let mut next_protection_alarm_ms = Some(1_000);
+        let mut protection_alarm = ProtectionAlarmCadence::new();
         let mut buzzer = BuzzerArbiter::new();
-        let _ = buzzer.activate_protection(BuzzerCueSource::ThermalProtection, 0);
+        let _ = protection_alarm.enter(&mut buzzer, 0);
 
+        // A late executor wake preserves the silent step instead of skipping
+        // directly to the next audible pulse.
         assert_eq!(buzzer.tick(1_000).output.frequency_hz, None);
+        assert_eq!(buzzer.output().duty_percent, 0);
         assert!(maybe_play_protection_alarm(
             true,
-            &mut next_protection_alarm_ms,
+            &mut protection_alarm,
             &mut buzzer,
             1_000,
         ));
         assert_eq!(buzzer.active_cue(), Some(BuzzerCueId::ProtectionAlarm));
-        assert_eq!(buzzer.output().frequency_hz, Some(2_300));
-        assert_eq!(next_protection_alarm_ms, Some(2_000));
+        assert_eq!(buzzer.output().frequency_hz, None);
+        assert_eq!(protection_alarm.next_replay_ms(), Some(2_000));
     }
 
     #[test]
