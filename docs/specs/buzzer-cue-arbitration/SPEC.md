@@ -26,7 +26,7 @@
 ### REQ-BUZZER-ARBITRATION-002
 
 - 系统 MUST 以 `ProtectionAlarm > AttentionReminder > FeedbackCue` 的优先级仲裁请求。
-- `ProtectionAlarm` MUST 保留其既有四步音型（`2300Hz`、静音、`1850Hz`、静音）并作为 non-looping one-shot 在热失控进入时立即播放；活动热失控期间以一秒节奏重播。
+- `ProtectionAlarm` MUST 保留其既有四步音型（`2300Hz`、静音、`2300Hz`、静音）并作为 non-looping one-shot 在热失控进入时立即播放；活动热失控期间以一秒节奏重播。
 - 活动 `ProtectionAlarm` MUST 立即抢占较低优先级 cue，并清除 Pending Feedback。
 
 ### REQ-BUZZER-ARBITRATION-003

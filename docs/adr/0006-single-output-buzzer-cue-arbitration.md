@@ -22,7 +22,7 @@ cooperative display, USB, and control work. There is no mixing and no direct
 caller preemption.
 
 - `ProtectionAlarm` is the highest-priority cue. Its established four-step
-  rhythm (`2300Hz`, rest, `1850Hz`, rest) remains a non-looping one-shot, played immediately on
+  rhythm (`2300Hz`, rest, `2300Hz`, rest) remains a non-looping one-shot, played immediately on
   thermal-runaway entry and then at the existing one-second cadence. It immediately preempts
   lower-priority playback and clears retained feedback.
 - `AttentionReminder` is lower than `ProtectionAlarm` and higher than ordinary
